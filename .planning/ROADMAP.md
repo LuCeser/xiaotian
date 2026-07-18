@@ -36,7 +36,17 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. System enforces 100 concurrent session limit with backpressure handling
   3. System uses drop-oldest strategy for buffer overflow without crashes
   4. Structured logging captures all system events with proper error levels
-**Plans**: TBD
+**Plans**: 8 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Project skeleton + Make build + CI workflow
+- [ ] 01-02-PLAN.md — Typed Config struct + layered Viper loader + startup validation
+- [ ] 01-03-PLAN.md — Structured logging (Zap) + panic recovery middleware (ERR-04)
+- [ ] 01-04-PLAN.md — Memory monitor + load shedding at 150MB budget (RES-01)
+- [ ] 01-05-PLAN.md — Buffer pool with drop-oldest overflow strategy (RES-04)
+- [ ] 01-06-PLAN.md — Connection registry + 100-session limit + token bucket (RES-03)
+- [ ] 01-07-PLAN.md — Fixed-size worker pool with backpressure signals
+- [ ] 01-08-PLAN.md — Server coordinator + health/metrics + main.go entry point
 
 **PROJECT_MODE**: mvp
 
@@ -193,7 +203,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Resource-Constrained Infrastructure | 0/0 | Not started | - |
+| 1. Resource-Constrained Infrastructure | 0/8 | Planning complete | - |
 | 2. WebSocket Communication Layer | 0/0 | Not started | - |
 | 3. Python CLI Integration | 0/0 | Not started | - |
 | 4. Database Schema Design | 0/0 | Not started | - |
