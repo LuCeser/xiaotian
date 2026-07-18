@@ -1,0 +1,23 @@
+# Build output
+/bin/
+/dist/
+*.exe
+
+# Test artifacts
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# Vendor (use modules)
+vendor/
