@@ -1,0 +1,18 @@
+# Install: pip install pre-commit && pre-commit install
+default_language_version:
+  golang: "1.26"
+repos:
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: gofmt
+        args: [-s]
+      - id: goimports
+        args: [-local=github.com/xiaotian/home-tutor-agent, -w]
+      - id: go-mod-tidy-repo
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v1.64.8
+    hooks:
+      - id: golangci-lint
+        args: [--config=.golangci.yml]
+        pass_filenames: false

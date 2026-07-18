@@ -1,0 +1,30 @@
+run:
+  timeout: 5m
+  go: "1.26"
+
+linters:
+  disable-all: true
+  enable:
+    - gosec
+    - govet
+    - staticcheck
+    - misspell
+    - ineffassign
+    - unused
+    - errcheck
+    - gofmt
+    - goimports
+
+linters-settings:
+  govet:
+    enable-all: true
+  goimports:
+    local-prefixes: github.com/xiaotian/home-tutor-agent
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  formats:
+    - format: colored-line-number
