@@ -9,15 +9,16 @@ const (
 )
 
 // Checksum computes the CRC-16-CCITT checksum of data.
+// Polynomial: 0x1021, Initial: 0xFFFF, Reflected: No, Final XOR: 0x0000
 func Checksum(data []byte) uint16 {
-	crc := uint16(0xFFFF) // Initial value for CCITT
+	crc := uint16(0xFFFF) // Initial value
 	for _, b := range data {
-		crc = uint16((crc << 8) ^ uint16(b))
+		crc ^= uint16(b) << 8
 		for i := 0; i < 8; i++ {
 			if crc&0x8000 != 0 {
-				crc = uint16((crc << 1) ^ CCITT)
+				crc = (crc << 1) ^ CCITT
 			} else {
-				crc = uint16(crc << 1)
+				crc = crc << 1
 			}
 		}
 	}
