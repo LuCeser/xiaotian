@@ -77,12 +77,12 @@ Plans:
   3. System properly registers sessions and cleans up connections on disconnect
   4. System manages concurrent connections with proper backpressure handling
 
-**Plans**: 3 plans
+**Plans**: 1/3 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — Binary frame protocol + CRC-16 codec (WS-02, D-01, D-05~D-11)
+- [x] 02-01-PLAN.md — Binary frame protocol + CRC-16 codec (WS-02, D-01, D-05~D-11)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -265,7 +265,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Resource-Constrained Infrastructure | 1/8 | In Progress|  |
-| 2. WebSocket Communication Layer | 0/3 | Not started | - |
+| 2. WebSocket Communication Layer | 1/3 | In Progress|  |
 | 3. Python CLI Integration | 0/0 | Not started | - |
 | 4. Database Schema Design | 0/0 | Not started | - |
 | 5. FSRS Core Implementation | 0/0 | Not started | - |
