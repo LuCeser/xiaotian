@@ -40,12 +40,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. System uses drop-oldest strategy for buffer overflow without crashes
   4. Structured logging captures all system events with proper error levels
 
-**Plans**: 8 plans
+**Plans**: 1/8 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Project skeleton + Make build + CI workflow
+- [x] 01-01-PLAN.md — Project skeleton + Make build + CI workflow
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -77,7 +77,20 @@ Plans:
   3. System properly registers sessions and cleans up connections on disconnect
   4. System manages concurrent connections with proper backpressure handling
 
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 02-01-PLAN.md — Binary frame protocol + CRC-16 codec (WS-02, D-01, D-05~D-11)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 02-02-PLAN.md — Hub + Client lifecycle + Heartbeat + test helpers (WS-03, D-04, D-13~D-17)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 02-03-PLAN.md — HTTP Server + Router + end-to-end integration tests (WS-01, WS-04, D-02, D-19)
 
 **PROJECT_MODE**: mvp
 
@@ -251,8 +264,8 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Resource-Constrained Infrastructure | 0/8 | Planning complete | - |
-| 2. WebSocket Communication Layer | 0/0 | Not started | - |
+| 1. Resource-Constrained Infrastructure | 1/8 | In Progress|  |
+| 2. WebSocket Communication Layer | 0/3 | Not started | - |
 | 3. Python CLI Integration | 0/0 | Not started | - |
 | 4. Database Schema Design | 0/0 | Not started | - |
 | 5. FSRS Core Implementation | 0/0 | Not started | - |
