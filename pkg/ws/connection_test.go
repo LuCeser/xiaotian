@@ -360,6 +360,13 @@ func TestClientReadPumpDecodesValidFrame(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
+	// Start Hub to process registration/unregistration
+	go fakeHub.Run(ctx)
+
+	// Register client with Hub
+	fakeHub.Register(client)
+	time.Sleep(50 * time.Millisecond) // Wait for registration
+
 	// Start readPump goroutine
 	go client.readPump(ctx)
 
@@ -400,6 +407,13 @@ func TestClientReadPumpIgnoresInvalidFrame(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start Hub to process registration/unregistration
+	go fakeHub.Run(ctx)
+
+	// Register client with Hub
+	fakeHub.Register(client)
+	time.Sleep(50 * time.Millisecond) // Wait for registration
 
 	// Start readPump goroutine
 	go client.readPump(ctx)
@@ -485,6 +499,13 @@ func TestClientReadPumpPanicRecovery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
+	// Start Hub to process registration/unregistration
+	go fakeHub.Run(ctx)
+
+	// Register client with Hub
+	fakeHub.Register(client)
+	time.Sleep(50 * time.Millisecond) // Wait for registration
+
 	// Start readPump goroutine (should not crash despite handler panic)
 	go client.readPump(ctx)
 
@@ -498,7 +519,7 @@ func TestClientReadPumpPanicRecovery(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify unregistration was called (graceful exit despite panic)
-	if fakeHub.Clients() == 0 {
+	if fakeHub.Clients() != 0 {
 		t.Error("readPump should unregister on exit despite handler panic")
 	}
 
