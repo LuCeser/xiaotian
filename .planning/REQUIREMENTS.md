@@ -38,10 +38,10 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 
 ### WebSocket Communication
 
-- [ ] **WS-01**: System establishes persistent WebSocket connection with iPad browser
-- [ ] **WS-02**: System handles binary audio frames (640B for 20ms@16kHz PCM)
-- [ ] **WS-03**: System implements proper session registration and cleanup
-- [ ] **WS-04**: System manages concurrent connections with backpressure handling
+- [x] **WS-01**: System establishes persistent WebSocket connection with iPad browser
+- [x] **WS-02**: System handles binary audio frames (640B for 20ms@16kHz PCM)
+- [x] **WS-03**: System implements proper session registration and cleanup
+- [x] **WS-04**: System manages concurrent connections with backpressure handling
 
 ### Resource Management
 
@@ -122,10 +122,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FEED-02 | Phase 10 | Pending |
 | FEED-03 | Phase 10 | Pending |
 | FEED-04 | Phase 10 | Pending |
-| WS-01 | Phase 2 | Pending |
-| WS-02 | Phase 2 | Pending |
-| WS-03 | Phase 2 | Pending |
-| WS-04 | Phase 2 | Pending |
+| WS-01 | Phase 2 | Complete |
+| WS-02 | Phase 2 | Complete |
+| WS-03 | Phase 2 | Complete |
+| WS-04 | Phase 2 | Complete |
 | RES-01 | Phase 1 | Pending |
 | RES-02 | Phase 11 | Pending |
 | RES-03 | Phase 1 | Pending |
@@ -144,6 +144,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ERR-04 | Phase 1 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 32 total
 - Mapped to phases: 32 (100% coverage ✓)
 - Unmapped: 0
