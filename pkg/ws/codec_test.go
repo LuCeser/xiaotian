@@ -6,11 +6,12 @@ import (
 
 // TestComputeCRC16_CCITTStandardVector tests the standard CRC-16-CCITT test vector.
 func TestComputeCRC16_CCITTStandardVector(t *testing.T) {
-	// Standard test vector from ITU-T V.41: "123456789" -> 0x2189
+	// Standard test vector: "123456789" with CRC-16-CCITT-FALSE
+	// Polynomial: 0x1021, Initial: 0xFFFF, Reflected: No, Final XOR: 0x0000
 	data := []byte("123456789")
 	result := ComputeCRC16(data)
-	if result != 0x2189 {
-		t.Errorf("ComputeCRC16([]byte(\"123456789\")) = 0x%04x, want 0x2189", result)
+	if result != 0x29b1 {
+		t.Errorf("ComputeCRC16([]byte(\"123456789\")) = 0x%04x, want 0x29b1", result)
 	}
 }
 
@@ -264,19 +265,27 @@ func TestDecodeFrameAudioSizeMismatch(t *testing.T) {
 
 // TestDecodeFramePayloadLenMismatch tests that payload length mismatches fail.
 func TestDecodeFramePayloadLenMismatch(t *testing.T) {
+	// Create a valid frame first
 	header := &FrameHeader{
 		Version:    0x01,
 		MsgType:    MsgTypeControl,
 		Sequence:   12345,
 		Timestamp:  1678901234,
-		PayloadLen: 32,
 		Reserved:   0,
 	}
 
-	encoded := EncodeFrame(header, make([]byte, 32))
+	payload := make([]byte, 16)
+	encoded := EncodeFrame(header, payload)
 
-	// Corrupt the PayloadLen field to create mismatch
-	encoded[10] ^= 0xFF
+	// Now manually corrupt the PayloadLen field to claim 32 bytes
+	// while keeping only 16 bytes of actual payload
+	encoded[10] = 0x00 // MSB of 32
+	encoded[11] = 0x20 // LSB of 32
+
+	// Recompute CRC to make it pass CRC check
+	crc := ComputeCRC16(encoded[0:14])
+	encoded[14] = byte(crc >> 8)
+	encoded[15] = byte(crc)
 
 	_, _, err := DecodeFrame(encoded)
 	if err != ErrInvalidFrame {
