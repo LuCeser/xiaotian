@@ -71,7 +71,6 @@ func TestNewServerAcceptsValidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create hub: %v", err)
 	}
-	defer hub.Close()
 
 	handler := &Router{}
 	cfg := ServerConfig{
@@ -99,7 +98,6 @@ func TestServerUpgraderCompressionDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create hub: %v", err)
 	}
-	defer hub.Close()
 
 	handler := &Router{}
 	cfg := ServerConfig{
@@ -128,7 +126,6 @@ func TestServerUpgraderCheckOriginUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create hub: %v", err)
 	}
-	defer hub.Close()
 
 	handler := &Router{}
 	cfg := ServerConfig{
@@ -162,7 +159,6 @@ func TestServerUpgraderCheckOriginWhitelisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create hub: %v", err)
 	}
-	defer hub.Close()
 
 	handler := &Router{}
 	cfg := ServerConfig{
@@ -203,7 +199,6 @@ func TestServerHandleWebSocketUpgradeSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create hub: %v", err)
 	}
-	defer hub.Close()
 
 	// Start hub event loop
 	hubCtx, hubCancel := context.WithCancel(context.Background())
@@ -276,7 +271,6 @@ func TestServerHandleWebSocketOriginRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create hub: %v", err)
 	}
-	defer hub.Close()
 
 	// Start hub event loop
 	hubCtx, hubCancel := context.WithCancel(context.Background())
@@ -338,7 +332,6 @@ func TestServerHandleWebSocketParameterHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create hub: %v", err)
 	}
-	defer hub.Close()
 
 	// Start hub event loop
 	hubCtx, hubCancel := context.WithCancel(context.Background())
