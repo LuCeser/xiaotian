@@ -256,3 +256,69 @@ func TestBufferPoolConcurrent(t *testing.T) {
 		t.Errorf("TotalPuts: got %d, want %d", stats.TotalPuts, want)
 	}
 }
+
+// TestBufferPoolLogsDrops verifies that an overflow drop emits a Warn event
+// tagged with component="infra.pool" so operators can filter pool-drop
+// events out of the broader log stream. The fakeLogger from
+// middleware_test.go is reused (same package) — no new recording logger
+// needs to be defined here.
+func TestBufferPoolLogsDrops(t *testing.T) {
+	logger := newFakeLogger()
+	cfg := testBufferCfg(640, 1) // capacity = 1 — first overflow Put drops
+	p, err := NewAudioBufferPool(cfg, logger)
+	if err != nil {
+		t.Fatalf("NewAudioBufferPool: unexpected error: %v", err)
+	}
+
+	// Get two buffers (inFlight=2 > capacity=1), then Put the first one
+	// back — this triggers an overflow drop and emits the Warn event.
+	b1 := p.Get()
+	_ = p.Get()
+	if err := p.Put(b1); !errors.Is(err, ErrBufferDropped) {
+		t.Fatalf("expected first Put to drop, got err=%v", err)
+	}
+
+	// Find the drop entry in the captured log.
+	var dropEntry *loggedMsg
+	for i := range logger.state.msgs {
+		m := &logger.state.msgs[i]
+		if m.Level == "warn" && m.Msg == "buffer dropped (overflow)" {
+			dropEntry = m
+			break
+		}
+	}
+	if dropEntry == nil {
+		t.Fatalf("no 'buffer dropped (overflow)' warn entry emitted; msgs=%+v",
+			logger.state.msgs)
+	}
+
+	// The drop event MUST be tagged with component="infra.pool" so
+	// operators can filter infra-pool events from broader infra logs
+	// (D-25 conventional field, matches componentName + ".pool").
+	componentVal, ok := findField(dropEntry.Fields, "component")
+	if !ok {
+		t.Fatalf("component field missing from drop event: %+v", dropEntry.Fields)
+	}
+	if componentVal != "infra.pool" {
+		t.Errorf("component: got %v, want 'infra.pool'", componentVal)
+	}
+
+	// The drops counter MUST be present so operators can correlate the log
+	// entry with the metric (Plan 08 reads Stats().TotalDrops for
+	// `infra_pool_drops_total`).
+	dropsVal, ok := findField(dropEntry.Fields, "drops")
+	if !ok {
+		t.Errorf("drops field missing from drop event: %+v", dropEntry.Fields)
+	} else if d, isInt := dropsVal.(uint64); !isInt || d != 1 {
+		t.Errorf("drops field: got %v (%T), want uint64(1)", dropsVal, dropsVal)
+	}
+
+	// The capacity field MUST be present so a single log line carries
+	// enough context to diagnose the overflow without consulting config.
+	capacityVal, ok := findField(dropEntry.Fields, "capacity")
+	if !ok {
+		t.Errorf("capacity field missing from drop event: %+v", dropEntry.Fields)
+	} else if c, isInt := capacityVal.(int32); !isInt || c != 1 {
+		t.Errorf("capacity field: got %v (%T), want int32(1)", capacityVal, capacityVal)
+	}
+}
