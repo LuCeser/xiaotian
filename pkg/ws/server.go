@@ -175,6 +175,3 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.Close()
 	s.logger.Debug("connection handler exiting")
 }
-
-// DefaultHeartbeatInterval is the default heartbeat interval (30 seconds)
-const DefaultHeartbeatInterval = 30 * time.Second
