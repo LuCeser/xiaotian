@@ -70,14 +70,14 @@ func requireNoError(t *testing.T, err error, msgAndArgs ...any) {
 		if msg == "" {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		t.Fatalf(msg+": %v", err)
+		t.Fatalf("%s: %v", msg, err)
 	}
 }
 
 func requireError(t *testing.T, err error, msgAndArgs ...any) {
 	t.Helper()
 	if err == nil {
-		t.Fatalf(formatMsg(msgAndArgs))
+		t.Fatal(formatMsg(msgAndArgs))
 	}
 }
 
@@ -88,7 +88,7 @@ func requireErrorIs(t *testing.T, err, target error, msgAndArgs ...any) {
 		if msg == "" {
 			t.Fatalf("error %v does not wrap %v", err, target)
 		}
-		t.Fatalf(msg+": got %v, want wrap of %v", err, target)
+		t.Fatalf("%s: got %v, want wrap of %v", msg, err, target)
 	}
 }
 
@@ -99,7 +99,7 @@ func requireEqual(t *testing.T, want, got any, msgAndArgs ...any) {
 		if msg == "" {
 			t.Fatalf("want %v, got %v", want, got)
 		}
-		t.Fatalf(msg+": want %v, got %v", want, got)
+		t.Fatalf("%s: want %v, got %v", msg, want, got)
 	}
 }
 
@@ -111,21 +111,21 @@ func requireLen(t *testing.T, x any, n int, msgAndArgs ...any) {
 		if msg == "" {
 			t.Fatalf("want len %d, got %d", n, l)
 		}
-		t.Fatalf(msg+": want len %d, got %d", n, l)
+		t.Fatalf("%s: want len %d, got %d", msg, n, l)
 	}
 }
 
 func requireTrue(t *testing.T, cond bool, msgAndArgs ...any) {
 	t.Helper()
 	if !cond {
-		t.Fatalf(formatMsg(msgAndArgs))
+		t.Fatal(formatMsg(msgAndArgs))
 	}
 }
 
 func requireNotNil(t *testing.T, x any, msgAndArgs ...any) {
 	t.Helper()
 	if x == nil {
-		t.Fatalf(formatMsg(msgAndArgs))
+		t.Fatal(formatMsg(msgAndArgs))
 	}
 }
 
@@ -136,21 +136,21 @@ func assertEqual(t *testing.T, want, got any, msgAndArgs ...any) {
 		if msg == "" {
 			t.Errorf("want %v, got %v", want, got)
 		}
-		t.Errorf(msg+": want %v, got %v", want, got)
+		t.Errorf("%s: want %v, got %v", msg, want, got)
 	}
 }
 
 func assertTrue(t *testing.T, cond bool, msgAndArgs ...any) {
 	t.Helper()
 	if !cond {
-		t.Errorf(formatMsg(msgAndArgs))
+		t.Error(formatMsg(msgAndArgs))
 	}
 }
 
 func assertFalse(t *testing.T, cond bool, msgAndArgs ...any) {
 	t.Helper()
 	if cond {
-		t.Errorf(formatMsg(msgAndArgs))
+		t.Error(formatMsg(msgAndArgs))
 	}
 }
 
@@ -161,14 +161,14 @@ func assertErrorIs(t *testing.T, err, target error, msgAndArgs ...any) {
 		if msg == "" {
 			t.Errorf("error %v does not wrap %v", err, target)
 		}
-		t.Errorf(msg+": got %v, want wrap of %v", err, target)
+		t.Errorf("%s: got %v, want wrap of %v", msg, err, target)
 	}
 }
 
 func assertError(t *testing.T, err error, msgAndArgs ...any) {
 	t.Helper()
 	if err == nil {
-		t.Errorf(formatMsg(msgAndArgs))
+		t.Error(formatMsg(msgAndArgs))
 	}
 }
 
@@ -180,7 +180,7 @@ func assertLen(t *testing.T, x any, n int, msgAndArgs ...any) {
 		if msg == "" {
 			t.Errorf("want len %d, got %d", n, l)
 		}
-		t.Errorf(msg+": want len %d, got %d", n, l)
+		t.Errorf("%s: want len %d, got %d", msg, n, l)
 	}
 }
 
@@ -195,7 +195,7 @@ func assertContains[T comparable](t *testing.T, xs []T, want T, msgAndArgs ...an
 	if msg == "" {
 		t.Errorf("%v not in %v", want, xs)
 	} else {
-		t.Errorf(msg+": %v not in %v", want, xs)
+		t.Errorf("%s: %v not in %v", msg, want, xs)
 	}
 }
 
@@ -206,7 +206,7 @@ func assertLessOrEqual[T ordered](t *testing.T, a, b T, msgAndArgs ...any) {
 		if msg == "" {
 			t.Errorf("want %v <= %v", a, b)
 		}
-		t.Errorf(msg+": want %v <= %v", a, b)
+		t.Errorf("%s: want %v <= %v", msg, a, b)
 	}
 }
 
@@ -217,7 +217,7 @@ func assertGreater[T ordered](t *testing.T, a, b T, msgAndArgs ...any) {
 		if msg == "" {
 			t.Errorf("want %v > %v", a, b)
 		}
-		t.Errorf(msg+": want %v > %v", a, b)
+		t.Errorf("%s: want %v > %v", msg, a, b)
 	}
 }
 
@@ -228,7 +228,7 @@ func assertGreaterOrEqual[T ordered](t *testing.T, a, b T, msgAndArgs ...any) {
 		if msg == "" {
 			t.Errorf("want %v >= %v", a, b)
 		}
-		t.Errorf(msg+": want %v >= %v", a, b)
+		t.Errorf("%s: want %v >= %v", msg, a, b)
 	}
 }
 
@@ -436,7 +436,7 @@ func TestRegisterStoresCorrectState(t *testing.T) {
 // match the canonical UUID v4 regex (8-4-4-4-12 hex, version nibble 4,
 // variant nibble in {8,9,a,b}).
 func TestSessionIDIsUUIDv4(t *testing.T) {
-	r := newTestRegistry(t, 10, 5*time.Minute, 30*time.Second)
+	r := newTestRegistry(t, 25, 5*time.Minute, 30*time.Second)
 	for i := 0; i < 20; i++ {
 		c, err := r.Register()
 		requireNoError(t, err)

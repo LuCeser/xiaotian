@@ -510,3 +510,99 @@ func newUUIDv4() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
+
+// TokenBucket is the per-connection throttling primitive (D-66). It is the
+// canonical lazy-refill token bucket: every Allow call computes the time
+// elapsed since the last refill, credits `elapsed * rate` tokens (capped at
+// `burst`), then either consumes one token (returns true) or rejects the
+// call (returns false).
+//
+// Threat mitigated (T-01-25 DoS): a misbehaving client that floods the
+// server with requests is throttled at the connection level before its
+// traffic reaches the worker pool. The bucket is per-connection so one
+// client cannot starve another.
+//
+// Concurrency: a single sync.Mutex serializes Allow calls. The critical
+// section is pure arithmetic (no I/O) so contention is negligible under
+// the Phase 1 concurrency envelope (50-100 sessions, 100 req/sec each).
+type TokenBucket struct {
+	// mu guards tokens, last. Held only inside Allow; never held across an
+	// external call.
+	mu sync.Mutex
+
+	// tokens is the current floating-point token count. Float (not int) so
+	// partial-token accumulation from sub-millisecond elapsed times is not
+	// truncated away.
+	tokens float64
+
+	// rate is the refill rate in tokens per second. Set once at
+	// construction time; never mutated.
+	rate float64
+
+	// burst is the maximum token count. Tokens accumulated beyond this are
+	// discarded (cap), which is what makes the bucket "bursty": a long idle
+	// period cannot stockpile more than `burst` tokens.
+	burst float64
+
+	// last is the timestamp of the most recent refill. Updated on every
+	// Allow call.
+	last time.Time
+}
+
+// NewTokenBucket constructs a TokenBucket with the given refill rate and
+// burst capacity (D-66). The bucket starts full (tokens = burst) so the
+// very first Allow calls (up to burst) succeed immediately.
+//
+// Validation: ratePerSec > 0 and burst > 0. Non-positive values return an
+// error wrapping ErrInvalidThrottleConfig (fail-closed — a non-functional
+// throttle is worse than no throttle because it gives a false sense of
+// protection).
+func NewTokenBucket(ratePerSec int, burst int) (*TokenBucket, error) {
+	if ratePerSec <= 0 {
+		return nil, errors.Wrap(ErrInvalidThrottleConfig,
+			fmt.Sprintf("ratePerSec must be > 0, got %d", ratePerSec))
+	}
+	if burst <= 0 {
+		return nil, errors.Wrap(ErrInvalidThrottleConfig,
+			fmt.Sprintf("burst must be > 0, got %d", burst))
+	}
+	return &TokenBucket{
+		tokens: float64(burst),
+		rate:   float64(ratePerSec),
+		burst:  float64(burst),
+		last:   time.Now(),
+	}, nil
+}
+
+// Allow consumes one token if available and returns true; otherwise returns
+// false without blocking. The refill calculation is lazy — no goroutine is
+// required to top up the bucket, the calculation happens on every call.
+//
+// Algorithm (canonical token bucket):
+//  1. Lock b.mu.
+//  2. Compute elapsed time since b.last.
+//  3. Credit elapsed * b.rate tokens, capped at b.burst.
+//  4. Update b.last to now.
+//  5. If b.tokens >= 1: consume one token, return true.
+//  6. Else return false.
+//
+// The cap at step 3 is what limits bursts: no matter how long the bucket
+// sits idle, it never accumulates more than `burst` tokens.
+func (b *TokenBucket) Allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(b.last).Seconds()
+	b.tokens += elapsed * b.rate
+	if b.tokens > b.burst {
+		b.tokens = b.burst
+	}
+	b.last = now
+
+	if b.tokens >= 1 {
+		b.tokens -= 1
+		return true
+	}
+	return false
+}
