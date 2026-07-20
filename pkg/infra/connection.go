@@ -156,20 +156,20 @@ type LifecycleHooks struct {
 type ConnectionStats struct {
 	// Active is the current number of registered connections. Sampled under
 	// the registry read lock.
-	Active int
+	Active int `json:"active"`
 
 	// TotalAccepted is the monotonically-increasing count of successful
 	// Register calls since the registry was constructed. Tracked atomically.
-	TotalAccepted uint64
+	TotalAccepted uint64 `json:"total_accepted"`
 
 	// TotalRejected is the monotonically-increasing count of Register calls
 	// rejected at capacity (ErrTooManyConnections). Tracked atomically.
-	TotalRejected uint64
+	TotalRejected uint64 `json:"total_rejected"`
 
 	// TotalCleaned is the monotonically-increasing count of connections
 	// removed by the stale-eviction goroutine. Caller-initiated Unregister
 	// calls do NOT increment this counter. Tracked atomically.
-	TotalCleaned uint64
+	TotalCleaned uint64 `json:"total_cleaned"`
 }
 
 // ConnectionRegistry is the bounded in-memory pool of active connections

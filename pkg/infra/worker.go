@@ -94,12 +94,12 @@ type WorkerPool struct {
 // at slightly different instants). Callers that need a transactional
 // snapshot must take one externally (none of the Phase 1 callers do).
 type WorkerPoolStats struct {
-	InFlight          int32
-	QueueCapacity     int
-	QueueLen          int
-	TotalProcessed    uint64
-	TotalPanics       uint64
-	TotalBackpressure uint64
+	InFlight          int32  `json:"in_flight"`
+	QueueCapacity     int    `json:"queue_capacity"`
+	QueueLen          int    `json:"queue_len"`
+	TotalProcessed    uint64 `json:"total_processed"`
+	TotalPanics       uint64 `json:"total_panics"`
+	TotalBackpressure uint64 `json:"total_backpressure"`
 }
 
 // NewWorkerPool constructs a WorkerPool with the supplied config.
