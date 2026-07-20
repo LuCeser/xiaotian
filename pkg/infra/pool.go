@@ -26,26 +26,26 @@ type PoolStats struct {
 	// InFlight is the number of buffers currently handed out via Get and
 	// not yet returned via Put. Negative values are impossible by
 	// construction (Put only decrements after a matching Get).
-	InFlight int64
+	InFlight int64 `json:"in_flight"`
 
 	// Capacity is the max in-flight count before drop-oldest kicks in.
 	// Equals BufferConfig.PoolSize at construction; immutable afterward.
-	Capacity int
+	Capacity int `json:"capacity"`
 
 	// TotalGets is the cumulative count of Get calls since construction.
 	// Monotonically increasing.
-	TotalGets uint64
+	TotalGets uint64 `json:"total_gets"`
 
 	// TotalPuts is the cumulative count of Put calls that passed
 	// validation (oversized/nil rejections do NOT increment this counter
 	// — they fail before accounting runs). Monotonically increasing.
-	TotalPuts uint64
+	TotalPuts uint64 `json:"total_puts"`
 
 	// TotalDrops is the cumulative count of overflow drops (Put calls
 	// that returned ErrBufferDropped). This is the canonical RES-04
 	// health metric — a non-zero, growing value signals sustained
 	// overload.
-	TotalDrops uint64
+	TotalDrops uint64 `json:"total_drops"`
 }
 
 // AudioBufferPool wraps sync.Pool for fixed-size audio buffers (RES-04,
