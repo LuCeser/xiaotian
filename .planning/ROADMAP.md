@@ -40,7 +40,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. System uses drop-oldest strategy for buffer overflow without crashes
   4. Structured logging captures all system events with proper error levels
 
-**Plans**: 1/8 plans executed
+**Plans**: 2/8 plans executed
 
 Plans:
 **Wave 1**
@@ -49,7 +49,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-02-PLAN.md — Typed Config struct + layered Viper loader + startup validation
+- [x] 01-02-PLAN.md — Typed Config struct + layered Viper loader + startup validation
 - [ ] 01-03-PLAN.md — Structured logging (Zap) + panic recovery middleware (ERR-04)
 
 **Wave 3** *(blocked on Wave 2 completion)*
@@ -264,7 +264,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Resource-Constrained Infrastructure | 1/8 | In Progress|  |
+| 1. Resource-Constrained Infrastructure | 2/8 | In Progress|  |
 | 2. WebSocket Communication Layer | 1/3 | Complete    | 2026-07-19 |
 | 3. Python CLI Integration | 0/0 | Not started | - |
 | 4. Database Schema Design | 0/0 | Not started | - |
