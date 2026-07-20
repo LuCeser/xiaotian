@@ -6,6 +6,9 @@
 package infra
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -119,4 +122,153 @@ func TestDefaultConfig(t *testing.T) {
 				cfg.Shutdown.Timeout)
 		}
 	})
+}
+
+// TestLoadConfigDefaults verifies the lowest precedence layer: with no file
+// and no env vars, LoadConfig returns DefaultConfig() verbatim.
+func TestLoadConfigDefaults(t *testing.T) {
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig('') returned error %v, want nil", err)
+	}
+	def := DefaultConfig()
+	if cfg.Memory.LimitBytes != def.Memory.LimitBytes {
+		t.Errorf("Memory.LimitBytes = %d, want default %d", cfg.Memory.LimitBytes, def.Memory.LimitBytes)
+	}
+	if cfg.Session.MaxConcurrent != def.Session.MaxConcurrent {
+		t.Errorf("Session.MaxConcurrent = %d, want default %d",
+			cfg.Session.MaxConcurrent, def.Session.MaxConcurrent)
+	}
+	if cfg.Buffer.AudioFrameBytes != def.Buffer.AudioFrameBytes {
+		t.Errorf("Buffer.AudioFrameBytes = %d, want default %d",
+			cfg.Buffer.AudioFrameBytes, def.Buffer.AudioFrameBytes)
+	}
+	if cfg.Server.Addr != def.Server.Addr {
+		t.Errorf("Server.Addr = %q, want default %q", cfg.Server.Addr, def.Server.Addr)
+	}
+}
+
+// TestLoadConfigGracefulMissingFile verifies the file-not-found path: passing
+// a path to a nonexistent file is NOT an error — the loader falls back to
+// defaults + env. This is required so the service can boot without an
+// operator-supplied config file (D-03 environment-based default behaviour).
+func TestLoadConfigGracefulMissingFile(t *testing.T) {
+	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig(nonexistent) returned error %v, want nil (graceful file-not-found)",
+			err)
+	}
+	def := DefaultConfig()
+	if cfg.Session.MaxConcurrent != def.Session.MaxConcurrent {
+		t.Errorf("Session.MaxConcurrent = %d, want default %d",
+			cfg.Session.MaxConcurrent, def.Session.MaxConcurrent)
+	}
+}
+
+// TestLoadConfigEnvOverride verifies the env-var layer (D-52 middle
+// precedence). HTA_MEMORY_LIMITBYTES overrides the default 150MB with 100MB.
+func TestLoadConfigEnvOverride(t *testing.T) {
+	t.Setenv("HTA_MEMORY_LIMITBYTES", "104857600") // 100MB
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig returned error %v, want nil", err)
+	}
+	if cfg.Memory.LimitBytes != MemoryBytes(104857600) {
+		t.Errorf("Memory.LimitBytes = %d, want 104857600 (env override)",
+			cfg.Memory.LimitBytes)
+	}
+}
+
+// TestLoadConfigFileOverride verifies the file layer (D-52 middle precedence,
+// below env). A yaml file setting session.maxConcurrent=50 overrides the
+// default of 100.
+func TestLoadConfigFileOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte("session:\n  maxConcurrent: 50\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error %v", path, err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig(%s) error %v, want nil", path, err)
+	}
+	if cfg.Session.MaxConcurrent != 50 {
+		t.Errorf("Session.MaxConcurrent = %d, want 50 (file override)",
+			cfg.Session.MaxConcurrent)
+	}
+}
+
+// TestLoadConfigPrecedence verifies the full D-52 chain: env > file > default.
+// The file says 50, env says 200, default is 100 — env MUST win.
+func TestLoadConfigPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte("session:\n  maxConcurrent: 50\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error %v", path, err)
+	}
+	t.Setenv("HTA_SESSION_MAXCONCURRENT", "200")
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig(%s) error %v, want nil", path, err)
+	}
+	if cfg.Session.MaxConcurrent != 200 {
+		t.Errorf("Session.MaxConcurrent = %d, want 200 (env wins over file per D-52)",
+			cfg.Session.MaxConcurrent)
+	}
+}
+
+// TestLoadConfigInvalidMemoryLimit verifies D-04 fail-fast: a zero memory
+// budget is rejected with ErrConfigInvalid.
+func TestLoadConfigInvalidMemoryLimit(t *testing.T) {
+	t.Setenv("HTA_MEMORY_LIMITBYTES", "0")
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for memory.limitBytes=0")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
+// TestLoadConfigInvalidSessionLimit verifies the (0, 1000] bound on
+// MaxConcurrent. -1 fails because the value is non-positive.
+func TestLoadConfigInvalidSessionLimit(t *testing.T) {
+	t.Setenv("HTA_SESSION_MAXCONCURRENT", "-1")
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for maxConcurrent=-1")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
+// TestLoadConfigInvalidBufferBytes verifies the D-71 hard constraint:
+// AudioFrameBytes must be exactly 640 (20ms@16kHz PCM). Any other value is
+// rejected because the client codec cannot decode it.
+func TestLoadConfigInvalidBufferBytes(t *testing.T) {
+	t.Setenv("HTA_BUFFER_AUDIOFRAMEBYTES", "42")
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for audioFrameBytes=42")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
+// TestLoadConfigUnknownStrategy verifies that only StrategyDropOldest is
+// accepted in Phase 1 (D-73). Other strategies are rejected rather than
+// silently coerced.
+func TestLoadConfigUnknownStrategy(t *testing.T) {
+	t.Setenv("HTA_BUFFER_STRATEGY", "fifo")
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for strategy=fifo")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
 }
