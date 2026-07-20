@@ -8,10 +8,15 @@
 package infra
 
 import (
+	"fmt"
+	"os"
+	"reflect"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/spf13/viper"
 )
 
 // Package-scoped constants (D-38). These are unexported because they encode
@@ -276,4 +281,319 @@ func DefaultConfig() Config {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// LoadConfig resolves the operational configuration using the D-52 layered
+// precedence: defaults < config file < environment variables. It then runs
+// Config.Validate and returns the final, validated Config.
+//
+// Startup-only contract (D-19): this function MUST be called exactly once at
+// process boot. There is no reload API — operators restart the process to
+// pick up new values.
+//
+// File handling:
+//   - If configPath is empty, no file is loaded.
+//   - If configPath points to a missing file, the file is silently skipped
+//     (the env layer and defaults still apply). This lets the service boot
+//     without an operator-supplied config file.
+//   - If configPath points to a malformed file (bad YAML, wrong schema
+//     shape), the error is wrapped and returned — silent misconfiguration
+//     would be worse than a noisy boot.
+//
+// Env handling:
+//   - Prefix is HTA (Home Tutor Agent). Examples: HTA_MEMORY_LIMITBYTES,
+//     HTA_SESSION_MAXCONCURRENT, HTA_BUFFER_STRATEGY.
+//   - Every leaf field is bound explicitly via BindEnv (T-01-06 mitigation)
+//     so we never depend on AutomaticEnv's heuristic.
+//
+// Validate handling:
+//   - On any validation failure, returns Config{} and an error that wraps
+//     ErrConfigInvalid (detectable via errors.Is).
+func LoadConfig(configPath string) (Config, error) {
+	cfg := DefaultConfig()
+
+	v := viper.New()
+
+	// Layer 1 (middle precedence): config file. Skip silently on
+	// missing-file so the service can boot without an operator-supplied
+	// config (D-03 environment-default).
+	if configPath != "" {
+		if _, statErr := os.Stat(configPath); statErr == nil {
+			v.SetConfigFile(configPath)
+			if err := v.ReadInConfig(); err != nil {
+				var notFoundErr viper.ConfigFileNotFoundError
+				if !errors.As(err, &notFoundErr) {
+					return Config{}, errors.Wrap(err, "reading config file")
+				}
+			}
+		}
+	}
+
+	// Layer 2 (highest precedence): environment variables. Prefix HTA +
+	// dotted key with "." -> "_" yields HTA_MEMORY_LIMITBYTES etc.
+	v.SetEnvPrefix(envPrefix)
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+	bindEnvForAllLeaves(v)
+
+	// Unmarshal over the defaults already in cfg. Viper only overrides
+	// keys it has a value for; everything else is preserved.
+	if err := v.Unmarshal(&cfg, viper.DecodeHook(decodeHook)); err != nil {
+		return Config{}, errors.Wrap(err, "unmarshalling config")
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return Config{}, errors.Wrap(err, "config validation failed")
+	}
+	return cfg, nil
+}
+
+// Validate enforces every D-44 centralized validation rule. On any failure
+// it returns an error that wraps ErrConfigInvalid so callers can branch with
+// errors.Is(err, infra.ErrConfigInvalid).
+//
+// Rules (each maps to a row in the threat register):
+//   - T-01-04 / T-01-07: numeric ranges (memory, sessions, workers).
+//   - D-71: AudioFrameBytes is codec-locked at 640.
+//   - D-73: only StrategyDropOldest supported in Phase 1.
+//   - D-70: thresholds ascending and bounded.
+//   - D-04: fail-fast at startup, never at runtime.
+func (c Config) Validate() error {
+	if c.Memory.LimitBytes == 0 {
+		return errors.Wrap(ErrConfigInvalid, "memory.limitBytes must be > 0")
+	}
+	if c.Memory.LimitBytes > MemoryBytes(1024*1024*1024) {
+		return errors.Wrap(ErrConfigInvalid,
+			"memory.limitBytes cannot exceed 1GB on a 1C/1G VPS")
+	}
+	if c.Memory.MonitorInterval <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "memory.monitorInterval must be > 0")
+	}
+	if err := validateThresholds(c.Memory.Thresholds); err != nil {
+		return err
+	}
+	if c.Memory.LoadShedAtPercent <= 0 || c.Memory.LoadShedAtPercent > 100 {
+		return errors.Wrap(ErrConfigInvalid,
+			"memory.loadShedAtPercent must be in (0, 100]")
+	}
+	if len(c.Memory.Thresholds) > 0 {
+		maxThreshold := c.Memory.Thresholds[len(c.Memory.Thresholds)-1]
+		if c.Memory.LoadShedAtPercent < maxThreshold {
+			return errors.Wrap(ErrConfigInvalid,
+				"memory.loadShedAtPercent must be >= max(thresholds)")
+		}
+	}
+
+	if c.Session.MaxConcurrent <= 0 || c.Session.MaxConcurrent > 1000 {
+		return errors.Wrap(ErrConfigInvalid,
+			"session.maxConcurrent must be in (0, 1000]")
+	}
+	if c.Session.IdleTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "session.idleTimeout must be > 0")
+	}
+	if c.Session.CleanupInterval <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "session.cleanupInterval must be > 0")
+	}
+
+	if c.Buffer.AudioFrameBytes != 640 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf(
+				"buffer.audioFrameBytes must be 640 (20ms@16kHz PCM), got %d",
+				c.Buffer.AudioFrameBytes))
+	}
+	if c.Buffer.PoolSize <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "buffer.poolSize must be > 0")
+	}
+	if c.Buffer.Strategy != StrategyDropOldest {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf(
+				"buffer.strategy must be %q, got %q",
+				StrategyDropOldest, c.Buffer.Strategy))
+	}
+
+	if c.Server.Addr == "" {
+		return errors.Wrap(ErrConfigInvalid, "server.addr is required")
+	}
+	if c.Server.ReadTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "server.readTimeout must be > 0")
+	}
+	if c.Server.WriteTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "server.writeTimeout must be > 0")
+	}
+	if c.Server.HealthAddr == "" {
+		return errors.Wrap(ErrConfigInvalid, "server.healthAddr is required")
+	}
+
+	if !isValidLogLevel(c.Log.Level) {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("log.level must be one of debug/info/warn/error, got %q",
+				c.Log.Level))
+	}
+	if c.Log.Format != "json" && c.Log.Format != "console" {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("log.format must be json or console, got %q", c.Log.Format))
+	}
+	if c.Log.Output == "" {
+		return errors.Wrap(ErrConfigInvalid, "log.output is required")
+	}
+
+	if c.Worker.PoolSize <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "worker.poolSize must be > 0")
+	}
+	if c.Worker.QueueSize <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "worker.queueSize must be > 0")
+	}
+
+	if c.Connection.ThrottleRatePerSec <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			"connection.throttleRatePerSec must be > 0")
+	}
+	if c.Connection.ThrottleBurst <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "connection.throttleBurst must be > 0")
+	}
+	if c.Connection.DialTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "connection.dialTimeout must be > 0")
+	}
+
+	if c.Shutdown.Timeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "shutdown.timeout must be > 0")
+	}
+
+	return nil
+}
+
+// validateThresholds checks the D-70 invariant: thresholds MUST be ascending
+// and every element MUST be in the open-closed range (0, 100].
+func validateThresholds(ts []Percent) error {
+	if len(ts) == 0 {
+		return errors.Wrap(ErrConfigInvalid, "memory.thresholds must not be empty")
+	}
+	prev := Percent(0)
+	for i, p := range ts {
+		if p <= 0 || p > 100 {
+			return errors.Wrap(ErrConfigInvalid,
+				fmt.Sprintf(
+					"memory.thresholds[%d]=%d must be in (0, 100]", i, p))
+		}
+		if p <= prev {
+			return errors.Wrap(ErrConfigInvalid,
+				fmt.Sprintf(
+					"memory.thresholds must be strictly ascending; %d followed by %d",
+					prev, p))
+		}
+		prev = p
+	}
+	return nil
+}
+
+// isValidLogLevel is the allowlist for Log.Level.
+func isValidLogLevel(level string) bool {
+	switch level {
+	case "debug", "info", "warn", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+// bindEnvForAllLeaves registers explicit env bindings for every leaf field
+// of Config. This is the T-01-06 mitigation: relying on AutomaticEnv alone
+// is brittle because viper's case-handling can silently miss keys whose
+// struct tag contains uppercase letters. BindEnv removes the ambiguity.
+//
+// Keys MUST match the mapstructure tag path exactly (lowercased by viper
+// internally), and env var names are derived from SetEnvPrefix + the dotted
+// key with "." replaced by "_" via SetEnvKeyReplacer.
+func bindEnvForAllLeaves(v *viper.Viper) {
+	keys := []string{
+		"memory.limitBytes",
+		"memory.monitorInterval",
+		"memory.thresholds",
+		"memory.loadShedAtPercent",
+		"session.maxConcurrent",
+		"session.idleTimeout",
+		"session.cleanupInterval",
+		"buffer.audioFrameBytes",
+		"buffer.poolSize",
+		"buffer.strategy",
+		"server.addr",
+		"server.readTimeout",
+		"server.writeTimeout",
+		"server.healthAddr",
+		"log.level",
+		"log.format",
+		"log.output",
+		"worker.poolSize",
+		"worker.queueSize",
+		"connection.throttleRatePerSec",
+		"connection.throttleBurst",
+		"connection.dialTimeout",
+		"shutdown.timeout",
+	}
+	for _, key := range keys {
+		_ = v.BindEnv(key)
+	}
+}
+
+// decodeHook is the viper DecodeHook passed to Unmarshal. It bridges the
+// small gap between viper's string-typed env values and our two domain
+// newtypes (MemoryBytes, Percent) and the slice type []Percent. Anything we
+// do not own passes through untouched so viper's default hooks (duration
+// parsing, slice splitting) still run.
+func decodeHook(from, to reflect.Type, data interface{}) (interface{}, error) {
+	switch to {
+	case reflect.TypeOf(MemoryBytes(0)):
+		// viper/cast hands us uint64 for numeric strings.
+		if u, ok := data.(uint64); ok {
+			return MemoryBytes(u), nil
+		}
+		if i, ok := data.(int); ok {
+			if i < 0 {
+				return nil, fmt.Errorf("MemoryBytes cannot be negative, got %d", i)
+			}
+			return MemoryBytes(i), nil
+		}
+		if f, ok := data.(float64); ok {
+			if f < 0 {
+				return nil, fmt.Errorf("MemoryBytes cannot be negative, got %f", f)
+			}
+			return MemoryBytes(f), nil
+		}
+	case reflect.TypeOf(Percent(0)):
+		if i, ok := data.(int); ok {
+			return Percent(i), nil
+		}
+		if f, ok := data.(float64); ok {
+			return Percent(f), nil
+		}
+	case reflect.TypeOf([]Percent{}):
+		switch v := data.(type) {
+		case []int:
+			out := make([]Percent, len(v))
+			for i, x := range v {
+				out[i] = Percent(x)
+			}
+			return out, nil
+		case []float64:
+			out := make([]Percent, len(v))
+			for i, x := range v {
+				out[i] = Percent(x)
+			}
+			return out, nil
+		case []interface{}:
+			out := make([]Percent, len(v))
+			for i, x := range v {
+				switch xv := x.(type) {
+				case int:
+					out[i] = Percent(xv)
+				case float64:
+					out[i] = Percent(xv)
+				default:
+					return nil, fmt.Errorf("thresholds element %d has unsupported type %T", i, x)
+				}
+			}
+			return out, nil
+		}
+	}
+	return data, nil
 }
