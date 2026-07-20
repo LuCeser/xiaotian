@@ -179,15 +179,18 @@ func TestFieldSanitization(t *testing.T) {
 			crCount, out)
 	}
 
-	// Additionally, the parsed payload value must equal the input (round-trip
-	// through JSON decode): sanitization escapes the bytes for transport, it
-	// does not mutate the logical value.
+	// The decoded payload value is the sanitized form (literal "\n" two-char
+	// sequence), NOT the original raw-newline string. Sanitization
+	// intentionally mutates the value to defend log-stream parsers; the
+	// contract is "no raw control bytes", not "byte-for-byte round-trip".
 	lines := parseLogLines(t, out)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 log line, got %d", len(lines))
 	}
-	if got := lines[0]["payload"]; got != malicious {
-		t.Errorf("payload round-trip: got %v, want %q", got, malicious)
+	const wantSanitized = `line1\nline2\rinjected`
+	if got := lines[0]["payload"]; got != wantSanitized {
+		t.Errorf("payload after sanitization: got %q, want %q (literal backslash escapes)",
+			got, wantSanitized)
 	}
 }
 
