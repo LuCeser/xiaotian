@@ -40,7 +40,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. System uses drop-oldest strategy for buffer overflow without crashes
   4. Structured logging captures all system events with proper error levels
 
-**Plans**: 3/8 plans executed
+**Plans**: 7/8 plans executed
 
 Plans:
 **Wave 1**
@@ -54,10 +54,10 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 01-04-PLAN.md — Memory monitor + load shedding at 150MB budget (RES-01)
-- [ ] 01-05-PLAN.md — Buffer pool with drop-oldest overflow strategy (RES-04)
-- [ ] 01-06-PLAN.md — Connection registry + 100-session limit + token bucket (RES-03)
-- [ ] 01-07-PLAN.md — Fixed-size worker pool with backpressure signals
+- [x] 01-04-PLAN.md — Memory monitor + load shedding at 150MB budget (RES-01)
+- [x] 01-05-PLAN.md — Buffer pool with drop-oldest overflow strategy (RES-04)
+- [x] 01-06-PLAN.md — Connection registry + 100-session limit + token bucket (RES-03)
+- [x] 01-07-PLAN.md — Fixed-size worker pool with backpressure signals
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -264,7 +264,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Resource-Constrained Infrastructure | 3/8 | In Progress|  |
+| 1. Resource-Constrained Infrastructure | 7/8 | In Progress|  |
 | 2. WebSocket Communication Layer | 1/3 | Complete    | 2026-07-19 |
 | 3. Python CLI Integration | 0/0 | Not started | - |
 | 4. Database Schema Design | 0/0 | Not started | - |
