@@ -228,8 +228,11 @@ func TestServerSnapshot(t *testing.T) {
 		// not actually consult the monitor.
 		t.Errorf("Memory.UsedBytes: got 0, want > 0 (runtime reports real Sys)")
 	}
-	if snap.Uptime <= 0 {
-		t.Errorf("Uptime: got %s, want > 0", snap.Uptime)
+	// Uptime can be 0 on Windows where time.Now has ~1ms granularity and
+	// Snapshot may run inside the same quantum as Start. Negative would be
+	// a real bug (startedAt in the future); zero is acceptable.
+	if snap.Uptime < 0 {
+		t.Errorf("Uptime: got %s, want >= 0", snap.Uptime)
 	}
 	// Workers and connections must be at zero — nothing has been submitted
 	// or registered yet.
