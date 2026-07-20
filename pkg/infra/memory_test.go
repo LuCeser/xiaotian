@@ -287,7 +287,7 @@ func TestMemoryMonitorStopsOnContextCancel(t *testing.T) {
 
 	src := &fakeMemSource{}
 	m := newMonitorBuilder().
-		withLimit(150 * 1024 * 1024).
+		withLimit(150*1024*1024).
 		build(t, src, func(string) {}, newFakeLogger())
 
 	if err := m.Start(ctx); err != nil {
