@@ -55,16 +55,24 @@ func NewRuntimeMemSource() MemSource {
 // "memory_budget_exceeded") that the callback can log, emit as a metric, or
 // use as a circuit-breaker label.
 //
+// The active argument is true on a threshold breach (rising edge — circuit
+// breaker trips OPEN) and false on recovery (falling edge — breaker closes
+// again). The paired true/false events let the registered callback keep its
+// own latch in lockstep with the monitor's internal shedActive flag without
+// polling Snapshot() (Plan 08's Server uses this to drive its
+// Server.LoadShedding() reflector for the health endpoint).
+//
 // LoadShedder acts as the trip signal for a circuit breaker (D-15): the
-// registered callback (Plan 08's WorkerPool.Submit gate) trips OPEN when
-// invoked, rejecting new work until the monitor clears the shedActive latch
-// (usage returns below threshold). The hysteresis ensures the breaker does
-// not flap between open and closed on every poll.
+// registered callback (Plan 08's Server load-shed latch) trips OPEN when
+// invoked with active=true, rejecting new work until the monitor invokes it
+// again with active=false. The hysteresis inside MemoryMonitor (shedActive
+// latch) ensures the breaker does not flap between open and closed on every
+// poll — the callback fires at most once per transition.
 //
 // LoadShedder MUST be safe to call from the monitor's polling goroutine.
-// The reference implementation in Plan 08 will only set an atomic flag —
-// no blocking I/O, no allocations.
-type LoadShedder func(reason string)
+// The reference implementation in Plan 08 only flips an atomic.Bool — no
+// blocking I/O, no allocations.
+type LoadShedder func(reason string, active bool)
 
 // ErrAlreadyRunning is returned by MemoryMonitor.Start when the monitor has
 // already been started on the same instance. Start is NOT idempotent —
@@ -331,14 +339,15 @@ func (m *MemoryMonitor) tick() {
 			// Circuit breaker trips OPEN. Plan 08's callback will reject
 			// new work until shedActive clears in the recovery branch
 			// below.
-			m.loadShedder("memory_budget_exceeded")
+			m.loadShedder("memory_budget_exceeded", true)
 		}
 		return
 	}
 
 	// Recovery branch: pct dropped below loadShedAt. If we were previously
 	// shedding, clear the latch so a future breach can re-fire (closed →
-	// open transition).
+	// open transition). Fire the callback with active=false so downstream
+	// latches (Plan 08's Server.LoadShedding()) clear in lockstep.
 	m.mu.Lock()
 	wasActive := m.shedActive
 	if wasActive {
@@ -350,6 +359,7 @@ func (m *MemoryMonitor) tick() {
 			F("component", "infra.memory"),
 			F("percent", int(pct)),
 		)
+		m.loadShedder("memory_budget_exceeded", false)
 	}
 }
 

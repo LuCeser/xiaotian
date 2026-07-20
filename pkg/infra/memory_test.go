@@ -34,27 +34,46 @@ func (f *fakeMemSource) set(b uint64) {
 
 // shedCounter is a thread-safe counter for LoadShedder invocations. Each call
 // records its reason so tests can assert on both count and the reason code.
+//
+// count tracks only active=true (rising-edge) events — the canonical
+// "load-shed activations" metric. clears tracks active=false (falling-edge)
+// events so tests can additionally assert on the close transition.
 type shedCounter struct {
 	mu      sync.Mutex
 	count   int
+	clears  int
 	reasons []string
 }
 
-// fire is the LoadShedder callback closure. It increments count and appends
-// the reason; safe to call from the monitor goroutine and read from the test
-// goroutine simultaneously.
-func (s *shedCounter) fire(reason string) {
+// fire is the LoadShedder callback closure. It increments count (active=true)
+// or clears (active=false) and appends the reason on rising edges; safe to
+// call from the monitor goroutine and read from the test goroutine
+// simultaneously.
+func (s *shedCounter) fire(reason string, active bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.count++
-	s.reasons = append(s.reasons, reason)
+	if active {
+		s.count++
+		s.reasons = append(s.reasons, reason)
+	} else {
+		s.clears++
+	}
 }
 
-// get returns the current shed count under the lock.
+// get returns the current shed count (rising-edge events only) under the
+// lock.
 func (s *shedCounter) get() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.count
+}
+
+// getClears returns the current clear count (falling-edge events) under the
+// lock. Used by tests that assert on the closed → open transition.
+func (s *shedCounter) getClears() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clears
 }
 
 // newMonitorBuilder is a tiny DSL for assembling a MemoryMonitor with the
@@ -109,7 +128,7 @@ func (b monitorBuilder) build(
 func TestServiceMemoryBudget(t *testing.T) {
 	const limit = 150 * 1024 * 1024
 	src := &fakeMemSource{bytes: limit}
-	m := newMonitorBuilder().build(t, src, func(string) {}, newFakeLogger())
+	m := newMonitorBuilder().build(t, src, func(string, bool) {}, newFakeLogger())
 
 	used, lim, pct := m.Snapshot()
 	if used != limit {
@@ -129,7 +148,7 @@ func TestServiceMemoryBudgetSub16(t *testing.T) {
 	const limit = 150 * 1024 * 1024
 	const used = 16 * 1024 * 1024
 	src := &fakeMemSource{bytes: used}
-	m := newMonitorBuilder().build(t, src, func(string) {}, newFakeLogger())
+	m := newMonitorBuilder().build(t, src, func(string, bool) {}, newFakeLogger())
 
 	_, _, pct := m.Snapshot()
 	if pct != Percent(10) {
@@ -146,7 +165,7 @@ func TestMemoryMonitorThresholdAlerts(t *testing.T) {
 	logger := newFakeLogger()
 	m := newMonitorBuilder().
 		withLimit(limit).
-		build(t, src, func(string) {}, logger)
+		build(t, src, func(string, bool) {}, logger)
 
 	// Drive tick() through 10 → 80 → 90 → 95 percent. At each step above a
 	// threshold, the monitor emits a Warn whose threshold field equals every
@@ -288,7 +307,7 @@ func TestMemoryMonitorStopsOnContextCancel(t *testing.T) {
 	src := &fakeMemSource{}
 	m := newMonitorBuilder().
 		withLimit(150*1024*1024).
-		build(t, src, func(string) {}, newFakeLogger())
+		build(t, src, func(string, bool) {}, newFakeLogger())
 
 	if err := m.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -320,7 +339,7 @@ func TestMemoryMonitorStartIdempotent(t *testing.T) {
 	defer cancel()
 
 	src := &fakeMemSource{}
-	m := newMonitorBuilder().build(t, src, func(string) {}, newFakeLogger())
+	m := newMonitorBuilder().build(t, src, func(string, bool) {}, newFakeLogger())
 
 	if err := m.Start(ctx); err != nil {
 		t.Fatalf("first Start: %v", err)
@@ -342,7 +361,7 @@ func TestNewMemoryMonitorValidation(t *testing.T) {
 		LoadShedAtPercent: 95,
 	}
 	src := &fakeMemSource{}
-	shedder := func(string) {}
+	shedder := func(string, bool) {}
 
 	t.Run("nil_source", func(t *testing.T) {
 		_, err := NewMemoryMonitor(validCfg, nil, shedder, newFakeLogger())

@@ -1,0 +1,74 @@
+# Home Tutor Agent — example configuration
+#
+# Copy to config.yaml and edit, OR override individual values via environment
+# variables prefixed with HTA_ (e.g. HTA_MEMORY_LIMITBYTES, HTA_BUFFER_STRATEGY).
+# Missing config files are silently skipped; the service boots from defaults.
+# Malformed YAML or invalid values fail fast at startup (D-04).
+#
+# See pkg/infra/config.go for the authoritative schema and validation rules.
+
+memory:
+  # 150 MB budget on the 1C/1G VPS — RES-01. Leaves headroom for the OS
+  # and the Python sidecar.
+  limitBytes: 157286400
+  # How often the runtime is sampled against limitBytes. 5s is well inside
+  # the safe range for runtime.ReadMemStats (stop-the-world cost).
+  monitorInterval: 5s
+  # Ascending percent-of-budget alert thresholds (D-70).
+  thresholds: [80, 90, 95]
+  # Percent-of-budget at which new work is rejected (D-18).
+  loadShedAtPercent: 95
+
+session:
+  # Hard cap on concurrent sessions — RES-03. At-capacity Register calls
+  # return ErrTooManyConnections; main.go's HTTP layer translates to 429.
+  maxConcurrent: 100
+  # How long a connection may go without activity before the cleaner reaps it.
+  idleTimeout: 5m
+  # Sweep cadence for stale-connection eviction (D-57).
+  cleanupInterval: 30s
+
+buffer:
+  # PCM frame size: 20ms @ 16kHz mono = 640 bytes (D-71). Non-negotiable.
+  audioFrameBytes: 640
+  # Number of frames pre-allocated in the sync.Pool (D-69).
+  poolSize: 1000
+  # Only drop-oldest supported in Phase 1 (D-73).
+  strategy: drop-oldest
+
+server:
+  # Public service listen address (HTTP + WebSocket).
+  addr: "0.0.0.0:8080"
+  # Slowloris defences (D-22).
+  readTimeout: 10s
+  writeTimeout: 10s
+  # Localhost-only health/metrics listener. Kept separate from the public
+  # addr so probe traffic does not compete with session traffic.
+  healthAddr: "127.0.0.1:8081"
+
+log:
+  # debug | info | warn | error
+  level: info
+  # json (machine-parseable) | console (human-readable)
+  format: json
+  # stderr captures by systemd / container runtimes
+  output: stderr
+
+worker:
+  # Number of worker goroutines. 2*runtime.NumCPU() on a 2-core VPS = 4.
+  poolSize: 4
+  # Bounded queue depth. When full, Submit returns ErrWorkerPoolFull and
+  # the caller (HTTP layer) translates to 503.
+  queueSize: 256
+
+connection:
+  # Per-outbound-connection token bucket (D-66). DoS mitigation.
+  throttleRatePerSec: 100
+  throttleBurst: 10
+  dialTimeout: 5s
+
+shutdown:
+  # Maximum time allowed for in-flight requests to complete before the
+  # process force-exits. 30s satisfies systemd / k8s termination grace
+  # periods (D-21).
+  timeout: 30s
