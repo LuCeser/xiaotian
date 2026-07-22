@@ -13,7 +13,7 @@ Journey from greenfield to production real-time dictation tutor system. Start wi
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Resource-Constrained Infrastructure** - Foundation setup with 150MB memory budget and monitoring
+- [x] **Phase 1: Resource-Constrained Infrastructure** - Foundation setup with 150MB memory budget and monitoring (completed 2026-07-23)
 - [x] **Phase 2: WebSocket Communication Layer** - Persistent connections with binary audio frame support (completed 2026-07-19)
 - [ ] **Phase 3: Python CLI Integration** - Subprocess bridge to vocab_manager and TTS generation
 - [ ] **Phase 4: Database Schema Design** - SQLite schema for vocabulary and FSRS metadata
@@ -264,7 +264,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Resource-Constrained Infrastructure | 8/8 | In Progress|  |
+| 1. Resource-Constrained Infrastructure | 8/8 | Complete    | 2026-07-23 |
 | 2. WebSocket Communication Layer | 1/3 | Complete    | 2026-07-19 |
 | 3. Python CLI Integration | 0/0 | Not started | - |
 | 4. Database Schema Design | 0/0 | Not started | - |

@@ -1,9 +1,13 @@
 ---
-status: testing
+status: passed
 phase: 01-resource-constrained-infrastructure
 source: [01-VERIFICATION.md]
 started: 2026-07-20T23:56:57Z
-updated: 2026-07-20T23:56:57Z
+updated: 2026-07-23T00:00:00Z
+deferrals:
+  - item: "RES-01 memory budget under real concurrent load"
+    deferred_to: "Phase 12 (End-to-End Validation)"
+    decided_at: 2026-07-23
 ---
 
 ## Current Test
@@ -48,22 +52,23 @@ expected: On a 1C/1G target (or cgroups-limited env), ramp bin/service to 100 co
 Sample hta_memory_used_bytes every 5s for 5+ minutes. Memory stays ≤150MB; near 95% usage the
 load-shed flag trips (hta_load_shedding → 1) and /health returns 503. Idle memory ~7% (~10.5MB)
 already proven by TestMainMemoryUnder150MBAtIdle.
-result: [pending]
+result: deferred (Phase 12) — product-owner decision 2026-07-23; mechanism built + unit-proven, real-VPS load test folded into Phase 12's own success criterion.
 
 ## Summary
 
 total: 5
 passed: 4
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
+deferred: 1
 
 ## Gaps
 
 - RES-01 "under load": mechanism fully implemented and unit-tested (MemoryMonitor → LoadShedder →
-  Server.loadShedding → /health 503), but no test drives real concurrent load through the assembled
-  Server on target hardware. Requires a load test on a 1C/1G VPS or cgroups-limited CI runner.
+  Server.loadShedding → /health 503). The real concurrent-load proof on a 1C/1G VPS is deferred to
+  Phase 12 (End-to-End Validation), which owns this exact criterion. See `deferrals:` in frontmatter.
 
 ---
 

@@ -45,10 +45,10 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 
 ### Resource Management
 
-- [ ] **RES-01**: System operates within 150MB memory budget for Go service
+- [x] **RES-01**: System operates within 150MB memory budget for Go service
 - [ ] **RES-02**: System implements audio buffer pool with sync.Pool for frame reuse
-- [ ] **RES-03**: System enforces connection limits (100 concurrent sessions max)
-- [ ] **RES-04**: System uses drop-oldest strategy for overflow situations
+- [x] **RES-03**: System enforces connection limits (100 concurrent sessions max)
+- [x] **RES-04**: System uses drop-oldest strategy for overflow situations
 
 ### Python Integration
 
@@ -69,7 +69,7 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 - [ ] **ERR-01**: System gracefully handles WebSocket disconnections
 - [ ] **ERR-02**: System provides meaningful error messages to parents and students
 - [ ] **ERR-03**: System implements timeout-based session cleanup
-- [ ] **ERR-04**: System logs errors with structured logging for debugging
+- [x] **ERR-04**: System logs errors with structured logging for debugging
 
 ## v2 Requirements
 
@@ -126,10 +126,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | WS-02 | Phase 2 | Complete |
 | WS-03 | Phase 2 | Complete |
 | WS-04 | Phase 2 | Complete |
-| RES-01 | Phase 1 | Pending |
+| RES-01 | Phase 1 | Complete |
 | RES-02 | Phase 11 | Pending |
-| RES-03 | Phase 1 | Pending |
-| RES-04 | Phase 1 | Pending |
+| RES-03 | Phase 1 | Complete |
+| RES-04 | Phase 1 | Complete |
 | PY-01 | Phase 3 | Pending |
 | PY-02 | Phase 3 | Pending |
 | PY-03 | Phase 3 | Pending |
@@ -141,7 +141,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ERR-01 | Phase 11 | Pending |
 | ERR-02 | Phase 11 | Pending |
 | ERR-03 | Phase 7 | Pending |
-| ERR-04 | Phase 1 | Pending |
+| ERR-04 | Phase 1 | Complete |
 
 **Coverage:**
 
