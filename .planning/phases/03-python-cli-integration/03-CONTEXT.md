@@ -75,7 +75,7 @@ store, TTS generation).
   those files and slices them into 640B frames for streaming. This reuses
   pregenerate's existing cache/retry/trim logic and matches its pre-generate
   nature.
-- **D-07: "full streaming TTS" is redefined as a *delivery-layer* property.** The
+- **D-07: "full streaming TTS" is redefined as a delivery-layer property.** The
   PROJECT.md constraint "Full streaming TTS (consistency over caching)" means
   Phase 6 streams audio frames to the client; it does **not** require live
   per-frame generation. Generation uses pregenerate's pre-generate + cache model
