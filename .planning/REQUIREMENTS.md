@@ -52,7 +52,7 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 
 ### Python Integration
 
-- [ ] **PY-01**: System integrates with existing vocab_manager.py CLI
+- [x] **PY-01**: System integrates with existing vocab_manager.py CLI
 - [ ] **PY-02**: System executes subprocess commands for word selection (due command)
 - [ ] **PY-03**: System executes subprocess commands for FSRS updates (review command)
 - [ ] **PY-04**: System integrates with existing pregenerate_dictation.py for TTS generation
@@ -130,7 +130,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RES-02 | Phase 11 | Pending |
 | RES-03 | Phase 1 | Complete |
 | RES-04 | Phase 1 | Complete |
-| PY-01 | Phase 3 | Pending |
+| PY-01 | Phase 3 | Complete |
 | PY-02 | Phase 3 | Pending |
 | PY-03 | Phase 3 | Pending |
 | PY-04 | Phase 3 | Pending |

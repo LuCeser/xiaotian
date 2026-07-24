@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: python-cli-integration
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-07-24T14:10:02.443Z"
-last_activity: 2026-07-23
+stopped_at: Completed 03-01-PLAN.md (PythonConfig + vendor scripts + Makefile py-* targets)
+last_updated: "2026-07-24T14:42:32.998Z"
+last_activity: 2026-07-24
 last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 11
-  completed_plans: 9
+  total_plans: 16
+  completed_plans: 10
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2025-07-18)
 ## Current Position
 
 Phase: 03 (python-cli-integration) — EXECUTING
-Plan: 1 of ?
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-07-23 — Phase 03 execution started
+Last activity: 2026-07-24 — Phase 03 execution started
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██████░░░░] 63%
 
 ## Performance Metrics
 
@@ -55,6 +55,11 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: -
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 03 P01 | 20 | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -63,7 +68,8 @@ Progress: [░░░░░░░░░░] 0%
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
-None yet.
+- [Phase ?]: PythonConfig 采用 13 个操作性字段（路径/超时/并发），照抄 MemoryConfig 范式；密钥经 os.Getenv 注入子进程而非入 Config（D-05）
+- [Phase ?]: vendor 脚本逐字节拷入 third_party/python/（D-03）；fsrs 包名经上游 requirements.txt 确认正确，保持 fsrs>=0.0.1 不变
 
 ### Pending Todos
 
@@ -83,6 +89,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-24T13:35:08.662Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-python-cli-integration/03-CONTEXT.md
+Last session: 2026-07-24T14:42:32.992Z
+Stopped at: Completed 03-01-PLAN.md (PythonConfig + vendor scripts + Makefile py-* targets)
+Resume file: .planning/phases/03-python-cli-integration/03-02-PLAN.md
