@@ -106,7 +106,22 @@ Plans:
   3. System integrates with pregenerate_dictation.py for TTS audio generation
   4. Subprocess errors are captured and surfaced to logging system
 
-**Plans**: TBD
+**Plans**: 5/5 plans created
+
+Plans:
+**Wave 1**
+
+- [ ] 03-01-PLAN.md — PythonConfig 扩展 + vendor 上游脚本 + Makefile py-* target (PY-01, D-03/D-04/D-05)
+- [ ] 03-02-PLAN.md — Executor 接口 + sentinel 错误 + 解析器 + 信号量 + 黄金 fixture (PY-01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 03-03-PLAN.md — Bridge exec 引擎 + 进程组杀死 + 密钥 env 注入 + 结构化日志 + main.go 接线 (PY-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 03-04-PLAN.md — RunDue + RunReview + argv 构造 + 末尾 JSON 提取 (PY-02, PY-03)
+- [ ] 03-05-PLAN.md — RunPregenerate + 按行路径解析 + flock 串行化 + shell fake (PY-04)
 
 **PROJECT_MODE**: mvp
 
