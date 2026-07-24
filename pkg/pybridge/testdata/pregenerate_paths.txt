@@ -1,0 +1,3 @@
+/opt/hta/cache/hello.mp3
+/opt/hta/cache/goodbye.mp3
+/opt/hta/cache/thank_you.mp3

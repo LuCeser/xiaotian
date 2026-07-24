@@ -1,0 +1,24 @@
+[
+  {
+    "id": 42,
+    "word": "hello",
+    "meaning": "你好",
+    "example": "Hello, world!",
+    "unit": "unit-1",
+    "state": "Learning",
+    "due": "2026-07-24 15:30",
+    "stability": 1.25,
+    "difficulty": 4.5
+  },
+  {
+    "id": 43,
+    "word": "goodbye",
+    "meaning": "再见",
+    "example": "Goodbye, my friend.",
+    "unit": "unit-1",
+    "state": "Review",
+    "due": "2026-07-24 16:00",
+    "stability": 3.7,
+    "difficulty": 5.2
+  }
+]

@@ -1,0 +1,14 @@
+Warning: unknown rating 'maybe' for 'hello', skipping
+Warning: card 'foobar' not found, skipping
+Warning: card '{unset}' exists in multiple categories (unit-a, unit-b); pass --category to review it, skipping
+{
+  "updated": [
+    {
+      "word": "goodbye",
+      "rating": "again",
+      "next_due": "2026-07-24 16:00",
+      "state": "Learning",
+      "stability": 0.5
+    }
+  ]
+}

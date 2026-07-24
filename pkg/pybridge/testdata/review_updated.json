@@ -1,0 +1,18 @@
+{
+  "updated": [
+    {
+      "word": "hello",
+      "rating": "good",
+      "next_due": "2026-07-25 03:30",
+      "state": "Review",
+      "stability": 2.1
+    },
+    {
+      "word": "goodbye",
+      "rating": "again",
+      "next_due": "2026-07-24 16:00",
+      "state": "Learning",
+      "stability": 0.5
+    }
+  ]
+}
