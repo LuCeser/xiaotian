@@ -13,6 +13,11 @@ coverage.html
 .env
 .env.local
 
+# Python venv created by `make py-bootstrap` (D-04). Never committed — the
+# venv is rebuilt on the deploy host from third_party/python/requirements.txt.
+third_party/python/.venv/
+third_party/python/.venv*/
+
 # Logs
 *.log
 

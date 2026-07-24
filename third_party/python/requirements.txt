@@ -1,0 +1,21 @@
+# Python dependencies for the vendored dictation scripts.
+# Pinned by `make py-bootstrap` via pip freeze after install (D-04).
+# Versions left floating (>=) so pip can resolve the latest compatible
+# release at venv-build time; the resulting freeze is the authoritative
+# lock for reproducible deploys.
+#
+# See D-03 (vendor) and D-04 (venv) in
+# .planning/phases/03-python-cli-integration/03-CONTEXT.md.
+
+# fsrs — Free Spaced Repetition Scheduler engine.
+# Imported by vocab_manager.py (from fsrs import ...).
+fsrs>=0.0.1
+
+# requests — HTTP client for Volcengine TTS calls.
+# Imported by pregenerate_dictation.py (import requests).
+requests>=2.31.0
+
+# edge-tts — Microsoft Edge TTS fallback for direct provider calls.
+# Imported by pregenerate_dictation.py (import edge_tts) for the
+# contextual TTS 2.0 fallback path.
+edge-tts>=6.1.0
