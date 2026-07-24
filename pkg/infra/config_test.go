@@ -9,9 +9,22 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+// setRequiredPythonEnv installs the two python.* env vars that have no
+// default in DefaultConfig (interpreter, scriptsDir) but are required by
+// Config.Validate. Tests that exercise LoadConfig expecting success call this
+// first; tests that exercise a python validation failure do NOT (they want
+// Validate to fail on the python field they're testing).
+func setRequiredPythonEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("HTA_PYTHON_INTERPRETER", "/opt/hta/venv/bin/python")
+	t.Setenv("HTA_PYTHON_SCRIPTSDIR", "third_party/python")
+}
 
 // TestDefaultConfig asserts the phase-1 baseline configuration (D-52 lowest
 // precedence layer). Every value here is what LoadConfig MUST return when no
@@ -122,11 +135,40 @@ func TestDefaultConfig(t *testing.T) {
 				cfg.Shutdown.Timeout)
 		}
 	})
+
+	t.Run("python defaults per D-02/D-03/D-04", func(t *testing.T) {
+		// Interpreter and ScriptsDir are intentionally empty in DefaultConfig
+		// — they are deployment-specific and must come from env/file. The
+		// non-empty defaults below are the only ones the plan locks in.
+		if cfg.Python.VocabScript != "vocab_manager.py" {
+			t.Errorf("Python.VocabScript = %q, want %q (D-03 vendor)",
+				cfg.Python.VocabScript, "vocab_manager.py")
+		}
+		if cfg.Python.PregenScript != "pregenerate_dictation.py" {
+			t.Errorf("Python.PregenScript = %q, want %q (D-03 vendor)",
+				cfg.Python.PregenScript, "pregenerate_dictation.py")
+		}
+		if cfg.Python.DueTimeout != 10*time.Second {
+			t.Errorf("Python.DueTimeout = %v, want 10s", cfg.Python.DueTimeout)
+		}
+		if cfg.Python.ReviewTimeout != 10*time.Second {
+			t.Errorf("Python.ReviewTimeout = %v, want 10s", cfg.Python.ReviewTimeout)
+		}
+		if cfg.Python.PregenTimeout != 120*time.Second {
+			t.Errorf("Python.PregenTimeout = %v, want 120s (TTS+ffmpeg slower, D-01)",
+				cfg.Python.PregenTimeout)
+		}
+		if cfg.Python.MaxConcurrent != 2 {
+			t.Errorf("Python.MaxConcurrent = %d, want 2 (D-02 global semaphore cap)",
+				cfg.Python.MaxConcurrent)
+		}
+	})
 }
 
 // TestLoadConfigDefaults verifies the lowest precedence layer: with no file
 // and no env vars, LoadConfig returns DefaultConfig() verbatim.
 func TestLoadConfigDefaults(t *testing.T) {
+	setRequiredPythonEnv(t)
 	cfg, err := LoadConfig("")
 	if err != nil {
 		t.Fatalf("LoadConfig('') returned error %v, want nil", err)
@@ -153,6 +195,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 // defaults + env. This is required so the service can boot without an
 // operator-supplied config file (D-03 environment-based default behaviour).
 func TestLoadConfigGracefulMissingFile(t *testing.T) {
+	setRequiredPythonEnv(t)
 	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	if err != nil {
 		t.Fatalf("LoadConfig(nonexistent) returned error %v, want nil (graceful file-not-found)",
@@ -168,6 +211,7 @@ func TestLoadConfigGracefulMissingFile(t *testing.T) {
 // TestLoadConfigEnvOverride verifies the env-var layer (D-52 middle
 // precedence). HTA_MEMORY_LIMITBYTES overrides the default 150MB with 100MB.
 func TestLoadConfigEnvOverride(t *testing.T) {
+	setRequiredPythonEnv(t)
 	t.Setenv("HTA_MEMORY_LIMITBYTES", "104857600") // 100MB
 	cfg, err := LoadConfig("")
 	if err != nil {
@@ -183,6 +227,7 @@ func TestLoadConfigEnvOverride(t *testing.T) {
 // below env). A yaml file setting session.maxConcurrent=50 overrides the
 // default of 100.
 func TestLoadConfigFileOverride(t *testing.T) {
+	setRequiredPythonEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := []byte("session:\n  maxConcurrent: 50\n")
@@ -202,6 +247,7 @@ func TestLoadConfigFileOverride(t *testing.T) {
 // TestLoadConfigPrecedence verifies the full D-52 chain: env > file > default.
 // The file says 50, env says 200, default is 100 — env MUST win.
 func TestLoadConfigPrecedence(t *testing.T) {
+	setRequiredPythonEnv(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := []byte("session:\n  maxConcurrent: 50\n")
@@ -270,5 +316,124 @@ func TestLoadConfigUnknownStrategy(t *testing.T) {
 	}
 	if !errors.Is(err, ErrConfigInvalid) {
 		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
+// === Phase 3: PythonConfig tests (PY-01, D-03/D-04/D-05) ===
+
+// TestLoadConfigInvalidPythonInterpreter verifies the D-04/D-03 rule that
+// python.interpreter is mandatory: without it, the bridge cannot spawn the
+// venv Python. Failure wraps ErrConfigInvalid.
+func TestLoadConfigInvalidPythonInterpreter(t *testing.T) {
+	// Set every other required python field so the interpreter check is the
+	// ONLY failing rule (proves the error comes from THIS validation, not a
+	// downstream one).
+	t.Setenv("HTA_PYTHON_SCRIPTSDIR", "third_party/python")
+	// HTA_PYTHON_INTERPRETER deliberately unset → DefaultConfig leaves it "".
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for python.interpreter empty")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
+// TestLoadConfigInvalidPythonScriptsDir verifies that python.scriptsDir is
+// required (the vendored scripts directory must be located, D-03).
+func TestLoadConfigInvalidPythonScriptsDir(t *testing.T) {
+	t.Setenv("HTA_PYTHON_INTERPRETER", "/opt/hta/venv/bin/python")
+	// HTA_PYTHON_SCRIPTSDIR deliberately unset.
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for python.scriptsDir empty")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
+// TestLoadConfigInvalidPythonMaxConcurrent verifies the D-02 bound: the
+// semaphore cap MUST be in [1, 4]. Values outside that range (e.g. 8) risk
+// fork-bombing the 1C/1G VPS or starving the Go heap.
+func TestLoadConfigInvalidPythonMaxConcurrent(t *testing.T) {
+	setRequiredPythonEnv(t)
+	t.Setenv("HTA_PYTHON_MAXCONCURRENT", "8")
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for maxConcurrent=8")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
+// TestLoadConfigInvalidPythonTimeouts verifies the three subprocess timeouts
+// (dueTimeout, reviewTimeout, pregenTimeout) reject non-positive values. A
+// zero timeout would let a wedged subprocess hang the caller indefinitely.
+//
+// Uses bare integers (0, -1) in the YAML layer rather than duration strings:
+// viper's duration decoder accepts ints as nanoseconds, and "0" lands as
+// time.Duration(0) where Validate's > 0 check fires. Duration strings like
+// "0s" trip viper's strconv.ParseInt pre-check and fail at unmarshal time
+// before reaching Validate, so they are unsuitable for this rule test.
+func TestLoadConfigInvalidPythonTimeouts(t *testing.T) {
+	setRequiredPythonEnv(t)
+	for _, tc := range []struct {
+		name string
+		yaml string
+	}{
+		{"dueTimeout", "python:\n  dueTimeout: 0\n"},
+		{"reviewTimeout", "python:\n  reviewTimeout: 0\n"},
+		{"pregenTimeout", "python:\n  pregenTimeout: -1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatalf("WriteFile(%s) error %v", path, err)
+			}
+			_, err := LoadConfig(path)
+			if err == nil {
+				t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for %s",
+					tc.name)
+			}
+			if !errors.Is(err, ErrConfigInvalid) {
+				t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+			}
+		})
+	}
+}
+
+// TestPythonConfigHasNoSecretFields is the D-05 automated guard. It uses
+// reflect to walk every field of PythonConfig and fails if any field name
+// contains a secret-shaped substring. This prevents future contributors from
+// accidentally adding APIKey/Secret/Password/Token fields to the typed Config
+// — secrets must travel through os.Getenv in pkg/pybridge, never through
+// this struct.
+//
+// If a legitimate future field legitimately trips one of these substrings
+// (e.g. "tokenBucket"), rename the field rather than weakening the guard.
+func TestPythonConfigHasNoSecretFields(t *testing.T) {
+	secretSubstrings := []string{"secret", "password", "apikey", "token"}
+	typ := reflect.TypeOf(PythonConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		// Only inspect real exported config fields (skip zero-value reflect
+		// internal noise — there is none here, but the guard is cheap).
+		name := strings.ToLower(field.Name)
+		for _, sub := range secretSubstrings {
+			if strings.Contains(name, sub) {
+				t.Fatalf("D-05 violation: PythonConfig.%s field name contains "+
+					"secret substring %q — secrets MUST travel through os.Getenv "+
+					"in pkg/pybridge, never through this struct (D-05)",
+					field.Name, sub)
+			}
+		}
+	}
+	// Sanity: ensure we actually inspected a non-zero field count so a future
+	// refactor that accidentally empties PythonConfig does not silently pass.
+	if typ.NumField() == 0 {
+		t.Fatal("PythonConfig has zero fields — reflect guard has nothing to inspect")
 	}
 }

@@ -72,3 +72,56 @@ shutdown:
   # process force-exits. 30s satisfies systemd / k8s termination grace
   # periods (D-21).
   timeout: 30s
+
+python:
+  # --------------------------------------------------------------------
+  # pkg/pybridge subprocess configuration (Phase 3, PY-01).
+  # See pkg/infra/config.go PythonConfig for the authoritative schema.
+  # D-05 INVARIANT: this block MUST NOT contain VOLCENGINE_TTS_* secrets.
+  # TTS credentials travel from the live process environment (os.Getenv in
+  # pkg/pybridge) directly into the spawned subprocess env — they are
+  # intentionally absent here so they never enter git history.
+  # --------------------------------------------------------------------
+
+  # Absolute path to the venv python used to spawn vocab_manager.py and
+  # pregenerate_dictation.py (D-04). `make py-bootstrap` creates this venv.
+  # Example for the 1C/1G VPS deployment:
+  interpreter: /opt/hta/venv/bin/python
+
+  # Directory holding the vendored Python scripts (D-03 vendor). Vendored at
+  # third_party/python/ in this repo — see `make py-sync` for upstream sync.
+  scriptsDir: third_party/python
+
+  # Filename of the FSRS vocab_manager script inside scriptsDir (D-03).
+  vocabScript: vocab_manager.py
+  # Filename of the pregenerate_dictation script inside scriptsDir (D-03).
+  pregenScript: pregenerate_dictation.py
+
+  # Runtime SQLite DB path (env DICTATION_DB_PATH) for FSRS state (D-09/D-10).
+  vocabDBPath: /opt/hta/data/vocab.db
+  # Runtime data directory (env DICTATION_DATA_DIR) for non-cache state.
+  dataDir: /opt/hta/data
+  # Runtime cache directory (env DICTATION_CACHE_DIR) where pregenerate writes
+  # mp3 files (D-06 — Go holds paths/manifest, not audio bytes).
+  cacheDir: /opt/hta/data/cache/audio
+  # Runtime manifest directory (env DICTATION_MANIFEST_DIR).
+  manifestDir: /opt/hta/data/cache
+  # Non-secret .env file (env DICTATION_ENV_FILE) the subprocess may load for
+  # DICTATION_* path overrides. VOLCENGINE_TTS_* secrets are NOT placed here
+  # (D-05).
+  envFile: /opt/hta/data/dictation.env
+
+  # Subprocess wall-clock caps. vocab_manager is in-process fast (10s); the
+  # pregenerate call batches TTS + ffmpeg for an entire word list so it is
+  # allowed longer (D-01 spawn-per-call, cold-start amortised over the batch).
+  dueTimeout: 10s
+  reviewTimeout: 10s
+  pregenTimeout: 120s
+
+  # Global bounded-semaphore cap on simultaneously running Python subprocesses
+  # (D-02). Prevents 50-100 concurrent sessions from fork-bombing the 1C/1G
+  # VPS. MUST be in [1, 4]. Recommended 2 — see RESEARCH Pitfall 7 memory
+  # math (each pregenerate call holds ~50-100MB transient Python memory; 2 ×
+  # 100MB = 200MB worst case, within the VPS headroom outside the 150MB Go
+  # budget).
+  maxConcurrent: 2

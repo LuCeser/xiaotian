@@ -13,10 +13,17 @@ import (
 // server-level tests do not spend real wall-clock waiting on monitor / cleanup
 // ticks. The values are still > 0 (validation-enforced) but small enough that
 // a polling goroutine's first tick happens inside any reasonable test budget.
+//
+// The Python.* operational fields (Phase 3) are populated with non-empty
+// placeholders because Config.Validate now requires python.interpreter and
+// python.scriptsDir — the tests do not spawn real subprocesses, so the values
+// only need to pass validation.
 func fastServerConfig() Config {
 	cfg := DefaultConfig()
 	cfg.Memory.MonitorInterval = 10 * time.Millisecond
 	cfg.Session.CleanupInterval = 20 * time.Millisecond
+	cfg.Python.Interpreter = "/opt/hta/venv/bin/python"
+	cfg.Python.ScriptsDir = "third_party/python"
 	return cfg
 }
 

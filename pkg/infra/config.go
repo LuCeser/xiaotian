@@ -94,6 +94,81 @@ type Config struct {
 
 	// Shutdown tunes graceful drain on SIGTERM/SIGINT (D-21).
 	Shutdown ShutdownConfig `json:"shutdown" mapstructure:"shutdown"`
+
+	// Python tunes the pkg/pybridge subprocess layer (Phase 3, D-03/D-04/D-05).
+	// Holds only operational configuration: interpreter path, vendored script
+	// paths, runtime data/cache directories, subprocess timeouts, and the
+	// global concurrency cap. Secrets (VOLCENGINE_TTS_*) are deliberately NOT
+	// modelled here — the bridge reads them via os.Getenv per D-05 and the
+	// package's own "no secret fields" rule (see Config doc comment above).
+	Python PythonConfig `json:"python" mapstructure:"python"`
+}
+
+// PythonConfig tunes the Go ↔ Python subprocess bridge (Phase 3, D-03/D-04).
+// It carries only operational fields; TTS credentials are intentionally absent
+// — see the Config struct doc comment and D-05. The TestPythonConfigHasNoSecretFields
+// reflect guard enforces this invariant automatically.
+type PythonConfig struct {
+	// Interpreter is the absolute path to the venv's python executable used
+	// to spawn vocab_manager.py / pregenerate_dictation.py (D-04). Example:
+	// "/opt/hta/venv/bin/python". Empty is rejected by Validate.
+	Interpreter string `json:"interpreter" mapstructure:"interpreter"`
+
+	// ScriptsDir is the directory holding the vendored Python scripts
+	// (D-03 vendor). Typically "third_party/python" relative to the process
+	// CWD. Empty is rejected by Validate.
+	ScriptsDir string `json:"scriptsDir" mapstructure:"scriptsDir"`
+
+	// VocabScript is the filename of the vocab_manager script inside
+	// ScriptsDir. Default "vocab_manager.py". Empty is rejected by Validate.
+	VocabScript string `json:"vocabScript" mapstructure:"vocabScript"`
+
+	// PregenScript is the filename of the pregenerate_dictation script inside
+	// ScriptsDir. Default "pregenerate_dictation.py". Empty is rejected by
+	// Validate.
+	PregenScript string `json:"pregenScript" mapstructure:"pregenScript"`
+
+	// VocabDBPath is the runtime SQLite DB path (env DICTATION_DB_PATH) used
+	// by vocab_manager for FSRS state (D-09/D-10). Forwarded to the subprocess
+	// via its --db global argument by the bridge.
+	VocabDBPath string `json:"vocabDBPath" mapstructure:"vocabDBPath"`
+
+	// DataDir is the runtime data directory (env DICTATION_DATA_DIR) used by
+	// the Python scripts for non-cache persistent state.
+	DataDir string `json:"dataDir" mapstructure:"dataDir"`
+
+	// CacheDir is the runtime cache directory (env DICTATION_CACHE_DIR) where
+	// pregenerate_dictation writes mp3 files (D-06). Forwarded to the
+	// subprocess via env.
+	CacheDir string `json:"cacheDir" mapstructure:"cacheDir"`
+
+	// ManifestDir is the runtime manifest directory (env DICTATION_MANIFEST_DIR)
+	// where pregenerate_dictation emits its generated-audio manifest.
+	ManifestDir string `json:"manifestDir" mapstructure:"manifestDir"`
+
+	// EnvFile is the path to the non-secret .env file (env DICTATION_ENV_FILE)
+	// the subprocess may load for DICTATION_* path overrides. VOLCENGINE_TTS_*
+	// secrets are NOT placed here — they come from the live process environment
+	// per D-05.
+	EnvFile string `json:"envFile" mapstructure:"envFile"`
+
+	// DueTimeout caps the wall-clock duration of a vocab_manager.py due call.
+	// Units: seconds (parsed from strings like "10s"). Default 10s.
+	DueTimeout time.Duration `json:"dueTimeout" mapstructure:"dueTimeout"`
+
+	// ReviewTimeout caps the wall-clock duration of a vocab_manager.py review
+	// call. Units: seconds. Default 10s.
+	ReviewTimeout time.Duration `json:"reviewTimeout" mapstructure:"reviewTimeout"`
+
+	// PregenTimeout caps the wall-clock duration of a pregenerate_dictation.py
+	// generate call. Default 120s — TTS + ffmpeg are slower than vocab_manager
+	// and the call batches an entire word list (D-01).
+	PregenTimeout time.Duration `json:"pregenTimeout" mapstructure:"pregenTimeout"`
+
+	// MaxConcurrent is the global bounded-semaphore cap on simultaneously
+	// running Python subprocesses (D-02). Prevents 50-100 concurrent sessions
+	// from fork-bombing the 1C/1G VPS. Default 2. MUST be in [1, 4].
+	MaxConcurrent int `json:"maxConcurrent" mapstructure:"maxConcurrent"`
 }
 
 // MemoryConfig bounds the process heap. LoadConfig validates that LimitBytes
@@ -280,6 +355,14 @@ func DefaultConfig() Config {
 		Shutdown: ShutdownConfig{
 			Timeout: 30 * time.Second,
 		},
+		Python: PythonConfig{
+			VocabScript:   "vocab_manager.py",
+			PregenScript:  "pregenerate_dictation.py",
+			DueTimeout:    10 * time.Second,
+			ReviewTimeout: 10 * time.Second,
+			PregenTimeout: 120 * time.Second,
+			MaxConcurrent: 2,
+		},
 	}
 }
 
@@ -459,6 +542,36 @@ func (c Config) Validate() error {
 		return errors.Wrap(ErrConfigInvalid, "shutdown.timeout must be > 0")
 	}
 
+	// Python bridge operational fields (D-03/D-04/D-05). Note that secret
+	// values (VOLCENGINE_TTS_*) are intentionally absent from PythonConfig;
+	// their presence is enforced by TestPythonConfigHasNoSecretFields.
+	if c.Python.Interpreter == "" {
+		return errors.Wrap(ErrConfigInvalid, "python.interpreter is required")
+	}
+	if c.Python.ScriptsDir == "" {
+		return errors.Wrap(ErrConfigInvalid, "python.scriptsDir is required")
+	}
+	if c.Python.VocabScript == "" {
+		return errors.Wrap(ErrConfigInvalid, "python.vocabScript is required")
+	}
+	if c.Python.PregenScript == "" {
+		return errors.Wrap(ErrConfigInvalid, "python.pregenScript is required")
+	}
+	if c.Python.MaxConcurrent < 1 || c.Python.MaxConcurrent > 4 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("python.maxConcurrent must be in [1, 4], got %d",
+				c.Python.MaxConcurrent))
+	}
+	if c.Python.DueTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "python.dueTimeout must be > 0")
+	}
+	if c.Python.ReviewTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "python.reviewTimeout must be > 0")
+	}
+	if c.Python.PregenTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "python.pregenTimeout must be > 0")
+	}
+
 	return nil
 }
 
@@ -529,6 +642,19 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"connection.throttleBurst",
 		"connection.dialTimeout",
 		"shutdown.timeout",
+		"python.interpreter",
+		"python.scriptsDir",
+		"python.vocabScript",
+		"python.pregenScript",
+		"python.vocabDBPath",
+		"python.dataDir",
+		"python.cacheDir",
+		"python.manifestDir",
+		"python.envFile",
+		"python.dueTimeout",
+		"python.reviewTimeout",
+		"python.pregenTimeout",
+		"python.maxConcurrent",
 	}
 	for _, key := range keys {
 		_ = v.BindEnv(key)
