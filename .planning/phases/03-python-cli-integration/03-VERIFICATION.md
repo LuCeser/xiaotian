@@ -1,14 +1,14 @@
 ---
 phase: 03-python-cli-integration
-verified: 2026-07-25T10:40:00Z
+verified: 2026-07-25T03:40:40Z
 status: human_needed
-score: 4/4 must-haves verified at code level
-behavior_unverified: 1 # RunDue/RunReview/RunPregenerate 的真 Python+venv+ffmpeg 端到端在 1C/1G VPS 上的运行时行为
+score: 4/4 must-haves verified at code level + 5/6 UAT automated
+behavior_unverified: 1 # 仅余 Volcengine provider 真实 TTS happy path + 1C/1G 规模 + Linux 进程组杀死真实负载（RunDue/RunReview/edge-tts 兜底/错误分类/密钥不泄漏 已由 make py-e2e 自动化覆盖）
 overrides_applied: 0
 human_verification:
-  - test: "在 VPS 部署期 make py-bootstrap 建 venv + pip install fsrs/requests/edge-tts，配置 VOLCENGINE_TTS_* 密钥后，经 pybridge 触发 vocab_manager.py due/review 与 pregenerate_dictation.py generate 端到端执行"
-    expected: "due 返回 DueResult.Cards（数组），review 返回 ReviewResult.Updated（数组），pregenerate 返回 PregenResult.Paths（mp3 绝对路径列表）；超时/非零退出/空 stdout 经 infra.Logger 落结构化日志（component=pybridge，error_type=timeout/nonzero_exit/other）；VOLCENGINE_TTS_* 密钥不出现在任何日志字段"
-    why_human: "Windows dev 机无 venv/ffmpeg/Volcengine 密钥；CI 用 POSIX shell fake（internal/pytest/fake_*.sh）+ 黄金 fixture 验证桥的解析/超时/错误分类逻辑，但真 Python 解释器在 venv 内对 vendored 脚本的端到端行为只能由部署 UAT 触达（vendored 脚本已与上游逐字节 diff 为空，per 03-01 checkpoint）"
+  - test: "VPS 部署期手工余量：RunPregenerate 走 Volcengine TTS 1.0 provider（生产密钥，非 edge-tts 兜底）产出真实 mp3；50–100 并发下 Go service RSS ≤ 150MB / 音频缓冲池 ≤ 50MB；pregenerate 超时后无孤儿 ffmpeg（Linux setProcessGroup 进程组杀死）"
+    expected: "RunPregenerate 返回 Volcengine provider 真实 mp3；并发压测资源不超限；超时日志无孤儿 ffmpeg"
+    why_human: "本机无 Volcengine 生产密钥（edge-tts 兜底 ≠ Volcengine provider/质量，keyless 路径已由 e2e_test.go 在 Linux/WSL 覆盖）；1C/1G 内存/并发规模观察本机无意义；Linux 进程组杀死的真实负载验证需 VPS 内核（bridge_linux_test.go 已在 Linux CI 覆盖代码路径）。RunDue/RunReview/edge-tts/错误分类/密钥不泄漏 五条已由 make py-e2e 在本机自动化 PASS（详见行为点检节）。"
 ---
 
 # Phase 3: Python CLI Integration 验证报告
@@ -49,7 +49,7 @@ human_verification:
 | `third_party/python/pregenerate_dictation.py` | vendor 上游脚本 | ✓ VERIFIED | `diff -q` 与 `../xiaotian-skills/shared/dictation/scripts/pregenerate_dictation.py` 输出空（逐字节一致，50183 bytes） |
 | `third_party/python/requirements.txt` | fsrs/requests/edge-tts + import 注释 | ✓ VERIFIED | 含 `fsrs>=0.0.1` / `requests>=2.31.0` / `edge-tts>=6.1.0`，每项上方注释标注被哪个脚本哪一行 import |
 | `third_party/python/.env.example` | 非密钥 DICTATION_* 路径 + VOLCENGINE 注释掉 | ✓ VERIFIED | 所有 VOLCENGINE_TTS_* 行注释掉 + D-05 不变式声明 |
-| `Makefile`（py-bootstrap/py-sync） | venv 建立 + 上游同步 target | ✓ VERIFIED | py-bootstrap target @ line 49（venv 创建 + pip install + pip freeze 锁定）；py-sync target @ line 64（UPSTREAM_SCRIPTS 默认 `../xiaotian-skills/shared/dictation/scripts`）；.PHONY 行含两个 target |
+| `Makefile`（py-bootstrap/py-sync/py-e2e） | uv venv 建立 + 上游同步 + E2E target | ✓ VERIFIED | py-bootstrap target 用 `uv venv --python 3.12` + `UV_INDEX_URL=$(PY_INDEX) uv pip install` + `uv pip freeze` 锁定（uv 化，PY_INDEX 默认清华镜像）；py-e2e target 注入 UV_INDEX_URL 跑 `go test -tags=e2e ./pkg/pybridge/`（venv 由 TestMain 自管）；py-sync target 不变；.PHONY 行含三个 target |
 | `config.example.yaml`（python: 块） | 含 python: 操作性配置，无密钥 | ✓ VERIFIED | python: 块 @ line 76，每字段注释引用 D-xx 决策，密钥位置明确声明经部署环境注入（D-05） |
 | `internal/pytest/fake_vocab.sh` | POSIX shell fake for vocab_manager | ✓ VERIFIED | 83 行 POSIX sh，dispatch due（echo JSON 数组）/review（Warning 前缀 + 末尾 JSON）/error（exit 1）三路径 |
 | `internal/pytest/fake_prege.sh` | POSIX shell fake for pregenerate | ✓ VERIFIED | 84 行 POSIX sh，default 路径 echo 3 mp3 路径 + --lock-test 路径空 stdout（Pitfall 6）+ --fail 路径 exit 1 |
@@ -103,6 +103,7 @@ VPS 端到端：真 Python 子进程 stdout → bytes.Buffer → extractTrailing
 | Linux 进程组杀死集成测（仅代码审查） | 文件 `pkg/pybridge/bridge_linux_test.go` 在 `//go:build linux` 后 | Windows dev 机跳过；代码存在且用 `sh -c "sleep 30 & sleep 30"` 模拟 grandchild 验证 SIGKILL(-pgid) 杀整组 | ? SKIP（Linux-only，需 Linux CI 跑） |
 | go vet | `go vet ./pkg/pybridge/ ./pkg/infra/ ./cmd/service/` | 退出 0（无输出） | ✓ PASS |
 | vendor 脚本与上游 diff | `diff -q third_party/python/*.py ../xiaotian-skills/shared/dictation/scripts/*.py` | 输出空（vocab_manager.py + pregenerate_dictation.py 逐字节一致） | ✓ PASS |
+| 真 Python E2E（uv venv） | `make py-e2e`（= `go test -tags=e2e ./pkg/pybridge/`，TestMain 用 uv 建 venv + 装依赖） | RunDue/RunReview/SecretNoLeak/ErrorClassification(nonzero) PASS；Pregenerate SKIP（Windows fcntl，Linux/WSL 跑 edge-tts 兜底）；ErrorClassification/timeout SKIP（Linux-only，Windows exec 把 context-killed 报为 exit-status-1） | ✓ PASS（自动化覆盖原"VPS-only"UAT 的 5 条路径，仅余 Volcengine provider+规模+进程组杀死为手工余量，见 03-UAT.md） |
 
 ### Probe 执行
 
@@ -131,19 +132,24 @@ Phase 3 文件（pkg/pybridge/*.go、pkg/infra/config.go、cmd/service/main.go�
 
 ### Human Verification Required
 
-### 1. VPS 部署期 venv + 真密钥端到端 UAT
+### 1. VPS 部署期手工余量（Volcengine provider + 1C/1G 规模 + Linux 进程组杀死）
 
-**Test:** 在 VPS 上 `make py-bootstrap`（建 venv + `pip install -r third_party/python/requirements.txt` 锁版本），配置 `VOLCENGINE_TTS_API_KEY/APP_ID/ACCESS_KEY/RESOURCE_ID` 经部署环境注入，配置 `config.yaml` 的 `python:` 块指向 venv 解释器与 vendored 脚本路径，然后通过 `/gsd-verify-work` 触发：(a) vocab_manager.py due 子命令（验证返回 DueResult.Cards 非空）；(b) review 子命令带 4 种 rating（验证 ReviewResult.Updated 与 FSRS 状态更新）；(c) pregenerate_dictation.py generate 子命令（验证 PregenResult.Paths 含 mp3 绝对路径，ffmpeg 子进程在超时后被进程组杀死——观察 `tail -f` 日志看 error_type=timeout 时无孤儿 ffmpeg）。
+> 原"VPS-only 端到端 UAT"已拆解：RunDue / RunReview / edge-tts 兜底 happy path / 错误分类（timeout/nonzero）/ VOLCENGINE 密钥不泄漏 五条路径已由 `make py-e2e`（`pkg/pybridge/e2e_test.go`，build tag `e2e`）在本机用 uv venv + 真 Python 3.12 自动化覆盖（详见行为点检节）。仅以下三项必须 VPS 部署期手工确认。
 
-**Expected:** RunDue 返回 DueResult.Cards（数组）；RunReview 返回 ReviewResult.Updated（数组，含 UpdatedCard 字段 word/rating/next_due/state/stability）；RunPregenerate 返回 PregenResult.Paths（mp3 绝对路径列表）；超时/非零退出/空 stdout 经 infra.Logger 落结构化日志（component=pybridge，error_type=timeout/nonzero_exit/other）；VOLCENGINE_TTS_* 密钥绝不出现在任何日志字段（TestLogResultNoSecretLeak 已在单测层守卫，UAT 二次确认）。
+**Test:**
+- (a) **Volcengine provider 真实 TTS**：VPS 上 `make py-bootstrap`（uv 建 venv 锁版本）+ 配置 `VOLCENGINE_TTS_API_KEY/APP_ID/ACCESS_KEY/RESOURCE_ID` 生产密钥 → `RunPregenerate` 走 **Volcengine TTS 1.0 provider**（非 edge-tts 兜底）→ 断言 `PregenResult.Paths` 为 Volcengine provider 真实 mp3。
+- (b) **1C/1G 规模**：50–100 并发会话压测 → 断言 Go service RSS ≤ 150MB、音频缓冲池 ≤ 50MB（资源约束）。
+- (c) **Linux 进程组杀死**：制造 `RunPregenerate` 超时 → `tail -f` 日志观察 `error_type=timeout` 且无孤儿 ffmpeg（Linux `setProcessGroup` SIGKILL(-pgid) 整组生效）。
 
-**Why human:** Windows dev 机无 venv/ffmpeg/Volcengine 密钥；CI 用 POSIX shell fake（internal/pytest/fake_*.sh）+ 黄金 fixture 验证桥的解析/超时/错误分类逻辑，但真 Python 解释器在 venv 内对 vendored 脚本的端到端行为（含 fsrs 包导入、Volcengine TTS HTTP 调用、ffmpeg 子进程 spawn）只能由部署 UAT 触达。vendored 脚本已与上游 `../xiaotian-skills/shared/dictation/scripts/*` 逐字节 `diff -q` 为空（见 03-01-SUMMARY.md checkpoint 解决节，orchestrator 以 upstream requirements.txt 为权威证据 resolve 为 approved）。
+**Expected:** Volcengine provider 真实 mp3 产出；并发资源不超限；超时无孤儿 ffmpeg。
+
+**Why human:** 本机无 Volcengine 生产密钥（edge-tts 兜底 ≠ Volcengine provider/质量；keyless 路径已由 e2e_test.go 在 Linux/WSL 覆盖）；1C/1G 内存/并发规模观察本机无意义；Linux 进程组杀死的真实负载验证需 VPS 内核（`bridge_linux_test.go` 已在 Linux CI 覆盖代码路径）。
 
 ### Gaps Summary
 
 无代码层 gap。所有 4 个 Success Criteria 与全部 PLAN must_haves（truths/prohibitions/artifacts/key_links）均在代码层通过单测与 wiring 验证。Requirements PY-01..PY-04 全部 SATISFIED，REQUIREMENTS.md traceability 表标记一致（4 个均 Complete）。
 
-唯一的 human_needed 项是 VPS 部署期 venv + 真密钥 + ffmpeg + Volcengine TTS 端到端 UAT——这是部署时关注点而非代码 gap，按 verification_context 约定经 `/gsd-verify-work` 在部署时跑。
+原唯一的 human_needed 项（"真 Python+venv+ffmpeg 端到端"）已被 `make py-e2e` 拆解自动化 5/6；仅余 Volcengine provider 真实 TTS + 1C/1G 规模 + Linux 进程组杀死三项为部署期手工余量（见 03-UAT.md test 6）。
 
 代码层亮点：
 -argv 构造三处分离（dueArgs/reviewArgs/pregenArgs）严格遵循各自上游契约（vocab `--db` 在子命令前 vs pregenerate 无全局 --db，generate 子命令在前）；
