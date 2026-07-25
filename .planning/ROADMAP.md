@@ -106,7 +106,7 @@ Plans:
   3. System integrates with pregenerate_dictation.py for TTS audio generation
   4. Subprocess errors are captured and surfaced to logging system
 
-**Plans**: 4/5 plans executed
+**Plans**: 5/5 plans executed
 
 Plans:
 **Wave 1**
@@ -121,7 +121,7 @@ Plans:
 **Wave 3** *(blocked on Wave 2 completion)*
 
 - [x] 03-04-PLAN.md — RunDue + RunReview + argv 构造 + 末尾 JSON 提取 (PY-02, PY-03)
-- [ ] 03-05-PLAN.md — RunPregenerate + 按行路径解析 + flock 串行化 + shell fake (PY-04)
+- [x] 03-05-PLAN.md — RunPregenerate + 按行路径解析 + flock 串行化 + shell fake (PY-04)
 
 **PROJECT_MODE**: mvp
 
@@ -281,7 +281,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 |-------|----------------|--------|-----------|
 | 1. Resource-Constrained Infrastructure | 8/8 | Complete    | 2026-07-23 |
 | 2. WebSocket Communication Layer | 1/3 | Complete    | 2026-07-19 |
-| 3. Python CLI Integration | 4/5 | In Progress|  |
+| 3. Python CLI Integration | 5/5 | In Progress|  |
 | 4. Database Schema Design | 0/0 | Not started | - |
 | 5. FSRS Core Implementation | 0/0 | Not started | - |
 | 6. TTS Audio Streaming | 0/0 | Not started | - |

@@ -4,16 +4,16 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 03
 current_phase_name: python-cli-integration
-status: executing
-stopped_at: Completed 03-04-PLAN.md (RunDue + RunReview + dueArgs/reviewArgs + Pitfall 2 验收)
-last_updated: "2026-07-25T01:44:46.969Z"
+status: verifying
+stopped_at: Completed 03-05-PLAN.md (RunPregenerate + pregenArgs + cap=1 pregenSem + classifyPregenResult + Pitfall 6 空 stdout 检测 + ErrBridgeNotImplemented 删除 — Phase 3 完结)
+last_updated: "2026-07-25T02:16:14.632Z"
 last_activity: 2026-07-24
 last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 3
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 16
-  completed_plans: 13
+  completed_plans: 14
 ---
 
 # Project State
@@ -29,10 +29,10 @@ See: .planning/PROJECT.md (updated 2025-07-18)
 
 Phase: 03 (python-cli-integration) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-07-24 — Phase 03 execution started
 
-Progress: [████████░░] 81%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ Progress: [████████░░] 81%
 | Phase 03 P02 | ~10 | 2 tasks | 10 files |
 | Phase 03 P03 | ~25 | 2 tasks | 6 files |
 | Phase 03 P04 | ~12 | 2 tasks | 3 files |
+| Phase 03 P05 | ~25 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,10 @@ Recent decisions affecting current work:
 - [Phase ?]: Plan 03-04: argv 构造用 cfg.VocabScript 直接作 args[0]（照 RESEARCH+plan），不主动 filepath.Join(ScriptsDir, VocabScript)——调用方对路径形式负全责
 - [Phase ?]: Plan 03-04: ErrPythonEmpty 在 RunDue/RunReview 显式前置 len(stdout)==0 检查（Rule 1），让 4 类 sentinel 真正互斥可达，对齐 executor.go 契约
 - [Phase ?]: Plan 03-04: reviewArgs 自动 size-based 选 --results vs --file（plan 明确路径），不读 opts.UseFile/ResultsFile；nil Results 兜底为空 map 防 'null' 被脚本拒（Rule 2）
+- [Phase ?]: Plan 03-05: pregenArgs 对空 Words/Language 在 argv 层返回 error（脚本 required=True 字段提前拦下），避免无谓 subprocess spawn + 错误消息更精确
+- [Phase ?]: Plan 03-05: Bridge.pregenSem cap=1 专用串行化（独立于 D-02 全局 sem），防 fcntl.flock 全局锁竞争致 exit 0 + 空 stdout 静默失败；acquire 在 b.run 前让排队 caller 不饥饿 due/review 路径
+- [Phase ?]: Plan 03-05: classifyPregenResult 提取为纯函数让 4 类 sentinel 分支无 subprocess 表驱动可测（plan 明确允许）；Pitfall 6 空 stdout exit 0 严格返回 ErrPythonEmpty 绝非性零路径成功
+- [Phase ?]: Plan 03-05: ErrBridgeNotImplemented + RunPregenerate stub 全删除（Phase 3 完结），var _ Executor = (*Bridge)(nil) 现完全靠 RunDue/RunReview/RunPregenerate 三个真方法通过编译期检查
 
 ### Pending Todos
 
@@ -100,6 +105,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-25T01:44:46.963Z
-Stopped at: Completed 03-04-PLAN.md (RunDue + RunReview + dueArgs/reviewArgs + Pitfall 2 验收)
-Resume file: .planning/phases/03-python-cli-integration/03-05-PLAN.md
+Last session: 2026-07-25T02:16:14.626Z
+Stopped at: Completed 03-05-PLAN.md (RunPregenerate + pregenArgs + cap=1 pregenSem + classifyPregenResult + Pitfall 6 空 stdout 检测 + ErrBridgeNotImplemented 删除 — Phase 3 完结)
+Resume file: None — Phase 3 complete, ready for /gsd-verify-work
