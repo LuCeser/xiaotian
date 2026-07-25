@@ -1,13 +1,10 @@
 ---
 phase: 02-websocket-communication-layer
-reviewed: 2026-07-25T00:00:00Z
+reviewed: 2026-07-26T00:00:00Z
 depth: standard
-files_reviewed: 17
+files_reviewed: 12
 files_reviewed_list:
   - internal/wstest/helpers.go
-  - pkg/crc16/crc16.go
-  - pkg/ws/codec.go
-  - pkg/ws/codec_test.go
   - pkg/ws/connection.go
   - pkg/ws/connection_test.go
   - pkg/ws/heartbeat.go
@@ -15,433 +12,389 @@ files_reviewed_list:
   - pkg/ws/hub.go
   - pkg/ws/hub_test.go
   - pkg/ws/integration_test.go
-  - pkg/ws/protocol.go
-  - pkg/ws/protocol_test.go
   - pkg/ws/router.go
   - pkg/ws/router_test.go
   - pkg/ws/server.go
   - pkg/ws/server_test.go
 findings:
-  critical: 7
-  warning: 10
-  info: 4
-  total: 21
+  critical: 1
+  warning: 9
+  info: 6
+  total: 16
 status: issues_found
 ---
 
 # Phase 02: Code Review Report
 
-**Reviewed:** 2026-07-25
+**Reviewed:** 2026-07-26T00:00:00Z
 **Depth:** standard
-**Files Reviewed:** 17
+**Files Reviewed:** 12
 **Status:** issues_found
 
 ## Summary
 
-The Phase 2 WebSocket layer delivers a working binary frame protocol (CRC-16-CCITT verified against the standard `0x29B1` test vector), a hub with capacity enforcement, a per-message-type router with worker pools and panic recovery, and a gorilla/websocket upgrade server with Origin whitelisting. The codec and protocol packages are sound.
+The Phase 02 WebSocket layer is generally well-structured: bounded channels throughout, a clean pump-per-connection model, close-safe `Send` via RWMutex, CRC validation at the codec boundary, and origin whitelisting. The previous review round (CR-/WR- prefixed comments inline) addressed the worst immediate defects (send-on-closed-channel, write timeouts, Safari compression, etc.).
 
-However, the connection lifecycle and server layer contain **multiple blocker-class defects** that will break production behavior on a 1C/1G VPS:
+That said, this adversarial pass still finds one Critical and several Warnings. The single most important defect is the **Hub goroutine leak on shutdown**: `Register`/`Unregister` are blocking sends on channels that `Hub.Run` stops draining the moment its context cancels, with no `Close` to drain or close them. Under the documented 150 MB / 1C VPS budget this is the kind of defect that silently accumulates live goroutines during deployment rollovers and connection bursts. Beyond that, the Router's panic-recovery loop, the lack of any shutdown timeout on `Router.Close`, silent writePump exits, and several API-contract lies (non-blocking claims, `Close` always returning `nil`) all degrade production readiness. None of the Critical/Warning findings are stylistic; each can cause observable misbehavior under realistic load or shutdown conditions.
 
-- `readPump`'s `select { default: ReadMessage() }` pattern defeats context cancellation — blocked reads cannot be interrupted.
-- `SetReadDeadline` is set exactly once at handshake time, so every connection is force-closed at 60 seconds regardless of activity.
-- `Heartbeat` is implemented and tested but **never invoked** anywhere in `server.go`; `HeartbeatInterval` is dead config.
-- `Client.send` is a private channel with no public `Send` method — the server has no way to push audio/TTS frames back to the client, breaking the streaming-TTS core flow described in CLAUDE.md.
-- `CheckOrigin` returns `true` for an empty `Origin` header, contradicting the D-24 "never return-true" rule from PATTERNS.md.
-- `writePump` performs writes with no write deadline, allowing a slow/frozen client to pin a goroutine indefinitely under the 150MB budget.
-
-Several tests also assert the opposite polarity of what their comments describe, so they pass by accident while proving nothing.
+Concurrency correctness was traced through the full lifecycle (upgrade -> register -> pumps -> heartbeat -> unregister), including the `readPump` watcher goroutine, the `Send`/`CloseSend` RWMutex handoff, and the Router's worker-pool backpressure path.
 
 ## Critical Issues
 
-### CR-01: `readPump` `select` with `default` makes context cancellation ineffective
+### CR-01: Hub goroutine leak on shutdown - blocking Register/Unregister with no drain, no Close, no channel close
 
-**File:** `pkg/ws/connection.go:119-150`
+**File:** `pkg/ws/hub.go:95-150`, `pkg/ws/connection.go:128-130`, `pkg/ws/server.go:175-201`
+
 **Issue:**
+Three facts compose into a single critical defect:
+
+1. `Hub.Register` and `Hub.Unregister` are **blocking** channel sends:
+   ```go
+   func (h *Hub) Register(c *Client)   { h.register <- c }   // blocks if buffer full
+   func (h *Hub) Unregister(c *Client) { h.unregister <- c } // blocks if buffer full
+   ```
+   The doc comments claim *"This is a non-blocking operation - the request is queued"* - that is false. The channels are buffered (`RegisterBuffer`/`UnregisterBuffer`) but once the buffer fills the caller blocks indefinitely.
+
+2. `Hub.Run` returns immediately on `ctx.Done()` **without draining** the register/unregister channels and **without closing** them:
+   ```go
+   case <-ctx.Done():
+       return  // pending requests abandoned; channels left open and full
+   ```
+
+3. `Client.readPump` unconditionally calls `c.hub.Unregister(c)` in a `defer` on every exit path (including panics and ctx cancel). `Server.HandleWebSocket` calls `s.hub.Register(client)` before starting pumps, and then blocks on `<-done`.
+
+**Leak path A - shutdown with the wrong order (the order the integration test itself uses):**
+`hubCancel()` -> `Hub.Run` returns -> connections still alive -> HTTP server stops -> per-connection ctx cancels -> `readPump` exits -> `defer c.hub.Unregister(c)` executes -> `h.unregister <- c` **blocks forever** because nothing drains the channel. Each blocked `readPump` pins its `HandleWebSocket` goroutine on `<-done`. With >`UnregisterBuffer` (default 32) live connections at shutdown time, goroutine count grows without bound until process exit. `TestIntegration_ServerShutdownCleansAllGoroutines` masks this by using only 5 connections against a 32-buffer channel - exactly under the threshold where the leak triggers.
+
+**Leak path B - steady-state burst:** if `Hub.Run` is momentarily slow (e.g., a synchronous zap sink, GC pause, or a registration spike) and more than `RegisterBuffer` callers call `Register` concurrently, `HandleWebSocket` hangs at `s.hub.Register(client)` - and it does **not** respect the request context, so even after the HTTP client gives up the goroutine stays. `Unregister` has the same property in `readPump`'s defer.
+
+On a 1C/1G VPS with a 150 MB Go-service budget, an unbounded goroutine leak during every deploy/rollover is operationally critical. Each leaked goroutine retains its stack (~8 KB minimum) plus the `Client`, its `send` channel buffer (~16 msgs), and the `*websocket.Conn` buffers.
+
+**Fix:** make the hub APIs genuinely non-blocking and add a real `Close`:
 
 ```go
-for {
+func (h *Hub) Register(c *Client) bool {
     select {
+    case h.register <- c:
+        return true
     default:
-        msgType, data, err := c.conn.ReadMessage()  // blocks here
-        ...
-    case <-ctx.Done():
-        return
+        return false // shed; caller should reject the connection
     }
+}
+
+func (h *Hub) Unregister(c *Client) {
+    select {
+    case h.unregister <- c:
+    default:
+        // hub is not draining (shutting down or saturated); the client
+        // will be GC'd once its pumps exit. Do not block readPump's defer.
+        h.logger.Warn("unregister dropped: hub not draining")
+    }
+}
+
+func (h *Hub) Close() {
+    close(h.register)   // callers must handle the panic via recover, or
+    close(h.unregister) // use a closed-flag guard like Client.CloseSend
 }
 ```
 
-Go's `select` semantics: when a `default` branch is present and no other case is *immediately* ready, `default` runs at once. The result is that the loop falls into `default` on every iteration and then **blocks inside `ReadMessage`**. `ctx.Done()` is only re-evaluated after `ReadMessage` returns, and even then, because `default` is always ready, the scheduler may pick `default` again and re-enter another blocking read.
-
-Concretely: if a client opens a WebSocket and sends nothing, `ReadMessage` blocks forever, `ctx.Done()` cannot interrupt it, and shutdown/cancel of that connection relies entirely on the underlying `conn.Close()` being called from another path. On the resource-constrained VPS this means hub shutdown, graceful server restart, and per-connection cancel all leak the read goroutine until the TCP stack notices the peer is gone.
-
-This also makes the `case <-ctx.Done(): return` branch effectively unreachable while a read is in flight, defeating D-12 (context-based lifecycle).
-
-**Fix:** Drop the `select`/`default` shape and either (a) spawn a close-on-cancel watcher, or (b) drive cancellation through `SetReadDeadline` refreshed each loop iteration:
-
+And in `Hub.Run`, drain on `ctx.Done()` before returning:
 ```go
-func (c *Client) readPump(ctx context.Context) {
-    defer c.hub.Unregister(c)
-    defer func() {
-        if r := recover(); r != nil {
-            c.logger.Error("readPump panic recovered",
-                zap.Any("recovered", r), zap.Stack("stack"))
-        }
-    }()
-
-    // Close the conn when ctx is cancelled, unblocking ReadMessage.
-    stop := make(chan struct{})
-    defer close(stop)
-    go func() {
-        select {
-        case <-ctx.Done():
-            _ = c.conn.Close()
-        case <-stop:
-        }
-    }()
-
+case <-ctx.Done():
+    // drain any pending unregister so blocked readPumps can exit
     for {
-        msgType, data, err := c.conn.ReadMessage()
-        if err != nil {
+        select {
+        case c := <-h.unregister:
+            c.CloseSend()
+        default:
             return
         }
-        _ = msgType
-        header, payload, err := DecodeFrame(data)
-        if err != nil {
-            c.logger.Warn("frame decode failed, skipping", zap.Error(err))
-            continue
-        }
-        if err := c.handler.Route(ctx, c, header, payload); err != nil {
-            c.logger.Warn("handler route failed", zap.Error(err))
-        }
+    }
+```
+
+`Server.HandleWebSocket` must also stop blocking on `Register` - drop or reject the connection if it returns false, and respect `r.Context()` so a disconnected HTTP client does not pin a goroutine.
+
+## Warnings
+
+### WR-01: Router worker re-enters the loop after a handler panic - CPU/log amplification on 1C VPS
+
+**File:** `pkg/ws/router.go:141-173`
+
+**Issue:**
+The worker wraps `handler(...)` in an inner `func(){ defer recover(); handler(...) }()`. This is good for isolation, but after recovery the outer `for` loop immediately reads the next task. If a handler bug causes a panic on every frame for a given `MsgType`, the cycle is: client streams frames -> `readPump` queues them -> worker pops task -> panic -> `zap.Stack("stack")` (which calls `runtime.Stack`, very expensive) -> recover -> next task -> repeat. One malicious or buggy client can pin the single CPU core and emit GB of stack-trace logs. Contrast with `readPump`, where the deferred recover correctly *exits* the connection on first panic - much smaller blast radius.
+
+**Fix:** add a per-worker (or per-handler) panic rate limiter / circuit breaker, and avoid `zap.Stack` on the hot path:
+
+```go
+var panics atomic.Int32
+// inside the inner func:
+if rec := recover(); rec != nil {
+    if panics.Add(1) > 8 {          // trip the breaker
+        r.logger.Error("handler panic threshold exceeded; disabling route",
+            zap.String("msg_type", mt.String()))
+        // stop draining this route; or back off exponentially
+        select { case <-r.ctx.Done(): return }
+    }
+    r.logger.Error("handler panic recovered",
+        zap.String("msg_type", mt.String()), zap.Any("recovered", rec))
+    // do NOT capture zap.Stack on every panic - log it once on the first one
+}
+```
+
+### WR-02: `Router.Close` has no shutdown timeout - a stuck handler blocks shutdown forever
+
+**File:** `pkg/ws/router.go:176-179`
+
+**Issue:**
+```go
+func (r *Router) Close() {
+    r.cancel()
+    r.wg.Wait() // unbounded
+}
+```
+`r.cancel()` only fires `ctx.Done()`; it cannot interrupt a running `handler(task.ctx, ...)`. If a handler is blocked on a slow downstream (TTS API, DB, `time.Sleep`), `wg.Wait` blocks until that handler returns. There is no upper bound. On a constrained VPS being rolled, this prevents clean process exit and may force SIGKILL, losing in-flight work. (This is compounded by WR-08: the handler runs under the *connection* ctx, so `r.cancel()` does not even deliver cancellation to the in-flight handler.)
+
+**Fix:** bound the wait and report:
+```go
+func (r *Router) Close() error {
+    r.cancel()
+    done := make(chan struct{})
+    go func() { r.wg.Wait(); close(done) }()
+    select {
+    case <-done:
+        return nil
+    case <-time.After(5 * time.Second):
+        r.logger.Error("router.Close timed out waiting for workers")
+        return errors.New("router shutdown timed out")
     }
 }
 ```
 
-### CR-02: Read deadline set exactly once at upgrade time — every connection dies at 60s
+### WR-03: `Client.Close` always returns `nil` - hides close-frame delivery failures
 
-**File:** `pkg/ws/server.go:136`
+**File:** `pkg/ws/connection.go:277-289`
+
 **Issue:**
-
 ```go
-conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+func (c *Client) Close(code int, reason string) error {
+    c.closeOnce.Do(func() {
+        _ = c.conn.WriteControl(websocket.CloseMessage, ...)  // error discarded
+        _ = c.conn.Close()                                     // error discarded
+    })
+    return nil  // always
+}
 ```
+The Hub calls this on the capacity-rejection path (`c.Close(websocket.CloseTryAgainLater, "server full")`). If `WriteControl` fails (client already gone, write deadline exceeded), the "server full" close frame is **never sent** but the caller believes the close was clean. The signature advertises an error that can never be observed, which is an API-contract lie.
 
-`SetReadDeadline` sets an *absolute* deadline, not an idle timeout. The deadline is never refreshed (there is no pong handler, no per-read refresh in `readPump`). After 60 seconds, every read fails with `i/o timeout` and the connection is torn down — regardless of whether the client is actively streaming audio.
-
-On a real dictation session that lasts more than a minute (the common case for elementary-school tutoring), the connection will be killed mid-session. This is a correctness/data-loss bug for the core use case.
-
-The standard gorilla/websocket pattern is to refresh the deadline on each pong (or each read):
+**Fix:** return the WriteControl error (or at least log it), and document that `nil` only means "close frame accepted by the kernel buffer":
 
 ```go
-conn.SetPongHandler(func(string) error {
-    conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-    return nil
+var writeErr error
+c.closeOnce.Do(func() {
+    writeErr = c.conn.WriteControl(
+        websocket.CloseMessage,
+        websocket.FormatCloseMessage(code, reason),
+        time.Now().Add(time.Second),
+    )
+    if cerr := c.conn.Close(); writeErr == nil {
+        writeErr = cerr
+    }
 })
+return writeErr
 ```
 
-Without also wiring the heartbeat (see CR-03), there is no pong to refresh against.
+### WR-04: `writePump` exits silently on write errors and timeouts - no production observability
 
-**Fix:** Either set a per-read deadline inside `readPump` before each `ReadMessage`, or install a pong handler that refreshes the deadline, and pair it with an active Heartbeat (CR-03).
+**File:** `pkg/ws/connection.go:206-236`
 
-### CR-03: `Heartbeat` is implemented and tested but never wired into `Server`
-
-**File:** `pkg/ws/server.go:75-77, 123-177`, `pkg/ws/heartbeat.go:29`
 **Issue:**
-
-`ServerConfig.HeartbeatInterval` is parsed and defaulted, but `Heartbeat(...)` is never launched by `HandleWebSocket` or anywhere else. `grep -n "Heartbeat\|HeartbeatInterval"` shows only config plumbing and tests — no production call site.
-
-Effect:
-
-1. No PING frames are sent, so Safari background-tab silent drops (RESEARCH.md Pitfall 2) are not mitigated — the explicit reason `Heartbeat` exists.
-2. Without PINGs, there is no pong path to refresh `SetReadDeadline` (CR-02), compounding the 60-second-kill issue.
-3. The 100-concurrent-session budget cannot be reclaimed from half-open TCP connections because nothing probes liveness.
-
-The PATTERNS.md "Heartbeat" section explicitly requires the ticker to run with the 30s `DefaultHeartbeatInterval`. The function is correct; it is just never called.
-
-**Fix:** In `HandleWebSocket`, after launching `readPump`/`writePump`, also launch a heartbeat goroutine bound to the connection context:
-
-```go
-if s.cfg.HeartbeatInterval > 0 {
-    go Heartbeat(ctx, conn, s.cfg.HeartbeatInterval, s.logger)
-}
-```
-
-The doc comment in `heartbeat.go` warning that Heartbeat "should not run concurrently with writePump" is also incorrect (see WR-06) — gorilla/websocket permits concurrent `WriteControl` (PING) alongside a single-writer `WriteMessage`, so this wiring is safe.
-
-### CR-04: No public API to send messages to a client — `Client.send` is private and write-only from tests
-
-**File:** `pkg/ws/connection.go:54-94, 153-185`
-**Issue:**
-
-`Client.send` is a private `chan []byte`. `writePump` reads from it, but the only writers in the entire codebase are test files (`client.send <- []byte("message")` in `connection_test.go`). There is no `Client.Send([]byte)` method, no `Client.SendAudio(...)`, nothing exposed for handlers.
-
-The CLAUDE.md core-value statement requires streaming TTS audio back to the student. The router/handler signature is `func(ctx, c *Client, h *FrameHeader, payload []byte) error` — handlers receive `*Client` but have no way to push a response. The integration tests even acknowledge this:
-
-```go
-// integration_test.go:34-37
-ws.MsgTypeAudio: func(...) error {
-    // Just verify handler was called - we can't write to private send channel from here
-    return nil
-},
-```
-
-For Phase 2's scope ("communication layer"), this is a blocker: the upstream direction (server→client) is implemented at the wire/protocol layer (`EncodeFrame`, `writePump`) but unreachable from any handler.
-
-**Fix:** Expose a thread-safe send method. Pick one of:
-
-```go
-// Option A: non-blocking send with backpressure signal.
-func (c *Client) Send(msg []byte) error {
-    select {
-    case c.send <- msg:
-        return nil
-    default:
-        return ErrSendBufferFull
-    }
-}
-
-// Option B: blocking send with ctx.
-func (c *Client) Send(ctx context.Context, msg []byte) error {
-    select {
-    case c.send <- msg:
-        return nil
-    case <-ctx.Done():
-        return ctx.Err()
-    }
-}
-```
-
-Option A is more consistent with the router's drop-oldest semantics (D-73). The companion issue — handlers sending after `Hub.Unregister` closes `c.send` — must also be addressed (a `sendClosed` flag guarded by `closeOnce`, or recovering from the resulting panic).
-
-### CR-05: `CheckOrigin` accepts requests with no `Origin` header
-
-**File:** `pkg/ws/server.go:108-115`
-**Issue:**
-
-```go
-CheckOrigin: func(r *http.Request) bool {
-    origin := r.Header.Get("Origin")
-    if origin == "" {
-        return true // Allow requests with no Origin header
-    }
-    return allowedOrigins[origin]
-},
-```
-
-PATTERNS.md D-24 explicitly forbids wildcard or always-true origin checks ("OriginPatterns whitelist enforced (D-24) — never '*' or return-true"). Allowing empty Origin is functionally close to `return true` because any non-browser client (curl, urllib, an attacker's script) can omit the header. Browser WebSocket clients always send `Origin` on cross-origin requests, so legitimate Safari/Chrome traffic is unaffected by rejecting empty Origins.
-
-For a children's tutoring service (CLAUDE.md target audience: elementary school students), the CSRF/cross-origin risk is real — a malicious page could open a WebSocket to this server and stream audio or trigger billing.
-
-**Fix:**
-
-```go
-CheckOrigin: func(r *http.Request) bool {
-    origin := r.Header.Get("Origin")
-    if origin == "" {
-        return false // browsers always send Origin; reject non-browser clients
-    }
-    return allowedOrigins[origin]
-},
-```
-
-If a server-to-server client genuinely needs to connect without a browser Origin, require a shared secret header or mTLS instead of weakening the browser path.
-
-### CR-06: `writePump` performs writes with no write deadline — slow clients pin goroutines
-
-**File:** `pkg/ws/connection.go:160-185`
-**Issue:**
-
+Both write-failure exit paths swallow the error:
 ```go
 if err := c.conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+    return  // no log
+}
+```
+A connection that repeatedly drops writes (slow client, network partition) is indistinguishable from a clean shutdown in the logs. Under the 150 MB budget, `writePump` exit due to `SetWriteDeadline` expiry (the CR-06 protection) is the *expected* slow-client-kill mechanism - but it is invisible. Combined with WR-05 (Heartbeat logs at Debug), the service has almost no signal for connection-drop root cause.
+
+**Fix:**
+```go
+if err := c.conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+    c.logger.Info("writePump exit: write failed",
+        zap.Error(err),
+        zap.Bool("timeout", errors.Is(err, os.ErrDeadlineExceeded)))
     return
 }
 ```
 
-No `conn.SetWriteDeadline(...)` before the write. A malicious or slow client that advertises a tiny TCP receive window can stall this write indefinitely, pinning one goroutine per connection. Combined with the 100-session budget and 150MB memory ceiling, this is an exhaustion vector: an attacker opens 100 connections, never ACKs, and 100 goroutines + their pending send-buffers (16KB each) stay resident forever.
+### WR-05: Heartbeat logs ping-failure exit at `Debug` - too low for production
 
-Gorilla/websocket's `WriteMessage` honors a write deadline only if one is set; otherwise it blocks on the underlying `net.Conn`.
+**File:** `pkg/ws/heartbeat.go:45-49`
 
-**Fix:**
-
+**Issue:**
 ```go
-for {
-    select {
-    case msg, ok := <-c.send:
-        if !ok {
-            return
-        }
-        _ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-        if err := c.conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
-            return
-        }
-    case <-ctx.Done():
+if err := c.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
+    logger.Debug("heartbeat ping failed, exiting", zap.Error(err))
+    return
+}
+```
+Ping failure is the primary signal of a stale/dead connection (the whole reason `Heartbeat` exists per its own doc comment). A `Debug` log is dropped in any production zap config running at Info+. This makes stale-connection diagnosis impossible without reconfiguring log levels, and means the only signal of a Safari background-tab silent drop (the documented Phase-02 failure mode, RESEARCH.md Pitfall 2) is invisible.
+
+**Fix:** `logger.Info("heartbeat ping failed; exiting", zap.Error(err))` - or at minimum `Warn`.
+
+### WR-06: `Heartbeat` panics on non-positive interval - exported function, no validation
+
+**File:** `pkg/ws/heartbeat.go:32-34`
+
+**Issue:**
+```go
+func Heartbeat(ctx context.Context, c WebSocketConn, interval time.Duration, logger *zap.Logger) {
+    ticker := time.NewTicker(interval) // panics if interval <= 0
+```
+`time.NewTicker` documents: *"NewTicker panics for d <= 0"*. The only thing protecting callers today is `Server.HandleWebSocket`'s `if s.cfg.HeartbeatInterval > 0` guard (server.go:196). But `Heartbeat` is an exported symbol; any future caller (a test helper, a different server type, a restart path) that passes a zero or negative interval takes the process down with an unrecovered panic in a per-connection goroutine. `readPump`'s deferred recover would not catch this because `Heartbeat` is launched in its own goroutine by `Server.HandleWebSocket` with no recover wrapper.
+
+**Fix:** validate at the boundary:
+```go
+func Heartbeat(ctx context.Context, c WebSocketConn, interval time.Duration, logger *zap.Logger) {
+    if interval <= 0 {
+        logger.Warn("heartbeat disabled: non-positive interval", zap.Duration("interval", interval))
         return
     }
+    ticker := time.NewTicker(interval)
+    defer ticker.Stop()
+    // ...
 }
 ```
 
-A reasonable write timeout for streaming audio on a 1.5s-latency target is 5–10 seconds.
+### WR-07: `ServerConfig.Validate` skips HeartbeatInterval, buffer sizes, and handshake timeout
 
-### CR-07: Hub reads `len(h.clients)` after releasing the lock — data race
+**File:** `pkg/ws/server.go:31-44`
 
-**File:** `pkg/ws/hub.go:112-114, 124-125`
 **Issue:**
+`Validate` only checks `AllowedOrigins` and `MaxMessageBytes`. `HeartbeatInterval`, `ReadBufferSize`, `WriteBufferSize`, and `HandshakeTimeout` are not validated. The `NewServer` defaulting logic only treats `== 0` as "use default" - a negative value passes through unchanged:
+- `HeartbeatInterval = -1` -> not zeroed -> server.go:149 computes `readTimeout := -1 * 2 = -2`, which falls into the `<= 0` fallback. The guard at line 196 then never launches `Heartbeat`. Result: silently broken heartbeat + an effective 60s fixed read deadline, contradicting the operator's intent.
+- `ReadBufferSize` / `WriteBufferSize` negative is passed straight to `websocket.Upgrader`, which has its own undocumented behavior.
+- `HandshakeTimeout` negative -> `websocket.Upgrader.HandshakeTimeout` semantics undefined.
 
+**Fix:** extend `Validate`:
 ```go
-h.mu.Lock()
-h.clients[c] = true
-h.mu.Unlock()
-h.logger.Info("hub registered client",
-    zap.Int("total", len(h.clients)))   // <-- read without holding the lock
-
-// Same pattern in the unregister branch:
-h.mu.Unlock()
-close(c.send)
-h.logger.Info("hub unregistered client",
-    zap.Int("total", len(h.clients)))   // <-- read without holding the lock
-```
-
-Today this happens to be safe only because `Hub.Run` is the sole writer. But `Clients()` acquires `RLock` and other code paths read the map. The pattern violates the rule established in PATTERNS.md ("Thread Safety (D-11) … Always pair Lock/Unlock with defer. Never hold a lock across a channel send or a blocking call") and is one refactor away from a `-race` failure: any future addition of a second writer (e.g., a periodic stale-connection sweeper that mutates `clients`) will turn this into a genuine data race.
-
-It is also the kind of bug `go test -race` won't currently catch only because no test exercises `Clients()` concurrently with `Hub.Run` logging.
-
-**Fix:** Capture the count while the lock is held:
-
-```go
-h.mu.Lock()
-h.clients[c] = true
-total := len(h.clients)
-h.mu.Unlock()
-h.logger.Info("hub registered client", zap.Int("total", total))
-```
-
-## Warnings
-
-### WR-01: CRC only covers the 14-byte header — payload corruption is undetected
-
-**File:** `pkg/ws/codec.go:19-32`, `pkg/ws/protocol.go:96-98`
-**Issue:** `ValidateFrame` computes the CRC over `data[0:14]` only. A single-bit flip in a 640-byte audio payload passes validation. For a real-time dictation tutor feeding PCM to a child, silent payload corruption produces pops/clicks without any integrity alarm. PATTERNS.md describes this as by design ("bytes 0-13"), but for the audio path specifically it is a quality/correctness risk worth flagging. At minimum, document the limitation in the protocol contract; preferably extend the CRC to cover the payload.
-
-### WR-02: Test assertions inverted — `TestClientReadPumpDecodesValidFrame` and `TestClientReadPumpIgnoresInvalidFrame` error on the *expected* outcome
-
-**File:** `pkg/ws/connection_test.go:388-390, 436-438`
-**Issue:**
-
-```go
-// Verify unregistration was called
-if fakeHub.Clients() == 0 {
-    t.Error("readPump should unregister on exit")
+if c.HeartbeatInterval < 0 {
+    return errors.Wrap(ErrInvalidServerConfig, "heartbeat interval must be >= 0")
+}
+if c.ReadBufferSize < 0 || c.WriteBufferSize < 0 {
+    return errors.Wrap(ErrInvalidServerConfig, "buffer sizes must be >= 0")
+}
+if c.HandshakeTimeout < 0 {
+    return errors.Wrap(ErrInvalidServerConfig, "handshake timeout must be >= 0")
 }
 ```
 
-The comment and message claim "verify unregistration was called", but the assertion fires when `Clients() == 0` — i.e., exactly when unregistration *did* happen. The polarity is reversed. The companion test `TestClientReadPumpPanicRecovery` (line 522) and `TestClientReadPumpUnregistersOnError` (line 464) both use the correct polarity (`!= 0` / `> 0`). These tests currently pass only because timing windows leave the client in the map when the check runs — they assert nothing useful and mask regressions.
+### WR-08: Router worker runs handlers under the *connection* context, not the router context
 
-**Fix:** Invert to `if fakeHub.Clients() != 0 { t.Error(...) }` in both tests.
+**File:** `pkg/ws/router.go:98-130, 163`
 
-### WR-03: `TestClientReadPumpUnregistersOnError` does not start `Hub.Run`, so it cannot verify unregistration
-
-**File:** `pkg/ws/connection_test.go:442-469`
-**Issue:** The test never calls `fakeHub.Register(client)` nor `go fakeHub.Run(ctx)`. The readPump's deferred `c.hub.Unregister(c)` puts a client on the unregister channel that nobody drains. `fakeHub.Clients()` returns 0 simply because the map was always empty. The "unregistration was called" assertion passes trivially and would continue to pass even if `readPump` skipped the defer entirely. This is a test-reliability bug.
-
-**Fix:** Start `go fakeHub.Run(ctx)`, call `fakeHub.Register(client)`, wait for registration, then verify `Clients()==1`, then let readPump error out, then verify `Clients()==0`.
-
-### WR-04: `EncodeFrame`/`EncodeHeader` mutate the caller's `*FrameHeader`
-
-**File:** `pkg/ws/codec.go:36-41`, `pkg/ws/protocol.go:83-103`
 **Issue:**
+`Route` is called from `readPump` with `readPump`'s `ctx` (the per-connection context). That `ctx` is stored in `frameTask` and passed to `handler(task.ctx, ...)` by the worker. Consequences:
+1. `Router.Close()` calling `r.cancel()` does **not** interrupt an in-flight handler - only the connection ctx cancelling does. So WR-02's timeout is the only defense, and even then the handler keeps running after `Router.Close` returns.
+2. A handler that legitimately needs the router's lifetime (e.g., to flush state when the router shuts down) has no way to observe it.
+3. After a client disconnects, its `ctx` is cancelled, so any queued tasks for that client become no-ops - but they still occupy the channel and the worker still dequeues them. Benign, but worth documenting.
 
+**Fix:** derive a per-task context from **both** so either parent cancels it:
 ```go
-func EncodeFrame(h *FrameHeader, payload []byte) []byte {
-    h.PayloadLen = uint16(len(payload))   // mutates input
-    header := EncodeHeader(h)             // EncodeHeader also writes h.CRC16
-    ...
+taskCtx, cancel := context.WithCancel(r.ctx)        // router shutdown
+defer cancel()
+// then also derive from the connection ctx so client disconnect cancels too:
+ctx, _ := context.WithCancel(taskCtx)
+// or simply: taskCtx, _ := context.WithCancel(ctx) and select r.ctx.Done in the worker
+```
+At minimum, document that handlers observe the *connection* context, not the router's.
+
+### WR-09: No coordinated `Server.Close` - operator must manually order HTTP -> Hub -> Router shutdown
+
+**File:** `pkg/ws/server.go` (whole file), `pkg/ws/hub.go` (no `Close`)
+
+**Issue:**
+There is no single entry point that shuts the WebSocket subsystem down cleanly. `Server` holds `hub` and `handler` but exposes no `Close`/`Shutdown`. To avoid the CR-01 leak the caller must know to: (1) stop the HTTP server and wait for in-flight handlers, (2) only then cancel the Hub ctx, (3) call `router.Close()`. Getting the order wrong - which `TestIntegration_ServerShutdownCleansAllGoroutines` itself does (`hubCancel()` *before* `testServer.Close()`) - triggers the CR-01 leak. The "right order" is tribal knowledge with no compiler or test enforcement.
+
+**Fix:** add a coordinated shutdown:
+```go
+func (s *Server) Shutdown(ctx context.Context) error {
+    // 1. Stop accepting; wait for HandleWebSocket goroutines to finish
+    //    (requires the http.Server, which Server doesn't currently hold).
+    // 2. Cancel hub ctx and wait for Hub.Run to exit + drain (needs Hub.Close from CR-01).
+    // 3. router.Close() with a bounded wait.
 }
 ```
-
-The encode path silently overwrites two caller-supplied fields. This is surprising (the function is named "Encode", not "NormalizeThenEncode") and creates a footgun: a caller encoding the same header twice with different payloads will see `PayloadLen` from the most recent call, and `CRC16` always reflects the latest encoding. If the caller stored the header for logging or comparison, the values are now wrong.
-
-**Fix:** Either document this clearly in the doc comment, or compute the encoded fields into a local copy:
-
-```go
-func EncodeFrame(h *FrameHeader, payload []byte) []byte {
-    local := *h
-    local.PayloadLen = uint16(len(payload))
-    header := EncodeHeader(&local)
-    ...
-}
-```
-
-(If you choose to keep the mutation, at least rename to signal the side effect.)
-
-### WR-05: Default `MaxMessageBytes` (65536) is smaller than the protocol's own maximum frame size (65551)
-
-**File:** `pkg/ws/server.go:79`, `pkg/ws/protocol.go:14-23`
-**Issue:** `PayloadLen` is `uint16`, allowing up to 65535 bytes. With the 16-byte header, a frame can be 65551 bytes — but the server sets `conn.SetReadLimit(65536)`, so any control frame with payload > 65520 bytes is rejected by gorilla/websocket before `DecodeFrame` ever runs. The protocol contract and the enforcement are out of sync. A client sending a maximally-large control frame (which the wire format permits) will be silently dropped. Either tighten the protocol (e.g., document a 65KB practical cap) or raise `MaxMessageBytes` to 65551+.
-
-### WR-06: `Heartbeat` doc comment incorrectly forbids concurrent use with `writePump`
-
-**File:** `pkg/ws/heartbeat.go:26-28`
-**Issue:**
-
-> Integration note: Heartbeat should not run concurrently with writePump on the same websocket.Conn, as gorilla/websocket does not allow concurrent writes.
-
-This is inaccurate. gorilla/websocket explicitly supports one concurrent `WriteMessage` writer plus any number of `WriteControl` callers (PING/CLOSE). The doc note is the apparent reason Heartbeat is never wired into `Server` (the comment scared the integrator away from the obvious call site). Correct the doc and remove the false blocker so CR-03 can be fixed without confusion.
-
-### WR-07: `DecodeFrame` performs no `MsgType` or `Version` validation
-
-**File:** `pkg/ws/codec.go:57-88`
-**Issue:** The decoder returns a `*FrameHeader` whose `MsgType` may be `0xFF` and `Version` may be `0xFE` — both pass decoding as long as the CRC happens to match. `ProtocolVersion` is never checked against `h.Version`, and `MsgType` validity is only enforced later by `Router.Route` (which returns `ErrUnknownMessageType`). A frame with version 0xFF and a known `MsgType` will be silently accepted and dispatched to a handler. This is a protocol-confusion risk; future versioned changes to the wire format will be unable to distinguish old/new frames at the codec layer. Reject unknown versions at the codec boundary.
-
-### WR-08: `readPump` claims an invariant (`_ = msgType // We only process binary messages`) it does not enforce
-
-**File:** `pkg/ws/connection.go:129`
-**Issue:** The comment says "we only process binary messages", but no `if msgType != websocket.BinaryMessage` check exists. A client sending `TextMessage` will have its payload fed to `DecodeFrame`, where it will (usually) fail CRC and be silently dropped — but the comment claims an invariant the code does not uphold. Either enforce the invariant (reject non-binary) or delete the misleading comment.
-
-### WR-09: `TestIntegration_BackpressureSignalPath` measures client write errors, not server overload
-
-**File:** `pkg/ws/integration_test.go:592-609`
-**Issue:**
-
-```go
-err = conn.WriteMessage(websocket.BinaryMessage, frame)
-if err != nil {
-    overloadedCount++
-} else {
-    successCount++
-}
-```
-
-This counts *client-side* write errors as "backpressure". The server's `Router.Route` returns `ErrRouterOverloaded` internally, but that error is logged and dropped — it never reaches the client at the WebSocket layer. So `overloadedCount` will be 0 unless the TCP buffer fills up (which won't happen with 5 small frames). The test therefore does not actually exercise the backpressure signal path it claims to validate. It passes vacuously. To truly test this, expose a server-side counter of `ErrRouterOverloaded` and assert it is non-zero.
-
-### WR-10: `fakeConn.mu` declared but never used; non-atomic fields read/written without synchronization
-
-**File:** `pkg/ws/connection_test.go:43-58`
-**Issue:** The struct has a `mu sync.Mutex` field that is never acquired anywhere, while fields like `readMessageResult`, `readMessageError`, `onWriteMessage` are mutated by the test goroutine and read inside `fakeConn` methods called from `readPump`/`writePump` goroutines. Under `-race`, the unused mutex is dead code; the unsynchronized field accesses are latent data races that today happen not to fire because of timing. Either delete the unused `mu`, or actually use it to guard the non-atomic fields.
+Even without the full refactor, adding the method (and making it call a future `Hub.Close`) documents the required order.
 
 ## Info
 
-### IN-01: Heavy reliance on `time.Sleep` makes the test suite scheduler-sensitive
+### IN-01: Dead code - `fakeHub` struct in connection_test.go never instantiated
 
-**File:** `pkg/ws/connection_test.go`, `pkg/ws/hub_test.go`, `pkg/ws/integration_test.go` (numerous)
-**Issue:** Dozens of `time.Sleep(50 * time.Millisecond)` / `200 * time.Millisecond` waits in place of deterministic synchronization. The hub_test.go author already discovered this and added `waitForGoroutineIncrease`/`waitForGoroutineDrain` pollers — extend that pattern to the rest of the suite. CI under load (Windows runner, parallel packages) will otherwise flake.
+**File:** `pkg/ws/connection_test.go:176-189`
 
-### IN-02: `Router.Close` cancels context but never closes route channels
+**Issue:**
+The type `fakeHub` (with `Unregister`/`Register` methods) is defined but every test that names a variable `fakeHub` assigns it the result of `NewHub(...)` - a real `*Hub`. The `fakeHub` type is never used as a type. This is dead test code that implies the tests exercise a fake when they actually exercise the real Hub.
 
-**File:** `pkg/ws/router.go:161-165`
-**Issue:** Channels are left open; workers exit via `<-r.ctx.Done()`. This works but is atypical — closing the channels would let workers take the `!ok` branch and exit without relying on the context winning the select race. Not a bug; readability improvement.
+**Fix:** delete the `fakeHub` struct and its methods, or rename the variables (`hub` instead of `fakeHub`) to stop shadowing.
 
-### IN-03: `fakeFrameHandler` struct field alignment inconsistent
+### IN-02: Stale comment - `MaxMessageBytes` documented as "Default 65536", actual default is 65551
 
-**File:** `pkg/ws/connection_test.go:111-119`
-**Issue:** Alignment of field tags varies (some aligned, some not). `gofmt` will rewrite this on next run; the file as committed is not gofmt-clean.
+**File:** `pkg/ws/server.go:22-23`, `pkg/ws/server.go:83-85`
 
-### IN-04: `Router.Route` reads `r.handlers[mt]` under `RLock` but then accesses `r.routes[mt]` after release
+**Issue:**
+```go
+MaxMessageBytes int64 // Default 65536 (64KB, RESEARCH.md Anti-Pattern)
+```
+But `DefaultMaxMessageBytes = HeaderSize + 0xFFFF = 16 + 65535 = 65551` and `NewServer` sets `cfg.MaxMessageBytes = DefaultMaxMessageBytes` when zero. The field comment contradicts the code and will mislead operators sizing their buffers.
 
-**File:** `pkg/ws/router.go:101-124`
-**Issue:** The lock guards the existence check, then releases before the channel send. Today both maps are immutable post-construction, so this is safe. The locking suggests mutability that doesn't exist; either drop the lock (and document immutability) or hold it for the channel send. Cosmetic but misleading to future maintainers.
+**Fix:** update the field comment to `// Default 65551 (HeaderSize + max uint16 payload; WR-05)`.
+
+### IN-03: Origin whitelist does not account for ports - operator configuration gotcha
+
+**File:** `pkg/ws/server.go:93-102, 113-124`
+
+**Issue:**
+The whitelist is built as exact strings with optional `http://`/`https://` prefixes. A browser sends `Origin: http://tutor.example.com:8080` (with port), but a config of `AllowedOrigins: ["tutor.example.com"]` only adds `tutor.example.com`, `http://tutor.example.com`, `https://tutor.example.com` - never the `:8080` variant. The check fails closed (good for security), but the operator gets a mysteriously rejected browser with no diagnostic. WebSocket same-origin comparison is scheme+host+port; this implementation silently ignores the port dimension.
+
+**Fix:** either parse origins as `url.URL` and compare scheme+host+port explicitly, or document loudly that operators must include the port in `AllowedOrigins` (e.g., `"localhost:8080"`).
+
+### IN-04: `TestClientReadPumpPanicRecovery` uses a fixed `time.Sleep` instead of the `waitFor` polling helper
+
+**File:** `pkg/ws/connection_test.go:536-591`
+
+**Issue:**
+The other `readPump` tests in this file were fixed (WR-02) to poll via `waitFor(t, 200*time.Millisecond, ...)`. This one still uses `time.Sleep(100 * time.Millisecond); if fakeHub.Clients() != 0` - the same scheduler-sensitive pattern that flaked the others under `-race`/CI load. The test's own comment acknowledges relying on `cancel()` then `Sleep`.
+
+**Fix:**
+```go
+readCancel()
+if !waitFor(t, 200*time.Millisecond, "panic recovery unregisters", func() bool {
+    return fakeHub.Clients() == 0
+}) {
+    t.Error("readPump should unregister on exit despite handler panic")
+}
+```
+
+### IN-05: `Router.mu` is taken but `handlers` is never mutated after construction
+
+**File:** `pkg/ws/router.go:42-53, 106-108`
+
+**Issue:**
+`Router` has a `mu sync.RWMutex` and `Route` takes `r.mu.RLock()` to read `r.handlers[h.MsgType]`. There is no writer of `handlers` anywhere in the package - `NewRouter` populates it once and it is never mutated. The lock protects nothing and adds `RLock`/`RUnlock` overhead on every `Route` call (the read-pump hot path).
+
+**Fix:** either drop the lock and read the map directly (it is immutable after `NewRouter` returns), or document that the lock exists for a future `AddRoute`/`RemoveRoute` API. If keeping the lock, snapshot the map into a `map[MessageType]bool` lookup once at construction to avoid the map lookup under lock.
+
+### IN-06: Storing `context.Context` and `context.CancelFunc` in the `Router` struct
+
+**File:** `pkg/ws/router.go:42-53, 73-81`
+
+**Issue:**
+`Router.ctx` and `Router.cancel` are stored as struct fields. The Go team explicitly documents "Do not store Contexts inside a struct type; instead pass a Context explicitly to each function that needs it" (`go.dev/blog/context`). For a long-lived component this is a common, defensible pattern, but it is worth flagging because `router_test.go` and other tests construct `Router` values via `&Router{}` directly (e.g., `server_test.go:50` does `handler := &Router{}`), which leaves `ctx`/`cancel` as their zero values (`nil` context, `nil` cancel). Calling `Close()` or `Route()` on a zero-value `Router` would nil-deref `r.cancel` (calling a nil func) or read from a nil `r.ctx`. Today this only happens in tests that immediately pass the zero-value to `NewServer` for config validation, but it is a latent footgun.
+
+**Fix:** either guard `Close`/`Route` against the zero value (`if r.cancel != nil`), or stop constructing bare `&Router{}` in tests and always go through `NewRouter`.
 
 ---
 
-_Reviewed: 2026-07-25_
+_Reviewed: 2026-07-26T00:00:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
