@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 )
 
 func main() {
@@ -98,6 +99,23 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
+
+	// Phase 3 (D-03/D-04/D-05): construct the Go <-> Python subprocess bridge.
+	// NewBridge is a pure constructor -- it spawns no subprocess and performs
+	// no file IO, so it is safe to call at boot even when the configured
+	// Python interpreter is not yet installed (e.g. main_test.go boot tests
+	// use the literal string "python3"). The pyBridge reference is held for
+	// Phase 5 (FSRS orchestration) and Phase 7 (session flow), which reach
+	// the bridge via RunDue/RunReview/RunPregenerate.
+	pyBridge, err := pybridge.NewBridge(cfg.Python, logger)
+	if err != nil {
+		logger.Error("pybridge construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	_ = pyBridge // wired into RunDue/RunReview/RunPregenerate callers in Phase 5/7
 
 	if err := infra.RegisterMetrics(server); err != nil {
 		logger.Error("metrics registration failed",
