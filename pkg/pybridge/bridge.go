@@ -45,17 +45,17 @@ import (
 // keep the build green and the interface contract enforced.
 var _ Executor = (*Bridge)(nil)
 
-// ErrBridgeNotImplemented is the sentinel returned by the Bridge's command
-// method stubs until Plan 03-04 (RunDue/RunReview) and Plan 03-05
-// (RunPregenerate) replace them with real implementations. The stubs exist
-// solely so the `var _ Executor = (*Bridge)(nil)` compile-time check above
-// can run before the command methods are written -- callers MUST NOT depend
-// on this error in production code. Once 03-04 / 03-05 land the stubs (and
-// this sentinel) are deleted.
+// ErrBridgeNotImplemented is the sentinel returned by the remaining Bridge
+// command method stub. Plan 03-04 replaced RunDue/RunReview with real
+// implementations in vocab.go; only RunPregenerate remains as a stub until
+// Plan 03-05 lands (pregenerate.go). The stub exists solely so the
+// `var _ Executor = (*Bridge)(nil)` compile-time check above passes -- callers
+// MUST NOT depend on this error in production code. Plan 03-05 will delete
+// this sentinel together with the RunPregenerate stub.
 //
 // Detection via errors.Is(err, ErrBridgeNotImplemented) is supported but
 // should never be needed outside this package's own tests.
-var ErrBridgeNotImplemented = errors.New("pybridge: bridge command method not yet implemented (Plan 03-04 / 03-05).")
+var ErrBridgeNotImplemented = errors.New("pybridge: bridge command method not yet implemented (Plan 03-05).")
 
 // pythonSecretEnvKeys is the fixed allowlist of VOLCENGINE_TTS_* secret env
 // vars the bridge forwards from the parent process to the Python subprocess
@@ -359,27 +359,6 @@ func (b *Bridge) logResult(method string, start time.Time, stdout, stderr []byte
 		)
 		b.logger.Error("python subprocess error", fields...)
 	}
-}
-
-// RunDue is a STUB. The real implementation (executes
-// `vocab_manager.py --db <path> due ...` and parses the JSON array via
-// extractTrailingJSON) lands in Plan 03-04 (vocab.go). Until then this stub
-// exists solely so the compile-time `var _ Executor = (*Bridge)(nil)` check
-// at the top of this file passes.
-//
-// Returns ErrBridgeNotImplemented unconditionally. Tests that exercise
-// Bridge construction, childEnv, logResult, or run() do NOT route through
-// this method; they call the helpers directly.
-func (*Bridge) RunDue(ctx context.Context, _ DueOpts) (DueResult, error) {
-	return DueResult{}, errors.Wrap(ErrBridgeNotImplemented, "RunDue")
-}
-
-// RunReview is a STUB. The real implementation (executes
-// `vocab_manager.py --db <path> review ...` and parses the {"updated": [...]}
-// JSON via extractTrailingJSON) lands in Plan 03-04 (vocab.go). See RunDue
-// for the rationale.
-func (*Bridge) RunReview(ctx context.Context, _ ReviewOpts) (ReviewResult, error) {
-	return ReviewResult{}, errors.Wrap(ErrBridgeNotImplemented, "RunReview")
 }
 
 // RunPregenerate is a STUB. The real implementation (executes
