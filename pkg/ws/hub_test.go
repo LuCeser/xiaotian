@@ -200,20 +200,22 @@ func TestHubStopsOnContextCancel(t *testing.T) {
 
 	go hub.Run(ctx)
 
-	// Give the goroutine time to start
-	time.Sleep(50 * time.Millisecond)
-
-	// Verify goroutine count increased
-	runningGoroutines := runtime.NumGoroutine()
-	if runningGoroutines <= baseGoroutines {
+	// Wait for the hub.Run goroutine to actually start. A fixed time.Sleep is
+	// scheduler-sensitive and flakes under full-suite load: the assertion below
+	// fired intermittently because the goroutine hadn't been scheduled within
+	// 50ms. Polling for the count to rise (with a deadline) keeps the test's
+	// intent — prove hub.Run blocks — while removing the timing fragility.
+	started := waitForGoroutineIncrease(baseGoroutines, 500*time.Millisecond)
+	if !started {
 		t.Error("Expected goroutine count to increase after starting hub.Run")
 	}
 
 	// Cancel context to trigger shutdown
 	cancel()
 
-	// Wait for goroutine to exit (should be within 200ms per D-12)
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the goroutine to exit (should be within 200ms per D-12). Poll
+	// instead of a fixed sleep so cleanup under load is observed reliably.
+	waitForGoroutineDrain(baseGoroutines+1, 500*time.Millisecond)
 
 	// Verify goroutine count returned to baseline
 	finalGoroutines := runtime.NumGoroutine()
@@ -312,4 +314,32 @@ func TestHubConcurrentRegisterUnregister(t *testing.T) {
 
 	// If we got here without data race, the test passes
 	// Run with -race to detect issues
+}
+
+// waitForGoroutineIncrease polls until the live goroutine count rises above
+// baseline, returning true once it does or false on timeout. Replaces a fixed
+// time.Sleep before asserting "hub.Run started a goroutine" — the sleep was
+// scheduler-sensitive and flaked under full-suite load.
+func waitForGoroutineIncrease(baseline int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		runtime.Gosched()
+		if runtime.NumGoroutine() > baseline {
+			return true
+		}
+	}
+	return false
+}
+
+// waitForGoroutineDrain polls until the live goroutine count drops to target
+// or below, or the timeout elapses. Replaces a fixed sleep before asserting
+// "hub.Run exited after cancel" for the same scheduler-fragility reason.
+func waitForGoroutineDrain(target int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		runtime.Gosched()
+		if runtime.NumGoroutine() <= target {
+			return
+		}
+	}
 }
