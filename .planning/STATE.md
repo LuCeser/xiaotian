@@ -89,7 +89,14 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+源自 2026-07-25 架构评审（/architecture）：
+
+- [ ] **统一连接注册表** — `infra.ConnectionRegistry` vs `ws.Hub` 双轨制，需 ADR 拍单一真相源（评审 P0-2）。`todos/pending/2026-07-25-unify-connection-registry-adr.md`
+- [ ] **解决 WorkerPool 建而不用** — 无任何 Submit 调用，接线 or 登记 deferred（评审 P1-3）。`todos/pending/2026-07-25-resolve-workerpool-unused.md`
+- [ ] **Phase 4 前定 FSRS+SQLite 所有权** — Python(vocab_manager) 已实现 FSRS+SQLite，Phase 4/5 重新定义范围，需 ADR（评审 P1-4）。`todos/pending/2026-07-25-fsrs-sqlite-ownership-adr.md`
+- [ ] **仓库卫生批处理** — README 漂移 / gitignore 根级二进制 / 残留 .gitkeep 清理（评审 P2-5/P2-6/P3-7）。`todos/pending/2026-07-25-repo-hygiene-readme-gitignore-cleanup.md`
+
+> 注：评审 P0-1（WS 层未接入运行时，服务监听不到 :8080）未建 todo —— 归入 Phase 2 收尾（02-02/02-03 接线计划）处理。
 
 ### Blockers/Concerns
 
