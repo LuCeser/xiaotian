@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: python-cli-integration
 status: executing
-stopped_at: Completed 03-02-PLAN.md (pybridge Executor interface + sentinels + parsers + semaphore)
-last_updated: "2026-07-24T14:58:06.305Z"
+stopped_at: Completed 03-03-PLAN.md (Bridge exec engine + process-group kill + secrets env + main.go wiring)
+last_updated: "2026-07-25T01:18:48.260Z"
 last_activity: 2026-07-24
 last_activity_desc: Phase 03 execution started
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 16
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2025-07-18)
 ## Current Position
 
 Phase: 03 (python-cli-integration) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-07-24 — Phase 03 execution started
 
-Progress: [███████░░░] 69%
+Progress: [████████░░] 75%
 
 ## Performance Metrics
 
@@ -61,6 +61,7 @@ Progress: [███████░░░] 69%
 |------|----------|-------|-------|
 | Phase 03 P01 | 20 | 3 tasks | 10 files |
 | Phase 03 P02 | ~10 | 2 tasks | 10 files |
+| Phase 03 P03 | ~25 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,8 @@ Recent decisions affecting current work:
 - [Phase 03]: pybridge.DueCard/UpdatedCard 字段照 vocab_manager.py 真实 JSON 契约（id/word/meaning/example/unit/state/due/stability/difficulty；word/rating/next_due/state/stability），非 plan 草案的 translation/pronunciation/[]string——Rule 1 修正
 - [Phase 03]: pybridge semaphore.acquire 加 fast-path ctx.Done() 检查避免 Go select 非确定性（已取消 ctx + 空位时随机选分支）——Rule 1 修正
 - [Phase 03]: pybridge 公共契约层 logger-free：接口/类型/纯函数/信号量不注入 infra.Logger；日志注入点在 Plan 03-03 Bridge 实现（D-25 canonical）
+- [Phase ?]: Plan 03-03 Bridge: NewBridge 返回 (*Bridge, error) 照抄 NewConnectionRegistry DI 范式（cfg 逐字段校验 + nil-logger 替换）；RunDue/Review/Pregenerate 加 stub 返回 ErrBridgeNotImplemented 让 var _ Executor 编译期检查就位，Plan 03-04/05 替换时同 commit 删除 sentinel
+- [Phase ?]: Plan 03-03 childEnv 加 PYTHONUNBUFFERED=1 强制 stdout/stderr 在 Wait 返回前 flush（Rule 2 correctness，避免 SIGKILL 时漏捕上游诊断）；setProcessGroup 双 build-tag 隔离照 main.go 第 12-13 行 SIGTERM 约定同类
 
 ### Pending Todos
 
@@ -93,6 +96,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-24T14:57:53.537Z
-Stopped at: Completed 03-02-PLAN.md (pybridge Executor interface + sentinels + parsers + semaphore)
-Resume file: .planning/phases/03-python-cli-integration/03-03-PLAN.md
+Last session: 2026-07-25T01:18:48.253Z
+Stopped at: Completed 03-03-PLAN.md (Bridge exec engine + process-group kill + secrets env + main.go wiring)
+Resume file: .planning/phases/03-python-cli-integration/03-04-PLAN.md
