@@ -185,8 +185,36 @@ func (b *Bridge) RunPregenerate(ctx context.Context, opts PregenOpts) (PregenRes
 		b.cfg.Interpreter, args...)
 	defer b.logResult("pregenerate", start, stdout, stderr, exitCode, err)
 
-	if err != nil && (errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled)) {
+	return classifyPregenResult(stdout, stderr, exitCode, err)
+}
+
+// classifyPregenResult is the pure post-run classifier for RunPregenerate,
+// extracted to a top-level function so the four sentinel branches
+// (ErrPythonTimeout / ErrPythonExit / ErrPythonEmpty / success) are testable
+// without spawning a Python subprocess -- Windows dev hosts have no venv, so
+// the table-driven unit tests in pregenerate_test.go drive this function
+// directly with fixture bytes + synthetic exit codes.
+//
+// Classification rules (in order -- first match wins):
+//  1. runErr is context.DeadlineExceeded/Canceled -> ErrPythonTimeout
+//     (b.run's Cancel hook already SIGKILLed the process group).
+//  2. exitCode != 0                              -> *ExitError wrapping
+//     ErrPythonExit (FSRS/ffmpeg/Volcengine error; stderr carries the
+//     script's diagnostic).
+//  3. len(stdout) == 0                           -> ErrPythonEmpty (RESEARCH
+//     Pitfall 6: empty-success-stdout is the signature of fcntl.flock
+//     contention OR a script bug; never a silent zero-path success).
+//  4. splitNonEmptyLines yields 0 paths          -> ErrPythonEmpty (whitespace-
+//     only stdout is still a contract violation).
+//  5. otherwise                                  -> PregenResult{Paths} with
+//     the parsed line-based mp3 paths (NEVER json.Unmarshal -- Pitfall 3).
+//
+// The function performs no I/O. stderr is only consumed inside the *ExitError
+// wrapper; it is never logged here (logResult handles the structured-log
+// side; classifyPregenResult only classifies).
+func classifyPregenResult(stdout, stderr []byte, exitCode int, runErr error) (PregenResult, error) {
+	if runErr != nil && (errors.Is(runErr, context.DeadlineExceeded) ||
+		errors.Is(runErr, context.Canceled)) {
 		return PregenResult{}, errors.Wrap(ErrPythonTimeout, "run pregenerate")
 	}
 	if exitCode != 0 {
@@ -201,13 +229,13 @@ func (b *Bridge) RunPregenerate(ctx context.Context, opts PregenOpts) (PregenRes
 	// Empty-success-stdout guard (RESEARCH Pitfall 6 acceptance point).
 	// pregenerate_dictation.py's _acquire_global_lock (line 1297-1313) calls
 	// sys.exit(0) when it cannot acquire the flock -- the process exits 0
-	// with EMPTY stdout. The cap=1 pregenSem above prevents this from
-	// happening under normal Go-side concurrency, but it cannot defend
-	// against a non-Go process (a manual operator invocation, a stale
-	// process from a previous deploy, etc.) holding the lock. Detect the
-	// signature here and surface it as ErrPythonEmpty rather than a silent
-	// zero-path success. Also catches "script bug: exited 0 but printed
-	// nothing" -- still a bridge-level contract violation.
+	// with EMPTY stdout. The cap=1 pregenSem in RunPregenerate prevents this
+	// under normal Go-side concurrency, but cannot defend against a non-Go
+	// process (manual operator invocation, stale process from a previous
+	// deploy) holding the lock. Detect the signature here and surface it as
+	// ErrPythonEmpty rather than a silent zero-path success. Also catches
+	// "script bug: exited 0 but printed nothing" -- still a bridge-level
+	// contract violation.
 	if len(stdout) == 0 {
 		return PregenResult{}, errors.Wrap(ErrPythonEmpty,
 			"pregenerate returned empty stdout (likely flock contention)")
