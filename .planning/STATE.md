@@ -7,13 +7,13 @@ current_phase_name: python-cli-integration
 status: verifying
 stopped_at: Completed 03-05-PLAN.md (RunPregenerate + pregenArgs + cap=1 pregenSem + classifyPregenResult + Pitfall 6 空 stdout 检测 + ErrBridgeNotImplemented 删除 — Phase 3 完结)
 last_updated: "2026-07-25T02:16:14.632Z"
-last_activity: 2026-07-24
-last_activity_desc: Phase 03 execution started
+last_activity: 2026-07-25
+last_activity_desc: Phase 02 手动收尾 — 02-02/02-03 SUMMARY 补写 + flaky test 修复（安全恢复门）
 progress:
   total_phases: 3
   completed_phases: 2
   total_plans: 16
-  completed_plans: 14
+  completed_plans: 16
 ---
 
 # Project State
@@ -46,7 +46,7 @@ Progress: [█████████░] 88%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 02 | 1 | - | - |
+| 02 | 3 | - | - |
 | 01 | 8 | - | - |
 
 **Recent Trend:**
@@ -96,7 +96,8 @@ Recent decisions affecting current work:
 - [ ] **Phase 4 前定 FSRS+SQLite 所有权** — Python(vocab_manager) 已实现 FSRS+SQLite，Phase 4/5 重新定义范围，需 ADR（评审 P1-4）。`todos/pending/2026-07-25-fsrs-sqlite-ownership-adr.md`
 - [ ] **仓库卫生批处理** — README 漂移 / gitignore 根级二进制 / 残留 .gitkeep 清理（评审 P2-5/P2-6/P3-7）。`todos/pending/2026-07-25-repo-hygiene-readme-gitignore-cleanup.md`
 
-> 注：评审 P0-1（WS 层未接入运行时，服务监听不到 :8080）未建 todo —— 归入 Phase 2 收尾（02-02/02-03 接线计划）处理。
+> 注：评审 P0-1（WS 层未接入运行时，服务监听不到 :8080）未建 todo。
+> **2026-07-25 更新**：Phase 02 手动收尾已完成（02-02/02-03 SUMMARY 补写、flaky test 修复、ROADMAP 3/3）——但这两个计划交付的是 WS *库*（Hub/Client/Server/Router），**并非** main.go 运行时接线。P0-1（main.go 监听 :8080 + mux.HandleFunc("/ws", server.HandleWebSocket)）仍属 **Phase 1 Plan 08** 范围，当前未交付、未建 todo —— 建议后续为 P0-1 单独建 todo。
 
 ### Blockers/Concerns
 

@@ -77,7 +77,7 @@ Plans:
   3. System properly registers sessions and cleans up connections on disconnect
   4. System manages concurrent connections with proper backpressure handling
 
-**Plans**: 1/3 plans executed
+**Plans**: 3/3 plans executed
 
 Plans:
 **Wave 1**
@@ -86,11 +86,11 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 02-02-PLAN.md — Hub + Client lifecycle + Heartbeat + test helpers (WS-03, D-04, D-13~D-17)
+- [x] 02-02-PLAN.md — Hub + Client lifecycle + Heartbeat + test helpers (WS-03, D-04, D-13~D-17)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 02-03-PLAN.md — HTTP Server + Router + end-to-end integration tests (WS-01, WS-04, D-02, D-19)
+- [x] 02-03-PLAN.md — HTTP Server + Router + end-to-end integration tests (WS-01, WS-04, D-02, D-19)
 
 **PROJECT_MODE**: mvp
 
