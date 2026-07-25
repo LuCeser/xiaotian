@@ -39,23 +39,10 @@ import (
 
 // Compile-time interface satisfaction check (D-43). If Bridge ever drifts
 // from the Executor contract this fails the build at compile time rather than
-// surfacing as a runtime panic. The full RunDue/RunReview/RunPregenerate
-// implementations live in vocab.go and pregenerate.go (Plan 03-04 / 03-05);
-// until those land, the stub implementations at the bottom of this file
-// keep the build green and the interface contract enforced.
+// surfacing as a runtime panic. As of Plan 03-05 all three methods --
+// RunDue / RunReview (vocab.go, Plan 03-04) and RunPregenerate
+// (pregenerate.go, Plan 03-05) -- are real implementations; no stubs remain.
 var _ Executor = (*Bridge)(nil)
-
-// ErrBridgeNotImplemented is the sentinel returned by the remaining Bridge
-// command method stub. Plan 03-04 replaced RunDue/RunReview with real
-// implementations in vocab.go; only RunPregenerate remains as a stub until
-// Plan 03-05 lands (pregenerate.go). The stub exists solely so the
-// `var _ Executor = (*Bridge)(nil)` compile-time check above passes -- callers
-// MUST NOT depend on this error in production code. Plan 03-05 will delete
-// this sentinel together with the RunPregenerate stub.
-//
-// Detection via errors.Is(err, ErrBridgeNotImplemented) is supported but
-// should never be needed outside this package's own tests.
-var ErrBridgeNotImplemented = errors.New("pybridge: bridge command method not yet implemented (Plan 03-05).")
 
 // pythonSecretEnvKeys is the fixed allowlist of VOLCENGINE_TTS_* secret env
 // vars the bridge forwards from the parent process to the Python subprocess
@@ -104,6 +91,19 @@ type Bridge struct {
 	// sem caps simultaneous Python subprocesses (D-02). Built from
 	// cfg.MaxConcurrent at construction; not exposed outside the package.
 	sem semaphore
+
+	// pregenSem is a DEDICATED cap=1 serialization lock layered on top of
+	// sem for the pregenerate path only (Plan 03-05, RESEARCH Pitfall 6).
+	// Rationale: pregenerate_dictation.py takes a GLOBAL single-instance
+	// fcntl.flock(LOCK_EX|LOCK_NB) on /tmp/pregenerate_dictation.lock. If a
+	// second invocation runs while one holds the lock, the second exits 0
+	// with EMPTY stdout (it could not acquire the lock). The cap=1 lock
+	// here makes concurrent RunPregenerate callers QUEUE in Go rather than
+	// race into the Python-side lock-held failure. The general sem (above)
+	// still bounds total Python processes; pregenSem is an extra constraint
+	// specific to pregenerate. Acquired in RunPregenerate BEFORE b.run so
+	// queueing happens outside the general-sem slot too.
+	pregenSem semaphore
 }
 
 // NewBridge is the Bridge constructor (D-42 constructor DI). It validates
@@ -162,9 +162,10 @@ func NewBridge(cfg infra.PythonConfig, logger infra.Logger) (*Bridge, error) {
 		logger = infra.NewNoOpLogger()
 	}
 	return &Bridge{
-		cfg:    cfg,
-		logger: logger,
-		sem:    newSemaphore(cfg.MaxConcurrent),
+		cfg:       cfg,
+		logger:    logger,
+		sem:       newSemaphore(cfg.MaxConcurrent),
+		pregenSem: newSemaphore(1),
 	}, nil
 }
 
@@ -361,10 +362,4 @@ func (b *Bridge) logResult(method string, start time.Time, stdout, stderr []byte
 	}
 }
 
-// RunPregenerate is a STUB. The real implementation (executes
-// `pregenerate_dictation.py generate ...` and parses the line-based mp3
-// path output via splitNonEmptyLines) lands in Plan 03-05 (pregenerate.go).
-// See RunDue for the rationale.
-func (*Bridge) RunPregenerate(ctx context.Context, _ PregenOpts) (PregenResult, error) {
-	return PregenResult{}, errors.Wrap(ErrBridgeNotImplemented, "RunPregenerate")
-}
+// RunPregenerate is implemented in pregenerate.go (Plan 03-05).
