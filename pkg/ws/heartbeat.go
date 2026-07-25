@@ -23,9 +23,12 @@ const DefaultHeartbeatInterval = 30 * time.Second
 // - Exits immediately on Ping write failure (connection likely broken)
 // - Exits on context cancellation (D-12 lifecycle)
 //
-// Integration note: Heartbeat should not run concurrently with writePump on the same
-// websocket.Conn, as gorilla/websocket does not allow concurrent writes. Plan 03 Server
-// decides whether to enable Heartbeat goroutine per connection.
+// WR-06 concurrency note: Heartbeat sends PING frames via WriteControl, which gorilla/websocket
+// explicitly permits to run alongside a single WriteMessage writer. It is therefore safe to run
+// concurrently with writePump on the same connection — the only constraint is at most one
+// WriteMessage writer at a time, and writePump is the sole data writer. Server launches one
+// Heartbeat goroutine per connection (CR-03); the pongs it elicits refresh that connection's
+// read deadline (CR-02).
 func Heartbeat(ctx context.Context, c WebSocketConn, interval time.Duration, logger *zap.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

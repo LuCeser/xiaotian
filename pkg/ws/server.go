@@ -11,6 +11,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// DefaultMaxMessageBytes is the default WebSocket read limit. It allows the largest
+// frame the wire protocol can express (16-byte header + uint16 max payload = 65551),
+// keeping the enforced limit in sync with the protocol contract (WR-05).
+const DefaultMaxMessageBytes = int64(HeaderSize + 0xFFFF)
+
 // ServerConfig defines server configuration (D-44 centralized validation)
 type ServerConfig struct {
 	AllowedOrigins  []string // Origin whitelist (D-24, forbidden "*" or empty)
@@ -76,7 +81,7 @@ func NewServer(hub *Hub, handler FrameHandler, cfg ServerConfig, logger *zap.Log
 		cfg.HeartbeatInterval = DefaultHeartbeatInterval // From Plan 02 (would be defined elsewhere)
 	}
 	if cfg.MaxMessageBytes == 0 {
-		cfg.MaxMessageBytes = 65536 // Default 64KB
+		cfg.MaxMessageBytes = DefaultMaxMessageBytes // 65551: header + uint16 max payload (WR-05)
 	}
 
 	// Set ClientCfg defaults
@@ -108,7 +113,11 @@ func NewServer(hub *Hub, handler FrameHandler, cfg ServerConfig, logger *zap.Log
 			CheckOrigin: func(r *http.Request) bool {
 				origin := r.Header.Get("Origin")
 				if origin == "" {
-					return true // Allow requests with no Origin header
+					// CR-05: browsers always send Origin on cross-origin WebSocket
+					// requests, so an empty Origin means a non-browser client (curl,
+					// urllib, an attacker's script). Reject it rather than weaken the
+					// browser path into a near-return-true (D-24 forbids '*' / return-true).
+					return false
 				}
 				// Check against whitelist
 				return allowedOrigins[origin]
@@ -132,8 +141,20 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Set read limit (T-02-12 oversized DoS protection)
 	conn.SetReadLimit(s.cfg.MaxMessageBytes)
 
-	// Set initial read deadline
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	// CR-02/CR-03: idle-timeout + heartbeat. SetReadDeadline sets an absolute time,
+	// not an idle timeout — setting it once at upgrade kills every connection at a
+	// fixed age. Refresh it on each pong instead: Heartbeat (launched below) sends
+	// PINGs every HeartbeatInterval, a healthy client's pong rolls the deadline
+	// forward, and two consecutive missed pongs mark the connection dead.
+	readTimeout := s.cfg.HeartbeatInterval * 2
+	if readTimeout <= 0 {
+		readTimeout = 60 * time.Second
+	}
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+		return nil
+	})
 
 	// Extract handshake parameters (D-12)
 	userID := r.URL.Query().Get("user_id")
@@ -167,6 +188,14 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	go client.writePump(ctx)
+
+	// CR-03: keep the connection alive with PING/PONG (mitigates Safari background-tab
+	// silent drops, RESEARCH.md Pitfall 2, and refreshes the read deadline above).
+	// gorilla/websocket permits one concurrent WriteMessage writer (writePump) plus any
+	// number of WriteControl callers, so running Heartbeat concurrently is safe (WR-06).
+	if s.cfg.HeartbeatInterval > 0 {
+		go Heartbeat(ctx, conn, s.cfg.HeartbeatInterval, s.logger)
+	}
 
 	// Wait for connection to close (blocking until readPump exits)
 	<-done

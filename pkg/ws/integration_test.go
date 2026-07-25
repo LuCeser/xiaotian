@@ -586,30 +586,38 @@ func TestIntegration_BackpressureSignalPath(t *testing.T) {
 		t.Fatalf("Expected status 101, got %d", resp.StatusCode)
 	}
 
-	// Rapidly send multiple frames to trigger backpressure
+	// Rapidly send multiple frames to trigger backpressure. The router is configured
+	// with RouteBuffer=1 and a single worker whose handler sleeps 50ms, so frames that
+	// arrive while the channel is full are dropped with ErrRouterOverloaded (D-73).
 	audioPayload := wstest.TestAudioPayload()
 
-	successCount := 0
-	overloadedCount := 0
-
+	sentCount := 0
 	for i := 0; i < 5; i++ {
 		frame := wstest.MustBuildTestFrame(t, ws.MsgTypeAudio, uint32(i+1), audioPayload)
 
-		err = conn.WriteMessage(websocket.BinaryMessage, frame)
-		if err != nil {
-			overloadedCount++
-		} else {
-			successCount++
+		// Client-side writes succeed regardless — the drop happens server-side at the
+		// router and that signal never reaches the WebSocket layer (WR-09).
+		if err := conn.WriteMessage(websocket.BinaryMessage, frame); err == nil {
+			sentCount++
 		}
 
 		// Small delay between sends
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	t.Logf("Sent %d frames successfully, %d triggered backpressure (or write errors)", successCount, overloadedCount)
+	t.Logf("Sent %d frames to the server", sentCount)
 
-	// Wait for all queued messages to be processed
+	// Wait for the worker to drain and any overload drops to be recorded.
 	time.Sleep(300 * time.Millisecond)
+
+	// WR-09: assert the server-side backpressure signal directly. The previous test
+	// counted client write errors (always 0 here, since drops are server-side) and so
+	// proved nothing — it passed vacuously.
+	if dropped := router.OverloadedCount(); dropped == 0 {
+		t.Error("Expected router to report overloaded drops under backpressure, got 0")
+	} else {
+		t.Logf("Router dropped %d frame(s) due to overload", dropped)
+	}
 
 	// Verify at least some handlers were called
 	called := blockingHandlerCalled.Load()

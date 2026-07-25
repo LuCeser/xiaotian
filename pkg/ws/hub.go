@@ -109,20 +109,22 @@ func (h *Hub) Run(ctx context.Context) {
 
 			// Accept client
 			h.clients[c] = true
+			total := len(h.clients) // CR-07: capture under lock; reading after Unlock races future writers
 			h.mu.Unlock()
 			h.logger.Info("hub registered client",
-				zap.Int("total", len(h.clients)))
+				zap.Int("total", total))
 
 		case c := <-h.unregister:
 			// Handle client unregistration (WS-03 session cleanup)
 			h.mu.Lock()
 			if _, ok := h.clients[c]; ok {
 				delete(h.clients, c)
+				total := len(h.clients) // CR-07: capture under lock
 				h.mu.Unlock()
-				// Signal writePump to exit by closing send channel
-				close(c.send)
+				// Signal writePump to exit by closing the send channel (close-safe, CR-04)
+				c.CloseSend()
 				h.logger.Info("hub unregistered client",
-					zap.Int("total", len(h.clients)))
+					zap.Int("total", total))
 			} else {
 				// Client already unregistered (idempotent)
 				h.mu.Unlock()

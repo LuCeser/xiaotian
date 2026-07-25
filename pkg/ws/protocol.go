@@ -76,6 +76,11 @@ var (
 
 	// ErrUnknownMessageType is returned when an unknown message type is encountered
 	ErrUnknownMessageType = errors.New("unknown message type")
+
+	// ErrUnsupportedVersion is returned when a decoded frame's protocol version is not
+	// ProtocolVersion. Checked at the codec boundary so future wire-format changes can
+	// be distinguished from legacy frames (WR-07).
+	ErrUnsupportedVersion = errors.New("unsupported protocol version")
 )
 
 // EncodeHeader encodes a FrameHeader into a 16-byte slice using big-endian byte order (D-10)

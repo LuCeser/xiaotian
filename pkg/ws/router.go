@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -45,6 +46,10 @@ type Router struct {
 	logger   *zap.Logger
 	ctx      context.Context
 	cancel   context.CancelFunc
+
+	// overloaded counts frames dropped because a per-type channel was full
+	// (ErrRouterOverloaded). Observable server-side backpressure signal (WR-09).
+	overloaded atomic.Int32
 }
 
 // frameTask represents a frame to be processed
@@ -119,8 +124,17 @@ func (r *Router) Route(ctx context.Context, c *Client, h *FrameHeader, payload [
 	case <-r.ctx.Done():
 		return ErrRouterShuttingDown
 	default:
+		r.overloaded.Add(1) // WR-09: observable server-side backpressure counter
 		return ErrRouterOverloaded // D-73 drop-oldest backpressure
 	}
+}
+
+// OverloadedCount returns the number of frames dropped because a per-type channel was
+// full (ErrRouterOverloaded). Exposed so the backpressure signal can be observed
+// server-side — in tests and monitoring — rather than inferred from client write
+// errors, which never reflect router-level drops (WR-09).
+func (r *Router) OverloadedCount() int64 {
+	return int64(r.overloaded.Load())
 }
 
 // worker processes frames from the channel (D-16 worker pool for logic)

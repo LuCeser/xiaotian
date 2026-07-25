@@ -14,6 +14,21 @@ import (
 
 // Test helper functions (local copies to avoid import cycle with wstest package)
 
+// waitFor polls cond until it returns true or the timeout elapses, returning whether
+// cond ever held. Replaces fixed time.Sleep waits for deterministic synchronization
+// (IN-01) and makes the unregistration assertions below scheduler-robust under -race.
+func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return cond()
+}
+
 // MustBuildTestFrame builds a test frame for testing. Panics on failure (t.Helper() pattern).
 func MustBuildTestFrame(t *testing.T, msgType MessageType, seq uint32, payload []byte) []byte {
 	t.Helper()
@@ -40,6 +55,11 @@ func getTestAudioPayload() []byte {
 // fakeConn is a manual fake for *websocket.Conn (D-48 - no testify/mock).
 // Records calls to WebSocket methods for verification in tests.
 type fakeConn struct {
+	// mu guards the non-atomic control fields below (readMessageResult/Error,
+	// writeMessageError, writeControlError, onWriteMessage, onWriteControl), which are
+	// set by the test goroutine and read inside ReadMessage/WriteMessage/WriteControl
+	// running on the pump goroutines. WR-10: previously declared but unused, leaving
+	// latent data races under -race.
 	mu                    sync.Mutex
 	readMessageCallCount  atomic.Int32
 	writeMessageCallCount atomic.Int32
@@ -59,22 +79,30 @@ type fakeConn struct {
 
 func (f *fakeConn) ReadMessage() (int, []byte, error) {
 	f.readMessageCallCount.Add(1)
-	if f.readMessageError != nil {
-		return 0, nil, f.readMessageError
+	f.mu.Lock()
+	result := f.readMessageResult
+	err := f.readMessageError
+	f.mu.Unlock()
+	if err != nil {
+		return 0, nil, err
 	}
-	if f.readMessageResult != nil {
-		return websocket.BinaryMessage, f.readMessageResult, nil
+	if result != nil {
+		return websocket.BinaryMessage, result, nil
 	}
 	return websocket.BinaryMessage, []byte("test"), nil
 }
 
 func (f *fakeConn) WriteMessage(messageType int, data []byte) error {
 	f.writeMessageCallCount.Add(1)
-	if f.writeMessageError != nil {
-		return f.writeMessageError
+	f.mu.Lock()
+	err := f.writeMessageError
+	cb := f.onWriteMessage
+	f.mu.Unlock()
+	if err != nil {
+		return err
 	}
-	if f.onWriteMessage != nil {
-		f.onWriteMessage(data)
+	if cb != nil {
+		cb(data)
 	}
 	return nil
 }
@@ -92,12 +120,23 @@ func (f *fakeConn) WriteControl(messageType int, data []byte, deadline time.Time
 			}
 		}
 	}
-	if f.writeControlError != nil {
-		return f.writeControlError
+	f.mu.Lock()
+	err := f.writeControlError
+	cb := f.onWriteControl
+	f.mu.Unlock()
+	if err != nil {
+		return err
 	}
-	if f.onWriteControl != nil {
-		f.onWriteControl(messageType, data)
+	if cb != nil {
+		cb(messageType, data)
 	}
+	return nil
+}
+
+// SetWriteDeadline satisfies the WebSocketConn interface. writePump sets a write
+// deadline before each WriteMessage (CR-06); the fake does not model network
+// backpressure, so the deadline is accepted and ignored.
+func (f *fakeConn) SetWriteDeadline(deadline time.Time) error {
 	return nil
 }
 
@@ -255,8 +294,8 @@ func TestClientWritePumpExitsOnChannelClose(t *testing.T) {
 	// Give goroutine time to start
 	time.Sleep(50 * time.Millisecond)
 
-	// Close send channel to trigger writePump exit
-	close(client.send)
+	// Close send channel to trigger writePump exit (use the close-safe API, CR-04)
+	client.CloseSend()
 
 	// Wait for goroutine to exit (should be within 100ms)
 	time.Sleep(100 * time.Millisecond)
@@ -357,26 +396,28 @@ func TestClientReadPumpDecodesValidFrame(t *testing.T) {
 		t.Fatalf("NewClient failed: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	// Start Hub to process registration/unregistration
-	go fakeHub.Run(ctx)
+	// Hub outlives the read pump so it can drain the unregister after readPump exits.
+	// A single shared ctx would cancel Hub.Run at the same instant as readPump, racing
+	// the unregister and leaving the client in the map (the latent flake WR-02 exposed).
+	hubCtx, hubCancel := context.WithCancel(context.Background())
+	defer hubCancel()
+	go fakeHub.Run(hubCtx)
 
 	// Register client with Hub
 	fakeHub.Register(client)
-	time.Sleep(50 * time.Millisecond) // Wait for registration
+	if !waitFor(t, 200*time.Millisecond, "client registration", func() bool {
+		return fakeHub.Clients() == 1
+	}) {
+		t.Fatalf("client should be registered before readPump starts, got %d", fakeHub.Clients())
+	}
+
+	readCtx, readCancel := context.WithCancel(context.Background())
+	defer readCancel()
 
 	// Start readPump goroutine
-	go client.readPump(ctx)
+	go client.readPump(readCtx)
 
 	// Wait for read and routing
-	time.Sleep(200 * time.Millisecond)
-
-	// Cancel context to stop readPump
-	cancel()
-
-	// Wait for goroutine to exit
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify handler.Route was called
@@ -384,8 +425,15 @@ func TestClientReadPumpDecodesValidFrame(t *testing.T) {
 		t.Error("readPump should call handler.Route for valid frame")
 	}
 
-	// Verify unregistration was called
-	if fakeHub.Clients() == 0 {
+	// Stop readPump only; the hub keeps running to process the unregister.
+	readCancel()
+
+	// WR-02: verify unregistration completed on exit. The previous assertion fired when
+	// Clients()==0 — exactly when unregistration HAD happened — so it proved the opposite
+	// of its message. Inverted, and polled so it is robust to scheduling jitter.
+	if !waitFor(t, 200*time.Millisecond, "readPump unregisters on exit", func() bool {
+		return fakeHub.Clients() == 0
+	}) {
 		t.Error("readPump should unregister on exit")
 	}
 }
@@ -406,25 +454,26 @@ func TestClientReadPumpIgnoresInvalidFrame(t *testing.T) {
 		t.Fatalf("NewClient failed: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Start Hub to process registration/unregistration
-	go fakeHub.Run(ctx)
+	// Hub outlives the read pump so it can drain the unregister after readPump exits.
+	hubCtx, hubCancel := context.WithCancel(context.Background())
+	defer hubCancel()
+	go fakeHub.Run(hubCtx)
 
 	// Register client with Hub
 	fakeHub.Register(client)
-	time.Sleep(50 * time.Millisecond) // Wait for registration
+	if !waitFor(t, 200*time.Millisecond, "client registration", func() bool {
+		return fakeHub.Clients() == 1
+	}) {
+		t.Fatalf("client should be registered before readPump starts, got %d", fakeHub.Clients())
+	}
+
+	readCtx, readCancel := context.WithCancel(context.Background())
+	defer readCancel()
 
 	// Start readPump goroutine
-	go client.readPump(ctx)
+	go client.readPump(readCtx)
 
 	// Wait for read attempt
-	time.Sleep(200 * time.Millisecond)
-
-	// Cancel context to stop readPump
-	cancel()
-
-	// Wait for goroutine to exit
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify handler.Route was NOT called (invalid frame was skipped)
@@ -432,8 +481,14 @@ func TestClientReadPumpIgnoresInvalidFrame(t *testing.T) {
 		t.Error("readPump should not call handler.Route for invalid frame")
 	}
 
-	// Verify unregistration was still called (graceful exit)
-	if fakeHub.Clients() == 0 {
+	// Stop readPump only; the hub keeps running to process the unregister.
+	readCancel()
+
+	// WR-02: verify unregistration still completed (graceful exit after skipping the
+	// invalid frame). Previously asserted the wrong polarity (fired when Clients()==0).
+	if !waitFor(t, 200*time.Millisecond, "readPump unregisters after skipping invalid frame", func() bool {
+		return fakeHub.Clients() == 0
+	}) {
 		t.Error("readPump should still unregister on exit after skipping invalid frame")
 	}
 }
@@ -453,19 +508,28 @@ func TestClientReadPumpUnregistersOnError(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Start readPump goroutine
-	go client.readPump(ctx)
+	// WR-03: the hub event loop must run and the client must be registered before
+	// readPump starts. The previous version never called Run/Register, so Clients()
+	// was always 0 and the assertion passed trivially even if the defer were removed.
+	go fakeHub.Run(ctx)
+	fakeHub.Register(client)
 
-	// Wait for error and unregistration
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify unregistration was called (Hub.Clients() should return 0 since error happened immediately)
-	if fakeHub.Clients() > 0 {
-		t.Error("readPump should unregister on ReadMessage error, leaving 0 clients")
+	if !waitFor(t, 200*time.Millisecond, "client registration", func() bool {
+		return fakeHub.Clients() == 1
+	}) {
+		t.Fatalf("client should be registered before readPump starts, got %d clients", fakeHub.Clients())
 	}
 
-	cancel()
+	// readPump errors on the first ReadMessage and unregisters via its defer.
+	go client.readPump(ctx)
+
+	if !waitFor(t, 200*time.Millisecond, "client unregistration on read error", func() bool {
+		return fakeHub.Clients() == 0
+	}) {
+		t.Error("readPump should unregister on ReadMessage error, leaving 0 clients")
+	}
 }
 
 // TestClientReadPumpPanicRecovery verifies readPump recovers from handler panics.

@@ -19,6 +19,7 @@ type WebSocketConn interface {
 	ReadMessage() (int, []byte, error)
 	WriteMessage(int, []byte) error
 	WriteControl(int, []byte, time.Time) error
+	SetWriteDeadline(time.Time) error
 	Close() error
 }
 
@@ -49,6 +50,20 @@ func (c ClientConfig) Validate() error {
 // ErrInvalidClientConfig is returned when ClientConfig validation fails.
 var ErrInvalidClientConfig = errors.New("invalid client config")
 
+// Sentinel errors for Client.Send (CR-04).
+var (
+	// ErrSendBufferFull is returned by Send when the bounded send channel is full.
+	// Non-blocking: callers should shed load (consistent with the router's drop-oldest semantics, D-73).
+	ErrSendBufferFull = errors.New("client send buffer full")
+	// ErrClientClosing is returned by Send when the client is shutting down and the
+	// send channel has been (or is being) closed by CloseSend.
+	ErrClientClosing = errors.New("client is closing")
+)
+
+// defaultWriteTimeout bounds how long a single WebSocket write may block, protecting
+// against slow/frozen clients pinning goroutines under the 150MB memory budget (CR-06).
+const defaultWriteTimeout = 10 * time.Second
+
 // Client represents a WebSocket client connection with independent read/write pumps (D-16).
 // It extends the minimal skeleton defined in hub.go to include full connection lifecycle management.
 type Client struct {
@@ -70,6 +85,13 @@ type Client struct {
 
 	// closeOnce ensures Close is called only once (prevents double-close panics)
 	closeOnce sync.Once
+
+	// sendMu guards send-channel close safety. Send takes the read lock to check
+	// sendClosed before a non-blocking send; CloseSend takes the write lock to flip
+	// sendClosed and close the channel atomically. This makes Send safe to call
+	// even when Hub.Unregister races it (CR-04).
+	sendMu     sync.RWMutex
+	sendClosed bool
 }
 
 // NewClient creates a new Client with the given configuration (D-42 constructor DI).
@@ -116,36 +138,60 @@ func (c *Client) readPump(ctx context.Context) {
 		}
 	}()
 
-	for {
+	// CR-01: a blocked ReadMessage cannot be interrupted by ctx alone. Spawn a watcher
+	// that closes the underlying conn when ctx is cancelled — on a real *websocket.Conn
+	// this unblocks the in-flight read within milliseconds instead of waiting for the
+	// read deadline. stop is closed on normal exit so the watcher does not leak.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
 		select {
-		default:
-			// Blocking read from WebSocket (returns when connection closes or error occurs)
-			msgType, data, err := c.conn.ReadMessage()
-			if err != nil {
-				// Connection closed or read error - exit goroutine normally
-				// Hub.Unregister will be called by defer
-				return
-			}
-			_ = msgType // We only process binary messages (our custom protocol)
-
-			// Decode frame using Plan 01 protocol
-			header, payload, err := DecodeFrame(data)
-			if err != nil {
-				// Skip malformed frames but don't disconnect (avoid single-frame踢连接)
-				// Malicious frames can't kick off legitimate connections
-				c.logger.Warn("frame decode failed, skipping", zap.Error(err))
-				continue
-			}
-
-			// Route decoded frame to handler (non-blocking via separate goroutine in writePump)
-			if err := c.handler.Route(ctx, c, header, payload); err != nil {
-				// Handler errors are logged but don't terminate the connection
-				c.logger.Warn("handler route failed", zap.Error(err))
-			}
-
 		case <-ctx.Done():
-			// D-12: Context cancelled - exit goroutine gracefully
+			_ = c.conn.Close()
+		case <-stop:
+		}
+	}()
+
+	for {
+		// Cheap, non-blocking cancellation check. Catches ctx cancellation for
+		// transports whose ReadMessage returns immediately (e.g. test fakes that do
+		// not honor Close). For real blocking reads, the watcher above handles it.
+		select {
+		case <-ctx.Done():
 			return
+		default:
+		}
+
+		// Blocking read from WebSocket (returns when connection closes or error occurs)
+		msgType, data, err := c.conn.ReadMessage()
+		if err != nil {
+			// Connection closed or read error - exit goroutine normally
+			// Hub.Unregister will be called by defer
+			return
+		}
+
+		// WR-08: enforce the binary-message invariant. Our custom frame protocol runs
+		// over BinaryMessage; TextMessage is rejected at the boundary rather than fed
+		// to DecodeFrame (which would only fail CRC and be silently dropped).
+		if msgType != websocket.BinaryMessage {
+			c.logger.Warn("non-binary ws message ignored",
+				zap.Int("msg_type", msgType))
+			continue
+		}
+
+		// Decode frame using Plan 01 protocol
+		header, payload, err := DecodeFrame(data)
+		if err != nil {
+			// Skip malformed frames but don't disconnect (avoid single-frame踢连接)
+			// Malicious frames can't kick off legitimate connections
+			c.logger.Warn("frame decode failed, skipping", zap.Error(err))
+			continue
+		}
+
+		// Route decoded frame to handler
+		if err := c.handler.Route(ctx, c, header, payload); err != nil {
+			// Handler errors are logged but don't terminate the connection
+			c.logger.Warn("handler route failed", zap.Error(err))
 		}
 	}
 }
@@ -167,13 +213,18 @@ func (c *Client) writePump(ctx context.Context) {
 		select {
 		case msg, ok := <-c.send:
 			if !ok {
-				// Channel closed by Hub (via Unregister) - exit goroutine
+				// Channel closed by Hub (via CloseSend/Unregister) - exit goroutine
 				return
 			}
 
+			// CR-06: set a write deadline so a slow/frozen client (tiny TCP receive
+			// window, never ACKs) cannot pin this goroutine indefinitely under the
+			// 150MB budget. A timed-out write exits the pump and reclaims resources.
+			_ = c.conn.SetWriteDeadline(time.Now().Add(defaultWriteTimeout))
+
 			// Serial write to WebSocket (only one goroutine writes to conn)
 			if err := c.conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
-				// Write error - exit goroutine (connection likely broken)
+				// Write error/timeout - exit goroutine (connection likely broken)
 				return
 			}
 
@@ -182,6 +233,42 @@ func (c *Client) writePump(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// Send queues a message for asynchronous write to the client. It is the only
+// sanctioned way for handlers to push data (e.g. audio/TTS frames) back to the
+// client (CR-04) — writePump remains the single writer to the underlying conn.
+//
+// Non-blocking and safe to call concurrently:
+//   - ErrSendBufferFull: the bounded send channel is full; shed load (drop-oldest, D-73).
+//   - ErrClientClosing:  the client is shutting down and the send channel is closed.
+//
+// The sendClosed flag + RWMutex make the check-then-send atomic with CloseSend, so
+// Send never panics on a closed channel even if Hub.Unregister races it.
+func (c *Client) Send(msg []byte) error {
+	c.sendMu.RLock()
+	defer c.sendMu.RUnlock()
+	if c.sendClosed {
+		return ErrClientClosing
+	}
+	select {
+	case c.send <- msg:
+		return nil
+	default:
+		return ErrSendBufferFull
+	}
+}
+
+// CloseSend closes the send channel, signaling writePump to exit. It is the
+// close-safe counterpart to Send and is called by Hub on Unregister. Idempotent.
+func (c *Client) CloseSend() {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.sendClosed {
+		return
+	}
+	c.sendClosed = true
+	close(c.send)
 }
 
 // Close gracefully closes the client connection with a status code and reason.

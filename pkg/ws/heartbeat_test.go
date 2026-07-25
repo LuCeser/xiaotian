@@ -36,6 +36,11 @@ func (f *fakeConnForHeartbeat) WriteMessage(int, []byte) error {
 	return nil
 }
 
+// SetWriteDeadline satisfies WebSocketConn; unused by Heartbeat's WriteControl path.
+func (f *fakeConnForHeartbeat) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
 func (f *fakeConnForHeartbeat) Close() error {
 	return nil
 }
