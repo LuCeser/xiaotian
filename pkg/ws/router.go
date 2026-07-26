@@ -23,7 +23,20 @@ const routerShutdownTimeout = 5 * time.Second
 // amplification from a repeatedly-panicking handler on the 1C VPS.
 const routerPanicThreshold int32 = 8
 
-// Handler is a business logic processing function
+// Handler is a business logic processing function.
+//
+// WR-08: the ctx passed to a Handler is the PER-CONNECTION context (readPump's
+// ctx), NOT the Router's lifetime context. Consequences callers must know:
+//   - Router.Close / r.cancel() does NOT interrupt an in-flight Handler; only
+//     the connection context cancelling (client disconnect, server shutdown)
+//     does. WR-02's bounded Close wait is therefore the only defence against a
+//     Handler blocked on a slow downstream.
+//   - A Handler that needs to observe the Router's lifetime (e.g. to flush
+//     state on router shutdown) cannot do so via ctx today — it would need a
+//     separate signal. File as a follow-up if a handler requires it.
+//   - After a client disconnects its ctx is cancelled, so queued tasks for that
+//     client become no-ops; they still occupy the channel and a worker still
+//     dequeues them. Benign, but the cause of the bounded queue drain on close.
 type Handler func(ctx context.Context, c *Client, h *FrameHeader, payload []byte) error
 
 // RouterConfig defines router configuration
@@ -115,7 +128,11 @@ func NewRouter(handlers map[MessageType]Handler, cfg RouterConfig, logger *zap.L
 	return router, nil
 }
 
-// Route submits a frame to the appropriate handler (FrameHandler interface implementation)
+// Route submits a frame to the appropriate handler (FrameHandler interface
+// implementation). The caller's ctx (readPump's per-connection ctx) is stored
+// in the frameTask and later passed to the handler as-is (WR-08): handlers run
+// under the CONNECTION context, not the Router's. See Handler doc for the
+// cancellation semantics this implies.
 func (r *Router) Route(ctx context.Context, c *Client, h *FrameHeader, payload []byte) error {
 	// IN-06: tests construct bare &Router{} (server_test.go) for config-validation
 	// paths, leaving ctx/cancel as nil zero values. Reading from a nil ctx's
