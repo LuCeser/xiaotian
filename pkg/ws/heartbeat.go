@@ -54,9 +54,16 @@ func Heartbeat(ctx context.Context, c WebSocketConn, interval time.Duration, log
 			// Send Ping with deadline (interval/2 ensures we don't block longer than one cycle)
 			deadline := time.Now().Add(interval / 2)
 			if err := c.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
-				// Ping failed - connection is broken or remote is unreachable
-				// Exit goroutine and let readPump detect connection failure via Hub.Unregister
-				logger.Debug("heartbeat ping failed, exiting", zap.Error(err))
+				// Ping failed - connection is broken or remote is unreachable.
+				// Exit goroutine and let readPump detect connection failure via
+				// Hub.Unregister.
+				// WR-05: ping failure is the primary signal of a stale/dead
+				// connection (the whole reason Heartbeat exists). Debug is dropped
+				// under any production zap config at Info+, making stale-connection
+				// diagnosis and the documented Safari background-tab silent drop
+				// (RESEARCH.md Pitfall 2) invisible. Log at Info so the signal
+				// survives a default config.
+				logger.Info("heartbeat ping failed; exiting", zap.Error(err))
 				return
 			}
 		}
