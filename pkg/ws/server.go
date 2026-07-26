@@ -40,6 +40,19 @@ func (c ServerConfig) Validate() error {
 	if c.MaxMessageBytes <= 0 {
 		return errors.Wrap(ErrInvalidServerConfig, "max message bytes must be > 0")
 	}
+	// WR-07: NewServer only treats == 0 as "use default"; a negative value passes
+	// through unchanged and silently breaks behaviour (e.g. HeartbeatInterval = -1
+	// computes readTimeout = -2, falling into the <= 0 fixed-60s fallback while the
+	// operator believes they configured heartbeat). Reject negatives explicitly.
+	if c.HeartbeatInterval < 0 {
+		return errors.Wrap(ErrInvalidServerConfig, "heartbeat interval must be >= 0")
+	}
+	if c.ReadBufferSize < 0 || c.WriteBufferSize < 0 {
+		return errors.Wrap(ErrInvalidServerConfig, "buffer sizes must be >= 0")
+	}
+	if c.HandshakeTimeout < 0 {
+		return errors.Wrap(ErrInvalidServerConfig, "handshake timeout must be >= 0")
+	}
 	return nil
 }
 
