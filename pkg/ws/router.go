@@ -5,10 +5,18 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
+
+// routerShutdownTimeout bounds how long Router.Close waits for in-flight workers
+// before giving up (WR-02). r.cancel() only fires ctx.Done(); it cannot interrupt
+// a handler blocked on a slow downstream (TTS API, DB, time.Sleep). Without a
+// bound, a single stuck handler blocks clean process exit on the constrained VPS
+// and may force SIGKILL, losing in-flight work.
+const routerShutdownTimeout = 5 * time.Second
 
 // Handler is a business logic processing function
 type Handler func(ctx context.Context, c *Client, h *FrameHeader, payload []byte) error
@@ -172,8 +180,28 @@ func (r *Router) worker(mt MessageType, handler Handler) {
 	}
 }
 
-// Close gracefully shuts down the router
-func (r *Router) Close() {
+// Close gracefully shuts down the router.
+//
+// WR-02: bounds the worker wait at routerShutdownTimeout. r.cancel() only fires
+// ctx.Done(); it cannot interrupt a handler blocked on a slow downstream, so an
+// unbounded wg.Wait() could stall process exit indefinitely on the constrained
+// VPS. Returns nil if all workers exited cleanly, or an error if the timeout
+// elapsed (workers may still be running — the caller should treat this as "give
+// up and let the process exit"). Callers that previously ignored the return value
+// continue to compile.
+func (r *Router) Close() error {
 	r.cancel()
-	r.wg.Wait() // Wait for all workers to exit (D-12 cleanup)
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(routerShutdownTimeout):
+		r.logger.Error("router close timed out waiting for workers",
+			zap.Duration("timeout", routerShutdownTimeout))
+		return errors.New("router shutdown timed out")
+	}
 }
