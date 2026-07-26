@@ -5,6 +5,7 @@ package ws
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 
@@ -224,7 +225,14 @@ func (c *Client) writePump(ctx context.Context) {
 
 			// Serial write to WebSocket (only one goroutine writes to conn)
 			if err := c.conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
-				// Write error/timeout - exit goroutine (connection likely broken)
+				// WR-04: surface write-failure exits so a slow/dropped client is
+				// diagnosable in production logs instead of looking like a clean
+				// shutdown. The CR-06 write-deadline expiry is the expected
+				// slow-client-kill mechanism — logging it here is the only signal
+				// of that path firing.
+				c.logger.Info("writePump exit: write failed",
+					zap.Error(err),
+					zap.Bool("timeout", errors.Is(err, os.ErrDeadlineExceeded)))
 				return
 			}
 
