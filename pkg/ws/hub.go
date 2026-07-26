@@ -66,6 +66,16 @@ type Hub struct {
 
 	// logger is the structured logger (D-25)
 	logger *zap.Logger
+
+	// closeMu guards the shutdown flag. Register/Unregister take the read lock to
+	// check closed before a non-blocking send; Close takes the write lock to flip
+	// the flag. This mirrors Client.CloseSend (CR-04) and is what prevents a
+	// send-on-closed-channel race — and, more importantly here, prevents
+	// readPump's deferred Unregister from blocking indefinitely once Hub.Run has
+	// stopped draining (CR-01). We intentionally do NOT close the register/
+	// unregister channels: doing so would make Run receive nil values and busy-loop.
+	closeMu sync.RWMutex
+	closed  bool
 }
 
 // NewHub creates a new Hub with the given configuration (D-42 constructor DI).
@@ -92,7 +102,13 @@ func NewHub(cfg HubConfig, logger *zap.Logger) (*Hub, error) {
 // Run starts the hub's main event loop (D-12 context-based lifecycle).
 // It processes client registration, unregistration, and context cancellation.
 // This method blocks until the context is cancelled.
+//
+// On exit (any path) Run defers Close, which flips the closed flag so that any
+// straggler Register/Unregister calls (e.g. from a readPump's defer) are
+// short-circuited instead of blocking forever on channels nobody is draining
+// (CR-01 goroutine-leak fix).
 func (h *Hub) Run(ctx context.Context) {
+	defer h.Close()
 	for {
 		select {
 		case c := <-h.register:
@@ -131,22 +147,94 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 
 		case <-ctx.Done():
-			// Context cancelled - exit goroutine (D-12 resource cleanup)
+			// CR-01: drain any pending unregister so that in-flight disconnects
+			// get their CloseSend (writePump-exit) signal. Unregister is already
+			// non-blocking, so this drain is belt-and-suspenders for clean teardown.
+			h.drainUnregister()
+			return
+		}
+	}
+}
+
+// drainUnregister processes any buffered unregister requests without blocking.
+// Called from Run on ctx.Done() so writePumps partnered with disconnecting
+// clients receive their CloseSend signal during shutdown (CR-01).
+func (h *Hub) drainUnregister() {
+	for {
+		select {
+		case c := <-h.unregister:
+			if c == nil {
+				continue
+			}
+			c.CloseSend()
+		default:
 			return
 		}
 	}
 }
 
 // Register sends a client registration request to the hub (D-17 channel routing).
-// This is a non-blocking operation - the request is queued in the register channel.
-func (h *Hub) Register(c *Client) {
-	h.register <- c
+//
+// Genuinely non-blocking (CR-01): it returns false if the hub is shutting down
+// (Close has run) or the register channel is saturated. The caller must reject
+// the connection on false — otherwise the client would be silently dropped or,
+// under the old blocking semantics, the caller would pin a goroutine forever.
+// The doc comments previously claimed "non-blocking" but the channel send was
+// blocking once the buffer filled; this implementation now honours the claim.
+func (h *Hub) Register(c *Client) bool {
+	h.closeMu.RLock()
+	defer h.closeMu.RUnlock()
+	if h.closed {
+		return false
+	}
+	select {
+	case h.register <- c:
+		return true
+	default:
+		return false // saturated — shed; caller should reject the connection
+	}
 }
 
 // Unregister sends a client unregistration request to the hub (D-17 channel routing).
-// This is a non-blocking operation - the request is queued in the unregister channel.
+//
+// Genuinely non-blocking (CR-01): if the hub is shutting down (Close has run) or
+// the unregister channel is saturated, the request is dropped and a warning is
+// logged. This is critical because readPump calls Unregister in a defer on every
+// exit path; a blocking send here (as the old implementation had) pins the
+// goroutine forever once Hub.Run stops draining during shutdown — the exact leak
+// that took down deploys on the 1C/1G VPS. The dropped client is reclaimed by GC
+// once its pumps exit.
 func (h *Hub) Unregister(c *Client) {
-	h.unregister <- c
+	h.closeMu.RLock()
+	defer h.closeMu.RUnlock()
+	if h.closed {
+		return
+	}
+	select {
+	case h.unregister <- c:
+	default:
+		h.logger.Warn("unregister dropped: hub saturated or shutting down")
+	}
+}
+
+// Close shuts the hub down (CR-01). After Close returns, Register reports false
+// and Unregister is a no-op, so callers running concurrently with shutdown (a
+// readPump's deferred Unregister, an in-flight HandleWebSocket) can never block
+// on the register/unregister channels. Idempotent.
+//
+// Close does NOT physically close the register/unregister channels: Run reads
+// from them, and closing them would make Run receive nil values. The closed flag
+// under closeMu is the entire mechanism — the channels are reclaimed by GC once
+// the Hub is unreachable. Run defers Close on exit, so callers normally do not
+// need to invoke it directly; Server.Shutdown calls it to short-circuit
+// stragglers before they reach the channels.
+func (h *Hub) Close() {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if h.closed {
+		return
+	}
+	h.closed = true
 }
 
 // Clients returns the current number of active clients (D-11 thread-safe).

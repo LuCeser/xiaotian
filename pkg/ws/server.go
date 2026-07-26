@@ -171,8 +171,16 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register with hub (will be processed asynchronously)
-	s.hub.Register(client)
+	// Register with hub (will be processed asynchronously). CR-01: Register is
+	// non-blocking; if the hub is shutting down or saturated it returns false and
+	// we reject the connection here rather than blocking the HTTP handler
+	// goroutine — which previously pinned a goroutine forever once Hub.Run had
+	// stopped draining during shutdown.
+	if !s.hub.Register(client) {
+		s.logger.Warn("hub rejected registration: hub shutting down or saturated")
+		_ = client.Close(websocket.CloseTryAgainLater, "server full")
+		return
+	}
 
 	// Start client pumps with connection lifecycle
 	ctx, cancel := context.WithCancel(r.Context())
