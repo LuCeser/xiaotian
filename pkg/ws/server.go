@@ -19,7 +19,7 @@ const DefaultMaxMessageBytes = int64(HeaderSize + 0xFFFF)
 // ServerConfig defines server configuration (D-44 centralized validation)
 type ServerConfig struct {
 	AllowedOrigins  []string // Origin whitelist (D-24, forbidden "*" or empty)
-	MaxMessageBytes int64    // Default 65536 (64KB, RESEARCH.md Anti-Pattern)
+	MaxMessageBytes int64    // Default 65551 (HeaderSize + max uint16 payload; IN-02)
 	ReadBufferSize  int      // Default 4096
 	WriteBufferSize int      // Default 4096
 	HandshakeTimeout time.Duration // Default 10s
