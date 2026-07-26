@@ -532,7 +532,16 @@ func TestClientReadPumpUnregistersOnError(t *testing.T) {
 	}
 }
 
-// TestClientReadPumpPanicRecovery verifies readPump recovers from handler panics.
+// TestClientReadPumpPanicRecovery verifies readPump recovers from handler panics
+// and still unregisters cleanly on exit.
+//
+// IN-04: the previous version reused a single ctx for both the Hub and readPump
+// and asserted via fixed time.Sleep. Under CR-01 the hub's ctx.Done and the
+// readPump defer race: if Hub.Run exits (and Close flips the closed flag) before
+// the deferred Unregister reaches the channel, the unregister is dropped and the
+// client stays in the map — making the test flaky. The other readPump tests were
+// already fixed (WR-02) to give the hub its own longer-lived ctx and to poll via
+// waitFor; this test now follows the same pattern.
 func TestClientReadPumpPanicRecovery(t *testing.T) {
 	// Build a valid test frame
 	validFrame := MustBuildTestFrame(t, MsgTypeAudio, 1, getTestAudioPayload())
@@ -553,37 +562,39 @@ func TestClientReadPumpPanicRecovery(t *testing.T) {
 		t.Fatalf("NewClient failed: %v", err)
 	}
 
-	// Capture logger output (use development config to see panic logs)
-	logger, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatalf("failed to create logger: %v", err)
-	}
-	client.logger = logger
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	// Start Hub to process registration/unregistration
-	go fakeHub.Run(ctx)
+	// Hub outlives the read pump so it can drain the unregister after readPump exits.
+	hubCtx, hubCancel := context.WithCancel(context.Background())
+	defer hubCancel()
+	go fakeHub.Run(hubCtx)
 
 	// Register client with Hub
 	fakeHub.Register(client)
-	time.Sleep(50 * time.Millisecond) // Wait for registration
+	if !waitFor(t, 200*time.Millisecond, "client registration", func() bool {
+		return fakeHub.Clients() == 1
+	}) {
+		t.Fatalf("client should be registered before readPump starts, got %d", fakeHub.Clients())
+	}
+
+	readCtx, readCancel := context.WithCancel(context.Background())
+	defer readCancel()
 
 	// Start readPump goroutine (should not crash despite handler panic)
-	go client.readPump(ctx)
+	go client.readPump(readCtx)
 
-	// Wait for panic and recovery
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the handler to be invoked at least once (it panics, readPump recovers).
+	if !waitFor(t, 500*time.Millisecond, "handler invoked (panic recovered)", func() bool {
+		return fakeHandler.routeCallCount.Load() >= 1
+	}) {
+		t.Fatal("readPump should invoke (and recover from) the panicking handler at least once")
+	}
 
-	// Cancel context to stop readPump
-	cancel()
+	// Stop readPump only; the hub keeps running to process the unregister.
+	readCancel()
 
-	// Wait for goroutine to exit
-	time.Sleep(100 * time.Millisecond)
-
-	// Verify unregistration was called (graceful exit despite panic)
-	if fakeHub.Clients() != 0 {
+	// Verify unregistration completed on exit despite the earlier handler panic.
+	if !waitFor(t, 200*time.Millisecond, "readPump unregisters after panic recovery", func() bool {
+		return fakeHub.Clients() == 0
+	}) {
 		t.Error("readPump should unregister on exit despite handler panic")
 	}
 
