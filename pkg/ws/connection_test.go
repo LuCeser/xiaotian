@@ -173,21 +173,6 @@ func (f *fakeFrameHandler) Route(ctx context.Context, c *Client, header *FrameHe
 	return nil
 }
 
-// fakeHub is a minimal fake for Hub to test Client unregistration.
-type fakeHub struct {
-	unregisterClient atomic.Value // *Client
-	unregisterCallCount atomic.Int32
-}
-
-func (f *fakeHub) Unregister(c *Client) {
-	f.unregisterCallCount.Add(1)
-	f.unregisterClient.Store(c)
-}
-
-func (f *fakeHub) Register(c *Client) {
-	// Not needed for Client tests
-}
-
 // TestNewClientConstructor verifies NewClient returns valid Client with initialized send channel.
 func TestNewClientConstructor(t *testing.T) {
 	fakeConn := &fakeConn{}
