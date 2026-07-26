@@ -233,3 +233,35 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.Close()
 	s.logger.Debug("connection handler exiting")
 }
+
+// Shutdown gracefully tears down the WebSocket subsystem (WR-09).
+//
+// There was previously no single entry point for shutdown; the caller had to
+// know the tribal ordering (HTTP server -> Hub -> Router) to avoid the CR-01
+// goroutine leak. Getting it wrong — which TestIntegration_ServerShutdownCleansAllGoroutines
+// itself did (hubCancel before testServer.Close) — triggers the leak.
+//
+// Required caller ordering to avoid the CR-01 leak:
+//  1. http.Server.Shutdown(ctx) — stop accepting and wait for in-flight
+//     HandleWebSocket goroutines. MUST happen first, so no new
+//     HandleWebSocket goroutines start while the Hub is being torn down.
+//  2. Server.Shutdown(ctx) — this method: closes the Hub (short-circuits any
+//     straggler Register/Unregister so their goroutines exit without blocking)
+//     and then closes the Router (stops the worker pool with a bounded wait,
+//     WR-02).
+//
+// Idempotent. The ctx argument is reserved for a future bounded-wait / nested
+// http.Server.Shutdown when Server grows an *http.Server field; today the Router
+// bounds its own wait (WR-02).
+func (s *Server) Shutdown(ctx context.Context) error {
+	_ = ctx // reserved for future bounded shutdown
+	// Hub.Close flips the closed flag so any in-flight or future HandleWebSocket
+	// goroutines exit without blocking on the hub channels (CR-01).
+	s.hub.Close()
+	// Close the router/handler if it exposes Close() error. *Router does (WR-02);
+	// the type assertion keeps Shutdown decoupled from the concrete Router type.
+	if closer, ok := s.handler.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
+}
