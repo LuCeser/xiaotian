@@ -18,6 +18,11 @@ import (
 // and may force SIGKILL, losing in-flight work.
 const routerShutdownTimeout = 5 * time.Second
 
+// routerPanicThreshold is the per-router handler-panic count at which the worker
+// circuit breaker trips and stops dequeuing tasks (WR-01). Prevents CPU/log
+// amplification from a repeatedly-panicking handler on the 1C VPS.
+const routerPanicThreshold int32 = 8
+
 // Handler is a business logic processing function
 type Handler func(ctx context.Context, c *Client, h *FrameHeader, payload []byte) error
 
@@ -58,6 +63,15 @@ type Router struct {
 	// overloaded counts frames dropped because a per-type channel was full
 	// (ErrRouterOverloaded). Observable server-side backpressure signal (WR-09).
 	overloaded atomic.Int32
+
+	// panicCount is a router-wide tally of recovered handler panics used by the
+	// worker circuit breaker (WR-01). On a 1C VPS an unthrottled
+	// panic->recover->panic loop pins the single core and emits GB of stack
+	// traces (zap.Stack calls runtime.Stack, which is very expensive). Once the
+	// count exceeds routerPanicThreshold the workers stop dequeuing so a single
+	// buggy/malicious route cannot amplify. The counter is shared across all
+	// routes/workers: conservative, but adequate for a 1C budget.
+	panicCount atomic.Int32
 }
 
 // frameTask represents a frame to be processed
@@ -150,6 +164,19 @@ func (r *Router) worker(mt MessageType, handler Handler) {
 	defer r.wg.Done()
 
 	for {
+		// WR-01: circuit breaker. If handlers (router-wide) have panicked beyond
+		// routerPanicThreshold, stop dequeuing this route so a buggy/malicious
+		// handler cannot pin the single CPU core in a panic->recover->panic loop.
+		// readPump, by contrast, exits the whole connection on first panic — much
+		// smaller blast radius; this is the router-side equivalent.
+		if r.panicCount.Load() > routerPanicThreshold {
+			r.logger.Error("router worker stopping: handler panic threshold exceeded",
+				zap.String("component", "ws.router"),
+				zap.String("msg_type", mt.String()),
+				zap.Int32("panics", r.panicCount.Load()),
+				zap.Int32("threshold", routerPanicThreshold))
+			return
+		}
 		select {
 		case task, ok := <-r.routes[mt]:
 			if !ok {
@@ -160,11 +187,25 @@ func (r *Router) worker(mt MessageType, handler Handler) {
 			func() {
 				defer func() {
 					if rec := recover(); rec != nil {
-						r.logger.Error("handler panic recovered",
-							zap.String("component", "ws.router"),
-							zap.String("msg_type", mt.String()),
-							zap.Any("recovered", rec),
-							zap.Stack("stack"))
+						// WR-01: zap.Stack calls runtime.Stack (very expensive). A
+						// panicking handler can fire on every frame from a streaming
+						// client, so capture the full stack only on the first panic;
+						// subsequent ones log a cheap count line. The circuit breaker
+						// above then stops the loop once the threshold is crossed.
+						count := r.panicCount.Add(1)
+						if count == 1 {
+							r.logger.Error("handler panic recovered (first occurrence, full stack)",
+								zap.String("component", "ws.router"),
+								zap.String("msg_type", mt.String()),
+								zap.Any("recovered", rec),
+								zap.Stack("stack"))
+						} else {
+							r.logger.Error("handler panic recovered",
+								zap.String("component", "ws.router"),
+								zap.String("msg_type", mt.String()),
+								zap.Any("recovered", rec),
+								zap.Int32("panic_count", count))
+						}
 					}
 				}()
 
