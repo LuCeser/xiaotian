@@ -30,6 +30,17 @@ const DefaultHeartbeatInterval = 30 * time.Second
 // Heartbeat goroutine per connection (CR-03); the pongs it elicits refresh that connection's
 // read deadline (CR-02).
 func Heartbeat(ctx context.Context, c WebSocketConn, interval time.Duration, logger *zap.Logger) {
+	// WR-06: time.NewTicker panics for non-positive intervals. Heartbeat is an
+	// exported symbol; the only thing protecting callers today is Server's
+	// HeartbeatInterval > 0 guard, which a future caller (test helper, restart
+	// path) can easily bypass — taking the process down with an unrecovered
+	// panic in a per-connection goroutine (readPump's recover cannot catch it
+	// because Heartbeat runs in its own goroutine with no recover wrapper).
+	// Validate at the boundary instead.
+	if interval <= 0 {
+		logger.Warn("heartbeat disabled: non-positive interval", zap.Duration("interval", interval))
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
