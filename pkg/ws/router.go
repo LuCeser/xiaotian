@@ -55,7 +55,6 @@ type Router struct {
 	routes   map[MessageType]chan frameTask
 	handlers map[MessageType]Handler
 	wg       sync.WaitGroup
-	mu       sync.RWMutex
 	logger   *zap.Logger
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -125,9 +124,11 @@ func (r *Router) Route(ctx context.Context, c *Client, h *FrameHeader, payload [
 	default:
 	}
 
-	r.mu.RLock()
+	// IN-05: handlers is populated once in NewRouter and never mutated, so the
+	// map is safe to read concurrently without a lock (Go permits concurrent map
+	// reads when there are no writers). The previous RLock/RUnlock guarded
+	// nothing and added overhead on the readPump hot path.
 	_, ok := r.handlers[h.MsgType]
-	r.mu.RUnlock()
 
 	if !ok {
 		return errors.Wrap(ErrUnknownMessageType, fmt.Sprintf("msg type 0x%02x", h.MsgType))
