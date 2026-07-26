@@ -18,7 +18,15 @@ const DefaultMaxMessageBytes = int64(HeaderSize + 0xFFFF)
 
 // ServerConfig defines server configuration (D-44 centralized validation)
 type ServerConfig struct {
-	AllowedOrigins  []string // Origin whitelist (D-24, forbidden "*" or empty)
+	// AllowedOrigins is the Origin whitelist (D-24, forbidden "*" or empty).
+	// Entries are matched against the browser's full Origin header. The whitelist
+	// is built as exact strings with optional http:// / https:// prefixes, so a
+	// config of "tutor.example.com" matches "http://tutor.example.com" but NOT
+	// "http://tutor.example.com:8080". WebSocket same-origin comparison is
+	// scheme+host+port; operators MUST include the port for non-default ports
+	// (e.g. "localhost:8080"), otherwise the browser is rejected with no
+	// diagnostic (IN-03).
+	AllowedOrigins []string
 	MaxMessageBytes int64    // Default 65551 (HeaderSize + max uint16 payload; IN-02)
 	ReadBufferSize  int      // Default 4096
 	WriteBufferSize int      // Default 4096
