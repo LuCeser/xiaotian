@@ -117,6 +117,12 @@ func NewRouter(handlers map[MessageType]Handler, cfg RouterConfig, logger *zap.L
 
 // Route submits a frame to the appropriate handler (FrameHandler interface implementation)
 func (r *Router) Route(ctx context.Context, c *Client, h *FrameHeader, payload []byte) error {
+	// IN-06: tests construct bare &Router{} (server_test.go) for config-validation
+	// paths, leaving ctx/cancel as nil zero values. Reading from a nil ctx's
+	// Done() would nil-deref. Treat an uninitialized router as "shutting down".
+	if r.ctx == nil {
+		return ErrRouterShuttingDown
+	}
 	// Check if router is shutting down first
 	select {
 	case <-r.ctx.Done():
@@ -232,7 +238,12 @@ func (r *Router) worker(mt MessageType, handler Handler) {
 // up and let the process exit"). Callers that previously ignored the return value
 // continue to compile.
 func (r *Router) Close() error {
-	r.cancel()
+	// IN-06: guard against the zero-value Router (bare &Router{} constructed in
+	// tests for config validation), where cancel is nil. Calling a nil CancelFunc
+	// panics.
+	if r.cancel != nil {
+		r.cancel()
+	}
 	done := make(chan struct{})
 	go func() {
 		r.wg.Wait()
