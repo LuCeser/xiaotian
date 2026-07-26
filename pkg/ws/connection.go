@@ -282,16 +282,26 @@ func (c *Client) CloseSend() {
 // Close gracefully closes the client connection with a status code and reason.
 // Uses closeOnce to prevent double-close panics (can be called by Hub on rejection).
 // Sends a WebSocket close control frame with a 1-second write deadline.
+//
+// WR-03: returns the WriteControl error (or, if that succeeded, the conn.Close
+// error) instead of always returning nil. The Hub calls this on the
+// capacity-rejection path (CloseTryAgainLater); if the close frame could not be
+// written (client already gone, deadline exceeded) the caller needs to know so it
+// does not believe the "server full" frame was delivered. A nil return now only
+// means "close frame accepted by the kernel buffer / conn closed cleanly".
 func (c *Client) Close(code int, reason string) error {
+	var writeErr error
 	c.closeOnce.Do(func() {
 		// Send close frame with timeout
-		_ = c.conn.WriteControl(
+		writeErr = c.conn.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(code, reason),
 			time.Now().Add(time.Second),
 		)
-		// Close the underlying connection
-		_ = c.conn.Close()
+		// Close the underlying connection; prefer the WriteControl error if both fail.
+		if cerr := c.conn.Close(); writeErr == nil {
+			writeErr = cerr
+		}
 	})
-	return nil
+	return writeErr
 }
