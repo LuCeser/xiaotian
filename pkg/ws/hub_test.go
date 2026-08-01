@@ -2,7 +2,6 @@ package ws
 
 import (
 	"context"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,8 +24,8 @@ func TestNewHubValidatesLimit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := HubConfig{
-				Limit:          tt.limit,
-				RegisterBuffer: 32,
+				Limit:            tt.limit,
+				RegisterBuffer:   32,
 				UnregisterBuffer: 32,
 			}
 
@@ -44,8 +43,8 @@ func TestNewHubValidatesLimit(t *testing.T) {
 // TestNewHubAcceptsPositiveLimit verifies NewHub succeeds with positive limit.
 func TestNewHubAcceptsPositiveLimit(t *testing.T) {
 	cfg := HubConfig{
-		Limit:          100,
-		RegisterBuffer: 32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
 
@@ -61,8 +60,8 @@ func TestNewHubAcceptsPositiveLimit(t *testing.T) {
 // TestHubRegisterAddsClient verifies Register adds a client to the hub.
 func TestHubRegisterAddsClient(t *testing.T) {
 	cfg := HubConfig{
-		Limit:          100,
-		RegisterBuffer: 32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
 
@@ -95,8 +94,8 @@ func TestHubRegisterAddsClient(t *testing.T) {
 // TestHubUnregisterRemovesClient verifies Unregister removes a client from the hub.
 func TestHubUnregisterRemovesClient(t *testing.T) {
 	cfg := HubConfig{
-		Limit:          100,
-		RegisterBuffer: 32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
 
@@ -129,8 +128,8 @@ func TestHubUnregisterRemovesClient(t *testing.T) {
 // TestHubRejectsAtCapacity verifies hub rejects clients when at capacity limit.
 func TestHubRejectsAtCapacity(t *testing.T) {
 	cfg := HubConfig{
-		Limit:          2,
-		RegisterBuffer: 32,
+		Limit:            2,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
 
@@ -183,52 +182,67 @@ func TestHubRejectsAtCapacity(t *testing.T) {
 	// (Third client should not have been added)
 }
 
-// TestHubStopsOnContextCancel verifies hub.Run goroutine exits when context is cancelled.
+// TestHubStopsOnContextCancel verifies hub.Run exits when its context is cancelled.
+//
+// This test proves the same intent the old goroutine-count assertions tried to
+// prove ("hub.Run started" / "hub.Run exited after cancel") using deterministic
+// functional signals instead of runtime.NumGoroutine(), which is scheduler-
+// sensitive and flaked under full-suite concurrent load on Windows. The three
+// signals here are observable regardless of OS scheduling:
+//
+//  1. Liveness: Register a probe client, observe hub.Clients()==1. Only Run's
+//     select-loop register branch increments the count, so a rising count is
+//     functional proof Run is consuming its register channel.
+//  2. Exit: poll hub.closed. Close is deferred inside Run (hub.go: defer
+//     h.Close()), so closed==true deterministically proves Run has returned —
+//     i.e. its goroutine exited (no CR-01 leak).
+//  3. Shutdown: Register returns false on a closed hub (behavioural, not timing).
+//
+// The probe is a zero-value &Client{}: the Hub accept path only stores the
+// pointer as a map key (h.clients[c] = true) and never dereferences it, so a
+// bare struct is safe.
 func TestHubStopsOnContextCancel(t *testing.T) {
 	cfg := HubConfig{
-		Limit:          100,
-		RegisterBuffer: 32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
 
 	hub, _ := NewHub(cfg, zap.NewNop())
 
 	ctx, cancel := context.WithCancel(context.Background())
-
-	// Measure goroutine count before starting hub.Run
-	baseGoroutines := runtime.NumGoroutine()
+	defer cancel()
 
 	go hub.Run(ctx)
 
-	// Wait for the hub.Run goroutine to actually start. A fixed time.Sleep is
-	// scheduler-sensitive and flakes under full-suite load: the assertion below
-	// fired intermittently because the goroutine hadn't been scheduled within
-	// 50ms. Polling for the count to rise (with a deadline) keeps the test's
-	// intent — prove hub.Run blocks — while removing the timing fragility.
-	started := waitForGoroutineIncrease(baseGoroutines, 2*time.Second)
-	if !started {
-		t.Error("Expected goroutine count to increase after starting hub.Run")
+	// Liveness proof: a probe client lands in the clients map only through
+	// Run's select-loop register branch. If this count rises, Run is live.
+	probe := &Client{}
+	if !hub.Register(probe) {
+		t.Fatal("Register(probe) returned false before cancel; hub not live or saturated")
+	}
+	if !waitFor(t, 2*time.Second, "hub.Clients() == 1 after Register(probe)", func() bool { return hub.Clients() == 1 }) {
+		t.Fatalf("hub.Clients() == 1 after Register(probe) (timed out after %v)", 2*time.Second)
 	}
 
-	// Cancel context to trigger shutdown
+	// Exit proof: Close is deferred inside Run, so closed==true means Run has
+	// returned and its goroutine has exited (no CR-01 leak).
 	cancel()
+	if !waitFor(t, 2*time.Second, "hub.closed == true after cancel()", func() bool { return hub.closed }) {
+		t.Fatalf("hub.closed == true after cancel() (timed out after %v)", 2*time.Second)
+	}
 
-	// Wait for the goroutine to exit (should be within 200ms per D-12). Poll
-	// instead of a fixed sleep so cleanup under load is observed reliably.
-	waitForGoroutineDrain(baseGoroutines+1, 2*time.Second)
-
-	// Verify goroutine count returned to baseline
-	finalGoroutines := runtime.NumGoroutine()
-	if finalGoroutines > baseGoroutines+1 { // +1 for test tolerance
-		t.Errorf("Expected goroutine count to return to baseline after cancel, got %d (baseline %d)", finalGoroutines, baseGoroutines)
+	// Functional shutdown proof: a closed hub short-circuits Register.
+	if hub.Register(&Client{}) {
+		t.Error("Register on closed hub returned true; want false")
 	}
 }
 
 // TestHubRegisterChannelBounded verifies register channel has bounded capacity.
 func TestHubRegisterChannelBounded(t *testing.T) {
 	cfg := HubConfig{
-		Limit:          100,
-		RegisterBuffer: 32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
 
@@ -281,8 +295,8 @@ func TestHubRegisterChannelBounded(t *testing.T) {
 // TestHubConcurrentRegisterUnregister verifies concurrent register/unregister is race-free.
 func TestHubConcurrentRegisterUnregister(t *testing.T) {
 	cfg := HubConfig{
-		Limit:          100,
-		RegisterBuffer: 32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
 
@@ -316,30 +330,9 @@ func TestHubConcurrentRegisterUnregister(t *testing.T) {
 	// Run with -race to detect issues
 }
 
-// waitForGoroutineIncrease polls until the live goroutine count rises above
-// baseline, returning true once it does or false on timeout. Replaces a fixed
-// time.Sleep before asserting "hub.Run started a goroutine" — the sleep was
-// scheduler-sensitive and flaked under full-suite load.
-func waitForGoroutineIncrease(baseline int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		runtime.Gosched()
-		if runtime.NumGoroutine() > baseline {
-			return true
-		}
-	}
-	return false
-}
-
-// waitForGoroutineDrain polls until the live goroutine count drops to target
-// or below, or the timeout elapses. Replaces a fixed sleep before asserting
-// "hub.Run exited after cancel" for the same scheduler-fragility reason.
-func waitForGoroutineDrain(target int, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		runtime.Gosched()
-		if runtime.NumGoroutine() <= target {
-			return
-		}
-	}
-}
+// TestHubStopsOnContextCancel relies on the package-level waitFor helper
+// (defined in connection_test.go) for deterministic condition polling. That
+// helper replaces the old scheduler-fragile runtime.NumGoroutine polls
+// (waitForGoroutineIncrease / waitForGoroutineDrain, now deleted): it waits on
+// a behaviour-based condition rather than a goroutine count, removing the OS-
+// scheduler timing dependence that caused the full-suite flake.
