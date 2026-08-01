@@ -6,9 +6,9 @@ current_phase: 03
 current_phase_name: python-cli-integration
 status: human_needed
 stopped_at: Phase 3 验证完成 → human_needed(代码级 4/4 truths + UAT 5/6 自动化通过;仅余 Volcengine TTS 真实路径 + 1C/1G 资源规模 + Linux 进程组真实负载,待 VPS 人工验证)
-last_updated: "2026-08-01T04:28:46Z"
+last_updated: "2026-08-01T06:50:07Z"
 last_activity: 2026-08-01
-last_activity_desc: Quick task 260801-ge1 — 接入 WS 运行时(P0-1:WSConfig 配置块 + main.go :8080 /ws 接线 + no-op handlers + CR-01 安全关闭)
+last_activity_desc: Quick task 260801-kdq — 根治 ws TestHubStopsOnContextCancel flake(确定性信号替代 NumGoroutine;50 次隔离 + 3 轮全量验证根除)
 progress:
   total_phases: 3
   completed_phases: 2
@@ -109,6 +109,7 @@ None yet.
 |---|-------------|------|--------|--------|-----------|
 | 260801-fh3 | 让 Home Tutor Agent 在 Windows 本机能跑起来调试 | 2026-08-01 | 077e77d | | [260801-fh3-home-tutor-agent-windows](./quick/260801-fh3-home-tutor-agent-windows/) |
 | 260801-ge1 | 接入 WebSocket 运行时(P0-1) | 2026-08-01 | bfb24d3 | Verified | [260801-ge1-websocket-p0-1](./quick/260801-ge1-websocket-p0-1/) |
+| 260801-kdq | 根治 ws TestHubStopsOnContextCancel flake | 2026-08-01 | b65ad5e | | [260801-kdq-ws-testhubstopsoncontextcancel-flake](./quick/260801-kdq-ws-testhubstopsoncontextcancel-flake/) |
 
 ## Deferred Items
 
