@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 )
@@ -421,7 +422,21 @@ func LoadConfig(configPath string) (Config, error) {
 
 	// Unmarshal over the defaults already in cfg. Viper only overrides
 	// keys it has a value for; everything else is preserved.
-	if err := v.Unmarshal(&cfg, viper.DecodeHook(decodeHook)); err != nil {
+	//
+	// Supplying a custom DecodeHook makes viper's internal v.decodeHook
+	// non-nil, which makes viper SKIP its default composed hook chain
+	// (StringToTimeDurationHookFunc, StringToSliceHookFunc). The decodeHook
+	// below only owns MemoryBytes/Percent; without the defaults composed
+	// back in, every time.Duration field ("5s"/"30s" in config.yaml) fails
+	// to parse via strconv.ParseInt and the service cannot boot. We compose
+	// the standard hooks back so duration + slice parsing works as the
+	// decodeHook comment promises.
+	if err := v.Unmarshal(&cfg, viper.DecodeHook(
+		mapstructure.ComposeDecodeHookFunc(
+			decodeHook,
+			mapstructure.StringToTimeDurationHookFunc(),
+			mapstructure.StringToSliceHookFunc(" "),
+		))); err != nil {
 		return Config{}, errors.Wrap(err, "unmarshalling config")
 	}
 

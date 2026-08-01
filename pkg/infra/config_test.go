@@ -244,6 +244,66 @@ func TestLoadConfigFileOverride(t *testing.T) {
 	}
 }
 
+// TestLoadConfigFileDurations is a regression guard for the time.Duration
+// parsing path. Supplying a custom viper DecodeHook makes viper skip its
+// default StringToTimeDurationHookFunc; without that hook composed back in,
+// every duration string ("5s"/"30s") in a real config.yaml fails to parse
+// via strconv.ParseInt and the service cannot boot. This test writes
+// duration-bearing YAML — the gap that hid the bug — so a future regression
+// of the hook composition fails here instead of at process startup.
+func TestLoadConfigFileDurations(t *testing.T) {
+	setRequiredPythonEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte(strings.Join([]string{
+		"memory:",
+		"  monitorInterval: 7s",
+		"session:",
+		"  idleTimeout: 9m",
+		"  cleanupInterval: 45s",
+		"server:",
+		"  readTimeout: 12s",
+		"  writeTimeout: 12s",
+		"connection:",
+		"  dialTimeout: 6s",
+		"shutdown:",
+		"  timeout: 40s",
+		"python:",
+		"  dueTimeout: 11s",
+		"  reviewTimeout: 11s",
+		"  pregenTimeout: 130s",
+		"",
+	}, "\n"))
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error %v", path, err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig(%s) error %v, want nil (duration strings must parse)", path, err)
+	}
+	cases := []struct {
+		name string
+		got  time.Duration
+		want time.Duration
+	}{
+		{"Memory.MonitorInterval", cfg.Memory.MonitorInterval, 7 * time.Second},
+		{"Session.IdleTimeout", cfg.Session.IdleTimeout, 9 * time.Minute},
+		{"Session.CleanupInterval", cfg.Session.CleanupInterval, 45 * time.Second},
+		{"Server.ReadTimeout", cfg.Server.ReadTimeout, 12 * time.Second},
+		{"Server.WriteTimeout", cfg.Server.WriteTimeout, 12 * time.Second},
+		{"Connection.DialTimeout", cfg.Connection.DialTimeout, 6 * time.Second},
+		{"Shutdown.Timeout", cfg.Shutdown.Timeout, 40 * time.Second},
+		{"Python.DueTimeout", cfg.Python.DueTimeout, 11 * time.Second},
+		{"Python.ReviewTimeout", cfg.Python.ReviewTimeout, 11 * time.Second},
+		{"Python.PregenTimeout", cfg.Python.PregenTimeout, 130 * time.Second},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v (YAML duration string did not parse)", c.name, c.got, c.want)
+		}
+	}
+}
+
 // TestLoadConfigPrecedence verifies the full D-52 chain: env > file > default.
 // The file says 50, env says 200, default is 100 — env MUST win.
 func TestLoadConfigPrecedence(t *testing.T) {
