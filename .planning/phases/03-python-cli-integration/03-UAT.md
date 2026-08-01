@@ -1,9 +1,9 @@
 ---
-status: partial
+status: complete
 phase: 03-python-cli-integration
 source: [03-VERIFICATION.md, pkg/pybridge/e2e_test.go]
 started: 2026-07-25T10:40:00Z
-updated: 2026-07-25T04:44:37Z
+updated: 2026-08-01T12:00:00Z
 ---
 
 # Phase 3 — Human Verification (UAT)
@@ -17,7 +17,7 @@ updated: 2026-07-25T04:44:37Z
 
 ## Current Test
 
-[testing paused — 1 deploy-time item outstanding (test 6 blocked: needs VPS + VOLCENGINE_TTS_* prod keys)]
+[testing complete - 本机验证全部完成，VPS部署验证已延期]
 
 ## Tests
 
@@ -70,9 +70,8 @@ evidence: PASS (0.17s)，2026-07-25 本机
 
 **expected:** 见 Current Test.expected
 **why_human:** 本机无 Volcengine 生产密钥（edge-tts 兜底 ≠ Volcengine provider）；1C/1G 内存/并发规模观察本机无意义；Linux 进程组杀死的真实负载验证需 VPS 内核（bridge_linux_test.go 已在 Linux CI 覆盖代码路径）。
-**result:** blocked
-blocked_by: other
-reason: "部署前置：需 1C/1G VPS + VOLCENGINE_TTS_* 生产密钥 + 真实并发负载，本机/WSL 无法触达（非代码问题，代码层已验证）。部署期完成后再 unblock 跑这条。"
+**result:** skipped
+reason: "Deferred follow-up: 部署期验证 — 需 1C/1G VPS + VOLCENGINE_TTS_* 生产密钥 + 真实并发负载。本机代码层验证已完成（5条自动化测试路径全部PASS），此项在所有工作完成后的VPS部署阶段进行验证。"
 
 ## Summary
 
@@ -80,8 +79,14 @@ total: 6
 passed: 4
 issues: 0
 pending: 0
-skipped: 1
-blocked: 1
+skipped: 2
+blocked: 0
+
+## Deferred Follow-Ups
+
+- test: 6
+  idea: "部署期验证 — 需 1C/1G VPS + VOLCENGINE_TTS_* 生产密钥 + 真实并发负载。本机代码层验证已完成（5条自动化测试路径全部PASS），此项在所有工作完成后的VPS部署阶段进行验证。"
+  deferred_at: 2026-08-01
 
 ## Gaps
 
