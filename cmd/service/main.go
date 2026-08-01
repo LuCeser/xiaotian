@@ -25,8 +25,11 @@ import (
 	"syscall"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
+	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
 func main() {
@@ -133,6 +136,96 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		return 1
 	}
 
+	// ------------------------------------------------------------------
+	// Public WebSocket server (P0-1). Phase 2 delivered the pkg/ws library
+	// (Hub/Client/Server/Router); this is the runtime connective tissue that
+	// makes the service actually listen on cfg.Server.Addr (:8080) and serve
+	// the /ws upgrade route. Handlers are no-op (Phase 6/7 placeholders); the
+	// upgrade, Hub registration, heartbeat, frame decode, and Router dispatch
+	// all go live here. Double validation: infra WSConfig owns defaults/
+	// overrides, the ws package constructors (NewHub/NewRouter/NewServer) own
+	// semantic defaults and re-validate.
+	// ------------------------------------------------------------------
+	hubCfg := ws.HubConfig{
+		Limit:            cfg.WS.HubLimit,
+		RegisterBuffer:   cfg.WS.HubRegisterBuffer,
+		UnregisterBuffer: cfg.WS.HubUnregisterBuffer,
+	}
+	routerCfg := ws.RouterConfig{
+		RouteBuffer:       cfg.WS.RouteBuffer,
+		WorkerConcurrency: cfg.WS.WorkerConcurrency,
+	}
+	serverCfg := ws.ServerConfig{
+		AllowedOrigins:    cfg.WS.AllowedOrigins,
+		MaxMessageBytes:   cfg.WS.MaxMessageBytes,   // 0 → ws fills default
+		ReadBufferSize:    cfg.WS.ReadBufferSize,    // 0 → ws fills default
+		WriteBufferSize:   cfg.WS.WriteBufferSize,   // 0 → ws fills default
+		HeartbeatInterval: cfg.WS.HeartbeatInterval,
+	}
+
+	// pkg/ws takes *zap.Logger directly (it predates the infra.Logger
+	// abstraction). Bridge the two: extract the configured zap logger from the
+	// production ZapLogger, falling back to a nop logger for the test/no-op
+	// path. The level/format/output configured in NewLogger are preserved.
+	wsLogger := zap.NewNop()
+	if zl, ok := logger.(*infra.ZapLogger); ok {
+		wsLogger = zl.Zap()
+	}
+
+	hub, err := ws.NewHub(hubCfg, wsLogger)
+	if err != nil {
+		logger.Error("ws hub construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	router, err := ws.NewRouter(noOpHandlers(), routerCfg, wsLogger)
+	if err != nil {
+		logger.Error("ws router construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	wsServer, err := ws.NewServer(hub, router, serverCfg, wsLogger)
+	if err != nil {
+		logger.Error("ws server construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+
+	// Hub.Run blocks until ctx.Done then defers Close (CR-01-safe). Bound to
+	// the lifetime ctx so it exits as soon as shutdown begins.
+	go hub.Run(ctx)
+
+	// Public mux carries ONLY /ws. /health and /metrics stay on the separate
+	// localhost healthSrv below (probe/session traffic separation is the
+	// established design).
+	publicMux := http.NewServeMux()
+	publicMux.HandleFunc("/ws", wsServer.HandleWebSocket)
+	publicSrv := &http.Server{
+		Addr:              cfg.Server.Addr,
+		Handler:           publicMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+	}
+	go func() {
+		logger.Info("public server listening",
+			infra.F("component", "infra.main"),
+			infra.F("addr", cfg.Server.Addr),
+		)
+		if err := publicSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("public server error",
+				infra.F("component", "infra.main"),
+				infra.ErrField(err),
+			)
+		}
+	}()
+
 	// Health/metrics HTTP server on the dedicated health listener
 	// (default 127.0.0.1:8081). Bound separately from the public service
 	// addr so probe traffic does not compete with session traffic.
@@ -168,6 +261,24 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Shutdown.Timeout)
 	defer shutdownCancel()
 
+	// CR-01-safe WS shutdown order (documented contract in
+	// pkg/ws/server.go Server.Shutdown): stop the public HTTP listener FIRST so
+	// no new HandleWebSocket goroutines start while the Hub is torn down, THEN
+	// close the ws subsystem (Hub.Close + Router.Close with its bounded worker
+	// wait). The Router internally bounds its own wait at routerShutdownTimeout
+	// (5s), so the total stays within cfg.Shutdown.Timeout.
+	if err := publicSrv.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("public server shutdown error",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+	}
+	if err := wsServer.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("ws server shutdown error",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("server shutdown error",
 			infra.F("component", "infra.main"),

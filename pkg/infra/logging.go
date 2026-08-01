@@ -226,6 +226,17 @@ func (z *ZapLogger) Sync() error {
 	return z.l.Sync()
 }
 
+// Zap returns the underlying *zap.Logger for interop with packages (e.g.
+// pkg/ws) whose API takes *zap.Logger directly. Callers logging through the
+// infra.Logger interface keep T-01-09 Field sanitization; this accessor is
+// ONLY for handing the configured, level-filtered logger to a
+// *zap.Logger-typed dependency injection point. It does not bypass Field
+// sanitization for infra's own log calls — those still go through the
+// interface methods.
+func (z *ZapLogger) Zap() *zap.Logger {
+	return z.l
+}
+
 // toZapFields converts the package-local Field slice into the zap.Field
 // slice zap's logger methods require. String values are sanitized to defend
 // against log injection (T-01-09); non-string values pass through to
