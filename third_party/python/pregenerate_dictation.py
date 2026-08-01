@@ -9,7 +9,13 @@ The contextual TTS 2.0 whole-segment mode remains available as a fallback.
 """
 
 import base64
-import fcntl
+# POSIX-only (Linux production); on Windows/macOS dev host fcntl is absent.
+# Mirrors the Go-side convention in pkg/pybridge/bridge_linux.go (real impl) +
+# bridge_other.go (documented no-op stub). See CLAUDE.md cross-platform dev principle.
+try:
+    import fcntl  # POSIX only (Linux production)
+except ImportError:
+    fcntl = None  # Windows/macOS dev host — see CLAUDE.md cross-platform dev principle
 import hashlib
 import os
 import shutil
@@ -1295,11 +1301,19 @@ def _run_main():
 
 
 def _acquire_global_lock():
-    lock_path = "/tmp/pregenerate_dictation.lock"
+    # Cross-platform lock path: tempfile.gettempdir() returns /tmp on Linux
+    # (byte-identical to the previous hardcoded /tmp/...) and %TEMP% on Windows.
+    lock_path = os.path.join(tempfile.gettempdir(), "pregenerate_dictation.lock")
     lock_file = None
     try:
         lock_file = open(lock_path, "w", encoding="utf-8")
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fcntl is None:
+            # Windows/macOS dev host: no fcntl — dev inner loop only, no real
+            # concurrency; production Linux path keeps the real flock below.
+            pass
+        else:
+            # Linux production: real flock — byte-identical to pre-fix behavior.
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         print(f"Another pregenerate_dictation.py instance is running ({lock_path}); exiting.", file=sys.stderr)
         if lock_file is not None:
@@ -1313,6 +1327,18 @@ def _acquire_global_lock():
     return lock_file
 
 
+def _release_global_lock(lock_file):
+    """Release the global pregenerate lock and close the lock file.
+
+    On Linux (fcntl present) this issues LOCK_UN before close — byte-identical
+    to the pre-fix call sites. On Windows/macOS dev host (fcntl is None) it
+    only closes the file (the open/close pair is a harmless no-op lock).
+    """
+    if fcntl is not None:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+    lock_file.close()
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "generate":
         sys.argv.pop(1)
@@ -1321,8 +1347,7 @@ def main():
         try:
             _cli_generate(args)
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-            lock_file.close()
+            _release_global_lock(lock_file)
         return
 
     lock_file = _acquire_global_lock()
@@ -1338,7 +1363,9 @@ def main():
         try:
             _run_main()
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            # Linux: LOCK_UN via helper (byte-identical to pre-fix); Windows: close-only no-op.
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
     finally:
         lock_file.close()
 

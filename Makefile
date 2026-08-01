@@ -16,7 +16,7 @@ PY_INDEX ?= https://pypi.tuna.tsinghua.edu.cn/simple
 
 build:
 	mkdir -p bin
-	go build -ldflags '-s -w' -o $(BINARY) ./cmd/service
+	CGO_ENABLED=0 go build -ldflags '-s -w' -o $(BINARY) ./cmd/service
 
 test:
 	go test -race -v $(PKG)

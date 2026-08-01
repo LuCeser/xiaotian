@@ -112,6 +112,14 @@ type Config struct {
 	// service boots with NO ws: block in config.yaml.
 	WS WSConfig `json:"ws" mapstructure:"ws"`
 
+	// Database tunes the SQLite storage layer (Phase 4). Holds only the
+	// operational path; pragmas (WAL, busy_timeout, foreign_keys) are NOT
+	// configurable here — they are correctness-critical and owned by
+	// database.Open (D-09). The value SHOULD match PythonConfig.VocabDBPath
+	// so Go and Python hit the same file (D-03). Empty path defaults to
+	// $HOME/.home-tutor-agent/vocab.db via database.Open.
+	Database DatabaseConfig `json:"database" mapstructure:"database"`
+
 	// FSRS tunes the FSRS orchestration layer (Phase 5, D-03). Holds only
 	// operational fields — default word count, fetch-lock duration, unit and
 	// category scope — and NEVER credentials (D-24 no-secret invariant,
@@ -173,6 +181,20 @@ type WSConfig struct {
 	// WorkerConcurrency is the per-MsgType Router worker count. Default 4
 	// (ws.RouterConfig default).
 	WorkerConcurrency int `json:"workerConcurrency" mapstructure:"workerConcurrency"`
+}
+
+// DatabaseConfig tunes the SQLite storage layer (Phase 4, D-09). It carries
+// only the operational path; pragmas are correctness-critical and owned by
+// database.Open — they are intentionally NOT exposed here. The value SHOULD
+// match PythonConfig.VocabDBPath so Go and Python hit the same file (D-03).
+// Empty path is accepted at config time (service boots without a database:
+// block) and resolved later by database.Open.
+type DatabaseConfig struct {
+	// Path is the absolute or relative path to the SQLite database file.
+	// Default "" (empty) — database.Open resolves to
+	// $HOME/.home-tutor-agent/vocab.db when empty. The value SHOULD match
+	// PythonConfig.VocabDBPath so Go and Python access the same file (D-03).
+	Path string `json:"path" mapstructure:"path"`
 }
 
 // PythonConfig tunes the Go ↔ Python subprocess bridge (Phase 3, D-03/D-04).
@@ -500,6 +522,7 @@ func DefaultConfig() Config {
 			RouteBuffer:        32, // ws.RouterConfig default
 			WorkerConcurrency:  4,  // ws.RouterConfig default
 		},
+<<<<<<< Updated upstream
 		FSRS: FSRSConfig{
 			// FSRS-02 default word count sits in the 20-30 band so a session
 			// with no explicit count serves a sensible batch.
@@ -509,6 +532,10 @@ func DefaultConfig() Config {
 			FetchLockHours:  24.0,
 			DefaultUnit:     "", // empty = all units (valid default)
 			DefaultCategory: "english",
+=======
+		Database: DatabaseConfig{
+			Path: "", // empty → database.Open resolves to $HOME/.home-tutor-agent/vocab.db
+>>>>>>> Stashed changes
 		},
 	}
 }
@@ -848,12 +875,16 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"ws.hubUnregisterBuffer",
 		"ws.routeBuffer",
 		"ws.workerConcurrency",
+<<<<<<< Updated upstream
 		// Phase 5 FSRS orchestration (D-03). Pitfall 6: every leaf MUST be
 		// bound explicitly or HTA_FSRS_* env vars are silently inert.
 		"fsrs.defaultWordCount",
 		"fsrs.fetchLockHours",
 		"fsrs.defaultUnit",
 		"fsrs.defaultCategory",
+=======
+		"database.path",
+>>>>>>> Stashed changes
 	}
 	for _, key := range keys {
 		_ = v.BindEnv(key)

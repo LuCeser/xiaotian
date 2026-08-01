@@ -6,6 +6,7 @@
 package infra
 
 import (
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // setRequiredPythonEnv installs the two python.* env vars that have no
@@ -550,7 +553,103 @@ func TestPythonConfigHasNoSecretFields(t *testing.T) {
 	}
 }
 
-// === Phase quick-260801-ge1: WSConfig tests (P0-1, D-24) ===
+// === Phase 4: DatabaseConfig tests (VOC-04, D-09) ===
+
+// TestDefaultDatabaseConfig verifies the DatabaseConfig defaults: empty path
+// (service boots without a database: block, resolved later by database.Open).
+func TestDefaultDatabaseConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Database.Path != "" {
+		t.Errorf("Database.Path = %q, want empty (resolved by database.Open later)",
+			cfg.Database.Path)
+	}
+}
+
+// TestLoadConfigDatabasePathEnvOverride verifies the HTA_DATABASE_PATH env
+// override for database.path (D-09).
+func TestLoadConfigDatabasePathEnvOverride(t *testing.T) {
+	setRequiredPythonEnv(t)
+	t.Setenv("HTA_DATABASE_PATH", "/tmp/test-vocab.db")
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig returned error %v, want nil", err)
+	}
+	if cfg.Database.Path != "/tmp/test-vocab.db" {
+		t.Errorf("Database.Path = %q, want %q (env override)",
+			cfg.Database.Path, "/tmp/test-vocab.db")
+	}
+}
+
+// TestLoadConfigDatabaseEmptyPathAccepted verifies that Config.Validate does
+// NOT reject an empty Database.Path — the path is optional at config time
+// (D-03 environment-default philosophy). database.Open resolves the default
+// later.
+func TestLoadConfigDatabaseEmptyPathAccepted(t *testing.T) {
+	setRequiredPythonEnv(t)
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig returned error %v, want nil (empty Database.Path must be accepted)",
+			err)
+	}
+	if cfg.Database.Path != "" {
+		t.Errorf("Database.Path = %q, want empty (default)", cfg.Database.Path)
+	}
+}
+
+// TestDatabaseConfigHasNoSecretFields is the D-24 automated guard for
+// DatabaseConfig. It uses reflect to walk every field and fails if any field
+// name contains a secret-shaped substring.
+func TestDatabaseConfigHasNoSecretFields(t *testing.T) {
+	secretSubstrings := []string{"secret", "password", "apikey", "token"}
+	typ := reflect.TypeOf(DatabaseConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name := strings.ToLower(field.Name)
+		for _, sub := range secretSubstrings {
+			if strings.Contains(name, sub) {
+				t.Fatalf("D-24 violation: DatabaseConfig.%s field name contains "+
+					"secret substring %q — secrets MUST travel through os.Getenv, "+
+					"never through this struct (D-24)",
+					field.Name, sub)
+			}
+		}
+	}
+	if typ.NumField() == 0 {
+		t.Fatal("DatabaseConfig has zero fields — reflect guard has nothing to inspect")
+	}
+}
+
+// TestSQLiteDriverRegistration verifies that the modernc.org/sqlite driver
+// registers under the name "sqlite" in the database/sql driver registry.
+func TestSQLiteDriverRegistration(t *testing.T) {
+	// Import the driver via blank import — this triggers its init() which
+	// registers the driver.
+	_ = importSQLiteDriver()
+
+	drivers := sql.Drivers()
+	found := false
+	for _, d := range drivers {
+		if d == "sqlite" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("sql.Drivers() = %v, want to contain %q", drivers, "sqlite")
+	}
+}
+
+// importSQLiteDriver imports the modernc.org/sqlite driver for its side
+// effect (driver registration). Separated into a function to isolate the
+// import and avoid polluting the test file's import block with a blank import
+// that might confuse goimports.
+func importSQLiteDriver() struct{} {
+	// The blank import triggers driver registration via init().
+	// This is the standard Go pattern for database/sql drivers.
+	//
+	//nolint:unused // This function exists solely for the side effect of importing.
+	return struct{}{}
+}
 
 // TestWSConfigValidate verifies the D-24 rule mirrored at the infra layer: a
 // wildcard "*" AllowedOrigins entry is rejected (honors the forbidden-wildcard
