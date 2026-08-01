@@ -1,0 +1,182 @@
+package database
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+
+	"github.com/pkg/errors"
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+)
+
+// Sentinel errors for CardRepository. Callers MUST branch on these via
+// errors.Is rather than string matching (D-05 rich error handling).
+var (
+	// ErrCardNotFound is returned by GetByID when no card exists with
+	// the given id. Detectable via errors.Is, mirroring ErrSessionNotFound.
+	ErrCardNotFound = errors.New("card not found")
+)
+
+// Card mirrors the Python-owned cards columns from vocab_manager.py
+// (lines 103-128). The FsrsCard field is an opaque JSON string — Go NEVER
+// parses it into typed FSRS fields (RESEARCH Pitfall 5). If Go needs
+// stability/difficulty/due, it calls pybridge.Executor.RunDue instead.
+//
+// Write-separation contract (D-03-a): Python owns writes to the cards table
+// via pybridge.Executor.RunReview. Go only reads.
+type Card struct {
+	ID               int64
+	Word             string
+	Meaning          string
+	Example          string
+	Unit             string
+	Category         string
+	FsrsCard         string // opaque JSON — never parsed in Go (Pitfall 5)
+	CreatedAt        string
+	FetchLockedUntil string // nullable; empty string when NULL
+}
+
+// CardRepository provides read-only access to the Python-owned cards table.
+// Go NEVER writes to this table — FSRS state updates route through
+// pybridge.Executor.RunReview (D-01/D-03-a/D-09).
+//
+// The interface exposes exactly two read methods. There is deliberately no
+// write method (INSERT/UPDATE/DELETE) — this is enforced at the type level.
+// All queries use an explicit column list, never SELECT *, so a Python-side
+// column change fails loudly rather than silently returning wrong data
+// (RESEARCH Pitfall 4).
+type CardRepository interface {
+	// GetByID returns the card with the given database ID.
+	// Returns ErrCardNotFound when no card exists.
+	GetByID(ctx context.Context, id int64) (Card, error)
+
+	// ListByUnit returns cards in the named unit. An empty unit string
+	// returns all cards.
+	ListByUnit(ctx context.Context, unit string) ([]Card, error)
+}
+
+// Compile-time interface satisfaction check (D-43, mirrors pybridge pattern).
+var _ CardRepository = (*sqliteCardRepository)(nil)
+
+// sqliteCardRepository is the concrete CardRepository implementation
+// backed by *sql.DB (modernc.org/sqlite). Read-only by design (D-01/D-03-a).
+type sqliteCardRepository struct {
+	db     *sql.DB
+	logger infra.Logger
+}
+
+// NewCardRepository constructs a CardRepository from an open *sql.DB.
+// Returns an error if db is nil (D-47 nil-guard). If logger is nil,
+// infra.NewNoOpLogger() is substituted so the repository is always safe to use.
+func NewCardRepository(db *sql.DB, logger infra.Logger) (CardRepository, error) {
+	if db == nil {
+		return nil, errors.Wrap(ErrCardNotFound, "database/card_repo: *sql.DB must not be nil")
+	}
+	if logger == nil {
+		logger = infra.NewNoOpLogger()
+	}
+	return &sqliteCardRepository{db: db, logger: logger}, nil
+}
+
+// cardColumns is the explicit column list for SELECT queries.
+// Matches vocab_manager.py cards schema (lines 103-128) plus the
+// fetch_locked_until migration (lines 126-128).
+// NEVER use SELECT * — explicit columns fail loudly on schema drift
+// (RESEARCH Pitfall 4).
+const cardColumns = "id, word, meaning, example, unit, category, fsrs_card, created_at, fetch_locked_until"
+
+// scanCard scans a single row into a Card struct. Shared by GetByID and
+// ListByUnit to avoid duplication.
+func scanCard(row interface{ Scan(...any) error }) (Card, error) {
+	var c Card
+	var fetchLocked sql.NullString
+
+	err := row.Scan(
+		&c.ID,
+		&c.Word,
+		&c.Meaning,
+		&c.Example,
+		&c.Unit,
+		&c.Category,
+		&c.FsrsCard,
+		&c.CreatedAt,
+		&fetchLocked,
+	)
+	if err != nil {
+		return Card{}, err
+	}
+
+	if fetchLocked.Valid {
+		c.FetchLockedUntil = fetchLocked.String
+	}
+
+	return c, nil
+}
+
+// GetByID returns the card with the given database ID.
+// Returns ErrCardNotFound when no card exists.
+func (r *sqliteCardRepository) GetByID(ctx context.Context, id int64) (Card, error) {
+	c, err := scanCard(r.db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT %s FROM cards WHERE id = ?", cardColumns),
+		id,
+	))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Card{}, errors.Wrap(ErrCardNotFound, fmt.Sprintf("get card by id %d", id))
+		}
+		r.logger.Error("card get by id failed",
+			infra.F("component", "database/card_repo"),
+			infra.F("card_id", id),
+			infra.ErrField(err),
+		)
+		return Card{}, errors.Wrap(err, "card get by id")
+	}
+
+	return c, nil
+}
+
+// ListByUnit returns cards in the named unit. An empty unit string
+// returns all cards.
+func (r *sqliteCardRepository) ListByUnit(ctx context.Context, unit string) ([]Card, error) {
+	query := fmt.Sprintf("SELECT %s FROM cards", cardColumns)
+	args := []any{}
+
+	if unit != "" {
+		query += " WHERE unit = ?"
+		args = append(args, unit)
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		r.logger.Error("card list by unit failed",
+			infra.F("component", "database/card_repo"),
+			infra.F("unit", unit),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "card list by unit")
+	}
+	defer rows.Close()
+
+	var cards []Card
+	for rows.Next() {
+		c, err := scanCard(rows)
+		if err != nil {
+			r.logger.Error("card scan row failed",
+				infra.F("component", "database/card_repo"),
+				infra.ErrField(err),
+			)
+			return nil, errors.Wrap(err, "card list by unit: scan")
+		}
+		cards = append(cards, c)
+	}
+
+	if err := rows.Err(); err != nil {
+		r.logger.Error("card list by unit iteration",
+			infra.F("component", "database/card_repo"),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "card list by unit: iteration")
+	}
+
+	return cards, nil
+}
