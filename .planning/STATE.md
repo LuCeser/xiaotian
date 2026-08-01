@@ -4,11 +4,11 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 03
 current_phase_name: python-cli-integration
-status: verifying
-stopped_at: Completed 03-05-PLAN.md (RunPregenerate + pregenArgs + cap=1 pregenSem + classifyPregenResult + Pitfall 6 空 stdout 检测 + ErrBridgeNotImplemented 删除 — Phase 3 完结)
-last_updated: "2026-08-01T03:33:47Z"
+status: human_needed
+stopped_at: Phase 3 验证完成 → human_needed(代码级 4/4 truths + UAT 5/6 自动化通过;仅余 Volcengine TTS 真实路径 + 1C/1G 资源规模 + Linux 进程组真实负载,待 VPS 人工验证)
+last_updated: "2026-08-01T04:28:46Z"
 last_activity: 2026-08-01
-last_activity_desc: Quick task 260801-fh3 — Windows 本机调试就绪(uv venv + 本机 config.yaml + viper Duration hook 修复 + ws flaky 修复)
+last_activity_desc: Quick task 260801-ge1 — 接入 WS 运行时(P0-1:WSConfig 配置块 + main.go :8080 /ws 接线 + no-op handlers + CR-01 安全关闭)
 progress:
   total_phases: 3
   completed_phases: 2
@@ -105,9 +105,10 @@ None yet.
 
 ### Quick Tasks Completed
 
-| # | Description | Date | Commit | Directory |
-|---|-------------|------|--------|-----------|
-| 260801-fh3 | 让 Home Tutor Agent 在 Windows 本机能跑起来调试 | 2026-08-01 | 077e77d | [260801-fh3-home-tutor-agent-windows](./quick/260801-fh3-home-tutor-agent-windows/) |
+| # | Description | Date | Commit | Status | Directory |
+|---|-------------|------|--------|--------|-----------|
+| 260801-fh3 | 让 Home Tutor Agent 在 Windows 本机能跑起来调试 | 2026-08-01 | 077e77d | | [260801-fh3-home-tutor-agent-windows](./quick/260801-fh3-home-tutor-agent-windows/) |
+| 260801-ge1 | 接入 WebSocket 运行时(P0-1) | 2026-08-01 | bfb24d3 | Verified | [260801-ge1-websocket-p0-1](./quick/260801-ge1-websocket-p0-1/) |
 
 ## Deferred Items
 
