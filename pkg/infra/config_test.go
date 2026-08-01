@@ -672,3 +672,68 @@ func TestFSRSConfigValidate(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadConfigInvalidFSRSWordCount proves the env binding (sync point 5)
+// AND the validation (sync point 4) are both wired end-to-end through
+// LoadConfig: an out-of-range HTA_FSRS_DEFAULTWORDCOUNT fails boot with
+// ErrConfigInvalid rather than being silently accepted. Mirrors
+// TestLoadConfigInvalidPythonMaxConcurrent.
+func TestLoadConfigInvalidFSRSWordCount(t *testing.T) {
+	setRequiredPythonEnv(t)
+	t.Setenv("HTA_FSRS_DEFAULTWORDCOUNT", "0")
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for fsrs.defaultWordCount=0")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
+// TestLoadConfigFSRSWordCountEnvOverride proves bindEnv registered the
+// fsrs.defaultWordCount leaf (Pitfall 6 guard): HTA_FSRS_DEFAULTWORDCOUNT=30
+// overrides the D-03 default of 25 with no error. Mirrors
+// TestLoadConfigEnvOverride.
+func TestLoadConfigFSRSWordCountEnvOverride(t *testing.T) {
+	setRequiredPythonEnv(t)
+	t.Setenv("HTA_FSRS_DEFAULTWORDCOUNT", "30")
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig returned error %v, want nil", err)
+	}
+	if cfg.FSRS.DefaultWordCount != 30 {
+		t.Errorf("FSRS.DefaultWordCount = %d, want 30 (env override via HTA_FSRS_DEFAULTWORDCOUNT)",
+			cfg.FSRS.DefaultWordCount)
+	}
+}
+
+// TestFSRSConfigHasNoSecretFields is the D-24 automated guard for the Phase 5
+// FSRSConfig. It uses reflect to walk every field and fails if any field name
+// contains a secret-shaped substring, mirroring the PythonConfig guard. This
+// prevents future contributors from accidentally adding APIKey/Secret/Password/
+// Token fields to FSRSConfig — secrets must travel through os.Getenv, never
+// through this struct.
+//
+// If a legitimate future field legitimately trips one of these substrings,
+// rename the field rather than weakening the guard.
+func TestFSRSConfigHasNoSecretFields(t *testing.T) {
+	secretSubstrings := []string{"secret", "password", "apikey", "token"}
+	typ := reflect.TypeOf(FSRSConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name := strings.ToLower(field.Name)
+		for _, sub := range secretSubstrings {
+			if strings.Contains(name, sub) {
+				t.Fatalf("D-24 violation: FSRSConfig.%s field name contains "+
+					"secret substring %q — secrets MUST travel through os.Getenv, "+
+					"never through this struct (D-24)",
+					field.Name, sub)
+			}
+		}
+	}
+	// Sanity: ensure we actually inspected a non-zero field count so a future
+	// refactor that accidentally empties FSRSConfig does not silently pass.
+	if typ.NumField() == 0 {
+		t.Fatal("FSRSConfig has zero fields — reflect guard has nothing to inspect")
+	}
+}
