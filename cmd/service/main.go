@@ -22,11 +22,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
@@ -119,6 +121,62 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		return 1
 	}
 	_ = pyBridge // wired into RunDue/RunReview/RunPregenerate callers in Phase 5/7
+
+	// Phase 4 (D-09): open the shared SQLite database.
+	// The path comes from Config.Database.Path; when empty, resolve to
+	// $HOME/.home-tutor-agent/vocab.db (mirrors PythonConfig default philosophy).
+	// sql.DB lifetime = service lifetime. Closed during shutdown via defer.
+	dbPath := cfg.Database.Path
+	if dbPath == "" {
+		dbPath = filepath.Join(homeDir(), ".home-tutor-agent", "vocab.db")
+	}
+	db, err := database.Open(dbPath)
+	if err != nil {
+		logger.Error("database open failed",
+			infra.F("component", "infra.main"),
+			infra.F("path", dbPath),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Warn("database close error",
+				infra.F("component", "infra.main"),
+				infra.ErrField(err),
+			)
+		}
+	}()
+
+	// Run idempotent migration for Go-owned tables (D-08).
+	// Does NOT touch Python-owned cards/review_logs.
+	if err := database.Migrate(ctx, db); err != nil {
+		logger.Error("database migration failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+
+	// Construct repositories (D-07, D-42 constructor DI).
+	cardRepo, err := database.NewCardRepository(db, logger)
+	if err != nil {
+		logger.Error("card repository construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	sessionRepo, err := database.NewSessionRepository(db, logger)
+	if err != nil {
+		logger.Error("session repository construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	_ = cardRepo    // consumed by Phase 5 FSRS orchestration
+	_ = sessionRepo // consumed by Phase 7 session management
 
 	if err := infra.RegisterMetrics(server); err != nil {
 		logger.Error("metrics registration failed",
@@ -313,3 +371,13 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 // ensure fmt is referenced even if future refactors remove the only call
 // site. Cheap to keep, painful to forget.
 var _ = fmt.Sprintf
+
+// homeDir returns the user's home directory. On error (e.g. HOME not set),
+// it returns "." as a safe fallback. Used by the database bootstrap to
+// resolve the default vocab.db path when cfg.Database.Path is empty.
+func homeDir() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return "."
+}
