@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Resource-Constrained Infrastructure** - Foundation setup with 150MB memory budget and monitoring (completed 2026-07-23)
 - [x] **Phase 2: WebSocket Communication Layer** - Persistent connections with binary audio frame support (completed 2026-07-19)
-- [ ] **Phase 3: Python CLI Integration** - Subprocess bridge to vocab_manager and TTS generation
+- [x] **Phase 3: Python CLI Integration** - Subprocess bridge to vocab_manager and TTS generation (completed 2026-08-01)
 - [ ] **Phase 4: Database Schema Design** - SQLite schema for vocabulary and FSRS metadata
 - [ ] **Phase 5: FSRS Core Implementation** - Automatic due word selection and parameter updates
 - [ ] **Phase 6: TTS Audio Streaming** - Real-time audio delivery with <1.5s latency
@@ -137,7 +137,14 @@ Plans:
   3. Database schema supports FSRS parameter storage (difficulty, retention intervals)
   4. Database operations maintain ACID properties for concurrent access
 
-**Plans**: TBD
+**Plans**:
+- 04-01: Foundation — modernc.org/sqlite driver + CGO_ENABLED=0 lock + DatabaseConfig
+- 04-02: FSRS+SQLite ownership ADR (resolves P1-4 architecture review todo)
+- 04-03: pkg/database — schema + Open (WAL pragmas) + Migrate + README
+- 04-04: SessionRepository + read-only CardRepository + tests
+- 04-05: main.go wiring (Open + Migrate + repos + db.Close) — integration vertical slice
+
+Total: 5 plans across 4 waves (Wave 1 has 2 parallel plans: 04-01 + 04-02)
 
 **PROJECT_MODE**: mvp
 
@@ -281,7 +288,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 |-------|----------------|--------|-----------|
 | 1. Resource-Constrained Infrastructure | 8/8 | Complete    | 2026-07-23 |
 | 2. WebSocket Communication Layer | 1/3 | Complete    | 2026-07-19 |
-| 3. Python CLI Integration | 5/5 | In Progress|  |
+| 3. Python CLI Integration | 5/5 | Complete    | 2026-08-01 |
 | 4. Database Schema Design | 0/0 | Not started | - |
 | 5. FSRS Core Implementation | 0/0 | Not started | - |
 | 6. TTS Audio Streaming | 0/0 | Not started | - |
