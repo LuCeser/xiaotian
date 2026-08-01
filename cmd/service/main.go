@@ -29,6 +29,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
+	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
@@ -120,7 +121,19 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
-	_ = pyBridge // wired into RunDue/RunReview/RunPregenerate callers in Phase 5/7
+
+	// Phase 5 (D-01): FSRS orchestration service. Composes pyBridge via the
+	// Executor interface. NewFSRSService is a pure constructor — no subprocess
+	// spawned, same contract as NewBridge.
+	fsrsSvc, err := fsrs.NewFSRSService(pyBridge, logger, cfg.FSRS)
+	if err != nil {
+		logger.Error("fsrs service construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	_ = fsrsSvc // consumed by Phase 7 session orchestration
 
 	// Phase 4 (D-09): open the shared SQLite database.
 	// The path comes from Config.Database.Path; when empty, resolve to
