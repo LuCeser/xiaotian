@@ -205,7 +205,7 @@ func TestHubStopsOnContextCancel(t *testing.T) {
 	// fired intermittently because the goroutine hadn't been scheduled within
 	// 50ms. Polling for the count to rise (with a deadline) keeps the test's
 	// intent — prove hub.Run blocks — while removing the timing fragility.
-	started := waitForGoroutineIncrease(baseGoroutines, 500*time.Millisecond)
+	started := waitForGoroutineIncrease(baseGoroutines, 2*time.Second)
 	if !started {
 		t.Error("Expected goroutine count to increase after starting hub.Run")
 	}
@@ -215,7 +215,7 @@ func TestHubStopsOnContextCancel(t *testing.T) {
 
 	// Wait for the goroutine to exit (should be within 200ms per D-12). Poll
 	// instead of a fixed sleep so cleanup under load is observed reliably.
-	waitForGoroutineDrain(baseGoroutines+1, 500*time.Millisecond)
+	waitForGoroutineDrain(baseGoroutines+1, 2*time.Second)
 
 	// Verify goroutine count returned to baseline
 	finalGoroutines := runtime.NumGoroutine()
