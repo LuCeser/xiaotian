@@ -12,6 +12,10 @@ coverage.html
 # Environment
 .env
 .env.local
+# Local config.yaml (machine-specific paths, may hold non-secret config;
+# secrets are never landed here per D-05 — they travel via live env). Never
+# committed so local edits do not pollute git history.
+/config.yaml
 
 # Python venv created by `make py-bootstrap` (D-04). Never committed — the
 # venv is rebuilt on the deploy host from third_party/python/requirements.txt.
