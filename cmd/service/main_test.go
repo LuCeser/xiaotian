@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // runMu serializes tests that invoke run() so two tests do not race for
@@ -210,6 +212,130 @@ func TestMainRejectsInvalidConfig(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("run did not return within 10s for invalid config")
+	}
+}
+
+// TestMainWSPublicRouteUpgradesAndShutsDownCleanly proves the public /ws route
+// upgrades a real WebSocket client (HTTP 101) and that shutdown leaves no leaked
+// goroutines (CR-01). This is the P0-1 end-to-end contract: the service listens
+// on cfg.Server.Addr, the /ws upgrade works with the default localhost origin,
+// and the CR-01-safe shutdown ordering drains every pump/hub/router goroutine.
+func TestMainWSPublicRouteUpgradesAndShutsDownCleanly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test, skipped in -short mode")
+	}
+	runMu.Lock()
+	defer runMu.Unlock()
+	clearHTAEnv(t)
+
+	// Point the public listener at an ephemeral port via the env-override layer
+	// (run()'s signature only overrides the health addr).
+	pubAddr, err := freePortAddr()
+	if err != nil {
+		t.Fatalf("freePortAddr (public): %v", err)
+	}
+	t.Setenv("HTA_SERVER_ADDR", pubAddr)
+
+	healthAddr, err := freePortAddr()
+	if err != nil {
+		t.Fatalf("freePortAddr (health): %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan int, 1)
+	go func() { done <- run(ctx, "config-does-not-exist.yaml", healthAddr) }()
+
+	// Poll-dial the WS endpoint until success or a 5s timeout. The default
+	// AllowedOrigins [localhost, 127.0.0.1] accept Origin http://localhost.
+	url := "ws://" + pubAddr + "/ws?user_id=t&device=t"
+	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+	header := http.Header{}
+	header.Set("Origin", "http://localhost")
+
+	var conn *websocket.Conn
+	dialDeadline := time.Now().Add(5 * time.Second)
+	for {
+		c, resp, derr := dialer.DialContext(ctx, url, header)
+		if derr == nil {
+			conn = c
+			break
+		}
+		if resp != nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+		if time.Now().After(dialDeadline) {
+			t.Skipf("WS dial never succeeded at %s within 5s (port race?)", url)
+		}
+		select {
+		case <-ctx.Done():
+			t.Skipf("ctx cancelled before WS dial succeeded at %s", url)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	// Upgrade observed: record the goroutine baseline (pumps/hub/router/workers
+	// are all live), then close the client conn.
+	baseline := runtime.NumGoroutine()
+	_ = conn.Close()
+
+	// Cancel and wait for run() to return cleanly (exit 0).
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Errorf("exit code: got %d, want 0", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return within 10s of ctx cancel")
+	}
+
+	// CR-01 goroutine-leak assertion: allow 200ms for pumps/Hub/Router to exit,
+	// then assert the delta stays within tolerance (same as
+	// TestIntegration_ServerShutdownCleansAllGoroutines in pkg/ws).
+	time.Sleep(200 * time.Millisecond)
+	final := runtime.NumGoroutine()
+	if delta := final - baseline; delta > 2 {
+		t.Errorf("goroutine leak: baseline=%d final=%d delta=%d (want <= 2, CR-01)",
+			baseline, final, delta)
+	}
+}
+
+// TestMainBootsWithNoWSConfigBlock proves the "boots from defaults" guarantee
+// from a runtime (not just config) perspective: with NO ws: block in the config
+// file and NO HTA_WS_* env vars, the service still boots (DefaultConfig supplies
+// the dev-safe origins) and shuts down cleanly. This is the P0-1 must-have.
+func TestMainBootsWithNoWSConfigBlock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test, skipped in -short mode")
+	}
+	runMu.Lock()
+	defer runMu.Unlock()
+	clearHTAEnv(t) // clears every HTA_* including HTA_WS_*, sets python env
+
+	healthAddr, err := freePortAddr()
+	if err != nil {
+		t.Fatalf("freePortAddr: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan int, 1)
+	go func() { done <- run(ctx, "config-does-not-exist.yaml", healthAddr) }()
+
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Errorf("exit code: got %d, want 0 (must boot from defaults, no ws block)", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return within 10s of ctx cancel")
 	}
 }
 

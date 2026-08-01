@@ -155,11 +155,23 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		RouteBuffer:       cfg.WS.RouteBuffer,
 		WorkerConcurrency: cfg.WS.WorkerConcurrency,
 	}
+	// Map cfg.WS → ws.ServerConfig. The infra layer uses 0 as the "use ws
+	// package default" sentinel for the size/buffer fields. ReadBufferSize and
+	// WriteBufferSize pass ws.ServerConfig.Validate (which only rejects < 0) so
+	// NewServer's own 0→4096 fill branch handles them. MaxMessageBytes is
+	// different: ws.ServerConfig.Validate rejects <= 0 BEFORE NewServer's
+	// 0→DefaultMaxMessageBytes fill branch can run, so the fill must happen
+	// here at the wiring layer (double validation: infra owns the override
+	// layer, main.go bridges the semantic default, ws re-validates).
+	maxMsg := cfg.WS.MaxMessageBytes
+	if maxMsg == 0 {
+		maxMsg = ws.DefaultMaxMessageBytes // 65551 (HeaderSize + max uint16 payload)
+	}
 	serverCfg := ws.ServerConfig{
 		AllowedOrigins:    cfg.WS.AllowedOrigins,
-		MaxMessageBytes:   cfg.WS.MaxMessageBytes,   // 0 → ws fills default
-		ReadBufferSize:    cfg.WS.ReadBufferSize,    // 0 → ws fills default
-		WriteBufferSize:   cfg.WS.WriteBufferSize,   // 0 → ws fills default
+		MaxMessageBytes:   maxMsg,
+		ReadBufferSize:    cfg.WS.ReadBufferSize,    // 0 → ws.NewServer fills 4096
+		WriteBufferSize:   cfg.WS.WriteBufferSize,   // 0 → ws.NewServer fills 4096
 		HeartbeatInterval: cfg.WS.HeartbeatInterval,
 	}
 
