@@ -125,3 +125,49 @@ python:
   # 100MB = 200MB worst case, within the VPS headroom outside the 150MB Go
   # budget).
   maxConcurrent: 2
+
+ws:
+  # --------------------------------------------------------------------
+  # WebSocket runtime listener configuration (P0-1).
+  # See pkg/infra/config.go WSConfig for the authoritative schema.
+  #
+  # DEFAULTS: this entire block is OPTIONAL. With NO ws: block at all, the
+  # service boots on the default AllowedOrigins [localhost, 127.0.0.1] —
+  # exactly what a local dev session needs. Set production origins here.
+  #
+  # D-24: the wildcard origin "*" is FORBIDDEN and rejected at both the infra
+  # (pkg/infra WSConfig.Validate) and ws (pkg/ws ServerConfig.Validate) layers.
+  #
+  # IN-03: ws.ServerConfig.CheckOrigin matches scheme+host+port, so you MUST
+  # include the port for any non-default port, e.g. "tutor.example.com:8080".
+  # A bare "tutor.example.com" matches "http://tutor.example.com" but NOT
+  # "http://tutor.example.com:8080" — the browser is silently rejected.
+  #
+  # DOUBLE VALIDATION: zero-valued maxMessageBytes/readBufferSize/
+  # writeBufferSize fall back to the ws package's own semantic defaults
+  # (65551 / 4096 / 4096) at construction time in cmd/service/main.go. Leave
+  # them 0 unless you have a reason to override.
+  # --------------------------------------------------------------------
+
+  # Origin whitelist. Defaults to localhost/127.0.0.1 for dev. PRODUCTION
+  # MUST set the real origin(s) here.
+  # allowedOrigins: [localhost, 127.0.0.1]
+
+  # Ping cadence (D-14). Default 30s == ws.DefaultHeartbeatInterval.
+  # heartbeatInterval: 30s
+
+  # Single-frame read limit. 0 → ws fills 65551 (header + max uint16 payload).
+  # maxMessageBytes: 0
+
+  # gorilla buffer sizes. 0 → ws fills 4096 for each.
+  # readBufferSize: 0
+  # writeBufferSize: 0
+
+  # Hub capacity + channel buffers (D-04). Default 100 matches session.maxConcurrent.
+  # hubLimit: 100
+  # hubRegisterBuffer: 32
+  # hubUnregisterBuffer: 32
+
+  # Router per-MsgType channel capacity + worker count (D-16).
+  # routeBuffer: 32
+  # workerConcurrency: 4

@@ -103,6 +103,67 @@ type Config struct {
 	// modelled here — the bridge reads them via os.Getenv per D-05 and the
 	// package's own "no secret fields" rule (see Config doc comment above).
 	Python PythonConfig `json:"python" mapstructure:"python"`
+
+	// WS tunes the public WebSocket runtime listener (P0-1). Holds only
+	// operational fields mirroring the PythonConfig pattern (no secrets —
+	// D-24 invariant). This is the infra default/override layer; ws package
+	// constructors own the semantic defaults and re-validate (double
+	// validation). AllowedOrigins defaults to the localhost pair so the
+	// service boots with NO ws: block in config.yaml.
+	WS WSConfig `json:"ws" mapstructure:"ws"`
+}
+
+// WSConfig tunes the Go service's WebSocket runtime (P0-1). It carries only
+// operational fields; the wildcard origin "*" is forbidden at BOTH this layer
+// and ws.ServerConfig.Validate (D-24). DefaultConfig supplies dev-safe origins
+// [localhost, 127.0.0.1] so the service boots without an operator-supplied ws:
+// block — there is intentionally NO "origins required" check here (the defaults
+// always win when the operator leaves it empty).
+//
+// The MaxMessageBytes / *BufferSize fields default to ZERO (not 65551/4096) so
+// ws.NewServer applies its own semantic defaults via its "treat 0 as
+// use-default" branch. This keeps infra as the default/override layer and ws as
+// the semantic-default layer (double validation per the P0-1 design decision).
+type WSConfig struct {
+	// AllowedOrigins is the Origin whitelist (D-24). Default ["localhost",
+	// "127.0.0.1"]. The wildcard "*" is rejected by Validate. ws.ServerConfig
+	// matches scheme+host+port (IN-03), so operators MUST include the port for
+	// non-default ports (e.g. "tutor.example.com:8080").
+	AllowedOrigins []string `json:"allowedOrigins" mapstructure:"allowedOrigins"`
+
+	// HeartbeatInterval is the WS ping cadence (D-14). Default 30s, equal to
+	// ws.DefaultHeartbeatInterval.
+	HeartbeatInterval time.Duration `json:"heartbeatInterval" mapstructure:"heartbeatInterval"`
+
+	// MaxMessageBytes caps a single WS read. Default 0 → ws.NewServer fills
+	// DefaultMaxMessageBytes (65551). Infra does NOT pre-fill 65551.
+	MaxMessageBytes int64 `json:"maxMessageBytes" mapstructure:"maxMessageBytes"`
+
+	// ReadBufferSize is the gorilla read buffer size. Default 0 → ws.NewServer
+	// fills 4096.
+	ReadBufferSize int `json:"readBufferSize" mapstructure:"readBufferSize"`
+
+	// WriteBufferSize is the gorilla write buffer size. Default 0 →
+	// ws.NewServer fills 4096.
+	WriteBufferSize int `json:"writeBufferSize" mapstructure:"writeBufferSize"`
+
+	// HubLimit is the max concurrent WS connections (D-04). Default 100,
+	// matching SessionConfig.MaxConcurrent.
+	HubLimit int `json:"hubLimit" mapstructure:"hubLimit"`
+
+	// HubRegisterBuffer is the Hub register channel capacity. Default 32.
+	HubRegisterBuffer int `json:"hubRegisterBuffer" mapstructure:"hubRegisterBuffer"`
+
+	// HubUnregisterBuffer is the Hub unregister channel capacity. Default 32.
+	HubUnregisterBuffer int `json:"hubUnregisterBuffer" mapstructure:"hubUnregisterBuffer"`
+
+	// RouteBuffer is the per-MsgType Router channel capacity. Default 32
+	// (ws.RouterConfig default).
+	RouteBuffer int `json:"routeBuffer" mapstructure:"routeBuffer"`
+
+	// WorkerConcurrency is the per-MsgType Router worker count. Default 4
+	// (ws.RouterConfig default).
+	WorkerConcurrency int `json:"workerConcurrency" mapstructure:"workerConcurrency"`
 }
 
 // PythonConfig tunes the Go ↔ Python subprocess bridge (Phase 3, D-03/D-04).
@@ -364,6 +425,21 @@ func DefaultConfig() Config {
 			PregenTimeout: 120 * time.Second,
 			MaxConcurrent: 2,
 		},
+		WS: WSConfig{
+			// Dev-safe origins so the service boots with NO ws: block in
+			// config.yaml (P0-1 must-have). Operators MUST set production
+			// origins; the wildcard "*" is rejected at both layers (D-24).
+			AllowedOrigins:     []string{"localhost", "127.0.0.1"},
+			HeartbeatInterval:  30 * time.Second, // == ws.DefaultHeartbeatInterval
+			MaxMessageBytes:    0,                // 0 → ws.NewServer fills 65551
+			ReadBufferSize:     0,                // 0 → ws.NewServer fills 4096
+			WriteBufferSize:    0,                // 0 → ws.NewServer fills 4096
+			HubLimit:           100,              // D-04 / session.maxConcurrent parity
+			HubRegisterBuffer:  32,
+			HubUnregisterBuffer: 32,
+			RouteBuffer:        32, // ws.RouterConfig default
+			WorkerConcurrency:  4,  // ws.RouterConfig default
+		},
 	}
 }
 
@@ -587,6 +663,20 @@ func (c Config) Validate() error {
 		return errors.Wrap(ErrConfigInvalid, "python.pregenTimeout must be > 0")
 	}
 
+	// WS origin whitelist (D-24). The wildcard "*" is forbidden at this layer
+	// to mirror ws.ServerConfig.Validate; both layers reject it so a slip at
+	// either boundary is caught. There is intentionally NO "origins required"
+	// check here — DefaultConfig always supplies the localhost pair, so an
+	// operator-supplied empty list simply means the defaults win and the
+	// service still boots. The semantics-level "origins required" enforcement
+	// happens inside ws.ServerConfig.Validate, which main.go still invokes.
+	for _, origin := range c.WS.AllowedOrigins {
+		if origin == "*" {
+			return errors.Wrap(ErrConfigInvalid,
+				"ws.allowedOrigins must not contain wildcard \"*\" (D-24)")
+		}
+	}
+
 	return nil
 }
 
@@ -670,6 +760,16 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"python.reviewTimeout",
 		"python.pregenTimeout",
 		"python.maxConcurrent",
+		"ws.allowedOrigins",
+		"ws.heartbeatInterval",
+		"ws.maxMessageBytes",
+		"ws.readBufferSize",
+		"ws.writeBufferSize",
+		"ws.hubLimit",
+		"ws.hubRegisterBuffer",
+		"ws.hubUnregisterBuffer",
+		"ws.routeBuffer",
+		"ws.workerConcurrency",
 	}
 	for _, key := range keys {
 		_ = v.BindEnv(key)

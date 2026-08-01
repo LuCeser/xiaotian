@@ -163,6 +163,58 @@ func TestDefaultConfig(t *testing.T) {
 				cfg.Python.MaxConcurrent)
 		}
 	})
+
+	t.Run("ws defaults — dev-safe origins, heartbeat, double-validation zeros", func(t *testing.T) {
+		// AllowedOrigins defaults to the localhost pair so the service boots
+		// from defaults with NO ws: block in config.yaml (P0-1 must-have).
+		want := []string{"localhost", "127.0.0.1"}
+		if len(cfg.WS.AllowedOrigins) != len(want) {
+			t.Fatalf("WS.AllowedOrigins length = %d, want %d (%v)",
+				len(cfg.WS.AllowedOrigins), len(want), want)
+		}
+		for i, w := range want {
+			if cfg.WS.AllowedOrigins[i] != w {
+				t.Errorf("WS.AllowedOrigins[%d] = %q, want %q", i, cfg.WS.AllowedOrigins[i], w)
+			}
+		}
+		if cfg.WS.HeartbeatInterval != 30*time.Second {
+			t.Errorf("WS.HeartbeatInterval = %v, want 30s (ws.DefaultHeartbeatInterval)",
+				cfg.WS.HeartbeatInterval)
+		}
+		// Zero means "let ws.NewServer apply its own default" — infra does NOT
+		// pre-fill 65551/4096 (double-validation design).
+		if cfg.WS.MaxMessageBytes != 0 {
+			t.Errorf("WS.MaxMessageBytes = %d, want 0 (defer to ws package default)",
+				cfg.WS.MaxMessageBytes)
+		}
+		if cfg.WS.ReadBufferSize != 0 {
+			t.Errorf("WS.ReadBufferSize = %d, want 0 (defer to ws package default)",
+				cfg.WS.ReadBufferSize)
+		}
+		if cfg.WS.WriteBufferSize != 0 {
+			t.Errorf("WS.WriteBufferSize = %d, want 0 (defer to ws package default)",
+				cfg.WS.WriteBufferSize)
+		}
+		// Hub/router buffer fields are non-zero usable defaults.
+		if cfg.WS.HubLimit != 100 {
+			t.Errorf("WS.HubLimit = %d, want 100 (D-04 / session.maxConcurrent parity)",
+				cfg.WS.HubLimit)
+		}
+		if cfg.WS.HubRegisterBuffer != 32 {
+			t.Errorf("WS.HubRegisterBuffer = %d, want 32", cfg.WS.HubRegisterBuffer)
+		}
+		if cfg.WS.HubUnregisterBuffer != 32 {
+			t.Errorf("WS.HubUnregisterBuffer = %d, want 32", cfg.WS.HubUnregisterBuffer)
+		}
+		if cfg.WS.RouteBuffer != 32 {
+			t.Errorf("WS.RouteBuffer = %d, want 32 (ws.RouterConfig default)",
+				cfg.WS.RouteBuffer)
+		}
+		if cfg.WS.WorkerConcurrency != 4 {
+			t.Errorf("WS.WorkerConcurrency = %d, want 4 (ws.RouterConfig default)",
+				cfg.WS.WorkerConcurrency)
+		}
+	})
 }
 
 // TestLoadConfigDefaults verifies the lowest precedence layer: with no file
@@ -496,4 +548,43 @@ func TestPythonConfigHasNoSecretFields(t *testing.T) {
 	if typ.NumField() == 0 {
 		t.Fatal("PythonConfig has zero fields — reflect guard has nothing to inspect")
 	}
+}
+
+// === Phase quick-260801-ge1: WSConfig tests (P0-1, D-24) ===
+
+// TestWSConfigValidate verifies the D-24 rule mirrored at the infra layer: a
+// wildcard "*" AllowedOrigins entry is rejected (honors the forbidden-wildcard
+// invariant that ws.ServerConfig.Validate also enforces). The error wraps
+// ErrConfigInvalid so callers branch with errors.Is.
+func TestWSConfigValidate(t *testing.T) {
+	t.Run("wildcard origin rejected", func(t *testing.T) {
+		setRequiredPythonEnv(t)
+		cfg := DefaultConfig()
+		cfg.WS.AllowedOrigins = []string{"*"}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("Validate returned nil error, want ErrConfigInvalid for wildcard origin")
+		}
+		if !errors.Is(err, ErrConfigInvalid) {
+			t.Errorf("Validate error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+		}
+	})
+
+	t.Run("default WS passes Validate (boots from defaults)", func(t *testing.T) {
+		// A DefaultConfig() with NO WS override MUST pass Validate — this is
+		// the P0-1 "service boots with no ws: block" guarantee. The default
+		// localhost/127.0.0.1 origins satisfy the infra layer; ws.NewServer
+		// re-validates at construction time (double-validation).
+		//
+		// Python.Interpreter/ScriptsDir have NO default (deployment-specific,
+		// supplied via env in the real boot path) so fill them on the struct to
+		// isolate the assertion to the WS layer. This mirrors what
+		// setRequiredPythonEnv does at the viper/env layer for LoadConfig.
+		cfg := DefaultConfig()
+		cfg.Python.Interpreter = "/opt/hta/venv/bin/python"
+		cfg.Python.ScriptsDir = "third_party/python"
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("DefaultConfig().Validate() = %v, want nil (WS defaults must not break Validate)", err)
+		}
+	})
 }
