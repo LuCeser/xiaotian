@@ -161,7 +161,16 @@ Total: 5 plans across 4 waves (Wave 1 has 2 parallel plans: 04-01 + 04-02)
   3. System implements fetch-lock pattern preventing concurrent session conflicts
   4. Parent feedback ratings (good/hard/again/easy) trigger FSRS parameter updates
 
-**Plans**: TBD
+**Plans**: 2/2 plans planned
+
+Plans:
+**Wave 1**
+
+- [ ] 05-01-PLAN.md — FSRSConfig extension (config.go + config_test.go, 5 sync points, per D-03) (FSRS-02, FSRS-03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 05-02-PLAN.md — FSRSService orchestration layer (pkg/fsrs) + main.go wiring (FSRS-01, FSRS-02, FSRS-03, FSRS-04, D-01/D-02/D-02-a/D-04/D-05)
 
 **PROJECT_MODE**: mvp
 
@@ -291,7 +300,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 2. WebSocket Communication Layer | 1/3 | Complete    | 2026-07-19 |
 | 3. Python CLI Integration | 5/5 | Complete    | 2026-08-01 |
 | 4. Database Schema Design | 5/5 | Complete    | 2026-08-01 |
-| 5. FSRS Core Implementation | 0/0 | Not started | - |
+| 5. FSRS Core Implementation | 0/2 | Planning | - |
 | 6. TTS Audio Streaming | 0/0 | Not started | - |
 | 7. Session State Management | 0/0 | Not started | - |
 | 8. Student Web Interface | 0/0 | Not started | - |
