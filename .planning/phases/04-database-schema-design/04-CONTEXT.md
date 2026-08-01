@@ -29,6 +29,7 @@ This phase delivers **SQLite schema reconciliation and Go-owned auxiliary data d
 - **D-01:** Treat `vocab_manager.py` schema as canonical for vocabulary and FSRS data. Phase 4 does not modify the existing `cards` or `review_logs` tables. The Python implementation remains the permanent engine (Phase 3 D-09).
 - **D-02:** Phase 4 extends the database with Go-owned auxiliary tables only. New tables serve Go concerns (session bookkeeping, state management) and avoid conflicts with the Python schema.
 - **D-03:** Database file sharing strategy — Go and Python access the same SQLite database file (`vocab.db`) via `DICTATION_DB_PATH` environment variable. Go uses SQLite's built-in concurrency (WAL mode already enabled by vocab_manager) to safely read/write auxiliary tables while Python owns `cards`/`review_logs`.
+- **D-03-a:** Clear write separation documentation. ADR must explicitly document: Python owns writes to `cards`/`review_logs` tables; Go owns writes to `sessions`/`session_events` tables; cross-system writes prohibited (no Go writes to Python tables, no Python writes to Go tables).
 
 ### Go-Owned Auxiliary Data
 - **D-04:** Minimal session bookkeeping tables only. Phase 4 creates `sessions` and `session_events` tables for session lifecycle tracking (IDLE → LISTENING → DICTATING → WAITING_PARENT → FEEDBACK).
@@ -38,10 +39,14 @@ This phase delivers **SQLite schema reconciliation and Go-owned auxiliary data d
 ### Database Access Layer Design
 - **D-07:** Repository pattern with `sql.DB`. Phase 4 creates `pkg/database` package with repository interfaces (`SessionRepository`, `CardRepository` for reads) that accept `*sql.DB` dependencies. Aligns with Phase 1 DI patterns (D-42/D-47 constructor injection).
 - **D-08:** Minimal migration strategy. Phase 4 uses `CREATE TABLE IF NOT EXISTS` for auxiliary tables and checks column existence via `PRAGMA table_info` before `ALTER TABLE` (same pattern as vocab_manager's migration code). No formal migration framework; schema drift detection is manual.
+- **D-08-a:** Schema drift detection method. Phase 5 integration tests include schema validation comparing Go auxiliary table schemas against expected definitions. Any drift raises blocking error before deployment.
+- **D-08-b:** Operational responsibility assignment. Phase 5 executor validates schema consistency as part of integration test suite; CI pipeline enforces schema checks before each deployment.
+- **D-08-c:** Reconciliation process. If drift detected, integration test fails with specific schema mismatch details; resolution requires explicit migration script before deployment can proceed.
 - **D-09:** Database initialization in `cmd/service/main.go`. The `sql.DB` connection is opened during service startup, configured via `Config.DatabasePath` (new field extending Phase 1 Config), and injected into repositories. Connection lifetime matches service lifetime.
 
 ### Schema Documentation Approach
 - **D-10:** ADR for FSRS+SQLite ownership reconciliation. Phase 4 creates `.planning/adr/2026-08-01-fsrs-sqlite-ownership.md` documenting the decision that Python `vocab_manager.py` owns the canonical vocabulary/FSRS schema and Go extends it with auxiliary tables only. This resolves the pending architecture review todo.
+- **D-10-a:** ADR must address 4 required elements: (1) Single source of truth declaration — Python vocab_manager.py is canonical FSRS+SQLite authority; (2) Write separation rules — Python writes cards/review_logs, Go writes sessions/session_events; (3) Schema modification process — Changes to Python schema require explicit ADR update; (4) Conflict resolution — If schema drift occurs, Python schema takes precedence, Go must adapt auxiliary tables.
 - **D-11:** Schema documentation in code comments. Each table creation includes a comment header documenting purpose, key relationships, and ownership (Python vs Go). A README in `pkg/database` documents the overall schema architecture.
 - **D-12:** No separate schema documentation file. The canonical schema definition lives in code (both Python's `vocab_manager.py` and Go's migration logic), keeping docs close to implementation.
 
