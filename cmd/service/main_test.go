@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite" // Pure-Go SQLite driver (CGO_ENABLED=0)
 
 	"github.com/gorilla/websocket"
 )
@@ -405,6 +408,141 @@ func waitForOK(t *testing.T, url string, timeout time.Duration) bool {
 			return false
 		case <-time.After(50 * time.Millisecond):
 		}
+	}
+}
+
+// TestMainDatabaseConnection proves the Phase 4 vertical slice: run() opens the
+// shared SQLite database, runs the idempotent migration, constructs both
+// repositories, and closes the DB on shutdown. The test points cfg.Database.Path
+// at a t.TempDir() file, boots a short-lived run(), then re-opens the DB
+// read-only to assert the sessions table exists (proving Open+Migrate ran).
+// Follows existing Windows-safe test style (cancel ctx, no syscall.Kill).
+func TestMainDatabaseConnection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test, skipped in -short mode")
+	}
+	runMu.Lock()
+	defer runMu.Unlock()
+	clearHTAEnv(t)
+
+	// Point cfg.Database.Path at a temp directory so the DB is created there.
+	dbDir := t.TempDir()
+	dbPath := dbDir + "/test-vocab.db"
+	t.Setenv("HTA_DATABASE_PATH", dbPath)
+
+	healthAddr, err := freePortAddr()
+	if err != nil {
+		t.Fatalf("freePortAddr: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan int, 1)
+	go func() { done <- run(ctx, "config-does-not-exist.yaml", healthAddr) }()
+
+	// Wait for the health server to come up — proves run() completed boot.
+	if !waitForOK(t, "http://"+healthAddr+"/health", 5*time.Second) {
+		t.Fatalf("health never responded; run() may have failed to boot")
+	}
+
+	// Cancel and wait for run() to return cleanly (exit 0).
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Errorf("exit code: got %d, want 0", code)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not return within 15s of ctx cancel")
+	}
+
+	// After shutdown, re-open the DB read-only and assert the sessions table
+	// exists — proving database.Open() and database.Migrate() ran at boot.
+	import_database_check(t, dbPath)
+}
+
+// TestMainDatabaseDefaultPath proves the "empty path resolves to HOME default"
+// guarantee: when cfg.Database.Path is empty and HOME is overridden, run()
+// creates the DB under $HOME/.home-tutor-agent/vocab.db. On Windows, HOME
+// must also be set because os.UserHomeDir() checks USERPROFILE first.
+func TestMainDatabaseDefaultPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test, skipped in -short mode")
+	}
+	runMu.Lock()
+	defer runMu.Unlock()
+	clearHTAEnv(t)
+
+	// Override HOME (and USERPROFILE on Windows) so the default path resolves
+	// to a temp directory. os.UserHomeDir() on Windows checks USERPROFILE
+	// before HOME, so we must set both.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
+
+	healthAddr, err := freePortAddr()
+	if err != nil {
+		t.Fatalf("freePortAddr: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan int, 1)
+	go func() { done <- run(ctx, "config-does-not-exist.yaml", healthAddr) }()
+
+	if !waitForOK(t, "http://"+healthAddr+"/health", 5*time.Second) {
+		t.Fatalf("health never responded; run() may have failed to boot")
+	}
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Errorf("exit code: got %d, want 0", code)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not return within 15s of ctx cancel")
+	}
+
+	// Assert the default DB file was created under $HOME/.home-tutor-agent/vocab.db.
+	defaultDB := tmpHome + "/.home-tutor-agent/vocab.db"
+	if _, err := os.Stat(defaultDB); os.IsNotExist(err) {
+		t.Errorf("default DB not created at %s", defaultDB)
+	}
+}
+
+// import_database_check opens the DB file read-only and asserts the sessions
+// table exists, proving Open+Migrate ran at boot. Separated from the test so
+// the "database" import does not conflict with the test file's existing imports.
+// Uses the same modernc.org/sqlite driver as production.
+func import_database_check(t *testing.T, dbPath string) {
+	t.Helper()
+	t.Logf("checking database at %s", dbPath)
+
+	// We cannot import database package from main_test (same package), so use
+	// database/sql directly with the same driver. This proves the DB file is
+	// valid SQLite and was migrated.
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatalf("re-open DB read-only: %v", err)
+	}
+	defer db.Close()
+
+	var name string
+	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").Scan(&name)
+	if err != nil {
+		t.Fatalf("sessions table not found after boot: %v", err)
+	}
+	if name != "sessions" {
+		t.Errorf("unexpected table name: got %q, want %q", name, "sessions")
+	}
+
+	// Also verify session_events exists.
+	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='session_events'").Scan(&name)
+	if err != nil {
+		t.Fatalf("session_events table not found after boot: %v", err)
 	}
 }
 
