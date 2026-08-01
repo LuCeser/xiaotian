@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 03
-current_phase_name: python-cli-integration
-status: human_needed
-stopped_at: Phase 3 验证完成 → human_needed(代码级 4/4 truths + UAT 5/6 自动化通过;仅余 Volcengine TTS 真实路径 + 1C/1G 资源规模 + Linux 进程组真实负载,待 VPS 人工验证)
-last_updated: "2026-08-01T06:50:07Z"
+current_phase: 5
+current_phase_name: FSRS Core Implementation
+status: planning
+stopped_at: Completed 04-01-PLAN.md (modernc.org/sqlite driver + CGO_ENABLED=0 lock + DatabaseConfig — Phase 4 plan 1 complete)
+last_updated: "2026-08-01T12:04:10.274Z"
 last_activity: 2026-08-01
-last_activity_desc: Quick task 260801-kdq — 根治 ws TestHubStopsOnContextCancel flake(确定性信号替代 NumGoroutine;50 次隔离 + 3 轮全量验证根除)
+last_activity_desc: Phase 04 complete, transitioned to Phase 5
 progress:
-  total_phases: 3
-  completed_phases: 2
-  total_plans: 16
-  completed_plans: 16
+  total_phases: 4
+  completed_phases: 4
+  total_plans: 21
+  completed_plans: 21
 ---
 
 # Project State
@@ -23,22 +23,22 @@ progress:
 See: .planning/PROJECT.md (updated 2025-07-18)
 
 **Core value:** Students receive personalized, real-time dictation practice with immediate feedback while parents get detailed progress tracking and the ability to influence the learning algorithm through their reviews.
-**Current focus:** Phase 03 — python-cli-integration
+**Current focus:** Phase 04 — database-schema-design
 
 ## Current Position
 
-Phase: 03 (python-cli-integration) — EXECUTING
-Plan: 5 of 5
-Status: Phase complete — ready for verification
-Last activity: 2026-07-24 — Phase 03 execution started
+Phase: 5 — FSRS Core Implementation
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-08-01 — Phase 04 complete, transitioned to Phase 5
 
-Progress: [█████████░] 88%
+Progress: [██████████░] 90%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 9
+- Total plans completed: 21
 - Average duration: - min
 - Total execution time: 0.0 hours
 
@@ -46,8 +46,10 @@ Progress: [█████████░] 88%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 02 | 3 | - | - |
 | 01 | 8 | - | - |
+| 02 | 3 | - | - |
+| 03 | 5 | - | - |
+| 04 | 5 | - | - |
 
 **Recent Trend:**
 
@@ -64,6 +66,8 @@ Progress: [█████████░] 88%
 | Phase 03 P03 | ~25 | 2 tasks | 6 files |
 | Phase 03 P04 | ~12 | 2 tasks | 3 files |
 | Phase 03 P05 | ~25 | 2 tasks | 5 files |
+| Phase 04 P01 | ~15 | 2 tasks | 6 files |
+| Phase 04 P02 | ~15 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -86,6 +90,9 @@ Recent decisions affecting current work:
 - [Phase ?]: Plan 03-05: Bridge.pregenSem cap=1 专用串行化（独立于 D-02 全局 sem），防 fcntl.flock 全局锁竞争致 exit 0 + 空 stdout 静默失败；acquire 在 b.run 前让排队 caller 不饥饿 due/review 路径
 - [Phase ?]: Plan 03-05: classifyPregenResult 提取为纯函数让 4 类 sentinel 分支无 subprocess 表驱动可测（plan 明确允许）；Pitfall 6 空 stdout exit 0 严格返回 ErrPythonEmpty 绝非性零路径成功
 - [Phase ?]: Plan 03-05: ErrBridgeNotImplemented + RunPregenerate stub 全删除（Phase 3 完结），var _ Executor = (*Bridge)(nil) 现完全靠 RunDue/RunReview/RunPregenerate 三个真方法通过编译期检查
+- [Phase 04]: modernc.org/sqlite v1.55.0 作为纯 Go SQLite 驱动（CGO_ENABLED=0 跨平台契约）
+- [Phase 04]: DatabaseConfig 仅含 Path 字段，pragmas（WAL/busy_timeout/foreign_keys）由 database.Open 拥有，不在 Config 中暴露
+- [Phase 04]: CGO_ENABLED=0 在 Makefile build target 和 CI workflow 中锁定，防止隐式 CGO 依赖
 
 ### Pending Todos
 
@@ -93,7 +100,7 @@ Recent decisions affecting current work:
 
 - [ ] **统一连接注册表** — `infra.ConnectionRegistry` vs `ws.Hub` 双轨制，需 ADR 拍单一真相源（评审 P0-2）。`todos/pending/2026-07-25-unify-connection-registry-adr.md`
 - [ ] **解决 WorkerPool 建而不用** — 无任何 Submit 调用，接线 or 登记 deferred（评审 P1-3）。`todos/pending/2026-07-25-resolve-workerpool-unused.md`
-- [ ] **Phase 4 前定 FSRS+SQLite 所有权** — Python(vocab_manager) 已实现 FSRS+SQLite，Phase 4/5 重新定义范围，需 ADR（评审 P1-4）。`todos/pending/2026-07-25-fsrs-sqlite-ownership-adr.md`
+- [x] **Phase 4 前定 FSRS+SQLite 所有权** — Python(vocab_manager) 已实现 FSRS+SQLite，Phase 4/5 重新定义范围，需 ADR（评审 P1-4）。`todos/pending/2026-07-25-fsrs-sqlite-ownership-adr.md` → Resolved: ADR created at `.planning/adr/2026-08-01-fsrs-sqlite-ownership.md`
 - [ ] **仓库卫生批处理** — README 漂移 / gitignore 根级二进制 / 残留 .gitkeep 清理（评审 P2-5/P2-6/P3-7）。`todos/pending/2026-07-25-repo-hygiene-readme-gitignore-cleanup.md`
 
 > 注：评审 P0-1（WS 层未接入运行时，服务监听不到 :8080）未建 todo。
@@ -121,6 +128,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-25T02:16:14.626Z
-Stopped at: Completed 03-05-PLAN.md (RunPregenerate + pregenArgs + cap=1 pregenSem + classifyPregenResult + Pitfall 6 空 stdout 检测 + ErrBridgeNotImplemented 删除 — Phase 3 完结)
-Resume file: None — Phase 3 complete, ready for /gsd-verify-work
+Last session: 2026-08-01T18:30:00.000Z
+Stopped at: Completed 04-01-PLAN.md (modernc.org/sqlite driver + CGO_ENABLED=0 lock + DatabaseConfig — Phase 4 plan 1 complete)
+Resume file: None — Phase 4 plan 1 complete, ready for next plan (04-03)

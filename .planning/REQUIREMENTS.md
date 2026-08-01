@@ -12,7 +12,7 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 - [ ] **VOC-01**: Parent can add vocabulary words with Chinese translations, pronunciations, and example sentences
 - [ ] **VOC-02**: Parent can organize words into units and lessons
 - [ ] **VOC-03**: Parent can configure FSRS parameters (difficulty, retention interval)
-- [ ] **VOC-04**: System stores vocabulary data in SQLite database with proper schema
+- [x] **VOC-04**: System stores vocabulary data in SQLite database with proper schema
 
 ### FSRS Integration
 
@@ -108,7 +108,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | VOC-01 | Phase 9 | Pending |
 | VOC-02 | Phase 9 | Pending |
 | VOC-03 | Phase 9 | Pending |
-| VOC-04 | Phase 4 | Pending |
+| VOC-04 | Phase 4 | Complete |
 | FSRS-01 | Phase 5 | Pending |
 | FSRS-02 | Phase 5 | Pending |
 | FSRS-03 | Phase 5 | Pending |
