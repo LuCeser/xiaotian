@@ -111,6 +111,15 @@ type Config struct {
 	// validation). AllowedOrigins defaults to the localhost pair so the
 	// service boots with NO ws: block in config.yaml.
 	WS WSConfig `json:"ws" mapstructure:"ws"`
+
+	// FSRS tunes the FSRS orchestration layer (Phase 5, D-03). Holds only
+	// operational fields — default word count, fetch-lock duration, unit and
+	// category scope — and NEVER credentials (D-24 no-secret invariant,
+	// enforced by TestFSRSConfigHasNoSecretFields). These defaults flow into
+	// FSRSService.SelectDueCards when the caller's SelectOpts fields are zero,
+	// so the service boots and serves a sensible session with NO fsrs: block
+	// in config.yaml.
+	FSRS FSRSConfig `json:"fsrs" mapstructure:"fsrs"`
 }
 
 // WSConfig tunes the Go service's WebSocket runtime (P0-1). It carries only
@@ -231,6 +240,57 @@ type PythonConfig struct {
 	// running Python subprocesses (D-02). Prevents 50-100 concurrent sessions
 	// from fork-bombing the 1C/1G VPS. Default 2. MUST be in [1, 4].
 	MaxConcurrent int `json:"maxConcurrent" mapstructure:"maxConcurrent"`
+}
+
+// FSRSConfig tunes the FSRS orchestration layer (Phase 5, D-03). It carries
+// only operational fields — word counts, durations, and scope labels — and is
+// intentionally devoid of credentials; the TestFSRSConfigHasNoSecretFields
+// reflect guard enforces the D-24 no-secret invariant automatically. These
+// values are the defaults Plan 05-02's NewFSRSService reads when SelectOpts
+// leaves a field at its zero value.
+type FSRSConfig struct {
+	// DefaultWordCount is the number of words a dictation session pulls when
+	// the caller does not specify a count (FSRS-02). Default 25, sitting in
+	// the 20-30 band. MUST be in [1, 100] so a session never returns zero
+	// words nor an unbounded batch on the resource-constrained VPS.
+	DefaultWordCount int `json:"defaultWordCount" mapstructure:"defaultWordCount"`
+
+	// FetchLockHours is how long a single fetch result is considered fresh
+	// before a re-fetch is permitted (FSRS-03). Default 24.0 (hours). MUST be
+	// > 0 so the lock cannot be disabled (which would allow re-fetch storms).
+	FetchLockHours float64 `json:"fetchLockHours" mapstructure:"fetchLockHours"`
+
+	// DefaultUnit is the unit/lesson scope used when the caller does not pin a
+	// unit. The empty string is the valid "all units" default — it is NOT
+	// rejected by Validate. Default "".
+	DefaultUnit string `json:"defaultUnit" mapstructure:"defaultUnit"`
+
+	// DefaultCategory is the vocabulary category scope (e.g. "english").
+	// Default "english" (Phase 5 scope). MUST be non-empty so SelectDueCards
+	// always narrows to a real category rather than returning an unscoped set.
+	DefaultCategory string `json:"defaultCategory" mapstructure:"defaultCategory"`
+}
+
+// Validate enforces the FSRSConfig field ranges (D-03/D-04 fail-fast). On any
+// failure it returns an error wrapping ErrConfigInvalid so callers branch with
+// errors.Is(err, infra.ErrConfigInvalid). NewFSRSService in Plan 05-02 also
+// calls this directly, so the method is independently callable from
+// Config.Validate.
+func (c FSRSConfig) Validate() error {
+	if c.DefaultWordCount < 1 || c.DefaultWordCount > 100 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("fsrs.defaultWordCount must be in [1, 100], got %d",
+				c.DefaultWordCount))
+	}
+	if c.FetchLockHours <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("fsrs.fetchLockHours must be > 0, got %v",
+				c.FetchLockHours))
+	}
+	if c.DefaultCategory == "" {
+		return errors.Wrap(ErrConfigInvalid, "fsrs.defaultCategory is required")
+	}
+	return nil
 }
 
 // MemoryConfig bounds the process heap. LoadConfig validates that LimitBytes
@@ -439,6 +499,16 @@ func DefaultConfig() Config {
 			HubUnregisterBuffer: 32,
 			RouteBuffer:        32, // ws.RouterConfig default
 			WorkerConcurrency:  4,  // ws.RouterConfig default
+		},
+		FSRS: FSRSConfig{
+			// FSRS-02 default word count sits in the 20-30 band so a session
+			// with no explicit count serves a sensible batch.
+			DefaultWordCount: 25,
+			// FSRS-03 fetch-lock: a fetched word set is fresh for 24h before a
+			// re-fetch is permitted.
+			FetchLockHours:  24.0,
+			DefaultUnit:     "", // empty = all units (valid default)
+			DefaultCategory: "english",
 		},
 	}
 }
@@ -677,6 +747,14 @@ func (c Config) Validate() error {
 		}
 	}
 
+	// FSRS orchestration (Phase 5, D-03). FSRSConfig.Validate enforces field
+	// ranges so a malformed HTA_FSRS_* value fails boot rather than producing
+	// silent misconfiguration (D-04 fail-fast). Delegated to the sub-struct so
+	// NewFSRSService can call the same validator independently.
+	if err := c.FSRS.Validate(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -770,6 +848,12 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"ws.hubUnregisterBuffer",
 		"ws.routeBuffer",
 		"ws.workerConcurrency",
+		// Phase 5 FSRS orchestration (D-03). Pitfall 6: every leaf MUST be
+		// bound explicitly or HTA_FSRS_* env vars are silently inert.
+		"fsrs.defaultWordCount",
+		"fsrs.fetchLockHours",
+		"fsrs.defaultUnit",
+		"fsrs.defaultCategory",
 	}
 	for _, key := range keys {
 		_ = v.BindEnv(key)

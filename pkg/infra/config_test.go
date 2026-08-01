@@ -588,3 +588,152 @@ func TestWSConfigValidate(t *testing.T) {
 		}
 	})
 }
+
+// === Phase 5: FSRSConfig tests (D-03) ===
+
+// TestDefaultFSRSConfig asserts the Phase 5 FSRS defaults (D-03). DefaultWordCount
+// 25 sits inside the FSRS-02 20-30 band; FetchLockHours 24.0 satisfies FSRS-03;
+// DefaultUnit "" is the valid "all units" default; DefaultCategory "english" is
+// the Phase 5 vocabulary scope.
+func TestDefaultFSRSConfig(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.FSRS.DefaultWordCount != 25 {
+		t.Errorf("FSRS.DefaultWordCount = %d, want 25 (FSRS-02: within 20-30)",
+			cfg.FSRS.DefaultWordCount)
+	}
+	if cfg.FSRS.FetchLockHours != 24.0 {
+		t.Errorf("FSRS.FetchLockHours = %v, want 24.0 (FSRS-03 fetch-lock duration)",
+			cfg.FSRS.FetchLockHours)
+	}
+	if cfg.FSRS.DefaultUnit != "" {
+		t.Errorf("FSRS.DefaultUnit = %q, want %q (empty means all units)",
+			cfg.FSRS.DefaultUnit, "")
+	}
+	if cfg.FSRS.DefaultCategory != "english" {
+		t.Errorf("FSRS.DefaultCategory = %q, want %q",
+			cfg.FSRS.DefaultCategory, "english")
+	}
+}
+
+// TestFSRSConfigValidate exercises the FSRSConfig.Validate rules (D-03/D-04):
+// DefaultWordCount in [1, 100], FetchLockHours > 0, DefaultCategory != "".
+// The DefaultUnit empty string is the valid "all units" default and is NOT
+// rejected. Each error case must wrap ErrConfigInvalid (D-44 centralized
+// validation, detectable via errors.Is).
+func TestFSRSConfigValidate(t *testing.T) {
+	// Each error case isolates ONE rule by holding the other fields valid.
+	cases := []struct {
+		name    string
+		cfg     FSRSConfig
+		wantErr bool
+	}{
+		{
+			"DefaultWordCount=0 rejected (lower bound)",
+			FSRSConfig{DefaultWordCount: 0, FetchLockHours: 24.0, DefaultCategory: "english"},
+			true,
+		},
+		{
+			"DefaultWordCount=101 rejected (upper bound)",
+			FSRSConfig{DefaultWordCount: 101, FetchLockHours: 24.0, DefaultCategory: "english"},
+			true,
+		},
+		{
+			"FetchLockHours=0 rejected (must be > 0)",
+			FSRSConfig{DefaultWordCount: 25, FetchLockHours: 0, DefaultCategory: "english"},
+			true,
+		},
+		{
+			"DefaultCategory empty rejected",
+			FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: ""},
+			true,
+		},
+		{
+			"valid config accepted",
+			FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: "english"},
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("FSRSConfig.Validate() returned nil, want ErrConfigInvalid")
+				}
+				if !errors.Is(err, ErrConfigInvalid) {
+					t.Errorf("FSRSConfig.Validate() error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("FSRSConfig.Validate() returned %v, want nil", err)
+				}
+			}
+		})
+	}
+}
+
+// TestLoadConfigInvalidFSRSWordCount proves the env binding (sync point 5)
+// AND the validation (sync point 4) are both wired end-to-end through
+// LoadConfig: an out-of-range HTA_FSRS_DEFAULTWORDCOUNT fails boot with
+// ErrConfigInvalid rather than being silently accepted. Mirrors
+// TestLoadConfigInvalidPythonMaxConcurrent.
+func TestLoadConfigInvalidFSRSWordCount(t *testing.T) {
+	setRequiredPythonEnv(t)
+	t.Setenv("HTA_FSRS_DEFAULTWORDCOUNT", "0")
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for fsrs.defaultWordCount=0")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
+// TestLoadConfigFSRSWordCountEnvOverride proves bindEnv registered the
+// fsrs.defaultWordCount leaf (Pitfall 6 guard): HTA_FSRS_DEFAULTWORDCOUNT=30
+// overrides the D-03 default of 25 with no error. Mirrors
+// TestLoadConfigEnvOverride.
+func TestLoadConfigFSRSWordCountEnvOverride(t *testing.T) {
+	setRequiredPythonEnv(t)
+	t.Setenv("HTA_FSRS_DEFAULTWORDCOUNT", "30")
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig returned error %v, want nil", err)
+	}
+	if cfg.FSRS.DefaultWordCount != 30 {
+		t.Errorf("FSRS.DefaultWordCount = %d, want 30 (env override via HTA_FSRS_DEFAULTWORDCOUNT)",
+			cfg.FSRS.DefaultWordCount)
+	}
+}
+
+// TestFSRSConfigHasNoSecretFields is the D-24 automated guard for the Phase 5
+// FSRSConfig. It uses reflect to walk every field and fails if any field name
+// contains a secret-shaped substring, mirroring the PythonConfig guard. This
+// prevents future contributors from accidentally adding APIKey/Secret/Password/
+// Token fields to FSRSConfig — secrets must travel through os.Getenv, never
+// through this struct.
+//
+// If a legitimate future field legitimately trips one of these substrings,
+// rename the field rather than weakening the guard.
+func TestFSRSConfigHasNoSecretFields(t *testing.T) {
+	secretSubstrings := []string{"secret", "password", "apikey", "token"}
+	typ := reflect.TypeOf(FSRSConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name := strings.ToLower(field.Name)
+		for _, sub := range secretSubstrings {
+			if strings.Contains(name, sub) {
+				t.Fatalf("D-24 violation: FSRSConfig.%s field name contains "+
+					"secret substring %q — secrets MUST travel through os.Getenv, "+
+					"never through this struct (D-24)",
+					field.Name, sub)
+			}
+		}
+	}
+	// Sanity: ensure we actually inspected a non-zero field count so a future
+	// refactor that accidentally empties FSRSConfig does not silently pass.
+	if typ.NumField() == 0 {
+		t.Fatal("FSRSConfig has zero fields — reflect guard has nothing to inspect")
+	}
+}
