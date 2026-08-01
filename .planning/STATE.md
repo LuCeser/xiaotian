@@ -6,9 +6,9 @@ current_phase: 03
 current_phase_name: python-cli-integration
 status: verifying
 stopped_at: Completed 03-05-PLAN.md (RunPregenerate + pregenArgs + cap=1 pregenSem + classifyPregenResult + Pitfall 6 空 stdout 检测 + ErrBridgeNotImplemented 删除 — Phase 3 完结)
-last_updated: "2026-07-25T02:16:14.632Z"
-last_activity: 2026-07-25
-last_activity_desc: Phase 02 手动收尾 — 02-02/02-03 SUMMARY 补写 + flaky test 修复（安全恢复门）
+last_updated: "2026-08-01T03:33:47Z"
+last_activity: 2026-08-01
+last_activity_desc: Quick task 260801-fh3 — Windows 本机调试就绪(uv venv + 本机 config.yaml + viper Duration hook 修复 + ws flaky 修复)
 progress:
   total_phases: 3
   completed_phases: 2
@@ -102,6 +102,12 @@ Recent decisions affecting current work:
 ### Blockers/Concerns
 
 None yet.
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260801-fh3 | 让 Home Tutor Agent 在 Windows 本机能跑起来调试 | 2026-08-01 | 077e77d | [260801-fh3-home-tutor-agent-windows](./quick/260801-fh3-home-tutor-agent-windows/) |
 
 ## Deferred Items
 
