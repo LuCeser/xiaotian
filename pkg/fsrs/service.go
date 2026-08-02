@@ -7,6 +7,7 @@ package fsrs
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/pkg/errors"
 
@@ -75,7 +76,12 @@ func NewFSRSService(exec pybridge.Executor, logger infra.Logger, cfg infra.FSRSC
 		return nil, errors.Wrap(ErrFSRSInvalid, "pybridge.Executor must not be nil")
 	}
 	if err := cfg.Validate(); err != nil {
-		return nil, errors.Wrap(ErrFSRSInvalid, "fsrs config validation failed")
+		// Wrap the underlying error so the field-specific message and the
+		// ErrConfigInvalid chain survive, while keeping ErrFSRSInvalid
+		// reachable via the second %w (Go 1.20+ multi-%w). Callers may branch
+		// on either sentinel (D-05 rich error handling).
+		return nil, fmt.Errorf("fsrs config validation failed: %w (sentinel %w)",
+			err, ErrFSRSInvalid)
 	}
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
