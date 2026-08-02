@@ -186,17 +186,17 @@ Plans:
   3. Audio streaming integrates with WebSocket binary frame protocol
   4. TTS generation errors are caught and reported without session crashes
 
-**Plans**: 4 plans
+**Plans**: 3/4 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 06-01-PLAN.md — TTSConfig + pkg/tts types + MP3-to-PCM codec + SessionCache (D-07, D-09, D-10, DICT-03)
+- [x] 06-01-PLAN.md — TTSConfig + pkg/tts types + MP3-to-PCM codec + SessionCache (D-07, D-09, D-10, DICT-03)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 06-02-PLAN.md — TTS Generator + batch generation via RunPregenerate + 3-retry-skip strategy (PY-04, D-01, D-05, DICT-03)
-- [ ] 06-03-PLAN.md — Audio Frame Streamer + WS binary frame delivery + prefetch + breakpoint resume (DICT-03, DICT-05, D-03, D-04, D-06)
+- [x] 06-02-PLAN.md — TTS Generator + batch generation via RunPregenerate + 3-retry-skip strategy (PY-04, D-01, D-05, DICT-03)
+- [x] 06-03-PLAN.md — Audio Frame Streamer + WS binary frame delivery + prefetch + breakpoint resume (DICT-03, DICT-05, D-03, D-04, D-06)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -315,7 +315,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 3. Python CLI Integration | 5/5 | Complete    | 2026-08-01 |
 | 4. Database Schema Design | 5/5 | Complete    | 2026-08-01 |
 | 5. FSRS Core Implementation | 2/2 | Complete    | 2026-08-02 |
-| 6. TTS Audio Streaming | 0/4 | Not started | - |
+| 6. TTS Audio Streaming | 3/4 | In Progress|  |
 | 7. Session State Management | 0/0 | Not started | - |
 | 8. Student Web Interface | 0/0 | Not started | - |
 | 9. Parent Vocabulary Management | 0/0 | Not started | - |
