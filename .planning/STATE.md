@@ -8,7 +8,7 @@ status: planning
 stopped_at: Phase 5 context gathered and reviewed
 last_updated: "2026-08-02T06:41:30.676Z"
 last_activity: 2026-08-02
-last_activity_desc: Phase 05 complete, transitioned to Phase 6
+last_activity_desc: Completed quick task 260802-ldq: 创建最小化前端验证界面
 progress:
   total_phases: 5
   completed_phases: 5
@@ -118,6 +118,7 @@ None yet.
 | 260801-fh3 | 让 Home Tutor Agent 在 Windows 本机能跑起来调试 | 2026-08-01 | 077e77d | | [260801-fh3-home-tutor-agent-windows](./quick/260801-fh3-home-tutor-agent-windows/) |
 | 260801-ge1 | 接入 WebSocket 运行时(P0-1) | 2026-08-01 | bfb24d3 | Verified | [260801-ge1-websocket-p0-1](./quick/260801-ge1-websocket-p0-1/) |
 | 260801-kdq | 根治 ws TestHubStopsOnContextCancel flake | 2026-08-01 | b65ad5e | | [260801-kdq-ws-testhubstopsoncontextcancel-flake](./quick/260801-kdq-ws-testhubstopsoncontextcancel-flake/) |
+| 260802-ldq | 创建最小化前端验证界面，用于测试WebSocket连接、FSRS单词选择和TTS音频流播放 | 2026-08-02 | ad599a5 | Verified | [260802-ldq-websocket-fsrs-tts](./quick/260802-ldq-websocket-fsrs-tts/) |
 
 ## Deferred Items
 
