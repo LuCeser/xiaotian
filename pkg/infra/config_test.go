@@ -836,3 +836,108 @@ func TestFSRSConfigHasNoSecretFields(t *testing.T) {
 		t.Fatal("FSRSConfig has zero fields — reflect guard has nothing to inspect")
 	}
 }
+
+// TestTTSConfigValid asserts that a well-formed TTSConfig passes validation.
+func TestTTSConfigValid(t *testing.T) {
+	cfg := TTSConfig{
+		SessionDir:         "/tmp/tts",
+		MaxRetries:         3,
+		GenerationTimeout:  30 * time.Second,
+		PrefetchCount:      2,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("TTSConfig.Validate() with valid config returned error: %v", err)
+	}
+}
+
+// TestTTSConfigEmptySessionDir asserts that empty SessionDir fails validation.
+func TestTTSConfigEmptySessionDir(t *testing.T) {
+	cfg := TTSConfig{
+		SessionDir:         "",
+		MaxRetries:         3,
+		GenerationTimeout:  30 * time.Second,
+		PrefetchCount:      2,
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("TTSConfig.Validate() with empty SessionDir returned nil, want error")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Fatalf("TTSConfig.Validate() error = %v, want error wrapping ErrConfigInvalid", err)
+	}
+}
+
+// TestTTSConfigZeroMaxRetries asserts that MaxRetries=0 fails validation.
+func TestTTSConfigZeroMaxRetries(t *testing.T) {
+	cfg := TTSConfig{
+		SessionDir:         "/tmp/tts",
+		MaxRetries:         0,
+		GenerationTimeout:  30 * time.Second,
+		PrefetchCount:      2,
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("TTSConfig.Validate() with MaxRetries=0 returned nil, want error")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Fatalf("TTSConfig.Validate() error = %v, want error wrapping ErrConfigInvalid", err)
+	}
+}
+
+// TestTTSConfigNegativeMaxRetries asserts that negative MaxRetries fails validation.
+func TestTTSConfigNegativeMaxRetries(t *testing.T) {
+	cfg := TTSConfig{
+		SessionDir:         "/tmp/tts",
+		MaxRetries:         -1,
+		GenerationTimeout:  30 * time.Second,
+		PrefetchCount:      2,
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("TTSConfig.Validate() with negative MaxRetries returned nil, want error")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Fatalf("TTSConfig.Validate() error = %v, want error wrapping ErrConfigInvalid", err)
+	}
+}
+
+// TestTTSConfigZeroGenerationTimeout asserts that GenerationTimeout=0 fails validation.
+func TestTTSConfigZeroGenerationTimeout(t *testing.T) {
+	cfg := TTSConfig{
+		SessionDir:         "/tmp/tts",
+		MaxRetries:         3,
+		GenerationTimeout:  0,
+		PrefetchCount:      2,
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("TTSConfig.Validate() with GenerationTimeout=0 returned nil, want error")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Fatalf("TTSConfig.Validate() error = %v, want error wrapping ErrConfigInvalid", err)
+	}
+}
+
+// TestTTSConfigHasNoSecretFields is the D-24 automated guard for TTSConfig.
+// It uses reflect to walk every field and fails if any field name contains
+// a secret-shaped substring, mirroring the FSRSConfig guard.
+func TestTTSConfigHasNoSecretFields(t *testing.T) {
+	secretSubstrings := []string{"secret", "password", "apikey", "token"}
+	typ := reflect.TypeOf(TTSConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name := strings.ToLower(field.Name)
+		for _, sub := range secretSubstrings {
+			if strings.Contains(name, sub) {
+				t.Fatalf("D-24 violation: TTSConfig.%s field name contains "+
+					"secret substring %q — secrets MUST travel through os.Getenv, "+
+					"never through this struct (D-24)",
+					field.Name, sub)
+			}
+		}
+	}
+	// Sanity: ensure we actually inspected a non-zero field count
+	if typ.NumField() == 0 {
+		t.Fatal("TTSConfig has zero fields — reflect guard has nothing to inspect")
+	}
+}

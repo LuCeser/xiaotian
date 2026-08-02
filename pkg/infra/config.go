@@ -128,6 +128,15 @@ type Config struct {
 	// so the service boots and serves a sensible session with NO fsrs: block
 	// in config.yaml.
 	FSRS FSRSConfig `json:"fsrs" mapstructure:"fsrs"`
+
+	// TTS tunes the TTS audio streaming layer (Phase 6, D-10). Holds only
+	// operational fields — session cache directory, retry counts, timeouts,
+	// and prefetch depth — and NEVER credentials (D-24 no-secret invariant,
+	// enforced by TestTTSConfigHasNoSecretFields). These defaults flow into
+	// tts constructors when the caller's option fields are zero, so the
+	// service boots and serves a sensible session with NO tts: block in
+	// config.yaml.
+	TTS TTSConfig `json:"tts" mapstructure:"tts"`
 }
 
 // DatabaseConfig tunes the SQLite storage layer (Phase 4). Holds only the
@@ -311,6 +320,53 @@ func (c FSRSConfig) Validate() error {
 	}
 	if c.DefaultCategory == "" {
 		return errors.Wrap(ErrConfigInvalid, "fsrs.defaultCategory is required")
+	}
+	return nil
+}
+
+// TTSConfig tunes the TTS audio streaming layer (Phase 6, D-10). It carries
+// only operational fields — session cache directory, retry counts, timeouts,
+// and prefetch depth — and is intentionally devoid of credentials; the
+// TestTTSConfigHasNoSecretFields reflect guard enforces the D-24 no-secret
+// invariant automatically. These values are the defaults Plan 06-01's tts
+// constructors read when option fields are zero.
+type TTSConfig struct {
+	// SessionDir is the base directory for session PCM caches (D-02, D-08).
+	// Each session gets a subdirectory under this base. Default "/tmp/tts_sessions".
+	// MUST be non-empty.
+	SessionDir string `json:"sessionDir" mapstructure:"sessionDir"`
+
+	// MaxRetries is the per-word TTS generation retry count (D-05). Default 3.
+	// MUST be in [1, 10] to prevent infinite retry loops.
+	MaxRetries int `json:"maxRetries" mapstructure:"maxRetries"`
+
+	// GenerationTimeout is the single-word generation timeout (D-05). Default
+	// 120s (matches PythonConfig.PregenTimeout). MUST be > 0.
+	GenerationTimeout time.Duration `json:"generationTimeout" mapstructure:"generationTimeout"`
+
+	// PrefetchCount is the number of upcoming words to pre-load into memory
+	// (D-04). Default 2. MUST be in [0, 10]; zero disables prefetch.
+	PrefetchCount int `json:"prefetchCount" mapstructure:"prefetchCount"`
+}
+
+// Validate enforces the TTSConfig field ranges (D-10 fail-fast). On any
+// failure it returns an error wrapping ErrConfigInvalid so callers branch with
+// errors.Is(err, infra.ErrConfigInvalid).
+func (c TTSConfig) Validate() error {
+	if c.SessionDir == "" {
+		return errors.Wrap(ErrConfigInvalid, "tts.sessionDir is required")
+	}
+	if c.MaxRetries < 1 || c.MaxRetries > 10 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("tts.maxRetries must be in [1, 10], got %d", c.MaxRetries))
+	}
+	if c.GenerationTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("tts.generationTimeout must be > 0, got %v", c.GenerationTimeout))
+	}
+	if c.PrefetchCount < 0 || c.PrefetchCount > 10 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("tts.prefetchCount must be in [0, 10], got %d", c.PrefetchCount))
 	}
 	return nil
 }
@@ -534,6 +590,16 @@ func DefaultConfig() Config {
 			FetchLockHours:  24.0,
 			DefaultUnit:     "", // empty = all units (valid default)
 			DefaultCategory: "english",
+		},
+		TTS: TTSConfig{
+			// D-02: session-level cache under /tmp/tts_sessions/{sessionID}/
+			SessionDir: "/tmp/tts_sessions",
+			// D-05: 3 retries per word before skipping
+			MaxRetries: 3,
+			// D-05: 120s timeout matches PythonConfig.PregenTimeout
+			GenerationTimeout: 120 * time.Second,
+			// D-04: prefetch next 2 words to eliminate network latency
+			PrefetchCount: 2,
 		},
 	}
 }
@@ -780,6 +846,14 @@ func (c Config) Validate() error {
 		return err
 	}
 
+	// TTS audio streaming (Phase 6, D-10). TTSConfig.Validate enforces field
+	// ranges so a malformed HTA_TTS_* value fails boot rather than producing
+	// silent misconfiguration (D-04 fail-fast). Delegated to the sub-struct so
+	// tts constructors can call the same validator independently.
+	if err := c.TTS.Validate(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -879,6 +953,12 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"fsrs.fetchLockHours",
 		"fsrs.defaultUnit",
 		"fsrs.defaultCategory",
+		// Phase 6 TTS audio streaming (D-10). Pitfall 6: every leaf MUST be
+		// bound explicitly or HTA_TTS_* env vars are silently inert.
+		"tts.sessionDir",
+		"tts.maxRetries",
+		"tts.generationTimeout",
+		"tts.prefetchCount",
 		// Database path (Phase 4).
 		"database.path",
 	}
