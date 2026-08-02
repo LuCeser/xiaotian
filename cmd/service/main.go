@@ -32,6 +32,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
+	"github.com/xiaotian/home-tutor-agent/pkg/tts"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
@@ -133,7 +134,37 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
-	_ = fsrsSvc // consumed by Phase 7 session orchestration
+
+	// Phase 6 (TTS audio streaming): TTS component construction.
+	// NewSessionCache is a pure constructor (creates directories if needed).
+	cache, err := tts.NewSessionCache(cfg.TTS.SessionDir, logger)
+	if err != nil {
+		logger.Error("TTS session cache construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+
+	// NewGenerator is a pure constructor (composes pyBridge, cache, logger).
+	gen, err := tts.NewGenerator(pyBridge, cache, logger, cfg.TTS)
+	if err != nil {
+		logger.Error("TTS generator construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+
+	// NewStreamer is a pure constructor (composes cache, logger).
+	streamer, err := tts.NewStreamer(cache, logger, cfg.TTS)
+	if err != nil {
+		logger.Error("TTS streamer construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
 
 	// Phase 4 (D-09): open the shared SQLite database.
 	// The path comes from Config.Database.Path; when empty, resolve to
@@ -263,7 +294,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
-	router, err := ws.NewRouter(noOpHandlers(), routerCfg, wsLogger)
+	router, err := ws.NewRouter(ttsHandlers(fsrsSvc, gen, streamer, logger), routerCfg, wsLogger)
 	if err != nil {
 		logger.Error("ws router construction failed",
 			infra.F("component", "infra.main"),
