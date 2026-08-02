@@ -76,4 +76,8 @@ var (
 
 	// ErrSendBufferFull is returned when the WebSocket send buffer is full.
 	ErrSendBufferFull = errors.New("send buffer full")
+
+	// ErrClientClosing is returned when the client is shutting down and the
+	// send channel is closed.
+	ErrClientClosing = errors.New("client is closing")
 )
