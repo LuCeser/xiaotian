@@ -141,6 +141,9 @@ func (s *Streamer) StreamWord(ctx context.Context, client Sender, sessionID stri
 		}
 	}
 
+	// 5. Send end-of-word notification frame
+	s.sendWordComplete(ctx, client, wordID)
+
 	return nil
 }
 

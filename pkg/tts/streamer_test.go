@@ -3,7 +3,9 @@ package tts
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -92,14 +94,14 @@ func TestStreamWord_Basic(t *testing.T) {
 		t.Fatalf("StreamWord failed: %v", err)
 	}
 
-	// Should send exactly 2 frames
+	// Should send 3 frames: 2 audio frames + 1 word_complete status frame
 	count := sender.count()
-	if count != 2 {
-		t.Errorf("expected 2 frames, got %d", count)
+	if count != 3 {
+		t.Errorf("expected 3 frames (2 audio + 1 status), got %d", count)
 	}
 
-	// Verify each frame is 656 bytes (16-byte header + 640-byte payload)
-	for i := 0; i < count; i++ {
+	// Verify first 2 frames are audio frames (656 bytes each)
+	for i := 0; i < 2; i++ {
 		frame := sender.get(i)
 		if len(frame) != 656 {
 			t.Errorf("frame %d: expected length 656, got %d", i, len(frame))
@@ -160,15 +162,16 @@ func TestStreamWord_StartSeq(t *testing.T) {
 	ctx := context.Background()
 
 	// Stream from sequence 5 (should skip frames 1-4, but we only have 3 frames total)
-	// So we should get 0 frames since all frames are before sequence 5
+	// So we should get 0 audio frames since all frames are before sequence 5
+	// But we still get 1 status frame
 	err = streamer.StreamWord(ctx, sender, "session1", "word1", 5)
 	if err != nil {
 		t.Fatalf("StreamWord failed: %v", err)
 	}
 
 	count := sender.count()
-	if count != 0 {
-		t.Errorf("expected 0 frames when startSeq=5 with only 3 frames total, got %d", count)
+	if count != 1 {
+		t.Errorf("expected 1 frame (status only) when startSeq=5 with only 3 audio frames total, got %d", count)
 	}
 }
 
@@ -201,15 +204,15 @@ func TestStreamWord_StartSeqPartial(t *testing.T) {
 	sender := &mockSender{}
 	ctx := context.Background()
 
-	// Stream from sequence 2 (should skip frame 1, send frames 2-3)
+	// Stream from sequence 2 (should skip frame 1, send frames 2-3 + status)
 	err = streamer.StreamWord(ctx, sender, "session1", "word1", 2)
 	if err != nil {
 		t.Fatalf("StreamWord failed: %v", err)
 	}
 
 	count := sender.count()
-	if count != 2 {
-		t.Errorf("expected 2 frames when startSeq=2 with 3 frames total, got %d", count)
+	if count != 3 {
+		t.Errorf("expected 3 frames (2 audio + 1 status) when startSeq=2 with 3 audio frames total, got %d", count)
 	}
 
 	// First frame sent should be sequence 2
@@ -417,5 +420,251 @@ func TestNewStreamer_InvalidArgs(t *testing.T) {
 	}
 	if streamer == nil {
 		t.Error("expected non-nil streamer with substituted logger")
+	}
+}
+
+// TestPrefetchNext_Basic tests that PrefetchNext loads PCM into prefetch map
+func TestPrefetchNext_Basic(t *testing.T) {
+	cache, err := NewSessionCache(t.TempDir(), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+
+	// Store PCM for 2 words
+	pcm1 := make([]byte, 640)
+	pcm2 := make([]byte, 640)
+	cache.Store("session1", "word1", pcm1)
+	cache.Store("session1", "word2", pcm2)
+
+	cfg := infra.TTSConfig{
+		SessionDir:       t.TempDir(),
+		MaxRetries:       3,
+		GenerationTimeout: 120 * time.Second,
+		PrefetchCount:    3,
+	}
+
+	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
+	if err != nil {
+		t.Fatalf("failed to create streamer: %v", err)
+	}
+
+	// Prefetch 2 words
+	streamer.PrefetchNext("session1", []string{"word1", "word2"})
+
+	// Verify StreamWord uses prefetched data (no cache.Load call)
+	sender := &mockSender{}
+	ctx := context.Background()
+
+	// Delete from cache to verify prefetch is used
+	cache.Cleanup("session1")
+
+	// Stream word1 - should use prefetched data
+	err = streamer.StreamWord(ctx, sender, "session1", "word1", 0)
+	if err != nil {
+		t.Fatalf("StreamWord failed with prefetched data: %v", err)
+	}
+
+	// Should send 2 frames: 1 audio + 1 word_complete status
+	count := sender.count()
+	if count != 2 {
+		t.Errorf("expected 2 frames (1 audio + 1 status) from prefetched data, got %d", count)
+	}
+}
+
+// TestPrefetchNext_NonExistentWord tests that PrefetchNext logs and continues for missing words
+func TestPrefetchNext_NonExistentWord(t *testing.T) {
+	cache, err := NewSessionCache(t.TempDir(), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+
+	// Store PCM for 1 word
+	pcm1 := make([]byte, 640)
+	cache.Store("session1", "word1", pcm1)
+
+	cfg := infra.TTSConfig{
+		SessionDir:       t.TempDir(),
+		MaxRetries:       3,
+		GenerationTimeout: 120 * time.Second,
+		PrefetchCount:    3,
+	}
+
+	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
+	if err != nil {
+		t.Fatalf("failed to create streamer: %v", err)
+	}
+
+	// Prefetch 2 words (word2 doesn't exist) - should not error
+	streamer.PrefetchNext("session1", []string{"word1", "word2"})
+
+	// Verify word1 was prefetched (stream it successfully)
+	sender := &mockSender{}
+	ctx := context.Background()
+
+	// Delete from cache to verify prefetch is used
+	cache.Cleanup("session1")
+
+	err = streamer.StreamWord(ctx, sender, "session1", "word1", 0)
+	if err != nil {
+		t.Fatalf("StreamWord failed: %v", err)
+	}
+}
+
+// TestClearPrefetch tests that ClearPrefetch removes words from prefetch map
+func TestClearPrefetch(t *testing.T) {
+	cache, err := NewSessionCache(t.TempDir(), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+
+	pcm1 := make([]byte, 640)
+	cache.Store("session1", "word1", pcm1)
+
+	cfg := infra.TTSConfig{
+		SessionDir:       t.TempDir(),
+		MaxRetries:       3,
+		GenerationTimeout: 120 * time.Second,
+		PrefetchCount:    3,
+	}
+
+	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
+	if err != nil {
+		t.Fatalf("failed to create streamer: %v", err)
+	}
+
+	// Prefetch word1
+	streamer.PrefetchNext("session1", []string{"word1"})
+
+	// Clear word1
+	streamer.ClearPrefetch("word1")
+
+	// Verify prefetch was cleared (StreamWord should fall back to cache)
+	sender := &mockSender{}
+	ctx := context.Background()
+
+	err = streamer.StreamWord(ctx, sender, "session1", "word1", 0)
+	if err != nil {
+		t.Fatalf("StreamWord failed: %v", err)
+	}
+
+	// Should send 2 frames: 1 audio + 1 status
+	count := sender.count()
+	if count != 2 {
+		t.Errorf("expected 2 frames (1 audio + 1 status) after cache clear, got %d", count)
+	}
+}
+
+// TestEndOfWordNotification tests that StreamWord sends word_complete status frame
+func TestEndOfWordNotification(t *testing.T) {
+	cache, err := NewSessionCache(t.TempDir(), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+
+	// Store PCM for 1 word (640 bytes = 1 frame)
+	pcm1 := make([]byte, 640)
+	cache.Store("session1", "word1", pcm1)
+
+	cfg := infra.TTSConfig{
+		SessionDir:       t.TempDir(),
+		MaxRetries:       3,
+		GenerationTimeout: 120 * time.Second,
+		PrefetchCount:    3,
+	}
+
+	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
+	if err != nil {
+		t.Fatalf("failed to create streamer: %v", err)
+	}
+
+	sender := &mockSender{}
+	ctx := context.Background()
+
+	err = streamer.StreamWord(ctx, sender, "session1", "word1", 0)
+	if err != nil {
+		t.Fatalf("StreamWord failed: %v", err)
+	}
+
+	// Should send 2 frames: 1 audio frame + 1 word_complete status frame
+	count := sender.count()
+	if count != 2 {
+		t.Errorf("expected 2 frames (1 audio + 1 status), got %d", count)
+	}
+
+	// Verify second frame is status frame with word_complete
+	statusFrame := sender.get(1)
+	if len(statusFrame) < ws.HeaderSize {
+		t.Fatalf("status frame too short: %d bytes", len(statusFrame))
+	}
+
+	header := &ws.FrameHeader{}
+	header.Version = statusFrame[0]
+	header.MsgType = ws.MessageType(statusFrame[1])
+	header.PayloadLen = binary.BigEndian.Uint16(statusFrame[10:12])
+
+	if header.MsgType != ws.MsgTypeStatus {
+		t.Errorf("expected status frame, got msgtype %d", header.MsgType)
+	}
+
+	// Decode JSON payload
+	payload := make(map[string]string)
+	json.Unmarshal(statusFrame[ws.HeaderSize:], &payload)
+
+	if payload["type"] != "word_complete" {
+		t.Errorf("expected type=word_complete, got %s", payload["type"])
+	}
+	if payload["word_id"] != "word1" {
+		t.Errorf("expected word_id=word1, got %s", payload["word_id"])
+	}
+}
+
+// TestPrefetchNext_MultipleWords tests prefetching multiple words
+func TestPrefetchNext_MultipleWords(t *testing.T) {
+	cache, err := NewSessionCache(t.TempDir(), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+
+	// Store PCM for 3 words
+	for i := 1; i <= 3; i++ {
+		wordID := fmt.Sprintf("word%d", i)
+		pcm := make([]byte, 640)
+		cache.Store("session1", wordID, pcm)
+	}
+
+	cfg := infra.TTSConfig{
+		SessionDir:       t.TempDir(),
+		MaxRetries:       3,
+		GenerationTimeout: 120 * time.Second,
+		PrefetchCount:    3,
+	}
+
+	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
+	if err != nil {
+		t.Fatalf("failed to create streamer: %v", err)
+	}
+
+	// Prefetch all 3 words
+	streamer.PrefetchNext("session1", []string{"word1", "word2", "word3"})
+
+	// Delete from cache to verify prefetch is used
+	cache.Cleanup("session1")
+
+	// Stream all 3 words - should use prefetched data
+	ctx := context.Background()
+	for i := 1; i <= 3; i++ {
+		wordID := fmt.Sprintf("word%d", i)
+		sender := &mockSender{}
+
+		err = streamer.StreamWord(ctx, sender, "session1", wordID, 0)
+		if err != nil {
+			t.Fatalf("StreamWord failed for %s: %v", wordID, err)
+		}
+
+		// Each word should send 2 frames: 1 audio + 1 status
+		count := sender.count()
+		if count != 2 {
+			t.Errorf("expected 2 frames (1 audio + 1 status) for %s, got %d", wordID, count)
+		}
 	}
 }
