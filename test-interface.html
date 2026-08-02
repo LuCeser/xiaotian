@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket/FSRS/TTS Test Interface</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 28px;
+            font-weight: 600;
+        }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+
+        .card h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: #1f2937;
+        }
+
+        .status-row {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ef4444;
+            transition: background 0.3s ease;
+        }
+
+        .status-indicator.connecting {
+            background: #f59e0b;
+        }
+
+        .status-indicator.connected {
+            background: #10b981;
+        }
+
+        .status-indicator.error {
+            background: #ef4444;
+        }
+
+        .status-text {
+            font-size: 14px;
+            font-weight: 500;
+            color: #6b7280;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .input-group label {
+            font-size: 14px;
+            font-weight: 500;
+            color: #374151;
+            white-space: nowrap;
+        }
+
+        input[type="text"], input[type="number"] {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+
+        input[type="text"]:focus, input[type="number"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        button:hover:not(:disabled) {
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+
+        .btn-success {
+            background: #10b981;
+            color: white;
+        }
+
+        .results-area {
+            background: #f9fafb;
+            border-radius: 6px;
+            padding: 16px;
+            min-height: 100px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            color: #374151;
+            white-space: pre-wrap;
+        }
+
+        .results-area:empty::before {
+            content: 'No results yet';
+            color: #9ca3af;
+        }
+
+        .log-area {
+            background: #1f2937;
+            border-radius: 6px;
+            padding: 16px;
+            min-height: 300px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            color: #e5e7eb;
+            white-space: pre-wrap;
+        }
+
+        .log-entry {
+            margin-bottom: 4px;
+            padding: 4px 0;
+        }
+
+        .log-entry.control {
+            color: #60a5fa;
+        }
+
+        .log-entry.audio {
+            color: #34d399;
+        }
+
+        .log-entry.error {
+            color: #f87171;
+        }
+
+        .log-entry.status {
+            color: #9ca3af;
+        }
+
+        .stats-row {
+            display: flex;
+            gap: 24px;
+            margin-top: 12px;
+            font-size: 13px;
+            color: #6b7280;
+        }
+
+        .stats-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .stats-value {
+            font-weight: 600;
+            color: #1f2937;
+        }
+
+        @media (max-width: 768px) {
+            .input-group {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            button {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 WebSocket/FSRS/TTS Test Interface</h1>
+
+        <!-- WebSocket Status Card -->
+        <div class="card">
+            <h2>🔌 WebSocket Status</h2>
+            <div class="status-row">
+                <div class="status-indicator" id="wsStatusIndicator"></div>
+                <span class="status-text" id="wsStatusText">Disconnected</span>
+            </div>
+            <div class="input-group">
+                <label for="userId">User ID:</label>
+                <input type="text" id="userId" value="test" placeholder="Enter user ID">
+                <button class="btn-primary" id="connectBtn" onclick="connect()">Connect</button>
+                <button class="btn-danger" id="disconnectBtn" onclick="disconnect()" style="display: none;">Disconnect</button>
+            </div>
+        </div>
+
+        <!-- FSRS Test Card -->
+        <div class="card">
+            <h2>📚 FSRS Word Selection Test</h2>
+            <div class="input-group">
+                <label for="wordCount">Word Count:</label>
+                <input type="number" id="wordCount" value="20" min="1" max="100">
+                <button class="btn-success" id="getWordsBtn" onclick="requestDueCards()" disabled>Get Due Words</button>
+            </div>
+            <div class="results-area" id="fsrsResults"></div>
+        </div>
+
+        <!-- TTS Audio Test Card -->
+        <div class="card">
+            <h2>🔊 TTS Audio Streaming Test</h2>
+            <div class="input-group">
+                <button class="btn-success" id="playAudioBtn" onclick="playTestAudio()" disabled>Play Test Audio</button>
+                <span class="status-text" id="audioStatus">Click to enable audio</span>
+            </div>
+            <div class="stats-row">
+                <div class="stats-item">
+                    Frames: <span class="stats-value" id="frameCount">0</span>
+                </div>
+                <div class="stats-item">
+                    Gaps: <span class="stats-value" id="gapCount">0</span>
+                </div>
+                <div class="stats-item">
+                    Duplicates: <span class="stats-value" id="duplicateCount">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Message Log Card -->
+        <div class="card">
+            <h2>📋 Message Log</h2>
+            <div class="log-area" id="logArea"></div>
+        </div>
+    </div>
+
+    <script>
+        // WebSocket connection state
+        let ws = null;
+        let connectionState = 'CLOSED'; // CLOSED, CONNECTING, OPEN, ERROR
+        let audioContext = null;
+        let audioEnabled = false;
+
+        // Frame tracking
+        let sequenceCounter = 0;
+        const receivedSequences = [];
+        let frameCount = 0;
+        let gapCount = 0;
+        let duplicateCount = 0;
+
+        // Message type constants (from pkg/ws/protocol.go)
+        const MsgType = {
+            Audio: 0x01,
+            Control: 0x02,
+            Error: 0x03,
+            Heartbeat: 0x04,
+            Session: 0x05,
+            Status: 0x06
+        };
+
+        // Protocol constants
+        const HeaderSize = 16;
+        const AudioFrameSize = 640;
+        const ProtocolVersion = 0x01;
+
+        // CRC-16-CCITT implementation (from pkg/crc16/crc16.go)
+        function crc16Checksum(data) {
+            const CCITT = 0x1021;
+            let crc = 0xFFFF; // Initial value
+
+            for (let i = 0; i < data.length; i++) {
+                crc ^= (data[i] << 8);
+                for (let j = 0; j < 8; j++) {
+                    if ((crc & 0x8000) !== 0) {
+                        crc = ((crc << 1) ^ CCITT) & 0xFFFF;
+                    } else {
+                        crc = (crc << 1) & 0xFFFF;
+                    }
+                }
+            }
+            return crc;
+        }
+
+        // Parse 16-byte frame header (big-endian)
+        function parseFrameHeader(arrayBuffer) {
+            const view = new DataView(arrayBuffer);
+            return {
+                version: view.getUint8(0),
+                msgType: view.getUint8(1),
+                sequence: view.getUint32(2, false), // big-endian
+                timestamp: view.getUint32(6, false), // big-endian
+                payloadLen: view.getUint16(10, false), // big-endian
+                reserved: view.getUint16(12, false), // big-endian
+                crc16: view.getUint16(14, false) // big-endian
+            };
+        }
+
+        // Encode frame header with CRC-16-CCITT
+        function encodeFrameHeader(header) {
+            const buffer = new ArrayBuffer(HeaderSize);
+            const view = new DataView(buffer);
+
+            view.setUint8(0, header.version);
+            view.setUint8(1, header.msgType);
+            view.setUint32(2, header.sequence, false); // big-endian
+            view.setUint32(6, header.timestamp, false); // big-endian
+            view.setUint16(10, header.payloadLen, false); // big-endian
+            view.setUint16(12, header.reserved, false); // big-endian
+
+            // Compute CRC-16 over bytes 0-13
+            const headerBytes = new Uint8Array(buffer.slice(0, 14));
+            const crc = crc16Checksum(headerBytes);
+            view.setUint16(14, crc, false); // big-endian
+
+            return buffer;
+        }
+
+        // Build complete frame with header and payload
+        function buildFrame(header, payload) {
+            const headerBuffer = encodeFrameHeader(header);
+            const payloadBytes = new TextEncoder().encode(payload);
+
+            const frame = new Uint8Array(headerBuffer.byteLength + payloadBytes.length);
+            frame.set(new Uint8Array(headerBuffer), 0);
+            frame.set(payloadBytes, headerBuffer.byteLength);
+
+            return frame.buffer;
+        }
+
+        // Get next sequence number
+        function nextSequence() {
+            return ++sequenceCounter;
+        }
+
+        // Format timestamp for logging
+        function formatTimestamp() {
+            const now = new Date();
+            return now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+        }
+
+        // Add log entry with color coding
+        function addLog(message, type = 'status') {
+            const logArea = document.getElementById('logArea');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${formatTimestamp()}] ${message}`;
+            logArea.appendChild(entry);
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        // Update WebSocket status UI
+        function updateStatus(state, message) {
+            const indicator = document.getElementById('wsStatusIndicator');
+            const statusText = document.getElementById('wsStatusText');
+            const connectBtn = document.getElementById('connectBtn');
+            const disconnectBtn = document.getElementById('disconnectBtn');
+
+            indicator.className = 'status-indicator';
+
+            switch (state) {
+                case 'CONNECTING':
+                    indicator.classList.add('connecting');
+                    break;
+                case 'OPEN':
+                    indicator.classList.add('connected');
+                    connectBtn.style.display = 'none';
+                    disconnectBtn.style.display = 'inline-block';
+                    enableButtons(true);
+                    break;
+                case 'CLOSED':
+                case 'ERROR':
+                    indicator.classList.add('error');
+                    connectBtn.style.display = 'inline-block';
+                    disconnectBtn.style.display = 'none';
+                    enableButtons(false);
+                    break;
+            }
+
+            statusText.textContent = message;
+            connectionState = state;
+        }
+
+        // Enable/disable buttons based on connection state
+        function enableButtons(enabled) {
+            document.getElementById('getWordsBtn').disabled = !enabled;
+            document.getElementById('playAudioBtn').disabled = !enabled || !audioEnabled;
+        }
+
+        // Connect to WebSocket
+        function connect() {
+            const userId = document.getElementById('userId').value || 'test';
+            const wsUrl = `ws://localhost:8080/ws?user_id=${encodeURIComponent(userId)}&device=web`;
+
+            updateStatus('CONNECTING', 'Connecting...');
+            addLog(`Connecting to ${wsUrl}`, 'status');
+
+            try {
+                ws = new WebSocket(wsUrl);
+                ws.binaryType = 'arraybuffer'; // CRITICAL for binary frames
+
+                ws.onopen = () => {
+                    updateStatus('OPEN', 'Connected');
+                    addLog('WebSocket connected successfully', 'status');
+                };
+
+                ws.onmessage = (event) => {
+                    handleMessage(event.data);
+                };
+
+                ws.onerror = (error) => {
+                    updateStatus('ERROR', 'Connection error');
+                    addLog('WebSocket error occurred', 'error');
+                    console.error('WebSocket error:', error);
+                };
+
+                ws.onclose = (event) => {
+                    updateStatus('CLOSED', 'Disconnected');
+                    addLog(`WebSocket closed: ${event.code} - ${event.reason}`, 'status');
+                    enableButtons(false);
+                };
+
+            } catch (error) {
+                updateStatus('ERROR', 'Connection failed');
+                addLog(`Connection failed: ${error.message}`, 'error');
+                console.error('Connection error:', error);
+            }
+        }
+
+        // Disconnect from WebSocket
+        function disconnect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close(1000, 'User disconnected');
+                addLog('WebSocket disconnecting...', 'status');
+            }
+        }
+
+        // Handle incoming WebSocket messages
+        function handleMessage(data) {
+            if (!(data instanceof ArrayBuffer)) {
+                addLog('Received non-binary data', 'error');
+                return;
+            }
+
+            const bytes = new Uint8Array(data);
+
+            if (bytes.length < HeaderSize) {
+                addLog(`Frame too short: ${bytes.length} bytes`, 'error');
+                return;
+            }
+
+            // Parse header
+            const header = parseFrameHeader(data.slice(0, HeaderSize));
+            const payload = bytes.slice(HeaderSize);
+
+            // Log frame reception
+            const msgTypeName = Object.keys(MsgType).find(key => MsgType[key] === header.msgType) || 'UNKNOWN';
+            addLog(`[${msgTypeName}] Seq=${header.sequence} Len=${header.payloadLen}`, 'status');
+
+            // Route to handler based on message type
+            switch (header.msgType) {
+                case MsgType.Audio:
+                    handleAudioFrame(payload, header.sequence);
+                    break;
+                case MsgType.Control:
+                    handleControlFrame(payload);
+                    break;
+                case MsgTypeError:
+                    handleErrorFrame(payload);
+                    break;
+                case MsgType.Heartbeat:
+                    addLog('Received heartbeat', 'status');
+                    break;
+                case MsgType.Session:
+                    addLog('Received session message', 'status');
+                    break;
+                case MsgType.Status:
+                    addLog('Received status message', 'status');
+                    break;
+                default:
+                    addLog(`Unknown message type: 0x${header.msgType.toString(16)}`, 'error');
+            }
+        }
+
+        // Handle control frames (FSRS responses)
+        function handleControlFrame(payload) {
+            try {
+                const text = new TextDecoder().decode(payload);
+                addLog(`[CONTROL] Payload: ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`, 'control');
+
+                const data = JSON.parse(text);
+                displayFSRSResults(data);
+
+                if (data.type === 'select_due_cards_result') {
+                    const wordCount = data.result?.cards?.length || 0;
+                    addLog(`[CONTROL] Received ${wordCount} words`, 'control');
+                }
+            } catch (error) {
+                addLog(`[CONTROL] Parse error: ${error.message}`, 'error');
+                console.error('Control frame error:', error);
+            }
+        }
+
+        // Handle audio frames
+        function handleAudioFrame(payload, sequence) {
+            frameCount++;
+            document.getElementById('frameCount').textContent = frameCount;
+
+            // Check for gaps or duplicates
+            if (receivedSequences.includes(sequence)) {
+                duplicateCount++;
+                document.getElementById('duplicateCount').textContent = duplicateCount;
+                addLog(`[AUDIO] Duplicate frame ${sequence}`, 'audio');
+                return;
+            }
+
+            if (receivedSequences.length > 0) {
+                const lastSeq = receivedSequences[receivedSequences.length - 1];
+                if (sequence > lastSeq + 1) {
+                    gapCount++;
+                    document.getElementById('gapCount').textContent = gapCount;
+                    addLog(`[AUDIO] Gap detected: missing ${lastSeq + 1} to ${sequence - 1}`, 'audio');
+                }
+            }
+
+            receivedSequences.push(sequence);
+            addLog(`[AUDIO] Frame ${sequence} (${payload.length} bytes)`, 'audio');
+
+            // Play audio if context is available
+            if (audioContext && payload.length === AudioFrameSize) {
+                playAudioFrame(payload);
+            }
+        }
+
+        // Handle error frames
+        function handleErrorFrame(payload) {
+            try {
+                const text = new TextDecoder().decode(payload);
+                addLog(`[ERROR] ${text}`, 'error');
+            } catch (error) {
+                addLog(`[ERROR] Unable to parse error message`, 'error');
+            }
+        }
+
+        // Display FSRS results
+        function displayFSRSResults(data) {
+            const resultsArea = document.getElementById('fsrsResults');
+
+            if (data.type === 'select_due_cards_result') {
+                const cards = data.result?.cards || [];
+
+                if (cards.length === 0) {
+                    resultsArea.textContent = 'No due words found';
+                    return;
+                }
+
+                let output = `Found ${cards.length} due words:\n\n`;
+                cards.forEach((card, index) => {
+                    output += `${index + 1}. ${card.word}\n`;
+                    output += `   Meaning: ${card.meaning}\n`;
+                    if (card.example) {
+                        output += `   Example: ${card.example}\n`;
+                    }
+                    output += '\n';
+                });
+
+                resultsArea.textContent = output;
+            } else {
+                resultsArea.textContent = JSON.stringify(data, null, 2);
+            }
+        }
+
+        // Request due cards from FSRS
+        function requestDueCards() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('Cannot send: WebSocket not connected', 'error');
+                return;
+            }
+
+            const limit = parseInt(document.getElementById('wordCount').value) || 20;
+
+            const payload = JSON.stringify({
+                type: 'select_due_cards',
+                params: {
+                    limit: limit,
+                    category: '',
+                    units: [],
+                    fetch_lock_hours: 0.5
+                }
+            });
+
+            const header = {
+                version: ProtocolVersion,
+                msgType: MsgType.Control,
+                sequence: nextSequence(),
+                timestamp: Math.floor(Date.now() / 1000),
+                payloadLen: payload.length,
+                reserved: 0
+            };
+
+            const frame = buildFrame(header, payload);
+
+            try {
+                ws.send(frame);
+                addLog(`[CONTROL] Sent select_due_cards request (limit=${limit})`, 'control');
+                document.getElementById('getWordsBtn').textContent = 'Loading...';
+                document.getElementById('getWordsBtn').disabled = true;
+
+                // Reset button after timeout
+                setTimeout(() => {
+                    document.getElementById('getWordsBtn').textContent = 'Get Due Words';
+                    document.getElementById('getWordsBtn').disabled = false;
+                }, 5000);
+            } catch (error) {
+                addLog(`Send failed: ${error.message}`, 'error');
+                document.getElementById('getWordsBtn').textContent = 'Get Due Words';
+                document.getElementById('getWordsBtn').disabled = false;
+            }
+        }
+
+        // Play audio frame using Web Audio API
+        function playAudioFrame(pcmData) {
+            if (!audioContext) {
+                return;
+            }
+
+            try {
+                const audioBuffer = audioContext.createBuffer(
+                    1, // mono channel
+                    AudioFrameSize / 2, // 640 bytes = 320 samples @ 16-bit
+                    16000 // 16kHz sample rate
+                );
+
+                const channelData = audioBuffer.getChannelData(0);
+                const view = new DataView(pcmData.buffer);
+
+                // Convert 16-bit PCM to float32 normalized to [-1, 1]
+                for (let i = 0; i < AudioFrameSize / 2; i++) {
+                    const sample = view.getInt16(i * 2, false); // big-endian
+                    channelData[i] = sample / 32768.0;
+                }
+
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start();
+
+                addLog('[AUDIO] Playing frame', 'audio');
+            } catch (error) {
+                addLog(`[AUDIO] Playback error: ${error.message}`, 'error');
+                console.error('Audio playback error:', error);
+            }
+        }
+
+        // Play test audio (synthesize test tone)
+        function playTestAudio() {
+            if (!audioContext) {
+                initAudioContext();
+            }
+
+            if (!audioContext) {
+                addLog('[AUDIO] Failed to initialize audio', 'error');
+                return;
+            }
+
+            try {
+                // Generate 440Hz sine wave (1 second)
+                const sampleRate = audioContext.sampleRate || 16000;
+                const duration = 1.0;
+                const numSamples = sampleRate * duration;
+
+                const audioBuffer = audioContext.createBuffer(1, numSamples, sampleRate);
+                const channelData = audioBuffer.getChannelData(0);
+
+                for (let i = 0; i < numSamples; i++) {
+                    const t = i / sampleRate;
+                    channelData[i] = 0.3 * Math.sin(2 * Math.PI * 440 * t);
+                }
+
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start();
+
+                addLog('[AUDIO] Playing test tone (440Hz)', 'audio');
+                document.getElementById('audioStatus').textContent = 'Playing test tone...';
+
+                source.onended = () => {
+                    document.getElementById('audioStatus').textContent = 'Ready';
+                };
+            } catch (error) {
+                addLog(`[AUDIO] Test tone error: ${error.message}`, 'error');
+                console.error('Test tone error:', error);
+            }
+        }
+
+        // Initialize Web Audio API (must be triggered by user interaction)
+        function initAudioContext() {
+            try {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                audioContext = new AudioContextClass();
+                audioEnabled = true;
+
+                document.getElementById('audioStatus').textContent = 'Ready';
+                document.getElementById('playAudioBtn').disabled = false;
+
+                addLog('[AUDIO] Web Audio API initialized', 'status');
+            } catch (error) {
+                addLog(`[AUDIO] Failed to initialize Web Audio API: ${error.message}`, 'error');
+                console.error('Audio context error:', error);
+            }
+        }
+
+        // Initialize audio context on first user interaction
+        document.addEventListener('click', function initAudioOnClick(e) {
+            if (!audioEnabled && (e.target.id === 'connectBtn' || e.target.id === 'playAudioBtn')) {
+                initAudioContext();
+                document.removeEventListener('click', initAudioOnClick);
+            }
+        }, { once: true });
+
+        // Handle page unload
+        window.addEventListener('beforeunload', () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close(1000, 'Page closed');
+            }
+        });
+
+        // Initial log message
+        addLog('Test interface loaded. Click "Connect" to begin.', 'status');
+    </script>
+</body>
+</html>
