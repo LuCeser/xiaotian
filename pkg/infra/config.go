@@ -130,17 +130,6 @@ type Config struct {
 	FSRS FSRSConfig `json:"fsrs" mapstructure:"fsrs"`
 }
 
-// WSConfig tunes the Go service's WebSocket runtime (P0-1). It carries only
-// operational fields; the wildcard origin "*" is forbidden at BOTH this layer
-// and ws.ServerConfig.Validate (D-24). DefaultConfig supplies dev-safe origins
-// [localhost, 127.0.0.1] so the service boots without an operator-supplied ws:
-// block — there is intentionally NO "origins required" check here (the defaults
-// always win when the operator leaves it empty).
-//
-// The MaxMessageBytes / *BufferSize fields default to ZERO (not 65551/4096) so
-// ws.NewServer applies its own semantic defaults via its "treat 0 as
-// use-default" branch. This keeps infra as the default/override layer and ws as
-// the semantic-default layer (double validation per the P0-1 design decision).
 // DatabaseConfig tunes the SQLite storage layer (Phase 4). Holds only the
 // operational path; pragmas (WAL, busy_timeout, foreign_keys) are NOT
 // configurable here — they are correctness-critical and owned by
@@ -155,6 +144,17 @@ type DatabaseConfig struct {
 	Path string `json:"path" mapstructure:"path"`
 }
 
+// WSConfig tunes the Go service's WebSocket runtime (P0-1). It carries only
+// operational fields; the wildcard origin "*" is forbidden at BOTH this layer
+// and ws.ServerConfig.Validate (D-24). DefaultConfig supplies dev-safe origins
+// [localhost, 127.0.0.1] so the service boots without an operator-supplied ws:
+// block — there is intentionally NO "origins required" check here (the defaults
+// always win when the operator leaves it empty).
+//
+// The MaxMessageBytes / *BufferSize fields default to ZERO (not 65551/4096) so
+// ws.NewServer applies its own semantic defaults via its "treat 0 as
+// use-default" branch. This keeps infra as the default/override layer and ws as
+// the semantic-default layer (double validation per the P0-1 design decision).
 type WSConfig struct {
 	// AllowedOrigins is the Origin whitelist (D-24). Default ["localhost",
 	// "127.0.0.1"]. The wildcard "*" is rejected by Validate. ws.ServerConfig
