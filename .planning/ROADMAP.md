@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: WebSocket Communication Layer** - Persistent connections with binary audio frame support (completed 2026-07-19)
 - [x] **Phase 3: Python CLI Integration** - Subprocess bridge to vocab_manager and TTS generation (completed 2026-08-01)
 - [x] **Phase 4: Database Schema Design** - SQLite schema for vocabulary and FSRS metadata (completed 2026-08-01)
-- [ ] **Phase 5: FSRS Core Implementation** - Automatic due word selection and parameter updates
+- [x] **Phase 5: FSRS Core Implementation** - Automatic due word selection and parameter updates (completed 2026-08-02)
 - [ ] **Phase 6: TTS Audio Streaming** - Real-time audio delivery with <1.5s latency
 - [ ] **Phase 7: Session State Management** - Complete session lifecycle and state transitions
 - [ ] **Phase 8: Student Web Interface** - Responsive iPad-optimized student experience
@@ -170,7 +170,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 05-02-PLAN.md — FSRSService orchestration layer (pkg/fsrs) + main.go wiring (FSRS-01, FSRS-02, FSRS-03, FSRS-04, D-01/D-02/D-02-a/D-04/D-05)
+- [x] 05-02-PLAN.md — FSRSService orchestration layer (pkg/fsrs) + main.go wiring (FSRS-01, FSRS-02, FSRS-03, FSRS-04, D-01/D-02/D-02-a/D-04/D-05)
 
 **PROJECT_MODE**: mvp
 
@@ -300,7 +300,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 2. WebSocket Communication Layer | 1/3 | Complete    | 2026-07-19 |
 | 3. Python CLI Integration | 5/5 | Complete    | 2026-08-01 |
 | 4. Database Schema Design | 5/5 | Complete    | 2026-08-01 |
-| 5. FSRS Core Implementation | 1/2 | In Progress|  |
+| 5. FSRS Core Implementation | 2/2 | Complete    | 2026-08-02 |
 | 6. TTS Audio Streaming | 0/0 | Not started | - |
 | 7. Session State Management | 0/0 | Not started | - |
 | 8. Student Web Interface | 0/0 | Not started | - |

@@ -16,10 +16,10 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 
 ### FSRS Integration
 
-- [ ] **FSRS-01**: System automatically selects due words based on spaced repetition algorithm
-- [ ] **FSRS-02**: System supports configurable word count limits (20-30 words default)
-- [ ] **FSRS-03**: System implements fetch-lock pattern for session isolation
-- [ ] **FSRS-04**: System updates FSRS parameters based on parent feedback ratings
+- [x] **FSRS-01**: System automatically selects due words based on spaced repetition algorithm
+- [x] **FSRS-02**: System supports configurable word count limits (20-30 words default)
+- [x] **FSRS-03**: System implements fetch-lock pattern for session isolation
+- [x] **FSRS-04**: System updates FSRS parameters based on parent feedback ratings
 
 ### Real-time Dictation
 
@@ -109,10 +109,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | VOC-02 | Phase 9 | Pending |
 | VOC-03 | Phase 9 | Pending |
 | VOC-04 | Phase 4 | Complete |
-| FSRS-01 | Phase 5 | Pending |
-| FSRS-02 | Phase 5 | Pending |
-| FSRS-03 | Phase 5 | Pending |
-| FSRS-04 | Phase 5 | Pending |
+| FSRS-01 | Phase 5 | Complete |
+| FSRS-02 | Phase 5 | Complete |
+| FSRS-03 | Phase 5 | Complete |
+| FSRS-04 | Phase 5 | Complete |
 | DICT-01 | Phase 8 | Pending |
 | DICT-02 | Phase 7 | Pending |
 | DICT-03 | Phase 6 | Pending |
