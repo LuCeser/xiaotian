@@ -246,7 +246,7 @@ func TestGenerateForSession_PregenerateFails(t *testing.T) {
 }
 
 // Test 4: GenerateForSession with a fake Executor returning 3 paths but the codec failing on the 2nd path still generates and caches words 1 and 3 (the 2nd is skipped after retries)
-// NOTE: Full retry logic is implemented in Task 2. For now, this test uses a selective mock that succeeds on word1 and word3 but fails on word2.
+// With retry logic implemented (Task 2), this test verifies that word2 fails all retry attempts while word1 and word3 succeed.
 func TestGenerateForSession_CodecFailsOnSecondWord(t *testing.T) {
 	exec := &fakeExecutor{
 		pregenerateResult: pybridge.PregenResult{
@@ -259,12 +259,10 @@ func TestGenerateForSession_CodecFailsOnSecondWord(t *testing.T) {
 		t.Fatalf("NewSessionCache failed: %v", err)
 	}
 
-	// Use a selective mock that succeeds on specific paths, fails on others
-	callCount := 0
+	// Mock that tracks which MP3 path is being converted and fails consistently on word2
 	convertMock := func(mp3Path string, opts ConvertOpts) (PCMData, error) {
-		callCount++
-		// Fail only on word2 (second call)
-		if callCount == 2 {
+		// Fail on word2 (all retries)
+		if mp3Path == "/tmp/word2.mp3" {
 			return PCMData{}, ErrPCMConversionFailed
 		}
 		// Succeed on word1 and word3
@@ -303,7 +301,7 @@ func TestGenerateForSession_CodecFailsOnSecondWord(t *testing.T) {
 		t.Error("result missing key 'word1' (should have succeeded)")
 	}
 	if _, ok := result["word2"]; ok {
-		t.Error("result has key 'word2' (should have been skipped)")
+		t.Error("result has key 'word2' (should have been skipped after retries)")
 	}
 	if _, ok := result["word3"]; !ok {
 		t.Error("result missing key 'word3' (should have succeeded)")
@@ -317,7 +315,7 @@ func TestGenerateForSession_CodecFailsOnSecondWord(t *testing.T) {
 
 	_, err = cache.Load(sessionID, "word2")
 	if err == nil {
-		t.Error("word2 should NOT be cached (conversion failed)")
+		t.Error("word2 should NOT be cached (all retries failed)")
 	}
 
 	_, err = cache.Load(sessionID, "word3")
@@ -449,4 +447,300 @@ func TestNewGenerator_NilExecutor(t *testing.T) {
 	if !errors.Is(err, ErrTTSGenerationFailed) {
 		t.Errorf("expected ErrTTSGenerationFailed, got %v", err)
 	}
+}
+
+// Task 2 Tests: Retry-skip logic + error classification + session cleanup helper
+
+// Test 1: retryConvert with convertFn failing ErrFFmpegNotFound on all 3 attempts returns ErrFFmpegNotFound and does not succeed (ffmpeg missing is not retryable)
+func TestRetryConvert_FFmpegNotFound_NoRetry(t *testing.T) {
+	exec := &fakeExecutor{
+		pregenerateResult: pybridge.PregenResult{
+			Paths: []string{"/tmp/word1.mp3"},
+		},
+	}
+
+	cache, err := NewSessionCache(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionCache failed: %v", err)
+	}
+
+	// Mock that always returns ErrFFmpegNotFound
+	convertMock := func(mp3Path string, opts ConvertOpts) (PCMData, error) {
+		return PCMData{}, ErrFFmpegNotFound
+	}
+
+	cfg := infra.DefaultConfig().TTS
+	logger := infra.NewNoOpLogger()
+
+	generator, err := NewGenerator(exec, cache, logger, cfg)
+	if err != nil {
+		t.Fatalf("NewGenerator failed: %v", err)
+	}
+
+	generator.convertFn = convertMock
+
+	ctx := context.Background()
+	sessionID := "test-session"
+	words := []string{"word1"}
+
+	result, err := generator.GenerateForSession(ctx, sessionID, words)
+	// Should succeed overall but skip the word
+	if err != nil {
+		t.Fatalf("GenerateForSession should succeed with skipped words, got error: %v", err)
+	}
+
+	// Result should be empty (word was skipped)
+	if len(result) != 0 {
+		t.Errorf("expected empty result (word skipped), got %d entries", len(result))
+	}
+}
+
+// Test 2: retryConvert with convertFn failing ErrPCMConversionFailed on first 2 attempts but succeeding on 3rd returns the PCM data successfully
+func TestRetryConvert_PCMConversionFailed_RetriesSucceed(t *testing.T) {
+	exec := &fakeExecutor{
+		pregenerateResult: pybridge.PregenResult{
+			Paths: []string{"/tmp/word1.mp3"},
+		},
+	}
+
+	cache, err := NewSessionCache(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionCache failed: %v", err)
+	}
+
+	// Mock that fails twice then succeeds
+	callCount := 0
+	convertMock := func(mp3Path string, opts ConvertOpts) (PCMData, error) {
+		callCount++
+		if callCount <= 2 {
+			return PCMData{}, ErrPCMConversionFailed
+		}
+		return PCMData{
+			Samples:   []byte{0x00, 0x01},
+			FrameSize: 640,
+		}, nil
+	}
+
+	cfg := infra.DefaultConfig().TTS
+	logger := infra.NewNoOpLogger()
+
+	generator, err := NewGenerator(exec, cache, logger, cfg)
+	if err != nil {
+		t.Fatalf("NewGenerator failed: %v", err)
+	}
+
+	generator.convertFn = convertMock
+
+	ctx := context.Background()
+	sessionID := "test-session"
+	words := []string{"word1"}
+
+	result, err := generator.GenerateForSession(ctx, sessionID, words)
+	if err != nil {
+		t.Fatalf("GenerateForSession failed: %v", err)
+	}
+
+	// Should have 1 successful result
+	if len(result) != 1 {
+		t.Errorf("expected 1 result (after retries), got %d", len(result))
+	}
+
+	// Verify the word was cached
+	_, err = cache.Load(sessionID, "word1")
+	if err != nil {
+		t.Errorf("word1 should be cached after successful retries, got error: %v", err)
+	}
+
+	// Should have called convertFn 3 times (2 failures + 1 success)
+	if callCount != 3 {
+		t.Errorf("expected 3 calls (2 retries + 1 success), got %d", callCount)
+	}
+}
+
+// Test 3: retryConvert with convertFn failing context.DeadlineExceeded on all attempts skips after MaxRetries and logs each attempt
+func TestRetryConvert_Timeout_SkipsAfterRetries(t *testing.T) {
+	exec := &fakeExecutor{
+		pregenerateResult: pybridge.PregenResult{
+			Paths: []string{"/tmp/word1.mp3"},
+		},
+	}
+
+	cache, err := NewSessionCache(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionCache failed: %v", err)
+	}
+
+	// Mock that always times out
+	convertMock := func(mp3Path string, opts ConvertOpts) (PCMData, error) {
+		return PCMData{}, context.DeadlineExceeded
+	}
+
+	cfg := infra.DefaultConfig().TTS
+	logger := infra.NewNoOpLogger()
+
+	generator, err := NewGenerator(exec, cache, logger, cfg)
+	if err != nil {
+		t.Fatalf("NewGenerator failed: %v", err)
+	}
+
+	generator.convertFn = convertMock
+
+	ctx := context.Background()
+	sessionID := "test-session"
+	words := []string{"word1"}
+
+	result, err := generator.GenerateForSession(ctx, sessionID, words)
+	// Should succeed overall but skip the word
+	if err != nil {
+		t.Fatalf("GenerateForSession should succeed with skipped words, got error: %v", err)
+	}
+
+	// Result should be empty (word was skipped after retries)
+	if len(result) != 0 {
+		t.Errorf("expected empty result (word skipped after retries), got %d entries", len(result))
+	}
+
+	// Verify the word was NOT cached
+	_, err = cache.Load(sessionID, "word1")
+	if err == nil {
+		t.Error("word1 should NOT be cached (all retries failed)")
+	}
+}
+
+// Test 4: GenerateForSession logs a warning with word_id and error_type fields for each skipped word
+func TestRetryConvert_LogsWarningForSkippedWords(t *testing.T) {
+	exec := &fakeExecutor{
+		pregenerateResult: pybridge.PregenResult{
+			Paths: []string{"/tmp/word1.mp3"},
+		},
+	}
+
+	cache, err := NewSessionCache(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionCache failed: %v", err)
+	}
+
+	// Mock that always fails
+	convertMock := func(mp3Path string, opts ConvertOpts) (PCMData, error) {
+		return PCMData{}, ErrPCMConversionFailed
+	}
+
+	// Use a logger that captures warnings
+	var loggedWarnings []string
+	logger := &captureLogger{
+		warnFunc: func(msg string, fields ...infra.Field) {
+			loggedWarnings = append(loggedWarnings, msg)
+		},
+	}
+
+	cfg := infra.DefaultConfig().TTS
+
+	generator, err := NewGenerator(exec, cache, logger, cfg)
+	if err != nil {
+		t.Fatalf("NewGenerator failed: %v", err)
+	}
+
+	generator.convertFn = convertMock
+
+	ctx := context.Background()
+	sessionID := "test-session"
+	words := []string{"word1"}
+
+	_, err = generator.GenerateForSession(ctx, sessionID, words)
+	if err != nil {
+		t.Fatalf("GenerateForSession should succeed with skipped words, got error: %v", err)
+	}
+
+	// Should have logged at least one warning for the skipped word
+	if len(loggedWarnings) == 0 {
+		t.Error("expected warning log for skipped word, got none")
+	}
+}
+
+// Test 5: CleanupSession method on Generator calls cache.Cleanup(sessionID) and returns nil on success
+func TestCleanupSession_Success(t *testing.T) {
+	exec := &fakeExecutor{}
+	cache, err := NewSessionCache(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionCache failed: %v", err)
+	}
+
+	cfg := infra.DefaultConfig().TTS
+	logger := infra.NewNoOpLogger()
+
+	generator, err := NewGenerator(exec, cache, logger, cfg)
+	if err != nil {
+		t.Fatalf("NewGenerator failed: %v", err)
+	}
+
+	ctx := context.Background()
+	sessionID := "test-session"
+
+	err = generator.CleanupSession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("CleanupSession failed: %v", err)
+	}
+}
+
+// Test 6: CleanupSession is idempotent (calling twice does not error)
+func TestCleanupSession_Idempotent(t *testing.T) {
+	exec := &fakeExecutor{}
+	cache, err := NewSessionCache(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionCache failed: %v", err)
+	}
+
+	cfg := infra.DefaultConfig().TTS
+	logger := infra.NewNoOpLogger()
+
+	generator, err := NewGenerator(exec, cache, logger, cfg)
+	if err != nil {
+		t.Fatalf("NewGenerator failed: %v", err)
+	}
+
+	ctx := context.Background()
+	sessionID := "test-session"
+
+	// First cleanup
+	err = generator.CleanupSession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("first CleanupSession failed: %v", err)
+	}
+
+	// Second cleanup (should not error)
+	err = generator.CleanupSession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("second CleanupSession failed (should be idempotent): %v", err)
+	}
+}
+
+// captureLogger is a test helper that captures log calls for verification
+type captureLogger struct {
+	warnFunc func(msg string, fields ...infra.Field)
+}
+
+func (l *captureLogger) Debug(msg string, fields ...infra.Field) {
+	// Ignore debug logs
+}
+
+func (l *captureLogger) Info(msg string, fields ...infra.Field) {
+	// Ignore info logs
+}
+
+func (l *captureLogger) Warn(msg string, fields ...infra.Field) {
+	if l.warnFunc != nil {
+		l.warnFunc(msg, fields...)
+	}
+}
+
+func (l *captureLogger) Error(msg string, fields ...infra.Field) {
+	// Ignore error logs
+}
+
+func (l *captureLogger) With(fields ...infra.Field) infra.Logger {
+	return l
+}
+
+func (l *captureLogger) Sync() error {
+	return nil
 }

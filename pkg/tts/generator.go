@@ -96,19 +96,14 @@ func (g *Generator) GenerateForSession(ctx context.Context, sessionID string, wo
 			}
 		}
 
-		// Convert with retry (will be implemented in Task 2)
-		pcmData, err := g.convertFn(mp3Path, ConvertOpts{
-			SampleRate: 16000,
-			Channels:   1,
-			BigEndian:  true,
-		})
-
+		// Convert with retry using retryConvert
+		pcmData, err := g.retryConvert(ctx, mp3Path)
 		if err != nil {
-			// For now, just log and skip (retry logic added in Task 2)
-			g.logger.Warn("word conversion failed, skipping",
+			// Log warning for skipped word (exhausted retries or non-retryable error)
+			g.logger.Warn("word generation failed after retries, skipping",
 				infra.F("component", "tts.generator"),
 				infra.F("word_id", wordID),
-				infra.ErrField(err),
+				infra.F("error_type", err.Error()),
 			)
 			continue
 		}
@@ -128,4 +123,86 @@ func (g *Generator) GenerateForSession(ctx context.Context, sessionID string, wo
 	}
 
 	return result, nil
+}
+
+// retryConvert attempts to convert an MP3 file to PCM with retries.
+// It loops up to MaxRetries times, classifying errors to determine retryability:
+// - ErrFFmpegNotFound: returns immediately (infrastructure failure, not retryable)
+// - context.DeadlineExceeded: retries with logging
+// - Other errors: retries with logging
+// Returns the last error wrapped in ErrTTSGenerationFailed after all retries exhausted.
+func (g *Generator) retryConvert(ctx context.Context, mp3Path string) (PCMData, error) {
+	var lastErr error
+
+	// Retry counter starts at 1 for natural log messages ("attempt 1/3", "attempt 2/3", etc.)
+	for attempt := 1; attempt <= g.cfg.MaxRetries; attempt++ {
+		// Attempt conversion
+		pcmData, err := g.convertFn(mp3Path, ConvertOpts{
+			SampleRate: 16000,
+			Channels:   1,
+			BigEndian:  true,
+		})
+
+		if err == nil {
+			// Success! Return immediately
+			return pcmData, nil
+		}
+
+		lastErr = err
+
+		// Classify error to determine retryability
+		if errors.Is(err, ErrFFmpegNotFound) {
+			// Infrastructure failure - not retryable
+			g.logger.Error("ffmpeg not found on PATH, aborting",
+				infra.F("component", "tts.generator"),
+				infra.F("attempt", attempt),
+				infra.ErrField(err),
+			)
+			return PCMData{}, err
+		}
+
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Timeout - log and retry
+			g.logger.Debug("TTS generation attempt timed out",
+				infra.F("component", "tts.generator"),
+				infra.F("attempt", attempt),
+				infra.F("max_retries", g.cfg.MaxRetries),
+			)
+			// Continue to next retry
+		} else {
+			// Other error (e.g., ErrPCMConversionFailed) - log and retry
+			g.logger.Warn("TTS generation attempt failed",
+				infra.F("component", "tts.generator"),
+				infra.F("attempt", attempt),
+				infra.F("max_retries", g.cfg.MaxRetries),
+				infra.ErrField(err),
+			)
+			// Continue to next retry
+		}
+	}
+
+	// All retries exhausted
+	return PCMData{}, errors.Wrap(lastErr, "word generation exhausted retries")
+}
+
+// CleanupSession removes the session's PCM cache directory.
+// It delegates to cache.Cleanup and logs the operation. This gives the session
+// lifecycle (Phase 7) a single entry point to clean up TTS resources.
+// Idempotent: calling multiple times on the same sessionID is safe.
+func (g *Generator) CleanupSession(ctx context.Context, sessionID string) error {
+	g.logger.Info("cleaning up TTS session",
+		infra.F("component", "tts.generator"),
+		infra.F("session_id", sessionID),
+	)
+
+	if err := g.cache.Cleanup(sessionID); err != nil {
+		g.logger.Error("failed to cleanup session",
+			infra.F("component", "tts.generator"),
+			infra.F("session_id", sessionID),
+			infra.ErrField(err),
+		)
+		return err
+	}
+
+	return nil
 }
