@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 06
-current_phase_name: TTS Audio Streaming
-status: executing
-stopped_at: Phase 6 context gathered
-last_updated: "2026-08-02T13:06:46.438Z"
-last_activity: 2026-08-02
-last_activity_desc: Phase 06 execution resumed (wave continue)
+current_phase: 07.1
+current_phase_name: Research and fix iOS WebSocket audio playback issues for iPad Safari browsers
+status: pending
+stopped_at:
+last_updated: "2026-08-08T05:00:00.000Z"
+last_activity: 2026-08-08
+last_activity_desc: Phase 06 complete - TTS audio streaming pipeline fully integrated
 progress:
-  total_phases: 6
-  completed_phases: 5
+  total_phases: 7
+  completed_phases: 6
   total_plans: 27
-  completed_plans: 24
+  completed_plans: 27
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2025-07-18)
 
 **Core value:** Students receive personalized, real-time dictation practice with immediate feedback while parents get detailed progress tracking and the ability to influence the learning algorithm through their reviews.
-**Current focus:** Phase 06 — TTS Audio Streaming
+**Current focus:** Phase 07.1 — iOS WebSocket audio playback issues (INSERTED)
 
 ## Current Position
 
-Phase: 06 (TTS Audio Streaming) — EXECUTING
-Plan: 1 of 4
-Status: Executing Phase 06
-Last activity: 2026-08-02 — Phase 06 execution resumed (wave continue)
+Phase: 06 (TTS Audio Streaming) — COMPLETE
+Plan: 4/4
+Status: Phase 06 complete - advancing to Phase 07.1
+Last activity: 2026-08-08 — Phase 06 complete - all TTS pipeline plans executed
 
-Progress: [██████████░] 90%
+Progress: [███████████████████] 100%
 
 ## Performance Metrics
 
@@ -120,6 +120,10 @@ None yet.
 | 260801-ge1 | 接入 WebSocket 运行时(P0-1) | 2026-08-01 | bfb24d3 | Verified | [260801-ge1-websocket-p0-1](./quick/260801-ge1-websocket-p0-1/) |
 | 260801-kdq | 根治 ws TestHubStopsOnContextCancel flake | 2026-08-01 | b65ad5e | | [260801-kdq-ws-testhubstopsoncontextcancel-flake](./quick/260801-kdq-ws-testhubstopsoncontextcancel-flake/) |
 | 260802-ldq | 创建最小化前端验证界面，用于测试WebSocket连接、FSRS单词选择和TTS音频流播放 | 2026-08-02 | ad599a5 | Verified | [260802-ldq-websocket-fsrs-tts](./quick/260802-ldq-websocket-fsrs-tts/) |
+
+### Roadmap Evolution
+
+- Phase 07.1 inserted after Phase 7: Research and fix iOS WebSocket audio playback issues for iPad Safari browsers (URGENT)
 
 ## Deferred Items
 

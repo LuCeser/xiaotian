@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Python CLI Integration** - Subprocess bridge to vocab_manager and TTS generation (completed 2026-08-01)
 - [x] **Phase 4: Database Schema Design** - SQLite schema for vocabulary and FSRS metadata (completed 2026-08-01)
 - [x] **Phase 5: FSRS Core Implementation** - Automatic due word selection and parameter updates (completed 2026-08-02)
-- [ ] **Phase 6: TTS Audio Streaming** - Real-time audio delivery with <1.5s latency
+- [x] **Phase 6: TTS Audio Streaming** - Real-time audio delivery with <1.5s latency (completed 2026-08-08)
 - [ ] **Phase 7: Session State Management** - Complete session lifecycle and state transitions
 - [ ] **Phase 8: Student Web Interface** - Responsive iPad-optimized student experience
 - [ ] **Phase 9: Parent Vocabulary Management** - Add/edit/organize vocabulary with FSRS configuration
@@ -186,7 +186,7 @@ Plans:
   3. Audio streaming integrates with WebSocket binary frame protocol
   4. TTS generation errors are caught and reported without session crashes
 
-**Plans**: 3/4 plans executed
+**Plans**: 4/4 plans executed
 
 Plans:
 **Wave 1**
@@ -200,7 +200,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 06-04-PLAN.md — End-to-end main.go wiring + control frame handlers + latency validation (DICT-03, DICT-05)
+- [x] 06-04-PLAN.md — End-to-end main.go wiring + control frame handlers + latency validation (DICT-03, DICT-05)
 
 **PROJECT_MODE**: mvp
 
@@ -219,6 +219,17 @@ Plans:
 **Plans**: TBD
 
 **PROJECT_MODE**: mvp
+
+### Phase 07.1: Research and fix iOS WebSocket audio playback issues for iPad Safari browsers (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 7
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.1 to break down)
 
 ### Phase 8: Student Web Interface
 
