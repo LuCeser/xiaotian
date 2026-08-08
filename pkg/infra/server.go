@@ -117,6 +117,12 @@ type Server struct {
 
 	// running is true between Start and Shutdown. Guarded by mu.
 	running bool
+
+	// connStats is the optional Hub-backed connection-stats provider (D-04
+	// option-a). When set, Snapshot reads live Hub counts instead of the
+	// soft-deprecated registry. Zero-value nil falls back to registry.Stats()
+	// so existing tests that do not call SetConnectionStatsProvider keep working.
+	connStats func() ConnectionStats
 }
 
 // NewServer constructs a Server from cfg and logger. It validates cfg
@@ -225,31 +231,19 @@ func (s *Server) Start(ctx context.Context) error {
 	// close-channel teardown. WorkerPool reads ctx directly (its worker
 	// loop selects on ctx.Done()).
 	memCtx, memCancel := context.WithCancel(ctx)
-	regCtx, regCancel := context.WithCancel(ctx)
 	s.memCancel = memCancel
-	s.regCancel = regCancel
 
 	if err := s.memMonitor.Start(memCtx); err != nil {
-		// Roll back: clear cancels and running flag so the caller can
+		// Roll back: clear cancel and running flag so the caller can
 		// retry after fixing whatever caused the failure.
 		memCancel()
-		regCancel()
 		s.mu.Lock()
 		s.running = false
 		s.mu.Unlock()
 		return errors.Wrap(err, "start memory monitor")
 	}
-	if err := s.registry.Start(regCtx); err != nil {
-		memCancel()
-		regCancel()
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-		return errors.Wrap(err, "start connection registry")
-	}
 	if err := s.workers.Start(ctx); err != nil {
 		memCancel()
-		regCancel()
 		s.mu.Lock()
 		s.running = false
 		s.mu.Unlock()
@@ -322,11 +316,29 @@ func (s *Server) Snapshot() ServerSnapshot {
 			Percent:    pct,
 		},
 		Pool:         s.pool.Stats(),
-		Connections:  s.registry.Stats(),
+		Connections:  s.connectionStats(),
 		Workers:      s.workers.Stats(),
 		LoadShedding: s.loadShedding.Load(),
 		Uptime:       time.Since(s.startedAt),
 	}
+}
+
+// connectionStats returns the Hub-backed connection counts when a provider
+// has been registered via SetConnectionStatsProvider (D-04 option-a), else
+// falls back to the soft-deprecated registry so existing tests keep working.
+func (s *Server) connectionStats() ConnectionStats {
+	if s.connStats != nil {
+		return s.connStats()
+	}
+	return s.registry.Stats()
+}
+
+// SetConnectionStatsProvider wires a Hub-backed connection-stats provider
+// (D-04 option-a). After this call, Snapshot reads live Hub connection counts
+// instead of the dead registry's always-0 map. Call after Hub construction,
+// before the first /metrics scrape (see main.go composition root).
+func (s *Server) SetConnectionStatsProvider(fn func() ConnectionStats) {
+	s.connStats = fn
 }
 
 // LoadShedding reports whether the MemoryMonitor's threshold has been

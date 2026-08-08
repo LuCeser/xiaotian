@@ -251,6 +251,67 @@ func TestServerSnapshot(t *testing.T) {
 	}
 }
 
+// TestSnapshot_HubConnections verifies the D-04 metrics provider:
+// SetConnectionStatsProvider routes Snapshot().Connections through a
+// Hub-backed closure (option-a) instead of the soft-deprecated registry.
+func TestSnapshot_HubConnections(t *testing.T) {
+	cfg := fastServerConfig()
+	srv, err := NewServer(cfg, newFakeLogger())
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
+	srv.SetConnectionStatsProvider(func() ConnectionStats {
+		return ConnectionStats{Active: 42, TotalAccepted: 100, TotalRejected: 5, TotalCleaned: 3}
+	})
+
+	snap := srv.Snapshot()
+	if snap.Connections.Active != 42 {
+		t.Errorf("Connections.Active: got %d, want 42", snap.Connections.Active)
+	}
+	if snap.Connections.TotalAccepted != 100 {
+		t.Errorf("Connections.TotalAccepted: got %d, want 100", snap.Connections.TotalAccepted)
+	}
+	if snap.Connections.TotalRejected != 5 {
+		t.Errorf("Connections.TotalRejected: got %d, want 5", snap.Connections.TotalRejected)
+	}
+	if snap.Connections.TotalCleaned != 3 {
+		t.Errorf("Connections.TotalCleaned: got %d, want 3", snap.Connections.TotalCleaned)
+	}
+}
+
+// TestSnapshot_ConnectionStatsFallback verifies that without a provider,
+// Snapshot falls back to registry.Stats() so existing behavior is preserved.
+func TestSnapshot_ConnectionStatsFallback(t *testing.T) {
+	cfg := fastServerConfig()
+	srv, err := NewServer(cfg, newFakeLogger())
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
+	// No provider set — should fall back to registry.Stats().
+	snap := srv.Snapshot()
+	if snap.Connections.Active != 0 {
+		t.Errorf("Fallback Connections.Active: got %d, want 0 (empty registry)", snap.Connections.Active)
+	}
+}
+
 // TestServerRejectsNilLogger proves D-47 (no global logger state): callers
 // must inject a non-nil Logger. Passing nil returns ErrInvalidServerConfig.
 func TestServerRejectsNilLogger(t *testing.T) {

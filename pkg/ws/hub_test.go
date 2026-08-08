@@ -336,3 +336,78 @@ func TestHubConcurrentRegisterUnregister(t *testing.T) {
 // (waitForGoroutineIncrease / waitForGoroutineDrain, now deleted): it waits on
 // a behaviour-based condition rather than a goroutine count, removing the OS-
 // scheduler timing dependence that caused the full-suite flake.
+
+// TestHub_Stats verifies the D-04 metrics counters (atomic.Uint64) track
+// accept/reject/unregister correctly. The Hub is the single source of truth
+// for connection lifecycle after D-04 option-a soft-deprecated
+// ConnectionRegistry from the metrics path.
+func TestHub_Stats(t *testing.T) {
+	cfg := HubConfig{
+		Limit:            2,
+		RegisterBuffer:   32,
+		UnregisterBuffer: 32,
+	}
+
+	hub, _ := NewHub(cfg, zap.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go hub.Run(ctx)
+
+	// Register two clients (fills capacity).
+	client1 := &Client{
+		send:      make(chan []byte, 16),
+		closeOnce: sync.Once{},
+		conn:      &fakeConnForHeartbeat{},
+		hub:       hub,
+		logger:    zap.NewNop(),
+	}
+	client2 := &Client{
+		send:      make(chan []byte, 16),
+		closeOnce: sync.Once{},
+		conn:      &fakeConnForHeartbeat{},
+		hub:       hub,
+		logger:    zap.NewNop(),
+	}
+	hub.Register(client1)
+	hub.Register(client2)
+
+	if !waitFor(t, 2*time.Second, "2 clients accepted", func() bool { return hub.Clients() == 2 }) {
+		t.Fatalf("Expected 2 clients, got %d", hub.Clients())
+	}
+
+	// Third client should be rejected at capacity limit.
+	client3 := &Client{
+		send:      make(chan []byte, 16),
+		closeOnce: sync.Once{},
+		conn:      &fakeConnForHeartbeat{},
+		hub:       hub,
+		logger:    zap.NewNop(),
+	}
+	hub.Register(client3)
+
+	if !waitFor(t, 2*time.Second, "TotalRejected == 1", func() bool { return hub.Stats().TotalRejected == 1 }) {
+		t.Fatalf("Expected TotalRejected == 1, got %d", hub.Stats().TotalRejected)
+	}
+
+	// Unregister client1.
+	hub.Unregister(client1)
+	if !waitFor(t, 2*time.Second, "TotalCleaned == 1", func() bool { return hub.Stats().TotalCleaned == 1 }) {
+		t.Fatalf("Expected TotalCleaned == 1, got %d", hub.Stats().TotalCleaned)
+	}
+
+	// Final snapshot: Active==1, TotalAccepted==2, TotalRejected==1, TotalCleaned==1.
+	stats := hub.Stats()
+	if stats.Active != 1 {
+		t.Errorf("Expected Active == 1, got %d", stats.Active)
+	}
+	if stats.TotalAccepted != 2 {
+		t.Errorf("Expected TotalAccepted == 2, got %d", stats.TotalAccepted)
+	}
+	if stats.TotalRejected != 1 {
+		t.Errorf("Expected TotalRejected == 1, got %d", stats.TotalRejected)
+	}
+	if stats.TotalCleaned != 1 {
+		t.Errorf("Expected TotalCleaned == 1, got %d", stats.TotalCleaned)
+	}
+}

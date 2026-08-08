@@ -6,9 +6,11 @@ package ws
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"go.uber.org/zap"
 )
 
@@ -76,6 +78,13 @@ type Hub struct {
 	// unregister channels: doing so would make Run receive nil values and busy-loop.
 	closeMu sync.RWMutex
 	closed  bool
+
+	// totalAccepted/totalRejected/totalCleaned track connection lifecycle
+	// events for the /metrics endpoint (D-04 option-a Hub-backed metrics).
+	// Incremented atomically in Run(); read by Stats().
+	totalAccepted atomic.Uint64
+	totalRejected atomic.Uint64
+	totalCleaned  atomic.Uint64
 }
 
 // NewHub creates a new Hub with the given configuration (D-42 constructor DI).
@@ -117,6 +126,7 @@ func (h *Hub) Run(ctx context.Context) {
 			if len(h.clients) >= h.limit {
 				h.mu.Unlock()
 				// Reject client at capacity (D-04 graceful rejection)
+				h.totalRejected.Add(1) // D-04: track for /metrics
 				_ = c.Close(websocket.CloseTryAgainLater, "server full")
 				h.logger.Info("hub rejected client at capacity",
 					zap.Int("limit", h.limit))
@@ -125,6 +135,7 @@ func (h *Hub) Run(ctx context.Context) {
 
 			// Accept client
 			h.clients[c] = true
+			h.totalAccepted.Add(1) // D-04: track for /metrics
 			total := len(h.clients) // CR-07: capture under lock; reading after Unlock races future writers
 			h.mu.Unlock()
 			h.logger.Info("hub registered client",
@@ -135,6 +146,7 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mu.Lock()
 			if _, ok := h.clients[c]; ok {
 				delete(h.clients, c)
+				h.totalCleaned.Add(1) // D-04: track for /metrics
 				total := len(h.clients) // CR-07: capture under lock
 				h.mu.Unlock()
 				// Signal writePump to exit by closing the send channel (close-safe, CR-04)
@@ -242,4 +254,20 @@ func (h *Hub) Clients() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
+}
+
+// Stats returns a snapshot of the hub's connection lifecycle counters (D-04
+// option-a Hub-backed metrics). Active is sampled under the read lock; the
+// monotonic counters are read atomically. Called by Server.Snapshot via the
+// connection-stats provider wired in main.go.
+func (h *Hub) Stats() infra.ConnectionStats {
+	h.mu.RLock()
+	active := len(h.clients)
+	h.mu.RUnlock()
+	return infra.ConnectionStats{
+		Active:        active,
+		TotalAccepted: h.totalAccepted.Load(),
+		TotalRejected: h.totalRejected.Load(),
+		TotalCleaned:  h.totalCleaned.Load(),
+	}
 }
