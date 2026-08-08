@@ -216,7 +216,20 @@ Plans:
   3. Sessions properly transition between states based on user actions and timeouts
   4. Timeout-based cleanup removes stale sessions without resource leaks
 
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 07-01-PLAN.md — pkg/session skeleton + FSM transition table + NewSession init (DICT-02, DICT-04, D-01/D-03/D-05/D-09/D-11)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07-02-PLAN.md — Session event loop + D-10 exit defer + per-state timeouts + Manager sweeper (DICT-04, ERR-03, D-02/D-08/D-10/D-13)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07-03-PLAN.md — D-04 metrics rewiring + D-06 WorkerPool audit + composition root wiring (ERR-03, D-04/D-06, resolves P0-2 + P1-3)
 
 **PROJECT_MODE**: mvp
 
@@ -327,7 +340,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 4. Database Schema Design | 5/5 | Complete    | 2026-08-01 |
 | 5. FSRS Core Implementation | 2/2 | Complete    | 2026-08-02 |
 | 6. TTS Audio Streaming | 4/4 | Complete    | 2026-08-08 |
-| 7. Session State Management | 0/0 | Not started | - |
+| 7. Session State Management | 0/3 | Not started | - |
 | 8. Student Web Interface | 0/0 | Not started | - |
 | 9. Parent Vocabulary Management | 0/0 | Not started | - |
 | 10. Parent Feedback System | 0/0 | Not started | - |
