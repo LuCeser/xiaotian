@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,18 @@ type FrameSender interface {
 	// Send sends a single binary WebSocket message. Returns an error if the
 	// send buffer is full or the connection is closed.
 	Send(msg []byte) error
+}
+
+// TTSSessionGenerator is the subset of *tts.Generator the Session uses for its
+// lifecycle (batch-generate at init, cleanup at exit). *tts.Generator satisfies
+// this interface structurally. Defined as a narrow seam so tests can inject a
+// fake generator (mirrors FrameSender, D-05/D-01) without constructing a real
+// *tts.Generator with private pybridge internals.
+type TTSSessionGenerator interface {
+	// GenerateForSession batch-generates PCM audio for the word list.
+	GenerateForSession(ctx context.Context, sessionID string, words []string) (map[string]string, error)
+	// CleanupSession removes the session's TTS cache directory (idempotent).
+	CleanupSession(ctx context.Context, sessionID string) error
 }
 
 // EventType represents the kind of event pushed onto a Session's event channel

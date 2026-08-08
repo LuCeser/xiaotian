@@ -1,0 +1,89 @@
+package session
+
+import (
+	"fmt"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/database"
+)
+
+// transition applies a user/system-driven FSM transition per DICT-04, D-03.
+//
+// It is a pure state-machine function: on a valid transition it mutates s.state
+// (and s.wordIndex where applicable) and returns nil; on an invalid (state,
+// event) pair it returns an error wrapping ErrInvalidTransition WITHOUT
+// mutating any field. Callers MUST detect the sentinel via errors.Is (DICT-04,
+// D-03).
+//
+// D-03 mandates a flat typed-enum switch — NOT a state-pattern interface and
+// NOT an external FSM library (both explicitly rejected). This table encodes
+// the ~15 enumerated user/system-driven transitions from RESEARCH.md §"FSM
+// Transition Table". Timeout/Cancel are loop-level signals handled by the event
+// loop (Plan 02), not the FSM table; they return nil here so the loop decides
+// to exit without the FSM terminating it.
+//
+// deadline is NOT updated here — that is done by the caller (the event-loop
+// transition wrapper in Plan 02). Keep this function a pure state machine.
+func (s *Session) transition(ev SessionEvent) error {
+	// Timeout/Cancel are loop-level signals, not FSM transitions. Return nil so
+	// the event loop (Plan 02) decides to exit; transition() never terminates
+	// the loop itself.
+	if ev.Type == EventTimeout || ev.Type == EventCancel {
+		return nil
+	}
+
+	switch s.state {
+	case database.StateIdle:
+		switch ev.Type {
+		case EventControlFrame:
+			if ev.ControlType == "play_word" {
+				s.wordIndex = 0
+				s.state = database.StateListening
+				return nil
+			}
+		}
+
+	case database.StateListening:
+		switch ev.Type {
+		case EventWordComplete:
+			// D-13: system-driven transition. The StreamWord-completion side
+			// channel (Plan 02) pushes WordComplete; the FSM advances to
+			// DICTATING.
+			s.state = database.StateDictating
+			return nil
+		case EventControlFrame:
+			if ev.ControlType == "play_word" {
+				// Replay the same word: stay in LISTENING (no index advance).
+				return nil
+			}
+		}
+
+	case database.StateDictating:
+		switch ev.Type {
+		case EventControlFrame:
+			if ev.ControlType == "next_word" {
+				if s.wordIndex >= len(s.wordQueue)-1 {
+					// Last word exhausted → wait for parent review (D-12: no
+					// UpdateRatings call).
+					s.state = database.StateWaitingParent
+					return nil
+				}
+				s.wordIndex++
+				s.state = database.StateListening
+				return nil
+			}
+		}
+
+	case database.StateWaitingParent:
+		switch ev.Type {
+		case EventParentReview:
+			s.state = database.StateFeedback
+			return nil
+		}
+
+		// FEEDBACK is terminal — no transitions out (a new session is created
+		// for the next round). Any event in FEEDBACK falls through to the
+		// invalid-transition error below.
+	}
+
+	return fmt.Errorf("%w: state=%s event=%v", ErrInvalidTransition, s.state, ev.Type)
+}

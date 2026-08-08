@@ -172,3 +172,38 @@ func (s *fakeFrameSender) Sent() [][]byte {
 }
 
 var _ session.FrameSender = (*fakeFrameSender)(nil)
+
+// fakeTTSGenerator implements session.TTSSessionGenerator for tests: configurable
+// error from GenerateForSession (for the D-10 init-path unlock test) + call
+// counter. *tts.Generator satisfies the interface structurally in production.
+type fakeTTSGenerator struct {
+	mu       sync.Mutex
+	genErr   error
+	genCalls int
+}
+
+func (g *fakeTTSGenerator) GenerateForSession(ctx context.Context, sessionID string, words []string) (map[string]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.genCalls++
+	if g.genErr != nil {
+		return nil, g.genErr
+	}
+	result := make(map[string]string, len(words))
+	for _, w := range words {
+		result[w] = "/fake/" + w + ".pcm"
+	}
+	return result, nil
+}
+
+func (g *fakeTTSGenerator) CleanupSession(ctx context.Context, sessionID string) error {
+	return nil
+}
+
+func (g *fakeTTSGenerator) GenCalls() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.genCalls
+}
+
+var _ session.TTSSessionGenerator = (*fakeTTSGenerator)(nil)
