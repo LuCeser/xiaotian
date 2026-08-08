@@ -1,0 +1,97 @@
+package session
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/database"
+)
+
+// FrameSender is the interface for sending binary WebSocket frames to a client
+// (extracted from ws.Client.Send so pkg/session need not depend on the send
+// contract from pkg/ws — mirroring the tts.Sender import-cycle seam, D-05).
+// *ws.Client satisfies this interface structurally.
+type FrameSender interface {
+	// Send sends a single binary WebSocket message. Returns an error if the
+	// send buffer is full or the connection is closed.
+	Send(msg []byte) error
+}
+
+// EventType represents the kind of event pushed onto a Session's event channel
+// (Phase 7). Modeled on ws.MessageType (uint8 enum + String() switch).
+type EventType uint8
+
+const (
+	// EventControlFrame is a client control frame (play_word / next_word),
+	// carrying the verb in ControlType and the target in WordID.
+	EventControlFrame EventType = 0x01
+	// EventWordComplete signals that TTS streaming for the current word
+	// finished (D-13 system-driven LISTENING→DICTATING transition).
+	EventWordComplete EventType = 0x02
+	// EventTimeout signals a per-state deadline exceeded (handled by the event
+	// loop, not the FSM table). The loop exits and the D-10 defer chain fires.
+	EventTimeout EventType = 0x03
+	// EventCancel signals a client-driven cancel. The loop exits and the D-10
+	// defer chain fires.
+	EventCancel EventType = 0x04
+	// EventParentReview is the parent-review event driving WAITING_PARENT→FEEDBACK.
+	EventParentReview EventType = 0x05
+)
+
+// String returns a human-readable name for the EventType (structured-logging
+// friendly, mirrors ws.MessageType.String()).
+func (e EventType) String() string {
+	switch e {
+	case EventControlFrame:
+		return "control_frame"
+	case EventWordComplete:
+		return "word_complete"
+	case EventTimeout:
+		return "timeout"
+	case EventCancel:
+		return "cancel"
+	case EventParentReview:
+		return "parent_review"
+	default:
+		return fmt.Sprintf("unknown(0x%02x)", uint8(e))
+	}
+}
+
+// SessionEvent is the event pushed onto a Session's events channel. WordID
+// carries the target word for EventControlFrame (play_word) and
+// EventWordComplete; ControlType carries the verb ("play_word" / "next_word")
+// for EventControlFrame; Payload is the raw JSON params if any.
+type SessionEvent struct {
+	Type        EventType
+	WordID      string
+	ControlType string
+	Payload     json.RawMessage
+}
+
+// State is a convenience alias for database.SessionState so the FSM and event
+// loop can write StateIdle / StateListening without the database package prefix
+// (no import cycle: database only imports infra).
+type State = database.SessionState
+
+// Sentinel errors returned by the session layer. Callers MUST detect them via
+// errors.Is, never by string matching (D-04, mirrors the tts/database
+// conventions). Each is wrapped at the call site so the sentinel stays
+// reachable through the error chain.
+var (
+	// ErrInvalidTransition is returned by the FSM transition() table for an
+	// (state, event) pair that is not a valid user/system-driven transition.
+	ErrInvalidTransition = errors.New("session: invalid state transition")
+
+	// ErrNoDueWords is returned by NewSession when SelectDueCards returns an
+	// empty slice (D-02-a: empty means none due, not a SelectDueCards error).
+	ErrNoDueWords = errors.New("session: no due words")
+
+	// ErrSessionClosed is returned when operating on a Session whose event loop
+	// has exited.
+	ErrSessionClosed = errors.New("session: closed")
+
+	// ErrManagerAlreadyRunning is returned by Manager.Start when the sweeper is
+	// already running (CompareAndSwap guard).
+	ErrManagerAlreadyRunning = errors.New("session: manager already running")
+)

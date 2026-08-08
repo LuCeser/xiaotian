@@ -78,6 +78,11 @@ type Config struct {
 	// Session bounds the active session count (D-56, RES-03).
 	Session SessionConfig `json:"session" mapstructure:"session"`
 
+	// SessionTimeout tunes the per-state FSM timeouts for dictation sessions
+	// (Phase 7, D-08/D-09). Sibling to Session (registry concerns stay separate
+	// from FSM concerns).
+	SessionTimeout SessionTimeoutConfig `json:"sessionTimeout" mapstructure:"sessionTimeout"`
+
 	// Buffer tunes the audio buffer pool (D-69, D-71, D-73).
 	Buffer BufferConfig `json:"buffer" mapstructure:"buffer"`
 
@@ -324,6 +329,52 @@ func (c FSRSConfig) Validate() error {
 	return nil
 }
 
+// SessionTimeoutConfig tunes the per-state FSM timeouts for dictation sessions
+// (Phase 7, D-08/D-09). Each field bounds how long a Session may remain in the
+// corresponding state before the event loop exits and the D-10 defer chain
+// fires. It is a sibling to SessionConfig (registry/connection concerns) so
+// FSM tuning never interacts with the connection-count bounds.
+type SessionTimeoutConfig struct {
+	// IdleStateTimeout bounds the IDLE state (default 30m). MUST be > 0.
+	IdleStateTimeout time.Duration `json:"idleStateTimeout" mapstructure:"idleStateTimeout"`
+	// ListeningStateTimeout bounds the LISTENING state (default 30s). MUST be > 0.
+	ListeningStateTimeout time.Duration `json:"listeningStateTimeout" mapstructure:"listeningStateTimeout"`
+	// DictatingStateTimeout bounds the DICTATING state (default 30s). MUST be > 0.
+	DictatingStateTimeout time.Duration `json:"dictatingStateTimeout" mapstructure:"dictatingStateTimeout"`
+	// WaitingParentStateTimeout bounds the WAITING_PARENT state (default 30m). MUST be > 0.
+	WaitingParentStateTimeout time.Duration `json:"waitingParentStateTimeout" mapstructure:"waitingParentStateTimeout"`
+	// FeedbackStateTimeout bounds the FEEDBACK state (default 5m). MUST be > 0.
+	FeedbackStateTimeout time.Duration `json:"feedbackStateTimeout" mapstructure:"feedbackStateTimeout"`
+}
+
+// Validate enforces that every per-state timeout is strictly positive (D-04
+// fail-fast). On any failure it returns an error wrapping ErrConfigInvalid so
+// callers branch with errors.Is(err, infra.ErrConfigInvalid). Independently
+// callable from Config.Validate (mirrors FSRSConfig.Validate).
+func (c SessionTimeoutConfig) Validate() error {
+	if c.IdleStateTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("session.idleStateTimeout must be > 0, got %v", c.IdleStateTimeout))
+	}
+	if c.ListeningStateTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("session.listeningStateTimeout must be > 0, got %v", c.ListeningStateTimeout))
+	}
+	if c.DictatingStateTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("session.dictatingStateTimeout must be > 0, got %v", c.DictatingStateTimeout))
+	}
+	if c.WaitingParentStateTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("session.waitingParentStateTimeout must be > 0, got %v", c.WaitingParentStateTimeout))
+	}
+	if c.FeedbackStateTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("session.feedbackStateTimeout must be > 0, got %v", c.FeedbackStateTimeout))
+	}
+	return nil
+}
+
 // TTSConfig tunes the TTS audio streaming layer (Phase 6, D-10). It carries
 // only operational fields — session cache directory, retry counts, timeouts,
 // and prefetch depth — and is intentionally devoid of credentials; the
@@ -526,6 +577,13 @@ func DefaultConfig() Config {
 			MaxConcurrent:   100,
 			IdleTimeout:     5 * time.Minute,
 			CleanupInterval: 30 * time.Second,
+		},
+		SessionTimeout: SessionTimeoutConfig{
+			IdleStateTimeout:          30 * time.Minute,
+			ListeningStateTimeout:     30 * time.Second,
+			DictatingStateTimeout:     30 * time.Second,
+			WaitingParentStateTimeout: 30 * time.Minute,
+			FeedbackStateTimeout:      5 * time.Minute,
 		},
 		Buffer: BufferConfig{
 			AudioFrameBytes: 640,
@@ -854,6 +912,14 @@ func (c Config) Validate() error {
 		return err
 	}
 
+	// Session FSM timeouts (Phase 7, D-09). SessionTimeoutConfig.Validate
+	// enforces positive durations so a malformed HTA_SESSIONTIMEOUT_* value
+	// fails boot rather than producing an instant-timeout session (D-04
+	// fail-fast). Delegated to the sub-struct so it is independently callable.
+	if err := c.SessionTimeout.Validate(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -959,6 +1025,15 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"tts.maxRetries",
 		"tts.generationTimeout",
 		"tts.prefetchCount",
+		// Phase 7 session FSM per-state timeouts (D-09). Pitfall 6: every leaf
+		// MUST be bound explicitly or HTA_SESSIONTIMEOUT_* env vars are silently
+		// inert. Keys mirror the mapstructure path of SessionTimeoutConfig
+		// (Config.SessionTimeout -> sessionTimeout.*).
+		"sessionTimeout.idleStateTimeout",
+		"sessionTimeout.listeningStateTimeout",
+		"sessionTimeout.dictatingStateTimeout",
+		"sessionTimeout.waitingParentStateTimeout",
+		"sessionTimeout.feedbackStateTimeout",
 		// Database path (Phase 4).
 		"database.path",
 	}
