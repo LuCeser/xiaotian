@@ -48,17 +48,17 @@ created: 2026-08-08
 | 7-01-fsm-invalid | 01 | 1 | DICT-04 | — | invalid transition must NOT mutate state | unit (table-driven) | `go test ./pkg/session/ -run TestTransition_Invalid -x` | ❌ W0 | ⬜ pending |
 | 7-02-init-due | 01 | 1 | DICT-02 | — | N/A | unit | `go test ./pkg/session/ -run TestNewSession_SelectDueCards -x` | ❌ W0 | ⬜ pending |
 | 7-02-init-ttsfail | 01 | 1 | DICT-02/D-10 | — | init failure releases FSRS lock | unit | `go test ./pkg/session/ -run TestNewSession_TTSFailure_Unlocks -x` | ❌ W0 | ⬜ pending |
-| 7-03-wordcomplete | 01 | 2 | DICT-04/D-13 | — | N/A | unit | `go test ./pkg/session/ -run TestEventLoop_WordComplete -x` | ❌ W0 | ⬜ pending |
-| 7-03-lastword | 01 | 2 | DICT-04 | — | N/A | unit | `go test ./pkg/session/ -run TestEventLoop_LastWord -x` | ❌ W0 | ⬜ pending |
-| 7-03-streamword | 01 | 2 | D-13 | — | N/A | unit | `go test ./pkg/session/ -run TestEventLoop_StreamWordCompletion -x` | ❌ W0 | ⬜ pending |
-| 7-04-timeout | 01 | 2 | ERR-03 | — | N/A | unit (short timeouts) | `go test ./pkg/session/ -run TestEventLoop_Timeout -x` | ❌ W0 | ⬜ pending |
-| 7-04-sweeper | 01 | 2 | ERR-03 | — | leaked session cancelled | unit | `go test ./pkg/session/ -run TestManager_Sweeper -x` | ❌ W0 | ⬜ pending |
-| 7-04-noleak | 01 | 2 | ERR-03 | — | no goroutine leak across lifecycle | unit + goleak | `go test ./pkg/session/ -run TestSession_NoGoroutineLeak -x` | ❌ W0 | ⬜ pending |
-| 7-05-exitdefer | 01 | 2 | D-10 | — | every exit path: UnlockCards + TTS cleanup + hub.Unregister | unit (subtests per exit path) | `go test ./pkg/session/ -run TestExitDefer -x` | ❌ W0 | ⬜ pending |
-| 7-05-freshctx | 01 | 2 | D-10/D-11 | — | deferred unlock uses fresh ctx (survives run-ctx cancel) | unit | `go test ./pkg/session/ -run TestReleaseFSRSLock_FreshContext -x` | ❌ W0 | ⬜ pending |
-| 7-05-norating | 01 | 2 | D-11/D-12 | — | exit does NOT call UpdateRatings | unit | `go test ./pkg/session/ -run TestExit_NoRatingCommit -x` | ❌ W0 | ⬜ pending |
-| 7-06-metrics | 01 | 3 | D-04 | — | Hub counts feed ServerSnapshot.Connections | unit | `go test ./pkg/infra/ -run TestSnapshot_HubConnections -x` | ❌ W0 | ⬜ pending |
-| 7-07-audit | 01 | 3 | D-06 | — | DB audit writes via WorkerPool.Submit | unit | `go test ./pkg/session/ -run TestAuditViaWorkerPool -x` | ❌ W0 | ⬜ pending |
+| 7-03-wordcomplete | 02 | 2 | DICT-04/D-13 | — | N/A | unit | `go test ./pkg/session/ -run TestEventLoop_WordComplete -x` | ❌ W0 | ⬜ pending |
+| 7-03-lastword | 02 | 2 | DICT-04 | — | N/A | unit | `go test ./pkg/session/ -run TestEventLoop_LastWord -x` | ❌ W0 | ⬜ pending |
+| 7-03-streamword | 02 | 2 | D-13 | — | N/A | unit | `go test ./pkg/session/ -run TestEventLoop_StreamWordCompletion -x` | ❌ W0 | ⬜ pending |
+| 7-04-timeout | 02 | 2 | ERR-03 | — | N/A | unit (short timeouts) | `go test ./pkg/session/ -run TestEventLoop_Timeout -x` | ❌ W0 | ⬜ pending |
+| 7-04-sweeper | 02 | 2 | ERR-03 | — | leaked session cancelled | unit | `go test ./pkg/session/ -run TestManager_Sweeper -x` | ❌ W0 | ⬜ pending |
+| 7-04-noleak | 02 | 2 | ERR-03 | — | no goroutine leak across lifecycle | unit + goleak | `go test ./pkg/session/ -run TestSession_NoGoroutineLeak -x` | ❌ W0 | ⬜ pending |
+| 7-05-exitdefer | 02 | 2 | D-10 | — | every exit path: UnlockCards + TTS cleanup + hub.Unregister | unit (subtests per exit path) | `go test ./pkg/session/ -run TestExitDefer -x` | ❌ W0 | ⬜ pending |
+| 7-05-freshctx | 02 | 2 | D-10/D-11 | — | deferred unlock uses fresh ctx (survives run-ctx cancel) | unit | `go test ./pkg/session/ -run TestReleaseFSRSLock_FreshContext -x` | ❌ W0 | ⬜ pending |
+| 7-05-norating | 02 | 2 | D-11/D-12 | — | exit does NOT call UpdateRatings | unit | `go test ./pkg/session/ -run TestExit_NoRatingCommit -x` | ❌ W0 | ⬜ pending |
+| 7-06-metrics | 03 | 3 | D-04 | — | Hub counts feed ServerSnapshot.Connections | unit | `go test ./pkg/infra/ -run TestSnapshot_HubConnections -x` | ❌ W0 | ⬜ pending |
+| 7-07-audit | 03 | 3 | D-06 | — | DB audit writes via WorkerPool.Submit | unit | `go test ./pkg/session/ -run TestAuditViaWorkerPool -x` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 

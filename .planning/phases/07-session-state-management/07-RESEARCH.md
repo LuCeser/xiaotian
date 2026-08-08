@@ -682,19 +682,17 @@ func (s *Session) run(ctx context.Context) {
 
 **Note:** All code signatures, struct fields, method names, file paths, and line ranges cited as `[VERIFIED]` were read from source this session. The only `[CITED]` claim is Go stdlib `time.After` semantics (confirmed via `go doc`).
 
-## Open Questions
+## Open Questions (RESOLVED — addressed in 07-01/02/03-PLAN.md)
 
-1. **Connection ctx plumbing (Pitfall 6 / A5) — planner must resolve**
+1. **Connection ctx plumbing (Pitfall 6 / A5) — RESOLVED:** Plan 02-T1 `Start(ctx)` derives the run-loop ctx from the per-connection ctx; Plan 03-T3 handler passes the connection ctx into `NewSession`. Plan 02-T2 `TestExitDefer/Cancel` verifies the cancel propagates so disconnect cancels the session.
    - What we know: `HandleWebSocket` creates `ctx, cancel := context.WithCancel(r.Context())` (`server.go:207`) and passes it to `readPump`/`writePump`. The Router passes the connection ctx to Handlers (`router.go:136`).
    - What's unclear: How does the Session receive this ctx? The session-control handler (reworked `handleStartSession`) receives `ctx` as a Handler arg — but that's the Router-worker ctx, which may outlive the connection. Need to verify whether `readPump`'s ctx cancel propagates to in-flight Router tasks (it should, since Router stores the caller's ctx in `frameTask` per `router.go:160`). **Recommendation:** the Session's `run()` ctx should derive from the same ctx the control-frame handler received, so disconnect cancels it. Planner: trace `readPump` ctx → Router frameTask.ctx → Handler ctx → Session.NewSession(ctx) and confirm the cancel propagates.
 
-2. **DB session ID vs runtime session UUID**
+2. **DB session ID vs runtime session UUID — RESOLVED:** Plan 01-T3 `Session` struct holds both `dbID int64` (for audit `UpdateState`/`AppendEvent`) and `id string` (UUID, for TTS/FSRS scope + logging). They are independent; the DB row is audit-only (D-06).
    - What we know: `database.Session.ID` is `int64` (autoincrement); the runtime needs a string UUID for TTS session dir + FSRS scope.
-   - Recommendation: Session holds both — `dbID int64` (for audit `UpdateState`/`AppendEvent`) and `sessionID string` (UUID, for TTS/FSRS scope + logging). They are independent; the DB row is audit-only (D-06).
 
-3. **`Metadata` JSON column usage**
+3. **`Metadata` JSON column usage — RESOLVED (planner's discretion):** Plan 01-T3 writes `{"session_uuid":"...","lock_category":"...","lock_unit":"...","word_count":N}` for Phase-10 replay traceability.
    - What we know: `database.Session.Metadata` is a JSON string column (`schema.go:42`). Built for Phase 7 extensibility.
-   - Recommendation: store `{"session_uuid":"...","lock_category":"...","lock_unit":"...","word_count":N}` for Phase-10 replay traceability. Planner's discretion.
 
 ## Environment Availability
 
