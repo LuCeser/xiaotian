@@ -198,3 +198,52 @@ func TestSessionCache_FileNaming_WordsStoredAsWordIDpcm(t *testing.T) {
 		t.Fatalf("PCM file not found at expected path: %s", expectedPath)
 	}
 }
+
+// TestSessionCache_RejectsPathTraversal_T0602 verifies T-06-02: Store and Load
+// must reject sessionID/wordID values that could escape baseDir via path
+// traversal ("..", "/", "\", dot segments) or contain disallowed characters.
+func TestSessionCache_RejectsPathTraversal_T0602(t *testing.T) {
+	baseDir := t.TempDir()
+	cache, err := NewSessionCache(baseDir, nil)
+	if err != nil {
+		t.Fatalf("NewSessionCache() returned error: %v", err)
+	}
+
+	// Each entry must be rejected by both Store and Load.
+	malicious := []string{
+		"..",
+		"../escape",
+		"foo/../bar",
+		"/etc/passwd",
+		"foo/bar",
+		`foo\bar`,
+		"word.pcm",      // dots not in allow-list
+		"session;rm -rf", // shell metacharacters
+		"",               // empty
+		"has space",
+	}
+
+	for _, bad := range malicious {
+		if err := cache.Store(bad, "word", []byte{0x00}); err == nil {
+			t.Errorf("Store(sessionID=%q) returned nil, want validation error", bad)
+		}
+		if err := cache.Store("session-1", bad, []byte{0x00}); err == nil {
+			t.Errorf("Store(wordID=%q) returned nil, want validation error", bad)
+		}
+		if _, err := cache.Load(bad, "word"); err == nil {
+			t.Errorf("Load(sessionID=%q) returned nil, want validation error", bad)
+		}
+		if _, err := cache.Load("session-1", bad); err == nil {
+			t.Errorf("Load(wordID=%q) returned nil, want validation error", bad)
+		}
+	}
+
+	// Sanity: valid identifiers (matching the server-generated session format
+	// and FSRS word strings) are still accepted.
+	valid := []string{"session-1786173984419", "hello", "word_1", "A-B_c9"}
+	for _, good := range valid {
+		if err := cache.Store(good, good, []byte{0x00}); err != nil {
+			t.Errorf("Store(valid=%q) returned unexpected error: %v", good, err)
+		}
+	}
+}

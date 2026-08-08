@@ -3,11 +3,31 @@ package tts
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
+
+// identPattern is the allow-list for sessionID and wordID identifiers used to
+// form filesystem paths. Restricted to alphanumeric, hyphen, and underscore so
+// that path separators ("/", "\") and traversal segments ("..") cannot reach
+// filepath.Join (T-06-02 path-traversal mitigation).
+var identPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// validateIdent rejects empty identifiers or any identifier containing
+// characters outside the allow-list. This prevents sessionID/wordID values
+// supplied via control frames from escaping baseDir through path traversal.
+func validateIdent(name, value string) error {
+	if value == "" {
+		return errors.Errorf("%s cannot be empty", name)
+	}
+	if !identPattern.MatchString(value) {
+		return errors.Errorf("%s contains invalid characters; only alphanumeric, hyphen, and underscore are allowed", name)
+	}
+	return nil
+}
 
 // SessionCache manages PCM file storage per D-02/D-08. Each session gets a
 // subdirectory under baseDir, and words are stored as {wordID}.pcm files.
@@ -38,11 +58,11 @@ func NewSessionCache(baseDir string, logger infra.Logger) (*SessionCache, error)
 // Creates parent directories via os.MkdirAll with 0755 permissions. Returns an
 // error wrapping os.WriteFile failures.
 func (c *SessionCache) Store(sessionID string, wordID string, pcm []byte) error {
-	if sessionID == "" {
-		return errors.New("sessionID cannot be empty")
+	if err := validateIdent("sessionID", sessionID); err != nil {
+		return err
 	}
-	if wordID == "" {
-		return errors.New("wordID cannot be empty")
+	if err := validateIdent("wordID", wordID); err != nil {
+		return err
 	}
 
 	sessionDir := c.SessionDir(sessionID)
@@ -65,11 +85,11 @@ func (c *SessionCache) Store(sessionID string, wordID string, pcm []byte) error 
 // does not exist (os.IsNotExist), returns ErrWordNotCached. Otherwise returns
 // the file bytes.
 func (c *SessionCache) Load(sessionID string, wordID string) ([]byte, error) {
-	if sessionID == "" {
-		return nil, errors.New("sessionID cannot be empty")
+	if err := validateIdent("sessionID", sessionID); err != nil {
+		return nil, err
 	}
-	if wordID == "" {
-		return nil, errors.New("wordID cannot be empty")
+	if err := validateIdent("wordID", wordID); err != nil {
+		return nil, err
 	}
 
 	filePath := filepath.Join(c.baseDir, sessionID, wordID+".pcm")
