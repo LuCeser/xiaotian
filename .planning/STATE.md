@@ -103,6 +103,7 @@ Recent decisions affecting current work:
 - [ ] **解决 WorkerPool 建而不用** — 无任何 Submit 调用，接线 or 登记 deferred（评审 P1-3）。`todos/pending/2026-07-25-resolve-workerpool-unused.md`
 - [x] **Phase 4 前定 FSRS+SQLite 所有权** — Python(vocab_manager) 已实现 FSRS+SQLite，Phase 4/5 重新定义范围，需 ADR（评审 P1-4）。`todos/pending/2026-07-25-fsrs-sqlite-ownership-adr.md` → Resolved: ADR created at `.planning/adr/2026-08-01-fsrs-sqlite-ownership.md`
 - [ ] **仓库卫生批处理** — README 漂移 / gitignore 根级二进制 / 残留 .gitkeep 清理（评审 P2-5/P2-6/P3-7）。`todos/pending/2026-07-25-repo-hygiene-readme-gitignore-cleanup.md`
+- [ ] **iOS WebSocket 音频播放问题研究** — iPad Safari 上 WebSocket 流式 TTS 播放问题，需调研当前方案能否达到预期效果。`todos/pending/2026-08-08-research-and-fix-ios-websocket-audio-playback-issues-for-ipa.md`
 
 > 注：评审 P0-1（WS 层未接入运行时，服务监听不到 :8080）未建 todo。
 > **2026-07-25 更新**：Phase 02 手动收尾已完成（02-02/02-03 SUMMARY 补写、flaky test 修复、ROADMAP 3/3）——但这两个计划交付的是 WS *库*（Hub/Client/Server/Router），**并非** main.go 运行时接线。P0-1（main.go 监听 :8080 + mux.HandleFunc("/ws", server.HandleWebSocket)）仍属 **Phase 1 Plan 08** 范围，当前未交付、未建 todo —— 建议后续为 P0-1 单独建 todo。
