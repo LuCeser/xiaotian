@@ -51,6 +51,10 @@ func (f *fakeExecutor) RunPregenerate(_ context.Context, _ pybridge.PregenOpts) 
 	return f.pregenResult, f.pregenErr
 }
 
+func (f *fakeExecutor) RunUnlock(_ context.Context, _ pybridge.UnlockOpts) (pybridge.UnlockResult, error) {
+	return pybridge.UnlockResult{}, nil
+}
+
 // --- NewFSRSService validation ---
 
 func TestNewFSRSServiceValidation(t *testing.T) {

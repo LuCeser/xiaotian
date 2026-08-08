@@ -40,6 +40,10 @@ func (f *fakeExecutor) RunPregenerate(ctx context.Context, opts pybridge.PregenO
 	return f.pregenerateResult, nil
 }
 
+func (f *fakeExecutor) RunUnlock(_ context.Context, _ pybridge.UnlockOpts) (pybridge.UnlockResult, error) {
+	return pybridge.UnlockResult{}, nil
+}
+
 // mockConvertFn is a mock MP3-to-PCM conversion function for testing.
 type mockConvertFn struct {
 	// pcmData is the PCM data to return on success.
