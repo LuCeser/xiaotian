@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 07.1
-current_phase_name: Research and fix iOS WebSocket audio playback issues for iPad Safari browsers
-status: planning
-stopped_at: Phase 7 planned
-last_updated: "2026-08-08T11:10:33.343Z"
+current_phase: 07
+current_phase_name: session-state-management
+status: complete
+stopped_at: Phase 07 complete
+last_updated: "2026-08-08T11:17:31.784Z"
 last_activity: 2026-08-08
-last_activity_desc: Phase 06 complete, transitioned to Phase 07.1
+last_activity_desc: Phase 07 execution complete (3/3 plans)
 progress:
   total_phases: 8
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 30
-  completed_plans: 27
+  completed_plans: 30
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2025-07-18)
 
 **Core value:** Students receive personalized, real-time dictation practice with immediate feedback while parents get detailed progress tracking and the ability to influence the learning algorithm through their reviews.
-**Current focus:** Phase 07.1 — iOS WebSocket audio playback issues (INSERTED)
+**Current focus:** Phase 07 — session-state-management
 
 ## Current Position
 
-Phase: 07.1 — Research and fix iOS WebSocket audio playback issues for iPad Safari browsers
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-08-08 — Phase 06 complete, transitioned to Phase 07.1
+Phase: 07 (session-state-management) — COMPLETE
+Plan: 3 of 3
+Status: Phase 07 complete
+Last activity: 2026-08-08 — Phase 07 execution complete (3/3 plans)
 
 Progress: [███████████████████] 100%
 
@@ -100,8 +100,8 @@ Recent decisions affecting current work:
 
 源自 2026-07-25 架构评审（/architecture）：
 
-- [ ] **统一连接注册表** — `infra.ConnectionRegistry` vs `ws.Hub` 双轨制，需 ADR 拍单一真相源（评审 P0-2）。`todos/pending/2026-07-25-unify-connection-registry-adr.md`
-- [ ] **解决 WorkerPool 建而不用** — 无任何 Submit 调用，接线 or 登记 deferred（评审 P1-3）。`todos/pending/2026-07-25-resolve-workerpool-unused.md`
+- [x] **统一连接注册表** — `infra.ConnectionRegistry` vs `ws.Hub` 双轨制，需 ADR 拍单一真相源（评审 P0-2）。`todos/pending/2026-07-25-unify-connection-registry-adr.md` → Resolved: Phase 07-03 D-04 — Hub is single source of truth; ConnectionRegistry soft-deprecated from metrics path; Hub.Stats() feeds ServerSnapshot via SetConnectionStatsProvider
+- [x] **解决 WorkerPool 建而不用** — 无任何 Submit 调用，接线 or 登记 deferred（评审 P1-3）。`todos/pending/2026-07-25-resolve-workerpool-unused.md` → Resolved: Phase 07-03 D-06 — session.audit.go calls pool.Submit for Create/UpdateState/AppendEvent (first real caller)
 - [x] **Phase 4 前定 FSRS+SQLite 所有权** — Python(vocab_manager) 已实现 FSRS+SQLite，Phase 4/5 重新定义范围，需 ADR（评审 P1-4）。`todos/pending/2026-07-25-fsrs-sqlite-ownership-adr.md` → Resolved: ADR created at `.planning/adr/2026-08-01-fsrs-sqlite-ownership.md`
 - [ ] **仓库卫生批处理** — README 漂移 / gitignore 根级二进制 / 残留 .gitkeep 清理（评审 P2-5/P2-6/P3-7）。`todos/pending/2026-07-25-repo-hygiene-readme-gitignore-cleanup.md`
 - [ ] **iOS WebSocket 音频播放问题研究** — iPad Safari 上 WebSocket 流式 TTS 播放问题，需调研当前方案能否达到预期效果。`todos/pending/2026-08-08-research-and-fix-ios-websocket-audio-playback-issues-for-ipa.md`
