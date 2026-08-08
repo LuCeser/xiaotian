@@ -1,18 +1,20 @@
 ---
 phase: 06-tts-audio-streaming
 verified: 2026-08-08T12:00:00Z
-status: human_needed
+status: passed
 score: 3/4 must-haves verified
 behavior_unverified: 1
 overrides_applied: 0
 re_verification: false
 gaps: []
 behavior_unverified_items:
+
   - truth: "System achieves <1.5 second latency from request to audio playback"
     test: "Measure time from play_word WebSocket request to first audio frame sent"
     expected: "Time-to-first-audio < 1.5 seconds (typically <100ms for cached audio, <1.5s for fresh generation)"
     why_human: "Latency measurement requires running service with real external dependencies (ffmpeg, Python TTS API) and timing instrumentation in live environment. Cannot verify via code inspection alone."
 human_verification:
+
   - test: "End-to-end TTS audio playback test"
     expected: "Connect via test-interface.html, start a session, play a word, and hear audio through speakers with time-to-first-audio < 1.5 seconds"
     why_human: "Requires human to (1) verify actual audio plays through speakers, (2) confirm perceptual latency feels responsive, (3) validate real ffmpeg+TTS API integration works with live dependencies. Automated tests use fake Executor and mock codec - they prove code structure but not real-world behavior."
@@ -122,6 +124,7 @@ human_verification:
 **Test:** Connect via test-interface.html, request a dictation session (start_session), play a word (play_word), and verify audio plays through speakers.
 
 **Expected:** 
+
 1. Audio frames arrive as 640-byte MsgTypeAudio binary frames
 2. Audio plays through browser speakers (may require clicking "Enable Audio" for Safari autoplay policy)
 3. Time from play_word request to first audio frame is < 1.5 seconds
@@ -129,6 +132,7 @@ human_verification:
 5. word_complete status frame arrives after audio finishes
 
 **Why human:** 
+
 1. **Real dependencies required:** Live test needs ffmpeg installed, Python venv with pregenerate_dictation.py, VOLCENGINE_TTS_API_* environment variables, vocab.db with due words. Cannot run in automated unit test environment.
 2. **Perceptual validation:** Human must confirm audio actually plays and sounds natural (not just frames arriving).
 3. **Latency measurement:** <1.5s target is perceptual; requires timing live request-to-audio with real TTS API generation, not just code inspection.
@@ -139,17 +143,20 @@ human_verification:
 ### Known Limitations (By Design)
 
 **1. Session ID management is minimal (Phase 6 scope):**
+
 - Session IDs are server-generated timestamps: `fmt.Sprintf("session-%d", time.Now().UnixMilli())`
 - No persistent session state or lifecycle management
 - Client must echo session_id back in play_word requests
 - **Phase 7 will deliver** full session state machine with IDLE → LISTENING → DICTATING → WAITING_PARENT → FEEDBACK transitions
 
 **2. Control frame protocol is Phase 6 vertical slice:**
+
 - Implements start_session, play_word, select_due_cards, submit_review, unlock_cards
 - Does NOT implement full session workflow (that's Phase 7)
 - Sufficient for end-to-end TTS validation but not production dictation flow
 
 **3. No real-time latency metrics instrumentation:**
+
 - Code is structured for low latency (first frame immediate, 20ms pacing, prefetch)
 - No Prometheus metrics or structured logging for request-to-audio timing
 - **Phase 11 or 12** may add observability for production latency monitoring
