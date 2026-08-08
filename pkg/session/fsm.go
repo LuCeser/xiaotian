@@ -31,6 +31,12 @@ func (s *Session) transition(ev SessionEvent) error {
 		return nil
 	}
 
+	// Protect state+wordIndex so cross-goroutine reads via State() / Deadline()
+	// (sweeper, tests) are race-free against this write (D-02 single-writer with
+	// mutex for -race cleanliness).
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	switch s.state {
 	case database.StateIdle:
 		switch ev.Type {

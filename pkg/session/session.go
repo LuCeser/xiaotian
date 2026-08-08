@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -23,20 +25,41 @@ import (
 // blocking the Router worker.
 const eventBufferSize = 32
 
+// SessionStreamer is the subset of *tts.Streamer the Session uses for D-13
+// word-audio streaming. *tts.Streamer satisfies it structurally. Defined as a
+// narrow seam so tests can inject a fake streamer (mirrors FrameSender, D-05).
+type SessionStreamer interface {
+	// StreamWord delivers audio for a single word to the given client. The
+	// Session owns this call per D-13 option B (server-side side channel).
+	StreamWord(ctx context.Context, client tts.Sender, sessionID string, wordID string, startSeq uint32) error
+}
+
+// SessionHub is the subset of *ws.Hub the Session uses for lifecycle cleanup.
+// *ws.Hub satisfies it structurally. Defined as a narrow seam so tests can
+// inject a fake hub (mirrors FrameSender, D-05).
+type SessionHub interface {
+	// Unregister removes the client from the hub. Non-blocking, idempotent
+	// per CR-01 (checks closed-flag before sending to the channel).
+	Unregister(c *ws.Client)
+}
+
 // Session is the in-memory authority for one dictation session's lifecycle
 // (D-02, D-06). It binds a WS client to an FSRS lock + TTS cache + FSM state.
 //
-// Concurrency contract (D-02): all mutable fields (state, wordQueue, wordIndex,
-// deadline) are written ONLY by the event-loop goroutine (run, implemented in
-// Plan 02). The single-writer discipline means NO mutex is needed on these
-// fields. External readers (the sweeper, tests) use the exported accessors.
+// Concurrency contract (D-02): the mutable FSM fields (state, deadline) are
+// protected by mu. The event-loop goroutine is the sole writer via transition()
+// and onTransition(); external readers (sweeper, tests) use the exported
+// accessors (State, Deadline) which take RLock. wordQueue and wordIndex are
+// accessed only within the event-loop goroutine (single-writer, no mutex
+// needed).
 type Session struct {
 	// --- Identity ---
 	id     string // TTS/FSRS session UUID (crypto/rand hex v4)
 	dbID   int64  // audit row id (best-effort, D-06; may lag behind)
 	connID string
 
-	// --- FSM state (single-writer: the event loop goroutine, D-02) ---
+	// --- FSM state (protected by mu for cross-goroutine reads) ---
+	mu        sync.RWMutex
 	state     database.SessionState
 	wordQueue []pybridge.DueCard
 	wordIndex int
@@ -50,24 +73,26 @@ type Session struct {
 	client   *ws.Client // the FrameSender target + hub identity (D-05)
 	fsrsSvc  fsrs.FSRSService
 	gen      TTSSessionGenerator // *tts.Generator satisfies structurally
-	streamer *tts.Streamer
+	streamer SessionStreamer     // *tts.Streamer satisfies structurally
 	repo     database.SessionRepository
 	pool     *infra.WorkerPool
-	hub      *ws.Hub
+	hub      SessionHub // *ws.Hub satisfies structurally
 	logger   infra.Logger
 	cfg      infra.Config
 
-	// --- Event loop (Plan 02 fills run/cancel; declared here for struct stability) ---
-	events chan SessionEvent
-	runCtx context.Context
-	cancel context.CancelFunc
-	onExit func() // set by Manager.NewSession for map cleanup (Plan 02)
+	// --- Event loop ---
+	events       chan SessionEvent
+	runCtx       context.Context
+	cancel       context.CancelFunc
+	done         chan struct{}      // closed when run() exits (liveness signal for tests/sweeper)
+	streamCancel context.CancelFunc // cancels in-flight StreamWord (set by spawnStreamWord in the loop goroutine)
+	onExit       func()             // set by Manager.NewSession for map cleanup
 }
 
 // NewSession constructs a Session by acquiring the FSRS fetch-lock, generating
 // TTS audio, and recording the audit row. It does NOT spawn the event-loop
-// goroutine — the caller (Manager.NewSession in Plan 02, or the handler in
-// Plan 03) calls s.Start(connCtx) to begin the loop.
+// goroutine — the caller (Manager.NewSession, or the handler in Plan 03) calls
+// s.Start(connCtx) to begin the loop.
 //
 // Init sequence (RESEARCH §"FSRS Lock Integration", DICT-02, D-11):
 //  1. SelectDueCards — acquire the fetch-lock + word queue.
@@ -85,10 +110,10 @@ func NewSession(
 	connID string,
 	fsrsSvc fsrs.FSRSService,
 	gen TTSSessionGenerator,
-	streamer *tts.Streamer,
+	streamer SessionStreamer,
 	repo database.SessionRepository,
 	pool *infra.WorkerPool,
-	hub *ws.Hub,
+	hub SessionHub,
 	logger infra.Logger,
 	cfg infra.Config,
 	selectOpts fsrs.SelectOpts,
@@ -112,7 +137,7 @@ func NewSession(
 
 	// Resolve the effective Category/Unit the same way fsrsService.SelectDueCards
 	// does (Pitfall 4: UnlockCards is Category+Unit scoped, not card-ID). These
-	// resolved values are replayed verbatim at exit (releaseFSRSLock, Plan 02).
+	// resolved values are replayed verbatim at exit (releaseFSRSLock).
 	resolvedCategory := selectOpts.Category
 	if resolvedCategory == "" {
 		resolvedCategory = cfg.FSRS.DefaultCategory
@@ -140,7 +165,7 @@ func NewSession(
 		// The defer chain is NOT installed yet (run() hasn't started), so the
 		// unlock must happen explicitly here. Using the caller's ctx is correct
 		// because it is still live at init time (unlike the deferred unlock in
-		// Plan 02, which needs a fresh ctx — Pitfall 1).
+		// run(), which needs a fresh ctx — Pitfall 1).
 		if _, unlockErr := fsrsSvc.UnlockCards(ctx, fsrs.UnlockOpts{
 			Category: resolvedCategory,
 			Unit:     resolvedUnit,
@@ -180,8 +205,258 @@ func NewSession(
 	// --- Step 6: Audit Create (fire-and-forget via pool.Submit, D-06). ---
 	s.auditCreate()
 
-	// Do NOT spawn go s.run(ctx) — that is Plan 02's responsibility.
+	// Do NOT spawn go s.run(ctx) — the caller does via Start(ctx).
 	return s, nil
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle: Start, run (event loop), Push
+// ---------------------------------------------------------------------------
+
+// Start derives a cancellable context from ctx and spawns the run goroutine.
+// Per Pitfall 6: ctx MUST be the per-connection context so that a WS disconnect
+// cancels the session immediately (firing the D-10 defer chain).
+func (s *Session) Start(ctx context.Context) {
+	s.done = make(chan struct{})
+	s.runCtx, s.cancel = context.WithCancel(ctx)
+	go s.run(s.runCtx)
+}
+
+// run is the single-writer event-loop goroutine (D-02). It mirrors ws.Hub.Run:
+// a for-select on the events channel, a per-state deadline timer, and ctx.Done.
+//
+// The D-10 defer chain is registered at the top of run() in LIFO order so it
+// fires on EVERY exit path (normal return, timeout, ctx cancel, panic):
+//
+//	registration order (LIFO execution):
+//	  1. close(done)            — runs LAST (after recovery)
+//	  2. panic recovery         — catches unrecovered panics → logged
+//	  3. onExit (map cleanup)   — removes the session from the Manager map
+//	  4. releaseFSRSLock        — fresh-ctx UnlockCards (Pitfall 1)
+//	  5. cleanupTTS             — removes TTS cache dir
+//	  6. unregisterFromHub      — runs FIRST (hub identity cleanup)
+func (s *Session) run(ctx context.Context) {
+	// 1. close(done) — registered FIRST → runs LAST.
+	defer func() {
+		if s.done != nil {
+			close(s.done)
+		}
+	}()
+
+	// 2. Panic recovery — without this an unrecovered panic in the session
+	// goroutine crashes the entire process. The three D-10 defers below still
+	// fire during panic unwinding, so D-10's lock release holds; but the
+	// process dies before that matters. Recovery turns a fatal process crash
+	// into a logged + cleaned-up single-session failure (mirrors ws.readPump).
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("session: run panic recovered",
+				infra.F("component", "session"),
+				infra.F("session_id", s.id),
+				infra.F("panic", r),
+				infra.F("stack", string(debug.Stack())),
+			)
+		}
+	}()
+
+	// 3. onExit (map cleanup) — runs after the D-10 cleanup so the session is
+	// fully torn down before map removal.
+	defer func() {
+		if s.onExit != nil {
+			s.onExit()
+		}
+	}()
+
+	// 4-6. D-10 cleanup chain (reverse registration = forward execution).
+	defer s.releaseFSRSLock()   // runs THIRD
+	defer s.cleanupTTS()        // runs SECOND
+	defer s.unregisterFromHub() // runs FIRST
+
+	for {
+		select {
+		case ev := <-s.events:
+			// Timeout/Cancel are loop-level signals — exit immediately (D-10
+			// defer chain fires). transition() returns nil for these but the
+			// loop handles them here rather than delegating.
+			if ev.Type == EventTimeout || ev.Type == EventCancel {
+				return
+			}
+			s.handleEvent(ev)
+
+		// Per-state deadline timer (D-08). Go 1.23+ GC-safe per Pitfall 2.
+		// time.After is re-evaluated on every loop iteration so an onTransition
+		// deadline update is reflected immediately.
+		case <-time.After(time.Until(s.Deadline())):
+			return
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// Push sends an event onto the session's events channel. Non-blocking w/ a
+// ctx.Done guard so a caller cannot block forever if the session has exited.
+func (s *Session) Push(ev SessionEvent) {
+	select {
+	case s.events <- ev:
+	case <-s.runCtx.Done():
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Event processing
+// ---------------------------------------------------------------------------
+
+// handleEvent processes a single non-exit event through the FSM. Invalid
+// transitions are logged and dropped (the session continues — mirrors the
+// "skip malformed, don't kick" philosophy at connection.go:186-189).
+func (s *Session) handleEvent(ev SessionEvent) {
+	if err := s.transition(ev); err != nil {
+		if errors.Is(err, ErrInvalidTransition) {
+			s.logger.Warn("session: dropping invalid transition event",
+				infra.F("component", "session"),
+				infra.F("session_id", s.id),
+				infra.F("event", ev.Type.String()),
+				infra.ErrField(err),
+			)
+			return
+		}
+		s.logger.Error("session: transition error",
+			infra.F("component", "session"),
+			infra.F("session_id", s.id),
+			infra.ErrField(err),
+		)
+		return
+	}
+	s.onTransition()
+}
+
+// onTransition is called after a successful FSM transition. It resets the
+// per-state deadline (D-08), fires the state-change audit (D-06), and spawns
+// the D-13 StreamWord side channel if the new state is LISTENING.
+func (s *Session) onTransition() {
+	s.mu.Lock()
+	s.deadline = time.Now().Add(s.timeoutFor(s.state))
+	newState := s.state
+	s.mu.Unlock()
+
+	s.auditState(newState)
+
+	// D-13: on entering LISTENING, the Session owns the StreamWord call. On its
+	// return, a goroutine pushes WordComplete onto the events channel, driving
+	// the LISTENING→DICTATING system transition.
+	if newState == database.StateListening {
+		s.spawnStreamWord()
+	}
+}
+
+// spawnStreamWord kicks off the D-13 server-side side channel: StreamWord runs
+// in a goroutine, and on its return pushes WordComplete onto the events channel.
+// An in-flight stream (from a replay request) is cancelled first.
+func (s *Session) spawnStreamWord() {
+	if s.streamer == nil {
+		return
+	}
+	// Cancel any in-flight stream (e.g. a replay request replaced the current word).
+	if s.streamCancel != nil {
+		s.streamCancel()
+	}
+
+	wordID := s.wordQueue[s.wordIndex].Word
+	streamCtx, cancel := context.WithCancel(s.runCtx)
+	s.streamCancel = cancel
+
+	go func() {
+		defer cancel()
+		err := s.streamer.StreamWord(streamCtx, s.client, s.id, wordID, 0)
+		if err != nil {
+			s.logger.Warn("session: stream word completed with error",
+				infra.F("component", "session"),
+				infra.F("session_id", s.id),
+				infra.F("word_id", wordID),
+				infra.ErrField(err),
+			)
+		}
+		// Push WordComplete regardless of error — the event loop decides the
+		// next state. A stream error does NOT terminate the session.
+		select {
+		case s.events <- SessionEvent{Type: EventWordComplete, WordID: wordID}:
+		case <-s.runCtx.Done():
+		}
+	}()
+}
+
+// ---------------------------------------------------------------------------
+// D-10 exit defer chain methods
+// ---------------------------------------------------------------------------
+
+// releaseFSRSLock releases the FSRS fetch-lock acquired at NewSession (D-10).
+//
+// Pitfall 1: the run-loop ctx is already cancelled by the time this defer fires
+// (disconnect/timeout/shutdown all cancel it). Using it would make pybridge
+// return context.Canceled immediately and the lock would never release. So we
+// construct a FRESH context.
+//
+// On UnlockCards error: log at Error but do NOT panic — the fetch-lock has a
+// 24h TTL (FetchLockHours) so it self-expires.
+func (s *Session) releaseFSRSLock() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	n, err := s.fsrsSvc.UnlockCards(ctx, fsrs.UnlockOpts{
+		Category: s.lockCategory,
+		Unit:     s.lockUnit,
+	})
+	if err != nil {
+		s.logger.Error("session: failed to release FSRS lock (will self-expire via 24h TTL)",
+			infra.F("component", "session"),
+			infra.F("session_id", s.id),
+			infra.F("category", s.lockCategory),
+			infra.F("unit", s.lockUnit),
+			infra.ErrField(err),
+		)
+		return
+	}
+	s.logger.Debug("session: released FSRS lock",
+		infra.F("component", "session"),
+		infra.F("session_id", s.id),
+		infra.F("category", s.lockCategory),
+		infra.F("unlocked", n),
+	)
+}
+
+// cleanupTTS removes the session's TTS cache directory (D-10). Idempotent —
+// safe to call from a defer even if the directory was already removed.
+func (s *Session) cleanupTTS() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := s.gen.CleanupSession(ctx, s.id); err != nil {
+		s.logger.Error("session: failed to cleanup TTS cache",
+			infra.F("component", "session"),
+			infra.F("session_id", s.id),
+			infra.ErrField(err),
+		)
+		return
+	}
+	s.logger.Debug("session: cleaned up TTS cache",
+		infra.F("component", "session"),
+		infra.F("session_id", s.id),
+	)
+}
+
+// unregisterFromHub removes the client from the WS hub (D-10). Non-blocking
+// and idempotent per CR-01. Nil-safe for tests that pass nil hub/client.
+func (s *Session) unregisterFromHub() {
+	if s.hub == nil || s.client == nil {
+		return
+	}
+	s.hub.Unregister(s.client)
+	s.logger.Debug("session: unregistered from hub",
+		infra.F("component", "session"),
+		infra.F("session_id", s.id),
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -192,8 +467,25 @@ func NewSession(
 // TTS cache scoping).
 func (s *Session) ID() string { return s.id }
 
-// State returns the current FSM state (read by the sweeper and tests).
-func (s *Session) State() database.SessionState { return s.state }
+// State returns the current FSM state (read by the sweeper and tests). RLock-
+// protected so it is race-free against the event loop's WLock in transition().
+func (s *Session) State() database.SessionState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state
+}
+
+// Deadline returns the per-state deadline (read by the sweeper). RLock-protected
+// so it is race-free against onTransition's WLock.
+func (s *Session) Deadline() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.deadline
+}
+
+// Done returns a channel that is closed when run() exits. Tests and the sweeper
+// use it to detect session liveness without polling.
+func (s *Session) Done() <-chan struct{} { return s.done }
 
 // WordQueueLen returns the number of words in the queue.
 func (s *Session) WordQueueLen() int { return len(s.wordQueue) }
@@ -210,7 +502,9 @@ func (s *Session) LockUnit() string { return s.lockUnit }
 // ---------------------------------------------------------------------------
 
 // timeoutFor returns the per-state timeout from cfg.SessionTimeout (D-08, D-09).
-// Called by the event loop (Plan 02) to reset the deadline on each transition.
+// Called by the event loop (onTransition) to reset the deadline on each
+// transition, and by the sweeper (cleanupLeaked) to compute the 2× threshold.
+// Only reads cfg (immutable) — no lock needed.
 func (s *Session) timeoutFor(state database.SessionState) time.Duration {
 	switch state {
 	case database.StateIdle:

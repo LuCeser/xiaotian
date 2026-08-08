@@ -8,6 +8,8 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
+	"github.com/xiaotian/home-tutor-agent/pkg/tts"
+	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
 // fakeFSRSService implements fsrs.FSRSService for tests. Shared across all
@@ -177,9 +179,10 @@ var _ session.FrameSender = (*fakeFrameSender)(nil)
 // error from GenerateForSession (for the D-10 init-path unlock test) + call
 // counter. *tts.Generator satisfies the interface structurally in production.
 type fakeTTSGenerator struct {
-	mu       sync.Mutex
-	genErr   error
-	genCalls int
+	mu           sync.Mutex
+	genErr       error
+	genCalls     int
+	cleanupCalls int
 }
 
 func (g *fakeTTSGenerator) GenerateForSession(ctx context.Context, sessionID string, words []string) (map[string]string, error) {
@@ -197,6 +200,9 @@ func (g *fakeTTSGenerator) GenerateForSession(ctx context.Context, sessionID str
 }
 
 func (g *fakeTTSGenerator) CleanupSession(ctx context.Context, sessionID string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cleanupCalls++
 	return nil
 }
 
@@ -206,4 +212,55 @@ func (g *fakeTTSGenerator) GenCalls() int {
 	return g.genCalls
 }
 
+func (g *fakeTTSGenerator) CleanupCalls() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.cleanupCalls
+}
+
 var _ session.TTSSessionGenerator = (*fakeTTSGenerator)(nil)
+
+// fakeStreamer implements session.SessionStreamer for tests. Records call count
+// + configurable error. *tts.Streamer satisfies the interface structurally in
+// production.
+type fakeStreamer struct {
+	mu          sync.Mutex
+	streamCalls int
+	streamErr   error
+}
+
+func (f *fakeStreamer) StreamWord(ctx context.Context, client tts.Sender, sessionID string, wordID string, startSeq uint32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.streamCalls++
+	return f.streamErr
+}
+
+func (f *fakeStreamer) StreamCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.streamCalls
+}
+
+var _ session.SessionStreamer = (*fakeStreamer)(nil)
+
+// fakeHub implements session.SessionHub for tests. Records Unregister calls.
+// *ws.Hub satisfies the interface structurally in production.
+type fakeHub struct {
+	mu              sync.Mutex
+	unregisterCalls int
+}
+
+func (f *fakeHub) Unregister(c *ws.Client) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unregisterCalls++
+}
+
+func (f *fakeHub) UnregisterCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.unregisterCalls
+}
+
+var _ session.SessionHub = (*fakeHub)(nil)

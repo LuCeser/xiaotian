@@ -1,7 +1,11 @@
 package session
 
 import (
+	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
@@ -10,23 +14,29 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
-// Manager tracks active Sessions and runs the global sweeper backstop. This is
-// a compilable stub for Plan 01 — Plan 02 fills in the sessions map, Start,
-// sweep, cleanupLeaked, NewSession, Lookup, and Push.
+// Manager tracks active Sessions and runs the global sweeper backstop (ERR-03,
+// D-08). It mirrors infra.ConnectionRegistry in shape: a map guarded by RWMutex,
+// a Start method with a CompareAndSwap guard on an atomic.Bool, and a
+// ticker-based sweep goroutine that cancels leaked sessions.
 type Manager struct {
-	hub      *ws.Hub
+	// --- Service deps (immutable after NewManager) ---
+	hub      SessionHub
 	fsrsSvc  fsrs.FSRSService
 	gen      *tts.Generator
-	streamer *tts.Streamer
+	streamer SessionStreamer
 	repo     database.SessionRepository
 	pool     *infra.WorkerPool
 	logger   infra.Logger
 	cfg      infra.Config
+
+	// --- Registry ---
+	mu       sync.RWMutex
+	sessions map[string]*Session // keyed by connID
+	running  atomic.Bool         // CompareAndSwap guard for Start (D-08)
 }
 
 // NewManager constructs a Manager with nil-guarded dependencies (D-42 DI shape,
-// mirroring NewFSRSService). Plan 02 adds the sessions map, running atomic,
-// and the Start/sweep/cleanupLeaked methods.
+// mirroring NewFSRSService / NewConnectionRegistry).
 func NewManager(
 	hub *ws.Hub,
 	fsrsSvc fsrs.FSRSService,
@@ -67,8 +77,134 @@ func NewManager(
 		pool:     pool,
 		logger:   logger,
 		cfg:      cfg,
+		sessions: make(map[string]*Session),
 	}, nil
 }
 
-// Compile-time type existence check (Plan 01 stub).
-var _ = (*Manager)(nil)
+// Start spawns the global sweeper goroutine. Returns ErrManagerAlreadyRunning
+// if already started (CompareAndSwap guard, mirrors connection.go:407-413).
+func (m *Manager) Start(ctx context.Context) error {
+	if !m.running.CompareAndSwap(false, true) {
+		return ErrManagerAlreadyRunning
+	}
+	go m.sweep(ctx)
+	return nil
+}
+
+// sweep is the global sweeper backstop (ERR-03). It ticks at
+// cfg.Session.CleanupInterval and cancels sessions whose deadline exceeds 2×
+// their state timeout. The sweeper's job is narrow: detect leaked goroutines
+// whose run() never returned (e.g. stuck in a Python subprocess). Normally-exited
+// sessions are already removed from the map by the onExit callback in the D-10
+// defer chain.
+func (m *Manager) sweep(ctx context.Context) {
+	interval := m.cfg.Session.CleanupInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	defer m.running.Store(false)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.cleanupLeaked()
+		}
+	}
+}
+
+// cleanupLeaked iterates active sessions under RLock, collects those whose
+// deadline exceeds 2× their state timeout, and cancels them outside the lock
+// (context.CancelFunc is goroutine-safe). The cancel fires the run-loop's
+// ctx.Done arm, which fires the D-10 defer chain.
+func (m *Manager) cleanupLeaked() {
+	type leakedEntry struct {
+		connID string
+		cancel context.CancelFunc
+	}
+	var leaked []leakedEntry
+
+	m.mu.RLock()
+	for connID, s := range m.sessions {
+		if time.Since(s.Deadline()) > 2*s.timeoutFor(s.State()) {
+			leaked = append(leaked, leakedEntry{connID: connID, cancel: s.cancel})
+		}
+	}
+	m.mu.RUnlock()
+
+	if len(leaked) == 0 {
+		return
+	}
+
+	m.logger.Warn("session: sweeper detected leaked sessions",
+		infra.F("component", "session"),
+		infra.F("count", len(leaked)),
+	)
+	for _, ls := range leaked {
+		if ls.cancel != nil {
+			ls.cancel()
+		}
+	}
+}
+
+// NewSession constructs a Session via the package-level NewSession, sets up its
+// lifecycle fields (done channel, runCtx/cancel, onExit callback), inserts it
+// into the registry, and spawns the event-loop goroutine.
+//
+// Per Pitfall 6: ctx MUST be the per-connection context so disconnect cancels
+// the session immediately.
+func (m *Manager) NewSession(
+	ctx context.Context,
+	client *ws.Client,
+	connID string,
+	selectOpts fsrs.SelectOpts,
+) (*Session, error) {
+	s, err := NewSession(
+		ctx, client, connID,
+		m.fsrsSvc, m.gen, m.streamer, m.repo, m.pool,
+		m.hub, m.logger, m.cfg, selectOpts,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set up lifecycle fields BEFORE inserting into the map so the sweeper's
+	// RLock establishes happens-before with these writes.
+	s.done = make(chan struct{})
+	s.runCtx, s.cancel = context.WithCancel(ctx)
+	s.onExit = func() { m.removeSession(connID) }
+
+	m.mu.Lock()
+	m.sessions[connID] = s
+	m.mu.Unlock()
+
+	go s.run(s.runCtx)
+	return s, nil
+}
+
+// Lookup returns the active Session for the given connID, or nil if not found.
+func (m *Manager) Lookup(connID string) *Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sessions[connID]
+}
+
+// Push looks up the session for connID and pushes the event onto its channel.
+// No-op if the session is not found (the caller may log this at a higher layer).
+func (m *Manager) Push(connID string, ev SessionEvent) {
+	s := m.Lookup(connID)
+	if s != nil {
+		s.Push(ev)
+	}
+}
+
+// removeSession removes the session from the registry. Called from the session's
+// onExit callback in the D-10 defer chain (fired when run() exits), so the map
+// entry is removed the instant the session terminates — regardless of exit cause.
+func (m *Manager) removeSession(connID string) {
+	m.mu.Lock()
+	delete(m.sessions, connID)
+	m.mu.Unlock()
+}

@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
+	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
 // testCfg returns a Config with sane defaults for session init tests. The
@@ -157,5 +159,282 @@ func TestNewSession_NilGuards(t *testing.T) {
 		context.Background(), nil, "c", fsrsSvc, nil, nil, nil, nil, nil, nil, testCfg(), fsrs.SelectOpts{},
 	); err == nil {
 		t.Error("NewSession() with nil gen should return error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Plan 07-02: Event loop + D-10 defer chain tests
+// ---------------------------------------------------------------------------
+
+// shortTimeoutCfg returns a Config with very short per-state timeouts for testing.
+func shortTimeoutCfg() infra.Config {
+	cfg := testCfg()
+	cfg.SessionTimeout.IdleStateTimeout = 50 * time.Millisecond
+	cfg.SessionTimeout.ListeningStateTimeout = 50 * time.Millisecond
+	cfg.SessionTimeout.DictatingStateTimeout = 50 * time.Millisecond
+	return cfg
+}
+
+// waitForState polls the session state until it matches want or timeout expires.
+func waitForState(t *testing.T, s *session.Session, want database.SessionState, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if s.State() == want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waitForState: state still %q, want %q after %v", s.State(), want, timeout)
+}
+
+// waitDone waits for the session goroutine to exit (Done channel closed) or timeout.
+func waitDone(t *testing.T, s *session.Session, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-s.Done():
+	case <-time.After(timeout):
+		t.Fatalf("waitDone: session did not exit within %v", timeout)
+	}
+}
+
+// TestEventLoop_WordComplete: play_word → LISTENING → D-13 StreamWord completion → DICTATING.
+func TestEventLoop_WordComplete(t *testing.T) {
+	streamer := &fakeStreamer{}
+	hub := &fakeHub{}
+	fsrsSvc := &fakeFSRSService{dueCards: threeCards()}
+	gen := &fakeTTSGenerator{}
+	repo := newFakeSessionRepository()
+
+	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, streamer, repo, nil, hub, nil, shortTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "play_word"})
+	// D-13: fakeStreamer returns instantly, so LISTENING→DICTATING may race
+	// past before we observe LISTENING. Asserting DICTATING proves both transitions.
+	waitForState(t, s, database.StateDictating, 2*time.Second)
+
+	if streamer.StreamCalls() < 1 {
+		t.Errorf("StreamCalls = %d, want >= 1 (D-13 StreamWord spawned)", streamer.StreamCalls())
+	}
+}
+
+// TestEventLoop_LastWord: 1 word — next_word on the last word drives WAITING_PARENT (not LISTENING).
+func TestEventLoop_LastWord(t *testing.T) {
+	streamer := &fakeStreamer{}
+	hub := &fakeHub{}
+	oneCard := []pybridge.DueCard{{ID: 1, Word: "apple"}}
+	fsrsSvc := &fakeFSRSService{dueCards: oneCard}
+	gen := &fakeTTSGenerator{}
+	repo := newFakeSessionRepository()
+
+	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, streamer, repo, nil, hub, nil, shortTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "play_word"})
+	// D-13 races past LISTENING; assert DICTATING (proves play_word→LISTENING→DICTATING).
+	waitForState(t, s, database.StateDictating, 2*time.Second)
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "next_word"})
+	waitForState(t, s, database.StateWaitingParent, 2*time.Second)
+}
+
+// TestEventLoop_Timeout: no events → per-state deadline fires → defer chain runs → lock released.
+func TestEventLoop_Timeout(t *testing.T) {
+	fsrsSvc := &fakeFSRSService{dueCards: threeCards()}
+	gen := &fakeTTSGenerator{}
+
+	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, nil, nil, nil, nil, nil, shortTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	waitDone(t, s, 5*time.Second)
+
+	if fsrsSvc.UnlockCount() != 1 {
+		t.Errorf("UnlockCount = %d, want 1 (FSRS lock released on timeout)", fsrsSvc.UnlockCount())
+	}
+}
+
+// TestEventLoop_StreamWordCompletion: on IDLE→LISTENING transition, spawnStreamWord calls StreamWord.
+func TestEventLoop_StreamWordCompletion(t *testing.T) {
+	streamer := &fakeStreamer{}
+	hub := &fakeHub{}
+	fsrsSvc := &fakeFSRSService{dueCards: threeCards()}
+	gen := &fakeTTSGenerator{}
+	repo := newFakeSessionRepository()
+
+	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, streamer, repo, nil, hub, nil, shortTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "play_word"})
+	// D-13 races past LISTENING; just verify StreamWord was invoked after a settle period.
+	time.Sleep(50 * time.Millisecond)
+
+	if streamer.StreamCalls() < 1 {
+		t.Errorf("StreamCalls = %d, want >= 1 (D-13 StreamWord invoked on LISTENING entry)", streamer.StreamCalls())
+	}
+}
+
+// TestExitDefer_Timeout: timeout exit → all three D-10 cleanup methods fire.
+func TestExitDefer_Timeout(t *testing.T) {
+	streamer := &fakeStreamer{}
+	hub := &fakeHub{}
+	fsrsSvc := &fakeFSRSService{dueCards: threeCards()}
+	gen := &fakeTTSGenerator{}
+	repo := newFakeSessionRepository()
+
+	s, err := session.NewSession(context.Background(), &ws.Client{}, "c1", fsrsSvc, gen, streamer, repo, nil, hub, nil, shortTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	waitDone(t, s, 5*time.Second)
+
+	if fsrsSvc.UnlockCount() != 1 {
+		t.Errorf("UnlockCount = %d, want 1", fsrsSvc.UnlockCount())
+	}
+	if gen.CleanupCalls() != 1 {
+		t.Errorf("CleanupCalls = %d, want 1", gen.CleanupCalls())
+	}
+	if hub.UnregisterCount() != 1 {
+		t.Errorf("UnregisterCount = %d, want 1", hub.UnregisterCount())
+	}
+}
+
+// TestExitDefer_Cancel: ctx cancel exit → all three D-10 cleanup methods fire.
+func TestExitDefer_Cancel(t *testing.T) {
+	streamer := &fakeStreamer{}
+	hub := &fakeHub{}
+	fsrsSvc := &fakeFSRSService{dueCards: threeCards()}
+	gen := &fakeTTSGenerator{}
+	repo := newFakeSessionRepository()
+
+	s, err := session.NewSession(context.Background(), &ws.Client{}, "c1", fsrsSvc, gen, streamer, repo, nil, hub, nil, shortTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.Start(ctx)
+
+	cancel()
+	waitDone(t, s, 5*time.Second)
+
+	if fsrsSvc.UnlockCount() != 1 {
+		t.Errorf("UnlockCount = %d, want 1", fsrsSvc.UnlockCount())
+	}
+	if gen.CleanupCalls() != 1 {
+		t.Errorf("CleanupCalls = %d, want 1", gen.CleanupCalls())
+	}
+	if hub.UnregisterCount() != 1 {
+		t.Errorf("UnregisterCount = %d, want 1", hub.UnregisterCount())
+	}
+}
+
+// TestExitDefer_NormalCompletion: full FSM lifecycle → cancel → all three D-10 cleanups fire.
+func TestExitDefer_NormalCompletion(t *testing.T) {
+	streamer := &fakeStreamer{}
+	hub := &fakeHub{}
+	oneCard := []pybridge.DueCard{{ID: 1, Word: "apple"}}
+	fsrsSvc := &fakeFSRSService{dueCards: oneCard}
+	gen := &fakeTTSGenerator{}
+	repo := newFakeSessionRepository()
+
+	s, err := session.NewSession(context.Background(), &ws.Client{}, "c1", fsrsSvc, gen, streamer, repo, nil, hub, nil, shortTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "play_word"})
+	// D-13 races past LISTENING; assert DICTATING directly.
+	waitForState(t, s, database.StateDictating, 2*time.Second)
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "next_word"})
+	waitForState(t, s, database.StateWaitingParent, 2*time.Second)
+	s.Push(session.SessionEvent{Type: session.EventParentReview})
+	waitForState(t, s, database.StateFeedback, 2*time.Second)
+
+	cancel()
+	waitDone(t, s, 5*time.Second)
+
+	if fsrsSvc.UnlockCount() != 1 {
+		t.Errorf("UnlockCount = %d, want 1", fsrsSvc.UnlockCount())
+	}
+	if gen.CleanupCalls() != 1 {
+		t.Errorf("CleanupCalls = %d, want 1", gen.CleanupCalls())
+	}
+	if hub.UnregisterCount() != 1 {
+		t.Errorf("UnregisterCount = %d, want 1", hub.UnregisterCount())
+	}
+}
+
+// TestReleaseFSRSLock_FreshContext: deferred UnlockCards receives a LIVE ctx (Pitfall 1).
+func TestReleaseFSRSLock_FreshContext(t *testing.T) {
+	fsrsSvc := &fakeFSRSService{dueCards: threeCards()}
+	gen := &fakeTTSGenerator{}
+
+	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, nil, nil, nil, nil, nil, shortTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.Start(ctx)
+
+	cancel() // cancel runCtx → defer chain → releaseFSRSLock with FRESH ctx
+	waitDone(t, s, 5*time.Second)
+
+	if err := fsrsSvc.UnlockCtxErr(); err != nil {
+		t.Errorf("UnlockCtxErr = %v, want nil (fresh ctx not cancelled — Pitfall 1)", err)
+	}
+}
+
+// TestExit_NoRatingCommit: exit must NOT call UpdateRatings (D-11/D-12).
+func TestExit_NoRatingCommit(t *testing.T) {
+	fsrsSvc := &fakeFSRSService{dueCards: threeCards()}
+	gen := &fakeTTSGenerator{}
+
+	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, nil, nil, nil, nil, nil, shortTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.Start(ctx)
+
+	cancel()
+	waitDone(t, s, 5*time.Second)
+
+	if fsrsSvc.UpdateRatingsCount() != 0 {
+		t.Errorf("UpdateRatingsCount = %d, want 0 (D-11/D-12 no partial-progress commit)", fsrsSvc.UpdateRatingsCount())
 	}
 }
