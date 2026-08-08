@@ -77,16 +77,16 @@ Phase 7 delivers the **complete session lifecycle** — the orchestration layer 
 - `.planning/CONTEXT.md` — 最小端到端流程 + 快速反馈周期优先 (Fast Feedback Cycle First). Phase 7 is THE phase that proves the end-to-end dictation flow.
 
 ### Codebase integration points (read before implementing)
-- `internal/database/schema.go` — `type SessionState string` + 5 state constants (canonical enum). `sessions` table: `state TEXT`, `word_count INTEGER`, `metadata TEXT`.
-- `internal/database/` (SessionRepository) — `Create`, `UpdateState`, `AppendEvent`, `GetByID` already built for Phase 7.
-- `internal/ws/hub.go` — `Hub.Run` (the event-loop pattern to mirror), `Register`/`Unregister`/`Clients()`.
-- `internal/ws/client.go` — `Client.Send([]byte) error` (the frame-push method Session needs).
-- `internal/ws/router.go` — `map[MessageType]Handler` dispatch; `MsgTypeSession` (0x05) unused and available.
-- `internal/tts/streamer.go` — `Streamer.StreamWord()` emits `word_complete` status frame; `Sender` interface (the import-cycle seam pattern to copy for `FrameSender`).
-- `internal/fsrs/` (FSRSService) — `SelectDueCards` (acquires fetch-lock), `UnlockCards` (releases), `UpdateRatings` (Phase 10 only).
-- `internal/infra/connection_registry.go` — `cleanupLoop` (sweeper pattern), `map[SessionID]*Connection` + RWMutex (storage pattern). To be soft-deprecated per D-04.
-- `internal/infra/worker_pool.go` — currently unused; becomes the DB-audit-write executor per D-06.
-- `cmd/xiaotian/main.go` (or current wiring location) — where infra.Server (owns ConnectionRegistry) and ws.Hub are both currently constructed; the rewiring site for D-04.
+- `pkg/database/schema.go` — `type SessionState string` + 5 state constants (canonical enum). `sessions` table: `state TEXT`, `word_count INTEGER`, `metadata TEXT`.
+- `pkg/database/` (SessionRepository) — `Create`, `UpdateState`, `AppendEvent`, `GetByID` already built for Phase 7.
+- `pkg/ws/hub.go` — `Hub.Run` (the event-loop pattern to mirror), `Register`/`Unregister`/`Clients()`.
+- `pkg/ws/connection.go` — `Client.Send([]byte) error` (the frame-push method Session needs).
+- `pkg/ws/router.go` — `map[MessageType]Handler` dispatch; `MsgTypeSession` (0x05) unused and available.
+- `pkg/tts/streamer.go` — `Streamer.StreamWord()` emits `word_complete` status frame; `Sender` interface (the import-cycle seam pattern to copy for `FrameSender`).
+- `pkg/fsrs/` (FSRSService) — `SelectDueCards` (acquires fetch-lock), `UnlockCards` (releases), `UpdateRatings` (Phase 10 only).
+- `pkg/infra/connection.go` — `cleanupLoop` (sweeper pattern), `map[SessionID]*Connection` + RWMutex (storage pattern). To be soft-deprecated per D-04.
+- `pkg/infra/worker.go` — currently unused; becomes the DB-audit-write executor per D-06.
+- `cmd/service/main.go` (or current wiring location) — where infra.Server (owns ConnectionRegistry) and ws.Hub are both currently constructed; the rewiring site for D-04.
 
 </canonical_refs>
 
