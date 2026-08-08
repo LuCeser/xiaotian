@@ -9,12 +9,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
-	"github.com/xiaotian/home-tutor-agent/pkg/tts"
+	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
@@ -39,10 +38,10 @@ type playWordParams struct {
 
 // selectDueCardsParams are the parameters for FSRS due word queries.
 type selectDueCardsParams struct {
-	Limit           int    `json:"limit"`
-	Category        string `json:"category"`
-	Units           string `json:"units"`
-	FetchLockHours  int    `json:"fetch_lock_hours"`
+	Limit          int    `json:"limit"`
+	Category       string `json:"category"`
+	Units          string `json:"units"`
+	FetchLockHours int    `json:"fetch_lock_hours"`
 }
 
 // unlockCardsParams are the parameters for clearing FSRS fetch locks.
@@ -83,7 +82,7 @@ type submitReviewParams struct {
 
 // submitReviewResultResponse wraps the FSRS ReviewResult for the client.
 type submitReviewResultResponse struct {
-	Type   string               `json:"type"`
+	Type   string                `json:"type"`
 	Result pybridge.ReviewResult `json:"result"`
 }
 
@@ -102,7 +101,7 @@ type wordCompleteNotification struct {
 // ttsHandlers returns the per-MsgType handler map handed to ws.NewRouter.
 // It composes the FSRS service, TTS generator, and streamer to deliver the
 // end-to-end TTS audio streaming pipeline.
-func ttsHandlers(fsrsSvc fsrs.FSRSService, gen *tts.Generator, streamer *tts.Streamer, logger infra.Logger) map[ws.MessageType]ws.Handler {
+func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, logger infra.Logger) map[ws.MessageType]ws.Handler {
 	return map[ws.MessageType]ws.Handler{
 		// MsgTypeAudio: inbound PCM frames. Placeholder until Phase 7+
 		// processes client microphone audio.
@@ -126,21 +125,21 @@ func ttsHandlers(fsrsSvc fsrs.FSRSService, gen *tts.Generator, streamer *tts.Str
 			// Dispatch based on control type
 			switch control.Type {
 			case "start_session":
-				return handleStartSession(ctx, client, control.Params, fsrsSvc, gen, streamer, logger)
+				return handleStartSession(ctx, client, control.Params, manager, logger)
 
 			case "play_word":
-				return handlePlayWord(ctx, client, control.Params, streamer, logger)
+				return handlePlayWord(ctx, client, control.Params, manager, logger)
 
-		case "select_due_cards":
-			return handleSelectDueCards(ctx, client, control.Params, fsrsSvc, logger)
+			case "select_due_cards":
+				return handleSelectDueCards(ctx, client, control.Params, fsrsSvc, logger)
 
-		case "submit_review":
-			return handleSubmitReview(ctx, client, control.Params, fsrsSvc, logger)
+			case "submit_review":
+				return handleSubmitReview(ctx, client, control.Params, fsrsSvc, logger)
 
-		case "unlock_cards":
-			return handleUnlockCards(ctx, client, control.Params, fsrsSvc, logger)
+			case "unlock_cards":
+				return handleUnlockCards(ctx, client, control.Params, fsrsSvc, logger)
 
-		default:
+			default:
 				logger.Warn("unknown control type",
 					infra.F("type", control.Type),
 				)
@@ -151,8 +150,9 @@ func ttsHandlers(fsrsSvc fsrs.FSRSService, gen *tts.Generator, streamer *tts.Str
 	}
 }
 
-// handleStartSession orchestrates FSRS selection, TTS generation, and prefetch.
-func handleStartSession(ctx context.Context, client *ws.Client, params json.RawMessage, fsrsSvc fsrs.FSRSService, gen *tts.Generator, streamer *tts.Streamer, logger infra.Logger) error {
+// handleStartSession delegates to the session Manager which handles FSRS
+// lock acquisition, TTS generation, and session lifecycle internally.
+func handleStartSession(ctx context.Context, client *ws.Client, params json.RawMessage, manager *session.Manager, logger infra.Logger) error {
 	var p startSessionParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		logger.Warn("invalid start_session params", infra.ErrField(err))
@@ -160,60 +160,25 @@ func handleStartSession(ctx context.Context, client *ws.Client, params json.RawM
 		return nil
 	}
 
-	// Select due words via FSRS
-	cards, err := fsrsSvc.SelectDueCards(ctx, fsrs.SelectOpts{
+	s, err := manager.NewSession(ctx, client, clientConnID(client), fsrs.SelectOpts{
 		Limit:    p.Limit,
 		Category: p.Category,
 	})
 	if err != nil {
-		logger.Warn("FSRS selection failed", infra.ErrField(err))
-		sendErrorFrame(client, "no due words found")
-		return nil
-	}
-	if len(cards) == 0 {
-		logger.Warn("no due words found", infra.F("limit", p.Limit))
-		sendErrorFrame(client, "no due words found")
+		logger.Warn("session creation failed", infra.ErrField(err))
+		sendErrorFrame(client, "session creation failed")
 		return nil
 	}
 
-	// Extract word strings
-	words := make([]string, len(cards))
-	for i, card := range cards {
-		words[i] = card.Word
-	}
-
-	// Generate session ID (Phase 7 will provide real session IDs)
-	sessionID := fmt.Sprintf("session-%d", time.Now().UnixMilli())
-
-	// Generate TTS audio for all words in the session
-	_, err = gen.GenerateForSession(ctx, sessionID, words)
-	if err != nil {
-		logger.Error("TTS generation failed",
-			infra.F("session", sessionID),
-			infra.ErrField(err),
-		)
-		sendErrorFrame(client, "TTS generation failed")
-		return nil
-	}
-
-	// Prefetch the first N words for faster playback
-	firstWords := make([]string, 0, 10) // default prefetch count
-	for i := 0; i < len(cards) && i < 10; i++ {
-		firstWords = append(firstWords, cards[i].Word)
-	}
-	if len(firstWords) > 0 {
-		streamer.PrefetchNext(sessionID, firstWords)
-	}
-
-	// Send session_ready response
+	// Send session_ready response with the server-generated session ID and words.
 	response := sessionReadyResponse{
 		Type:      "session_ready",
-		SessionID: sessionID,
-		Words:     words,
+		SessionID: s.ID(),
+		Words:     s.Words(),
 	}
 	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
 		logger.Warn("failed to send session_ready response",
-			infra.F("session", sessionID),
+			infra.F("session", s.ID()),
 			infra.ErrField(err),
 		)
 	}
@@ -221,8 +186,9 @@ func handleStartSession(ctx context.Context, client *ws.Client, params json.RawM
 	return nil
 }
 
-// handlePlayWord streams audio frames for a single word.
-func handlePlayWord(ctx context.Context, client *ws.Client, params json.RawMessage, streamer *tts.Streamer, logger infra.Logger) error {
+// handlePlayWord pushes a play_word event onto the session's event channel.
+// The session event loop (Plan 02) owns the StreamWord call per D-13.
+func handlePlayWord(ctx context.Context, client *ws.Client, params json.RawMessage, manager *session.Manager, logger infra.Logger) error {
 	var p playWordParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		logger.Warn("invalid play_word params", infra.ErrField(err))
@@ -230,18 +196,20 @@ func handlePlayWord(ctx context.Context, client *ws.Client, params json.RawMessa
 		return nil
 	}
 
-	// Stream asynchronously so the handler returns immediately (frees Router worker)
-	go func() {
-		if err := streamer.StreamWord(ctx, client, p.SessionID, p.WordID, 0); err != nil {
-			logger.Warn("audio streaming failed",
-				infra.F("session", p.SessionID),
-				infra.F("word", p.WordID),
-				infra.ErrField(err),
-			)
-		}
-	}()
+	manager.Push(clientConnID(client), session.SessionEvent{
+		Type:        session.EventControlFrame,
+		ControlType: "play_word",
+		WordID:      p.WordID,
+	})
 
 	return nil
+}
+
+// clientConnID derives a stable connection identifier from the client pointer.
+// Each WebSocket connection has a unique *ws.Client instance, so the pointer
+// address serves as a connection-scoped ID for the session registry.
+func clientConnID(client *ws.Client) string {
+	return fmt.Sprintf("%p", client)
 }
 
 // handleSelectDueCards queries FSRS for due words (test interface support).

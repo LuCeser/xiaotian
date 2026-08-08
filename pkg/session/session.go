@@ -490,6 +490,16 @@ func (s *Session) Done() <-chan struct{} { return s.done }
 // WordQueueLen returns the number of words in the queue.
 func (s *Session) WordQueueLen() int { return len(s.wordQueue) }
 
+// Words returns the word strings from the session's word queue. Used by
+// the composition-root handler to populate the session_ready response.
+func (s *Session) Words() []string {
+	words := make([]string, len(s.wordQueue))
+	for i, card := range s.wordQueue {
+		words[i] = card.Word
+	}
+	return words
+}
+
 // LockCategory returns the resolved FSRS lock category captured at NewSession
 // (Pitfall 4 verification).
 func (s *Session) LockCategory() string { return s.lockCategory }

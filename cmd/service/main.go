@@ -32,6 +32,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
+	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/tts"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
@@ -219,8 +220,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
-	_ = cardRepo    // consumed by Phase 5 FSRS orchestration
-	_ = sessionRepo // consumed by Phase 7 session management
+	_ = cardRepo // consumed by Phase 5 FSRS orchestration
 
 	if err := infra.RegisterMetrics(server); err != nil {
 		logger.Error("metrics registration failed",
@@ -272,8 +272,8 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	serverCfg := ws.ServerConfig{
 		AllowedOrigins:    cfg.WS.AllowedOrigins,
 		MaxMessageBytes:   maxMsg,
-		ReadBufferSize:    cfg.WS.ReadBufferSize,    // 0 → ws.NewServer fills 4096
-		WriteBufferSize:   cfg.WS.WriteBufferSize,   // 0 → ws.NewServer fills 4096
+		ReadBufferSize:    cfg.WS.ReadBufferSize,  // 0 → ws.NewServer fills 4096
+		WriteBufferSize:   cfg.WS.WriteBufferSize, // 0 → ws.NewServer fills 4096
 		HeartbeatInterval: cfg.WS.HeartbeatInterval,
 	}
 
@@ -294,7 +294,26 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
-	router, err := ws.NewRouter(ttsHandlers(fsrsSvc, gen, streamer, logger), routerCfg, wsLogger)
+
+	// Phase 7: construct the session Manager (first real WorkerPool Submit caller — D-06, P1-3).
+	_, _, _, workers := server.Components()
+	manager, err := session.NewManager(hub, fsrsSvc, gen, streamer, sessionRepo, workers, logger, cfg)
+	if err != nil {
+		logger.Error("session manager construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+
+	// D-04: wire Hub-backed connection stats into the Server snapshot.
+	server.SetConnectionStatsProvider(func() infra.ConnectionStats {
+		return hub.Stats()
+	})
+
+	go manager.Start(ctx)
+
+	router, err := ws.NewRouter(ttsHandlers(manager, fsrsSvc, logger), routerCfg, wsLogger)
 	if err != nil {
 		logger.Error("ws router construction failed",
 			infra.F("component", "infra.main"),
