@@ -315,11 +315,29 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	// the lifetime ctx so it exits as soon as shutdown begins.
 	go hub.Run(ctx)
 
-	// Public mux carries ONLY /ws. /health and /metrics stay on the separate
-	// localhost healthSrv below (probe/session traffic separation is the
-	// established design).
+	// Public mux carries /ws plus a minimal static file route for the
+	// end-to-end validation interface (test-interface.html). /health and
+	// /metrics stay on the separate localhost healthSrv below (probe/session
+	// traffic separation is the established design).
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/ws", wsServer.HandleWebSocket)
+	publicMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Support multiple test interfaces for debugging
+		switch r.URL.Path {
+		case "/":
+			http.ServeFile(w, r, "test-interface.html")
+		case "/test-interface.html":
+			http.ServeFile(w, r, "test-interface.html")
+		case "/test-interface-debug.html":
+			http.ServeFile(w, r, "test-interface-debug.html")
+		case "/test-audio-sequence-bug.html":
+			http.ServeFile(w, r, "test-audio-sequence-bug.html")
+		case "/test-audio-bug-frontend.html":
+			http.ServeFile(w, r, "test-audio-bug-frontend.html")
+		default:
+			http.NotFound(w, r)
+		}
+	})
 	publicSrv := &http.Server{
 		Addr:              cfg.Server.Addr,
 		Handler:           publicMux,

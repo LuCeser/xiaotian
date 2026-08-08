@@ -39,6 +39,13 @@ type FSRSService interface {
 	// FSRS engine verbatim. Go does NOT validate or map ratings — any
 	// mapping decision belongs to a future phase (Pitfall 4).
 	UpdateRatings(ctx context.Context, ratings map[string]string, category string) (pybridge.ReviewResult, error)
+
+	// UnlockCards clears FSRS fetch locks for the given category (and
+	// optionally a single unit) via pybridge.Executor.RunUnlock. The opts
+	// fields are merged with FSRSConfig defaults: a zero-valued Category
+	// falls back to cfg.DefaultCategory. Returns the number of cards
+	// unlocked.
+	UnlockCards(ctx context.Context, opts UnlockOpts) (int, error)
 }
 
 // SelectOpts carries the caller's per-request preferences for SelectDueCards.
@@ -55,6 +62,16 @@ type SelectOpts struct {
 
 	// FetchLockHours overrides the default fetch-lock window. <= 0 → cfg.FetchLockHours.
 	FetchLockHours float64
+}
+
+// UnlockOpts carries the caller's per-request preferences for UnlockCards.
+// Zero-valued fields are replaced by FSRSConfig defaults.
+type UnlockOpts struct {
+	// Category filters by vocabulary category. Empty → cfg.DefaultCategory.
+	Category string
+
+	// Unit restricts the unlock to one unit. Empty = all units.
+	Unit string
 }
 
 // Compile-time interface satisfaction check (D-43).
@@ -147,4 +164,29 @@ func (s *fsrsService) UpdateRatings(ctx context.Context, ratings map[string]stri
 		return pybridge.ReviewResult{}, errors.Wrap(err, "fsrs service: update ratings")
 	}
 	return result, nil
+}
+
+// UnlockCards clears FSRS fetch locks for the given category (and
+// optionally a single unit). It merges the caller's UnlockOpts with
+// FSRSConfig defaults, builds pybridge.UnlockOpts, and delegates to
+// pybridge.Executor.RunUnlock. On success, returns the number of cards
+// unlocked.
+func (s *fsrsService) UnlockCards(ctx context.Context, opts UnlockOpts) (int, error) {
+	category := opts.Category
+	if category == "" {
+		category = s.cfg.DefaultCategory
+	}
+
+	result, err := s.exec.RunUnlock(ctx, pybridge.UnlockOpts{
+		Category: category,
+		Unit:     opts.Unit,
+	})
+	if err != nil {
+		s.logger.Error("fsrs service: unlock cards failed",
+			infra.F("component", "fsrs"),
+			infra.ErrField(err),
+		)
+		return 0, errors.Wrap(err, "fsrs service: unlock cards")
+	}
+	return result.Unlocked, nil
 }

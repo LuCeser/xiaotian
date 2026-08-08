@@ -45,6 +45,12 @@ type selectDueCardsParams struct {
 	FetchLockHours  int    `json:"fetch_lock_hours"`
 }
 
+// unlockCardsParams are the parameters for clearing FSRS fetch locks.
+type unlockCardsParams struct {
+	Category string `json:"category"`
+	Unit     string `json:"unit"`
+}
+
 // sessionReadyResponse is the control frame response for successful session start.
 type sessionReadyResponse struct {
 	Type      string   `json:"type"`
@@ -58,6 +64,27 @@ type selectDueCardsResultResponse struct {
 	Result struct {
 		Cards []pybridge.DueCard `json:"cards"`
 	} `json:"result"`
+}
+
+// unlockResultResponse is the control frame response for fetch-lock clears.
+type unlockResultResponse struct {
+	Type   string `json:"type"`
+	Result struct {
+		Unlocked int `json:"unlocked"`
+	} `json:"result"`
+}
+
+// submitReviewParams are the parameters for submitting dictation review ratings.
+// Ratings maps word string → FSRS rating ("again"/"hard"/"good"/"easy").
+type submitReviewParams struct {
+	Ratings  map[string]string `json:"ratings"`
+	Category string            `json:"category"`
+}
+
+// submitReviewResultResponse wraps the FSRS ReviewResult for the client.
+type submitReviewResultResponse struct {
+	Type   string               `json:"type"`
+	Result pybridge.ReviewResult `json:"result"`
 }
 
 // errorResponse is the control frame response for errors.
@@ -104,10 +131,16 @@ func ttsHandlers(fsrsSvc fsrs.FSRSService, gen *tts.Generator, streamer *tts.Str
 			case "play_word":
 				return handlePlayWord(ctx, client, control.Params, streamer, logger)
 
-			case "select_due_cards":
-				return handleSelectDueCards(ctx, client, control.Params, fsrsSvc, logger)
+		case "select_due_cards":
+			return handleSelectDueCards(ctx, client, control.Params, fsrsSvc, logger)
 
-			default:
+		case "submit_review":
+			return handleSubmitReview(ctx, client, control.Params, fsrsSvc, logger)
+
+		case "unlock_cards":
+			return handleUnlockCards(ctx, client, control.Params, fsrsSvc, logger)
+
+		default:
 				logger.Warn("unknown control type",
 					infra.F("type", control.Type),
 				)
@@ -132,11 +165,13 @@ func handleStartSession(ctx context.Context, client *ws.Client, params json.RawM
 		Limit:    p.Limit,
 		Category: p.Category,
 	})
-	if err != nil || len(cards) == 0 {
-		logger.Warn("FSRS selection failed or empty",
-			infra.ErrField(err),
-			infra.F("cards", len(cards)),
-		)
+	if err != nil {
+		logger.Warn("FSRS selection failed", infra.ErrField(err))
+		sendErrorFrame(client, "no due words found")
+		return nil
+	}
+	if len(cards) == 0 {
+		logger.Warn("no due words found", infra.F("limit", p.Limit))
 		sendErrorFrame(client, "no due words found")
 		return nil
 	}
@@ -237,6 +272,75 @@ func handleSelectDueCards(ctx context.Context, client *ws.Client, params json.Ra
 
 	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
 		logger.Warn("failed to send select_due_cards_result", infra.ErrField(err))
+	}
+
+	return nil
+}
+
+// handleSubmitReview submits dictation ratings to FSRS for scheduling updates.
+// Delegates to fsrsSvc.UpdateRatings which calls vocab_manager.py review subcommand.
+func handleSubmitReview(ctx context.Context, client *ws.Client, params json.RawMessage, fsrsSvc fsrs.FSRSService, logger infra.Logger) error {
+	var p submitReviewParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		logger.Warn("invalid submit_review params", infra.ErrField(err))
+		sendErrorFrame(client, "invalid submit_review params")
+		return nil
+	}
+
+	if len(p.Ratings) == 0 {
+		sendErrorFrame(client, "ratings map is empty")
+		return nil
+	}
+
+	result, err := fsrsSvc.UpdateRatings(ctx, p.Ratings, p.Category)
+	if err != nil {
+		logger.Warn("submit_review failed",
+			infra.F("words", len(p.Ratings)),
+			infra.ErrField(err),
+		)
+		sendErrorFrame(client, "FSRS review update failed")
+		return nil
+	}
+
+	response := submitReviewResultResponse{
+		Type:   "submit_review_result",
+		Result: result,
+	}
+
+	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
+		logger.Warn("failed to send submit_review_result", infra.ErrField(err))
+	}
+
+	return nil
+}
+
+// handleUnlockCards clears FSRS fetch locks via fsrsSvc.UnlockCards
+// (WebSocket test interface support).
+func handleUnlockCards(ctx context.Context, client *ws.Client, params json.RawMessage, fsrsSvc fsrs.FSRSService, logger infra.Logger) error {
+	var p unlockCardsParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		logger.Warn("invalid unlock_cards params", infra.ErrField(err))
+		sendErrorFrame(client, "invalid unlock_cards params")
+		return nil
+	}
+
+	n, err := fsrsSvc.UnlockCards(ctx, fsrs.UnlockOpts{
+		Category: p.Category,
+		Unit:     p.Unit,
+	})
+	if err != nil {
+		logger.Warn("unlock_cards failed", infra.ErrField(err))
+		sendErrorFrame(client, "unlock failed")
+		return nil
+	}
+
+	response := unlockResultResponse{
+		Type: "unlock_result",
+	}
+	response.Result.Unlocked = n
+
+	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
+		logger.Warn("failed to send unlock_result", infra.ErrField(err))
 	}
 
 	return nil

@@ -4,6 +4,8 @@
 //   - (*Bridge).RunReview   (PY-03): invokes the `review` subcommand with the
 //     caller-supplied rating map (4 ratings forwarded verbatim -- RESEARCH
 //     Pitfall 4) and parses the {"updated": [...]} JSON payload.
+//   - (*Bridge).RunUnlock   (PY-05): invokes the `unlock` subcommand to clear
+//     FSRS fetch locks and parses the {"unlocked": N} JSON payload.
 //
 // Both methods reuse Bridge.run (Plan 03-03 exec engine: semaphore, process
 // group, per-call timeout, logResult) and extractTrailingJSON (Plan 03-02
@@ -82,6 +84,37 @@ func dueArgs(cfg infra.PythonConfig, opts DueOpts) []string {
 			"--fetch-lock-hours",
 			strconv.FormatFloat(opts.FetchLockHours, 'f', -1, 64),
 		)
+	}
+	return args
+}
+
+// unlockArgs builds the argv slice for the vocab_manager.py `unlock`
+// subcommand.
+//
+// The returned slice is intended to be passed to Bridge.run as the variadic
+// `args` tail: the interpreter path is supplied separately by the caller.
+// The shape is:
+//
+//	[vocabScript, "--db", dbPath, "unlock", ...unlockFlags]
+//
+// where `--db` is placed BEFORE the `unlock` subcommand token because
+// vocab_manager.py's argparse declares `--db` on the top-level parser (same
+// contract as dueArgs). Every UnlockOpts field maps to at most one CLI flag;
+// a zero-valued field means "omit the flag".
+//
+// Flag mapping:
+//   - opts.Category -> --category <value> (omitted when empty)
+//   - opts.Unit     -> --unit <value>     (omitted when empty)
+//
+// The function performs no I/O and no validation beyond the zero-value
+// checks -- it is a pure transform of (cfg, opts) into an argv slice.
+func unlockArgs(cfg infra.PythonConfig, opts UnlockOpts) []string {
+	args := []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "unlock"}
+	if opts.Category != "" {
+		args = append(args, "--category", opts.Category)
+	}
+	if opts.Unit != "" {
+		args = append(args, "--unit", opts.Unit)
 	}
 	return args
 }
@@ -313,6 +346,64 @@ func (b *Bridge) RunReview(ctx context.Context, opts ReviewOpts) (ReviewResult, 
 	var result ReviewResult
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return ReviewResult{}, errors.Wrap(ErrPythonJSONParse, "run review")
+	}
+	return result, nil
+}
+
+// RunUnlock executes the vocab_manager.py `unlock` subcommand and returns
+// the number of cards whose fetch locks were cleared. It is the entry
+// point for clearing FSRS fetch locks (e.g. from the WebSocket test
+// interface).
+//
+// Lifecycle (same shape as RunDue):
+//  1. Build argv via unlockArgs (cfg.VocabScript + "--db" + dbPath +
+//     "unlock" + operational flags). `--db` precedes the subcommand token.
+//  2. Delegate to Bridge.run: semaphore acquire (D-02), per-call timeout
+//     (cfg.DueTimeout), exec.CommandContext argv slice (no shell, T-03-07),
+//     process-group kill (Linux), stdout/stderr capture.
+//  3. Defer a semantic logResult call with command="unlock".
+//  4. Classify the outcome into one of the pybridge sentinels:
+//     - context.DeadlineExceeded -> ErrPythonTimeout.
+//     - exit != 0                -> ExitError wrapping ErrPythonExit.
+//     - empty stdout on exit 0   -> ErrPythonEmpty.
+//     - extractTrailingJSON fail -> ErrPythonJSONParse.
+//     - json.Unmarshal fail      -> ErrPythonJSONParse.
+//
+// On success the returned UnlockResult.Unlocked mirrors the {"unlocked":
+// N} JSON object vocab_manager.py prints.
+func (b *Bridge) RunUnlock(ctx context.Context, opts UnlockOpts) (UnlockResult, error) {
+	start := time.Now()
+	args := unlockArgs(b.cfg, opts)
+	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.DueTimeout,
+		b.cfg.Interpreter, args...)
+	defer b.logResult("unlock", start, stdout, stderr, exitCode, err)
+
+	if err != nil && (errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled)) {
+		return UnlockResult{}, errors.Wrap(ErrPythonTimeout, "run unlock")
+	}
+	if exitCode != 0 {
+		return UnlockResult{}, &ExitError{
+			Cmd:      "unlock",
+			ExitCode: exitCode,
+			Stderr:   string(stderr),
+			Err:      ErrPythonExit,
+		}
+	}
+
+	// Empty-success-stdout guard (same rationale as RunDue).
+	if len(stdout) == 0 {
+		return UnlockResult{}, errors.Wrap(ErrPythonEmpty, "run unlock")
+	}
+
+	raw, parseErr := extractTrailingJSON(stdout)
+	if parseErr != nil {
+		return UnlockResult{}, errors.Wrap(ErrPythonJSONParse, "run unlock")
+	}
+
+	var result UnlockResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return UnlockResult{}, errors.Wrap(ErrPythonJSONParse, "run unlock")
 	}
 	return result, nil
 }

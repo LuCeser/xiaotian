@@ -67,6 +67,7 @@ import (
 //   - opts.WordsPerSegment  -> --words-per-segment <int>     (omitted when <= 0)
 //   - opts.Prefix           -> --prefix <value>              (omitted when empty)
 //   - opts.Voice            -> --voice <value>               (omitted when empty)
+//   - opts.GenerationMode   -> --generation-mode <value>     (omitted when empty)
 //
 // Words is json.Marshal'd into a JSON array string (e.g. `["hello","world"]`)
 // because that is the form pregenerate_dictation.py's argparse expects
@@ -108,6 +109,9 @@ func pregenArgs(cfg infra.PythonConfig, opts PregenOpts) ([]string, error) {
 	}
 	if opts.Voice != "" {
 		args = append(args, "--voice", opts.Voice)
+	}
+	if opts.GenerationMode != "" {
+		args = append(args, "--generation-mode", opts.GenerationMode)
 	}
 	return args, nil
 }

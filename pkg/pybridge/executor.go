@@ -23,10 +23,9 @@ import (
 )
 
 // Executor is the contract every Python subprocess invocation flows
-// through (D-11 general-purpose wrapper). Phase 3 delivers exactly three
-// paths: due / review (vocab_manager.py) and pregenerate
-// (pregenerate_dictation.py). Secondary vocab_manager commands are left
-// for later phases.
+// through (D-11 general-purpose wrapper). Phase 3 delivers exactly four
+// paths: due / review / unlock (vocab_manager.py) and pregenerate
+// (pregenerate_dictation.py).
 //
 // Method semantics:
 //   - The due path invokes `vocab_manager.py --db <path> due ...` (PY-02)
@@ -42,6 +41,8 @@ import (
 //     ...` (PY-04) and returns the list of mp3 absolute paths the script
 //     wrote to CacheDir. stdout is line-based paths (NOT JSON); see
 //     splitNonEmptyLines.
+//   - The unlock path invokes `vocab_manager.py --db <path> unlock ...`
+//     and returns the count of cards whose fetch locks were cleared.
 //
 // The interface never exposes raw stdout/stderr []byte -- callers always
 // receive a typed result or a typed error (prohibition in 03-02-PLAN.md).
@@ -54,6 +55,7 @@ type Executor interface {
 	RunDue(ctx context.Context, opts DueOpts) (DueResult, error)
 	RunReview(ctx context.Context, opts ReviewOpts) (ReviewResult, error)
 	RunPregenerate(ctx context.Context, opts PregenOpts) (PregenResult, error)
+	RunUnlock(ctx context.Context, opts UnlockOpts) (UnlockResult, error)
 }
 
 // DueOpts carries the operational flags for the vocab_manager.py due
@@ -170,8 +172,16 @@ type PregenOpts struct {
 
 	// WordsPerSegment controls how many words are concatenated per
 	// output mp3 segment. Forwarded as --words-per-segment. <= 0 means
-	// use the script default.
+	// use the script default. Ignored by the "bare" generation mode.
 	WordsPerSegment int
+
+	// GenerationMode selects the TTS strategy. Forwarded as
+	// --generation-mode (contextual-segment|fragments|bare). Empty means
+	// use the script default ("fragments"). Use "bare" for per-word
+	// review tracks (one bare-word file per word, no narration), which
+	// keeps the paths[i] <-> words[i] position mapping correct while
+	// stripping scene/intro audio.
+	GenerationMode string
 
 	// Prefix namespaces the generated files inside CacheDir. Forwarded
 	// as --prefix. The script enforces ASCII safety via
@@ -189,6 +199,21 @@ type PregenOpts struct {
 // per line (NOT JSON -- see splitNonEmptyLines).
 type PregenResult struct {
 	Paths []string
+}
+
+// UnlockOpts carries the operational flags for the vocab_manager.py
+// unlock subcommand. Category filters by category; Unit restricts the
+// unlock to one unit, empty = all units.
+type UnlockOpts struct {
+	Category string
+	Unit     string
+}
+
+// UnlockResult is the typed payload the unlock path returns. Unlocked
+// mirrors the {"unlocked": N} JSON object vocab_manager.py prints on a
+// successful unlock call.
+type UnlockResult struct {
+	Unlocked int `json:"unlocked"`
 }
 
 // Sentinel errors returned by the pybridge layer. Callers MUST detect

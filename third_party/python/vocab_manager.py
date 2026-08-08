@@ -291,6 +291,19 @@ def cmd_due(db, args):
     print(json.dumps(due_cards, ensure_ascii=False, indent=2))
 
 
+def cmd_unlock(db, args):
+    """Clear fetch locks on cards (testing aid)."""
+    query = "UPDATE cards SET fetch_locked_until = NULL WHERE category = ?"
+    params = [args.category or "english"]
+    if args.unit:
+        query += " AND unit = ?"
+        params.append(args.unit)
+
+    cur = db.execute(query, params)
+    db.commit()
+    print(json.dumps({"unlocked": cur.rowcount, "category": args.category, "unit": args.unit}, ensure_ascii=False))
+
+
 def cmd_new(db, args):
     """Get new cards (never reviewed, in Learning state with step 0)."""
     query = """
@@ -789,6 +802,11 @@ def main():
     p_merge.add_argument("--sources", required=True, help="Comma-separated source unit names")
     p_merge.add_argument("--category", default="english", help="Category (default: english)")
 
+    # unlock
+    p_unlock = subparsers.add_parser("unlock", help="Clear fetch locks on cards (testing aid)")
+    p_unlock.add_argument("--category", default="english", help="Category (default: english)")
+    p_unlock.add_argument("--unit", default="", help="Filter by unit (default: all units)")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -809,6 +827,7 @@ def main():
         "rename-unit": cmd_rename_unit,
         "delete-words": cmd_delete_words,
         "merge-units": cmd_merge_units,
+        "unlock": cmd_unlock,
     }
 
     try:

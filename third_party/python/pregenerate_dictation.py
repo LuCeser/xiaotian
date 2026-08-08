@@ -9,6 +9,7 @@ The contextual TTS 2.0 whole-segment mode remains available as a fallback.
 """
 
 import base64
+import uuid
 # POSIX-only (Linux production); on Windows/macOS dev host fcntl is absent.
 # Mirrors the Go-side convention in pkg/pybridge/bridge_linux.go (real impl) +
 # bridge_other.go (documented no-op stub). See CLAUDE.md cross-platform dev principle.
@@ -193,6 +194,7 @@ def _tts_volcengine(
     headers = {
         "Content-Type": "application/json",
         "X-Api-Resource-Id": resource_id,
+        "X-Api-Request-Id": str(uuid.uuid4()),
     }
     if use_api_key:
         headers["X-Api-Key"] = api_key
@@ -438,7 +440,7 @@ def _trim_audio_edges(path):
         (
             "silenceremove="
             "start_periods=1:start_silence=0.05:start_threshold=-45dB:"
-            "stop_periods=1:stop_silence=0.08:stop_threshold=-45dB"
+            "stop_periods=1:stop_silence=2.0:stop_threshold=-45dB"
         ),
         "-ar", "24000",
         "-ac", "1",
@@ -784,7 +786,12 @@ def _concat_fragments(fragment_paths, output_path):
             with open(concat_path, "w", encoding="utf-8") as f:
                 for idx, path in enumerate(fragment_paths, start=1):
                     link_path = os.path.join(tmp_dir, f"part_{idx:04d}.mp3")
-                    os.symlink(os.path.abspath(path), link_path)
+                    try:
+                        os.symlink(os.path.abspath(path), link_path)
+                    except OSError:
+                        # Windows: symlink requires admin/Developer Mode (WinError 1314);
+                        # fall back to copy so ffmpeg concat works everywhere.
+                        shutil.copy2(path, link_path)
                     f.write(f"file '{link_path}'\n")
 
             cmd = [
@@ -916,6 +923,37 @@ def _generate_fragment_audio(words, config, prefix, language, date_compact, dirs
     return output_paths
 
 
+def _generate_bare_audio(words, config, prefix, language, date_compact, dirs):
+    """Emit one bare-word track per word (with trailing silence), in input order.
+
+    Each track is the bare TTS for a single word followed by
+    SILENCE_AFTER_WORD seconds of silence. No scene/intro narration is added.
+    The trailing silence preserves the word's natural phoneme decay/reverb so
+    it does not sound truncated. Used for per-word review/practice where
+    dictation narration is undesirable. Returns paths in input order so
+    callers can map paths[i] <-> words[i] positionally.
+    """
+    word_paths = _ensure_words_cached(words, config, dirs, language, date_compact)
+    silence_paths = _ensure_silence_files(dirs)
+    after_word_ms = int(round(SILENCE_AFTER_WORD * 1000))
+    output_paths = []
+
+    for idx, word in enumerate(words, start=1):
+        filename = f"{prefix}_{date_compact}_{idx}.{config['output_format']}"
+        output_path = os.path.join(dirs["segments"], filename)
+        if _file_ready(output_path):
+            output_paths.append(output_path)
+            continue
+        fragment_paths = [
+            word_paths[word],
+            silence_paths[after_word_ms],
+        ]
+        print(f"  Bare word {idx}: '{word}' + {after_word_ms}ms silence", file=sys.stderr)
+        _concat_fragments(fragment_paths, output_path)
+        output_paths.append(output_path)
+    return output_paths
+
+
 def _config_for_mode(config, mode):
     effective = dict(config)
     effective["voices"] = dict(config["voices"])
@@ -948,6 +986,8 @@ def generate_dictation_audio(words, config, prefix, language, date_compact=None)
         return _generate_contextual_audio(words, config, prefix, language, date_compact, dirs)
     if mode == "fragments":
         return _generate_fragment_audio(words, config, prefix, language, date_compact, dirs)
+    if mode == "bare":
+        return _generate_bare_audio(words, config, prefix, language, date_compact, dirs)
     raise ValueError(f"Unknown generation mode: {mode!r}")
 
 
@@ -1057,9 +1097,9 @@ def _parse_generate_args():
                         help="Override voice ID (optional)")
     parser.add_argument(
         "--generation-mode",
-        choices=["contextual-segment", "fragments"],
+        choices=["contextual-segment", "fragments", "bare"],
         default=None,
-        help="TTS strategy (default: TTS 1.0 fragments; contextual-segment uses TTS 2.0)",
+        help="TTS strategy (default: TTS 1.0 fragments; contextual-segment uses TTS 2.0; bare emits one bare-word track per word with no narration)",
     )
     return parser.parse_args()
 

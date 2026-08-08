@@ -65,10 +65,22 @@ func (g *Generator) GenerateForSession(ctx context.Context, sessionID string, wo
 		return result, nil
 	}
 
-	// Call RunPregenerate to batch-generate MP3 files
+	// Call RunPregenerate to batch-generate MP3 files.
+	// WordsPerSegment:1 is REQUIRED — pregenerate_dictation.py concatenates
+	// `words_per_segment` words (+ "number N" intros + silence) into ONE mp3 per
+	// segment, and returns one path per segment (NOT per word). Below we map
+	// paths[i] -> words[i] positionally, so each segment must contain exactly one
+	// word for the mapping to stay correct. The default ("all words in one
+	// segment") would make the first word's cache hold the entire dictation track.
 	pregenResult, err := g.exec.RunPregenerate(ctx, pybridge.PregenOpts{
-		Words:     words,
-		Language: "english",
+		Words:           words,
+		Language:        "english",
+		WordsPerSegment: 1,
+		// "bare" emits one bare-word track per word (no scene/intro narration),
+		// so paths[i] <-> words[i] maps to the bare word the per-word Play
+		// button should play. Kept separate from the full-dictation "fragments"
+		// mode which adds opening/number/closing narration.
+		GenerationMode:  "bare",
 	})
 	if err != nil {
 		g.logger.Error("TTS batch generation failed",
@@ -140,7 +152,7 @@ func (g *Generator) retryConvert(ctx context.Context, mp3Path string) (PCMData, 
 		pcmData, err := g.convertFn(mp3Path, ConvertOpts{
 			SampleRate: 16000,
 			Channels:   1,
-			BigEndian:  true,
+			BigEndian:  false, // s16le — matches frontend getInt16(offset, true)
 		})
 
 		if err == nil {

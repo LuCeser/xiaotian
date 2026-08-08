@@ -84,6 +84,7 @@
             gap: 12px;
             align-items: center;
             margin-bottom: 16px;
+            flex-wrap: wrap;
         }
 
         .input-group label {
@@ -95,6 +96,7 @@
 
         input[type="text"], input[type="number"] {
             flex: 1;
+            min-width: 80px;
             padding: 8px 12px;
             border: 1px solid #d1d5db;
             border-radius: 6px;
@@ -142,12 +144,17 @@
             color: white;
         }
 
+        .btn-small {
+            padding: 4px 10px;
+            font-size: 12px;
+        }
+
         .results-area {
             background: #f9fafb;
             border-radius: 6px;
             padding: 16px;
-            min-height: 100px;
-            max-height: 300px;
+            min-height: 60px;
+            max-height: 400px;
             overflow-y: auto;
             font-family: 'Courier New', monospace;
             font-size: 13px;
@@ -160,12 +167,51 @@
             color: #9ca3af;
         }
 
+        .word-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .word-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            background: #f9fafb;
+            border-radius: 6px;
+            border: 1px solid #e5e7eb;
+            transition: all 0.2s;
+        }
+
+        .word-item.playing {
+            background: #ecfdf5;
+            border-color: #10b981;
+        }
+
+        .word-item.done {
+            background: #f0fdf4;
+            border-color: #86efac;
+        }
+
+        .word-item-label {
+            font-size: 14px;
+            font-weight: 500;
+            color: #1f2937;
+        }
+
+        .word-index {
+            color: #9ca3af;
+            font-size: 12px;
+            margin-right: 8px;
+        }
+
         .log-area {
             background: #1f2937;
             border-radius: 6px;
             padding: 16px;
             min-height: 300px;
-            max-height: 400px;
+            max-height: 500px;
             overflow-y: auto;
             font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
             font-size: 12px;
@@ -194,12 +240,17 @@
             color: #9ca3af;
         }
 
+        .log-entry.session {
+            color: #fbbf24;
+        }
+
         .stats-row {
             display: flex;
             gap: 24px;
             margin-top: 12px;
             font-size: 13px;
             color: #6b7280;
+            flex-wrap: wrap;
         }
 
         .stats-item {
@@ -211,6 +262,49 @@
         .stats-value {
             font-weight: 600;
             color: #1f2937;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .badge-info {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .word-actions {
+            display: flex;
+            gap: 6px;
+        }
+
+        .word-feedback {
+            font-size: 12px;
+            margin-left: 8px;
+        }
+
+        .word-feedback.correct { color: #10b981; font-weight: 600; }
+        .word-feedback.wrong { color: #ef4444; font-weight: 600; }
+        .word-feedback.listening { color: #f59e0b; font-weight: 600; }
+
+        .recording-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ef4444;
+            animation: pulse 1s infinite;
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
         }
 
         @media (max-width: 768px) {
@@ -227,11 +321,11 @@
 </head>
 <body>
     <div class="container">
-        <h1>🧪 WebSocket/FSRS/TTS Test Interface</h1>
+        <h1>WebSocket / FSRS / TTS Test Interface</h1>
 
         <!-- WebSocket Status Card -->
         <div class="card">
-            <h2>🔌 WebSocket Status</h2>
+            <h2>1. WebSocket Connection</h2>
             <div class="status-row">
                 <div class="status-indicator" id="wsStatusIndicator"></div>
                 <span class="status-text" id="wsStatusText">Disconnected</span>
@@ -244,23 +338,48 @@
             </div>
         </div>
 
-        <!-- FSRS Test Card -->
+        <!-- Dictation Session Card (Core E2E Flow) -->
         <div class="card">
-            <h2>📚 FSRS Word Selection Test</h2>
+            <h2>2. Dictation Session <span class="badge badge-info">E2E Core</span></h2>
+            <p style="font-size: 13px; color: #6b7280; margin-bottom: 16px;">
+                Starts a session: server selects due words via FSRS, pre-generates TTS audio,
+                then streams PCM on demand.
+            </p>
             <div class="input-group">
-                <label for="wordCount">Word Count:</label>
+                <label for="sessionWordCount">Words:</label>
+                <input type="number" id="sessionWordCount" value="5" min="1" max="25">
+                <button class="btn-success" id="startSessionBtn" onclick="startSession()" disabled>Start Session</button>
+            </div>
+            <div id="sessionInfo" style="display: none; margin-bottom: 12px;">
+                <span class="status-text">Session ID: <strong id="sessionIdDisplay" style="color: #1f2937;"></strong></span>
+            </div>
+            <div class="results-area" id="sessionWordsArea"></div>
+        </div>
+
+        <!-- FSRS Direct Query Card (Debug) -->
+        <div class="card">
+            <h2>3. FSRS Direct Query <span class="badge badge-info">Debug</span></h2>
+            <p style="font-size: 13px; color: #6b7280; margin-bottom: 16px;">
+                Queries FSRS for due cards without starting a session or generating TTS.
+                Use to verify the Python FSRS bridge independently.
+            </p>
+            <div class="input-group">
+                <label for="wordCount">Limit:</label>
                 <input type="number" id="wordCount" value="20" min="1" max="100">
-                <button class="btn-success" id="getWordsBtn" onclick="requestDueCards()" disabled>Get Due Words</button>
+                <button class="btn-primary" id="getWordsBtn" onclick="requestDueCards()" disabled>Query Due Cards</button>
+                <button class="btn-success btn-small" id="testReviewBtn" onclick="testSubmitReview()" disabled>Test Review (apple→good)</button>
+                <button class="btn-danger btn-small" id="unlockBtn" onclick="unlockCards()" disabled>Unlock Due Cards</button>
             </div>
             <div class="results-area" id="fsrsResults"></div>
         </div>
 
-        <!-- TTS Audio Test Card -->
+        <!-- Audio Status Card -->
         <div class="card">
-            <h2>🔊 TTS Audio Streaming Test</h2>
+            <h2>4. Audio Streaming</h2>
             <div class="input-group">
-                <button class="btn-success" id="playAudioBtn" onclick="playTestAudio()" disabled>Play Test Audio</button>
-                <span class="status-text" id="audioStatus">Click to enable audio</span>
+                <button class="btn-success" id="playAudioBtn" onclick="playTestAudio()" disabled>Play Test Tone</button>
+                <button class="btn-info" id="playAudioElementBtn" onclick="playTestAudioElement()">Test Audio Element</button>
+                <span class="status-text" id="audioStatus">Click any button to enable audio</span>
             </div>
             <div class="stats-row">
                 <div class="stats-item">
@@ -272,31 +391,64 @@
                 <div class="stats-item">
                     Duplicates: <span class="stats-value" id="duplicateCount">0</span>
                 </div>
+                <div class="stats-item">
+                    Format: <span class="stats-value">16kHz / 16-bit / mono / s16le</span>
+                </div>
             </div>
         </div>
 
         <!-- Message Log Card -->
         <div class="card">
-            <h2>📋 Message Log</h2>
+            <h2>5. Message Log</h2>
             <div class="log-area" id="logArea"></div>
         </div>
     </div>
 
     <script>
-        // WebSocket connection state
+        // ==================== State ====================
         let ws = null;
-        let connectionState = 'CLOSED'; // CLOSED, CONNECTING, OPEN, ERROR
+        let connectionState = 'CLOSED';
         let audioContext = null;
         let audioEnabled = false;
 
+        // Session state
+        let currentSessionId = null;
+        let sessionWords = [];
+        let playAllQueue = [];
+
+        // 🐛 BUG DETECTION STATE
+        let debugState = {
+            wordCompleteReceived: false,
+            framesAfterWordComplete: 0,
+            activeWordDuringComplete: null,
+            bugDetected: false
+        };
+
+        // Audio playback state (HTMLAudioElement for iOS/iPadOS compatibility)
+        let playback = {
+            active: false,
+            wordId: null,
+            audioBuffer: [], // Collect PCM frames
+            wavBuffer: null, // Prepared WAV buffer
+            audioReady: false, // Audio ready for playback
+            lastFrameTime: 0,
+            playTimer: null
+        };
+
+        // Speech recognition state
+        let recognition = null;
+        let speechSupported = false;
+        let currentSpeakIndex = -1;
+        let speechTimeout = null;
+
         // Frame tracking
         let sequenceCounter = 0;
-        const receivedSequences = [];
+        let receivedSequences = [];
         let frameCount = 0;
         let gapCount = 0;
         let duplicateCount = 0;
 
-        // Message type constants (from pkg/ws/protocol.go)
+        // ==================== Protocol Constants ====================
         const MsgType = {
             Audio: 0x01,
             Control: 0x02,
@@ -306,16 +458,16 @@
             Status: 0x06
         };
 
-        // Protocol constants
         const HeaderSize = 16;
-        const AudioFrameSize = 640;
+        const AudioFrameSize = 640;      // 20ms @ 16kHz 16-bit mono
+        const FrameDurationSec = 0.02;   // 320 samples / 16000 Hz
         const ProtocolVersion = 0x01;
+        const MaxSeqHistory = 10000;
 
-        // CRC-16-CCITT implementation (from pkg/crc16/crc16.go)
+        // ==================== CRC-16-CCITT ====================
         function crc16Checksum(data) {
             const CCITT = 0x1021;
-            let crc = 0xFFFF; // Initial value
-
+            let crc = 0xFFFF;
             for (let i = 0; i < data.length; i++) {
                 crc ^= (data[i] << 8);
                 for (let j = 0; j < 8; j++) {
@@ -329,74 +481,90 @@
             return crc;
         }
 
-        // Parse 16-byte frame header (big-endian)
+        // ==================== Frame Codec ====================
+
         function parseFrameHeader(arrayBuffer) {
             const view = new DataView(arrayBuffer);
             return {
                 version: view.getUint8(0),
                 msgType: view.getUint8(1),
-                sequence: view.getUint32(2, false), // big-endian
-                timestamp: view.getUint32(6, false), // big-endian
-                payloadLen: view.getUint16(10, false), // big-endian
-                reserved: view.getUint16(12, false), // big-endian
-                crc16: view.getUint16(14, false) // big-endian
+                sequence: view.getUint32(2, false),
+                timestamp: view.getUint32(6, false),
+                payloadLen: view.getUint16(10, false),
+                reserved: view.getUint16(12, false),
+                crc16: view.getUint16(14, false)
             };
         }
 
-        // Encode frame header with CRC-16-CCITT
         function encodeFrameHeader(header) {
             const buffer = new ArrayBuffer(HeaderSize);
             const view = new DataView(buffer);
-
             view.setUint8(0, header.version);
             view.setUint8(1, header.msgType);
-            view.setUint32(2, header.sequence, false); // big-endian
-            view.setUint32(6, header.timestamp, false); // big-endian
-            view.setUint16(10, header.payloadLen, false); // big-endian
-            view.setUint16(12, header.reserved, false); // big-endian
-
-            // Compute CRC-16 over bytes 0-13
+            view.setUint32(2, header.sequence, false);
+            view.setUint32(6, header.timestamp, false);
+            view.setUint16(10, header.payloadLen, false);
+            view.setUint16(12, header.reserved, false);
             const headerBytes = new Uint8Array(buffer.slice(0, 14));
             const crc = crc16Checksum(headerBytes);
-            view.setUint16(14, crc, false); // big-endian
-
+            view.setUint16(14, crc, false);
             return buffer;
         }
 
-        // Build complete frame with header and payload
-        function buildFrame(header, payload) {
+        // Build a complete frame: payloadLen derived from actual UTF-8 byte count
+        function buildFrame(msgType, payloadStr) {
+            const payloadBytes = new TextEncoder().encode(payloadStr);
+            const header = {
+                version: ProtocolVersion,
+                msgType: msgType,
+                sequence: ++sequenceCounter,
+                timestamp: Math.floor(Date.now() * 1000) & 0xFFFFFFFF,
+                payloadLen: payloadBytes.length,
+                reserved: 0
+            };
             const headerBuffer = encodeFrameHeader(header);
-            const payloadBytes = new TextEncoder().encode(payload);
-
             const frame = new Uint8Array(headerBuffer.byteLength + payloadBytes.length);
             frame.set(new Uint8Array(headerBuffer), 0);
             frame.set(payloadBytes, headerBuffer.byteLength);
-
             return frame.buffer;
         }
 
-        // Get next sequence number
-        function nextSequence() {
-            return ++sequenceCounter;
+        // Helper: send a Control frame with { type, params }
+        function sendControl(type, params) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('Cannot send: WebSocket not connected', 'error');
+                return false;
+            }
+            const payload = JSON.stringify({ type, params });
+            try {
+                ws.send(buildFrame(MsgType.Control, payload));
+                return true;
+            } catch (e) {
+                addLog(`Send failed: ${e.message}`, 'error');
+                return false;
+            }
         }
 
-        // Format timestamp for logging
+        // ==================== Logging ====================
+
         function formatTimestamp() {
             const now = new Date();
-            return now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+            return now.toTimeString().split(' ')[0] + '.' +
+                String(now.getMilliseconds()).padStart(3, '0');
         }
 
-        // Add log entry with color coding
-        function addLog(message, type = 'status') {
+        function addLog(message, type) {
+            type = type || 'status';
             const logArea = document.getElementById('logArea');
             const entry = document.createElement('div');
-            entry.className = `log-entry ${type}`;
-            entry.textContent = `[${formatTimestamp()}] ${message}`;
+            entry.className = 'log-entry ' + type;
+            entry.textContent = '[' + formatTimestamp() + '] ' + message;
             logArea.appendChild(entry);
             logArea.scrollTop = logArea.scrollHeight;
         }
 
-        // Update WebSocket status UI
+        // ==================== UI Helpers ====================
+
         function updateStatus(state, message) {
             const indicator = document.getElementById('wsStatusIndicator');
             const statusText = document.getElementById('wsStatusText');
@@ -404,7 +572,6 @@
             const disconnectBtn = document.getElementById('disconnectBtn');
 
             indicator.className = 'status-indicator';
-
             switch (state) {
                 case 'CONNECTING':
                     indicator.classList.add('connecting');
@@ -413,98 +580,95 @@
                     indicator.classList.add('connected');
                     connectBtn.style.display = 'none';
                     disconnectBtn.style.display = 'inline-block';
-                    enableButtons(true);
+                    enablePostConnectButtons(true);
                     break;
                 case 'CLOSED':
                 case 'ERROR':
                     indicator.classList.add('error');
                     connectBtn.style.display = 'inline-block';
                     disconnectBtn.style.display = 'none';
-                    enableButtons(false);
+                    enablePostConnectButtons(false);
                     break;
             }
-
             statusText.textContent = message;
             connectionState = state;
         }
 
-        // Enable/disable buttons based on connection state
-        function enableButtons(enabled) {
-            document.getElementById('getWordsBtn').disabled = !enabled;
-            document.getElementById('playAudioBtn').disabled = !enabled || !audioEnabled;
+        function enablePostConnectButtons(enabled) {
+		document.getElementById('startSessionBtn').disabled = !enabled;
+		document.getElementById('getWordsBtn').disabled = !enabled;
+		document.getElementById('testReviewBtn').disabled = !enabled;
+		document.getElementById('unlockBtn').disabled = !enabled;
+	}
+
+        function updateAudioStatus(text) {
+            document.getElementById('audioStatus').textContent = text;
         }
 
-        // Connect to WebSocket
+        // ==================== WebSocket Connection ====================
+
         function connect() {
             const userId = document.getElementById('userId').value || 'test';
-            const wsUrl = `ws://localhost:8080/ws?user_id=${encodeURIComponent(userId)}&device=web`;
+            // Dynamic host: works from localhost AND LAN devices (iPad)
+            const wsHost = window.location.hostname + ':8080';
+            const wsUrl = 'ws://' + wsHost + '/ws?user_id=' +
+                encodeURIComponent(userId) + '&device=web';
 
             updateStatus('CONNECTING', 'Connecting...');
-            addLog(`Connecting to ${wsUrl}`, 'status');
+            addLog('Connecting to ' + wsUrl, 'status');
 
             try {
                 ws = new WebSocket(wsUrl);
-                ws.binaryType = 'arraybuffer'; // CRITICAL for binary frames
+                ws.binaryType = 'arraybuffer';
 
-                ws.onopen = () => {
+                ws.onopen = function () {
                     updateStatus('OPEN', 'Connected');
-                    addLog('WebSocket connected successfully', 'status');
+                    addLog('WebSocket connected', 'status');
+                    initAudioContext();
                 };
 
-                ws.onmessage = (event) => {
+                ws.onmessage = function (event) {
                     handleMessage(event.data);
                 };
 
-                ws.onerror = (error) => {
+                ws.onerror = function () {
                     updateStatus('ERROR', 'Connection error');
-                    addLog('WebSocket error occurred', 'error');
-                    console.error('WebSocket error:', error);
+                    addLog('WebSocket error', 'error');
                 };
 
-                ws.onclose = (event) => {
+                ws.onclose = function (event) {
                     updateStatus('CLOSED', 'Disconnected');
-                    addLog(`WebSocket closed: ${event.code} - ${event.reason}`, 'status');
-                    enableButtons(false);
+                    addLog('WebSocket closed: ' + event.code + ' ' + event.reason, 'status');
+                    currentSessionId = null;
                 };
-
-            } catch (error) {
+            } catch (e) {
                 updateStatus('ERROR', 'Connection failed');
-                addLog(`Connection failed: ${error.message}`, 'error');
-                console.error('Connection error:', error);
+                addLog('Connection failed: ' + e.message, 'error');
             }
         }
 
-        // Disconnect from WebSocket
         function disconnect() {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.close(1000, 'User disconnected');
-                addLog('WebSocket disconnecting...', 'status');
+                addLog('Disconnecting...', 'status');
             }
         }
 
-        // Handle incoming WebSocket messages
+        // ==================== Message Dispatch ====================
+
         function handleMessage(data) {
             if (!(data instanceof ArrayBuffer)) {
                 addLog('Received non-binary data', 'error');
                 return;
             }
-
-            const bytes = new Uint8Array(data);
-
-            if (bytes.length < HeaderSize) {
-                addLog(`Frame too short: ${bytes.length} bytes`, 'error');
+            if (data.byteLength < HeaderSize) {
+                addLog('Frame too short: ' + data.byteLength + ' bytes', 'error');
                 return;
             }
 
-            // Parse header
             const header = parseFrameHeader(data.slice(0, HeaderSize));
-            const payload = bytes.slice(HeaderSize);
+            const payload = new Uint8Array(data, HeaderSize);
 
-            // Log frame reception
-            const msgTypeName = Object.keys(MsgType).find(key => MsgType[key] === header.msgType) || 'UNKNOWN';
-            addLog(`[${msgTypeName}] Seq=${header.sequence} Len=${header.payloadLen}`, 'status');
-
-            // Route to handler based on message type
             switch (header.msgType) {
                 case MsgType.Audio:
                     handleAudioFrame(payload, header.sequence);
@@ -512,269 +676,903 @@
                 case MsgType.Control:
                     handleControlFrame(payload);
                     break;
-                case MsgTypeError:
+                case MsgType.Error:
                     handleErrorFrame(payload);
                     break;
                 case MsgType.Heartbeat:
-                    addLog('Received heartbeat', 'status');
-                    break;
-                case MsgType.Session:
-                    addLog('Received session message', 'status');
+                    // Heartbeats are frequent; only log every 10th
+                    if (header.sequence % 10 === 0) {
+                        addLog('[HEARTBEAT] ping #' + header.sequence, 'status');
+                    }
                     break;
                 case MsgType.Status:
-                    addLog('Received status message', 'status');
+                    handleStatusFrame(payload);
+                    break;
+                case MsgType.Session:
+                    addLog('[SESSION] ' + decodeText(payload).substring(0, 200), 'session');
                     break;
                 default:
-                    addLog(`Unknown message type: 0x${header.msgType.toString(16)}`, 'error');
+                    addLog('Unknown msgType 0x' + header.msgType.toString(16), 'error');
             }
         }
 
-        // Handle control frames (FSRS responses)
-        function handleControlFrame(payload) {
+        function decodeText(payload) {
             try {
-                const text = new TextDecoder().decode(payload);
-                addLog(`[CONTROL] Payload: ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`, 'control');
-
-                const data = JSON.parse(text);
-                displayFSRSResults(data);
-
-                if (data.type === 'select_due_cards_result') {
-                    const wordCount = data.result?.cards?.length || 0;
-                    addLog(`[CONTROL] Received ${wordCount} words`, 'control');
-                }
-            } catch (error) {
-                addLog(`[CONTROL] Parse error: ${error.message}`, 'error');
-                console.error('Control frame error:', error);
+                return new TextDecoder().decode(payload);
+            } catch (e) {
+                return '<binary>';
             }
         }
 
-        // Handle audio frames
+        // ==================== Control Frame Handling ====================
+
+        function handleControlFrame(payload) {
+            const text = decodeText(payload);
+            addLog('[CONTROL RX] ' + text.substring(0, 300), 'control');
+
+            let data;
+            try {
+                data = JSON.parse(text);
+            } catch (e) {
+                addLog('[CONTROL] JSON parse error: ' + e.message, 'error');
+                return;
+            }
+
+            switch (data.type) {
+                case 'session_ready':
+                    handleSessionReady(data);
+                    break;
+                case 'select_due_cards_result':
+                    displayFSRSResults(data);
+                    break;
+                case 'submit_review_result':
+                    handleReviewResult(data);
+                    break;
+                case 'unlock_result':
+                    addLog('[CONTROL] unlock_result: cleared fetch lock on ' +
+                        ((data.result && data.result.unlocked != null) ? data.result.unlocked : '?') +
+                        ' card(s)', 'control');
+                    updateAudioStatus('Unlocked ' +
+                        ((data.result && data.result.unlocked != null) ? data.result.unlocked : '?') +
+                        ' card(s) — ready to test again');
+                    break;
+                case 'error':
+                    addLog('[CONTROL] Server error: ' + (data.message || 'unknown'), 'error');
+                    updateAudioStatus('Error: ' + (data.message || 'unknown'));
+                    break;
+                default:
+                    addLog('[CONTROL] Unhandled type: ' + data.type, 'status');
+            }
+        }
+
+        function handleSessionReady(data) {
+            currentSessionId = data.session_id;
+            sessionWords = data.words || [];
+            addLog('[SESSION] Ready — ' + sessionWords.length + ' words, id=' + currentSessionId, 'session');
+
+            document.getElementById('sessionIdDisplay').textContent = currentSessionId;
+            document.getElementById('sessionInfo').style.display = 'block';
+
+            displaySessionWords(sessionWords);
+
+            const btn = document.getElementById('startSessionBtn');
+            btn.textContent = 'Start Session';
+            btn.disabled = false;
+        }
+
+        function displaySessionWords(words) {
+            const area = document.getElementById('sessionWordsArea');
+
+            if (!words || words.length === 0) {
+                area.innerHTML = '<em style="color:#9ca3af;">No words in this session.</em>';
+                return;
+            }
+
+            let html = '<div class="word-list">';
+            if (words.length > 1) {
+                html += '<div style="margin-bottom:8px;">' +
+                    '<button class="btn-primary btn-small" onclick="playAll()">Play All (' + words.length + ')</button>' +
+                    '</div>';
+            }
+            words.forEach(function (word, i) {
+                html += '<div class="word-item" id="word-' + i + '">' +
+                    '<span><span class="word-index">' + (i + 1) + '.</span>' +
+                    '<span class="word-item-label">' + escapeHtml(word) + '</span>' +
+                    '<span class="word-feedback" id="feedback-' + i + '"></span></span>' +
+                    '<span class="word-actions">' +
+                    '<button class="btn-success btn-small" onclick="playWord(' + i + ')">Play</button>' +
+                    '<button class="btn-primary btn-small" id="speak-' + i + '" onclick="speakWord(' + i + ')" disabled>Speak</button>' +
+                    '</span>' +
+                    '</div>';
+            });
+            html += '</div>';
+            area.innerHTML = html;
+        }
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+            });
+        }
+
+        function markWordState(index, state) {
+            const el = document.getElementById('word-' + index);
+            if (!el) return;
+            el.classList.remove('playing', 'done');
+            if (state) el.classList.add(state);
+            // Enable Speak button once the word's audio has been played
+            if (state === 'done') {
+                var speakBtn = document.getElementById('speak-' + index);
+                if (speakBtn) speakBtn.disabled = false;
+            }
+        }
+
+        // ==================== Speech Recognition ====================
+
+        function initSpeechRecognition() {
+            if (recognition) return true;
+            var Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!Ctor) {
+                addLog('[SPEECH] Web Speech API not supported in this browser', 'error');
+                speechSupported = false;
+                return false;
+            }
+            recognition = new Ctor();
+            recognition.lang = 'en-US';
+            recognition.continuous = false;      // single-word recognition
+            recognition.interimResults = false;   // only final results
+            recognition.maxAlternatives = 1;
+
+            recognition.onresult = function (event) {
+                clearTimeout(speechTimeout);
+                var lastResult = event.results[event.results.length - 1];
+                if (lastResult.isFinal) {
+                    var transcript = lastResult[0].transcript.trim().toLowerCase();
+                    handleSpeechResult(transcript);
+                }
+            };
+
+            recognition.onerror = function (event) {
+                clearTimeout(speechTimeout);
+                handleSpeechError(event.error);
+            };
+
+            recognition.onend = function () {
+                clearTimeout(speechTimeout);
+                // If we were listening for a word and ended without result, clear UI
+                if (currentSpeakIndex >= 0) {
+                    var fb = document.getElementById('feedback-' + currentSpeakIndex);
+                    if (fb && fb.classList.contains('listening')) {
+                        fb.textContent = '';
+                        fb.className = 'word-feedback';
+                    }
+                }
+            };
+
+            speechSupported = true;
+            addLog('[SPEECH] SpeechRecognition initialized (lang=en-US)', 'status');
+            return true;
+        }
+
+        function speakWord(index) {
+            if (!recognition && !initSpeechRecognition()) {
+                updateAudioStatus('Speech recognition not supported');
+                return;
+            }
+
+            // Abort any in-progress recognition first
+            try { recognition.abort(); } catch (e) {}
+
+            currentSpeakIndex = index;
+            var word = sessionWords[index];
+
+            updateFeedback(index, '<span class="recording-dot"></span> Listening...', 'listening');
+            addLog('[SPEECH] Listening for "' + word + '"...', 'session');
+
+            // Must call start() synchronously in the user-gesture call stack
+            try {
+                recognition.start();
+
+                // Timeout guard for silent failures (iPad Safari may hang)
+                speechTimeout = setTimeout(function () {
+                    if (currentSpeakIndex === index) {
+                        addLog('[SPEECH] Timeout — no result in 8s', 'error');
+                        try { recognition.stop(); } catch (e) {}
+                        updateFeedback(index, '⚠ Timeout', 'wrong');
+                        currentSpeakIndex = -1;
+                    }
+                }, 8000);
+            } catch (e) {
+                // start() throws if already started
+                addLog('[SPEECH] start() error: ' + e.message, 'error');
+                updateFeedback(index, '⚠ Mic busy, retry', 'wrong');
+                currentSpeakIndex = -1;
+            }
+        }
+
+        function normalizeWord(s) {
+            return s.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+        }
+
+        function handleSpeechResult(transcript) {
+            if (currentSpeakIndex < 0) return;
+
+            var targetWord = sessionWords[currentSpeakIndex];
+            var normalized = normalizeWord(transcript);
+            var target = normalizeWord(targetWord);
+
+            addLog('[SPEECH] Heard: "' + transcript + '" → "' + normalized +
+                   '" (target: "' + target + '")', 'session');
+
+            var isCorrect = (normalized === target);
+            var rating = isCorrect ? 'good' : 'again';
+
+            if (isCorrect) {
+                updateFeedback(currentSpeakIndex, '✓ Correct! (heard: ' + escapeHtml(transcript) + ')', 'correct');
+            } else {
+                updateFeedback(currentSpeakIndex, '✗ Incorrect — heard: ' + escapeHtml(transcript), 'wrong');
+            }
+
+            submitReview(targetWord, rating, currentSpeakIndex);
+            currentSpeakIndex = -1;
+        }
+
+        function submitReview(word, rating, index) {
+            if (!currentSessionId) {
+                addLog('[FSRS] No session — review not submitted', 'error');
+                return;
+            }
+            var ratings = {};
+            ratings[word] = rating;
+
+            addLog('[CONTROL TX] submit_review word="' + word + '" rating="' + rating + '"', 'control');
+            sendControl('submit_review', {
+                ratings: ratings,
+                category: 'english'
+            });
+        }
+
+        function handleReviewResult(data) {
+            var updated = (data.result && data.result.updated) || [];
+            if (updated.length === 0) {
+                addLog('[FSRS] submit_review returned no updates', 'status');
+                return;
+            }
+            updated.forEach(function (card) {
+                var index = sessionWords.indexOf(card.word);
+                if (index >= 0) {
+                    appendFeedback(index, ' → next: ' + card.next_due + ' (' + card.state + ')');
+                }
+                addLog('[FSRS] ' + card.word + ' → ' + card.state +
+                       ', next due: ' + card.next_due +
+                       ', stability: ' + card.stability, 'session');
+            });
+        }
+
+        function handleSpeechError(error) {
+            addLog('[SPEECH] Error: ' + error, 'error');
+            if (currentSpeakIndex < 0) return;
+
+            var messages = {
+                'no-speech': 'No speech detected — try again',
+                'not-allowed': 'Microphone permission denied',
+                'network': 'Network error',
+                'audio-capture': 'Microphone unavailable',
+                'aborted': 'Cancelled',
+                'service-not-allowed': 'Speech service blocked'
+            };
+            var msg = messages[error] || error;
+            updateFeedback(currentSpeakIndex, '⚠ ' + msg, 'wrong');
+            currentSpeakIndex = -1;
+        }
+
+        function updateFeedback(index, html, type) {
+            var fb = document.getElementById('feedback-' + index);
+            if (!fb) return;
+            fb.innerHTML = html;
+            fb.className = 'word-feedback ' + (type || '');
+        }
+
+        function appendFeedback(index, text) {
+            var fb = document.getElementById('feedback-' + index);
+            if (!fb) return;
+            fb.innerHTML += ' <span style="color:#6b7280;font-weight:400;">' + text + '</span>';
+        }
+
+        // ==================== Status Frame Handling ====================
+
+        function handleStatusFrame(payload) {
+            const text = decodeText(payload);
+            let data;
+            try {
+                data = JSON.parse(text);
+            } catch (e) {
+                addLog('[STATUS] ' + text.substring(0, 200), 'status');
+                return;
+            }
+
+            if (data.type === 'word_complete') {
+                addLog('[STATUS] word_complete: ' + data.word_id + ' (audio playback will handle completion)', 'status');
+
+                // 🐛 BUG DETECTION: Track word_complete reception
+                if (playback.active && playback.wordId) {
+                    debugState.wordCompleteReceived = true;
+                    debugState.activeWordDuringComplete = playback.wordId;
+                    addLog('[🐛 DEBUG] word_complete received for "' + data.word_id + '" while playback.active=true for "' + playback.wordId + '"', 'status');
+
+                    if (data.word_id !== playback.wordId) {
+                        addLog('[🐛 BUG ALERT] word_complete for "' + data.word_id + '" but active word is "' + playback.wordId + '"', 'error');
+                    }
+                }
+            } else {
+                addLog('[STATUS] ' + text.substring(0, 200), 'status');
+            }
+        }
+
+        // ==================== Audio Frame Handling ====================
+
         function handleAudioFrame(payload, sequence) {
             frameCount++;
             document.getElementById('frameCount').textContent = frameCount;
 
-            // Check for gaps or duplicates
-            if (receivedSequences.includes(sequence)) {
+            // Sequence gap / duplicate detection
+            if (receivedSequences.indexOf(sequence) !== -1) {
                 duplicateCount++;
                 document.getElementById('duplicateCount').textContent = duplicateCount;
-                addLog(`[AUDIO] Duplicate frame ${sequence}`, 'audio');
                 return;
             }
 
             if (receivedSequences.length > 0) {
-                const lastSeq = receivedSequences[receivedSequences.length - 1];
+                var lastSeq = receivedSequences[receivedSequences.length - 1];
                 if (sequence > lastSeq + 1) {
                     gapCount++;
                     document.getElementById('gapCount').textContent = gapCount;
-                    addLog(`[AUDIO] Gap detected: missing ${lastSeq + 1} to ${sequence - 1}`, 'audio');
+                    addLog('[AUDIO] Gap: expected ' + (lastSeq + 1) + ', got ' + sequence, 'audio');
                 }
             }
 
             receivedSequences.push(sequence);
-            addLog(`[AUDIO] Frame ${sequence} (${payload.length} bytes)`, 'audio');
+            if (receivedSequences.length > MaxSeqHistory) {
+                receivedSequences.shift();
+            }
 
-            // Play audio if context is available
-            if (audioContext && payload.length === AudioFrameSize) {
-                playAudioFrame(payload);
+            // Log frame rejection reasons
+            if (!playback.active) {
+                // Skip logging frames when no active playback (reduces log spam)
+                return;
+            }
+
+            if (payload.length !== AudioFrameSize) {
+                addLog('[AUDIO] Frame ignored: wrong size ' + payload.length + ' vs ' + AudioFrameSize, 'audio');
+                return;
+            }
+
+            // Collect frames for HTMLAudioElement playback (iOS/iPadOS compatibility)
+            if (playback.active && payload.length === AudioFrameSize) {
+                // 🐛 BUG DETECTION: Check if we're collecting frames after word_complete
+                if (debugState.wordCompleteReceived && !debugState.bugDetected) {
+                    debugState.framesAfterWordComplete++;
+                    if (debugState.framesAfterWordComplete <= 3) {
+                        addLog('[🐛 BUG DETECTED] Frame ' + sequence + ' collected AFTER word_complete for "' + debugState.activeWordDuringComplete + '"', 'error');
+                        addLog('[🐛 BUG] This means we\'re collecting frames for the wrong word!', 'error');
+                        debugState.bugDetected = true;
+                    }
+                }
+
+                // Add frame to buffer
+                playback.audioBuffer.push(new Uint8Array(payload));
+                playback.lastFrameTime = Date.now();
+
+                // Log first frame arrival
+                if (playback.audioBuffer.length === 1) {
+                    addLog('[AUDIO] First frame for "' + playback.wordId + '" (seq=' + sequence + ')', 'audio');
+                }
+
+                // Log every 50 frames
+                if (playback.audioBuffer.length % 50 === 0) {
+                    addLog('[AUDIO] Collected ' + playback.audioBuffer.length + ' frames for "' + playback.wordId + '"', 'audio');
+                }
+
+                // Set/reset timer to play collected frames (300ms gap = end of stream)
+                if (playback.playTimer) {
+                    clearTimeout(playback.playTimer);
+                }
+                playback.playTimer = setTimeout(function() {
+                    playCollectedAudio();
+                }, 300); // 300ms without new frames = end of stream
             }
         }
 
-        // Handle error frames
-        function handleErrorFrame(payload) {
+        // Play collected PCM frames using HTMLAudioElement (iOS/iPadOS compatibility)
+        function playCollectedAudio() {
+            if (playback.audioBuffer.length === 0) {
+                addLog('[AUDIO-ELEMENT] No frames to play', 'error');
+                playback.active = false;
+                return;
+            }
+
             try {
-                const text = new TextDecoder().decode(payload);
-                addLog(`[ERROR] ${text}`, 'error');
-            } catch (error) {
-                addLog(`[ERROR] Unable to parse error message`, 'error');
+                addLog('[AUDIO-ELEMENT] Processing ' + playback.audioBuffer.length + ' frames for "' + playback.wordId + '"', 'status');
+
+                // Combine all frames into single PCM buffer
+                var totalSamples = playback.audioBuffer.length * (AudioFrameSize / 2);
+                var pcmData = new Uint8Array(totalSamples * 2);
+                var offset = 0;
+
+                for (var i = 0; i < playback.audioBuffer.length; i++) {
+                    pcmData.set(playback.audioBuffer[i], offset);
+                    offset += AudioFrameSize;
+                }
+
+                addLog('[AUDIO-ELEMENT] Combined ' + playback.audioBuffer.length + ' frames (' +
+                      (playback.audioBuffer.length * 20) + 'ms)', 'audio');
+
+                // Store in current playback state
+                playback.wavBuffer = createWavFromPCM16(pcmData, 16000, playback.audioBuffer.length * 320);
+                playback.audioReady = true;
+
+                // Show play button for user gesture requirement (iOS)
+                updateAudioStatus('Ready: ' + playback.wordId + ' - Click green button to play');
+                addLog('[AUDIO-ELEMENT] Ready to play "' + playback.wordId + '" - Click green button below', 'status');
+
+                // Show a prominent play button in the log area
+                var playButtonId = 'playBtn_' + Date.now();
+                var playButtonHtml = '<div id="' + playButtonId + '" style="margin: 10px 0; padding: 20px; background: #4CAF50; color: white; text-align: center; border-radius: 12px; cursor: pointer; font-weight: bold; font-size: 18px; border: 3px solid #45a049;" onclick="playReadyAudio(\'' + playButtonId + '\')">🔊 Click to PLAY: ' + playback.wordId + '</div>';
+                var logArea = document.getElementById('logArea');
+                logArea.innerHTML = playButtonHtml + logArea.innerHTML;
+
+            } catch (e) {
+                addLog('[AUDIO-ELEMENT] Error: ' + e.message, 'error');
+                resetPlaybackState();
             }
         }
 
-        // Display FSRS results
+        // Play prepared audio (called from user gesture)
+        function playReadyAudio(buttonId) {
+            if (!playback.wavBuffer || !playback.audioReady) {
+                addLog('[AUDIO-ELEMENT] No audio ready - state: wavBuffer=' + (playback.wavBuffer ? 'yes' : 'no') + ', audioReady=' + playback.audioReady, 'error');
+                return;
+            }
+
+            try {
+                // Remove the play button to prevent double-clicks
+                var button = document.getElementById(buttonId);
+                if (button) {
+                    button.parentNode.removeChild(button);
+                }
+
+                addLog('[AUDIO-ELEMENT] Starting playback for "' + playback.wordId + '"', 'status');
+
+                // Create blob and URL
+                var blob = new Blob([playback.wavBuffer], { type: 'audio/wav' });
+                var url = URL.createObjectURL(blob);
+
+                // Play with audio element (in user gesture context)
+                var audio = new Audio();
+                audio.src = url;
+
+                audio.play().then(function() {
+                    addLog('[AUDIO-ELEMENT] Playing "' + playback.wordId + '"', 'audio');
+                    updateAudioStatus('Playing: ' + playback.wordId);
+                }).catch(function(err) {
+                    addLog('[AUDIO-ELEMENT] Play failed: ' + err.message, 'error');
+                    resetPlaybackState();
+                });
+
+                audio.onended = function() {
+                    addLog('[AUDIO-ELEMENT] Completed "' + playback.wordId + '"', 'audio');
+                    updateAudioStatus('Completed: ' + playback.wordId);
+                    URL.revokeObjectURL(url);
+
+                    // Complete reset and move to next
+                    resetPlaybackState();
+
+                    // If in Play All mode, advance to next word
+                    if (playAllQueue.length > 0) {
+                        setTimeout(playNextInQueue, 200);
+                    }
+                };
+
+                audio.onerror = function(e) {
+                    addLog('[AUDIO-ELEMENT] Audio error: ' + e, 'error');
+                    resetPlaybackState();
+                };
+
+            } catch (e) {
+                addLog('[AUDIO-ELEMENT] Error: ' + e.message, 'error');
+                resetPlaybackState();
+            }
+        }
+
+        // Reset playback state completely
+        function resetPlaybackState() {
+            if (playback.playTimer) {
+                clearTimeout(playback.playTimer);
+            }
+            // Reset the per-stream sequence dedup buffer. The backend restarts
+            // sequence numbers at 1 for EACH word (streamer.go: currentSeq = i+1),
+            // so without this reset, every word after the first has ALL its frames
+            // rejected as "duplicates" of word 1's sequence history → no audio for
+            // word 2+. Scoped here so every new word (playWord + playNextInQueue)
+            // starts with a clean dedup window.
+            receivedSequences = [];
+            playback = {
+                active: false,
+                wordId: null,
+                audioBuffer: [],
+                wavBuffer: null,
+                audioReady: false,
+                lastFrameTime: 0,
+                playTimer: null
+            };
+        }
+
+        // Create WAV buffer from PCM16 data
+        function createWavFromPCM16(pcmData, sampleRate, numSamples) {
+            var dataSize = pcmData.length;
+            var bufferSize = 44 + dataSize; // WAV header + data
+            var buffer = new ArrayBuffer(bufferSize);
+            var view = new DataView(buffer);
+
+            // WAV Header
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + dataSize, true);
+            writeString(view, 8, 'WAVE');
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true); // fmt chunk size
+            view.setUint16(20, 1, true); // PCM format
+            view.setUint16(22, 1, true); // mono
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true); // byte rate
+            view.setUint16(32, 2, true); // block align
+            view.setUint16(34, 16, true); // bits per sample
+            writeString(view, 36, 'data');
+            view.setUint32(40, dataSize, true);
+
+            // Copy PCM data
+            var pcmView = new DataView(pcmData.buffer);
+            for (var i = 0; i < dataSize; i++) {
+                view.setUint8(44 + i, pcmView.getUint8(i));
+            }
+
+            return buffer;
+        }
+
+        // ==================== Error Frame Handling ====================
+
+        function handleErrorFrame(payload) {
+            addLog('[ERROR] ' + decodeText(payload), 'error');
+        }
+
+        // ==================== Session Actions ====================
+
+        function startSession() {
+            var limit = parseInt(document.getElementById('sessionWordCount').value, 10) || 5;
+
+            var btn = document.getElementById('startSessionBtn');
+            btn.textContent = 'Starting...';
+            btn.disabled = true;
+
+            document.getElementById('sessionWordsArea').innerHTML = '';
+            document.getElementById('sessionInfo').style.display = 'none';
+            currentSessionId = null;
+            sessionWords = [];
+            playAllQueue = [];
+
+            addLog('[CONTROL TX] start_session (limit=' + limit + ')', 'control');
+
+            if (sendControl('start_session', { limit: limit, category: '' })) {
+                // Reset button after 30s timeout if no response
+                setTimeout(function () {
+                    if (!currentSessionId) {
+                        btn.textContent = 'Start Session';
+                        btn.disabled = false;
+                        addLog('[SESSION] No session_ready within 30s — check server logs', 'error');
+                    }
+                }, 30000);
+            } else {
+                btn.textContent = 'Start Session';
+                btn.disabled = false;
+            }
+        }
+
+        function playWord(index) {
+            if (!currentSessionId) {
+                addLog('No active session', 'error');
+                return;
+            }
+            var word = sessionWords[index];
+            if (!word) return;
+
+            addLog('[PLAY] Starting playback for "' + word + '"', 'status');
+
+            // Complete reset before new playback
+            resetPlaybackState();
+
+            // 🐛 Reset debug state for new word playback
+            debugState = {
+                wordCompleteReceived: false,
+                framesAfterWordComplete: 0,
+                activeWordDuringComplete: null,
+                bugDetected: false
+            };
+
+            // Initialize fresh playback state
+            playback = {
+                active: true,
+                wordId: word,
+                audioBuffer: [],
+                wavBuffer: null,
+                audioReady: false,
+                lastFrameTime: 0,
+                playTimer: null
+            };
+            playAllQueue = []; // cancel any Play All sequence
+
+            addLog('[PLAY] Fresh state: active=' + playback.active + ', wordId=' + playback.wordId, 'status');
+
+            markWordState(index, 'playing');
+            updateAudioStatus('Collecting frames: ' + word);
+
+            addLog('[CONTROL TX] play_word word_id="' + word + '" session=' + currentSessionId, 'control');
+            sendControl('play_word', { word_id: word, session_id: currentSessionId });
+        }
+
+        function playAll() {
+            if (sessionWords.length === 0) return;
+            playAllQueue = sessionWords.slice(); // copy
+            addLog('[SESSION] Play All — queueing ' + playAllQueue.length + ' words', 'session');
+            playNextInQueue();
+        }
+
+        function playNextInQueue() {
+            if (playAllQueue.length === 0) return;
+            var word = playAllQueue.shift();
+            var index = sessionWords.indexOf(word);
+            if (index < 0) return;
+
+            // Reset playback state (HTMLAudioElement mode)
+            // resetPlaybackState() also clears receivedSequences so the next
+            // word's per-word-restarting sequences aren't seen as duplicates.
+            resetPlaybackState();
+            playback = {
+                active: true,
+                wordId: word,
+                audioBuffer: [],
+                wavBuffer: null,
+                audioReady: false,
+                lastFrameTime: 0,
+                playTimer: null
+            };
+
+            markWordState(index, 'playing');
+            updateAudioStatus('Collecting: ' + word + ' (' + playAllQueue.length + ' queued)');
+
+            addLog('[CONTROL TX] play_word word_id="' + word + '" (Play All)', 'control');
+            sendControl('play_word', { word_id: word, session_id: currentSessionId });
+        }
+
+        // ==================== FSRS Direct Query ====================
+
+        function testSubmitReview() {
+            addLog('[CONTROL TX] submit_review (debug: apple→good)', 'control');
+            sendControl('submit_review', {
+                ratings: { 'apple': 'good' },
+                category: 'english'
+            });
+        }
+
+        function requestDueCards() {
+            var limit = parseInt(document.getElementById('wordCount').value, 10) || 20;
+            addLog('[CONTROL TX] select_due_cards (limit=' + limit + ')', 'control');
+
+            var btn = document.getElementById('getWordsBtn');
+            btn.textContent = 'Loading...';
+            btn.disabled = true;
+
+            if (sendControl('select_due_cards', {
+                limit: limit,
+                category: '',
+                units: '',
+                fetch_lock_hours: 0
+            })) {
+                setTimeout(function () {
+                    btn.textContent = 'Query Due Cards';
+                    btn.disabled = false;
+                }, 5000);
+            } else {
+                btn.textContent = 'Query Due Cards';
+                btn.disabled = false;
+            }
+        }
+
+        function unlockCards() {
+            addLog('[CONTROL TX] unlock_cards', 'control');
+            var btn = document.getElementById('unlockBtn');
+            btn.textContent = 'Unlocking...';
+            btn.disabled = true;
+            if (sendControl('unlock_cards', { category: 'english', unit: '' })) {
+                setTimeout(function () {
+                    btn.textContent = 'Unlock Due Cards';
+                    btn.disabled = false;
+                }, 2000);
+            } else {
+                btn.textContent = 'Unlock Due Cards';
+                btn.disabled = false;
+            }
+        }
+
         function displayFSRSResults(data) {
-            const resultsArea = document.getElementById('fsrsResults');
+            var resultsArea = document.getElementById('fsrsResults');
 
             if (data.type === 'select_due_cards_result') {
-                const cards = data.result?.cards || [];
-
+                var cards = (data.result && data.result.cards) || [];
                 if (cards.length === 0) {
-                    resultsArea.textContent = 'No due words found';
+                    resultsArea.textContent = 'No due words found.';
+                    addLog('[CONTROL] select_due_cards returned 0 cards', 'control');
                     return;
                 }
 
-                let output = `Found ${cards.length} due words:\n\n`;
-                cards.forEach((card, index) => {
-                    output += `${index + 1}. ${card.word}\n`;
-                    output += `   Meaning: ${card.meaning}\n`;
-                    if (card.example) {
-                        output += `   Example: ${card.example}\n`;
-                    }
+                var output = 'Found ' + cards.length + ' due words:\n\n';
+                cards.forEach(function (card, i) {
+                    output += (i + 1) + '. ' + card.word + '\n';
+                    if (card.meaning) output += '   Meaning: ' + card.meaning + '\n';
+                    if (card.example) output += '   Example: ' + card.example + '\n';
                     output += '\n';
                 });
-
                 resultsArea.textContent = output;
+                addLog('[CONTROL] select_due_cards returned ' + cards.length + ' cards', 'control');
             } else {
                 resultsArea.textContent = JSON.stringify(data, null, 2);
             }
         }
 
-        // Request due cards from FSRS
-        function requestDueCards() {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                addLog('Cannot send: WebSocket not connected', 'error');
-                return;
-            }
+        // ==================== Audio Context ====================
 
-            const limit = parseInt(document.getElementById('wordCount').value) || 20;
-
-            const payload = JSON.stringify({
-                type: 'select_due_cards',
-                params: {
-                    limit: limit,
-                    category: '',
-                    units: [],
-                    fetch_lock_hours: 0.5
-                }
-            });
-
-            const header = {
-                version: ProtocolVersion,
-                msgType: MsgType.Control,
-                sequence: nextSequence(),
-                timestamp: Math.floor(Date.now() / 1000),
-                payloadLen: payload.length,
-                reserved: 0
-            };
-
-            const frame = buildFrame(header, payload);
-
+        function initAudioContext() {
+            if (audioEnabled) return;
             try {
-                ws.send(frame);
-                addLog(`[CONTROL] Sent select_due_cards request (limit=${limit})`, 'control');
-                document.getElementById('getWordsBtn').textContent = 'Loading...';
-                document.getElementById('getWordsBtn').disabled = true;
-
-                // Reset button after timeout
-                setTimeout(() => {
-                    document.getElementById('getWordsBtn').textContent = 'Get Due Words';
-                    document.getElementById('getWordsBtn').disabled = false;
-                }, 5000);
-            } catch (error) {
-                addLog(`Send failed: ${error.message}`, 'error');
-                document.getElementById('getWordsBtn').textContent = 'Get Due Words';
-                document.getElementById('getWordsBtn').disabled = false;
+                var AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                audioContext = new AudioContextClass();
+                // iOS/iPadOS: AudioContext starts suspended — resume on user gesture
+                if (audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+                audioEnabled = true;
+                document.getElementById('playAudioBtn').disabled = false;
+                updateAudioStatus('Ready (sample rate: ' + audioContext.sampleRate + ' Hz)');
+                addLog('[AUDIO] Web Audio API initialized', 'status');
+            } catch (e) {
+                addLog('[AUDIO] Init failed: ' + e.message, 'error');
             }
         }
 
-        // Play audio frame using Web Audio API
-        function playAudioFrame(pcmData) {
-            if (!audioContext) {
-                return;
-            }
-
-            try {
-                const audioBuffer = audioContext.createBuffer(
-                    1, // mono channel
-                    AudioFrameSize / 2, // 640 bytes = 320 samples @ 16-bit
-                    16000 // 16kHz sample rate
-                );
-
-                const channelData = audioBuffer.getChannelData(0);
-                const view = new DataView(pcmData.buffer);
-
-                // Convert 16-bit PCM to float32 normalized to [-1, 1]
-                for (let i = 0; i < AudioFrameSize / 2; i++) {
-                    const sample = view.getInt16(i * 2, false); // big-endian
-                    channelData[i] = sample / 32768.0;
-                }
-
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
-                source.start();
-
-                addLog('[AUDIO] Playing frame', 'audio');
-            } catch (error) {
-                addLog(`[AUDIO] Playback error: ${error.message}`, 'error');
-                console.error('Audio playback error:', error);
-            }
-        }
-
-        // Play test audio (synthesize test tone)
         function playTestAudio() {
-            if (!audioContext) {
-                initAudioContext();
-            }
+            if (!audioContext) initAudioContext();
+            if (!audioContext) return;
 
-            if (!audioContext) {
-                addLog('[AUDIO] Failed to initialize audio', 'error');
-                return;
+            // iOS/iPadOS: ensure context is running (may re-suspend)
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
             }
 
             try {
-                // Generate 440Hz sine wave (1 second)
-                const sampleRate = audioContext.sampleRate || 16000;
-                const duration = 1.0;
-                const numSamples = sampleRate * duration;
+                var sampleRate = audioContext.sampleRate || 16000;
+                var duration = 1.0;
+                var numSamples = Math.floor(sampleRate * duration);
+                var audioBuffer = audioContext.createBuffer(1, numSamples, sampleRate);
+                var channelData = audioBuffer.getChannelData(0);
 
-                const audioBuffer = audioContext.createBuffer(1, numSamples, sampleRate);
-                const channelData = audioBuffer.getChannelData(0);
-
-                for (let i = 0; i < numSamples; i++) {
-                    const t = i / sampleRate;
+                for (var i = 0; i < numSamples; i++) {
+                    var t = i / sampleRate;
                     channelData[i] = 0.3 * Math.sin(2 * Math.PI * 440 * t);
                 }
 
-                const source = audioContext.createBufferSource();
+                var source = audioContext.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(audioContext.destination);
                 source.start();
 
-                addLog('[AUDIO] Playing test tone (440Hz)', 'audio');
-                document.getElementById('audioStatus').textContent = 'Playing test tone...';
-
-                source.onended = () => {
-                    document.getElementById('audioStatus').textContent = 'Ready';
+                addLog('[AUDIO] Test tone 440Hz', 'audio');
+                updateAudioStatus('Playing test tone...');
+                source.onended = function () {
+                    updateAudioStatus('Ready');
                 };
-            } catch (error) {
-                addLog(`[AUDIO] Test tone error: ${error.message}`, 'error');
-                console.error('Test tone error:', error);
+            } catch (e) {
+                addLog('[AUDIO] Test tone error: ' + e.message, 'error');
             }
         }
 
-        // Initialize Web Audio API (must be triggered by user interaction)
-        function initAudioContext() {
+        // Test HTMLAudioElement as fallback for iOS/iPadOS
+        function playTestAudioElement() {
             try {
-                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-                audioContext = new AudioContextClass();
-                audioEnabled = true;
+                // Generate 1 second of 440Hz sine wave at 16kHz
+                var sampleRate = 16000;
+                var duration = 1.0;
+                var numSamples = Math.floor(sampleRate * duration);
 
-                document.getElementById('audioStatus').textContent = 'Ready';
-                document.getElementById('playAudioBtn').disabled = false;
+                // Create WAV file
+                var wavBuffer = createWavBuffer(function(t) {
+                    return 0.3 * Math.sin(2 * Math.PI * 440 * t);
+                }, sampleRate, numSamples);
 
-                addLog('[AUDIO] Web Audio API initialized', 'status');
-            } catch (error) {
-                addLog(`[AUDIO] Failed to initialize Web Audio API: ${error.message}`, 'error');
-                console.error('Audio context error:', error);
+                // Create blob and URL
+                var blob = new Blob([wavBuffer], { type: 'audio/wav' });
+                var url = URL.createObjectURL(blob);
+
+                // Play with audio element
+                var audio = new Audio();
+                audio.src = url;
+                audio.play().then(function() {
+                    addLog('[AUDIO-ELEMENT] Playing test tone 440Hz via <audio>', 'audio');
+                    updateAudioStatus('Playing via audio element...');
+                    addLog('[AUDIO-ELEMENT] This should work on iPad if audio element is supported', 'status');
+                }).catch(function(err) {
+                    addLog('[AUDIO-ELEMENT] Play failed: ' + err.message, 'error');
+                });
+
+                audio.onended = function() {
+                    updateAudioStatus('Ready');
+                    URL.revokeObjectURL(url); // Clean up
+                };
+            } catch (e) {
+                addLog('[AUDIO-ELEMENT] Error: ' + e.message, 'error');
             }
         }
 
-        // Initialize audio context on first user interaction
-        document.addEventListener('click', function initAudioOnClick(e) {
-            if (!audioEnabled && (e.target.id === 'connectBtn' || e.target.id === 'playAudioBtn')) {
-                initAudioContext();
-                document.removeEventListener('click', initAudioOnClick);
-            }
-        }, { once: true });
+        // Create WAV file buffer from sample generator function
+        function createWavBuffer(sampleFunc, sampleRate, numSamples) {
+            var byteRate = sampleRate * 2; // 16-bit mono
+            var dataSize = numSamples * 2;
+            var bufferSize = 44 + dataSize; // WAV header + data
 
-        // Handle page unload
-        window.addEventListener('beforeunload', () => {
+            var buffer = new ArrayBuffer(bufferSize);
+            var view = new DataView(buffer);
+
+            // WAV Header
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + dataSize, true);
+            writeString(view, 8, 'WAVE');
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true); // fmt chunk size
+            view.setUint16(20, 1, true); // PCM format
+            view.setUint16(22, 1, true); // mono
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true);
+            view.setUint16(32, 2, true); // block align
+            view.setUint16(34, 16, true); // bits per sample
+            writeString(view, 36, 'data');
+            view.setUint32(40, dataSize, true);
+
+            // Write PCM data
+            var offset = 44;
+            for (var i = 0; i < numSamples; i++) {
+                var t = i / sampleRate;
+                var sample = sampleFunc(t);
+                var intSample = Math.max(-32768, Math.min(32767, Math.floor(sample * 32768)));
+                view.setInt16(offset, intSample, true);
+                offset += 2;
+            }
+
+            return buffer;
+        }
+
+        function writeString(view, offset, string) {
+            for (var i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        // ==================== Cleanup ====================
+
+        window.addEventListener('beforeunload', function () {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.close(1000, 'Page closed');
             }
         });
 
-        // Initial log message
-        addLog('Test interface loaded. Click "Connect" to begin.', 'status');
+        // ==================== Init ====================
+        addLog('Interface loaded. Open http://localhost:8080/ and click Connect.', 'status');
     </script>
 </body>
 </html>
