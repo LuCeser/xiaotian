@@ -24,10 +24,10 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 ### Real-time Dictation
 
 - [ ] **DICT-01**: Student can request dictation session via button ("I want to dictate 30 words")
-- [ ] **DICT-02**: System initializes session with selected due words
-- [ ] **DICT-03**: System delivers individual word prompts via TTS audio streaming
-- [ ] **DICT-04**: System maintains session state (IDLE → LISTENING → DICTATING → WAITING_PARENT → FEEDBACK)
-- [ ] **DICT-05**: System achieves <1.5 second latency for audio responses
+- [x] **DICT-02**: System initializes session with selected due words
+- [x] **DICT-03**: System delivers individual word prompts via TTS audio streaming
+- [x] **DICT-04**: System maintains session state (IDLE → LISTENING → DICTATING → WAITING_PARENT → FEEDBACK)
+- [x] **DICT-05**: System achieves <1.5 second latency for audio responses
 
 ### Parent Feedback
 
@@ -68,7 +68,7 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 
 - [ ] **ERR-01**: System gracefully handles WebSocket disconnections
 - [ ] **ERR-02**: System provides meaningful error messages to parents and students
-- [ ] **ERR-03**: System implements timeout-based session cleanup
+- [x] **ERR-03**: System implements timeout-based session cleanup
 - [x] **ERR-04**: System logs errors with structured logging for debugging
 
 ## v2 Requirements
@@ -114,10 +114,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FSRS-03 | Phase 5 | Complete |
 | FSRS-04 | Phase 5 | Complete |
 | DICT-01 | Phase 8 | Pending |
-| DICT-02 | Phase 7 | Pending |
-| DICT-03 | Phase 6 | Pending |
-| DICT-04 | Phase 7 | Pending |
-| DICT-05 | Phase 6 | Pending |
+| DICT-02 | Phase 7 | Complete |
+| DICT-03 | Phase 6 | Complete |
+| DICT-04 | Phase 7 | Complete |
+| DICT-05 | Phase 6 | Complete |
 | FEED-01 | Phase 10 | Pending |
 | FEED-02 | Phase 10 | Pending |
 | FEED-03 | Phase 10 | Pending |
@@ -140,7 +140,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | WEB-04 | Phase 8 | Pending |
 | ERR-01 | Phase 11 | Pending |
 | ERR-02 | Phase 11 | Pending |
-| ERR-03 | Phase 7 | Pending |
+| ERR-03 | Phase 7 | Complete |
 | ERR-04 | Phase 1 | Complete |
 
 **Coverage:**
