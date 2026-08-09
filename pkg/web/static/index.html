@@ -41,27 +41,21 @@
     <!-- Main interaction area -->
     <main class="main-content">
       <!--
-        Session request section: student picks a word count and starts.
-        Visible by default. Hidden by app.js once a session is active.
+        Session request section: the prominent "I want to dictate 30 words"
+        CTA mounts into #session-button-container (ui-components.js). Visible
+        by default; the SessionButton component manages its own label and
+        disabled state from the SessionStateManager (DICT-01).
+
+        Wave 2 replaced Wave 1's static 10/20/30 word-count selector and
+        disabled start button with this single JS-driven component so there
+        is exactly one prominent affordance on page load.
       -->
       <section class="session-request-section" id="sessionRequest"
-               aria-labelledby="sessionRequestTitle">
-        <h2 id="sessionRequestTitle">今天想听写多少个单词？</h2>
+               role="region" aria-labelledby="sessionRequestTitle">
+        <h2 id="sessionRequestTitle">准备好了吗？开始今天的听写吧！</h2>
 
-        <div class="word-count-selector" role="group"
-             aria-label="选择听写单词数量">
-          <button type="button" class="kid-button word-count-btn"
-                  data-count="10" aria-pressed="false">10 个</button>
-          <button type="button" class="kid-button word-count-btn"
-                  data-count="20" aria-pressed="false">20 个</button>
-          <button type="button" class="kid-button word-count-btn"
-                  data-count="30" aria-pressed="false">30 个</button>
-        </div>
-
-        <button type="button" class="kid-button session-button"
-                id="startSession" disabled aria-disabled="true">
-          🎤 开始听写
-        </button>
+        <!-- SessionButton (ui-components.js) mounts here -->
+        <div id="session-button-container"></div>
       </section>
 
       <!--
@@ -94,16 +88,21 @@
 
     <!-- Footer with simple instructions -->
     <footer class="app-footer">
-      <p>💡 先选单词数量，再点「开始听写」</p>
+      <p>💡 点上面的按钮，开始听写 30 个单词</p>
     </footer>
   </div>
 
   <!--
     Scripts: loaded with `defer` so they execute in order after the DOM is
-    parsed. websocket-client.js defines window.WebSocketClient; app.js
-    consumes it to boot the connection. Order matters (defer preserves it).
+    parsed. Load order matters (defer preserves it):
+      websocket-client.js → window.WebSocketClient (transport)
+      state-manager.js    → window.SessionStateManager (state store)
+      ui-components.js    → window.SessionButton (uses the state store)
+      app.js              → wires them together
   -->
   <script src="js/websocket-client.js" defer></script>
+  <script src="js/state-manager.js" defer></script>
+  <script src="js/ui-components.js" defer></script>
   <script src="js/app.js" defer></script>
 </body>
 </html>
