@@ -236,6 +236,13 @@ func (f *fakeStreamer) StreamWord(ctx context.Context, client tts.Sender, sessio
 	return f.streamErr
 }
 
+// ClearSeqCounter satisfies the widened SessionStreamer interface (D-11 teardown
+// hook). No-op for tests — the production *tts.Streamer clears its per-session
+// counter here.
+func (f *fakeStreamer) ClearSeqCounter(sessionID string) {
+	// no-op
+}
+
 func (f *fakeStreamer) StreamCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

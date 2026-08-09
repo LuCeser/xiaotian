@@ -174,7 +174,15 @@ func (m *Manager) NewSession(
 	// RLock establishes happens-before with these writes.
 	s.done = make(chan struct{})
 	s.runCtx, s.cancel = context.WithCancel(ctx)
-	s.onExit = func() { m.removeSession(connID) }
+	s.onExit = func() {
+		m.removeSession(connID)
+		// D-11 teardown: clear the streamer's per-session sequence counter on
+		// every session exit so seqCounters stays bounded under the
+		// 100-concurrent budget (RESEARCH Pitfall 5). Keyed by s.ID() — the same
+		// session ID passed to StreamWord. Synchronous and non-blocking like
+		// removeSession.
+		m.streamer.ClearSeqCounter(s.ID())
+	}
 
 	m.mu.Lock()
 	m.sessions[connID] = s

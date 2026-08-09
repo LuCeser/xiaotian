@@ -32,6 +32,11 @@ type SessionStreamer interface {
 	// StreamWord delivers audio for a single word to the given client. The
 	// Session owns this call per D-13 option B (server-side side channel).
 	StreamWord(ctx context.Context, client tts.Sender, sessionID string, wordID string, startSeq uint32) error
+	// ClearSeqCounter removes the streamer's per-session monotonic sequence
+	// counter entry (D-11 teardown hook). Called on session exit so the
+	// seqCounters map stays bounded under the 100-concurrent budget (RESEARCH
+	// Pitfall 5 memory-leak mitigation).
+	ClearSeqCounter(sessionID string)
 }
 
 // SessionHub is the subset of *ws.Hub the Session uses for lifecycle cleanup.
