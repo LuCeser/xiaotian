@@ -238,21 +238,22 @@ Plans:
 **Goal:** Deliver a working end-to-end iPad Safari dictation flow on real hardware — student opens page → one-tap unlock → system reads words → gapless continuous playback of 20-30 words → student responds → feedback. Backend WS audio pipeline stays; fix is frontend (Web Audio API replacing HTMLAudioElement) + protocol-correctness bug fixes (sequence monotonicity). Not research-only — delivers a tested-on-real-iPad fix.
 **Requirements**: TBD (acceptance baseline = CONTEXT.md D-13 real-iPad conditions + D-10/D-11/D-12/D-09 protocol correctness)
 **Depends on:** Phase 7
-**Plans:** 4 plans
+**Plans:** 4/4 plans executed (completed 2026-08-09)
+**Verification:** Real-iPad UAT on iPadOS 26.5.2 — core audio playback PASS (D-13 cond. 1 one-tap unlock, cond. 3 per-word); gapless-continuous (Play All) + app-switch recovery not explicitly tested (residual hardening). See 07.1-04-SUMMARY.md.
 
 Plans:
 **Wave 1** (parallel — backend protocol foundation)
 
-- [ ] 07.1-01-PLAN.md — Streamer D-10/D-11 sequence fixes + ClearSeqCounter + session teardown hook (D-10, D-11, Pitfall 5) [tracer]
-- [ ] 07.1-02-PLAN.md — Control-frame D-12 monotonic atomic counter + D-09 compression-lock documentation (D-12, D-09)
+- [x] 07.1-01-PLAN.md — Streamer D-10/D-11 sequence fixes + ClearSeqCounter + session teardown hook (D-10, D-11, Pitfall 5) [tracer]
+- [x] 07.1-02-PLAN.md — Control-frame D-12 monotonic atomic counter + D-09 compression-lock documentation (D-12, D-09)
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 07.1-03-PLAN.md — Frontend Web Audio API rewrite: 3-condition unlock, gapless scheduling, PCM→AudioBuffer, app-switch recovery (D-01, D-02, D-03, D-04, D-05, D-06)
+- [x] 07.1-03-PLAN.md — Frontend Web Audio API rewrite: 3-condition unlock, gapless scheduling, PCM→AudioBuffer, app-switch recovery (D-01, D-02, D-03, D-04, D-05, D-06)
 
 **Wave 3** *(blocked on Wave 2 — real hardware gate)*
 
-- [ ] 07.1-04-PLAN.md — Real-iPad UAT against D-13 four conditions + iOS version capture (D-13, D-14)
+- [x] 07.1-04-PLAN.md — Real-iPad UAT against D-13 four conditions + iOS version capture (D-13, D-14)
 
 ### Phase 8: Student Web Interface
 
@@ -351,6 +352,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 5. FSRS Core Implementation | 2/2 | Complete    | 2026-08-02 |
 | 6. TTS Audio Streaming | 4/4 | Complete    | 2026-08-08 |
 | 7. Session State Management | 3/3 | Complete    | 2026-08-08 |
+| 07.1. iOS WebSocket Audio Playback Fix (INSERTED) | 4/4 | Complete    | 2026-08-09 |
 | 8. Student Web Interface | 0/0 | Not started | - |
 | 9. Parent Vocabulary Management | 0/0 | Not started | - |
 | 10. Parent Feedback System | 0/0 | Not started | - |
