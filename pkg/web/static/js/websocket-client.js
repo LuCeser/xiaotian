@@ -276,6 +276,7 @@
      *   - session start ack: {type, session_id, words[]}
      *   - error:             {type, message}
      *   - progress:          {type, currentWord, completedWords}
+     *   - word done:         {type, word_id}
      *   - session end:       {type, totalWords}
      *
      * @param {object} payload - parsed JSON control frame.
@@ -301,6 +302,9 @@
           break;
         case 'progress_update':
           this._applyProgressUpdate(payload);
+          break;
+        case 'word_complete':
+          this._applyWordComplete(payload);
           break;
         case 'session_complete':
           this._applySessionComplete(payload);
@@ -339,16 +343,51 @@
       this.stateManager.setState({ lastError: message });
     }
 
-    /** @private apply a progress_update frame (T-08-05 validates numbers). */
+    /**
+     * @private apply a progress frame.
+     * T-08-05 validates numeric types; T-08-08 additionally rejects negative
+     * values and completedWords > totalWords (tampering mitigation). A rejected
+     * frame is surfaced via errorHandler and does NOT mutate state, so the UI
+     * keeps the last known-good progress rather than rendering a broken bar.
+     */
     _applyProgressUpdate(payload) {
       if (typeof payload.currentWord !== 'number' || typeof payload.completedWords !== 'number') {
-        this.errorHandler(new Error('malformed progress_update frame'));
+        this.errorHandler(new Error('malformed progress frame'));
+        return;
+      }
+      // T-08-08: reject negative progress values.
+      if (payload.currentWord < 0 || payload.completedWords < 0) {
+        this.errorHandler(new Error('malformed progress frame: negative values'));
+        return;
+      }
+      // T-08-08: reject completedWords exceeding the promised total. totalWords
+      // is 0 before session_ready resolves; in that window we accept the frame
+      // (the session_ready ack will reset counters authoritatively).
+      var total = this.stateManager.getState().totalWords;
+      if (total > 0 && payload.completedWords > total) {
+        this.errorHandler(new Error('malformed progress frame: completedWords exceeds totalWords'));
         return;
       }
       this.stateManager.setState({
         currentWord: payload.currentWord,
         completedWords: payload.completedWords
       });
+    }
+
+    /**
+     * @private apply a word_complete frame — increment completedWords by one.
+     * Used by the backend's per-word streaming loop. word_id is informational
+     * (not stored). T-08-08: clamp the increment at totalWords so a sequence
+     * of word_complete frames cannot push progress past 100%.
+     */
+    _applyWordComplete(payload) {
+      var snapshot = this.stateManager.getState();
+      var total = snapshot.totalWords;
+      var next = snapshot.completedWords + 1;
+      if (total > 0 && next > total) {
+        next = total; // clamp at 100%
+      }
+      this.stateManager.setState({ completedWords: next });
     }
 
     /** @private apply a session_complete frame → end the session. */

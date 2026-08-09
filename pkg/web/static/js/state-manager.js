@@ -84,6 +84,13 @@
      * Only top-level keys are merged (shallow). Unknown keys are accepted so
      * future message types can extend state without editing this class.
      *
+     * After merging, progress counters are normalized (PLAN 08-03 Task 2,
+     * T-08-08 defense-in-depth): completedWords is clamped to [0, totalWords]
+     * and negatives on any progress field are corrected. The primary range
+     * check lives at the trust boundary in WebSocketClient._applyProgressUpdate
+     * (which REJECTS bad frames); this is a safety net so a future code path
+     * that bypasses the ws client cannot leave the store in an impossible state.
+     *
      * @param {object} updates - partial state to merge (e.g.
      *        {sessionActive: true, status: 'DICTATING'}).
      * @returns {object} the new state snapshot (shallow copy).
@@ -95,8 +102,35 @@
       // Merge onto a fresh object so the internal reference swaps atomically;
       // subscribers always observe a consistent snapshot.
       this.state = Object.assign({}, this.state, updates);
+      // T-08-08 defense-in-depth: normalize progress counters after merge so
+      // the store never holds an out-of-range value regardless of the caller.
+      this._normalizeProgress();
       this.notify();
       return this.getState();
+    }
+
+    /**
+     * Clamp progress counters to sane bounds. Called after every setState
+     * merge. Guards against: negative completedWords, completedWords exceeding
+     * totalWords, and divide-by-zero downstream (ProgressDisplay also guards
+     * totalWords === 0 before dividing, so this is belt-and-braces).
+     *
+     * @private
+     */
+    _normalizeProgress() {
+      var s = this.state;
+      // Coerce to integer bounds; only touch fields that are set.
+      if (typeof s.completedWords === 'number') {
+        if (s.completedWords < 0) {
+          s.completedWords = 0;
+        }
+        if (typeof s.totalWords === 'number' && s.totalWords > 0 && s.completedWords > s.totalWords) {
+          s.completedWords = s.totalWords;
+        }
+      }
+      if (typeof s.currentWord === 'number' && s.currentWord < 0) {
+        s.currentWord = 0;
+      }
     }
 
     /**

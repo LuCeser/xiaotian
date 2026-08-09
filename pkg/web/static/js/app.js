@@ -1,6 +1,6 @@
 /**
  * @file Student Dictation Interface — application entry point
- *       (Phase 8, Plan 02 Task 03 — session lifecycle wiring).
+ *       (Phase 8, Plan 03 — progress display wiring).
  *
  * Purpose:
  *   Main application initialization and component orchestration for the
@@ -8,13 +8,16 @@
  *   index.html after websocket-client.js, state-manager.js, and
  *   ui-components.js so all constructors are available.
  *
- * Responsibilities (Wave 2 scope):
+ * Responsibilities (Wave 2 + Wave 3 scope):
  *   1. Construct the SessionStateManager (single source of truth).
  *   2. Construct a WebSocketClient pointed at the backend /ws endpoint and
  *      register the state manager so inbound control frames dispatch into
  *      structured state updates (handleControlFrame).
  *   3. Construct the SessionButton and subscribe it to the state manager.
- *   4. Drive the connection-status indicator (#connectionStatus) from the
+ *   4. Construct the ProgressDisplay and subscribe it to the state manager
+ *      so status text, progress bar, and word counter update in real time
+ *      (Wave 3 / Plan 08-03). Reveals the progress section on session start.
+ *   5. Drive the connection-status indicator (#connectionStatus) from the
  *      state manager so students always see whether the app is online
  *      (Pitfall 4: never leave the student guessing).
  *
@@ -38,8 +41,8 @@
     setConnectionState('failed');
     return;
   }
-  if (!window.SessionStateManager || !window.SessionButton) {
-    console.error('[app] SessionStateManager/SessionButton unavailable — scripts did not load.');
+  if (!window.SessionStateManager || !window.SessionButton || !window.ProgressDisplay) {
+    console.error('[app] SessionStateManager/SessionButton/ProgressDisplay unavailable — scripts did not load.');
     setConnectionState('failed');
     return;
   }
@@ -89,6 +92,33 @@
     // Re-render the button whenever the authoritative state changes.
     stateManager.subscribe(function (state) {
       sessionButton.update(state);
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Progress display: mounts into #progress-display-container and subscribes
+  // to the state manager for real-time progress updates (PLAN 08-03 Task 2).
+  // Registered AFTER the session button so the button's visual state settles
+  // before the progress bar redraws (plan: "progress display updates after
+  // session button in subscriber order"). Also reveals the progress section
+  // once a session starts (Wave 1 shipped it hidden).
+  // ------------------------------------------------------------------
+  var progressHost = document.getElementById('progress-display-container');
+  var progressSection = document.getElementById('progressDisplay');
+  if (!progressHost) {
+    console.error('[app] #progress-display-container missing — ProgressDisplay cannot mount.');
+  } else {
+    var progressDisplay = new window.ProgressDisplay(progressHost, stateManager);
+    stateManager.subscribe(function (state) {
+      progressDisplay.update(state);
+      // Reveal the section once a session is active or has reached a
+      // non-idle state (e.g. FEEDBACK after completion). It stays visible
+      // thereafter so the student sees their result.
+      if (progressSection && progressSection.hasAttribute('hidden')) {
+        if (state.sessionActive || (state.status && state.status !== 'IDLE')) {
+          progressSection.removeAttribute('hidden');
+        }
+      }
     });
   }
 
