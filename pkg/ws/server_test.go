@@ -87,7 +87,12 @@ func TestNewServerAcceptsValidConfig(t *testing.T) {
 	}
 }
 
-// TestServerUpgraderCompressionDisabled verifies EnableCompression is false (Safari compatibility)
+// TestServerUpgraderCompressionDisabled verifies EnableCompression is false.
+//
+// D-09 (LOCKED): compression must stay OFF. With permessage-deflate enabled,
+// Safari 17.6 throws "Protocol error" when a TEXT control frame is followed by
+// a BINARY audio frame (Apple Developer Forum thread 744018, uWebSockets#1347).
+// This assertion guards that invariant so a future PR cannot regress it.
 func TestServerUpgraderCompressionDisabled(t *testing.T) {
 	logger := zap.NewNop()
 	hub, err := NewHub(HubConfig{

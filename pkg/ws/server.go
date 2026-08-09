@@ -132,7 +132,7 @@ func NewServer(hub *Hub, handler FrameHandler, cfg ServerConfig, logger *zap.Log
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:    cfg.ReadBufferSize,
 			WriteBufferSize:   cfg.WriteBufferSize,
-			EnableCompression: false, // D-02: Safari compatibility (CLAUDE.md target platform constraint overrides literal "compression enabled")
+			EnableCompression: false, // D-02/D-09: Safari compatibility — with permessage-deflate, Safari 17.6 throws "Protocol error" when a TEXT control frame is followed by a BINARY audio frame (Apple Developer Forum 744018, uWebSockets#1347)
 			CheckOrigin: func(r *http.Request) bool {
 				origin := r.Header.Get("Origin")
 				if origin == "" {
