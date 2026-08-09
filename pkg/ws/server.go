@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -19,13 +20,14 @@ const DefaultMaxMessageBytes = int64(HeaderSize + 0xFFFF)
 // ServerConfig defines server configuration (D-44 centralized validation)
 type ServerConfig struct {
 	// AllowedOrigins is the Origin whitelist (D-24, forbidden "*" or empty).
-	// Entries are matched against the browser's full Origin header. The whitelist
-	// is built as exact strings with optional http:// / https:// prefixes, so a
-	// config of "tutor.example.com" matches "http://tutor.example.com" but NOT
-	// "http://tutor.example.com:8080". WebSocket same-origin comparison is
-	// scheme+host+port; operators MUST include the port for non-default ports
-	// (e.g. "localhost:8080"), otherwise the browser is rejected with no
-	// diagnostic (IN-03).
+	// Entries are matched against the browser's Origin header in two passes:
+	// first an exact match (scheme+host+port), then a port-tolerant fallback
+	// that strips the port. So "localhost" matches both "http://localhost" and
+	// "http://localhost:8080" — a single entry covers any local dev port and
+	// LAN iPad testing without per-port churn. For strict port isolation,
+	// include the port explicitly (e.g. "tutor.example.com:8443"). Security
+	// stays host-whitelist-bound: the port-less origin must still be listed,
+	// and D-24's wildcard ban holds (IN-03).
 	AllowedOrigins []string
 	MaxMessageBytes int64    // Default 65551 (HeaderSize + max uint16 payload; IN-02)
 	ReadBufferSize  int      // Default 4096
@@ -140,14 +142,49 @@ func NewServer(hub *Hub, handler FrameHandler, cfg ServerConfig, logger *zap.Log
 					// browser path into a near-return-true (D-24 forbids '*' / return-true).
 					return false
 				}
-				// Check against whitelist
-				return allowedOrigins[origin]
+				// Exact whitelist match first (scheme+host+port per D-24).
+				if allowedOrigins[origin] {
+					return true
+				}
+				// Port-tolerant fallback: browsers append the port to the Origin
+				// header on non-default ports (e.g. http://localhost:8080), but
+				// whitelist entries conventionally omit it (localhost). Strip the
+				// port and retry so a single "localhost" entry covers any local dev
+				// port and LAN iPad testing without per-port config churn. Security
+				// is preserved: the port-less origin MUST still be whitelisted —
+				// this is not a return-true, and D-24's "*" / wildcard ban holds.
+				if stripped := stripOriginPort(origin); stripped != origin && allowedOrigins[stripped] {
+					return true
+				}
+				return false
 			},
 			HandshakeTimeout: cfg.HandshakeTimeout,
 		},
 	}
 
 	return server, nil
+}
+
+// stripOriginPort removes the port from an Origin header value, preserving the
+// scheme and host. It is used by CheckOrigin's port-tolerant fallback. If the
+// origin has no port or cannot be parsed, it is returned unchanged.
+//
+// Examples:
+//
+//	"http://localhost:8080"  → "http://localhost"
+//	"https://10.0.0.1:443"   → "https://10.0.0.1"
+//	"http://localhost"        → "http://localhost"  (unchanged)
+//	"null"                    → "null"             (unchanged)
+func stripOriginPort(origin string) string {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return origin
+	}
+	if u.Port() == "" {
+		return origin
+	}
+	u.Host = u.Hostname()
+	return u.String()
 }
 
 // HandleWebSocket handles HTTP → WebSocket upgrade (D-01, WS-01)

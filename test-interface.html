@@ -414,6 +414,11 @@
         // Session state
         let currentSessionId = null;
         let sessionWords = [];
+        // FSM sequential semantics (Phase 7): the first word uses play_word
+        // (IDLE→LISTENING); every subsequent word uses next_word
+        // (DICTATING→LISTENING, server advances wordIndex). The session owns
+        // the queue order; the client sends high-level intents.
+        let firstWordPlayed = false;
         let playAllQueue = [];
 
         // 🐛 BUG DETECTION STATE
@@ -748,6 +753,7 @@
         function handleSessionReady(data) {
             currentSessionId = data.session_id;
             sessionWords = data.words || [];
+            firstWordPlayed = false;
             addLog('[SESSION] Ready — ' + sessionWords.length + ' words, id=' + currentSessionId, 'session');
 
             document.getElementById('sessionIdDisplay').textContent = currentSessionId;
@@ -1314,8 +1320,12 @@
             markWordState(index, 'playing');
             updateAudioStatus('Collecting frames: ' + word);
 
-            addLog('[CONTROL TX] play_word word_id="' + word + '" session=' + currentSessionId, 'control');
-            sendControl('play_word', { word_id: word, session_id: currentSessionId });
+            // FSM sequential semantics: first word → play_word (IDLE→LISTENING),
+            // subsequent words → next_word (DICTATING→LISTENING).
+            var verb = firstWordPlayed ? 'next_word' : 'play_word';
+            firstWordPlayed = true;
+            addLog('[CONTROL TX] ' + verb + ' word_id="' + word + '" session=' + currentSessionId, 'control');
+            sendControl(verb, { word_id: word, session_id: currentSessionId });
         }
 
         function playAll() {
@@ -1348,8 +1358,11 @@
             markWordState(index, 'playing');
             updateAudioStatus('Collecting: ' + word + ' (' + playAllQueue.length + ' queued)');
 
-            addLog('[CONTROL TX] play_word word_id="' + word + '" (Play All)', 'control');
-            sendControl('play_word', { word_id: word, session_id: currentSessionId });
+            // FSM sequential semantics: first word → play_word, subsequent → next_word.
+            var verb = firstWordPlayed ? 'next_word' : 'play_word';
+            firstWordPlayed = true;
+            addLog('[CONTROL TX] ' + verb + ' word_id="' + word + '" (Play All)', 'control');
+            sendControl(verb, { word_id: word, session_id: currentSessionId });
         }
 
         // ==================== FSRS Direct Query ====================

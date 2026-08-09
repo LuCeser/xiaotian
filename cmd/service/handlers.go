@@ -127,8 +127,11 @@ func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, logger infr
 			case "start_session":
 				return handleStartSession(ctx, client, control.Params, manager, logger)
 
-			case "play_word":
-				return handlePlayWord(ctx, client, control.Params, manager, logger)
+		case "play_word":
+			return handlePlayWord(ctx, client, control.Params, manager, logger)
+
+		case "next_word":
+			return handleNextWord(ctx, client, control.Params, manager, logger)
 
 			case "select_due_cards":
 				return handleSelectDueCards(ctx, client, control.Params, fsrsSvc, logger)
@@ -199,6 +202,33 @@ func handlePlayWord(ctx context.Context, client *ws.Client, params json.RawMessa
 	manager.Push(clientConnID(client), session.SessionEvent{
 		Type:        session.EventControlFrame,
 		ControlType: "play_word",
+		WordID:      p.WordID,
+	})
+
+	return nil
+}
+
+// handleNextWord pushes a next_word event onto the session's event channel.
+// Per the FSM (Phase 7, fsm.go), DICTATING + next_word advances to the next
+// word in the server-owned queue (LISTENING); the event loop's onTransition
+// then spawns StreamWord for the new wordIndex. This is the multi-word
+// sequential-playback path that was missing in 07-03's handler rewiring.
+//
+// WordID is advisory — the session's wordIndex is authoritative because the
+// queue order comes from SelectDueCards (D-13: the session owns the word queue
+// and current index). The client sends high-level intents, not low-level
+// transitions.
+func handleNextWord(ctx context.Context, client *ws.Client, params json.RawMessage, manager *session.Manager, logger infra.Logger) error {
+	var p playWordParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		logger.Warn("invalid next_word params", infra.ErrField(err))
+		sendErrorFrame(client, "invalid next_word params")
+		return nil
+	}
+
+	manager.Push(clientConnID(client), session.SessionEvent{
+		Type:        session.EventControlFrame,
+		ControlType: "next_word",
 		WordID:      p.WordID,
 	})
 

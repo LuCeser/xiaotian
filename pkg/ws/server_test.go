@@ -188,6 +188,56 @@ func TestServerUpgraderCheckOriginWhitelisted(t *testing.T) {
 	}
 }
 
+// TestServerUpgraderCheckOriginWithPort verifies the port-tolerant fallback
+// (G-07-13): a browser visiting on a non-default port sends Origin
+// "http://localhost:8080", which a port-less whitelist entry "localhost" must
+// still accept. This is the real-world browser behavior that broke end-to-end
+// session flow in Phase 7 UAT.
+func TestServerUpgraderCheckOriginWithPort(t *testing.T) {
+	logger := zap.NewNop()
+	hub, err := NewHub(HubConfig{
+		Limit:            100,
+		RegisterBuffer:   32,
+		UnregisterBuffer: 32,
+	}, logger)
+	if err != nil {
+		t.Fatalf("failed to create hub: %v", err)
+	}
+
+	handler := &Router{}
+	cfg := ServerConfig{
+		AllowedOrigins:  []string{"localhost", "127.0.0.1"},
+		MaxMessageBytes: 65536,
+	}
+
+	server, err := NewServer(hub, handler, cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	acceptOrigins := []string{
+		"http://localhost:8080",  // non-default port + port-less whitelist entry
+		"https://localhost:8443",
+		"http://127.0.0.1:8080",
+		"http://localhost",       // exact match still works (regression guard)
+	}
+	for _, origin := range acceptOrigins {
+		req := httptest.NewRequest("GET", "/ws", nil)
+		req.Header.Set("Origin", origin)
+		if !server.upgrader.CheckOrigin(req) {
+			t.Errorf("CheckOrigin should accept whitelisted origin with port: %s", origin)
+		}
+	}
+
+	// Security guard: a non-whitelisted host with a port is still rejected
+	// (port tolerance must not weaken host-whitelist binding — D-24 holds).
+	rejectReq := httptest.NewRequest("GET", "/ws", nil)
+	rejectReq.Header.Set("Origin", "http://evil.com:8080")
+	if server.upgrader.CheckOrigin(rejectReq) {
+		t.Error("CheckOrigin should reject non-whitelisted origin even with port")
+	}
+}
+
 // TestServerHandleWebSocketUpgradeSuccess verifies successful WebSocket upgrade
 func TestServerHandleWebSocketUpgradeSuccess(t *testing.T) {
 	logger := zap.NewNop()
