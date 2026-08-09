@@ -24,6 +24,8 @@
   <link rel="stylesheet" href="styles/main.css">
 </head>
 <body>
+  <!-- Skip to main content link for accessibility (Plan 08-04 Task 3) -->
+  <a href="#main-content" class="skip-to-content">跳转到主要内容</a>
   <!-- Connection status indicator (Pitfall 4: always show connection state) -->
   <div class="connection-indicator" id="connectionStatus" role="status"
        aria-live="polite" aria-atomic="true" data-state="connecting">
@@ -39,7 +41,7 @@
     </header>
 
     <!-- Main interaction area -->
-    <main class="main-content">
+    <main class="main-content" id="main-content" role="main">
       <!--
         Session request section: the prominent "I want to dictate 30 words"
         CTA mounts into #session-button-container (ui-components.js). Visible
@@ -49,13 +51,16 @@
         Wave 2 replaced Wave 1's static 10/20/30 word-count selector and
         disabled start button with this single JS-driven component so there
         is exactly one prominent affordance on page load.
+
+        Plan 08-04 Task 3: Enhanced accessibility with proper ARIA roles
+        and semantic HTML structure.
       -->
       <section class="session-request-section" id="sessionRequest"
-               role="region" aria-labelledby="sessionRequestTitle">
+               role="region" aria-labelledby="sessionRequestTitle" aria-live="polite" aria-atomic="true">
         <h2 id="sessionRequestTitle">准备好了吗？开始今天的听写吧！</h2>
 
         <!-- SessionButton (ui-components.js) mounts here -->
-        <div id="session-button-container"></div>
+        <div id="session-button-container" role="group" aria-label="会话控制按钮"></div>
       </section>
 
       <!--
@@ -67,13 +72,15 @@
         (ui-components.js) renders the status text, progress bar, word counter,
         and encouragement into it from the authoritative SessionStateManager
         state — same pattern Wave 2 used for #session-button-container.
+
+        Plan 08-04 Task 3: Enhanced accessibility with ARIA live region.
       -->
       <section class="progress-display-section" id="progressDisplay"
-               aria-labelledby="progressTitle" hidden>
+               role="region" aria-labelledby="progressTitle" aria-live="polite" aria-atomic="true" hidden>
         <h2 id="progressTitle" class="visually-hidden">听写进度</h2>
 
         <!-- ProgressDisplay (ui-components.js) mounts here -->
-        <div id="progress-display-container"></div>
+        <div id="progress-display-container" role="status" aria-live="polite" aria-atomic="true"></div>
       </section>
     </main>
 

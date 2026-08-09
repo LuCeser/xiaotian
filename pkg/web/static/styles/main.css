@@ -51,6 +51,23 @@ body {
 
 /* ---------- Accessibility utility ---------- */
 
+.skip-to-content {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: #4facfe;
+  color: white;
+  padding: 8px 16px;
+  text-decoration: none;
+  z-index: 100;
+  border-radius: 0 0 8px 0;
+  font-weight: 600;
+}
+
+.skip-to-content:focus {
+  top: 0;
+}
+
 .visually-hidden {
   position: absolute !important;
   width: 1px;
@@ -171,6 +188,8 @@ body {
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
   user-select: none;
+  /* Plan 08-04 Task 3: enhanced touch target spacing */
+  margin: 0.25rem;
 }
 
 .kid-button:active {
@@ -183,6 +202,20 @@ body {
   opacity: 0.5;
   cursor: not-allowed;
   box-shadow: 0 4px 0 #3f5fbf;
+}
+
+/* Plan 08-04 Task 3: keyboard navigation focus states (accessibility) */
+.kid-button:focus-visible {
+  outline: 3px solid #4facfe;
+  outline-offset: 2px;
+  box-shadow: 0 4px 0 #3f5fbf, 0 6px 12px rgba(0, 0, 0, 0.12), 0 0 0 4px rgba(79, 172, 254, 0.3);
+}
+
+/* Plan 08-04 Task 3: WebKit-specific transform for Safari */
+.kid-button:active {
+  -webkit-transform: translateY(2px);
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 #3f5fbf, 0 3px 6px rgba(0, 0, 0, 0.12);
 }
 
 /* Word-count selector buttons: a friendly row of choices. */
@@ -199,12 +232,26 @@ body {
   background: #ffffff;
   color: #1e3a8a;
   box-shadow: 0 4px 0 #c7d6ff, 0 6px 12px rgba(0, 0, 0, 0.08);
+  /* Plan 08-04 Task 3: enhanced touch interaction */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: all 0.2s ease;
+}
+
+.word-count-btn:focus-visible {
+  outline: 3px solid #4facfe;
+  outline-offset: 2px;
 }
 
 .word-count-btn[aria-pressed="true"] {
   background: #4facfe;
   color: #fff;
   box-shadow: 0 4px 0 #1e3a8a, 0 6px 12px rgba(0, 0, 0, 0.12);
+}
+
+.word-count-btn:active {
+  -webkit-transform: scale(0.98);
+  transform: scale(0.98);
 }
 
 /* Start-session button: the prominent gradient call-to-action. */
@@ -218,10 +265,27 @@ body {
   background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
   color: #ffffff;
   box-shadow: 0 6px 0 #1e90b8, 0 10px 20px rgba(0, 0, 0, 0.15);
+  /* Plan 08-04 Task 3: smooth transitions and enhanced feedback */
+  transition: all 0.2s ease;
+}
+
+.session-button:focus-visible {
+  outline: 3px solid #4facfe;
+  outline-offset: 2px;
+  box-shadow: 0 6px 0 #1e90b8, 0 10px 20px rgba(0, 0, 0, 0.15), 0 0 0 4px rgba(79, 172, 254, 0.3);
 }
 
 .session-button:active {
   box-shadow: 0 3px 0 #1e90b8, 0 5px 10px rgba(0, 0, 0, 0.15);
+  -webkit-transform: translateY(2px);
+  transform: translateY(2px);
+}
+
+/* Plan 08-04 Task 3: loading state for async operations */
+.session-button:disabled,
+.session-button[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 /* ---------- Progress display ---------- */
@@ -232,6 +296,8 @@ body {
   padding: 1.5rem 1.25rem;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
   text-align: center;
+  /* Plan 08-04 Task 3: enhanced accessibility and visual feedback */
+  transition: all 0.2s ease;
 }
 
 .progress-status {
@@ -244,6 +310,13 @@ body {
 
 .status-icon {
   font-size: 1.5rem;
+  /* Plan 08-04 Task 3: animated icon for better feedback */
+  animation: bounce 1s ease-in-out infinite;
+}
+
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
 }
 
 .status-text {
@@ -259,6 +332,8 @@ body {
   border-radius: 999px;
   overflow: hidden;
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
+  /* Plan 08-04 Task 3: enhanced accessibility */
+  position: relative;
 }
 
 .progress-bar,
@@ -269,6 +344,8 @@ body {
   background: linear-gradient(90deg, #43e97b 0%, #38f9d7 100%);
   /* Smooth width transition on update; <300ms per Pitfall 7. */
   transition: width 250ms ease-out;
+  /* Plan 08-04 Task 3: enhanced visual feedback */
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .word-counter {
@@ -276,12 +353,18 @@ body {
   font-size: 1.1rem;
   font-weight: 600;
   color: #374151;
+  /* Plan 08-04 Task 3: improved readability */
+  line-height: 1.4;
 }
 
 .encouragement {
   margin-top: 0.5rem;
   font-size: 1.3rem;
   min-height: 1.5em;
+  /* Plan 08-04 Task 3: better visual feedback */
+  color: #10b981;
+  font-weight: 600;
+  transition: all 0.3s ease;
 }
 
 /* ---------- iPad-specific enhancement (768x1024) ---------- */
