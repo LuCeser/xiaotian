@@ -71,6 +71,12 @@
       this.messageQueue = [];
       this.state = STATE_DISCONNECTED;
 
+      // Optional SessionStateManager (registered via setStateManager). When
+      // present, inbound JSON control frames are dispatched into structured
+      // state updates instead of being handed raw to messageHandler. Wave 2
+      // session-lifecycle wiring.
+      this.stateManager = null;
+
       this._reconnectTimer = null;
       // Set true by disconnect() so the close handler does NOT schedule a
       // reconnect for an intentional teardown.
@@ -118,6 +124,11 @@
     /**
      * @private message handler: dispatch binary frames raw, parse JSON control
      * frames. A malformed JSON frame routes to errorHandler, not a throw.
+     *
+     * When a SessionStateManager is registered (Wave 2), parsed JSON control
+     * frames route to the structured control dispatcher for state updates
+     * instead of the generic messageHandler. Binary frames always go to
+     * messageHandler (Phase 7.1 audio hand-off).
      */
     _onMessage(event) {
       if (event.data instanceof ArrayBuffer) {
@@ -128,7 +139,12 @@
       // Text frame: assume JSON control message. Parse defensively.
       try {
         var parsed = JSON.parse(event.data);
-        this.messageHandler(parsed, false);
+        if (this.stateManager) {
+          // Wave 2: structured dispatch into the state store.
+          this.handleControlFrame(parsed);
+        } else {
+          this.messageHandler(parsed, false);
+        }
       } catch (parseErr) {
         // Deliver raw text so the consumer can decide; surface the parse issue.
         this.errorHandler(parseErr);
@@ -236,6 +252,113 @@
         }
       }
       this._setState(STATE_DISCONNECTED);
+    }
+
+    /**
+     * Register a SessionStateManager so inbound JSON control frames are
+     * dispatched into structured state updates. Optional — when unset, the
+     * client keeps Wave 1 behavior (parsed JSON handed to messageHandler).
+     * Safe to call multiple times.
+     *
+     * @param {SessionStateManager} [stateManager]
+     */
+    setStateManager(stateManager) {
+      this.stateManager = stateManager || null;
+    }
+
+    /**
+     * Dispatch a parsed JSON control frame into the registered state manager.
+     * Validates each frame's structure before applying it (T-08-05: do not
+     * let a malformed/spoofed frame drive UI state). Unknown types are logged
+     * and forwarded to messageHandler so consumers can extend the protocol.
+     *
+     * Handled types (see cmd/service/handlers.go):
+     *   - session start ack: {type, session_id, words[]}
+     *   - error:             {type, message}
+     *   - progress:          {type, currentWord, completedWords}
+     *   - session end:       {type, totalWords}
+     *
+     * @param {object} payload - parsed JSON control frame.
+     */
+    handleControlFrame(payload) {
+      // T-08-05: structural validation before any state mutation.
+      if (!payload || typeof payload !== 'object' || typeof payload.type !== 'string') {
+        this.errorHandler(new Error('malformed control frame: missing string type'));
+        return;
+      }
+      if (!this.stateManager) {
+        // No state store registered — fall back to the generic handler.
+        this.messageHandler(payload, false);
+        return;
+      }
+
+      switch (payload.type) {
+        case 'session_ready':
+          this._applySessionReady(payload);
+          break;
+        case 'error':
+          this._applyError(payload);
+          break;
+        case 'progress_update':
+          this._applyProgressUpdate(payload);
+          break;
+        case 'session_complete':
+          this._applySessionComplete(payload);
+          break;
+        default:
+          // Unknown control type — log and forward so consumers can evolve
+          // the protocol without editing the client.
+          if (typeof console !== 'undefined') {
+            console.warn('[ws] unknown control frame type:', payload.type, payload);
+          }
+          this.messageHandler(payload, false);
+      }
+    }
+
+    /** @private apply a session-start ack frame (T-08-05 validates fields). */
+    _applySessionReady(payload) {
+      if (typeof payload.session_id !== 'string' || !Array.isArray(payload.words)) {
+        this.errorHandler(new Error('malformed session-start ack frame'));
+        return;
+      }
+      this.stateManager.setState({
+        sessionActive: true,
+        status: 'DICTATING',
+        session_id: payload.session_id,
+        words: payload.words.slice(),
+        totalWords: payload.words.length,
+        currentWord: 0,
+        completedWords: 0,
+        lastError: null
+      });
+    }
+
+    /** @private apply an error frame — record message, preserve session flag. */
+    _applyError(payload) {
+      var message = typeof payload.message === 'string' ? payload.message : 'unknown error';
+      this.stateManager.setState({ lastError: message });
+    }
+
+    /** @private apply a progress_update frame (T-08-05 validates numbers). */
+    _applyProgressUpdate(payload) {
+      if (typeof payload.currentWord !== 'number' || typeof payload.completedWords !== 'number') {
+        this.errorHandler(new Error('malformed progress_update frame'));
+        return;
+      }
+      this.stateManager.setState({
+        currentWord: payload.currentWord,
+        completedWords: payload.completedWords
+      });
+    }
+
+    /** @private apply a session_complete frame → end the session. */
+    _applySessionComplete(payload) {
+      var total = typeof payload.totalWords === 'number' ? payload.totalWords : 0;
+      this.stateManager.setState({
+        sessionActive: false,
+        status: 'FEEDBACK',
+        completedWords: total
+      });
     }
   }
 
