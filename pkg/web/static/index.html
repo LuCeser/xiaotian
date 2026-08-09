@@ -99,9 +99,11 @@
   </div>
 
   <!--
-    Application entry point (Phase 8, Plan 01/03). Loaded with `defer` so the
-    DOM is parsed before app.js runs. Task 3 wires the WebSocket client here.
+    Scripts: loaded with `defer` so they execute in order after the DOM is
+    parsed. websocket-client.js defines window.WebSocketClient; app.js
+    consumes it to boot the connection. Order matters (defer preserves it).
   -->
+  <script src="js/websocket-client.js" defer></script>
   <script src="js/app.js" defer></script>
 </body>
 </html>
