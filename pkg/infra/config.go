@@ -501,6 +501,23 @@ type ServerConfig struct {
 	// separate from the public Addr so probing traffic does not compete
 	// with session traffic. Default "127.0.0.1:8081".
 	HealthAddr string `json:"healthAddr" mapstructure:"healthAddr"`
+
+	// StaticDir is the filesystem directory served as static files for the
+	// student web interface (Phase 8, WEB-02/WEB-04). Empty (the default)
+	// DISABLES static file serving — the service boots without it, mirroring
+	// the Database.Path "empty = disabled" precedent. When non-empty, main.go
+	// validates the directory exists at boot and mounts an http.FileServer at
+	// StaticRoute. Relative paths resolve against the process CWD, so
+	// production deployments typically set an absolute path
+	// (e.g. "/opt/hta/pkg/web/static").
+	StaticDir string `json:"staticDir" mapstructure:"staticDir"`
+
+	// StaticRoute is the URL prefix at which the static file server is mounted
+	// (Phase 8). Default "/". MUST start with "/" and MUST NOT collide with
+	// the "/ws" WebSocket upgrade path. Mounting at "/" coexists with "/ws"
+	// because Go's ServeMux matches the longer, more specific "/ws" pattern
+	// first. Only consulted when StaticDir is non-empty.
+	StaticRoute string `json:"staticRoute" mapstructure:"staticRoute"`
 }
 
 // LogConfig tunes structured logging output (D-25, D-34). The actual logger
@@ -595,6 +612,12 @@ func DefaultConfig() Config {
 			ReadTimeout:  10 * time.Second,
 			WriteTimeout: 10 * time.Second,
 			HealthAddr:   "127.0.0.1:8081",
+			// Phase 8: static interface serving is DISABLED by default (empty
+			// dir). Operators opt in by setting server.staticDir; the route
+			// then defaults to "/" so the student interface loads at the
+			// service root.
+			StaticDir:   "",
+			StaticRoute: "/",
 		},
 		Log: LogConfig{
 			Level:  "info",
@@ -817,6 +840,29 @@ func (c Config) Validate() error {
 		return errors.Wrap(ErrConfigInvalid, "server.healthAddr is required")
 	}
 
+	// Phase 8 static interface (WEB-02/WEB-04). StaticDir empty means
+	// "static serving disabled" (Database.Path precedent), so validation is
+	// only consulted when the operator opts in. When set, the route MUST be a
+	// valid absolute path that does not shadow the /ws upgrade. Directory
+	// EXISTENCE is intentionally NOT checked here — it is CWD-relative and
+	// would break DefaultConfig-based tests and cross-CWD boots; main.go
+	// fails fast on a missing directory at startup (Rule 2: fail-fast at boot).
+	if c.Server.StaticDir != "" {
+		if c.Server.StaticRoute == "" {
+			return errors.Wrap(ErrConfigInvalid,
+				"server.staticRoute is required when server.staticDir is set")
+		}
+		if !strings.HasPrefix(c.Server.StaticRoute, "/") {
+			return errors.Wrap(ErrConfigInvalid,
+				fmt.Sprintf("server.staticRoute must start with \"/\", got %q",
+					c.Server.StaticRoute))
+		}
+		if c.Server.StaticRoute == "/ws" || strings.HasPrefix(c.Server.StaticRoute, "/ws/") {
+			return errors.Wrap(ErrConfigInvalid,
+				"server.staticRoute must not collide with the /ws WebSocket upgrade path")
+		}
+	}
+
 	if !isValidLogLevel(c.Log.Level) {
 		return errors.Wrap(ErrConfigInvalid,
 			fmt.Sprintf("log.level must be one of debug/info/warn/error, got %q",
@@ -981,6 +1027,10 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"server.readTimeout",
 		"server.writeTimeout",
 		"server.healthAddr",
+		// Phase 8 static interface (WEB-02/WEB-04). Pitfall 6: every leaf
+		// MUST be bound explicitly or HTA_SERVER_STATIC* env vars are inert.
+		"server.staticDir",
+		"server.staticRoute",
 		"log.level",
 		"log.format",
 		"log.output",

@@ -60,9 +60,9 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 ### Web Interface
 
 - [ ] **WEB-01**: Parent interface for vocabulary management (add/edit/organize)
-- [ ] **WEB-02**: Student interface for dictation session requests and progress display
+- [x] **WEB-02**: Student interface for dictation session requests and progress display
 - [ ] **WEB-03**: Parent review interface for post-dictation feedback
-- [ ] **WEB-04**: Responsive design optimized for iPad Safari browser
+- [x] **WEB-04**: Responsive design optimized for iPad Safari browser
 
 ### Error Handling
 
@@ -135,9 +135,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PY-03 | Phase 3 | Complete |
 | PY-04 | Phase 3 | Complete |
 | WEB-01 | Phase 9 | Pending |
-| WEB-02 | Phase 8 | Pending |
+| WEB-02 | Phase 8 | Complete |
 | WEB-03 | Phase 10 | Pending |
-| WEB-04 | Phase 8 | Pending |
+| WEB-04 | Phase 8 | Complete |
 | ERR-01 | Phase 11 | Pending |
 | ERR-02 | Phase 11 | Pending |
 | ERR-03 | Phase 7 | Complete |
