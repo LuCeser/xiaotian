@@ -408,8 +408,6 @@
         // ==================== State ====================
         let ws = null;
         let connectionState = 'CLOSED';
-        let audioContext = null;
-        let audioEnabled = false;
 
         // Session state
         let currentSessionId = null;
@@ -421,24 +419,16 @@
         let firstWordPlayed = false;
         let playAllQueue = [];
 
-        // 🐛 BUG DETECTION STATE
-        let debugState = {
-            wordCompleteReceived: false,
-            framesAfterWordComplete: 0,
-            activeWordDuringComplete: null,
-            bugDetected: false
-        };
+        // Audio playback state (Web Audio API gapless scheduling)
+        let audioCtx = null;          // global AudioContext — created in the Start Session gesture (D-03)
+        let nextStartTime = 0;        // audio-clock scheduling point for the next word (D-04)
+        const pendingPcm = new Map(); // wordId → Uint8Array[] (accumulated s16le PCM frames)
+        let lastSeq = 0;              // last accepted audio-frame sequence (scalar dedup)
+        let currentWordId = null;     // word whose PCM frames are currently being accumulated
 
-        // Audio playback state (HTMLAudioElement for iOS/iPadOS compatibility)
-        let playback = {
-            active: false,
-            wordId: null,
-            audioBuffer: [], // Collect PCM frames
-            wavBuffer: null, // Prepared WAV buffer
-            audioReady: false, // Audio ready for playback
-            lastFrameTime: 0,
-            playTimer: null
-        };
+        function isAudioCtxReady() {
+            return audioCtx && audioCtx.state === 'running';
+        }
 
         // Speech recognition state
         let recognition = null;
@@ -448,7 +438,6 @@
 
         // Frame tracking
         let sequenceCounter = 0;
-        let receivedSequences = [];
         let frameCount = 0;
         let gapCount = 0;
         let duplicateCount = 0;
@@ -997,22 +986,58 @@
                 return;
             }
 
-            if (data.type === 'word_complete') {
-                addLog('[STATUS] word_complete: ' + data.word_id + ' (audio playback will handle completion)', 'status');
-
-                // 🐛 BUG DETECTION: Track word_complete reception
-                if (playback.active && playback.wordId) {
-                    debugState.wordCompleteReceived = true;
-                    debugState.activeWordDuringComplete = playback.wordId;
-                    addLog('[🐛 DEBUG] word_complete received for "' + data.word_id + '" while playback.active=true for "' + playback.wordId + '"', 'status');
-
-                    if (data.word_id !== playback.wordId) {
-                        addLog('[🐛 BUG ALERT] word_complete for "' + data.word_id + '" but active word is "' + playback.wordId + '"', 'error');
-                    }
-                }
-            } else {
+            if (data.type !== 'word_complete') {
                 addLog('[STATUS] ' + text.substring(0, 200), 'status');
+                return;
             }
+
+            // word_complete drives playback: merge the accumulated PCM chunks for
+            // this word into one AudioBuffer and schedule it on the audio clock (D-04).
+            const chunks = pendingPcm.get(data.word_id);
+            pendingPcm.delete(data.word_id);
+            if (!chunks || chunks.length === 0) {
+                addLog('[STATUS] word_complete for "' + data.word_id + '" — no PCM accumulated', 'status');
+                return;
+            }
+            if (!isAudioCtxReady()) {
+                addLog('[AUDIO] word_complete for "' + data.word_id + '" but AudioContext not running — PCM dropped', 'error');
+                return;
+            }
+
+            // Merge PCM chunks into one s16le byte buffer
+            const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+            const pcmBytes = new Uint8Array(totalLen);
+            let off = 0;
+            for (const c of chunks) {
+                pcmBytes.set(c, off);
+                off += c.length;
+            }
+
+            // PCM Int16 → Float32 AudioBuffer (D-05). The sampleRate argument is
+            // the runtime property audioCtx.sampleRate — NEVER a hardcoded 16000
+            // (D-02 gotcha: iOS may renegotiate the context sample rate).
+            const numSamples = pcmBytes.length / 2;
+            const buf = audioCtx.createBuffer(1, numSamples, audioCtx.sampleRate);
+            const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
+            const chan = buf.getChannelData(0);
+            for (let i = 0; i < numSamples; i++) {
+                chan[i] = view.getInt16(i * 2, true) / 32768;
+            }
+
+            // Gapless scheduling on the audio clock (D-04); snap nextStartTime to
+            // currentTime on underrun so late PCM never schedules in the past (D-18).
+            const src = audioCtx.createBufferSource();
+            src.buffer = buf;
+            src.connect(audioCtx.destination);
+            if (nextStartTime < audioCtx.currentTime) {
+                nextStartTime = audioCtx.currentTime;
+            }
+            src.start(nextStartTime);
+            nextStartTime += buf.duration;
+
+            addLog('[STATUS] word_complete: "' + data.word_id + '" — scheduled ' + numSamples +
+                   ' samples (' + (buf.duration * 1000).toFixed(0) + 'ms) at audio clock t=' +
+                   (nextStartTime - buf.duration).toFixed(3) + 's', 'audio');
         }
 
         // ==================== Audio Frame Handling ====================
@@ -1021,196 +1046,47 @@
             frameCount++;
             document.getElementById('frameCount').textContent = frameCount;
 
-            // Sequence gap / duplicate detection
-            if (receivedSequences.indexOf(sequence) !== -1) {
+            // Scalar monotonic dedup. With the D-11 backend fix, audio-frame
+            // sequences are session-monotonic, so a single lastSeq check suffices —
+            // no Set, no per-word history, no 300ms gap timer.
+            if (sequence <= lastSeq) {
                 duplicateCount++;
                 document.getElementById('duplicateCount').textContent = duplicateCount;
                 return;
             }
-
-            if (receivedSequences.length > 0) {
-                var lastSeq = receivedSequences[receivedSequences.length - 1];
-                if (sequence > lastSeq + 1) {
-                    gapCount++;
-                    document.getElementById('gapCount').textContent = gapCount;
-                    addLog('[AUDIO] Gap: expected ' + (lastSeq + 1) + ', got ' + sequence, 'audio');
-                }
+            if (lastSeq !== 0 && sequence > lastSeq + 1) {
+                gapCount++;
+                document.getElementById('gapCount').textContent = gapCount;
+                addLog('[AUDIO] Gap: expected ' + (lastSeq + 1) + ', got ' + sequence, 'audio');
             }
+            lastSeq = sequence;
 
-            receivedSequences.push(sequence);
-            if (receivedSequences.length > MaxSeqHistory) {
-                receivedSequences.shift();
-            }
-
-            // Log frame rejection reasons
-            if (!playback.active) {
-                // Skip logging frames when no active playback (reduces log spam)
-                return;
-            }
-
+            // Reject non-frame-sized payloads (640B = 20ms @ 16kHz 16-bit mono)
             if (payload.length !== AudioFrameSize) {
                 addLog('[AUDIO] Frame ignored: wrong size ' + payload.length + ' vs ' + AudioFrameSize, 'audio');
                 return;
             }
 
-            // Collect frames for HTMLAudioElement playback (iOS/iPadOS compatibility)
-            if (playback.active && payload.length === AudioFrameSize) {
-                // 🐛 BUG DETECTION: Check if we're collecting frames after word_complete
-                if (debugState.wordCompleteReceived && !debugState.bugDetected) {
-                    debugState.framesAfterWordComplete++;
-                    if (debugState.framesAfterWordComplete <= 3) {
-                        addLog('[🐛 BUG DETECTED] Frame ' + sequence + ' collected AFTER word_complete for "' + debugState.activeWordDuringComplete + '"', 'error');
-                        addLog('[🐛 BUG] This means we\'re collecting frames for the wrong word!', 'error');
-                        debugState.bugDetected = true;
-                    }
-                }
-
-                // Add frame to buffer
-                playback.audioBuffer.push(new Uint8Array(payload));
-                playback.lastFrameTime = Date.now();
-
-                // Log first frame arrival
-                if (playback.audioBuffer.length === 1) {
-                    addLog('[AUDIO] First frame for "' + playback.wordId + '" (seq=' + sequence + ')', 'audio');
-                }
-
-                // Log every 50 frames
-                if (playback.audioBuffer.length % 50 === 0) {
-                    addLog('[AUDIO] Collected ' + playback.audioBuffer.length + ' frames for "' + playback.wordId + '"', 'audio');
-                }
-
-                // Set/reset timer to play collected frames (300ms gap = end of stream)
-                if (playback.playTimer) {
-                    clearTimeout(playback.playTimer);
-                }
-                playback.playTimer = setTimeout(function() {
-                    playCollectedAudio();
-                }, 300); // 300ms without new frames = end of stream
-            }
-        }
-
-        // Play collected PCM frames using HTMLAudioElement (iOS/iPadOS compatibility)
-        function playCollectedAudio() {
-            if (playback.audioBuffer.length === 0) {
-                addLog('[AUDIO-ELEMENT] No frames to play', 'error');
-                playback.active = false;
+            // Accumulate PCM for the current word. Scheduling happens on
+            // word_complete — the status frame is the end-of-stream signal.
+            if (!currentWordId) {
+                addLog('[AUDIO] Frame received with no active word — ignored (seq=' + sequence + ')', 'audio');
                 return;
             }
-
-            try {
-                addLog('[AUDIO-ELEMENT] Processing ' + playback.audioBuffer.length + ' frames for "' + playback.wordId + '"', 'status');
-
-                // Combine all frames into single PCM buffer
-                var totalSamples = playback.audioBuffer.length * (AudioFrameSize / 2);
-                var pcmData = new Uint8Array(totalSamples * 2);
-                var offset = 0;
-
-                for (var i = 0; i < playback.audioBuffer.length; i++) {
-                    pcmData.set(playback.audioBuffer[i], offset);
-                    offset += AudioFrameSize;
-                }
-
-                addLog('[AUDIO-ELEMENT] Combined ' + playback.audioBuffer.length + ' frames (' +
-                      (playback.audioBuffer.length * 20) + 'ms)', 'audio');
-
-                // Store in current playback state
-                playback.wavBuffer = createWavFromPCM16(pcmData, 16000, playback.audioBuffer.length * 320);
-                playback.audioReady = true;
-
-                // Show play button for user gesture requirement (iOS)
-                updateAudioStatus('Ready: ' + playback.wordId + ' - Click green button to play');
-                addLog('[AUDIO-ELEMENT] Ready to play "' + playback.wordId + '" - Click green button below', 'status');
-
-                // Show a prominent play button in the log area
-                var playButtonId = 'playBtn_' + Date.now();
-                var playButtonHtml = '<div id="' + playButtonId + '" style="margin: 10px 0; padding: 20px; background: #4CAF50; color: white; text-align: center; border-radius: 12px; cursor: pointer; font-weight: bold; font-size: 18px; border: 3px solid #45a049;" onclick="playReadyAudio(\'' + playButtonId + '\')">🔊 Click to PLAY: ' + playback.wordId + '</div>';
-                var logArea = document.getElementById('logArea');
-                logArea.innerHTML = playButtonHtml + logArea.innerHTML;
-
-            } catch (e) {
-                addLog('[AUDIO-ELEMENT] Error: ' + e.message, 'error');
-                resetPlaybackState();
+            if (!pendingPcm.has(currentWordId)) {
+                pendingPcm.set(currentWordId, []);
             }
+            pendingPcm.get(currentWordId).push(new Uint8Array(payload));
         }
 
-        // Play prepared audio (called from user gesture)
-        function playReadyAudio(buttonId) {
-            if (!playback.wavBuffer || !playback.audioReady) {
-                addLog('[AUDIO-ELEMENT] No audio ready - state: wavBuffer=' + (playback.wavBuffer ? 'yes' : 'no') + ', audioReady=' + playback.audioReady, 'error');
-                return;
-            }
-
-            try {
-                // Remove the play button to prevent double-clicks
-                var button = document.getElementById(buttonId);
-                if (button) {
-                    button.parentNode.removeChild(button);
-                }
-
-                addLog('[AUDIO-ELEMENT] Starting playback for "' + playback.wordId + '"', 'status');
-
-                // Create blob and URL
-                var blob = new Blob([playback.wavBuffer], { type: 'audio/wav' });
-                var url = URL.createObjectURL(blob);
-
-                // Play with audio element (in user gesture context)
-                var audio = new Audio();
-                audio.src = url;
-
-                audio.play().then(function() {
-                    addLog('[AUDIO-ELEMENT] Playing "' + playback.wordId + '"', 'audio');
-                    updateAudioStatus('Playing: ' + playback.wordId);
-                }).catch(function(err) {
-                    addLog('[AUDIO-ELEMENT] Play failed: ' + err.message, 'error');
-                    resetPlaybackState();
-                });
-
-                audio.onended = function() {
-                    addLog('[AUDIO-ELEMENT] Completed "' + playback.wordId + '"', 'audio');
-                    updateAudioStatus('Completed: ' + playback.wordId);
-                    URL.revokeObjectURL(url);
-
-                    // Complete reset and move to next
-                    resetPlaybackState();
-
-                    // If in Play All mode, advance to next word
-                    if (playAllQueue.length > 0) {
-                        setTimeout(playNextInQueue, 200);
-                    }
-                };
-
-                audio.onerror = function(e) {
-                    addLog('[AUDIO-ELEMENT] Audio error: ' + e, 'error');
-                    resetPlaybackState();
-                };
-
-            } catch (e) {
-                addLog('[AUDIO-ELEMENT] Error: ' + e.message, 'error');
-                resetPlaybackState();
-            }
-        }
-
-        // Reset playback state completely
+        // Reset playback state: clear accumulated PCM and the dedup window.
+        // Called from playWord/playNextInQueue so each new word accumulates into
+        // a fresh bucket. (Sequences are session-monotonic after the D-11 fix, so
+        // this is belt-and-suspenders — but keeps the frontend independent of that
+        // contract.)
         function resetPlaybackState() {
-            if (playback.playTimer) {
-                clearTimeout(playback.playTimer);
-            }
-            // Reset the per-stream sequence dedup buffer. The backend restarts
-            // sequence numbers at 1 for EACH word (streamer.go: currentSeq = i+1),
-            // so without this reset, every word after the first has ALL its frames
-            // rejected as "duplicates" of word 1's sequence history → no audio for
-            // word 2+. Scoped here so every new word (playWord + playNextInQueue)
-            // starts with a clean dedup window.
-            receivedSequences = [];
-            playback = {
-                active: false,
-                wordId: null,
-                audioBuffer: [],
-                wavBuffer: null,
-                audioReady: false,
-                lastFrameTime: 0,
-                playTimer: null
-            };
+            pendingPcm.clear();
+            lastSeq = 0;
         }
 
         // Create WAV buffer from PCM16 data
@@ -1292,30 +1168,14 @@
 
             addLog('[PLAY] Starting playback for "' + word + '"', 'status');
 
-            // Complete reset before new playback
+            // Complete reset before new playback (clears pendingPcm + lastSeq)
             resetPlaybackState();
 
-            // 🐛 Reset debug state for new word playback
-            debugState = {
-                wordCompleteReceived: false,
-                framesAfterWordComplete: 0,
-                activeWordDuringComplete: null,
-                bugDetected: false
-            };
-
-            // Initialize fresh playback state
-            playback = {
-                active: true,
-                wordId: word,
-                audioBuffer: [],
-                wavBuffer: null,
-                audioReady: false,
-                lastFrameTime: 0,
-                playTimer: null
-            };
+            // Track the current word so handleAudioFrame accumulates its frames
+            currentWordId = word;
             playAllQueue = []; // cancel any Play All sequence
 
-            addLog('[PLAY] Fresh state: active=' + playback.active + ', wordId=' + playback.wordId, 'status');
+            addLog('[PLAY] Collecting frames for wordId=' + currentWordId, 'status');
 
             markWordState(index, 'playing');
             updateAudioStatus('Collecting frames: ' + word);
@@ -1341,19 +1201,9 @@
             var index = sessionWords.indexOf(word);
             if (index < 0) return;
 
-            // Reset playback state (HTMLAudioElement mode)
-            // resetPlaybackState() also clears receivedSequences so the next
-            // word's per-word-restarting sequences aren't seen as duplicates.
+            // Reset playback state so the next word accumulates fresh PCM
             resetPlaybackState();
-            playback = {
-                active: true,
-                wordId: word,
-                audioBuffer: [],
-                wavBuffer: null,
-                audioReady: false,
-                lastFrameTime: 0,
-                playTimer: null
-            };
+            currentWordId = word;
 
             markWordState(index, 'playing');
             updateAudioStatus('Collecting: ' + word + ' (' + playAllQueue.length + ' queued)');
@@ -1443,17 +1293,16 @@
         // ==================== Audio Context ====================
 
         function initAudioContext() {
-            if (audioEnabled) return;
+            if (audioCtx) return;
             try {
                 var AudioContextClass = window.AudioContext || window.webkitAudioContext;
-                audioContext = new AudioContextClass();
+                audioCtx = new AudioContextClass();
                 // iOS/iPadOS: AudioContext starts suspended — resume on user gesture
-                if (audioContext.state === 'suspended') {
-                    audioContext.resume();
+                if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
                 }
-                audioEnabled = true;
                 document.getElementById('playAudioBtn').disabled = false;
-                updateAudioStatus('Ready (sample rate: ' + audioContext.sampleRate + ' Hz)');
+                updateAudioStatus('Ready (sample rate: ' + audioCtx.sampleRate + ' Hz)');
                 addLog('[AUDIO] Web Audio API initialized', 'status');
             } catch (e) {
                 addLog('[AUDIO] Init failed: ' + e.message, 'error');
@@ -1461,19 +1310,19 @@
         }
 
         function playTestAudio() {
-            if (!audioContext) initAudioContext();
-            if (!audioContext) return;
+            if (!audioCtx) initAudioContext();
+            if (!audioCtx) return;
 
             // iOS/iPadOS: ensure context is running (may re-suspend)
-            if (audioContext.state === 'suspended') {
-                audioContext.resume();
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
             }
 
             try {
-                var sampleRate = audioContext.sampleRate || 16000;
+                var sampleRate = audioCtx.sampleRate; // D-02: runtime property
                 var duration = 1.0;
                 var numSamples = Math.floor(sampleRate * duration);
-                var audioBuffer = audioContext.createBuffer(1, numSamples, sampleRate);
+                var audioBuffer = audioCtx.createBuffer(1, numSamples, sampleRate);
                 var channelData = audioBuffer.getChannelData(0);
 
                 for (var i = 0; i < numSamples; i++) {
@@ -1481,9 +1330,9 @@
                     channelData[i] = 0.3 * Math.sin(2 * Math.PI * 440 * t);
                 }
 
-                var source = audioContext.createBufferSource();
+                var source = audioCtx.createBufferSource();
                 source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
+                source.connect(audioCtx.destination);
                 source.start();
 
                 addLog('[AUDIO] Test tone 440Hz', 'audio');
