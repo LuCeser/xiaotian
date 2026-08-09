@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
@@ -16,6 +17,20 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
+
+// controlFrameSeq is an atomic monotonic counter for control-frame Sequence
+// values (D-12). It replaces the previously hardcoded Sequence: 1 so that
+// consecutive sendControlFrame calls never collide on the same sequence — the
+// client relies on monotonic sequences for ordering/dedup. A package-level
+// global is acceptable here (research A4): sendControlFrame is a free function
+// with no session handle, and control frames are rare, so process-global
+// monotonicity is sufficient.
+var controlFrameSeq uint32
+
+// nextControlSeq returns the next control-frame sequence number. It is a
+// package-level function var (PATTERNS.md testability seam) so tests could
+// swap it; production always uses atomic.AddUint32 on controlFrameSeq.
+var nextControlSeq = func() uint32 { return atomic.AddUint32(&controlFrameSeq, 1) }
 
 // controlFramePayload represents the JSON schema for control frames.
 // The client sends: {"type":"start_session|play_word|select_due_cards","params":{...}}
@@ -352,9 +367,9 @@ func sendControlFrame(client *ws.Client, msgType ws.MessageType, payload interfa
 	}
 
 	header := &ws.FrameHeader{
-		Version:    1,
+		Version:    ws.ProtocolVersion,
 		MsgType:    msgType,
-		Sequence:   1, // TODO: per-handler atomic counter
+		Sequence:   nextControlSeq(),
 		PayloadLen: uint16(len(jsonBytes)),
 	}
 
