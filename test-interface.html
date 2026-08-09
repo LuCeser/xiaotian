@@ -348,7 +348,7 @@
             <div class="input-group">
                 <label for="sessionWordCount">Words:</label>
                 <input type="number" id="sessionWordCount" value="5" min="1" max="25">
-                <button class="btn-success" id="startSessionBtn" onclick="startSession()" disabled>Start Session</button>
+                <button class="btn-success" id="startSessionBtn" onclick="unlockAudioContext(); startSession()" disabled>Start Session</button>
             </div>
             <div id="sessionInfo" style="display: none; margin-bottom: 12px;">
                 <span class="status-text">Session ID: <strong id="sessionIdDisplay" style="color: #1f2937;"></strong></span>
@@ -618,7 +618,10 @@
                 ws.onopen = function () {
                     updateStatus('OPEN', 'Connected');
                     addLog('WebSocket connected', 'status');
-                    initAudioContext();
+                    // NOTE: the AudioContext is intentionally NOT created here.
+                    // iOS requires construction + resume() + a silent-buffer
+                    // .start(0) to all happen synchronously inside a user gesture
+                    // (D-03), so audio is unlocked on the Start Session tap.
                 };
 
                 ws.onmessage = function (event) {
@@ -1292,25 +1295,46 @@
 
         // ==================== Audio Context ====================
 
-        function initAudioContext() {
-            if (audioCtx) return;
-            try {
+        // D-03 3-condition iOS unlock. MUST be a plain (non-async) function:
+        // any await cuts the user-gesture call stack and iOS silently refuses.
+        // Bound to the Start Session click as its FIRST synchronous statement.
+        function unlockAudioContext() {
+            if (!audioCtx) {
                 var AudioContextClass = window.AudioContext || window.webkitAudioContext;
-                audioCtx = new AudioContextClass();
-                // iOS/iPadOS: AudioContext starts suspended — resume on user gesture
-                if (audioCtx.state === 'suspended') {
-                    audioCtx.resume();
+                // D-02: construct the context at 16kHz to match the backend PCM.
+                audioCtx = new AudioContextClass({ sampleRate: 16000 });
+                if (audioCtx.sampleRate !== 16000) {
+                    addLog('[AUDIO] WARN: ctx.sampleRate=' + audioCtx.sampleRate +
+                           ' (expected 16000) — PCM rate mismatch risk', 'error');
                 }
                 document.getElementById('playAudioBtn').disabled = false;
                 updateAudioStatus('Ready (sample rate: ' + audioCtx.sampleRate + ' Hz)');
-                addLog('[AUDIO] Web Audio API initialized', 'status');
-            } catch (e) {
-                addLog('[AUDIO] Init failed: ' + e.message, 'error');
+                addLog('[AUDIO] Web Audio API unlocked', 'status');
+
+                // D-06: if the context ever leaves 'running' (e.g. app-switch
+                // interruption), surface a tap-to-resume overlay.
+                audioCtx.onstatechange = function () {
+                    if (audioCtx.state === 'running') {
+                        hideTapToResumeOverlay();
+                    } else {
+                        showTapToResumeOverlay();
+                    }
+                };
             }
-        }
+            // Condition 2: resume() synchronously, no await.
+            audioCtx.resume();
+            // Condition 3 (CRITICAL for iOS 17+): start a real buffer source
+            // synchronously inside the gesture. resume() alone leaves output muted.
+            var silentBuf = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+            silentBuf.getChannelData(0)[0] = 0;
+            var silentSource = audioCtx.createBufferSource();
+            silentSource.buffer = silentBuf;
+            silentSource.connect(audioCtx.destination);
+            silentSource.start(0);
+}
 
         function playTestAudio() {
-            if (!audioCtx) initAudioContext();
+            if (!audioCtx) unlockAudioContext();
             if (!audioCtx) return;
 
             // iOS/iPadOS: ensure context is running (may re-suspend)
@@ -1344,6 +1368,47 @@
                 addLog('[AUDIO] Test tone error: ' + e.message, 'error');
             }
         }
+
+        // ==================== D-06: App-Switch / Visibility Recovery ====================
+
+        let tapToResumeOverlay = null;
+
+        function ensureTapToResumeOverlay() {
+            if (tapToResumeOverlay) return;
+            tapToResumeOverlay = document.createElement('div');
+            tapToResumeOverlay.id = 'tapToResumeOverlay';
+            tapToResumeOverlay.textContent = 'Tap to resume audio';
+            tapToResumeOverlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;' +
+                'background:rgba(0,0,0,0.65);color:#fff;display:none;align-items:center;' +
+                'justify-content:center;font-size:26px;font-weight:600;z-index:9999;cursor:pointer;';
+            // The overlay's tap IS a fresh user gesture — re-run the 3-condition unlock.
+            tapToResumeOverlay.onclick = function () {
+                unlockAudioContext();
+                hideTapToResumeOverlay();
+            };
+            document.body.appendChild(tapToResumeOverlay);
+        }
+
+        function showTapToResumeOverlay() {
+            ensureTapToResumeOverlay();
+            tapToResumeOverlay.style.display = 'flex';
+            addLog('[AUDIO] AudioContext not running — tap-to-resume overlay shown', 'error');
+        }
+
+        function hideTapToResumeOverlay() {
+            if (tapToResumeOverlay) {
+                tapToResumeOverlay.style.display = 'none';
+            }
+        }
+
+        // On return from background/tab-switch, attempt auto-resume (D-06). If the
+        // context cannot re-enter 'running', audioCtx.onstatechange (installed in
+        // unlockAudioContext) surfaces the tap-to-resume overlay.
+        document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'visible' && audioCtx) {
+                audioCtx.resume();
+            }
+        });
 
         // Test HTMLAudioElement as fallback for iOS/iPadOS
         function playTestAudioElement() {
