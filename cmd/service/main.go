@@ -99,6 +99,36 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		cfg.Server.HealthAddr = healthAddrOverride
 	}
 
+	// Phase 8 Plan 01: validate the static interface directory exists when
+	// configured. Fail-fast at boot (Rule 2: no silent 404 storm later) so a
+	// misconfigured server.staticDir aborts startup with a clear log line
+	// rather than serving an empty shell to every student. An empty StaticDir
+	// means static serving is disabled (Database.Path precedent) and is NOT
+	// an error.
+	if cfg.Server.StaticDir != "" {
+		info, err := os.Stat(cfg.Server.StaticDir)
+		if err != nil {
+			logger.Error("static directory not accessible",
+				infra.F("component", "infra.main"),
+				infra.F("dir", cfg.Server.StaticDir),
+				infra.ErrField(err),
+			)
+			return 1
+		}
+		if !info.IsDir() {
+			logger.Error("staticDir is not a directory",
+				infra.F("component", "infra.main"),
+				infra.F("dir", cfg.Server.StaticDir),
+			)
+			return 1
+		}
+		logger.Info("static interface directory verified",
+			infra.F("component", "infra.main"),
+			infra.F("dir", cfg.Server.StaticDir),
+			infra.F("route", cfg.Server.StaticRoute),
+		)
+	}
+
 	server, err := infra.NewServer(cfg, logger)
 	if err != nil {
 		logger.Error("server construction failed",
@@ -334,29 +364,36 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	// the lifetime ctx so it exits as soon as shutdown begins.
 	go hub.Run(ctx)
 
-	// Public mux carries /ws plus a minimal static file route for the
-	// end-to-end validation interface (test-interface.html). /health and
-	// /metrics stay on the separate localhost healthSrv below (probe/session
-	// traffic separation is the established design).
+	// Public mux carries /ws plus the student web interface static file
+	// server (Phase 8 Plan 01). /health and /metrics stay on the separate
+	// localhost healthSrv below (probe/session traffic separation is the
+	// established design).
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/ws", wsServer.HandleWebSocket)
-	publicMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Support multiple test interfaces for debugging
-		switch r.URL.Path {
-		case "/":
-			http.ServeFile(w, r, "test-interface.html")
-		case "/test-interface.html":
-			http.ServeFile(w, r, "test-interface.html")
-		case "/test-interface-debug.html":
-			http.ServeFile(w, r, "test-interface-debug.html")
-		case "/test-audio-sequence-bug.html":
-			http.ServeFile(w, r, "test-audio-sequence-bug.html")
-		case "/test-audio-bug-frontend.html":
-			http.ServeFile(w, r, "test-audio-bug-frontend.html")
-		default:
-			http.NotFound(w, r)
+
+	// Phase 8 Plan 01: mount the student interface. When server.staticDir is
+	// configured, an http.FileServer serves index.html, /styles/*, /js/* from
+	// that directory at StaticRoute (default "/"). ServeMux matches the more
+	// specific "/ws" pattern first, so the WebSocket upgrade endpoint does
+	// not conflict with the static root. When staticDir is empty (disabled),
+	// fall back to serving the legacy repo-root debug HTML files so existing
+	// developer workflows keep working.
+	if cfg.Server.StaticDir != "" {
+		publicMux.Handle(cfg.Server.StaticRoute, infra.StaticFileServer(cfg.Server.StaticDir, logger))
+		logger.Info("public server static files mounted",
+			infra.F("component", "infra.main"),
+			infra.F("route", cfg.Server.StaticRoute),
+			infra.F("dir", cfg.Server.StaticDir),
+		)
+		// Debug interfaces remain reachable at their explicit paths; ServeMux
+		// prefers these longer patterns over the "/" prefix so they do not
+		// collide with the static FileServer.
+		for _, dbg := range debugInterfaces {
+			publicMux.HandleFunc("/"+dbg, serveRepoRootFile(dbg))
 		}
-	})
+	} else {
+		publicMux.HandleFunc("/", serveDebugRoot)
+	}
 	publicSrv := &http.Server{
 		Addr:              cfg.Server.Addr,
 		Handler:           publicMux,
@@ -461,4 +498,50 @@ func homeDir() string {
 		return h
 	}
 	return "."
+}
+
+// debugInterfaces lists the repo-root HTML debug harnesses that should remain
+// reachable even when the student interface is mounted at "/". These are
+// developer-facing pages (Phase 7.1 audio regression harnesses, interface
+// debug pages); they are registered at their explicit paths so ServeMux
+// prefers them over the static "/" prefix handler.
+var debugInterfaces = []string{
+	"test-interface.html",
+	"test-interface-debug.html",
+	"test-audio-sequence-bug.html",
+	"test-audio-bug-frontend.html",
+}
+
+// serveRepoRootFile returns a handler that serves a single file from the
+// process CWD, responding 404 if the file is absent. Used to keep debug
+// harnesses reachable without exposing them through the static FileServer
+// (which is rooted at the student interface directory).
+func serveRepoRootFile(filename string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := os.Stat(filename); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, filename)
+	}
+}
+
+// serveDebugRoot is the fallback root handler used ONLY when static serving
+// is disabled (server.staticDir empty). It preserves the pre-Phase-8 root
+// behaviour: serve test-interface.html at "/" plus the other debug harnesses
+// at their named paths, so existing developer workflows survive the
+// introduction of the student interface config.
+func serveDebugRoot(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/", "/test-interface.html":
+		http.ServeFile(w, r, "test-interface.html")
+	case "/test-interface-debug.html":
+		http.ServeFile(w, r, "test-interface-debug.html")
+	case "/test-audio-sequence-bug.html":
+		http.ServeFile(w, r, "test-audio-sequence-bug.html")
+	case "/test-audio-bug-frontend.html":
+		http.ServeFile(w, r, "test-audio-bug-frontend.html")
+	default:
+		http.NotFound(w, r)
+	}
 }
