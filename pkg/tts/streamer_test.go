@@ -124,7 +124,7 @@ func TestStreamWord_Basic(t *testing.T) {
 		if header.PayloadLen != 640 {
 			t.Errorf("frame %d: expected payloadlen 640, got %d", i, header.PayloadLen)
 		}
-		// Sequence should start from 1 (startSeq=0 means first frame is sequence 1)
+		// First call to nextSeq returns 1 (D-11 session-level monotonic counter)
 		expectedSeq := uint32(i + 1)
 		if header.Sequence != expectedSeq {
 			t.Errorf("frame %d: expected sequence %d, got %d", i, expectedSeq, header.Sequence)
@@ -204,23 +204,24 @@ func TestStreamWord_StartSeqPartial(t *testing.T) {
 	sender := &mockSender{}
 	ctx := context.Background()
 
-	// Stream from sequence 2 (should skip frame 1, send frames 2-3 + status)
+	// Stream from startSeq=2. D-10: startSeq is 0-indexed, so startSeq=2 means
+	// startIndex=2 — only frames[2] is sent (1 audio frame) + 1 status frame.
 	err = streamer.StreamWord(ctx, sender, "session1", "word1", 2)
 	if err != nil {
 		t.Fatalf("StreamWord failed: %v", err)
 	}
 
 	count := sender.count()
-	if count != 3 {
-		t.Errorf("expected 3 frames (2 audio + 1 status) when startSeq=2 with 3 audio frames total, got %d", count)
+	if count != 2 {
+		t.Errorf("expected 2 frames (1 audio + 1 status) when startSeq=2 with 3 audio frames total, got %d", count)
 	}
 
-	// First frame sent should be sequence 2
+	// First audio frame sent has seq 1 (first call to nextSeq for this session)
 	frame := sender.get(0)
 	header := &ws.FrameHeader{}
 	header.Sequence = binary.BigEndian.Uint32(frame[2:6])
-	if header.Sequence != 2 {
-		t.Errorf("expected first frame sequence 2, got %d", header.Sequence)
+	if header.Sequence != 1 {
+		t.Errorf("expected first frame sequence 1, got %d", header.Sequence)
 	}
 }
 
@@ -552,6 +553,126 @@ func TestClearPrefetch(t *testing.T) {
 	if count != 2 {
 		t.Errorf("expected 2 frames (1 audio + 1 status) after cache clear, got %d", count)
 	}
+}
+
+// TestStreamWord_SessionMonotonicSeq verifies D-11: audio frame sequences are
+// monotonic across multiple StreamWord calls sharing one sessionID. The second
+// call's first frame seq equals the first call's last frame seq plus one.
+func TestStreamWord_SessionMonotonicSeq(t *testing.T) {
+	cache, err := NewSessionCache(t.TempDir(), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+
+	// Store 1920 bytes of PCM (3 frames at 640 bytes each) for two words
+	pcmData := make([]byte, 1920)
+	for i := range pcmData {
+		pcmData[i] = byte(i % 256)
+	}
+	err = cache.Store("session1", "word1", pcmData)
+	if err != nil {
+		t.Fatalf("failed to store word1 PCM: %v", err)
+	}
+	err = cache.Store("session1", "word2", pcmData)
+	if err != nil {
+		t.Fatalf("failed to store word2 PCM: %v", err)
+	}
+
+	cfg := infra.TTSConfig{
+		SessionDir:       t.TempDir(),
+		MaxRetries:       3,
+		GenerationTimeout: 120 * time.Second,
+		PrefetchCount:    3,
+	}
+
+	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
+	if err != nil {
+		t.Fatalf("failed to create streamer: %v", err)
+	}
+
+	ctx := context.Background()
+	const sessionID = "session1"
+
+	// First StreamWord call — 3 audio frames + 1 status frame.
+	sender1 := &mockSender{}
+	err = streamer.StreamWord(ctx, sender1, sessionID, "word1", 0)
+	if err != nil {
+		t.Fatalf("first StreamWord failed: %v", err)
+	}
+	lastSeq := frameSeq(t, sender1.get(2))
+
+	// Second StreamWord call on the same sessionID — 3 audio frames + 1 status.
+	sender2 := &mockSender{}
+	err = streamer.StreamWord(ctx, sender2, sessionID, "word2", 0)
+	if err != nil {
+		t.Fatalf("second StreamWord failed: %v", err)
+	}
+	firstSeq := frameSeq(t, sender2.get(0))
+
+	// D-11: cross-word monotonicity — second call's first seq == first call's
+	// last seq + 1.
+	if firstSeq != lastSeq+1 {
+		t.Errorf("expected second call first seq %d == first call last seq %d + 1, got %d", firstSeq, lastSeq, lastSeq+1)
+	}
+}
+
+// TestStreamer_ClearSeqCounter verifies the D-11 teardown hook (Pitfall 5): after
+// ClearSeqCounter, a subsequent StreamWord on the same sessionID restarts the
+// sequence at 1.
+func TestStreamer_ClearSeqCounter(t *testing.T) {
+	cache, err := NewSessionCache(t.TempDir(), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+
+	pcm1 := make([]byte, 640)
+	cache.Store("session1", "word1", pcm1)
+
+	cfg := infra.TTSConfig{
+		SessionDir:       t.TempDir(),
+		MaxRetries:       3,
+		GenerationTimeout: 120 * time.Second,
+		PrefetchCount:    3,
+	}
+
+	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
+	if err != nil {
+		t.Fatalf("failed to create streamer: %v", err)
+	}
+
+	ctx := context.Background()
+	const sessionID = "session1"
+
+	// First StreamWord — 1 audio frame + 1 status frame.
+	sender1 := &mockSender{}
+	err = streamer.StreamWord(ctx, sender1, sessionID, "word1", 0)
+	if err != nil {
+		t.Fatalf("first StreamWord failed: %v", err)
+	}
+
+	// Clear the per-session counter (session teardown, Pitfall 5).
+	streamer.ClearSeqCounter(sessionID)
+
+	// Second StreamWord on the same sessionID — sequence restarts at 1.
+	sender2 := &mockSender{}
+	err = streamer.StreamWord(ctx, sender2, sessionID, "word1", 0)
+	if err != nil {
+		t.Fatalf("second StreamWord failed: %v", err)
+	}
+	firstSeq := frameSeq(t, sender2.get(0))
+	if firstSeq != 1 {
+		t.Errorf("expected first frame sequence 1 after ClearSeqCounter, got %d", firstSeq)
+	}
+}
+
+// frameSeq decodes the Sequence field (bytes 2-6, big-endian) from an encoded
+// WS frame.
+func frameSeq(t *testing.T, frame []byte) uint32 {
+	t.Helper()
+	if len(frame) < ws.HeaderSize {
+		t.Fatalf("frame too short: %d bytes", len(frame))
+	}
+	return binary.BigEndian.Uint32(frame[2:6])
 }
 
 // TestEndOfWordNotification tests that StreamWord sends word_complete status frame

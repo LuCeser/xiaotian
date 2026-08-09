@@ -24,6 +24,13 @@ type Streamer struct {
 	// prefetch is an in-memory cache of upcoming words' PCM (D-04 prefetch)
 	prefetch    map[string][]byte
 	prefetchMu  sync.RWMutex
+	// seqCounters holds per-session monotonic audio frame sequence counters
+	// (D-11 fix). Each entry is incremented on every frame send for that
+	// session, replacing the old per-StreamWord reset (currentSeq = i+1).
+	// Entries are deleted on session exit via ClearSeqCounter to bound memory
+	// under the 100-concurrent budget (RESEARCH Pitfall 5).
+	seqCounters   map[string]uint32
+	seqCountersMu sync.Mutex
 }
 
 // Compile-time interface check
@@ -39,10 +46,11 @@ func NewStreamer(cache *SessionCache, logger infra.Logger, cfg infra.TTSConfig) 
 		logger = infra.NewNoOpLogger()
 	}
 	return &Streamer{
-		cache:    cache,
-		logger:   logger,
-		cfg:      cfg,
-		prefetch: make(map[string][]byte),
+		cache:       cache,
+		logger:      logger,
+		cfg:         cfg,
+		prefetch:    make(map[string][]byte),
+		seqCounters: make(map[string]uint32),
 	}, nil
 }
 
@@ -84,16 +92,17 @@ func (s *Streamer) StreamWord(ctx context.Context, client Sender, sessionID stri
 
 	// 4. Loop over frames starting from startSeq
 	// Skip frames before startSeq (D-06 breakpoint resume)
-	// startSeq=0 means send all frames, startSeq=2 means start from frame 2 (skip 0,1)
+	// D-10: startSeq is 0-indexed — startSeq=0 sends all frames, startSeq=N
+	// skips the first N frames (startIndex = startSeq).
 	startIndex := int(startSeq)
 	if startIndex < 0 {
 		startIndex = 0
 	}
-	// If startSeq > 0, convert to 0-indexed frame index
-	// startSeq=2 means start from frame index 1 (second frame), so startIndex = startSeq - 1
-	// BUT startSeq=0 means start from frame index 0 (first frame)
-	if startSeq > 0 {
-		startIndex = int(startSeq - 1)
+	// If startIndex is out of range there is nothing to stream — emit
+	// word_complete so the client still advances its state machine.
+	if startIndex >= len(frames) {
+		s.sendWordComplete(ctx, client, wordID)
+		return nil
 	}
 
 	for i := startIndex; i < len(frames); i++ {
@@ -112,7 +121,7 @@ func (s *Streamer) StreamWord(ctx context.Context, client Sender, sessionID stri
 		}
 
 		// 4b. Build the WS frame header
-		currentSeq := uint32(i + 1) // Sequences are 1-indexed
+		currentSeq := s.nextSeq(sessionID) // D-11: session-level monotonic seq (cross-word)
 		header := ws.FrameHeader{
 			Version:    ws.ProtocolVersion,
 			MsgType:    ws.MsgTypeAudio,
@@ -218,4 +227,27 @@ func (s *Streamer) ClearPrefetch(wordIDs ...string) {
 	for _, wordID := range wordIDs {
 		delete(s.prefetch, wordID)
 	}
+}
+
+// nextSeq returns the next monotonic audio frame sequence number for the given
+// session (D-11). The per-session counter is incremented on every call so frame
+// sequences stay unique across multiple StreamWord calls sharing one sessionID —
+// replacing the old per-StreamWord reset (currentSeq = i+1). Mirrors the
+// PrefetchNext locking discipline.
+func (s *Streamer) nextSeq(sessionID string) uint32 {
+	s.seqCountersMu.Lock()
+	defer s.seqCountersMu.Unlock()
+
+	s.seqCounters[sessionID]++
+	return s.seqCounters[sessionID]
+}
+
+// ClearSeqCounter removes the sequence counter entry for a session (D-11
+// teardown hook, RESEARCH Pitfall 5). Called on session exit so seqCounters does
+// not grow unboundedly under the 100-concurrent budget. Mirrors ClearPrefetch.
+func (s *Streamer) ClearSeqCounter(sessionID string) {
+	s.seqCountersMu.Lock()
+	defer s.seqCountersMu.Unlock()
+
+	delete(s.seqCounters, sessionID)
 }
