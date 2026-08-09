@@ -218,4 +218,238 @@
   SessionButton.LABEL_IDLE = LABEL_IDLE;
 
   global.SessionButton = SessionButton;
+
+  // ==================================================================
+  // ProgressDisplay — real-time dictation progress indicator
+  // (Phase 8, Plan 03 Task 01).
+  //
+  // Source: 08-RESEARCH.md Code Examples (Progress Display Component) +
+  // Pattern 3 (iPad-Optimized Responsive Design). Renders the
+  // progress-display-section content as a JS-driven component (mirroring
+  // the Wave 2 SessionButton pattern) and updates status text, progress
+  // bar fill, and word counter from the SessionStateManager in real time.
+  //
+  // Threat model (08-03 PLAN <threat_model>):
+  //   - T-08-08 (Tampering, progress values): the component clamps the
+  //     computed percentage to [0, 100] and guards totalWords === 0 before
+  //     dividing, so a malformed snapshot (negative completedWords,
+  //     completedWords > totalWords) cannot break the UI. Range validation
+  //     also lives in WebSocketClient._applyProgressUpdate (Task 2).
+  //   - T-08-09 (Info disclosure): the component renders only the student's
+  //     own session state from the single SessionStateManager — no
+  //     cross-session data can reach it (accepted per plan).
+  // ==================================================================
+
+  // Status message mapping (PLAN Task 1 spec). Each FSM status (Phase 7
+  // echoes) maps to a short, student-readable English string. These appear
+  // in the 22px status-text element on iPad per the plan's readability target.
+  var PROGRESS_STATUS_MESSAGES = {
+    IDLE: 'Ready to start',
+    LISTENING: 'Listening...',
+    DICTATING: 'Dictation in progress',
+    WAITING_PARENT: 'Waiting for parent',
+    FEEDBACK: 'Session complete!'
+  };
+  var PROGRESS_ERROR_MESSAGE = 'Something went wrong';
+
+  /**
+   * ProgressDisplay renders the dictation progress UI (status text, progress
+   * bar, word counter, encouragement) into a container element and keeps it
+   * in sync with the SessionStateManager. Replaces Wave 1's static inline
+   * progress markup with a JS-driven component so the structure matches the
+   * authoritative state (same pattern as SessionButton in Wave 2).
+   *
+   * @class
+   * @param {HTMLElement} container - element the progress UI mounts into
+   *        (#progress-display-container).
+   * @param {SessionStateManager} stateManager - the shared state store.
+   */
+  class ProgressDisplay {
+    constructor(container, stateManager) {
+      if (!container) {
+        throw new Error('ProgressDisplay requires a container element');
+      }
+      this.container = container;
+      this.stateManager = stateManager;
+
+      // Cached DOM references (populated by render()). Kept on the instance
+      // so update() can mutate them without re-querying on every state change.
+      this.statusRow = null;
+      this.statusText = null;
+      this.progressContainer = null; // the role=progressbar outer track
+      this.progressFill = null;      // the gradient inner fill
+      this.progressText = null;      // "X / Y words" counter
+      this.encouragement = null;     // milestone praise line
+
+      // Track the last percentage we rendered so encouragement only fires on
+      // a milestone crossing (avoids re-praising on every progress_update).
+      this._lastPercent = -1;
+
+      this.render();
+    }
+
+    /**
+     * Build the progress UI structure and mount it into the container.
+     * Idempotent: clears any previous content first (safe for re-mount).
+     * Uses the existing main.css class names (.progress-status, .status-text,
+     * .progress-container, .progress-bar/.progress-fill, .word-counter,
+     * .encouragement) so Wave 1's tested responsive styles apply unchanged.
+     */
+    render() {
+      while (this.container.firstChild) {
+        this.container.removeChild(this.container.firstChild);
+      }
+
+      // Status row: icon + readable status text (22px on iPad via CSS).
+      this.statusRow = document.createElement('div');
+      this.statusRow.className = 'progress-status';
+      var icon = document.createElement('span');
+      icon.className = 'status-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = '📝';
+      this.statusText = document.createElement('span');
+      this.statusText.className = 'status-text';
+      // aria-live on the row so status transitions are announced together.
+      this.statusRow.setAttribute('aria-live', 'polite');
+      this.statusRow.appendChild(icon);
+      this.statusRow.appendChild(this.statusText);
+
+      // Progress bar track (role=progressbar for AT). The fill lives inside.
+      this.progressContainer = document.createElement('div');
+      this.progressContainer.className = 'progress-container';
+      this.progressContainer.setAttribute('role', 'progressbar');
+      this.progressContainer.setAttribute('aria-label', 'Dictation progress');
+      this.progressContainer.setAttribute('aria-valuemin', '0');
+      this.progressContainer.setAttribute('aria-valuemax', '100');
+      this.progressContainer.setAttribute('aria-valuenow', '0');
+      this.progressFill = document.createElement('div');
+      this.progressFill.className = 'progress-bar progress-fill';
+      this.progressFill.style.width = '0%';
+      this.progressContainer.appendChild(this.progressFill);
+
+      // Word counter: "X / Y words" (PLAN Task 1 format).
+      this.progressText = document.createElement('div');
+      this.progressText.className = 'word-counter';
+      this.progressText.setAttribute('aria-live', 'polite');
+
+      // Encouragement line (kid-friendly milestone praise).
+      this.encouragement = document.createElement('div');
+      this.encouragement.className = 'encouragement';
+      this.encouragement.setAttribute('aria-live', 'polite');
+
+      this.container.appendChild(this.statusRow);
+      this.container.appendChild(this.progressContainer);
+      this.container.appendChild(this.progressText);
+      this.container.appendChild(this.encouragement);
+
+      // Apply the current state so the initial render matches (e.g. a
+      // ProgressDisplay constructed mid-session shows live progress).
+      if (this.stateManager) {
+        this.update(this.stateManager.getState());
+      }
+    }
+
+    /**
+     * State-driven view update (called by stateManager.subscribe). Translates
+     * the authoritative session state into status text, progress bar width,
+     * word counter, and encouragement. Handles all PLAN Task 3 edge cases:
+     *   - totalWords === 0: show "0 / 0 words", bar at 0% (no divide-by-zero)
+     *   - session not active: empty/ready state
+     *   - session_complete (FEEDBACK): force 100% + "Session complete!"
+     *   - error: show the error message in status text, maintain progress
+     *
+     * @param {object} state - snapshot from SessionStateManager.
+     */
+    update(state) {
+      if (!this.statusText) {
+        return; // not yet rendered
+      }
+      state = state || {};
+      var status = state.status || 'IDLE';
+      var sessionActive = !!state.sessionActive;
+      var totalWords = state.totalWords || 0;
+      var completedWords = state.completedWords || 0;
+      var lastError = state.lastError || null;
+
+      // --- Status text ---
+      // An error takes priority for the status line so the student sees what
+      // went wrong, but we DO NOT reset the progress bar (PLAN Task 3: "On
+      // error: show error message in status text, maintain current progress").
+      if (lastError) {
+        this.statusText.textContent = lastError;
+      } else {
+        this.statusText.textContent = this._messageForStatus(status);
+      }
+
+      // --- Progress percentage ---
+      // T-08-08: clamp to [0, 100] and guard divide-by-zero. A spoofed
+      // progress_update with completedWords > totalWords cannot overflow the
+      // bar; a negative cannot invert it.
+      var percent = 0;
+      if (totalWords > 0) {
+        percent = Math.round((completedWords / totalWords) * 100);
+        percent = Math.min(100, Math.max(0, percent));
+      }
+      // On FEEDBACK (session_complete), force 100% so the bar visibly fills
+      // even if the last progress_update lagged.
+      if (status === 'FEEDBACK' && totalWords > 0) {
+        percent = 100;
+        completedWords = totalWords;
+      }
+      this.progressFill.style.width = percent + '%';
+      this.progressContainer.setAttribute('aria-valuenow', String(percent));
+
+      // --- Word counter ("X / Y words") ---
+      this.progressText.textContent = completedWords + ' / ' + totalWords + ' words';
+
+      // --- Encouragement (milestone praise, fires only on crossing) ---
+      this.encouragement.textContent = this._encouragementFor(percent, status);
+
+      this._lastPercent = percent;
+    }
+
+    /**
+     * Map an FSM status to its student-readable status string. Falls back to
+     * the IDLE message for unknown values so the UI never shows "undefined".
+     *
+     * @private
+     * @param {string} status - one of SessionStateManager.STATUS_*.
+     * @returns {string}
+     */
+    _messageForStatus(status) {
+      if (PROGRESS_STATUS_MESSAGES.hasOwnProperty(status)) {
+        return PROGRESS_STATUS_MESSAGES[status];
+      }
+      return PROGRESS_STATUS_MESSAGES.IDLE;
+    }
+
+    /**
+     * Return a short encouragement string for a milestone crossing or terminal
+     * state. Returns '' when there is nothing new to say (so the line stays
+     * blank between milestones rather than flickering).
+     *
+     * @private
+     * @param {number} percent - current clamped percentage.
+     * @param {string} status - current FSM status.
+     * @returns {string}
+     */
+    _encouragementFor(percent, status) {
+      if (status === 'FEEDBACK') {
+        return '🎉 Great job!';
+      }
+      // Only fire encouragement on a milestone crossing to avoid re-praising
+      // on every word_complete / progress_update.
+      var prev = this._lastPercent;
+      if (percent >= 75 && prev < 75) return '⭐ Almost there!';
+      if (percent >= 50 && prev < 50) return '👍 Halfway done!';
+      if (percent >= 25 && prev < 25) return '😊 Good start!';
+      return '';
+    }
+  }
+
+  // Expose the status map + error message for tests / introspection.
+  ProgressDisplay.STATUS_MESSAGES = PROGRESS_STATUS_MESSAGES;
+  ProgressDisplay.ERROR_MESSAGE = PROGRESS_ERROR_MESSAGE;
+
+  global.ProgressDisplay = ProgressDisplay;
 })(typeof window !== 'undefined' ? window : this);
