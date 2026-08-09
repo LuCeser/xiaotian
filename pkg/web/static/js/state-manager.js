@@ -115,10 +115,21 @@
      * totalWords, and divide-by-zero downstream (ProgressDisplay also guards
      * totalWords === 0 before dividing, so this is belt-and-braces).
      *
+     * Also enforces the terminal-state invariant: once the FSM reaches
+     * FEEDBACK (the session-complete terminal state), completedWords MUST equal
+     * totalWords so the progress bar renders 100% regardless of which code
+     * path drove the transition. The ws-client's session-complete handler
+     * already sets this, but normalizing here protects against future callers.
+     *
      * @private
      */
     _normalizeProgress() {
       var s = this.state;
+      // Terminal-state invariant: FEEDBACK forces 100% completion.
+      if (s.status === STATUS_FEEDBACK && typeof s.totalWords === 'number' && s.totalWords > 0) {
+        s.completedWords = s.totalWords;
+        return;
+      }
       // Coerce to integer bounds; only touch fields that are set.
       if (typeof s.completedWords === 'number') {
         if (s.completedWords < 0) {
