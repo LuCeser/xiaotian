@@ -267,7 +267,14 @@ Plans:
   3. Responsive design works optimally on iPad Safari browser
   4. Interface handles WebSocket reconnections gracefully
 
-**Plans**: TBD
+**Plans**: 4/4 plans
+
+**Wave 1**
+
+- [ ] 08-01-PLAN.md — Static file serving + responsive HTML shell + WebSocket client foundation
+- [ ] 08-02-PLAN.md — Session request button + state management + WebSocket message handling
+- [ ] 08-03-PLAN.md — Progress display component + real-time updates + session lifecycle integration
+- [ ] 08-04-PLAN.md — Web Audio API integration + iPad-responsive polish + production error handling
 
 **PROJECT_MODE**: mvp
 **UI hint**: yes
