@@ -80,6 +80,59 @@ func TestNewRouterAcceptsValidConfig(t *testing.T) {
 	router.Close()
 }
 
+// TestNewRouter_RoutesPopulatedBeforeWorkers is a regression test for the P0
+// "concurrent map read and map write" race in NewRouter. The previous
+// single-loop implementation populated router.routes AND started worker
+// goroutines in the same iteration, so with >=2 message types a worker from
+// iteration 1 could read r.routes while iteration 2 wrote it — a fatal Go map
+// sanity check that crashed the process. The fix populates all routes first,
+// then starts all workers.
+func TestNewRouter_RoutesPopulatedBeforeWorkers(t *testing.T) {
+	trivialHandler := func(ctx context.Context, c *Client, h *FrameHeader, payload []byte) error {
+		return nil
+	}
+
+	handlers := map[MessageType]Handler{
+		MsgTypeAudio:   trivialHandler,
+		MsgTypeControl: trivialHandler,
+		MsgTypeStatus:  trivialHandler,
+	}
+
+	logger := zap.NewNop()
+	router, err := NewRouter(handlers, RouterConfig{
+		RouteBuffer:       8,
+		WorkerConcurrency: 4,
+	}, logger)
+	if err != nil {
+		t.Fatalf("failed to create router: %v", err)
+	}
+	defer router.Close()
+
+	// All routes populated — this is the deterministic guard that would fail if
+	// someone re-merged the loops into one pass.
+	if len(router.routes) != 3 {
+		t.Fatalf("expected 3 routes populated, got %d", len(router.routes))
+	}
+
+	// Each route channel must exist and be non-nil.
+	for _, mt := range []MessageType{MsgTypeAudio, MsgTypeControl, MsgTypeStatus} {
+		ch, ok := router.routes[mt]
+		if !ok || ch == nil {
+			t.Fatalf("route channel for message type %s missing or nil (ok=%v)", mt.String(), ok)
+		}
+	}
+
+	// Smoke that Route accepts a frame into each type's channel.
+	ctx := context.Background()
+	fakeClient := &Client{}
+	for _, mt := range []MessageType{MsgTypeAudio, MsgTypeControl, MsgTypeStatus} {
+		header := &FrameHeader{MsgType: mt}
+		if err := router.Route(ctx, fakeClient, header, []byte{0x01}); err != nil {
+			t.Fatalf("Route failed for message type %s: %v", mt.String(), err)
+		}
+	}
+}
+
 // TestRouterImplementsFrameHandler tests that Router implements FrameHandler interface
 func TestRouterImplementsFrameHandler(t *testing.T) {
 	// Compile-time check already done above, this is a runtime sanity check

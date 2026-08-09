@@ -114,11 +114,20 @@ func NewRouter(handlers map[MessageType]Handler, cfg RouterConfig, logger *zap.L
 		cancel:   cancel,
 	}
 
-	// Create channels for each message type and start workers
+	// Pass 1: fully populate the routes map BEFORE any worker goroutine starts.
+	// Starting workers inside this loop would let an early worker read r.routes
+	// concurrently with a later iteration's map write — Go's map sanity check
+	// then fatal-errors the whole process (seen as "concurrent map read and map
+	// write" in Router.worker). Populate-then-launch makes r.routes safe for the
+	// concurrent reads Route() and worker() perform, mirroring the
+	// populate-once-never-mutate guarantee already documented for r.handlers
+	// (see Route() comment).
 	for msgType := range handlers {
 		router.routes[msgType] = make(chan frameTask, cfg.RouteBuffer)
+	}
 
-		// Start WorkerConcurrency workers per message type (D-16 worker pool for logic)
+	// Pass 2: now that r.routes is fully populated, start the per-type worker pool.
+	for msgType := range handlers {
 		for i := 0; i < cfg.WorkerConcurrency; i++ {
 			router.wg.Add(1)
 			go router.worker(msgType, handlers[msgType])
