@@ -42,15 +42,17 @@
    *        (#session-button-container).
    * @param {SessionStateManager} stateManager - the shared state store.
    * @param {WebSocketClient} wsClient - used to send the start_session frame.
+   * @param {AudioController} audioController - Web Audio API integration (Plan 08-04 Task 2).
    */
   class SessionButton {
-    constructor(container, stateManager, wsClient) {
+    constructor(container, stateManager, wsClient, audioController) {
       if (!container) {
         throw new Error('SessionButton requires a container element');
       }
       this.container = container;
       this.stateManager = stateManager;
       this.wsClient = wsClient;
+      this.audioController = audioController;
 
       // In-flight request flag. True between click and session_ready/error.
       // Distinct from state.sessionActive (which is only true after the
@@ -101,9 +103,10 @@
     }
 
     /**
-     * Click handler: send start_session unless a session/request is already
-     * in flight. Hard-codes limit: 30 (T-08-06) and flips to the starting
-     * state immediately so the student sees feedback before the round trip.
+     * Click handler: unlock audio (D-03) then send start_session unless a
+     * session/request is already in flight. Hard-codes limit: 30 (T-08-06)
+     * and flips to the starting state immediately so the student sees feedback
+     * before the round trip.
      *
      * @param {Event} [evt] - DOM click event (ignored beyond signaling).
      */
@@ -125,6 +128,15 @@
         this.stateManager.setState({ lastError: null });
       }
       this.applyVisual(LABEL_STARTING, true);
+
+      // Plan 08-04 Task 2: unlock audio before starting session (D-03).
+      // This is the FIRST synchronous statement of the tap.
+      if (this.audioController && typeof this.audioController.unlockAudioContext === 'function') {
+        this.audioController.unlockAudioContext();
+        if (typeof console !== 'undefined') {
+          console.log('[session-button] audio unlocked before session start');
+        }
+      }
 
       // Emit the control frame. The ws client queues it if still connecting
       // and flushes on open, so a fast click during the initial handshake

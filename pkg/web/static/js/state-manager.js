@@ -58,6 +58,8 @@
       currentWord: 0, // 1-based index of the word currently being dictated
       totalWords: 0, // total words promised by session_ready (words.length)
       completedWords: 0, // words fully delivered this session
+      // Audio frame routing (Plan 08-04 Task 2).
+      currentWordId: null, // word whose audio frames are currently being accumulated
       // Connection (driven by WebSocketClient.stateCallback).
       connectionStatus: CONN_DISCONNECTED,
       // Last backend error message (string) or null. Surfaced to the UI so a
@@ -197,6 +199,16 @@
       var copy = Object.assign({}, this.state);
       copy.words = this.state.words.slice();
       return copy;
+    }
+
+    /**
+     * Get the current word ID for audio frame routing (Plan 08-04 Task 2).
+     * Used by the app layer to route audio frames to the AudioController.
+     *
+     * @returns {string|null} current word ID or null.
+     */
+    getCurrentWordId() {
+      return this.state.currentWordId || null;
     }
   }
 

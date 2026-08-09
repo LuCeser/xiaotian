@@ -41,8 +41,8 @@
     setConnectionState('failed');
     return;
   }
-  if (!window.SessionStateManager || !window.SessionButton || !window.ProgressDisplay) {
-    console.error('[app] SessionStateManager/SessionButton/ProgressDisplay unavailable — scripts did not load.');
+  if (!window.SessionStateManager || !window.SessionButton || !window.ProgressDisplay || !window.AudioController) {
+    console.error('[app] SessionStateManager/SessionButton/ProgressDisplay/AudioController unavailable — scripts did not load.');
     setConnectionState('failed');
     return;
   }
@@ -68,6 +68,16 @@
   var stateManager = new window.SessionStateManager();
 
   // ------------------------------------------------------------------
+  // Audio playback: Web Audio API integration (Plan 08-04 Task 2)
+  // ------------------------------------------------------------------
+  var audioController = new window.AudioController();
+
+  // Install visibility change listener for app-switch recovery (D-06).
+  document.addEventListener('visibilitychange', function () {
+    audioController.handleVisibilityChange();
+  });
+
+  // ------------------------------------------------------------------
   // WebSocket client: control frames dispatch into the state manager
   // ------------------------------------------------------------------
   var wsClient = new window.WebSocketClient(
@@ -83,12 +93,13 @@
 
   // ------------------------------------------------------------------
   // Session button: subscribes to the state manager for its visual states
+  // Wire audio unlock into session button click (D-03 3-condition iOS unlock)
   // ------------------------------------------------------------------
   var buttonHost = document.getElementById('session-button-container');
   if (!buttonHost) {
     console.error('[app] #session-button-container missing — SessionButton cannot mount.');
   } else {
-    var sessionButton = new window.SessionButton(buttonHost, stateManager, wsClient);
+    var sessionButton = new window.SessionButton(buttonHost, stateManager, wsClient, audioController);
     // Re-render the button whenever the authoritative state changes.
     stateManager.subscribe(function (state) {
       sessionButton.update(state);
@@ -129,8 +140,10 @@
     setConnectionState(toIndicatorState(state.connectionStatus));
   });
 
-  // Expose for console debugging. Not used for cross-script coupling.
-  window.__app = { stateManager: stateManager, wsClient: wsClient };
+  // Expose for console debugging and cross-script coupling (Plan 08-04 Task 2).
+  window.__app = { stateManager: stateManager, wsClient: wsClient, audioController: audioController };
+  // Expose audioController globally for websocket-client.js access (Plan 08-04 Task 2).
+  window.audioController = audioController;
 
   // ------------------------------------------------------------------
   // Handlers
@@ -140,13 +153,22 @@
    * Inbound message handler. With a state manager registered on the client,
    * JSON control frames are dispatched by handleControlFrame (never reach
    * here except for unknown control types forwarded for visibility). Binary
-   * frames (Phase 7.1 audio) route here for the future Web Audio hand-off.
+   * frames (Phase 7.1 audio) route to the AudioController for gapless playback.
    */
   function handleMessage(data, isBinary) {
     if (isBinary) {
-      // Binary audio frame — Wave 3 hands this to the Web Audio scheduler
-      // (Phase 7.1 pattern). Logged now for connection verification only.
-      console.debug('[app] binary frame received:', data && data.byteLength, 'bytes');
+      // Binary audio frame — route to AudioController (Plan 08-04 Task 2)
+      if (audioController && data && data.byteLength >= 16) {
+        // Parse frame header (16 bytes) for sequence number and extract payload
+        var view = new DataView(data);
+        var sequence = view.getUint32(2, false); // Big-endian sequence at offset 2
+        var payload = new Uint8Array(data, 16); // Skip 16-byte header
+        var state = stateManager.getState();
+        var wordId = state.currentWordId || null;
+        audioController.handleAudioFrame(payload, sequence, wordId);
+      } else {
+        console.warn('[app] binary frame received but AudioController unavailable or frame too small');
+      }
       return;
     }
     // Forwarded control frame (unknown type) or legacy path — log it.

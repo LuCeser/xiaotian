@@ -375,7 +375,8 @@
     }
 
     /**
-     * @private apply a word_complete frame — increment completedWords by one.
+     * @private apply a word_complete frame — increment completedWords by one
+     * AND trigger audio playback via the global AudioController (Plan 08-04 Task 2).
      * Used by the backend's per-word streaming loop. word_id is informational
      * (not stored). T-08-08: clamp the increment at totalWords so a sequence
      * of word_complete frames cannot push progress past 100%.
@@ -388,6 +389,12 @@
         next = total; // clamp at 100%
       }
       this.stateManager.setState({ completedWords: next });
+
+      // Plan 08-04 Task 2: trigger audio playback when word completes.
+      var wordId = typeof payload.word_id === 'string' ? payload.word_id : null;
+      if (wordId && typeof window !== 'undefined' && window.audioController) {
+        window.audioController.playWordComplete(wordId);
+      }
     }
 
     /** @private apply a session_complete frame → end the session. */
