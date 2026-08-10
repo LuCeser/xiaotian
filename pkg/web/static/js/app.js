@@ -47,6 +47,37 @@
     return;
   }
 
+  // Plan 08-04 Task 4: global error handlers for production resilience
+  window.addEventListener('error', function (event) {
+    console.error('[app] Global error:', event.error || event.message);
+    stateManager.setState({ lastError: '页面错误，请刷新重试' });
+  });
+
+  window.addEventListener('unhandledrejection', function (event) {
+    console.error('[app] Unhandled promise rejection:', event.reason);
+    stateManager.setState({ lastError: '异步操作失败，请刷新重试' });
+  });
+
+  // Plan 08-04 Task 4: resource cleanup on page unload
+  window.addEventListener('beforeunload', function () {
+    // Clean up audio controller resources
+    if (audioController) {
+      audioController.cleanup();
+    }
+    // Disconnect WebSocket cleanly
+    if (wsClient) {
+      wsClient.disconnect();
+    }
+  });
+
+  // Plan 08-04 Task 4: additional error tracking for monitoring
+  window.addEventListener('error', function (event) {
+    // Track errors for analytics/monitoring (could be extended)
+    if (typeof console !== 'undefined') {
+      console.error('[app] Error tracked:', event.message);
+    }
+  }, true); // Use capture phase for comprehensive error catching
+
   var WS_STATE = {
     CONNECTED: window.WebSocketClient.STATE_CONNECTED,
     CONNECTING: window.WebSocketClient.STATE_CONNECTING,
@@ -70,26 +101,45 @@
   // ------------------------------------------------------------------
   // Audio playback: Web Audio API integration (Plan 08-04 Task 2)
   // ------------------------------------------------------------------
-  var audioController = new window.AudioController();
+  var audioController;
+  try {
+    audioController = new window.AudioController();
 
-  // Install visibility change listener for app-switch recovery (D-06).
-  document.addEventListener('visibilitychange', function () {
-    audioController.handleVisibilityChange();
-  });
+    // Install visibility change listener for app-switch recovery (D-06).
+    document.addEventListener('visibilitychange', function () {
+      try {
+        audioController.handleVisibilityChange();
+      } catch (visErr) {
+        console.error('[app] visibility change handler error:', visErr);
+      }
+    });
+  } catch (audioErr) {
+    console.error('[app] AudioController initialization failed:', audioErr);
+    setConnectionState('failed');
+    return;
+  }
 
   // ------------------------------------------------------------------
   // WebSocket client: control frames dispatch into the state manager
   // ------------------------------------------------------------------
-  var wsClient = new window.WebSocketClient(
-    wsUrl,
-    handleMessage,
-    handleError,
-    handleStateChange
-  );
-  // Route inbound JSON control frames (session_ready/error/progress_update/
-  // session_complete) through handleControlFrame into the state manager.
-  wsClient.setStateManager(stateManager);
-  wsClient.connect();
+  var wsClient;
+  try {
+    wsClient = new window.WebSocketClient(
+      wsUrl,
+      handleMessage,
+      handleError,
+      handleStateChange
+    );
+    // Route inbound JSON control frames (session_ready/error/progress_update/
+    // session_complete) through handleControlFrame into the state manager.
+    wsClient.setStateManager(stateManager);
+    wsClient.connect();
+  } catch (wsErr) {
+    console.error('[app] WebSocket client initialization failed:', wsErr);
+    stateManager.setState({ lastError: '连接初始化失败，请刷新页面' });
+    setConnectionState('failed');
+    return;
+  }
 
   // ------------------------------------------------------------------
   // Session button: subscribes to the state manager for its visual states
@@ -99,11 +149,20 @@
   if (!buttonHost) {
     console.error('[app] #session-button-container missing — SessionButton cannot mount.');
   } else {
-    var sessionButton = new window.SessionButton(buttonHost, stateManager, wsClient, audioController);
-    // Re-render the button whenever the authoritative state changes.
-    stateManager.subscribe(function (state) {
-      sessionButton.update(state);
-    });
+    try {
+      var sessionButton = new window.SessionButton(buttonHost, stateManager, wsClient, audioController);
+      // Re-render the button whenever the authoritative state changes.
+      stateManager.subscribe(function (state) {
+        try {
+          sessionButton.update(state);
+        } catch (updateErr) {
+          console.error('[app] session button update error:', updateErr);
+        }
+      });
+    } catch (buttonErr) {
+      console.error('[app] SessionButton initialization failed:', buttonErr);
+      stateManager.setState({ lastError: '按钮初始化失败，请刷新页面' });
+    }
   }
 
   // ------------------------------------------------------------------
@@ -119,18 +178,27 @@
   if (!progressHost) {
     console.error('[app] #progress-display-container missing — ProgressDisplay cannot mount.');
   } else {
-    var progressDisplay = new window.ProgressDisplay(progressHost, stateManager);
-    stateManager.subscribe(function (state) {
-      progressDisplay.update(state);
-      // Reveal the section once a session is active or has reached a
-      // non-idle state (e.g. FEEDBACK after completion). It stays visible
-      // thereafter so the student sees their result.
-      if (progressSection && progressSection.hasAttribute('hidden')) {
-        if (state.sessionActive || (state.status && state.status !== 'IDLE')) {
-          progressSection.removeAttribute('hidden');
+    try {
+      var progressDisplay = new window.ProgressDisplay(progressHost, stateManager);
+      stateManager.subscribe(function (state) {
+        try {
+          progressDisplay.update(state);
+          // Reveal the section once a session is active or has reached a
+          // non-idle state (e.g. FEEDBACK after completion). It stays visible
+          // thereafter so the student sees their result.
+          if (progressSection && progressSection.hasAttribute('hidden')) {
+            if (state.sessionActive || (state.status && state.status !== 'IDLE')) {
+              progressSection.removeAttribute('hidden');
+            }
+          }
+        } catch (progressUpdateErr) {
+          console.error('[app] progress display update error:', progressUpdateErr);
         }
-      }
-    });
+      });
+    } catch (progressErr) {
+      console.error('[app] ProgressDisplay initialization failed:', progressErr);
+      // Non-critical: log and continue without progress display
+    }
   }
 
   // ------------------------------------------------------------------

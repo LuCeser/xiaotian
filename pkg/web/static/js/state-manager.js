@@ -93,14 +93,28 @@
      * (which REJECTS bad frames); this is a safety net so a future code path
      * that bypasses the ws client cannot leave the store in an impossible state.
      *
+     * Plan 08-04 Task 4: add state validation and consistency checks.
+     *
      * @param {object} updates - partial state to merge (e.g.
      *        {sessionActive: true, status: 'DICTATING'}).
      * @returns {object} the new state snapshot (shallow copy).
      */
     setState(updates) {
       if (!updates || typeof updates !== 'object') {
+        if (typeof console !== 'undefined') {
+          console.error('[state] setState called with invalid updates:', updates);
+        }
         return this.getState();
       }
+
+      // Plan 08-04 Task 4: validate state transitions before applying
+      if (!this._validateStateUpdate(this.state, updates)) {
+        if (typeof console !== 'undefined') {
+          console.error('[state] Invalid state transition rejected:', this.state, '→', updates);
+        }
+        return this.getState();
+      }
+
       // Merge onto a fresh object so the internal reference swaps atomically;
       // subscribers always observe a consistent snapshot.
       this.state = Object.assign({}, this.state, updates);
@@ -209,6 +223,49 @@
      */
     getCurrentWordId() {
       return this.state.currentWordId || null;
+    }
+
+    /**
+     * Reset state to initial values (Plan 08-04 Task 4). Called on error
+     * conditions or session cleanup.
+     */
+    reset() {
+      this.state = initialState();
+      this.notify();
+    }
+
+    /**
+     * Validate state transition (Plan 08-04 Task 4). Reject invalid
+     * transitions that would break session or connection invariants.
+     *
+     * @private
+     * @param {object} oldState - current state snapshot.
+     * @param {object} updates - proposed updates.
+     * @returns {boolean} true if transition is valid, false otherwise.
+     */
+    _validateStateUpdate(oldState, updates) {
+      // SessionActive cannot go from false to true without session_id
+      if (updates.sessionActive === true && !updates.session_id && !oldState.session_id) {
+        return false;
+      }
+
+      // Status must be a valid FSM state
+      if (updates.status) {
+        var validStates = [STATUS_IDLE, STATUS_LISTENING, STATUS_DICTATING, STATUS_WAITING_PARENT, STATUS_FEEDBACK];
+        if (validStates.indexOf(updates.status) === -1) {
+          return false;
+        }
+      }
+
+      // connectionStatus must be a valid connection state
+      if (updates.connectionStatus) {
+        var validConnStates = [CONN_DISCONNECTED, CONN_CONNECTING, CONN_CONNECTED, CONN_ERROR, CONN_FAILED];
+        if (validConnStates.indexOf(updates.connectionStatus) === -1) {
+          return false;
+        }
+      }
+
+      return true;
     }
   }
 

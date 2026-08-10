@@ -35,6 +35,8 @@
   var MAX_QUEUE_SIZE = 100; // Pitfall 2: ~6KB cap, drop oldest when exceeded
   var BASE_BACKOFF_MS = 1000; // 1s base for exponential backoff
   var MAX_BACKOFF_MS = 30000; // cap backoff at 30s
+  var CONNECTION_TIMEOUT_MS = 10000; // Plan 08-04 Task 4: 10s connection timeout
+  var MAX_MESSAGE_SIZE = 1024 * 1024; // Plan 08-04 Task 4: 1MB max message size
 
   /**
    * WebSocketClient wraps the native WebSocket with exponential-backoff
@@ -81,6 +83,11 @@
       // Set true by disconnect() so the close handler does NOT schedule a
       // reconnect for an intentional teardown.
       this._intentionalClose = false;
+
+      // Plan 08-04 Task 4: connection timeout tracking
+      this._connectionTimer = null;
+      // Circuit breaker: track consecutive failures
+      this._consecutiveErrors = 0;
     }
 
     /**
@@ -103,20 +110,38 @@
       this._intentionalClose = false;
       this._setState(STATE_CONNECTING);
 
-      this.ws = new global.WebSocket(this.url);
-      // ArrayBuffer so Phase 7.1 binary audio frames arrive as typed buffers
-      // (not Blobs), ready for Web Audio API decoding.
-      this.ws.binaryType = 'arraybuffer';
+      // Plan 08-04 Task 4: connection timeout guard
+      this._clearConnectionTimer();
+      this._connectionTimer = global.setTimeout(() => {
+        if (this.state === STATE_CONNECTING) {
+          this.errorHandler(new Error('Connection timeout (10s)'));
+          this._setState(STATE_ERROR);
+          this._onClose(); // Trigger reconnect logic
+        }
+      }, CONNECTION_TIMEOUT_MS);
 
-      this.ws.onopen = this._onOpen.bind(this);
-      this.ws.onmessage = this._onMessage.bind(this);
-      this.ws.onclose = this._onClose.bind(this);
-      this.ws.onerror = this._onError.bind(this);
+      try {
+        this.ws = new global.WebSocket(this.url);
+        // ArrayBuffer so Phase 7.1 binary audio frames arrive as typed buffers
+        // (not Blobs), ready for Web Audio API decoding.
+        this.ws.binaryType = 'arraybuffer';
+
+        this.ws.onopen = this._onOpen.bind(this);
+        this.ws.onmessage = this._onMessage.bind(this);
+        this.ws.onclose = this._onClose.bind(this);
+        this.ws.onerror = this._onError.bind(this);
+      } catch (constructErr) {
+        this._setState(STATE_ERROR);
+        this.errorHandler(constructErr);
+        this._clearConnectionTimer();
+      }
     }
 
     /** @private open handler: reset attempts, flush queue, mark connected. */
     _onOpen() {
       this.reconnectAttempts = 0;
+      this._consecutiveErrors = 0; // Reset circuit breaker
+      this._clearConnectionTimer();
       this._setState(STATE_CONNECTED);
       this._flushQueue();
     }
@@ -129,8 +154,20 @@
      * frames route to the structured control dispatcher for state updates
      * instead of the generic messageHandler. Binary frames always go to
      * messageHandler (Phase 7.1 audio hand-off).
+     *
+     * Plan 08-04 Task 4: add message size limits for memory protection.
      */
     _onMessage(event) {
+      // Plan 08-04 Task 4: reject oversized messages to prevent memory exhaustion
+      if (event.data instanceof ArrayBuffer && event.data.byteLength > MAX_MESSAGE_SIZE) {
+        this.errorHandler(new Error('Message too large: ' + event.data.byteLength + ' bytes'));
+        return;
+      }
+      if (typeof event.data === 'string' && event.data.length > MAX_MESSAGE_SIZE) {
+        this.errorHandler(new Error('Message too large: ' + event.data.length + ' chars'));
+        return;
+      }
+
       if (event.data instanceof ArrayBuffer) {
         // Binary audio frame (Phase 7.1).
         this.messageHandler(event.data, true);
@@ -237,6 +274,8 @@
      * Intentionally tear down the connection. Cancels any pending reconnect
      * timer and suppresses the automatic reconnect that onclose would
      * otherwise schedule. Safe to call multiple times.
+     *
+     * Plan 08-04 Task 4: proper resource cleanup on page unload.
      */
     disconnect() {
       this._intentionalClose = true;
@@ -244,6 +283,7 @@
         global.clearTimeout(this._reconnectTimer);
         this._reconnectTimer = null;
       }
+      this._clearConnectionTimer();
       if (this.ws) {
         try {
           this.ws.close();
@@ -251,7 +291,19 @@
           // Closing an already-closed socket can throw on some browsers; ignore.
         }
       }
+      // Plan 08-04 Task 4: clear message queue on disconnect
+      this.messageQueue = [];
       this._setState(STATE_DISCONNECTED);
+    }
+
+    /**
+     * @private clear the connection timeout timer.
+     */
+    _clearConnectionTimer() {
+      if (this._connectionTimer !== null) {
+        global.clearTimeout(this._connectionTimer);
+        this._connectionTimer = null;
+      }
     }
 
     /**

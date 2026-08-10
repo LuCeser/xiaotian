@@ -74,47 +74,58 @@
      * calls resume(), and starts a 1-sample silent buffer — all three
      * conditions are critical for iOS 17+.
      *
+     * Plan 08-04 Task 4: add error handling and graceful degradation.
+     *
      * @returns {boolean} true if unlock succeeded, false otherwise.
      */
     unlockAudioContext() {
-      if (!this.audioCtx) {
-        var AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContextClass) {
-          console.error('[audio] Web Audio API not supported in this browser');
-          return false;
+      try {
+        if (!this.audioCtx) {
+          var AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContextClass) {
+            console.error('[audio] Web Audio API not supported in this browser');
+            return false;
+          }
+
+          // D-02: construct at 16kHz to match backend PCM.
+          this.audioCtx = new AudioContextClass({ sampleRate: 16000 });
+
+          // D-02 gotcha: iOS may renegotiate sample rate — log mismatch.
+          if (this.audioCtx.sampleRate !== 16000) {
+            console.warn('[audio] WARN: ctx.sampleRate=' + this.audioCtx.sampleRate +
+              ' (expected 16000) — PCM rate mismatch risk');
+          }
+
+          console.log('[audio] Web Audio API unlocked at sampleRate=' + this.audioCtx.sampleRate);
+
+          // D-06: install state change handler for app-switch recovery.
+          var self = this;
+          this.audioCtx.onstatechange = function () {
+            try {
+              self._handleStateChange();
+            } catch (stateChangeErr) {
+              console.error('[audio] state change handler error:', stateChangeErr);
+            }
+          };
         }
 
-        // D-02: construct at 16kHz to match backend PCM.
-        this.audioCtx = new AudioContextClass({ sampleRate: 16000 });
+        // Condition 2: resume() synchronously, NO await.
+        this.audioCtx.resume();
 
-        // D-02 gotcha: iOS may renegotiate sample rate — log mismatch.
-        if (this.audioCtx.sampleRate !== 16000) {
-          console.warn('[audio] WARN: ctx.sampleRate=' + this.audioCtx.sampleRate +
-            ' (expected 16000) — PCM rate mismatch risk');
-        }
+        // Condition 3 (CRITICAL for iOS 17+): start a real buffer source
+        // synchronously inside the gesture. resume() alone leaves output muted.
+        var silentBuf = this.audioCtx.createBuffer(1, 1, this.audioCtx.sampleRate);
+        silentBuf.getChannelData(0)[0] = 0;
+        var silentSource = this.audioCtx.createBufferSource();
+        silentSource.buffer = silentBuf;
+        silentSource.connect(this.audioCtx.destination);
+        silentSource.start(0);
 
-        console.log('[audio] Web Audio API unlocked at sampleRate=' + this.audioCtx.sampleRate);
-
-        // D-06: install state change handler for app-switch recovery.
-        var self = this;
-        this.audioCtx.onstatechange = function () {
-          self._handleStateChange();
-        };
+        return true;
+      } catch (unlockErr) {
+        console.error('[audio] AudioContext unlock failed:', unlockErr);
+        return false;
       }
-
-      // Condition 2: resume() synchronously, NO await.
-      this.audioCtx.resume();
-
-      // Condition 3 (CRITICAL for iOS 17+): start a real buffer source
-      // synchronously inside the gesture. resume() alone leaves output muted.
-      var silentBuf = this.audioCtx.createBuffer(1, 1, this.audioCtx.sampleRate);
-      silentBuf.getChannelData(0)[0] = 0;
-      var silentSource = this.audioCtx.createBufferSource();
-      silentSource.buffer = silentBuf;
-      silentSource.connect(this.audioCtx.destination);
-      silentSource.start(0);
-
-      return true;
     }
 
     /**
@@ -158,60 +169,72 @@
      * Play a completed word. Called when backend sends word_complete
      * control frame after streaming all audio frames for that word.
      *
+     * Plan 08-04 Task 4: enhanced error handling and audio subsystem validation.
+     *
      * @param {string} wordId - word identifier to play.
      */
     playWordComplete(wordId) {
-      var chunks = this.pendingPcm.get(wordId);
-      if (!chunks || chunks.length === 0) {
-        console.warn('[audio] word_complete for "' + wordId + '" — no PCM accumulated');
-        return;
+      try {
+        var chunks = this.pendingPcm.get(wordId);
+        if (!chunks || chunks.length === 0) {
+          console.warn('[audio] word_complete for "' + wordId + '" — no PCM accumulated');
+          return;
+        }
+
+        if (!this.isAudioCtxReady()) {
+          console.error('[audio] word_complete for "' + wordId + '" but AudioContext not running — PCM dropped');
+          return;
+        }
+
+        // Clear pending PCM for this word (Plan 08-04 Task 4: memory cleanup).
+        this.pendingPcm.delete(wordId);
+
+        // Merge PCM chunks into one s16le buffer.
+        var totalLen = chunks.reduce(function (sum, chunk) { return sum + chunk.length; }, 0);
+        var pcmBytes = new Uint8Array(totalLen);
+        var offset = 0;
+        for (var i = 0; i < chunks.length; i++) {
+          pcmBytes.set(chunks[i], offset);
+          offset += chunks[i].length;
+        }
+
+        // D-05: PCM Int16 → Float32 AudioBuffer. Use audioCtx.sampleRate
+        // (runtime property, NEVER hardcoded 16000 per D-02).
+        var numSamples = pcmBytes.length / 2;
+        var buf = this.audioCtx.createBuffer(1, numSamples, this.audioCtx.sampleRate);
+        var view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
+        var chan = buf.getChannelData(0);
+        for (var i = 0; i < numSamples; i++) {
+          chan[i] = view.getInt16(i * 2, true) / 32768;
+        }
+
+        // D-04 + D-18: gapless scheduling with underrun snap.
+        var src = this.audioCtx.createBufferSource();
+        src.buffer = buf;
+        src.connect(this.audioCtx.destination);
+
+        // Plan 08-04 Task 4: add error handler for source start failure
+        src.onerror = function (err) {
+          console.error('[audio] BufferSource playback error:', err);
+        };
+
+        // Snap scheduledTime forward on underrun so late PCM never schedules in the past.
+        if (this.scheduledTime < this.audioCtx.currentTime) {
+          this.scheduledTime = this.audioCtx.currentTime;
+        }
+
+        src.start(this.scheduledTime);
+        this.scheduledTime += buf.duration;
+
+        this.isPlaying = true;
+
+        console.log('[audio] word_complete: "' + wordId + '" — scheduled ' + numSamples +
+          ' samples (' + (buf.duration * 1000).toFixed(0) + 'ms) at audio clock t=' +
+          (this.scheduledTime - buf.duration).toFixed(3) + 's');
+      } catch (playErr) {
+        console.error('[audio] word_complete playback failed for "' + wordId + '":', playErr);
+        this.isPlaying = false;
       }
-
-      if (!this.isAudioCtxReady()) {
-        console.error('[audio] word_complete for "' + wordId + '" but AudioContext not running — PCM dropped');
-        return;
-      }
-
-      // Clear pending PCM for this word.
-      this.pendingPcm.delete(wordId);
-
-      // Merge PCM chunks into one s16le buffer.
-      var totalLen = chunks.reduce(function (sum, chunk) { return sum + chunk.length; }, 0);
-      var pcmBytes = new Uint8Array(totalLen);
-      var offset = 0;
-      for (var i = 0; i < chunks.length; i++) {
-        pcmBytes.set(chunks[i], offset);
-        offset += chunks[i].length;
-      }
-
-      // D-05: PCM Int16 → Float32 AudioBuffer. Use audioCtx.sampleRate
-      // (runtime property, NEVER hardcoded 16000 per D-02).
-      var numSamples = pcmBytes.length / 2;
-      var buf = this.audioCtx.createBuffer(1, numSamples, this.audioCtx.sampleRate);
-      var view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
-      var chan = buf.getChannelData(0);
-      for (var i = 0; i < numSamples; i++) {
-        chan[i] = view.getInt16(i * 2, true) / 32768;
-      }
-
-      // D-04 + D-18: gapless scheduling with underrun snap.
-      var src = this.audioCtx.createBufferSource();
-      src.buffer = buf;
-      src.connect(this.audioCtx.destination);
-
-      // Snap scheduledTime forward on underrun so late PCM never schedules in the past.
-      if (this.scheduledTime < this.audioCtx.currentTime) {
-        this.scheduledTime = this.audioCtx.currentTime;
-      }
-
-      src.start(this.scheduledTime);
-      this.scheduledTime += buf.duration;
-
-      this.isPlaying = true;
-
-      console.log('[audio] word_complete: "' + wordId + '" — scheduled ' + numSamples +
-        ' samples (' + (buf.duration * 1000).toFixed(0) + 'ms) at audio clock t=' +
-        (this.scheduledTime - buf.duration).toFixed(3) + 's');
     }
 
     /**
@@ -328,12 +351,29 @@
     /**
      * Cleanup on session end. Stops all sources, clears pending data,
      * and resets state. Call this when a dictation session completes.
+     *
+     * Plan 08-04 Task 4: enhanced cleanup with error handling and memory management.
      */
     cleanup() {
-      this.stop();
-      this._hideTapToResumeOverlay();
-      // Note: we do NOT close the AudioContext — it persists across sessions
-      // to avoid re-unlocking. The context is only created once per page load.
+      try {
+        // Clear all pending PCM data (Plan 08-04 Task 4: memory cleanup).
+        this.pendingPcm.clear();
+
+        // Reset playback state.
+        this.isPlaying = false;
+        this.lastSeq = 0;
+        this.currentWordId = null;
+        this.scheduledTime = 0;
+
+        // Hide tap-to-resume overlay.
+        this._hideTapToResumeOverlay();
+
+        // Note: we do NOT close the AudioContext — it persists across sessions
+        // to avoid re-unlocking. The context is only created once per page load.
+        console.log('[audio] cleanup completed');
+      } catch (cleanupErr) {
+        console.error('[audio] cleanup error:', cleanupErr);
+      }
     }
   }
 
