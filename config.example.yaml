@@ -45,6 +45,24 @@ server:
   # Localhost-only health/metrics listener. Kept separate from the public
   # addr so probe traffic does not compete with session traffic.
   healthAddr: "127.0.0.1:8081"
+  # ------------------------------------------------------------------
+  # Phase 8 (WEB-02): student web interface static file serving.
+  #
+  # staticDir is the directory served as static files. Empty DISABLES
+  # static serving — the service falls back to debug test pages and the
+  # student interface will NOT load. Set this to enable the student
+  # interface.
+  #
+  # Relative paths resolve against the process CWD, so the service MUST
+  # be started from the repo root (use `make run` or ./run.ps1) for the
+  # relative path below to resolve. For production use an absolute path
+  # (e.g. /opt/hta/pkg/web/static).
+  # ------------------------------------------------------------------
+  staticDir: ./pkg/web/static
+  # URL prefix where the static file server mounts. Default "/". MUST
+  # start with "/" and MUST NOT collide with "/ws" (ServeMux matches the
+  # longer "/ws" pattern first so they coexist).
+  staticRoute: /
 
 log:
   # debug | info | warn | error

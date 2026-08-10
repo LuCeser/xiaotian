@@ -12,11 +12,28 @@ PY_VENV ?= third_party/python/.venv
 # the UV_INDEX_URL env var. See memory: china-mirror-installs.
 PY_INDEX ?= https://pypi.tuna.tsinghua.edu.cn/simple
 
-.PHONY: build test test-short lint fmt vet cover clean tidy py-bootstrap py-sync py-e2e
+.PHONY: build run test test-short lint fmt vet cover clean tidy py-bootstrap py-sync py-e2e
 
 build:
 	mkdir -p bin
 	CGO_ENABLED=0 go build -ldflags '-s -w' -o $(BINARY) ./cmd/service
+
+# run starts the service from the repo root so the relative config.yaml
+# path and staticDir (./pkg/web/static) resolve correctly (Phase 8, G-08-2).
+# go run inherits the CWD of the parent make process (= repo root), keeping
+# relative paths valid. If config.yaml is missing the service silently falls
+# back to DefaultConfig (static serving disabled) — run `make config-init`
+# first to copy the example, or set the values via HTA_* env vars.
+run:
+	go run ./cmd/service -config config.yaml
+
+# config-init copies config.example.yaml to config.yaml if it does not exist.
+# config.yaml is gitignored (machine-specific paths); this gives a working
+# starting point with staticDir pre-enabled.
+config-init:
+	@test -f config.yaml || { \
+		cp config.example.yaml config.yaml; \
+		echo "Created config.yaml from config.example.yaml — edit python.interpreter for your venv"; }
 
 test:
 	go test -race -v $(PKG)
