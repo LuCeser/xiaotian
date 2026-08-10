@@ -3,18 +3,19 @@ status: partial
 phase: 08-student-web-interface
 source: [08-01-SUMMARY.md, 08-02-SUMMARY.md, 08-03-SUMMARY.md, 08-04-SUMMARY.md, 08-05-SUMMARY.md]
 started: 2026-08-10T02:17:01Z
-updated: 2026-08-10T03:40:00Z
+updated: 2026-08-10T11:50:00Z
 ---
 
 ## Current Test
 <!-- OVERWRITE each test - shows where we are -->
 
-[testing paused — 7 passed, 0 issues, 5 blocked by real-iPad / missing backend streaming]
+[testing paused — 7 passed, 0 issues, 5 blocked by real-iPad / missing cross-phase multi-word flow]
 
-Verifying agent: pi (Orca), dispatched 2026-08-10. Service restarted with fixed config during
-verification (stale process was serving debug page). G-08-3 (WS text/binary mismatch) FIXED in
-commit bc7a5bd — Test 3 now passes (session_ready round-trip verified live). 5 tests remain
-blocked on real iPad + backend multi-word streaming.
+Re-examined 2026-08-10 (verify-work resume). Backend streaming state mapped via explorer: word_complete now
+emitted (streamer.go:163) but progress_update + session_complete still absent (0 sites in Go), and the shipped
+frontend never sends play_word (FSM never leaves IDLE) and never sets currentWordId (audio frames dropped).
+All 5 blocked tests confirmed STILL blocked — tests 7,8 on cross-phase multi-word/session-resume work, tests
+9,10,11 on real iPad. G-08-3 remains resolved (bc7a5bd). No code gaps open in Phase 8.
 
 ## Tests
 
@@ -54,13 +55,13 @@ reported: "pi-agent: kid-button 60×60px, session-button 72-88px (>>44px min) pe
 expected: If the connection drops, the indicator reflects it and the client reconnects with exponential backoff, never leaving the user guessing about connection state. Session state is preserved across reconnection.
 result: blocked
 blocked_by: prior-phase
-reason: "pi-agent: Cannot be meaningfully exercised without a live session (blocked by G-08-3). Reconnection code (exponential backoff BASE × 2^attempt, capped) is present in websocket-client.js but the session flow it would preserve never starts."
+reason: "Re-examined 2026-08-10: STILL blocked. Reconnection code (exponential backoff BASE × 2^attempt, capped) is present in websocket-client.js, but there is NO session resume protocol. Registry is keyed by connection pointer (manager.go:34, handlers.go:256-258); a disconnect cancels the per-connection ctx → run() exits (session.go:297-298) → session removed (manager.go:177-185). Frontend never re-sends start_session after reconnect (only flushes messages queued while disconnected, websocket-client.js:292-296), leaving stale sessionActive:true state. D-06 startSeq resume exists in streamer but spawnStreamWord hardcodes 0 (session.go:377). Cross-phase backend work — no owner phase."
 
 ### 8. Real-time progress display during a session
 expected: During a session, a progress bar fills 0% -> 100%, a word counter advances word-by-word, and status text transitions DICTATING -> FEEDBACK. Encouragement appears at 25/50/75/100% milestones.
 result: blocked
 blocked_by: prior-phase
-reason: "pi-agent: Backend does not emit progress_update/word_complete/session_complete frames (handlers.go emits only session_ready + error). Also blocked upstream by G-08-3 (session never starts). Deferred cross-phase backend work — no owner phase."
+reason: "Re-examined 2026-08-10: STILL blocked (reason refined — word_complete now exists). Backend NOW emits word_complete (streamer.go:163, MsgTypeStatus 0x06) after each word's audio — progress bar COULD advance on word_complete increments alone. But progress_update and session_complete have ZERO emit sites in cmd/+pkg/ (fsm.go:82-87 terminal FEEDBACK path emits nothing). More fundamentally the shipped frontend NEVER sends play_word (ui-components.js:145-148 is the only outbound control frame) so the FSM never leaves IDLE (fsm.go:43-48) → no audio, no word_complete, completedWords stays 0. Even if play_word were added, audio frames are dropped: currentWordId is never set (state-manager.js:62 init null; audio-controller.js:270 setCurrentWord has zero callers) → audio-controller.js:157-159 drops all PCM. Cross-phase backend + frontend work — no owner phase."
 
 ### 9. Audio playback — single-tap unlock (iOS)
 expected: On iPad Safari iOS 17+, tapping the session button unlocks audio on the FIRST tap (no second tap needed). AudioContext unlock uses the 3-condition synchronous approach (construct + resume + silent buffer.start(0)). First word latency <1.5s.
@@ -117,5 +118,5 @@ blocked: 5
 
 ## Blocked Items (not code gaps — external prerequisites)
 
-- tests 7, 8: blocked_by prior-phase — backend multi-word sequential streaming not implemented (handlers.go emits only session_ready + error). No owner phase assigned. Also upstream-blocked by G-08-3.
+- tests 7, 8: blocked_by prior-phase — re-examined 2026-08-10, STILL blocked. Multi-word sequential playback is partially implemented (word_complete now emitted, streamer.go:163) but end-to-end unreachable from the shipped frontend: (a) backend missing progress_update + session_complete emission (0 sites in Go); (b) frontend never sends play_word/next_word (FSM never leaves IDLE, fsm.go:43-48); (c) frontend never sets currentWordId so all PCM frames dropped (audio-controller.js:157-159); (d) no session resume protocol for test 7 (registry keyed by conn pointer). No owner phase assigned.
 - tests 9, 10, 11: blocked_by physical-device — require real iPad Safari iOS 17+ for audio-session + touch-ergonomic behavior. All frontend code (AudioController, gapless scheduling, app-switch recovery, 60px+ touch targets) is present and correct; only real-device rendering/gesture cannot be asserted on desktop.
