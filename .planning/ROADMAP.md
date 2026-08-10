@@ -306,8 +306,18 @@ Plans:
 
 **Note**: Phase 8 UAT test 7 (WebSocket reconnection / session resume) remains blocked and is owned by the existing **Phase 11** (Error Handling & Resilience, success criterion #1: "gracefully handles WebSocket disconnections").
 
-**Plans**: TBD
-**UI hint**: yes
+**Plans**: 2/2 plans (Wave 1 tracer + Wave 2 wire-fidelity expansion)
+
+Plans:
+**Wave 1**
+
+- [ ] 08.1-01-PLAN.md — Tracer: backend auto-advance core (D-02 FSM + D-04/D-06 emission + D-03 Option A trigger) + FSM unit table + end-to-end event-loop test + frontend currentWordId wiring (DICT-01, DICT-03, DICT-05, WEB-02)
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 08.1-02-PLAN.md — Real-WS wire-fidelity expansion: full N-word frame sequence + D-04 ordering invariant (progress_update.word_id precedes audio) + D-06 session_complete proof (DICT-01, DICT-03, WEB-02)
+
+**UI hint**: yes (--skip-ui: frontend change is one additive setState line; ProgressDisplay built in Phase 8, unchanged)
 
 ### Phase 9: Parent Vocabulary Management
 
@@ -391,7 +401,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 7. Session State Management | 3/3 | Complete    | 2026-08-08 |
 | 07.1. iOS WebSocket Audio Playback Fix (INSERTED) | 4/4 | Complete    | 2026-08-09 |
 | 8. Student Web Interface | 5/5 | In Progress|  |
-| 8.1. Multi-Word Dictation Flow (INSERTED) | 0/0 | Not started | - |
+| 8.1. Multi-Word Dictation Flow (INSERTED) | 0/2 | In Progress|  |
 | 9. Parent Vocabulary Management | 0/0 | Not started | - |
 | 10. Parent Feedback System | 0/0 | Not started | - |
 | 11. Error Handling & Resilience | 0/0 | Not started | - |
