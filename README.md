@@ -16,6 +16,37 @@ make build
 
 Produces a static binary at `bin/service`.
 
+## Running the Service
+
+The service loads `config.yaml` from the **current working directory**. You
+MUST run it from the repository root so the config file and the relative
+`staticDir` path resolve correctly.
+
+### First-time setup
+
+```sh
+make config-init   # copies config.example.yaml to config.yaml (gitignored)
+```
+
+Edit `config.yaml` to set `python.interpreter` to your venv path.
+
+### Start the service
+
+```sh
+make run           # Linux/macOS — runs from repo root
+./run.ps1          # Windows — sets CWD to repo root automatically
+```
+
+### Verify the student interface loaded
+
+Check the logs for `"static interface directory verified"`. Then open
+`http://localhost:8080/` in a browser — the student dictation interface
+should render with styling.
+
+> **Troubleshooting:** If the page loads without CSS/JS (404 errors), the
+> service is not finding `config.yaml` or `server.staticDir` is empty. See
+> [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed diagnosis.
+
 ## Test
 
 ```sh
