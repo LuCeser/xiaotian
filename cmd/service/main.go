@@ -177,6 +177,24 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		return 1
 	}
 
+	// Start periodic cleanup goroutine to prevent disk exhaustion on 1C/1G VPS
+	// Each session writes ~4MB of PCM files; without cleanup, crashed sessions
+	// leave orphan files that fill /tmp within hours (CR-1 fix)
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := cache.CleanupStale(30 * time.Minute); err != nil {
+					logger.Warn("TTS cache stale cleanup error", infra.ErrField(err))
+				}
+			}
+		}
+	}()
+
 	// NewGenerator is a pure constructor (composes pyBridge, cache, logger).
 	gen, err := tts.NewGenerator(pyBridge, cache, logger, cfg.TTS)
 	if err != nil {
