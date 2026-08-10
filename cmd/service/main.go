@@ -286,177 +286,197 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		return 1
 	}
 
-	// ------------------------------------------------------------------
-	// Public WebSocket server (P0-1). Phase 2 delivered the pkg/ws library
-	// (Hub/Client/Server/Router); this is the runtime connective tissue that
-	// makes the service actually listen on cfg.Server.Addr (:8080) and serve
-	// the /ws upgrade route. Handlers are no-op (Phase 6/7 placeholders); the
-	// upgrade, Hub registration, heartbeat, frame decode, and Router dispatch
-	// all go live here. Double validation: infra WSConfig owns defaults/
-	// overrides, the ws package constructors (NewHub/NewRouter/NewServer) own
-	// semantic defaults and re-validate.
-	// ------------------------------------------------------------------
-	hubCfg := ws.HubConfig{
-		Limit:            cfg.WS.HubLimit,
-		RegisterBuffer:   cfg.WS.HubRegisterBuffer,
-		UnregisterBuffer: cfg.WS.HubUnregisterBuffer,
-	}
-	routerCfg := ws.RouterConfig{
-		RouteBuffer:       cfg.WS.RouteBuffer,
-		WorkerConcurrency: cfg.WS.WorkerConcurrency,
-	}
-	// Map cfg.WS → ws.ServerConfig. The infra layer uses 0 as the "use ws
-	// package default" sentinel for the size/buffer fields. ReadBufferSize and
-	// WriteBufferSize pass ws.ServerConfig.Validate (which only rejects < 0) so
-	// NewServer's own 0→4096 fill branch handles them. MaxMessageBytes is
-	// different: ws.ServerConfig.Validate rejects <= 0 BEFORE NewServer's
-	// 0→DefaultMaxMessageBytes fill branch can run, so the fill must happen
-	// here at the wiring layer (double validation: infra owns the override
-	// layer, main.go bridges the semantic default, ws re-validates).
-	maxMsg := cfg.WS.MaxMessageBytes
-	if maxMsg == 0 {
-		maxMsg = ws.DefaultMaxMessageBytes // 65551 (HeaderSize + max uint16 payload)
-	}
-	serverCfg := ws.ServerConfig{
-		AllowedOrigins:    cfg.WS.AllowedOrigins,
-		MaxMessageBytes:   maxMsg,
-		ReadBufferSize:    cfg.WS.ReadBufferSize,  // 0 → ws.NewServer fills 4096
-		WriteBufferSize:   cfg.WS.WriteBufferSize, // 0 → ws.NewServer fills 4096
-		HeartbeatInterval: cfg.WS.HeartbeatInterval,
-	}
-
-	// pkg/ws takes *zap.Logger directly (it predates the infra.Logger
-	// abstraction). Bridge the two: extract the configured zap logger from the
-	// production ZapLogger, falling back to a nop logger for the test/no-op
-	// path. The level/format/output configured in NewLogger are preserved.
-	wsLogger := zap.NewNop()
-	if zl, ok := logger.(*infra.ZapLogger); ok {
-		wsLogger = zl.Zap()
-	}
-
-	hub, err := ws.NewHub(hubCfg, wsLogger)
-	if err != nil {
-		logger.Error("ws hub construction failed",
-			infra.F("component", "infra.main"),
-			infra.ErrField(err),
-		)
-		return 1
-	}
-
-	// Phase 7: construct the session Manager (first real WorkerPool Submit caller — D-06, P1-3).
-	_, _, _, workers := server.Components()
-	manager, err := session.NewManager(hub, fsrsSvc, gen, streamer, sessionRepo, workers, logger, cfg)
-	if err != nil {
-		logger.Error("session manager construction failed",
-			infra.F("component", "infra.main"),
-			infra.ErrField(err),
-		)
-		return 1
-	}
-
-	// D-04: wire Hub-backed connection stats into the Server snapshot.
-	server.SetConnectionStatsProvider(func() infra.ConnectionStats {
-		return hub.Stats()
-	})
-
-	go manager.Start(ctx)
-
-	router, err := ws.NewRouter(ttsHandlers(manager, fsrsSvc, logger), routerCfg, wsLogger)
-	if err != nil {
-		logger.Error("ws router construction failed",
-			infra.F("component", "infra.main"),
-			infra.ErrField(err),
-		)
-		return 1
-	}
-	wsServer, err := ws.NewServer(hub, router, serverCfg, wsLogger)
-	if err != nil {
-		logger.Error("ws server construction failed",
-			infra.F("component", "infra.main"),
-			infra.ErrField(err),
-		)
-		return 1
-	}
-
-	// Hub.Run blocks until ctx.Done then defers Close (CR-01-safe). Bound to
-	// the lifetime ctx so it exits as soon as shutdown begins.
-	go hub.Run(ctx)
-
-	// Public mux carries /ws plus the student web interface static file
-	// server (Phase 8 Plan 01). /health and /metrics stay on the separate
-	// localhost healthSrv below (probe/session traffic separation is the
-	// established design).
-	publicMux := http.NewServeMux()
-	publicMux.HandleFunc("/ws", wsServer.HandleWebSocket)
-
-	// Phase 8 Plan 01: mount the student interface. When server.staticDir is
-	// configured, an http.FileServer serves index.html, /styles/*, /js/* from
-	// that directory at StaticRoute (default "/"). ServeMux matches the more
-	// specific "/ws" pattern first, so the WebSocket upgrade endpoint does
-	// not conflict with the static root. When staticDir is empty (disabled),
-	// fall back to serving the legacy repo-root debug HTML files so existing
-	// developer workflows keep working.
-	if cfg.Server.StaticDir != "" {
-		publicMux.Handle(cfg.Server.StaticRoute, infra.StaticFileServer(cfg.Server.StaticDir, logger))
-		logger.Info("public server static files mounted",
-			infra.F("component", "infra.main"),
-			infra.F("route", cfg.Server.StaticRoute),
-			infra.F("dir", cfg.Server.StaticDir),
-		)
-		// Debug interfaces remain reachable at their explicit paths; ServeMux
-		// prefers these longer patterns over the "/" prefix so they do not
-		// collide with the static FileServer.
-		for _, dbg := range debugInterfaces {
-			publicMux.HandleFunc("/"+dbg, serveRepoRootFile(dbg))
+	// CR-2 fix: Wrap post-Start construction in a closure that defers server.Shutdown.
+	// This prevents goroutine leaks (MemoryMonitor + WorkerPool) when any component
+	// constructed after server.Start fails. If server.Start succeeds, we MUST call
+	// server.Shutdown on any early-return, otherwise those goroutines run forever.
+	shutdownErr := func() error {
+		// ------------------------------------------------------------------
+		// Public WebSocket server (P0-1). Phase 2 delivered the pkg/ws library
+		// (Hub/Client/Server/Router); this is the runtime connective tissue that
+		// makes the service actually listen on cfg.Server.Addr (:8080) and serve
+		// the /ws upgrade route. Handlers are no-op (Phase 6/7 placeholders); the
+		// upgrade, Hub registration, heartbeat, frame decode, and Router dispatch
+		// all go live here. Double validation: infra WSConfig owns defaults/
+		// overrides, the ws package constructors (NewHub/NewRouter/NewServer) own
+		// semantic defaults and re-validate.
+		// ------------------------------------------------------------------
+		hubCfg := ws.HubConfig{
+			Limit:            cfg.WS.HubLimit,
+			RegisterBuffer:   cfg.WS.HubRegisterBuffer,
+			UnregisterBuffer: cfg.WS.HubUnregisterBuffer,
 		}
-	} else {
-		publicMux.HandleFunc("/", serveDebugRoot)
-	}
-	publicSrv := &http.Server{
-		Addr:              cfg.Server.Addr,
-		Handler:           publicMux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       cfg.Server.ReadTimeout,
-		WriteTimeout:      cfg.Server.WriteTimeout,
-	}
-	go func() {
-		logger.Info("public server listening",
-			infra.F("component", "infra.main"),
-			infra.F("addr", cfg.Server.Addr),
-		)
-		if err := publicSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("public server error",
+		routerCfg := ws.RouterConfig{
+			RouteBuffer:       cfg.WS.RouteBuffer,
+			WorkerConcurrency: cfg.WS.WorkerConcurrency,
+		}
+		// Map cfg.WS → ws.ServerConfig. The infra layer uses 0 as the "use ws
+		// package default" sentinel for the size/buffer fields. ReadBufferSize and
+		// WriteBufferSize pass ws.ServerConfig.Validate (which only rejects < 0) so
+		// NewServer's own 0→4096 fill branch handles them. MaxMessageBytes is
+		// different: ws.ServerConfig.Validate rejects <= 0 BEFORE NewServer's
+		// 0→DefaultMaxMessageBytes fill branch can run, so the fill must happen
+		// here at the wiring layer (double validation: infra owns the override
+		// layer, main.go bridges the semantic default, ws re-validates).
+		maxMsg := cfg.WS.MaxMessageBytes
+		if maxMsg == 0 {
+			maxMsg = ws.DefaultMaxMessageBytes // 65551 (HeaderSize + max uint16 payload)
+		}
+		serverCfg := ws.ServerConfig{
+			AllowedOrigins:    cfg.WS.AllowedOrigins,
+			MaxMessageBytes:   maxMsg,
+			ReadBufferSize:    cfg.WS.ReadBufferSize,  // 0 → ws.NewServer fills 4096
+			WriteBufferSize:   cfg.WS.WriteBufferSize, // 0 → ws.NewServer fills 4096
+			HeartbeatInterval: cfg.WS.HeartbeatInterval,
+		}
+
+		// pkg/ws takes *zap.Logger directly (it predates the infra.Logger
+		// abstraction). Bridge the two: extract the configured zap logger from the
+		// production ZapLogger, falling back to a nop logger for the test/no-op
+		// path. The level/format/output configured in NewLogger are preserved.
+		wsLogger := zap.NewNop()
+		if zl, ok := logger.(*infra.ZapLogger); ok {
+			wsLogger = zl.Zap()
+		}
+
+		hub, err := ws.NewHub(hubCfg, wsLogger)
+		if err != nil {
+			logger.Error("ws hub construction failed",
 				infra.F("component", "infra.main"),
 				infra.ErrField(err),
 			)
+			return err
 		}
-	}()
 
-	// Health/metrics HTTP server on the dedicated health listener
-	// (default 127.0.0.1:8081). Bound separately from the public service
-	// addr so probe traffic does not compete with session traffic.
-	healthMux := http.NewServeMux()
-	healthMux.Handle("/health", infra.RecoveryMiddleware(logger, infra.HealthHandler(server, logger)))
-	healthMux.Handle("/metrics", infra.RecoveryMiddleware(logger, infra.MetricsHandler(server, logger)))
-	healthSrv := &http.Server{
-		Addr:              cfg.Server.HealthAddr,
-		Handler:           healthMux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-	}
-	go func() {
-		logger.Info("health server listening",
-			infra.F("component", "infra.main"),
-			infra.F("addr", cfg.Server.HealthAddr),
-		)
-		if err := healthSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("health server error",
+		// Phase 7: construct the session Manager (first real WorkerPool Submit caller — D-06, P1-3).
+		_, _, _, workers := server.Components()
+		manager, err := session.NewManager(hub, fsrsSvc, gen, streamer, sessionRepo, workers, logger, cfg)
+		if err != nil {
+			logger.Error("session manager construction failed",
 				infra.F("component", "infra.main"),
 				infra.ErrField(err),
 			)
+			return err
 		}
+
+		// D-04: wire Hub-backed connection stats into the Server snapshot.
+		server.SetConnectionStatsProvider(func() infra.ConnectionStats {
+			return hub.Stats()
+		})
+
+		go manager.Start(ctx)
+
+		router, err := ws.NewRouter(ttsHandlers(manager, fsrsSvc, logger), routerCfg, wsLogger)
+		if err != nil {
+			logger.Error("ws router construction failed",
+				infra.F("component", "infra.main"),
+				infra.ErrField(err),
+			)
+			return err
+		}
+		wsServer, err := ws.NewServer(hub, router, serverCfg, wsLogger)
+		if err != nil {
+			logger.Error("ws server construction failed",
+				infra.F("component", "infra.main"),
+				infra.ErrField(err),
+			)
+			return err
+		}
+
+		// Hub.Run blocks until ctx.Done then defers Close (CR-01-safe). Bound to
+		// the lifetime ctx so it exits as soon as shutdown begins.
+		go hub.Run(ctx)
+
+		// Public mux carries /ws plus the student web interface static file
+		// server (Phase 8 Plan 01). /health and /metrics stay on the separate
+		// localhost healthSrv below (probe/session traffic separation is the
+		// established design).
+		publicMux := http.NewServeMux()
+		publicMux.HandleFunc("/ws", wsServer.HandleWebSocket)
+
+		// Phase 8 Plan 01: mount the student interface. When server.staticDir is
+		// configured, an http.FileServer serves index.html, /styles/*, /js/* from
+		// that directory at StaticRoute (default "/"). ServeMux matches the more
+		// specific "/ws" pattern first, so the WebSocket upgrade endpoint does
+		// not conflict with the static root. When staticDir is empty (disabled),
+		// fall back to serving the legacy repo-root debug HTML files so existing
+		// developer workflows keep working.
+		if cfg.Server.StaticDir != "" {
+			publicMux.Handle(cfg.Server.StaticRoute, infra.StaticFileServer(cfg.Server.StaticDir, logger))
+			logger.Info("public server static files mounted",
+				infra.F("component", "infra.main"),
+				infra.F("route", cfg.Server.StaticRoute),
+				infra.F("dir", cfg.Server.StaticDir),
+			)
+			// Debug interfaces remain reachable at their explicit paths; ServeMux
+			// prefers these longer patterns over the "/" prefix so they do not
+			// collide with the static FileServer.
+			for _, dbg := range debugInterfaces {
+				publicMux.HandleFunc("/"+dbg, serveRepoRootFile(dbg))
+			}
+		} else {
+			publicMux.HandleFunc("/", serveDebugRoot)
+		}
+		publicSrv := &http.Server{
+			Addr:              cfg.Server.Addr,
+			Handler:           publicMux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       cfg.Server.ReadTimeout,
+			WriteTimeout:      cfg.Server.WriteTimeout,
+		}
+		go func() {
+			logger.Info("public server listening",
+				infra.F("component", "infra.main"),
+				infra.F("addr", cfg.Server.Addr),
+			)
+			if err := publicSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("public server error",
+					infra.F("component", "infra.main"),
+					infra.ErrField(err),
+				)
+			}
+		}()
+
+		// Health/metrics HTTP server on the dedicated health listener
+		// (default 127.0.0.1:8081). Bound separately from the public service
+		// addr so probe traffic does not compete with session traffic.
+		healthMux := http.NewServeMux()
+		healthMux.Handle("/health", infra.RecoveryMiddleware(logger, infra.HealthHandler(server, logger)))
+		healthMux.Handle("/metrics", infra.RecoveryMiddleware(logger, infra.MetricsHandler(server, logger)))
+		healthSrv := &http.Server{
+			Addr:              cfg.Server.HealthAddr,
+			Handler:           healthMux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+		}
+		go func() {
+			logger.Info("health server listening",
+				infra.F("component", "infra.main"),
+				infra.F("addr", cfg.Server.HealthAddr),
+			)
+			if err := healthSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("health server error",
+					infra.F("component", "infra.main"),
+					infra.ErrField(err),
+				)
+			}
+		}()
+
+		return nil
 	}()
+
+	// If any post-Start construction failed, shut down server immediately.
+	if shutdownErr != nil {
+		logger.Error("post-Start construction failed, shutting down server",
+			infra.F("component", "infra.main"),
+			infra.ErrField(shutdownErr),
+		)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = server.Shutdown(shutdownCtx)
+		return 1
+	}
 
 	// Wait for signal (or test-driven ctx cancellation).
 	<-ctx.Done()
