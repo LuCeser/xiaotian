@@ -267,7 +267,7 @@ Plans:
   3. Responsive design works optimally on iPad Safari browser
   4. Interface handles WebSocket reconnections gracefully
 
-**Plans**: 5 plans (4 executed, 1 gap closure in progress)
+**Plans**: 5/5 plans executed
 
 **Wave 1**
 
@@ -278,7 +278,7 @@ Plans:
 
 **Gap Closure Wave**
 
-- [ ] 08-05-PLAN.md — Fix static file serving 404 errors (gap G-08-2)
+- [x] 08-05-PLAN.md — Fix static file serving 404 errors (gap G-08-2)
 
 **PROJECT_MODE**: mvp
 **UI hint**: yes
@@ -364,7 +364,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 6. TTS Audio Streaming | 4/4 | Complete    | 2026-08-08 |
 | 7. Session State Management | 3/3 | Complete    | 2026-08-08 |
 | 07.1. iOS WebSocket Audio Playback Fix (INSERTED) | 4/4 | Complete    | 2026-08-09 |
-| 8. Student Web Interface | 4/4 | In Progress|  |
+| 8. Student Web Interface | 5/5 | In Progress|  |
 | 9. Parent Vocabulary Management | 0/0 | Not started | - |
 | 10. Parent Feedback System | 0/0 | Not started | - |
 | 11. Error Handling & Resilience | 0/0 | Not started | - |
