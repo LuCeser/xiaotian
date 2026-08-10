@@ -129,6 +129,21 @@
       this._clearConnectionTimer();
       this._connectionTimer = global.setTimeout(() => {
         if (this.state === STATE_CONNECTING) {
+          // CR-6 fix: Close the WebSocket and null handlers to orphan the socket
+          // before triggering reconnect, preventing race conditions where the
+          // original socket fires onopen/onclose after reconnect starts.
+          if (this.ws) {
+            try {
+              this.ws.close();
+            } catch (e) {
+              // Ignore errors during close
+            }
+            this.ws.onopen = null;
+            this.ws.onclose = null;
+            this.ws.onmessage = null;
+            this.ws.onerror = null;
+            this.ws = null;
+          }
           this.errorHandler(new Error('Connection timeout (10s)'));
           this._setState(STATE_ERROR);
           this._onClose(); // Trigger reconnect logic
@@ -439,6 +454,14 @@
         this.errorHandler(new Error('malformed session-start ack frame'));
         return;
       }
+
+      // CR-4 fix: Reset audio controller state between sessions to prevent
+      // sequence counter carryover that would reject all frames in session 2+
+      if (typeof window !== 'undefined' && window.audioController) {
+        window.audioController.stop();
+      }
+
+      var firstWordId = payload.words.length > 0 ? payload.words[0] : null;
       this.stateManager.setState({
         sessionActive: true,
         status: 'DICTATING',
@@ -447,8 +470,14 @@
         totalWords: payload.words.length,
         currentWord: 0,
         completedWords: 0,
+        currentWordId: firstWordId, // CR-3 fix: initialize audio routing to first word
         lastError: null
       });
+
+      // CR-3 fix: Send play_word control frame to start streaming audio for first word
+      if (firstWordId) {
+        this.send({ type: 'play_word', word_id: firstWordId });
+      }
     }
 
     /** @private apply an error frame — record message, preserve session flag. */
@@ -508,6 +537,15 @@
       var wordId = typeof payload.word_id === 'string' ? payload.word_id : null;
       if (wordId && typeof window !== 'undefined' && window.audioController) {
         window.audioController.playWordComplete(wordId);
+      }
+
+      // CR-3 fix: Advance to next word and send next_word control frame
+      var words = snapshot.words;
+      var nextWordIndex = snapshot.completedWords; // 0-based, already incremented above
+      if (nextWordIndex < words.length) {
+        var nextWordId = words[nextWordIndex];
+        this.stateManager.setState({ currentWordId: nextWordId });
+        this.send({ type: 'next_word', word_id: nextWordId });
       }
     }
 
