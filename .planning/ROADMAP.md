@@ -267,7 +267,7 @@ Plans:
   3. Responsive design works optimally on iPad Safari browser
   4. Interface handles WebSocket reconnections gracefully
 
-**Plans**: 4/4 plans executed
+**Plans**: 5 plans (4 executed, 1 gap closure in progress)
 
 **Wave 1**
 
@@ -275,6 +275,10 @@ Plans:
 - [x] 08-02-PLAN.md — Session request button + state management + WebSocket message handling
 - [x] 08-03-PLAN.md — Progress display component + real-time updates + session lifecycle integration
 - [x] 08-04-PLAN.md — Web Audio API integration + iPad-responsive polish + production error handling
+
+**Gap Closure Wave**
+
+- [ ] 08-05-PLAN.md — Fix static file serving 404 errors (gap G-08-2)
 
 **PROJECT_MODE**: mvp
 **UI hint**: yes
