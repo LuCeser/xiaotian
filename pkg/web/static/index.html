@@ -93,12 +93,14 @@
   <!--
     Scripts: loaded with `defer` so they execute in order after the DOM is
     parsed. Load order matters (defer preserves it):
-      websocket-client.js → window.WebSocketClient (transport)
+      frame-codec.js      → window.FrameCodec + SequenceCounter (wire format)
+      websocket-client.js → window.WebSocketClient (transport; uses FrameCodec)
       state-manager.js    → window.SessionStateManager (state store)
       audio-controller.js → window.AudioController (Web Audio API integration)
       ui-components.js    → window.SessionButton (uses the state store)
       app.js              → wires them together
   -->
+  <script src="js/frame-codec.js" defer></script>
   <script src="js/websocket-client.js" defer></script>
   <script src="js/state-manager.js" defer></script>
   <script src="js/audio-controller.js" defer></script>

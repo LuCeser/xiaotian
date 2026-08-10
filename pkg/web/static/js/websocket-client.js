@@ -38,6 +38,16 @@
   var CONNECTION_TIMEOUT_MS = 10000; // Plan 08-04 Task 4: 10s connection timeout
   var MAX_MESSAGE_SIZE = 1024 * 1024; // Plan 08-04 Task 4: 1MB max message size
 
+  // G-08-3: UTF-8 helpers for moving JSON text into/out of binary frame
+  // payloads. TextEncoder/TextDecoder are universal on target browsers
+  // (iPad Safari iOS 17+ included), so no manual fallback is needed.
+  function textEncode(str) {
+    return new global.TextEncoder().encode(str); // Uint8Array
+  }
+  function textDecode(bytes) {
+    return new global.TextDecoder('utf-8').decode(bytes);
+  }
+
   /**
    * WebSocketClient wraps the native WebSocket with exponential-backoff
    * reconnection and a bounded offline message queue.
@@ -88,6 +98,11 @@
       this._connectionTimer = null;
       // Circuit breaker: track consecutive failures
       this._consecutiveErrors = 0;
+
+      // G-08-3: monotonic client-side sequence counter for outbound control
+      // frames (mirrors the backend's D-12 atomic counter). Each encoded
+      // frame carries the next sequence so the server can order/dedup.
+      this._seqCounter = new (global.SequenceCounter || function () { this._s = 0; })();
     }
 
     /**
@@ -147,15 +162,18 @@
     }
 
     /**
-     * @private message handler: dispatch binary frames raw, parse JSON control
-     * frames. A malformed JSON frame routes to errorHandler, not a throw.
+     * @private message handler. G-08-3: the backend sends EVERY frame as a
+     * Phase-2 binary message (16-byte header + CRC-16). Decode the frame, then
+     * dispatch by MsgType:
+     *   - AUDIO: pass the original framed ArrayBuffer to messageHandler; app.js
+     *     parses the header (sequence at offset 2, payload at offset 16) and
+     *     routes PCM into AudioController. We pass event.data unchanged so that
+     *     existing header-parsing stays intact.
+     *   - CONTROL/ERROR/other: payload is a JSON control frame. Decode text,
+     *     JSON.parse, and dispatch into the state manager (handleControlFrame)
+     *     or the generic messageHandler when no state manager is registered.
      *
-     * When a SessionStateManager is registered (Wave 2), parsed JSON control
-     * frames route to the structured control dispatcher for state updates
-     * instead of the generic messageHandler. Binary frames always go to
-     * messageHandler (Phase 7.1 audio hand-off).
-     *
-     * Plan 08-04 Task 4: add message size limits for memory protection.
+     * Plan 08-04 Task 4: message-size guard retained for memory protection.
      */
     _onMessage(event) {
       // Plan 08-04 Task 4: reject oversized messages to prevent memory exhaustion
@@ -163,29 +181,47 @@
         this.errorHandler(new Error('Message too large: ' + event.data.byteLength + ' bytes'));
         return;
       }
-      if (typeof event.data === 'string' && event.data.length > MAX_MESSAGE_SIZE) {
-        this.errorHandler(new Error('Message too large: ' + event.data.length + ' chars'));
+
+      // G-08-3: text frames are no longer expected on the wire. If one arrives
+      // (e.g. a misconfigured peer), surface it instead of silently mis-routing.
+      if (!(event.data instanceof ArrayBuffer)) {
+        this.errorHandler(new Error('unexpected text frame; backend should send binary Phase-2 frames'));
         return;
       }
 
-      if (event.data instanceof ArrayBuffer) {
-        // Binary audio frame (Phase 7.1).
+      var decoded;
+      try {
+        decoded = FrameCodec.decode(event.data);
+      } catch (decodeErr) {
+        // CRC failure, unsupported version, or length mismatch — drop + surface.
+        this.errorHandler(decodeErr);
+        return;
+      }
+
+      if (decoded.msgType === FrameCodec.MSG_TYPE.AUDIO) {
         this.messageHandler(event.data, true);
         return;
       }
-      // Text frame: assume JSON control message. Parse defensively.
+
+      var jsonText;
       try {
-        var parsed = JSON.parse(event.data);
-        if (this.stateManager) {
-          // Wave 2: structured dispatch into the state store.
-          this.handleControlFrame(parsed);
-        } else {
-          this.messageHandler(parsed, false);
-        }
+        jsonText = textDecode(decoded.payload);
+      } catch (tdErr) {
+        this.errorHandler(tdErr);
+        return;
+      }
+      var parsed;
+      try {
+        parsed = JSON.parse(jsonText);
       } catch (parseErr) {
-        // Deliver raw text so the consumer can decide; surface the parse issue.
         this.errorHandler(parseErr);
-        this.messageHandler(event.data, false);
+        return;
+      }
+
+      if (this.stateManager) {
+        this.handleControlFrame(parsed);
+      } else {
+        this.messageHandler(parsed, false);
       }
     }
 
@@ -208,22 +244,48 @@
 
     /**
      * Send a message now if connected; otherwise enqueue it for the next
-     * successful (re)connection. Objects are stringified to JSON; strings are
-     * sent as-is. The queue is bounded (MAX_QUEUE_SIZE) — oldest entries drop
-     * first to protect the 1C/1G memory budget (Pitfall 2).
+     * successful (re)connection. Objects are JSON-stringified and wrapped in a
+     * Phase-2 binary control frame (G-08-3); strings are treated as
+     * pre-encoded JSON payloads and framed the same way. The queue is bounded
+     * (MAX_QUEUE_SIZE) — oldest entries drop first to protect the 1C/1G memory
+     * budget (Pitfall 2).
+     *
+     * G-08-3: the backend only accepts BinaryMessage + DecodeFrame, so every
+     * outbound control frame is encoded via FrameCodec (16-byte header +
+     * CRC-16-CCITT, MsgType=Control). Sending a raw JSON text frame would be
+     * silently dropped at the server boundary.
      *
      * @param {string|object} message
      */
     send(message) {
       if (this.state === STATE_CONNECTED && this.ws && this.ws.readyState === global.WebSocket.OPEN) {
-        var payload = typeof message === 'string' ? message : JSON.stringify(message);
-        this.ws.send(payload);
+        var json = typeof message === 'string' ? message : JSON.stringify(message);
+        var frame = FrameCodec.encode(
+          FrameCodec.MSG_TYPE.CONTROL,
+          this._nextSeq(),
+          textEncode(json)
+        );
+        this.ws.send(frame);
         return;
       }
       this.messageQueue.push(message);
       if (this.messageQueue.length > MAX_QUEUE_SIZE) {
         this.messageQueue.shift(); // drop oldest
       }
+    }
+
+    /**
+     * @private next outbound control-frame sequence number (monotonic uint32,
+     * client-side). Guards against a missing SequenceCounter (defensive — the
+     * script load order in index.html guarantees FrameCodec/SequenceCounter
+     * load before this client).
+     */
+    _nextSeq() {
+      if (this._seqCounter && typeof this._seqCounter.next === 'function') {
+        return this._seqCounter.next();
+      }
+      this._fallbackSeq = (this._fallbackSeq || 0) + 1;
+      return this._fallbackSeq >>> 0;
     }
 
     /** @private flush queued messages after a (re)connection. */
