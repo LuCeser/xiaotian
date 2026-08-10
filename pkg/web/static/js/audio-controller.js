@@ -201,7 +201,9 @@
         // D-05: PCM Int16 → Float32 AudioBuffer. Use audioCtx.sampleRate
         // (runtime property, NEVER hardcoded 16000 per D-02).
         var numSamples = pcmBytes.length / 2;
-        var buf = this.audioCtx.createBuffer(1, numSamples, this.audioCtx.sampleRate);
+        // CR-5 fix: use 16000 as the source rate (not audioCtx.sampleRate)
+        // PCM data is 16kHz samples; browser resamples to context rate.
+        var buf = this.audioCtx.createBuffer(1, numSamples, 16000);
         var view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
         var chan = buf.getChannelData(0);
         for (var i = 0; i < numSamples; i++) {

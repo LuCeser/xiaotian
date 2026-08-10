@@ -1020,7 +1020,9 @@
             // the runtime property audioCtx.sampleRate — NEVER a hardcoded 16000
             // (D-02 gotcha: iOS may renegotiate the context sample rate).
             const numSamples = pcmBytes.length / 2;
-            const buf = audioCtx.createBuffer(1, numSamples, audioCtx.sampleRate);
+            // CR-5 fix: use 16000 as the source rate (not audioCtx.sampleRate)
+            // PCM data is 16kHz samples; browser resamples to context rate.
+            const buf = audioCtx.createBuffer(1, numSamples, 16000);
             const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
             const chan = buf.getChannelData(0);
             for (let i = 0; i < numSamples; i++) {
