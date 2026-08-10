@@ -702,6 +702,16 @@ func DefaultConfig() Config {
 //     shape), the error is wrapped and returned — silent misconfiguration
 //     would be worse than a noisy boot.
 //
+// Working-directory requirement (Phase 8, G-08-2):
+//   - configPath is resolved relative to the process CWD. The service MUST
+//     be started from the repository root (use `make run` or ./run.ps1) for
+//     a relative path like "config.yaml" to resolve.
+//   - If the file is NOT found, LoadConfig silently falls back to
+//     DefaultConfig, whose Server.StaticDir is "" — that DISABLES the
+//     student web interface. The service boots and serves debug test pages
+//     instead, with CSS/JS assets returning 404. This is an operational
+//     concern (not a code bug): see docs/DEPLOYMENT.md for startup procedures.
+//
 // Env handling:
 //   - Prefix is HTA (Home Tutor Agent). Examples: HTA_MEMORY_LIMITBYTES,
 //     HTA_SESSION_MAXCONCURRENT, HTA_BUFFER_STRATEGY.
