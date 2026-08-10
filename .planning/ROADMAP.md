@@ -283,6 +283,32 @@ Plans:
 **PROJECT_MODE**: mvp
 **UI hint**: yes
 
+### Phase 8.1: Multi-Word Dictation Flow (INSERTED)
+
+**Goal:** Wire the end-to-end multi-word dictation playback — student taps "I want to dictate 30 words" → system sequentially reads all words with real-time progress → session completes. Closes the integration gap between the backend multi-word FSM (Phase 7) and the student frontend (Phase 8). Unblocks Phase 8 UAT test 8.
+**Depends on**: Phase 8
+**Requirements**: DICT-01 (full), DICT-03, DICT-05 (multi-word), WEB-02 (real-time progress)
+**Success Criteria** (what must be TRUE):
+
+  1. After session_ready, words play sequentially 1→N without further user interaction
+  2. Real-time progress display advances word-by-word (progress bar 0%→100%, word counter)
+  3. session_complete frame emitted and UI transitions to post-session state
+  4. currentWordId correctly set so audio frames are not dropped (resolves audio-controller.js:157-159 frame-drop)
+  5. Unblocks Phase 8 UAT test 8 (real-time progress display)
+
+**Open design decision** (for /gsd-discuss-phase): auto-advance (backend drives the word loop after start_session) vs client-driven (frontend orchestrates play_word/next_word).
+
+**Scope** (from Phase 8 UAT re-examination evidence):
+- Backend: emit progress_update (per word) + session_complete (on last word → WAITING_PARENT/FEEDBACK); currently 0 emit sites in cmd/+pkg/
+- Backend: decide auto-advance mode vs client-driven orchestration
+- Frontend: send play_word/next_word (if client-driven) OR handle auto-advance frames; currently ui-components.js:145-148 sends only start_session
+- Frontend: set currentWordId before audio frames arrive (state-manager.js:62 init null; audio-controller.js:270 setCurrentWord has zero callers)
+
+**Note**: Phase 8 UAT test 7 (WebSocket reconnection / session resume) remains blocked and is owned by the existing **Phase 11** (Error Handling & Resilience, success criterion #1: "gracefully handles WebSocket disconnections").
+
+**Plans**: TBD
+**UI hint**: yes
+
 ### Phase 9: Parent Vocabulary Management
 
 **Goal**: Parent interface for adding, editing, and organizing vocabulary with FSRS configuration
@@ -365,6 +391,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 7. Session State Management | 3/3 | Complete    | 2026-08-08 |
 | 07.1. iOS WebSocket Audio Playback Fix (INSERTED) | 4/4 | Complete    | 2026-08-09 |
 | 8. Student Web Interface | 5/5 | In Progress|  |
+| 8.1. Multi-Word Dictation Flow (INSERTED) | 0/0 | Not started | - |
 | 9. Parent Vocabulary Management | 0/0 | Not started | - |
 | 10. Parent Feedback System | 0/0 | Not started | - |
 | 11. Error Handling & Resilience | 0/0 | Not started | - |
