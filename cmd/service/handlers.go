@@ -107,12 +107,6 @@ type errorResponse struct {
 	Message string `json:"message"`
 }
 
-// wordCompleteNotification is sent after all audio frames for a word are delivered.
-type wordCompleteNotification struct {
-	Type   string `json:"type"`
-	WordID string `json:"word_id"`
-}
-
 // ttsHandlers returns the per-MsgType handler map handed to ws.NewRouter.
 // It composes the FSRS service, TTS generator, and streamer to deliver the
 // end-to-end TTS audio streaming pipeline.
@@ -142,17 +136,17 @@ func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, logger infr
 			case "start_session":
 				return handleStartSession(ctx, client, control.Params, manager, logger)
 
-		case "play_word":
-			return handlePlayWord(ctx, client, control.Params, manager, logger)
+			case "play_word":
+				return handlePlayWord(ctx, client, control.Params, manager, logger)
 
-		case "next_word":
-			return handleNextWord(ctx, client, control.Params, manager, logger)
+			case "next_word":
+				return handleNextWord(ctx, client, control.Params, manager, logger)
 
 			case "select_due_cards":
 				return handleSelectDueCards(ctx, client, control.Params, fsrsSvc, logger)
 
 			case "submit_review":
-				return handleSubmitReview(ctx, client, control.Params, fsrsSvc, logger)
+				return handleSubmitReview(ctx, client, control.Params, manager, fsrsSvc, logger)
 
 			case "unlock_cards":
 				return handleUnlockCards(ctx, client, control.Params, fsrsSvc, logger)
@@ -292,7 +286,7 @@ func handleSelectDueCards(ctx context.Context, client *ws.Client, params json.Ra
 
 // handleSubmitReview submits dictation ratings to FSRS for scheduling updates.
 // Delegates to fsrsSvc.UpdateRatings which calls vocab_manager.py review subcommand.
-func handleSubmitReview(ctx context.Context, client *ws.Client, params json.RawMessage, fsrsSvc fsrs.FSRSService, logger infra.Logger) error {
+func handleSubmitReview(ctx context.Context, client *ws.Client, params json.RawMessage, manager *session.Manager, fsrsSvc fsrs.FSRSService, logger infra.Logger) error {
 	var p submitReviewParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		logger.Warn("invalid submit_review params", infra.ErrField(err))
@@ -323,6 +317,11 @@ func handleSubmitReview(ctx context.Context, client *ws.Client, params json.RawM
 	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
 		logger.Warn("failed to send submit_review_result", infra.ErrField(err))
 	}
+
+	// Push EventParentReview to drive WAITING_PARENT→FEEDBACK transition, which triggers session_complete frame.
+	manager.Push(clientConnID(client), session.SessionEvent{
+		Type: session.EventParentReview,
+	})
 
 	return nil
 }
