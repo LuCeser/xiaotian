@@ -569,8 +569,16 @@
       });
     }
 
-    /** @private apply a paused frame → set status to PAUSED. */
+    /**
+     * @private apply a paused frame → set status to PAUSED. T-08-05 validates
+     * session_id; a rejected frame is surfaced via errorHandler and does NOT
+     * mutate state.
+     */
     _applyPaused(payload) {
+      if (typeof payload.session_id !== 'string') {
+        this.errorHandler(new Error('malformed paused frame'));
+        return;
+      }
       this.stateManager.setState({ status: 'PAUSED' });
     }
   }

@@ -699,7 +699,7 @@
      * element with the kid-button + dictation-control-button classes, sets
      * its textContent to label, applies the inline styles that keep every
      * control a large iOS HIG touch target (min-width:100px,
-     * min-height:56px, font-size:18px, ...), binds the click listener, and
+     * min-height:60px, font-size:18px, ...), binds the click listener, and
      * returns the element.
      *
      * @private
@@ -712,7 +712,7 @@
       btn.type = 'button';
       btn.className = 'kid-button dictation-control-button';
       btn.textContent = label;
-      btn.style.cssText = 'min-width:100px;min-height:56px;font-size:18px;padding:12px 20px;border-radius:12px;border:2px solid #e5e7eb;background:#fff;color:#374151;cursor:pointer;touch-action:manipulation;user-select:none;';
+      btn.style.cssText = 'min-width:100px;min-height:60px;font-size:18px;padding:12px 20px;border-radius:12px;border:2px solid #e5e7eb;background:#fff;color:#374151;cursor:pointer;touch-action:manipulation;user-select:none;';
       btn.addEventListener('click', onClick);
       return btn;
     }

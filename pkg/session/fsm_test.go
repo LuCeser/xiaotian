@@ -315,25 +315,37 @@ func TestPrevState_Tracked(t *testing.T) {
 
 	// IDLE → LISTENING
 	s := &Session{state: database.StateIdle, wordQueue: queue, wordIndex: 0}
-	s.transition(SessionEvent{Type: EventControlFrame, ControlType: "play_word"})
+	err := s.transition(SessionEvent{Type: EventControlFrame, ControlType: "play_word"})
+	if err != nil {
+		t.Fatalf("transition(play_word) returned error: %v", err)
+	}
 	if s.prevState != database.StateIdle {
 		t.Errorf("prevState after IDLE→LISTENING = %s, want IDLE", s.prevState)
 	}
 
 	// LISTENING → DICTATING
-	s.transition(SessionEvent{Type: EventWordComplete})
+	err = s.transition(SessionEvent{Type: EventWordComplete})
+	if err != nil {
+		t.Fatalf("transition(word_complete) returned error: %v", err)
+	}
 	if s.prevState != database.StateListening {
 		t.Errorf("prevState after LISTENING→DICTATING = %s, want LISTENING", s.prevState)
 	}
 
 	// DICTATING → PAUSED
-	s.transition(SessionEvent{Type: EventControlFrame, ControlType: "pause"})
+	err = s.transition(SessionEvent{Type: EventControlFrame, ControlType: "pause"})
+	if err != nil {
+		t.Fatalf("transition(pause) returned error: %v", err)
+	}
 	if s.prevState != database.StateDictating {
 		t.Errorf("prevState after DICTATING→PAUSED = %s, want DICTATING", s.prevState)
 	}
 
 	// PAUSED → DICTATING (resume)
-	s.transition(SessionEvent{Type: EventControlFrame, ControlType: "resume"})
+	err = s.transition(SessionEvent{Type: EventControlFrame, ControlType: "resume"})
+	if err != nil {
+		t.Fatalf("transition(resume) returned error: %v", err)
+	}
 	if s.prevState != database.StatePaused {
 		t.Errorf("prevState after PAUSED→DICTATING = %s, want PAUSED", s.prevState)
 	}
