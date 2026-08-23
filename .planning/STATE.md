@@ -5,7 +5,7 @@ milestone_name: milestone
 current_phase: 08
 current_phase_name: Student Web Interface
 status: executing
-stopped_at: Ticket 02 (Phase 8.1 scope) implemented be653a4 + dual-axis review fixes 5/5 — done pending iPad UAT; next /gsd-plan-phase 8.2 (ticket 03) or UAT
+stopped_at: Ticket 02 (Phase 8.1 scope) implemented be653a4 + dual-axis review fixes 5/5 + final-review cleanup 4f5c644/0ff7cca — done pending iPad UAT; next /gsd-plan-phase 8.2 (ticket 03) or UAT
 last_updated: "2026-08-23T15:12:19.000Z"
 last_activity: 2026-08-23
 last_activity_desc: "Completed quick task 260823-vn9: ticket 02 评审终局清理集"
@@ -152,5 +152,5 @@ Items acknowledged and carried forward from previous milestone close:
 ## Session Continuity
 
 Last session: 2026-08-23
-Stopped at: Ticket 02 implemented + reviewed + fixed (be653a4, 3a1fc59, 799de7c, f8e5e31, d6c046b, 45435bb); ticket 02 status doc closed — awaiting iPad UAT
+Stopped at: Ticket 02 implemented + reviewed + fixed (be653a4, 3a1fc59, 799de7c, f8e5e31, d6c046b, 45435bb, 4f5c644, 0ff7cca); ticket 02 status doc closed — awaiting iPad UAT
 Resume file: .scratch/speech-recognition-redesign/issues/03-voice-command-recognition-intent.md (Phase 8.2 source of truth) — next action /gsd-plan-phase 8.2；或先做 iPad UAT（ticket 02 验收项 5）
