@@ -57,7 +57,12 @@ type SessionHub interface {
 // and onTransition(); external readers (sweeper, tests) use the exported
 // accessors (State, Deadline) which take RLock. wordQueue and wordIndex are
 // accessed only within the event-loop goroutine (single-writer, no mutex
-// needed).
+// needed). prevState and repeatPending are likewise touched ONLY on the
+// event-loop goroutine: transition() writes them under the write lock, but
+// they have no cross-goroutine readers — onTransition() reads (and clears)
+// them lock-free on that same goroutine (see onTransition). Unlike
+// state/deadline, which DO have cross-goroutine readers via the RLock-taking
+// accessors, these two fields never need a lock on the read side.
 type Session struct {
 	// --- Identity ---
 	id     string // TTS/FSRS session UUID (crypto/rand hex v4)
@@ -67,13 +72,13 @@ type Session struct {
 	// --- FSM state (protected by mu for cross-goroutine reads) ---
 	mu               sync.RWMutex
 	state            database.SessionState
-	prevState        database.SessionState // Ticket 02: track previous state for resume detection
+	prevState        database.SessionState // Ticket 02: track previous state for resume detection — written ONLY by transition() under mu on the event-loop goroutine; read ONLY by onTransition()'s resume-from-pause check on that same goroutine (D-02 single-writer, same as streamGen) — the unlocked read is race-free by program order, no RLock needed or allowed.
 	wordQueue        []pybridge.DueCard
 	wordIndex        int
 	deadline         time.Time
 	currentWordID    string    // Track current word for progress frames (08-06)
 	sessionStartTime time.Time // Track session start time for duration calculation (08-06)
-	repeatPending    bool      // Ticket 02 DICT-07: flag set by transition, cleared by onTransition
+	repeatPending    bool      // Ticket 02 DICT-07: flag set by transition, cleared by onTransition — set by transition() under mu (repeat branches), read AND cleared ONLY by onTransition() on the same event-loop goroutine (D-02 single-writer, same as streamGen) — lock-free by program order, no lock needed or allowed.
 
 	// --- FSRS lock scope (captured at NewSession, replayed at exit — Pitfall 4) ---
 	lockCategory string
@@ -470,6 +475,25 @@ func (s *Session) onTransition() {
 	// This is triggered by the repeat event which passes through the FSM
 	// without state change, so we need a different detection mechanism.
 	// The repeat event sets a flag that onTransition reads and clears.
+	//
+	// Lock-free read/clear of repeatPending — DO NOT add a lock here
+	// (D-02 single-writer):
+	//   (a) Invariant: this function and transition() run sequentially on the
+	//   same event-loop goroutine (run() → handleEvent() calls transition()
+	//   first, then onTransition() on success), so transition()'s writes
+	//   happen-before these reads by program order, and no other goroutine
+	//   touches repeatPending — the unlocked read and the clear-write below
+	//   are race-free. mu guards these writes only incidentally, as part of
+	//   transition()'s critical section; it is NOT the source of read-side
+	//   safety.
+	//   (b) Never lock this block: spawnStreamWord(), called right below,
+	//   acquires s.mu itself — wrapping this block in s.mu would self-deadlock
+	//   (sync.RWMutex is not reentrant).
+	//   (c) Regression warning: this function once deadlocked holding the
+	//   write lock across timeoutFor → CurrentWord() (which takes RLock); the
+	//   established fix pattern is the release → compute → re-lock sequence at
+	//   the top of this function — never reintroduce nested acquisition of
+	//   s.mu.
 	if s.repeatPending {
 		s.repeatPending = false
 		if newState == database.StateDictating || newState == database.StatePaused {
@@ -479,6 +503,8 @@ func (s *Session) onTransition() {
 
 	// Ticket 02 DICT-07: on resume from PAUSED, re-spawn StreamWord for the
 	// current word (the word audio replays from the beginning).
+	// prevState: same single-goroutine invariant as repeatPending above —
+	// unlocked read, no lock needed or allowed.
 	if newState == database.StateDictating && s.prevState == database.StatePaused {
 		s.spawnStreamWord()
 	}
