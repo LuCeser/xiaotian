@@ -8,7 +8,7 @@ status: executing
 stopped_at: Phase 8.1 re-scoped to ticket 02 (student-paced Mimo TTS); awaiting /gsd-plan-phase 8.1 after 2026-08-23 ticket-set calibration
 last_updated: "2026-08-23T05:57:44.662Z"
 last_activity: 2026-08-23
-last_activity_desc: "Completed quick task 260823-ti8: 文档化 onTransition 无锁读取单写者不变量"
+last_activity_desc: "Completed quick task 260823-tyq: 补全 DictationControls 六个方法的 JSDoc 文档注释"
 progress:
   total_phases: 15
   completed_phases: 8
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 Phase: 08 (Student Web Interface) — EXECUTING (08-07 manual iPad UAT pending real device)
 Plans: 6 of 7 complete
 Status: Phase 08 near-complete; roadmap calibrated 2026-08-23 to speech-recognition-redesign ticket set (single source of truth)
-Last activity: 2026-08-23 — Completed quick task 260823-ti8: 文档化 onTransition 无锁读取单写者不变量（ticket 02 评审修复 #3/5）
+Last activity: 2026-08-23 — Completed quick task 260823-tyq: 补全 DictationControls 六个方法的 JSDoc（ticket 02 评审修复 #4/5）
 Next: /gsd-plan-phase 8.1 — re-plan after re-scope to ticket 02 (student-paced Mimo TTS dictation; prior auto-advance plans superseded)
 
 Progress: [█████▒▒▒▒▒] 53%
@@ -130,6 +130,7 @@ None yet.
 | 260823-sdx | 修复 session.go 过期 WordComplete 事件竞态：stream generation 计数器 | 2026-08-23 | 3a1fc59 | complete | [260823-sdx-session-go-wordcomplete-stream-generatio](./quick/260823-sdx-session-go-wordcomplete-stream-generatio/) |
 | 260823-t13 | 提取 PAUSED 5 分钟超时到 Config.SessionTimeout.PausedStateTimeout | 2026-08-23 | 799de7c | complete | [260823-t13-paused-5-config-sessiontimeout-pausedsta](./quick/260823-t13-paused-5-config-sessiontimeout-pausedsta/) |
 | 260823-ti8 | 文档化 onTransition 无锁读 repeatPending/prevState 的单写者不变量 | 2026-08-23 | f8e5e31 | complete | [260823-ti8-ontransition-repeatpending-prevstate](./quick/260823-ti8-ontransition-repeatpending-prevstate/) |
+| 260823-tyq | 补全 DictationControls 六个方法的 JSDoc 文档注释 | 2026-08-23 | d6c046b | complete | [260823-tyq-dictationcontrols-jsdoc](./quick/260823-tyq-dictationcontrols-jsdoc/) |
 
 ### Roadmap Evolution
 
