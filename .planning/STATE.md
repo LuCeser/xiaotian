@@ -8,7 +8,7 @@ status: executing
 stopped_at: Phase 8.1 re-scoped to ticket 02 (student-paced Mimo TTS); awaiting /gsd-plan-phase 8.1 after 2026-08-23 ticket-set calibration
 last_updated: "2026-08-23T05:57:44.662Z"
 last_activity: 2026-08-23
-last_activity_desc: "Completed quick task 260823-j2n: 收尾 speech-recognition-redesign Ticket 01 状态文档"
+last_activity_desc: "Completed quick task 260823-sdx: 修复 session.go 过期 WordComplete 事件竞态（stream generation 计数器）"
 progress:
   total_phases: 15
   completed_phases: 8
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 Phase: 08 (Student Web Interface) — EXECUTING (08-07 manual iPad UAT pending real device)
 Plans: 6 of 7 complete
 Status: Phase 08 near-complete; roadmap calibrated 2026-08-23 to speech-recognition-redesign ticket set (single source of truth)
-Last activity: 2026-08-23 — Completed quick task 260823-j2n: 收尾 speech-recognition-redesign Ticket 01 状态文档
+Last activity: 2026-08-23 — Completed quick task 260823-sdx: 修复 session.go 过期 WordComplete 事件竞态（stream generation 计数器，ticket 02 评审修复 #1/5）
 Next: /gsd-plan-phase 8.1 — re-plan after re-scope to ticket 02 (student-paced Mimo TTS dictation; prior auto-advance plans superseded)
 
 Progress: [█████▒▒▒▒▒] 53%
@@ -127,6 +127,7 @@ None yet.
 | 260823-cff | Fix category field in session_ready response for correct speech recognition language | 2026-08-23 | e8556fa | complete | [20260823-category-field-fix](./quick/20260823-category-field-fix/) |
 | 260823-fvx | 重构小米ASR实现以符合官方API规范 | 2026-08-23 | 9a8a7b3,3edb20a,cb72cab | complete | [260823-fvx-asr](./quick/260823-fvx-asr/) |
 | 260823-j2n | 收尾 speech-recognition-redesign Ticket 01 状态文档（issue 勾选/总结更新/STATE 补 commit） | 2026-08-23 | 371010c,eb58b7e | complete | [260823-j2n-speech-recognition-redesign-ticket-01-is](./quick/260823-j2n-speech-recognition-redesign-ticket-01-is/) |
+| 260823-sdx | 修复 session.go 过期 WordComplete 事件竞态：stream generation 计数器 | 2026-08-23 | 3a1fc59 | complete | [260823-sdx-session-go-wordcomplete-stream-generatio](./quick/260823-sdx-session-go-wordcomplete-stream-generatio/) |
 
 ### Roadmap Evolution
 
