@@ -1,0 +1,47 @@
+{
+  "ecosystem": "npm",
+  "config": {
+    "exa_search": false,
+    "brave_search": false,
+    "firecrawl": false,
+    "tavily_search": false
+  },
+  "questions": [
+    {
+      "text": "What are the best lightweight frontend frameworks for iPad Safari development that work within resource constraints?",
+      "kind": "web"
+    },
+    {
+      "text": "How to implement responsive design patterns optimized for iPad Safari browsers?",
+      "kind": "web"
+    },
+    {
+      "text": "What are the WebSocket integration patterns for real-time progress display in web applications?",
+      "kind": "web"
+    },
+    {
+      "text": "What state management approaches work best for real-time session progress tracking in vanilla JavaScript?",
+      "kind": "web"
+    },
+    {
+      "text": "What are robust WebSocket reconnection strategies for iPad Safari browsers?",
+      "kind": "web"
+    },
+    {
+      "text": "What accessibility considerations are important for elementary school student interfaces?",
+      "kind": "web"
+    },
+    {
+      "text": "What are iOS Safari-specific limitations and considerations for web applications?",
+      "kind": "web"
+    },
+    {
+      "text": "What are best practices for handling binary WebSocket messages and audio playback in Safari?",
+      "kind": "web"
+    },
+    {
+      "text": "How to implement simple, kid-friendly UI patterns for educational applications?",
+      "kind": "web"
+    }
+  ]
+}

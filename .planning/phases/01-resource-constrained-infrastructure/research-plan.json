@@ -1,0 +1,67 @@
+{
+  "ecosystem": "go",
+  "config": {
+    "exa_search": false,
+    "brave_search": false,
+    "firecrawl": false,
+    "tavily_search": false
+  },
+  "questions": [
+    {
+      "text": "How to track and enforce memory limits in Go applications using runtime.MemStats",
+      "kind": "docs",
+      "library": "go",
+      "version": "1.22"
+    },
+    {
+      "text": "Best practices for implementing connection limits and backpressure in Go servers",
+      "kind": "docs",
+      "library": "net",
+      "version": "latest"
+    },
+    {
+      "text": "How to use sync.Pool effectively for buffer reuse and memory management",
+      "kind": "docs",
+      "library": "sync",
+      "version": "latest"
+    },
+    {
+      "text": "Structured logging libraries and best practices for Go applications",
+      "kind": "docs",
+      "library": "log",
+      "version": "latest"
+    },
+    {
+      "text": "Graceful shutdown patterns and signal handling in Go services",
+      "kind": "docs",
+      "library": "os",
+      "version": "latest"
+    },
+    {
+      "text": "Error handling patterns with pkg/errors library in Go",
+      "kind": "docs",
+      "library": "github.com/pkg/errors",
+      "version": "latest"
+    },
+    {
+      "text": "Configuration management patterns and best practices for Go applications",
+      "kind": "web"
+    },
+    {
+      "text": "Testing frameworks and best practices for Go infrastructure code",
+      "kind": "docs",
+      "library": "testing",
+      "version": "latest"
+    },
+    {
+      "text": "Building static binaries and Make-based build systems for Go projects",
+      "kind": "web"
+    },
+    {
+      "text": "Worker pool pattern implementation in Go for concurrency control",
+      "kind": "docs",
+      "library": "sync",
+      "version": "latest"
+    }
+  ]
+}

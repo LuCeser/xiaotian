@@ -125,6 +125,7 @@ None yet.
 | 260801-kdq | 根治 ws TestHubStopsOnContextCancel flake | 2026-08-01 | b65ad5e | | [260801-kdq-ws-testhubstopsoncontextcancel-flake](./quick/260801-kdq-ws-testhubstopsoncontextcancel-flake/) |
 | 260802-ldq | 创建最小化前端验证界面，用于测试WebSocket连接、FSRS单词选择和TTS音频流播放 | 2026-08-02 | ad599a5 | Verified | [260802-ldq-websocket-fsrs-tts](./quick/260802-ldq-websocket-fsrs-tts/) |
 | 260823-cff | Fix category field in session_ready response for correct speech recognition language | 2026-08-23 | pending | complete | [20260823-category-field-fix](./quick/20260823-category-field-fix/) |
+| 260823-fvx | 重构小米ASR实现以符合官方API规范 | 2026-08-23 | (pending) | complete | [260823-fvx-asr](./quick/260823-fvx-asr/) |
 
 ### Roadmap Evolution
 

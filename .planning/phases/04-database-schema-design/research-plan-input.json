@@ -1,0 +1,28 @@
+{
+  "ecosystem": "npm",
+  "config": { "exa_search": false, "brave_search": false, "firecrawl": false, "tavily_search": false },
+  "questions": [
+    {
+      "text": "modernc.org/sqlite pure-Go SQLite driver: WAL mode support, busy_timeout, PRAGMA configuration via DSN, cross-compilation benefits vs mattn/go-sqlite3 CGo driver",
+      "kind": "docs",
+      "library": "modernc.org/sqlite",
+      "version": "1.34"
+    },
+    {
+      "text": "SQLite WAL mode multi-process concurrency: two processes sharing one database file, busy_timeout, _pragma DSN parameters, writer/reader safety",
+      "kind": "docs",
+      "library": "sqlite",
+      "version": ""
+    },
+    {
+      "text": "Go database/sql best practices with SQLite: SetMaxOpenConns, connection pooling, transaction patterns, PRAGMA execution",
+      "kind": "docs",
+      "library": "database/sql",
+      "version": ""
+    },
+    {
+      "text": "mattn/go-sqlite3 vs modernc.org/sqlite comparison for production Go services: CGo-free cross-compilation, performance, feature parity",
+      "kind": "web"
+    }
+  ]
+}

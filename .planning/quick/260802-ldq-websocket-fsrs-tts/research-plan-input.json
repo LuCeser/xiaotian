@@ -1,0 +1,35 @@
+{
+  "ecosystem": "web",
+  "config": {
+    "exa_search": true,
+    "brave_search": true,
+    "firecrawl": false,
+    "tavily_search": false
+  },
+  "questions": [
+    {
+      "text": "How to debug WebSocket connections in Chrome DevTools and Safari Web Inspector",
+      "kind": "docs",
+      "library": "websocket",
+      "version": "latest"
+    },
+    {
+      "text": "HTML5 Audio API for playing binary PCM audio streams from WebSocket",
+      "kind": "docs",
+      "library": "Web Audio API",
+      "version": "latest"
+    },
+    {
+      "text": "Common JavaScript frontend debugging pitfalls and how to avoid them",
+      "kind": "web"
+    },
+    {
+      "text": "Best practices for handling WebSocket binary frames in JavaScript",
+      "kind": "web"
+    },
+    {
+      "text": "Simple logging UI patterns for browser-based debugging tools",
+      "kind": "web"
+    }
+  ]
+}

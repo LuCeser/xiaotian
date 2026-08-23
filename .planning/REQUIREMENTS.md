@@ -23,7 +23,7 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 
 ### Real-time Dictation
 
-- [ ] **DICT-01**: Student can request dictation session via button ("I want to dictate 30 words")
+- [x] **DICT-01**: Student can request dictation session via button ("I want to dictate 30 words")
 - [x] **DICT-02**: System initializes session with selected due words
 - [x] **DICT-03**: System delivers individual word prompts via TTS audio streaming
 - [x] **DICT-04**: System maintains session state (IDLE → LISTENING → DICTATING → WAITING_PARENT → FEEDBACK)
@@ -61,6 +61,7 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 
 - [ ] **WEB-01**: Parent interface for vocabulary management (add/edit/organize)
 - [x] **WEB-02**: Student interface for dictation session requests and progress display
+  - **Completed Phase 08-06** (2025-08-15): Backend now emits progress_update, word_complete, and session_complete control frames. Frontend already implements play_word/next_word triggers. Real-time progress bar updates and gapless audio playback are now functional.
 - [ ] **WEB-03**: Parent review interface for post-dictation feedback
 - [x] **WEB-04**: Responsive design optimized for iPad Safari browser
 

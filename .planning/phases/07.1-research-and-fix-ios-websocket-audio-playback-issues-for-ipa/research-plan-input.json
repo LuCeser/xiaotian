@@ -1,0 +1,51 @@
+{
+  "ecosystem": "web",
+  "config": {
+    "exa_search": false,
+    "brave_search": false,
+    "firecrawl": true,
+    "tavily_search": false
+  },
+  "questions": [
+    {
+      "text": "Web Audio API (AudioContext) on iOS Safari - gesture unlock pattern, AudioBufferSourceNode scheduling, currentTime clock",
+      "kind": "docs",
+      "library": "web-audio-api",
+      "version": "latest"
+    },
+    {
+      "text": "iOS Safari AudioContext unlock pattern - touchend vs touchstart, silent buffer trick, one-time unlock persistence",
+      "kind": "web"
+    },
+    {
+      "text": "PCM Int16 to Float32 AudioBuffer conversion for Web Audio API - sample rate conversion, channel data handling",
+      "kind": "docs",
+      "library": "web-audio-api",
+      "version": "latest"
+    },
+    {
+      "text": "Gapless audio scheduling with AudioBufferSourceNode - lookahead buffer, currentTime scheduling, underrun recovery",
+      "kind": "web"
+    },
+    {
+      "text": "iOS Safari visibilitychange and AudioContext interrupted state handling - background app switch recovery",
+      "kind": "web"
+    },
+    {
+      "text": "WebSocket binary frame handling in iOS Safari - compression issues, deflate bug, Safari 17.6",
+      "kind": "web"
+    },
+    {
+      "text": "Production Web Audio API implementations - readest WebAudioPlayer.ts, persona audio-playback-manager.ts",
+      "kind": "scrape"
+    },
+    {
+      "text": "Web Audio API scheduling best practices - web.dev audio scheduling article",
+      "kind": "scrape"
+    },
+    {
+      "text": "iOS Safari audio autoplay policy - WebKit blog video policies for iOS",
+      "kind": "scrape"
+    }
+  ]
+}

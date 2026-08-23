@@ -1,0 +1,62 @@
+{
+  "ecosystem": "npm",
+  "config": {
+    "exa_search": false,
+    "brave_search": false,
+    "firecrawl": true,
+    "tavily_search": false
+  },
+  "questions": [
+    {
+      "text": "Web Audio API performance and behavior on real iPad devices with iOS Safari - official Apple documentation and best practices",
+      "kind": "scrape",
+      "url": "https://developer.apple.com/documentation/webkitjs"
+    },
+    {
+      "text": "iOS Safari-specific limitations and best practices for web applications - official Safari documentation",
+      "kind": "scrape",
+      "url": "https://developer.apple.com/library/archive/documentation/AudioVideo/Conceptual/Using_HTML5_Audio_Video/"
+    },
+    {
+      "text": "Safari Web Content Guide - iOS-specific considerations and responsive design patterns",
+      "kind": "scrape",
+      "url": "https://developer.apple.com/library/archive/documentation/AppleApplications/Reference/SafariWebContent/"
+    },
+    {
+      "text": "What are the best lightweight state management approaches for real-time session progress tracking in vanilla JavaScript without frameworks?",
+      "kind": "web"
+    },
+    {
+      "text": "WebSocket message queue memory limits and best practices for mobile browsers to prevent memory overflow",
+      "kind": "web"
+    },
+    {
+      "text": "Elementary school student interface design principles and kid-friendly UI patterns for educational applications",
+      "kind": "web"
+    },
+    {
+      "text": "iPad Safari responsive design best practices and touch interaction patterns for educational applications",
+      "kind": "web"
+    },
+    {
+      "text": "WebSocket reconnection strategies specifically optimized for iOS Safari mobile browsers",
+      "kind": "web"
+    },
+    {
+      "text": "Accessibility considerations for young students (elementary school age) in web applications",
+      "kind": "web"
+    },
+    {
+      "text": "Memory management and performance optimization techniques for web applications on iPad Safari browsers",
+      "kind": "web"
+    },
+    {
+      "text": "Touch interaction design guidelines and best practices for iPad educational applications",
+      "kind": "web"
+    },
+    {
+      "text": "Real-time progress display patterns and WebSocket message handling for responsive web interfaces",
+      "kind": "web"
+    }
+  ]
+}
