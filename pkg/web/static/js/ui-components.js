@@ -649,6 +649,18 @@
       this.render();
     }
 
+    /**
+     * Build the three dictation control buttons and mount them into the
+     * container. Idempotent: clears the container's existing children first
+     * so re-renders do not stack elements. Creates a .dictation-controls
+     * wrapper (role=group, aria-label "听写控制", centered flex layout), then
+     * builds the pause/resume ("⏸ 暂停"), repeat ("🔁 再读一遍"), and
+     * next-word ("⏭ 下一个") buttons via _createButton, each with its own
+     * Chinese aria-label. After mounting, if stateManager exists,
+     * immediately calls update() with its current state so the initial
+     * visibility and button labels are correct (e.g. when constructed while
+     * a session is already active).
+     */
     render() {
       while (this.container.firstChild) {
         this.container.removeChild(this.container.firstChild);
@@ -682,6 +694,19 @@
       }
     }
 
+    /**
+     * Button factory shared by the three controls. Creates a type=button
+     * element with the kid-button + dictation-control-button classes, sets
+     * its textContent to label, applies the inline styles that keep every
+     * control a large iOS HIG touch target (min-width:100px,
+     * min-height:56px, font-size:18px, ...), binds the click listener, and
+     * returns the element.
+     *
+     * @private
+     * @param {string} label - button textContent.
+     * @param {Function} onClick - click listener to bind.
+     * @returns {HTMLButtonElement}
+     */
     _createButton(label, onClick) {
       var btn = document.createElement('button');
       btn.type = 'button';
@@ -692,6 +717,17 @@
       return btn;
     }
 
+    /**
+     * Pause/resume button click handler. Sends a "resume" control frame
+     * (params: empty object) when this.isPaused is true and a "pause" frame
+     * otherwise. Does NOT flip isPaused locally — the flag's single source
+     * of truth is update(), which syncs it from the authoritative backend
+     * status, so the button label/color change waits for the state round
+     * trip to flow back through update(). Silently returns when wsClient is
+     * missing or its send is not a function.
+     *
+     * @private
+     */
     _handlePauseResume() {
       if (!this.wsClient || typeof this.wsClient.send !== 'function') return;
       if (this.isPaused) {
@@ -701,11 +737,28 @@
       }
     }
 
+    /**
+     * Repeat button click handler. Sends a "repeat" control frame (params:
+     * empty object) asking the backend to re-read the current word.
+     * Silently returns when wsClient is missing or its send is not a
+     * function.
+     *
+     * @private
+     */
     _handleRepeat() {
       if (!this.wsClient || typeof this.wsClient.send !== 'function') return;
       this.wsClient.send({ type: 'repeat', params: {} });
     }
 
+    /**
+     * Next-word button click handler. Reads currentWordId from
+     * stateManager.getState() (falling back to an empty string when
+     * stateManager is missing or the field is absent) and sends it as
+     * word_id in a "next_word" control frame. Silently returns when
+     * wsClient is missing or its send is not a function.
+     *
+     * @private
+     */
     _handleNext() {
       if (!this.wsClient || typeof this.wsClient.send !== 'function') return;
       var state = this.stateManager ? this.stateManager.getState() : {};
@@ -713,6 +766,19 @@
       this.wsClient.send({ type: 'next_word', params: { word_id: wordId } });
     }
 
+    /**
+     * State-driven view update (called by stateManager.subscribe). Syncs
+     * PAUSED into this.isPaused — the single source of truth for that flag,
+     * which _handlePauseResume reads to decide between resume and pause
+     * frames. Shows the controls only while sessionActive and status is
+     * DICTATING, LISTENING, or PAUSED; otherwise hides the container and
+     * returns early. While visible, toggles the pause/resume button's
+     * label, aria-label, and colors from isPaused (PAUSED → "▶ 继续" with a
+     * blue background/border, otherwise "⏸ 暂停" with white), and disables
+     * the next-word button when status is WAITING_PARENT.
+     *
+     * @param {object} state - snapshot from SessionStateManager.
+     */
     update(state) {
       if (!this.container) return;
       state = state || {};
