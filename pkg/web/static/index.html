@@ -82,6 +82,13 @@
         <!-- ProgressDisplay (ui-components.js) mounts here -->
         <div id="progress-display-container" role="status" aria-live="polite" aria-atomic="true"></div>
       </section>
+
+      <!-- Dictation feedback section: shows recording/wrong/correct per word -->
+      <section class="dictation-feedback-section" id="dictationFeedback"
+               role="region" aria-labelledby="dictationFeedbackTitle" hidden>
+        <h2 id="dictationFeedbackTitle" class="visually-hidden">听写反馈</h2>
+        <div id="dictation-feedback-container"></div>
+      </section>
     </main>
 
     <!-- Footer with simple instructions -->
@@ -97,6 +104,7 @@
       websocket-client.js → window.WebSocketClient (transport; uses FrameCodec)
       state-manager.js    → window.SessionStateManager (state store)
       audio-controller.js → window.AudioController (Web Audio API integration)
+      speech-controller.js→ window.SpeechController (Web Speech API answers)
       ui-components.js    → window.SessionButton (uses the state store)
       app.js              → wires them together
   -->
@@ -104,6 +112,7 @@
   <script src="js/websocket-client.js" defer></script>
   <script src="js/state-manager.js" defer></script>
   <script src="js/audio-controller.js" defer></script>
+  <script src="js/speech-controller.js" defer></script>
   <script src="js/ui-components.js" defer></script>
   <script src="js/app.js" defer></script>
 </body>

@@ -464,4 +464,151 @@
   ProgressDisplay.ERROR_MESSAGE = PROGRESS_ERROR_MESSAGE;
 
   global.ProgressDisplay = ProgressDisplay;
+
+  // ==================================================================
+  // DictationFeedback — recording indicator + correct/wrong feedback
+  // (Phase 8.1, dictation closed loop).
+  // ==================================================================
+
+  var DICTATION_FEEDBACK_MESSAGES = {
+    listening: '🎤 请说出来...',
+    correct: '✓',
+    incorrect: '✗',
+    skipped: '⏭ 跳过'
+  };
+
+  /**
+   * DictationFeedback renders the per-word dictation feedback UI:
+   * recording indicator, correct/incorrect verdict, and the expected
+   * answer when wrong.
+   *
+   * @class
+   * @param {HTMLElement} container - element to mount into
+   * @param {SessionStateManager} stateManager - the shared state store
+   */
+  class DictationFeedback {
+    constructor(container, stateManager) {
+      if (!container) throw new Error('DictationFeedback requires a container element');
+      this.container = container;
+      this.stateManager = stateManager;
+
+      this.feedbackEl = null;
+      this.wordDisplayEl = null;
+      this.heardEl = null;
+
+      // Inject pulse animation CSS if not already present
+      if (!document.getElementById('dictation-feedback-styles')) {
+        var style = document.createElement('style');
+        style.id = 'dictation-feedback-styles';
+        style.textContent = '@keyframes df-pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }';
+        document.head.appendChild(style);
+      }
+
+      this.render();
+    }
+
+    render() {
+      while (this.container.firstChild) {
+        this.container.removeChild(this.container.firstChild);
+      }
+
+      // Main feedback container
+      this.feedbackEl = document.createElement('div');
+      this.feedbackEl.className = 'dictation-feedback';
+      this.feedbackEl.setAttribute('aria-live', 'assertive');
+      this.feedbackEl.style.cssText = 'text-align:center;padding:20px;min-height:80px;display:flex;flex-direction:column;align-items:center;justify-content:center;';
+
+      // Word display (shows the current word being dictated)
+      this.wordDisplayEl = document.createElement('div');
+      this.wordDisplayEl.className = 'dictation-word';
+      this.wordDisplayEl.style.cssText = 'font-size:28px;font-weight:700;color:#1f2937;margin-bottom:12px;';
+
+      // Feedback message
+      this.heardEl = document.createElement('div');
+      this.heardEl.className = 'dictation-heard';
+      this.heardEl.style.cssText = 'font-size:16px;color:#6b7280;';
+
+      this.feedbackEl.appendChild(this.wordDisplayEl);
+      this.feedbackEl.appendChild(this.heardEl);
+      this.container.appendChild(this.feedbackEl);
+
+      // Apply current state
+      if (this.stateManager) {
+        this.update(this.stateManager.getState());
+      }
+    }
+
+    update(state) {
+      if (!this.feedbackEl) return;
+      state = state || {};
+
+      var dictationState = state.dictationState;
+      var currentWordId = state.currentWordId;
+      var expected = state.lastExpected;
+      var heard = state.lastHeard;
+      var correct = state.lastAnswerCorrect;
+
+      // Show/hide based on dictation state
+      if (!dictationState || !state.sessionActive) {
+        this.feedbackEl.style.display = 'none';
+        return;
+      }
+      this.feedbackEl.style.display = 'flex';
+
+      // Word display
+      if (currentWordId) {
+        this.wordDisplayEl.textContent = currentWordId;
+        this.wordDisplayEl.style.display = 'block';
+      } else if (expected) {
+        this.wordDisplayEl.textContent = expected;
+        this.wordDisplayEl.style.display = 'block';
+      } else {
+        this.wordDisplayEl.style.display = 'none';
+      }
+
+      // Feedback styling
+      switch (dictationState) {
+        case 'listening':
+          this.feedbackEl.style.background = '#fef3c7';
+          this.feedbackEl.style.borderRadius = '12px';
+          this.heardEl.textContent = DICTATION_FEEDBACK_MESSAGES.listening;
+          this.heardEl.style.color = '#92400e';
+          // Add pulsing animation
+          this.heardEl.style.animation = 'df-pulse 1s infinite';
+          break;
+
+        case 'correct':
+          this.feedbackEl.style.background = '#d1fae5';
+          this.feedbackEl.style.borderRadius = '12px';
+          this.heardEl.textContent = DICTATION_FEEDBACK_MESSAGES.correct + ' 正确！';
+          this.heardEl.style.color = '#065f46';
+          this.heardEl.style.animation = 'none';
+          break;
+
+        case 'incorrect':
+          this.feedbackEl.style.background = '#fee2e2';
+          this.feedbackEl.style.borderRadius = '12px';
+          var msg = DICTATION_FEEDBACK_MESSAGES.incorrect;
+          if (expected) msg += ' 正确答案: ' + expected;
+          if (heard) msg += ' (听到: ' + heard + ')';
+          this.heardEl.textContent = msg;
+          this.heardEl.style.color = '#991b1b';
+          this.heardEl.style.animation = 'none';
+          break;
+
+        case 'skipped':
+          this.feedbackEl.style.background = '#f3f4f6';
+          this.feedbackEl.style.borderRadius = '12px';
+          this.heardEl.textContent = DICTATION_FEEDBACK_MESSAGES.skipped + (heard ? ' (' + heard + ')' : '');
+          this.heardEl.style.color = '#6b7280';
+          this.heardEl.style.animation = 'none';
+          break;
+
+        default:
+          this.feedbackEl.style.display = 'none';
+      }
+    }
+  }
+
+  global.DictationFeedback = DictationFeedback;
 })(typeof window !== 'undefined' ? window : this);

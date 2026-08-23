@@ -56,8 +56,20 @@
       // Tap-to-resume overlay (D-06).
       this.tapToResumeOverlay = null;
 
+      // Playback-end callback. Fired when the last scheduled buffer finishes playing.
+      // Used by the dictation flow to start speech recognition after word audio ends.
+      this._onPlaybackEnd = null;
+
       // Frame size: 20ms @ 16kHz 16-bit mono = 640 bytes.
       this.AUDIO_FRAME_SIZE = 640;
+    }
+
+    /**
+     * Register a callback that fires when scheduled audio playback finishes.
+     * @param {function|null} callback - called with no args when playback ends.
+     */
+    setOnPlaybackEnd(callback) {
+      this._onPlaybackEnd = callback;
     }
 
     /**
@@ -181,62 +193,97 @@
           return;
         }
 
+        // If AudioContext is suspended (iOS D-03, app-switch D-06), attempt
+        // resume() and defer playback until the context is running. resume()
+        // returns a Promise — we chain the actual scheduling onto it.
+        if (this.audioCtx && this.audioCtx.state === 'suspended') {
+          console.log('[audio] AudioContext suspended — attempting resume for "' + wordId + '"');
+          var self = this;
+          this.audioCtx.resume().then(function () {
+            console.log('[audio] resume() succeeded, now playing "' + wordId + '"');
+            self._scheduleWordPlayback(wordId, chunks);
+          }).catch(function (resumeErr) {
+            console.error('[audio] resume() failed for "' + wordId + '":', resumeErr);
+          });
+          return;
+        }
+
         if (!this.isAudioCtxReady()) {
           console.error('[audio] word_complete for "' + wordId + '" but AudioContext not running — PCM dropped');
           return;
         }
 
-        // Clear pending PCM for this word (Plan 08-04 Task 4: memory cleanup).
-        this.pendingPcm.delete(wordId);
-
-        // Merge PCM chunks into one s16le buffer.
-        var totalLen = chunks.reduce(function (sum, chunk) { return sum + chunk.length; }, 0);
-        var pcmBytes = new Uint8Array(totalLen);
-        var offset = 0;
-        for (var i = 0; i < chunks.length; i++) {
-          pcmBytes.set(chunks[i], offset);
-          offset += chunks[i].length;
-        }
-
-        // D-05: PCM Int16 → Float32 AudioBuffer. Use audioCtx.sampleRate
-        // (runtime property, NEVER hardcoded 16000 per D-02).
-        var numSamples = pcmBytes.length / 2;
-        // CR-5 fix: use 16000 as the source rate (not audioCtx.sampleRate)
-        // PCM data is 16kHz samples; browser resamples to context rate.
-        var buf = this.audioCtx.createBuffer(1, numSamples, 16000);
-        var view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
-        var chan = buf.getChannelData(0);
-        for (var i = 0; i < numSamples; i++) {
-          chan[i] = view.getInt16(i * 2, true) / 32768;
-        }
-
-        // D-04 + D-18: gapless scheduling with underrun snap.
-        var src = this.audioCtx.createBufferSource();
-        src.buffer = buf;
-        src.connect(this.audioCtx.destination);
-
-        // Plan 08-04 Task 4: add error handler for source start failure
-        src.onerror = function (err) {
-          console.error('[audio] BufferSource playback error:', err);
-        };
-
-        // Snap scheduledTime forward on underrun so late PCM never schedules in the past.
-        if (this.scheduledTime < this.audioCtx.currentTime) {
-          this.scheduledTime = this.audioCtx.currentTime;
-        }
-
-        src.start(this.scheduledTime);
-        this.scheduledTime += buf.duration;
-
-        this.isPlaying = true;
-
-        console.log('[audio] word_complete: "' + wordId + '" — scheduled ' + numSamples +
-          ' samples (' + (buf.duration * 1000).toFixed(0) + 'ms) at audio clock t=' +
-          (this.scheduledTime - buf.duration).toFixed(3) + 's');
+        this._scheduleWordPlayback(wordId, chunks);
       } catch (playErr) {
         console.error('[audio] word_complete playback failed for "' + wordId + '":', playErr);
         this.isPlaying = false;
       }
+    }
+
+    /**
+     * @private Schedule PCM playback for a word. Extracted from playWordComplete
+     * so it can be called directly or after an async resume().
+     *
+     * @param {string} wordId - word identifier (for logging).
+     * @param {Uint8Array[]} chunks - accumulated PCM chunks for this word.
+     */
+    _scheduleWordPlayback(wordId, chunks) {
+      // Clear pending PCM for this word (Plan 08-04 Task 4: memory cleanup).
+      this.pendingPcm.delete(wordId);
+
+      // Merge PCM chunks into one s16le buffer.
+      var totalLen = chunks.reduce(function (sum, chunk) { return sum + chunk.length; }, 0);
+      var pcmBytes = new Uint8Array(totalLen);
+      var offset = 0;
+      for (var i = 0; i < chunks.length; i++) {
+        pcmBytes.set(chunks[i], offset);
+        offset += chunks[i].length;
+      }
+
+      // D-05: PCM Int16 → Float32 AudioBuffer. Use audioCtx.sampleRate
+      // (runtime property, NEVER hardcoded 16000 per D-02).
+      var numSamples = pcmBytes.length / 2;
+      // CR-5 fix: use 16000 as the source rate (not audioCtx.sampleRate)
+      // PCM data is 16kHz samples; browser resamples to context rate.
+      var buf = this.audioCtx.createBuffer(1, numSamples, 16000);
+      var view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
+      var chan = buf.getChannelData(0);
+      for (var i = 0; i < numSamples; i++) {
+        chan[i] = view.getInt16(i * 2, true) / 32768;
+      }
+
+      // D-04 + D-18: gapless scheduling with underrun snap.
+      var src = this.audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(this.audioCtx.destination);
+
+      // Plan 08-04 Task 4: add error handler for source start failure
+      src.onerror = function (err) {
+        console.error('[audio] BufferSource playback error:', err);
+      };
+
+      // Snap scheduledTime forward on underrun so late PCM never schedules in the past.
+      if (this.scheduledTime < this.audioCtx.currentTime) {
+        this.scheduledTime = this.audioCtx.currentTime;
+      }
+
+      src.start(this.scheduledTime);
+      this.scheduledTime += buf.duration;
+
+      // Fire playback-end callback when this buffer finishes.
+      var self = this;
+      src.onended = function () {
+        self.isPlaying = false;
+        if (typeof self._onPlaybackEnd === 'function') {
+          self._onPlaybackEnd();
+        }
+      };
+
+      this.isPlaying = true;
+
+      console.log('[audio] word_complete: "' + wordId + '" — scheduled ' + numSamples +
+        ' samples (' + (buf.duration * 1000).toFixed(0) + 'ms) at audio clock t=' +
+        (this.scheduledTime - buf.duration).toFixed(3) + 's');
     }
 
     /**
@@ -366,6 +413,7 @@
         this.lastSeq = 0;
         this.currentWordId = null;
         this.scheduledTime = 0;
+        this._onPlaybackEnd = null;
 
         // Hide tap-to-resume overlay.
         this._hideTapToResumeOverlay();

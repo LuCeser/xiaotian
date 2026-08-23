@@ -41,8 +41,8 @@
     setConnectionState('failed');
     return;
   }
-  if (!window.SessionStateManager || !window.SessionButton || !window.ProgressDisplay || !window.AudioController) {
-    console.error('[app] SessionStateManager/SessionButton/ProgressDisplay/AudioController unavailable — scripts did not load.');
+  if (!window.SessionStateManager || !window.SessionButton || !window.ProgressDisplay || !window.AudioController || !window.SpeechController) {
+    console.error('[app] SessionStateManager/SessionButton/ProgressDisplay/AudioController/SpeechController unavailable — scripts did not load.');
     setConnectionState('failed');
     return;
   }
@@ -63,6 +63,10 @@
     // Clean up audio controller resources
     if (audioController) {
       audioController.cleanup();
+    }
+    // Stop any in-progress speech recognition
+    if (speechController) {
+      speechController.cleanup();
     }
     // Disconnect WebSocket cleanly
     if (wsClient) {
@@ -119,6 +123,43 @@
     return;
   }
 
+  // Wire playback end → dictation recognition
+  audioController.setOnPlaybackEnd(function () {
+    var state = stateManager.getState();
+    var wordId = state.currentWordId;
+    if (wordId && state.sessionActive && state.status === 'DICTATING') {
+      // Small delay to let iOS audio session switch from playback to record
+      setTimeout(function () {
+        startDictationForWord(wordId);
+      }, 300);
+    }
+  });
+
+  // ------------------------------------------------------------------
+  // Speech recognition: Web Speech API for dictation answers
+  // ------------------------------------------------------------------
+  var speechController;
+  try {
+    speechController = new window.SpeechController();
+    // Probe browser support immediately after construction
+    speechController.init();  // Detects SpeechRecognition or webkitSpeechRecognition
+  } catch (speechErr) {
+    console.error('[app] SpeechController initialization failed:', speechErr);
+    // Non-critical: dictation will work but without answer checking
+  }
+  if (speechController) {
+    // Wire speech recognition callbacks
+    speechController.onResult(handleDictationResult);
+    speechController.onError(handleDictationError);
+    console.log('[app] SpeechController supported:', speechController.supported);
+  }
+
+  // Dictation loop state
+  var dictationRatings = {};      // word → rating ("good"/"again")
+  var pendingAnswerWordId = null; // word waiting for speech recognition
+  var feedbackTimer = null;       // timer for feedback display delay
+  var sessionCategory = '';       // category from session_ready for language detection
+
   // ------------------------------------------------------------------
   // WebSocket client: control frames dispatch into the state manager
   // ------------------------------------------------------------------
@@ -140,6 +181,18 @@
     setConnectionState('failed');
     return;
   }
+
+  // Capture session category for dictation language detection. session_ready
+  // is a known control type dispatched inside handleControlFrame, so it never
+  // reaches handleMessage — wrap the dispatcher to observe it first. The
+  // backend does not yet send a category field; this defaults gracefully.
+  var originalHandleControlFrame = wsClient.handleControlFrame.bind(wsClient);
+  wsClient.handleControlFrame = function (payload) {
+    if (payload && payload.type === 'session_ready') {
+      sessionCategory = payload.category || '';
+    }
+    originalHandleControlFrame(payload);
+  };
 
   // ------------------------------------------------------------------
   // Session button: subscribes to the state manager for its visual states
@@ -202,6 +255,34 @@
   }
 
   // ------------------------------------------------------------------
+  // Dictation feedback: recording indicator + per-word judgment
+  // ------------------------------------------------------------------
+  var feedbackHost = document.getElementById('dictation-feedback-container');
+  var feedbackSection = document.getElementById('dictationFeedback');
+  if (feedbackHost) {
+    try {
+      var dictationFeedback = new window.DictationFeedback(feedbackHost, stateManager);
+      stateManager.subscribe(function (state) {
+        try {
+          dictationFeedback.update(state);
+          // Show feedback section during dictation
+          if (feedbackSection) {
+            if (state.dictationState && state.sessionActive) {
+              feedbackSection.removeAttribute('hidden');
+            } else {
+              feedbackSection.setAttribute('hidden', '');
+            }
+          }
+        } catch (fbErr) {
+          console.error('[app] dictation feedback update error:', fbErr);
+        }
+      });
+    } catch (fbInitErr) {
+      console.error('[app] DictationFeedback initialization failed:', fbInitErr);
+    }
+  }
+
+  // ------------------------------------------------------------------
   // Connection indicator: also driven from the state manager
   // ------------------------------------------------------------------
   stateManager.subscribe(function (state) {
@@ -209,9 +290,48 @@
   });
 
   // Expose for console debugging and cross-script coupling (Plan 08-04 Task 2).
-  window.__app = { stateManager: stateManager, wsClient: wsClient, audioController: audioController };
+  window.__app = { stateManager: stateManager, wsClient: wsClient, audioController: audioController, speechController: speechController };
   // Expose audioController globally for websocket-client.js access (Plan 08-04 Task 2).
   window.audioController = audioController;
+  window.speechController = speechController;
+
+  // ------------------------------------------------------------------
+  // Auto-submit ratings when entering WAITING_PARENT + reset dictation
+  // state on session end.
+  //
+  // NOTE: setState() notifies subscribers unconditionally (no change
+  // detection), so this handler MUST NOT call setState on every pass or
+  // it will recurse infinitely. The needsReset dirty-check below makes
+  // the reset path fire at most once per session end.
+  // ------------------------------------------------------------------
+  stateManager.subscribe(function (state) {
+    if (state.status === 'WAITING_PARENT' && Object.keys(dictationRatings).length > 0) {
+      submitSessionRatings();
+    }
+    // Reset dictation state on session end
+    if (!state.sessionActive) {
+      var needsReset = Object.keys(dictationRatings).length > 0 ||
+        pendingAnswerWordId !== null ||
+        feedbackTimer !== null ||
+        !!state.dictationState ||
+        state.lastAnswerCorrect !== null && state.lastAnswerCorrect !== undefined ||
+        state.lastExpected !== null && state.lastExpected !== undefined ||
+        state.lastHeard !== null && state.lastHeard !== undefined;
+      if (!needsReset) {
+        return;
+      }
+      dictationRatings = {};
+      pendingAnswerWordId = null;
+      if (feedbackTimer) {
+        clearTimeout(feedbackTimer);
+        feedbackTimer = null;
+      }
+      if (speechController) {
+        speechController.stopListening();
+      }
+      stateManager.setState({ dictationState: null, lastAnswerCorrect: null, lastExpected: null, lastHeard: null });
+    }
+  });
 
   // ------------------------------------------------------------------
   // Handlers
@@ -239,6 +359,21 @@
       }
       return;
     }
+    // Unknown control frames forwarded by handleControlFrame arrive here
+    // pre-parsed; legacy text frames may still be raw JSON strings.
+    var parsed = data;
+    if (typeof data === 'string') {
+      try {
+        parsed = JSON.parse(data);
+      } catch (e) { /* not JSON, ignore */ }
+    }
+    if (parsed && typeof parsed === 'object') {
+      // Dictation judgment result — drive the closed-loop feedback UI.
+      if (parsed.type === 'answer_result') {
+        handleAnswerResult(parsed);
+        return;
+      }
+    }
     // Forwarded control frame (unknown type) or legacy path — log it.
     console.debug('[app] control message received:', data);
   }
@@ -261,6 +396,140 @@
   function handleStateChange(newState) {
     console.log('[app] WebSocket state:', newState);
     stateManager.setState({ connectionStatus: newState });
+  }
+
+  // ------------------------------------------------------------------
+  // Dictation loop: playback end → recognition → judgment → next word
+  // ------------------------------------------------------------------
+
+  /**
+   * Start the dictation loop for a word. Called when word audio finishes playing.
+   * Begins speech recognition for the current word.
+   */
+  function startDictationForWord(wordId) {
+    if (!speechController || !speechController.supported) {
+      console.warn('[dictation] speech not supported — auto-advancing');
+      // Skip to next word after a brief delay
+      feedbackTimer = setTimeout(function () {
+        sendNextWord(wordId);
+      }, 1500);
+      return;
+    }
+
+    // Determine language from session category
+    var lang = (sessionCategory === 'chinese' || sessionCategory === 'zh') ? 'zh-CN' : 'en-US';
+    speechController.init(lang);
+
+    // Show recording indicator
+    stateManager.setState({
+      dictationState: 'listening',
+      currentAnswerWordId: wordId
+    });
+
+    speechController.startListening(wordId);
+  }
+
+  /**
+   * Handle speech recognition result. Compare and show feedback.
+   */
+  function handleDictationResult(wordId, transcript) {
+    pendingAnswerWordId = null;
+    // Send submit_answer to server for judgment
+    if (wsClient && typeof wsClient.send === 'function') {
+      wsClient.send({
+        type: 'submit_answer',
+        params: { word_id: wordId, transcript: transcript }
+      });
+    }
+  }
+
+  /**
+   * Handle answer_result from server. Show feedback, then advance.
+   */
+  function handleAnswerResult(data) {
+    var wordId = data.word_id;
+    var correct = data.correct;
+    var expected = data.expected;
+    var heard = data.heard;
+    var rating = data.rating;
+
+    // Store rating for batch submit_review at end
+    dictationRatings[expected] = rating;
+
+    // Show feedback
+    stateManager.setState({
+      dictationState: correct ? 'correct' : 'incorrect',
+      lastAnswerCorrect: correct,
+      lastExpected: expected,
+      lastHeard: heard
+    });
+
+    // Differential delay: correct 1.2s, incorrect 2.5s (time to read correct answer)
+    var delay = correct ? 1200 : 2500;
+    feedbackTimer = setTimeout(function () {
+      stateManager.setState({ dictationState: null, lastAnswerCorrect: null, lastExpected: null, lastHeard: null });
+      sendNextWord(wordId);
+    }, delay);
+  }
+
+  /**
+   * Handle speech recognition error. Show skip feedback, then advance.
+   */
+  function handleDictationError(wordId, errorType) {
+    console.warn('[dictation] recognition error: ' + errorType + ' for word ' + wordId);
+    pendingAnswerWordId = null;
+
+    var messages = {
+      'no-speech': '没听到声音',
+      'not-allowed': '麦克风权限被拒绝',
+      'timeout': '录音超时',
+      'network': '网络错误',
+      'audio-capture': '麦克风不可用',
+      'start-failed': '录音启动失败',
+      'not-initialized': '语音识别未初始化'
+    };
+    var msg = messages[errorType] || '识别失败';
+
+    stateManager.setState({
+      dictationState: 'skipped',
+      lastHeard: msg
+    });
+
+    // No rating for skipped words — advance after delay
+    feedbackTimer = setTimeout(function () {
+      stateManager.setState({ dictationState: null, lastHeard: null });
+      sendNextWord(wordId);
+    }, 2500);
+  }
+
+  /**
+   * Send next_word to advance the session.
+   */
+  function sendNextWord(wordId) {
+    if (wsClient && typeof wsClient.send === 'function') {
+      wsClient.send({
+        type: 'next_word',
+        params: { word_id: wordId }
+      });
+    }
+  }
+
+  /**
+   * Submit accumulated ratings to FSRS when session completes.
+   */
+  function submitSessionRatings() {
+    if (Object.keys(dictationRatings).length === 0) {
+      console.log('[dictation] no ratings to submit');
+      return;
+    }
+    if (wsClient && typeof wsClient.send === 'function') {
+      console.log('[dictation] submitting ' + Object.keys(dictationRatings).length + ' ratings');
+      wsClient.send({
+        type: 'submit_review',
+        params: { ratings: dictationRatings, category: sessionCategory }
+      });
+    }
+    dictationRatings = {};
   }
 
   // ------------------------------------------------------------------

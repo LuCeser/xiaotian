@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html>
+<head><title>Multi-Word Audio Debug</title></head>
+<body>
+<h1>Multi-Word Audio Debug</h1>
+<button id="startBtn" style="font-size:24px;padding:12px 24px;margin:16px 0;">▶ Start Session</button>
+<div id="log" style="font-family:monospace;font-size:14px;white-space:pre-wrap;"></div>
+<script>
+var logEl = document.getElementById('log');
+function log(msg) {
+  var t = new Date().toISOString().substring(11,23);
+  logEl.textContent += '[' + t + '] ' + msg + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---- Minimal FrameCodec (copy from frame-codec.js) ----
+var HEADER_SIZE = 16;
+function crc16ccitt(bytes) {
+  var crc = 0xFFFF;
+  for (var i = 0; i < bytes.length; i++) {
+    crc ^= (bytes[i] << 8);
+    for (var j = 0; j < 8; j++) {
+      crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xFFFF : (crc << 1) & 0xFFFF;
+    }
+  }
+  return crc & 0xFFFF;
+}
+function encodeFrame(msgType, seq, payload) {
+  var buf = new ArrayBuffer(16 + payload.length);
+  var v = new DataView(buf);
+  var b = new Uint8Array(buf);
+  b[0] = 0x01; b[1] = msgType;
+  v.setUint32(2, seq, false);
+  v.setUint16(10, payload.length, false);
+  v.setUint16(14, crc16ccitt(b.subarray(0,14)), false);
+  new Uint8Array(buf).set(payload, 16);
+  return buf;
+}
+function decodeFrame(buf) {
+  var b = new Uint8Array(buf);
+  var v = new DataView(buf);
+  return { msgType: b[1], seq: v.getUint32(2, false), payloadLen: v.getUint16(10, false), payload: b.slice(16) };
+}
+
+// ---- Audio playback ----
+var audioCtx = null;
+var scheduledTime = 0;
+var lastSeq = 0;
+var pendingPcm = {};  // wordId -> [Uint8Array]
+
+// AudioContext MUST be created inside a user gesture (iOS D-03).
+// The Start button click handler creates it.
+function unlockAudio() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 16000});
+  // resume() must be called inside the same gesture handler.
+  // On iOS it's async but the gesture is still active during the microtask.
+  audioCtx.resume();
+  var buf = audioCtx.createBuffer(1, 1, 16000);
+  buf.getChannelData(0)[0] = 0;
+  var src = audioCtx.createBufferSource();
+  src.buffer = buf; src.connect(audioCtx.destination); src.start(0);
+  log('AudioContext unlocked: state=' + audioCtx.state + ' sampleRate=' + audioCtx.sampleRate);
+}
+
+function playWord(wordId) {
+  var chunks = pendingPcm[wordId];
+  if (!chunks || chunks.length === 0) {
+    log('WARNING: playWord("' + wordId + '") — no PCM accumulated!');
+    return;
+  }
+
+  // If suspended, resume first then play
+  if (audioCtx && audioCtx.state === 'suspended') {
+    log('AudioContext suspended — resuming for "' + wordId + '"...');
+    audioCtx.resume().then(function() {
+      log('Resume succeeded, now playing "' + wordId + '"');
+      doPlay(wordId, chunks);
+    }).catch(function(e) {
+      log('Resume FAILED: ' + e);
+    });
+    return;
+  }
+
+  if (!audioCtx || audioCtx.state !== 'running') {
+    log('WARNING: playWord("' + wordId + '") — AudioContext not running: ' + (audioCtx ? audioCtx.state : 'null'));
+    return;
+  }
+
+  doPlay(wordId, chunks);
+}
+
+function doPlay(wordId, chunks) {
+  var totalLen = chunks.reduce(function(s,c){return s+c.length}, 0);
+  var pcm = new Uint8Array(totalLen);
+  var off = 0;
+  for (var i = 0; i < chunks.length; i++) { pcm.set(chunks[i], off); off += chunks[i].length; }
+  delete pendingPcm[wordId];
+
+  var numSamples = pcm.length / 2;
+  var abuf = audioCtx.createBuffer(1, numSamples, 16000);
+  var view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  var chan = abuf.getChannelData(0);
+  for (var i = 0; i < numSamples; i++) { chan[i] = view.getInt16(i*2, true) / 32768; }
+
+  if (scheduledTime < audioCtx.currentTime) scheduledTime = audioCtx.currentTime;
+  var src = audioCtx.createBufferSource();
+  src.buffer = abuf; src.connect(audioCtx.destination);
+  src.start(scheduledTime);
+  var startTime = scheduledTime;
+  scheduledTime += abuf.duration;
+  log('PLAY "' + wordId + '": ' + numSamples + ' samples, ' + (abuf.duration*1000).toFixed(0) + 'ms, scheduled at ' + startTime.toFixed(3) + 's');
+}
+
+// ---- WebSocket ----
+var ws = null;
+var words = [];
+var currentWordId = null;
+var wordCompleteCount = 0;
+var audioFrameCount = 0;
+
+function connect() {
+  var url = 'ws://' + location.host + '/ws';
+  log('Connecting to ' + url + '...');
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = function() {
+    log('Connected!');
+    unlockAudio();
+    // Send start_session
+    var payload = new TextEncoder().encode(JSON.stringify({type:'start_session',params:{limit:3}}));
+    ws.send(encodeFrame(0x02, 1, payload));
+    log('Sent start_session(limit=3)');
+  };
+
+  ws.onmessage = function(ev) {
+    if (!(ev.data instanceof ArrayBuffer)) { log('TEXT: ' + ev.data); return; }
+    var frame = decodeFrame(ev.data);
+
+    if (frame.msgType === 0x01) {
+      // Audio frame
+      audioFrameCount++;
+      var seq = frame.seq;
+      var payload = frame.payload;
+
+      // Dedup (same as AudioController)
+      if (seq <= lastSeq) return;
+      lastSeq = seq;
+
+      if (!currentWordId) {
+        if (audioFrameCount <= 3) log('AUDIO #' + audioFrameCount + ' seq=' + seq + ' — NO currentWordId, SKIPPED');
+        return;
+      }
+
+      if (!pendingPcm[currentWordId]) pendingPcm[currentWordId] = [];
+      pendingPcm[currentWordId].push(new Uint8Array(payload));
+
+      if (audioFrameCount <= 3 || audioFrameCount % 50 === 0) {
+        log('AUDIO #' + audioFrameCount + ' seq=' + seq + ' → ' + currentWordId + ' (chunks: ' + pendingPcm[currentWordId].length + ')');
+      }
+      return;
+    }
+
+    // Control frame
+    var jsonStr = new TextDecoder().decode(frame.payload);
+    var ctrl;
+    try { ctrl = JSON.parse(jsonStr); } catch(e) { log('PARSE ERROR: ' + jsonStr); return; }
+
+    log('CTRL: ' + ctrl.type + (ctrl.word_id ? ' word_id=' + ctrl.word_id : ''));
+
+    if (ctrl.type === 'session_ready') {
+      words = ctrl.words || [];
+      log('Session ready: words=' + JSON.stringify(words));
+      currentWordId = words[0] || null;
+      log('currentWordId set to: ' + currentWordId);
+      // Send play_word
+      var p = new TextEncoder().encode(JSON.stringify({type:'play_word',params:{word_id:currentWordId}}));
+      ws.send(encodeFrame(0x02, 2, p));
+      log('Sent play_word(' + currentWordId + ')');
+    }
+    else if (ctrl.type === 'word_complete') {
+      wordCompleteCount++;
+      var wid = ctrl.word_id;
+      log('Word complete #' + wordCompleteCount + ': "' + wid + '" (audioFrames=' + audioFrameCount + ')');
+
+      // Play the completed word
+      playWord(wid);
+
+      // Advance to next word
+      if (wordCompleteCount < words.length) {
+        currentWordId = words[wordCompleteCount];
+        log('currentWordId updated to: ' + currentWordId);
+        var p = new TextEncoder().encode(JSON.stringify({type:'next_word',params:{word_id:currentWordId}}));
+        ws.send(encodeFrame(0x02, wordCompleteCount+2, p));
+        log('Sent next_word(' + currentWordId + ')');
+      } else {
+        log('ALL WORDS DONE!');
+        log('Total audio frames: ' + audioFrameCount);
+        log('Word complete events: ' + wordCompleteCount);
+      }
+    }
+    else if (ctrl.type === 'session_complete') {
+      log('SESSION COMPLETE');
+    }
+    else if (ctrl.type === 'error') {
+      log('ERROR: ' + ctrl.message);
+    }
+  };
+
+  ws.onerror = function(e) { log('WS ERROR: ' + e); };
+  ws.onclose = function(e) { log('WS CLOSED: code=' + e.code); };
+}
+
+// ---- Start button (user gesture required for AudioContext on iOS) ----
+document.getElementById('startBtn').addEventListener('click', function() {
+  this.disabled = true;
+  this.textContent = 'Running...';
+  unlockAudio();
+  connect();
+});
+
+// Do NOT auto-connect — unlockAudio() must run inside the click handler.
+</script>
+</body>
+</html>

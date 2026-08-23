@@ -474,9 +474,12 @@
         lastError: null
       });
 
-      // CR-3 fix: Send play_word control frame to start streaming audio for first word
+      // CR-3 fix: Send play_word control frame to start streaming audio for first word.
+      // Backend controlFramePayload expects {"type","params":{...}} — word_id must be
+      // nested under params or the router forwards an empty params object and the
+      // handler rejects it with "invalid play_word params".
       if (firstWordId) {
-        this.send({ type: 'play_word', word_id: firstWordId });
+        this.send({ type: 'play_word', params: { word_id: firstWordId } });
       }
     }
 
@@ -539,13 +542,17 @@
         window.audioController.playWordComplete(wordId);
       }
 
-      // CR-3 fix: Advance to next word and send next_word control frame
-      var words = snapshot.words;
-      var nextWordIndex = snapshot.completedWords; // 0-based, already incremented above
+      // CR-3 fix: Advance to next word and send next_word control frame.
+      // Same params-nesting requirement as play_word above.
+      // NOTE: read completedWords from live state (not the stale snapshot)
+      // because setState({completedWords: next}) above already updated it.
+      var words = this.stateManager.getState().words;
+      var completedNow = this.stateManager.getState().completedWords;
+      var nextWordIndex = completedNow; // 0-based index of the next word to play
       if (nextWordIndex < words.length) {
         var nextWordId = words[nextWordIndex];
         this.stateManager.setState({ currentWordId: nextWordId });
-        this.send({ type: 'next_word', word_id: nextWordId });
+        this.send({ type: 'next_word', params: { word_id: nextWordId } });
       }
     }
 
