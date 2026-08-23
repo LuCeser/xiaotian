@@ -341,6 +341,9 @@ type SessionTimeoutConfig struct {
 	ListeningStateTimeout time.Duration `json:"listeningStateTimeout" mapstructure:"listeningStateTimeout"`
 	// DictatingStateTimeout bounds the DICTATING state (default 30s). MUST be > 0.
 	DictatingStateTimeout time.Duration `json:"dictatingStateTimeout" mapstructure:"dictatingStateTimeout"`
+	// PausedStateTimeout bounds the PAUSED state (default 5m; Ticket 02
+	// DICT-07 — the student controls when to resume). MUST be > 0.
+	PausedStateTimeout time.Duration `json:"pausedStateTimeout" mapstructure:"pausedStateTimeout"`
 	// WaitingParentStateTimeout bounds the WAITING_PARENT state (default 30m). MUST be > 0.
 	WaitingParentStateTimeout time.Duration `json:"waitingParentStateTimeout" mapstructure:"waitingParentStateTimeout"`
 	// FeedbackStateTimeout bounds the FEEDBACK state (default 5m). MUST be > 0.
@@ -363,6 +366,10 @@ func (c SessionTimeoutConfig) Validate() error {
 	if c.DictatingStateTimeout <= 0 {
 		return errors.Wrap(ErrConfigInvalid,
 			fmt.Sprintf("session.dictatingStateTimeout must be > 0, got %v", c.DictatingStateTimeout))
+	}
+	if c.PausedStateTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("session.pausedStateTimeout must be > 0, got %v", c.PausedStateTimeout))
 	}
 	if c.WaitingParentStateTimeout <= 0 {
 		return errors.Wrap(ErrConfigInvalid,
@@ -599,6 +606,7 @@ func DefaultConfig() Config {
 			IdleStateTimeout:          30 * time.Minute,
 			ListeningStateTimeout:     30 * time.Second,
 			DictatingStateTimeout:     30 * time.Second,
+			PausedStateTimeout:        5 * time.Minute,
 			WaitingParentStateTimeout: 30 * time.Minute,
 			FeedbackStateTimeout:      5 * time.Minute,
 		},
@@ -1092,6 +1100,7 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"sessionTimeout.idleStateTimeout",
 		"sessionTimeout.listeningStateTimeout",
 		"sessionTimeout.dictatingStateTimeout",
+		"sessionTimeout.pausedStateTimeout",
 		"sessionTimeout.waitingParentStateTimeout",
 		"sessionTimeout.feedbackStateTimeout",
 		// Database path (Phase 4).
