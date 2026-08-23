@@ -3,6 +3,7 @@ package session_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
+	"github.com/xiaotian/home-tutor-agent/pkg/tts"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
@@ -487,4 +489,195 @@ func TestExit_NoRatingCommit(t *testing.T) {
 	if fsrsSvc.UpdateRatingsCount() != 0 {
 		t.Errorf("UpdateRatingsCount = %d, want 0 (D-11/D-12 no partial-progress commit)", fsrsSvc.UpdateRatingsCount())
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 260823-sdx: stale WordComplete race (repeat/next_word interleave)
+// ---------------------------------------------------------------------------
+
+// gatedStreamer is a session.SessionStreamer fake whose StreamWord calls block
+// on a per-call gate until the test releases them (260823-sdx). It deliberately
+// does NOT select on ctx.Done(): that reproduces the worst case where cancel
+// has already been called on an in-flight stream but the stream still finishes
+// and its goroutine pushes a WordComplete event — the stale-event race under
+// test. Without that "ignore the cancellation" behavior the race cannot be
+// made deterministic.
+type gatedStreamer struct {
+	mu       sync.Mutex
+	words    []string        // wordID of each StreamWord call, in call order
+	gates    []chan struct{} // gate[i] blocks call i until closed
+	returned []chan struct{} // returned[i] is closed when call i returns
+	released []bool          // makes release idempotent (cleanup re-releases)
+}
+
+func (g *gatedStreamer) StreamWord(ctx context.Context, client tts.Sender, sessionID string, wordID string, startSeq uint32) error {
+	g.mu.Lock()
+	gate := make(chan struct{})
+	ret := make(chan struct{})
+	g.words = append(g.words, wordID)
+	g.gates = append(g.gates, gate)
+	g.returned = append(g.returned, ret)
+	g.released = append(g.released, false)
+	g.mu.Unlock()
+
+	// Deliberately NOT selecting on ctx.Done() — see the type comment. An
+	// already-cancelled stream that still completes and pushes WordComplete is
+	// exactly the timing this fake must reproduce.
+	<-gate
+	close(ret)
+	return nil
+}
+
+// ClearSeqCounter satisfies the SessionStreamer interface (D-11 teardown hook).
+// No-op for tests.
+func (g *gatedStreamer) ClearSeqCounter(sessionID string) {
+	// no-op
+}
+
+// release closes the i-th call's gate, letting that StreamWord call return.
+// Idempotent: closing an already-released gate is a no-op, so t.Cleanup can
+// safely re-release every gate after the test released some of them.
+func (g *gatedStreamer) release(i int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if i >= 0 && i < len(g.gates) && !g.released[i] {
+		g.released[i] = true
+		close(g.gates[i])
+	}
+}
+
+// waitReturned blocks until the i-th StreamWord call has returned, failing the
+// test after a 2s timeout.
+func (g *gatedStreamer) waitReturned(t *testing.T, i int) {
+	t.Helper()
+	g.mu.Lock()
+	ret := g.returned[i]
+	g.mu.Unlock()
+	select {
+	case <-ret:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("waitReturned: StreamWord call %d did not return within 2s", i)
+	}
+}
+
+// calls returns how many StreamWord calls have been registered so far.
+func (g *gatedStreamer) calls() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.words)
+}
+
+// wordAt returns the wordID of the i-th StreamWord call.
+func (g *gatedStreamer) wordAt(i int) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.words[i]
+}
+
+var _ session.SessionStreamer = (*gatedStreamer)(nil)
+
+// waitForStreamCalls polls the gatedStreamer until at least n StreamWord calls
+// have been registered (2ms interval, 2s timeout). Needed because repeat does
+// not change the observable state — the spawn side effect is the only signal.
+func waitForStreamCalls(t *testing.T, g *gatedStreamer, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if g.calls() >= n {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waitForStreamCalls: %d StreamWord calls registered, want >= %d within 2s", g.calls(), n)
+}
+
+// TestEventLoop_Repeat_StaleWordCompleteDropped reproduces the 260823-sdx
+// race: in DICTATING, repeat spawns a replacement stream (gen2); next_word then
+// supersedes it again (gen3) and cancels gen2 — but the cancelled gen2 still
+// completes and pushes a stale WordComplete. The event loop must DROP that
+// stale event (session stays LISTENING) instead of letting it prematurely drive
+// LISTENING→DICTATING, which would skip the new word's listening phase.
+//
+// NOTE: the assertion is deliberately on the mid-sequence state (after the
+// stale event, before releasing gen3) — the FINAL state is DICTATING with or
+// without the fix (a WordComplete arriving while already DICTATING is an
+// invalid transition and gets dropped), so only the intermediate state
+// discriminates.
+func TestEventLoop_Repeat_StaleWordCompleteDropped(t *testing.T) {
+	gs := &gatedStreamer{}
+	hub := &fakeHub{}
+	twoCards := []pybridge.DueCard{{ID: 1, Word: "apple"}, {ID: 2, Word: "banana"}}
+	fsrsSvc := &fakeFSRSService{dueCards: twoCards}
+	gen := &fakeTTSGenerator{}
+	repo := newFakeSessionRepository()
+
+	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, gs, repo, nil, hub, nil, multiWordTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	// Release every registered gate on cleanup so blocked StreamWord
+	// goroutines don't pile up if the test fails early.
+	t.Cleanup(func() {
+		for i := 0; i < gs.calls(); i++ {
+			gs.release(i)
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	// Step 1: play_word → LISTENING spawns gen1 (apple), blocked on its gate.
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "play_word"})
+	waitForStreamCalls(t, gs, 1)
+	gs.release(0)
+	gs.waitReturned(t, 0)
+	waitForState(t, s, database.StateDictating, 2*time.Second)
+
+	// Step 2: repeat in DICTATING spawns gen2 (same word), blocked on its gate.
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "repeat"})
+	waitForStreamCalls(t, gs, 2)
+
+	// Step 3: next_word → LISTENING (wordIndex=1) spawns gen3 (banana) and
+	// cancels gen2 — which the fake deliberately ignores, so gen2 stays
+	// blocked on its own gate with an already-cancelled context.
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "next_word"})
+	waitForState(t, s, database.StateListening, 2*time.Second)
+	waitForStreamCalls(t, gs, 3)
+
+	// Step 4: let the cancelled gen2 finish — its goroutine pushes a stale
+	// WordComplete onto the events channel.
+	gs.release(1)
+	gs.waitReturned(t, 1)
+	time.Sleep(100 * time.Millisecond) // let the event loop consume the stale event
+
+	// Step 5 (discriminating assertion): the stale WordComplete(gen2) must be
+	// dropped — still LISTENING, still on the second word.
+	if got, want := s.State(), database.StateListening; got != want {
+		t.Errorf("stale WordComplete drove a transition: state=%v, want=%v", got, want)
+	}
+	if got, want := s.CurrentWord(), "banana"; got != want {
+		t.Errorf("CurrentWord() = %q, want %q (stale event must not advance the word)", got, want)
+	}
+
+	// Step 6: the current-generation WordComplete(gen3) drives
+	// LISTENING→DICTATING normally.
+	gs.release(2)
+	gs.waitReturned(t, 2)
+	waitForState(t, s, database.StateDictating, 2*time.Second)
+
+	// Exactly three streams were spawned: apple (play), apple (repeat),
+	// banana (next_word) — the stale gen2 must not have triggered a re-spawn.
+	if got := gs.calls(); got != 3 {
+		t.Errorf("StreamWord calls = %d, want 3", got)
+	}
+	for i, want := range []string{"apple", "apple", "banana"} {
+		if got := gs.wordAt(i); got != want {
+			t.Errorf("wordAt(%d) = %q, want %q", i, got, want)
+		}
+	}
+
+	cancel()
+	waitDone(t, s, 2*time.Second)
 }

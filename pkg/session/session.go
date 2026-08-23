@@ -96,6 +96,7 @@ type Session struct {
 	cancel       context.CancelFunc
 	done         chan struct{}      // closed when run() exits (liveness signal for tests/sweeper)
 	streamCancel context.CancelFunc // cancels in-flight StreamWord (set by spawnStreamWord in the loop goroutine)
+	streamGen    uint64             // spawnStreamWord's monotonically increasing stream generation; read/written ONLY on the event-loop goroutine (D-02 single-writer, same as wordQueue/wordIndex — no lock). Spawned goroutines only ever use the by-value copy captured via the go statement.
 	onExit       func()             // set by Manager.NewSession for map cleanup
 }
 
@@ -318,6 +319,25 @@ func (s *Session) run(ctx context.Context) {
 			if ev.Type == EventTimeout || ev.Type == EventCancel {
 				return
 			}
+			// 260823-sdx: drop stale WordComplete events. A superseded stream
+			// (cancelled by a repeat/resume/next_word re-spawn) may still
+			// complete and push its event; its generation no longer matches
+			// s.streamGen, so it is a stale artifact of an expected race —
+			// skip it rather than let it drive the FSM at the wrong moment
+			// (e.g. cutting a new word's LISTENING short into DICTATING).
+			// Current-generation events are unaffected, including a
+			// WordComplete arriving while already DICTATING (invalid
+			// transition, dropped downstream by handleEvent as before).
+			if ev.Type == EventWordComplete && ev.StreamGen != s.streamGen {
+				s.logger.Debug("session: dropping stale word_complete event",
+					infra.F("component", "session"),
+					infra.F("session_id", s.id),
+					infra.F("word_id", ev.WordID),
+					infra.F("event_stream_gen", ev.StreamGen),
+					infra.F("current_stream_gen", s.streamGen),
+				)
+				continue
+			}
 			s.handleEvent(ev)
 
 		// Per-state deadline timer (D-08). Go 1.23+ GC-safe per Pitfall 2.
@@ -488,6 +508,14 @@ func (s *Session) spawnStreamWord() {
 	streamCtx, cancel := context.WithCancel(s.runCtx)
 	s.streamCancel = cancel
 
+	// 260823-sdx: stamp this spawn with a fresh stream generation. A superseded
+	// stream (cancelled here or by a later re-spawn) may still complete and push
+	// its WordComplete; the event loop drops events whose generation no longer
+	// matches s.streamGen. This field is only touched on the event-loop
+	// goroutine; the goroutine below only uses the by-value copy `gen`.
+	s.streamGen++
+	gen := s.streamGen
+
 	go func() {
 		defer cancel()
 		err := s.streamer.StreamWord(streamCtx, s.client, s.id, wordID, 0)
@@ -502,7 +530,7 @@ func (s *Session) spawnStreamWord() {
 		// Push WordComplete regardless of error — the event loop decides the
 		// next state. A stream error does NOT terminate the session.
 		select {
-		case s.events <- SessionEvent{Type: EventWordComplete, WordID: wordID}:
+		case s.events <- SessionEvent{Type: EventWordComplete, WordID: wordID, StreamGen: gen}:
 		case <-s.runCtx.Done():
 		}
 	}()

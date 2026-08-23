@@ -74,12 +74,18 @@ func (e EventType) String() string {
 // SessionEvent is the event pushed onto a Session's events channel. WordID
 // carries the target word for EventControlFrame (play_word) and
 // EventWordComplete; ControlType carries the verb ("play_word" / "next_word")
-// for EventControlFrame; Payload is the raw JSON params if any.
+// for EventControlFrame; Payload is the raw JSON params if any. StreamGen
+// carries the stream generation stamped by spawnStreamWord; it is meaningful
+// only for EventWordComplete (a system-internal event, never client input —
+// client frames cannot inject this field). The event loop compares it against
+// the Session's current generation to drop stale WordComplete events pushed by
+// superseded (cancelled but still completing) streams.
 type SessionEvent struct {
 	Type        EventType
 	WordID      string
 	ControlType string
 	Payload     json.RawMessage
+	StreamGen   uint64
 }
 
 // State is a convenience alias for database.SessionState so the FSM and event
