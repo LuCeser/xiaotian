@@ -17,6 +17,8 @@ package database
 // Stored as TEXT in the database. The Phase 7 lifecycle is:
 //
 //	IDLE → LISTENING → DICTATING → WAITING_PARENT → FEEDBACK → IDLE
+//
+// Ticket 02 adds PAUSED: DICTATING ↔ PAUSED (student-driven pause/resume).
 type SessionState string
 
 const (
@@ -26,6 +28,9 @@ const (
 	StateListening SessionState = "LISTENING"
 	// StateDictating means the student is speaking (recording audio input).
 	StateDictating SessionState = "DICTATING"
+	// StatePaused means the student has paused dictation. The session can
+	// resume from the current word or replay it.
+	StatePaused SessionState = "PAUSED"
 	// StateWaitingParent means the session is waiting for parent feedback.
 	StateWaitingParent SessionState = "WAITING_PARENT"
 	// StateFeedback means the system is delivering post-session feedback.

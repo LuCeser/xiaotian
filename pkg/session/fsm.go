@@ -37,6 +37,9 @@ func (s *Session) transition(ev SessionEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Track previous state for resume-from-pause detection in onTransition.
+	prevState := s.state
+
 	switch s.state {
 	case database.StateIdle:
 		switch ev.Type {
@@ -44,6 +47,7 @@ func (s *Session) transition(ev SessionEvent) error {
 			if ev.ControlType == "play_word" {
 				s.wordIndex = 0
 				s.state = database.StateListening
+				s.prevState = prevState
 				return nil
 			}
 		}
@@ -55,6 +59,7 @@ func (s *Session) transition(ev SessionEvent) error {
 			// channel (Plan 02) pushes WordComplete; the FSM advances to
 			// DICTATING.
 			s.state = database.StateDictating
+			s.prevState = prevState
 			return nil
 		case EventControlFrame:
 			if ev.ControlType == "play_word" {
@@ -66,15 +71,56 @@ func (s *Session) transition(ev SessionEvent) error {
 	case database.StateDictating:
 		switch ev.Type {
 		case EventControlFrame:
-			if ev.ControlType == "next_word" {
+			switch ev.ControlType {
+			case "next_word":
 				if s.wordIndex >= len(s.wordQueue)-1 {
 					// Last word exhausted → wait for parent review (D-12: no
 					// UpdateRatings call).
 					s.state = database.StateWaitingParent
+					s.prevState = prevState
 					return nil
 				}
 				s.wordIndex++
 				s.state = database.StateListening
+				s.prevState = prevState
+				return nil
+			case "pause":
+				// Ticket 02 DICT-07: student pauses dictation.
+				s.state = database.StatePaused
+				s.prevState = prevState
+				return nil
+			case "repeat":
+				// Ticket 02 DICT-07: replay current word audio, stay in DICTATING.
+				// Set repeatPending so onTransition re-spawns StreamWord.
+				s.repeatPending = true
+				return nil
+			}
+		}
+
+	case database.StatePaused:
+		switch ev.Type {
+		case EventControlFrame:
+			switch ev.ControlType {
+			case "resume":
+				// Ticket 02 DICT-07: resume from pause — return to DICTATING.
+				s.state = database.StateDictating
+				s.prevState = prevState
+				return nil
+			case "repeat":
+				// Ticket 02 DICT-07: replay current word while paused.
+				// Stay in PAUSED; set repeatPending for onTransition.
+				s.repeatPending = true
+				return nil
+			case "next_word":
+				// Ticket 02 DICT-07: skip word while paused.
+				if s.wordIndex >= len(s.wordQueue)-1 {
+					s.state = database.StateWaitingParent
+					s.prevState = prevState
+					return nil
+				}
+				s.wordIndex++
+				s.state = database.StateListening
+				s.prevState = prevState
 				return nil
 			}
 		}
@@ -83,6 +129,7 @@ func (s *Session) transition(ev SessionEvent) error {
 		switch ev.Type {
 		case EventParentReview:
 			s.state = database.StateFeedback
+			s.prevState = prevState
 			return nil
 		}
 

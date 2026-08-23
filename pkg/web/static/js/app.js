@@ -47,6 +47,10 @@
     return;
   }
 
+  // Ticket 02 DICT-07: DictationControls is optional — if it fails to load,
+  // the session still works without pause/resume/repeat buttons.
+  var hasDictationControls = !!window.DictationControls;
+
   // Plan 08-04 Task 4: global error handlers for production resilience
   window.addEventListener('error', function (event) {
     console.error('[app] Global error:', event.error || event.message);
@@ -251,6 +255,35 @@
     } catch (progressErr) {
       console.error('[app] ProgressDisplay initialization failed:', progressErr);
       // Non-critical: log and continue without progress display
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Dictation controls: pause/resume/repeat/next buttons (Ticket 02 DICT-07)
+  // ------------------------------------------------------------------
+  var controlsHost = document.getElementById('dictation-controls-container');
+  var controlsSection = document.getElementById('dictationControls');
+  if (controlsHost && hasDictationControls) {
+    try {
+      var dictationControls = new window.DictationControls(controlsHost, stateManager, wsClient);
+      stateManager.subscribe(function (state) {
+        try {
+          dictationControls.update(state);
+          // Show controls section during active dictation
+          if (controlsSection) {
+            if (state.sessionActive && (state.status === 'DICTATING' || state.status === 'LISTENING' || state.status === 'PAUSED')) {
+              controlsSection.removeAttribute('hidden');
+            } else {
+              controlsSection.setAttribute('hidden', '');
+            }
+          }
+        } catch (ctrlUpdateErr) {
+          console.error('[app] dictation controls update error:', ctrlUpdateErr);
+        }
+      });
+    } catch (ctrlErr) {
+      console.error('[app] DictationControls initialization failed:', ctrlErr);
+      // Non-critical: session works without pause/resume/repeat
     }
   }
 

@@ -83,6 +83,16 @@
         <div id="progress-display-container" role="status" aria-live="polite" aria-atomic="true"></div>
       </section>
 
+      <!--
+        Dictation controls: pause/resume, repeat, next word buttons
+        (Ticket 02, DICT-07). Visible only during active dictation.
+      -->
+      <section class="dictation-controls-section" id="dictationControls"
+               role="region" aria-labelledby="dictationControlsTitle" hidden>
+        <h2 id="dictationControlsTitle" class="visually-hidden">听写控制</h2>
+        <div id="dictation-controls-container"></div>
+      </section>
+
       <!-- Dictation feedback section: shows recording/wrong/correct per word -->
       <section class="dictation-feedback-section" id="dictationFeedback"
                role="region" aria-labelledby="dictationFeedbackTitle" hidden>

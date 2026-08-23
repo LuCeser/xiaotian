@@ -67,11 +67,13 @@ type Session struct {
 	// --- FSM state (protected by mu for cross-goroutine reads) ---
 	mu               sync.RWMutex
 	state            database.SessionState
+	prevState        database.SessionState // Ticket 02: track previous state for resume detection
 	wordQueue        []pybridge.DueCard
 	wordIndex        int
 	deadline         time.Time
 	currentWordID    string    // Track current word for progress frames (08-06)
 	sessionStartTime time.Time // Track session start time for duration calculation (08-06)
+	repeatPending    bool      // Ticket 02 DICT-07: flag set by transition, cleared by onTransition
 
 	// --- FSRS lock scope (captured at NewSession, replayed at exit — Pitfall 4) ---
 	lockCategory string
@@ -322,6 +324,14 @@ func (s *Session) run(ctx context.Context) {
 		// time.After is re-evaluated on every loop iteration so an onTransition
 		// deadline update is reflected immediately.
 		case <-time.After(time.Until(s.Deadline())):
+			// PAUSED state: no timeout — the student controls when to resume.
+			// Reset the deadline so the timer doesn't keep firing.
+			if s.State() == database.StatePaused {
+				s.mu.Lock()
+				s.deadline = time.Now().Add(5 * time.Minute)
+				s.mu.Unlock()
+				continue
+			}
 			// DICTATING timeout means the student didn't answer in time: skip
 			// the word by pushing a synthetic next_word event and keep the
 			// session alive. Any other state timeout terminates the session
@@ -383,14 +393,19 @@ func (s *Session) handleEvent(ev SessionEvent) {
 // per-state deadline (D-08), fires the state-change audit (D-06), and spawns
 // the D-13 StreamWord side channel if the new state is LISTENING.
 // Additionally sends progress frames for real-time feedback (08-06).
+// Ticket 02: handles repeat (re-spawn StreamWord) and PAUSED state.
 func (s *Session) onTransition() {
 	s.mu.Lock()
-	deadliner := time.Now().Add(s.timeoutFor(s.state))
 	newState := s.state
+	// Compute deadline without holding the lock for the full duration.
+	// timeoutFor may call CurrentWord() which needs RLock, so compute
+	// the timeout separately.
 	s.mu.Unlock()
 
+	timeout := s.timeoutFor(newState)
+
 	s.mu.Lock()
-	s.deadline = deadliner
+	s.deadline = time.Now().Add(timeout)
 	s.mu.Unlock()
 
 	s.auditState(newState)
@@ -416,10 +431,35 @@ func (s *Session) onTransition() {
 		s.sendSessionCompleteFrame() // Notify client that session completed
 	}
 
+	// Ticket 02 DICT-07: Notify client when entering PAUSED state.
+	if newState == database.StatePaused {
+		s.sendPausedFrame()
+	}
+
 	// D-13: on entering LISTENING, the Session owns the StreamWord call. On its
 	// return, a goroutine pushes WordComplete onto the events channel, driving
 	// the LISTENING→DICTATING system transition.
 	if newState == database.StateListening {
+		s.spawnStreamWord()
+	}
+
+	// Ticket 02 DICT-07: on repeat (DICTATING or PAUSED), re-spawn StreamWord
+	// for the same word. The FSM does NOT change state on repeat, so
+	// onTransition fires with the same state — we detect repeat by checking
+	// if the current state is DICTATING or PAUSED and re-play the word.
+	// This is triggered by the repeat event which passes through the FSM
+	// without state change, so we need a different detection mechanism.
+	// The repeat event sets a flag that onTransition reads and clears.
+	if s.repeatPending {
+		s.repeatPending = false
+		if newState == database.StateDictating || newState == database.StatePaused {
+			s.spawnStreamWord()
+		}
+	}
+
+	// Ticket 02 DICT-07: on resume from PAUSED, re-spawn StreamWord for the
+	// current word (the word audio replays from the beginning).
+	if newState == database.StateDictating && s.prevState == database.StatePaused {
 		s.spawnStreamWord()
 	}
 }
@@ -734,6 +774,46 @@ func (s *Session) sendSessionCompleteFrame() {
 	}
 }
 
+// sendPausedFrame sends a paused control frame to the client (Ticket 02 DICT-07).
+func (s *Session) sendPausedFrame() {
+	if s.client == nil {
+		return // No client in tests
+	}
+
+	s.mu.RLock()
+	sessionID := s.id
+	s.mu.RUnlock()
+
+	pausedMsg := map[string]interface{}{
+		"type":       "paused",
+		"session_id": sessionID,
+	}
+
+	jsonBytes, err := json.Marshal(pausedMsg)
+	if err != nil {
+		s.logger.Warn("session: failed to marshal paused frame",
+			infra.F("session_id", s.id),
+			infra.ErrField(err),
+		)
+		return
+	}
+
+	header := &ws.FrameHeader{
+		Version:    ws.ProtocolVersion,
+		MsgType:    ws.MsgTypeControl,
+		Sequence:   0, // TODO: atomic counter for monotonic sequences
+		PayloadLen: uint16(len(jsonBytes)),
+	}
+	frame := ws.EncodeFrame(header, jsonBytes)
+
+	if err := s.client.Send(frame); err != nil {
+		s.logger.Warn("session: failed to send paused frame",
+			infra.F("session_id", s.id),
+			infra.ErrField(err),
+		)
+	}
+}
+
 // LockCategory returns the resolved FSRS lock category captured at NewSession
 // (Pitfall 4 verification).
 func (s *Session) LockCategory() string { return s.lockCategory }
@@ -746,9 +826,11 @@ func (s *Session) LockUnit() string { return s.lockUnit }
 // ---------------------------------------------------------------------------
 
 // timeoutFor returns the per-state timeout from cfg.SessionTimeout (D-08, D-09).
+// For DICTATING state, returns the adaptive timeout based on the current word's
+// length (Ticket 02 DICT-06: 8-15 seconds). For PAUSED state, returns a long
+// timeout (5 minutes) since the student controls when to resume.
 // Called by the event loop (onTransition) to reset the deadline on each
 // transition, and by the sweeper (cleanupLeaked) to compute the 2× threshold.
-// Only reads cfg (immutable) — no lock needed.
 func (s *Session) timeoutFor(state database.SessionState) time.Duration {
 	switch state {
 	case database.StateIdle:
@@ -756,7 +838,22 @@ func (s *Session) timeoutFor(state database.SessionState) time.Duration {
 	case database.StateListening:
 		return s.cfg.SessionTimeout.ListeningStateTimeout
 	case database.StateDictating:
+		// Ticket 02 DICT-06: use adaptive timeout based on current word length,
+		// but respect the config timeout as an upper bound. This ensures tests
+		// with short DictatingStateTimeout still work while production gets
+		// the full 8-15s adaptive window.
+		word := s.CurrentWord()
+		if word != "" {
+			adaptive := AdaptiveTimeout(word)
+			if adaptive < s.cfg.SessionTimeout.DictatingStateTimeout {
+				return adaptive
+			}
+			return s.cfg.SessionTimeout.DictatingStateTimeout
+		}
 		return s.cfg.SessionTimeout.DictatingStateTimeout
+	case database.StatePaused:
+		// Ticket 02 DICT-07: no dictation timeout while paused.
+		return 5 * time.Minute
 	case database.StateWaitingParent:
 		return s.cfg.SessionTimeout.WaitingParentStateTimeout
 	case database.StateFeedback:

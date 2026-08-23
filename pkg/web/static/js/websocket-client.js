@@ -438,6 +438,9 @@
         case 'session_complete':
           this._applySessionComplete(payload);
           break;
+        case 'paused':
+          this._applyPaused(payload);
+          break;
         default:
           // Unknown control type — log and forward so consumers can evolve
           // the protocol without editing the client.
@@ -564,6 +567,11 @@
         status: 'FEEDBACK',
         completedWords: total
       });
+    }
+
+    /** @private apply a paused frame → set status to PAUSED. */
+    _applyPaused(payload) {
+      this.stateManager.setState({ status: 'PAUSED' });
     }
   }
 

@@ -259,6 +259,7 @@
     IDLE: 'Ready to start',
     LISTENING: 'Listening...',
     DICTATING: 'Dictation in progress',
+    PAUSED: 'Paused — tap resume to continue',
     WAITING_PARENT: 'Waiting for parent',
     FEEDBACK: 'Session complete!'
   };
@@ -449,6 +450,9 @@
       if (status === 'FEEDBACK') {
         return '🎉 Great job!';
       }
+      if (status === 'PAUSED') {
+        return '⏸ Paused';
+      }
       // Only fire encouragement on a milestone crossing to avoid re-praising
       // on every word_complete / progress_update.
       var prev = this._lastPercent;
@@ -611,4 +615,138 @@
   }
 
   global.DictationFeedback = DictationFeedback;
+
+  // ==================================================================
+  // DictationControls — pause/resume/repeat/next buttons
+  // (Ticket 02, DICT-07).
+  //
+  // Kid-friendly large touch targets (60px+ per iOS HIG) with Chinese labels.
+  // Visible only during DICTATING or PAUSED states. Buttons send control
+  // frames via the WebSocket client.
+  // ==================================================================
+
+  /**
+   * DictationControls renders the dictation control buttons (pause/resume,
+   * repeat, next word) and keeps them in sync with the session state.
+   *
+   * @class
+   * @param {HTMLElement} container - element the controls mount into
+   * @param {SessionStateManager} stateManager - the shared state store
+   * @param {WebSocketClient} wsClient - used to send control frames
+   */
+  class DictationControls {
+    constructor(container, stateManager, wsClient) {
+      if (!container) throw new Error('DictationControls requires a container element');
+      this.container = container;
+      this.stateManager = stateManager;
+      this.wsClient = wsClient;
+
+      this.pauseResumeBtn = null;
+      this.repeatBtn = null;
+      this.nextBtn = null;
+      this.isPaused = false;
+
+      this.render();
+    }
+
+    render() {
+      while (this.container.firstChild) {
+        this.container.removeChild(this.container.firstChild);
+      }
+
+      var wrapper = document.createElement('div');
+      wrapper.className = 'dictation-controls';
+      wrapper.setAttribute('role', 'group');
+      wrapper.setAttribute('aria-label', '听写控制');
+      wrapper.style.cssText = 'display:flex;gap:12px;justify-content:center;flex-wrap:wrap;padding:16px 0;';
+
+      // Pause / Resume button (toggle)
+      this.pauseResumeBtn = this._createButton('⏸ 暂停', this._handlePauseResume.bind(this));
+      this.pauseResumeBtn.setAttribute('aria-label', '暂停听写');
+
+      // Repeat button
+      this.repeatBtn = this._createButton('🔁 再读一遍', this._handleRepeat.bind(this));
+      this.repeatBtn.setAttribute('aria-label', '再读一遍当前单词');
+
+      // Next word button
+      this.nextBtn = this._createButton('⏭ 下一个', this._handleNext.bind(this));
+      this.nextBtn.setAttribute('aria-label', '跳到下一个单词');
+
+      wrapper.appendChild(this.pauseResumeBtn);
+      wrapper.appendChild(this.repeatBtn);
+      wrapper.appendChild(this.nextBtn);
+      this.container.appendChild(wrapper);
+
+      if (this.stateManager) {
+        this.update(this.stateManager.getState());
+      }
+    }
+
+    _createButton(label, onClick) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'kid-button dictation-control-button';
+      btn.textContent = label;
+      btn.style.cssText = 'min-width:100px;min-height:56px;font-size:18px;padding:12px 20px;border-radius:12px;border:2px solid #e5e7eb;background:#fff;color:#374151;cursor:pointer;touch-action:manipulation;user-select:none;';
+      btn.addEventListener('click', onClick);
+      return btn;
+    }
+
+    _handlePauseResume() {
+      if (!this.wsClient || typeof this.wsClient.send !== 'function') return;
+      if (this.isPaused) {
+        this.wsClient.send({ type: 'resume', params: {} });
+      } else {
+        this.wsClient.send({ type: 'pause', params: {} });
+      }
+    }
+
+    _handleRepeat() {
+      if (!this.wsClient || typeof this.wsClient.send !== 'function') return;
+      this.wsClient.send({ type: 'repeat', params: {} });
+    }
+
+    _handleNext() {
+      if (!this.wsClient || typeof this.wsClient.send !== 'function') return;
+      var state = this.stateManager ? this.stateManager.getState() : {};
+      var wordId = state.currentWordId || '';
+      this.wsClient.send({ type: 'next_word', params: { word_id: wordId } });
+    }
+
+    update(state) {
+      if (!this.container) return;
+      state = state || {};
+
+      var isActive = !!state.sessionActive;
+      var status = state.status || 'IDLE';
+      var isDictating = status === 'DICTATING' || status === 'LISTENING';
+      var isPaused = status === 'PAUSED';
+
+      this.isPaused = isPaused;
+
+      // Show controls only during active dictation or paused
+      var shouldShow = isActive && (isDictating || isPaused);
+      this.container.style.display = shouldShow ? 'block' : 'none';
+
+      if (!shouldShow) return;
+
+      // Update pause/resume button label
+      if (isPaused) {
+        this.pauseResumeBtn.textContent = '▶ 继续';
+        this.pauseResumeBtn.setAttribute('aria-label', '继续听写');
+        this.pauseResumeBtn.style.background = '#dbeafe';
+        this.pauseResumeBtn.style.borderColor = '#3b82f6';
+      } else {
+        this.pauseResumeBtn.textContent = '⏸ 暂停';
+        this.pauseResumeBtn.setAttribute('aria-label', '暂停听写');
+        this.pauseResumeBtn.style.background = '#fff';
+        this.pauseResumeBtn.style.borderColor = '#e5e7eb';
+      }
+
+      // Disable next button if waiting for parent
+      this.nextBtn.disabled = (status === 'WAITING_PARENT');
+    }
+  }
+
+  global.DictationControls = DictationControls;
 })(typeof window !== 'undefined' ? window : this);

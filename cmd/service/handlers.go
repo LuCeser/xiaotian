@@ -161,6 +161,15 @@ func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, logger infr
 			case "next_word":
 				return handleNextWord(ctx, client, control.Params, manager, logger)
 
+			case "pause":
+				return handlePause(ctx, client, control.Params, manager, logger)
+
+			case "resume":
+				return handleResume(ctx, client, control.Params, manager, logger)
+
+			case "repeat":
+				return handleRepeat(ctx, client, control.Params, manager, logger)
+
 			case "select_due_cards":
 				return handleSelectDueCards(ctx, client, control.Params, fsrsSvc, logger)
 
@@ -309,6 +318,36 @@ func handleNextWord(ctx context.Context, client *ws.Client, params json.RawMessa
 		WordID:      p.WordID,
 	})
 
+	return nil
+}
+
+// handlePause pushes a pause event onto the session's event channel.
+// Ticket 02 DICT-07: student pauses dictation mid-word.
+func handlePause(ctx context.Context, client *ws.Client, params json.RawMessage, manager *session.Manager, logger infra.Logger) error {
+	manager.Push(clientConnID(client), session.SessionEvent{
+		Type:        session.EventControlFrame,
+		ControlType: "pause",
+	})
+	return nil
+}
+
+// handleResume pushes a resume event onto the session's event channel.
+// Ticket 02 DICT-07: student resumes from pause.
+func handleResume(ctx context.Context, client *ws.Client, params json.RawMessage, manager *session.Manager, logger infra.Logger) error {
+	manager.Push(clientConnID(client), session.SessionEvent{
+		Type:        session.EventControlFrame,
+		ControlType: "resume",
+	})
+	return nil
+}
+
+// handleRepeat pushes a repeat event onto the session's event channel.
+// Ticket 02 DICT-07: student requests the current word to be replayed.
+func handleRepeat(ctx context.Context, client *ws.Client, params json.RawMessage, manager *session.Manager, logger infra.Logger) error {
+	manager.Push(clientConnID(client), session.SessionEvent{
+		Type:        session.EventControlFrame,
+		ControlType: "repeat",
+	})
 	return nil
 }
 

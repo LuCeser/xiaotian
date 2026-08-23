@@ -31,6 +31,7 @@
   var STATUS_IDLE = 'IDLE';
   var STATUS_LISTENING = 'LISTENING';
   var STATUS_DICTATING = 'DICTATING';
+  var STATUS_PAUSED = 'PAUSED';
   var STATUS_WAITING_PARENT = 'WAITING_PARENT';
   var STATUS_FEEDBACK = 'FEEDBACK';
 
@@ -142,6 +143,7 @@
     _normalizeProgress() {
       var s = this.state;
       // Terminal-state invariant: FEEDBACK forces 100% completion.
+      // PAUSED does NOT force completion — progress is frozen at the current level.
       if (s.status === STATUS_FEEDBACK && typeof s.totalWords === 'number' && s.totalWords > 0) {
         s.completedWords = s.totalWords;
         return;
@@ -251,7 +253,7 @@
 
       // Status must be a valid FSM state
       if (updates.status) {
-        var validStates = [STATUS_IDLE, STATUS_LISTENING, STATUS_DICTATING, STATUS_WAITING_PARENT, STATUS_FEEDBACK];
+        var validStates = [STATUS_IDLE, STATUS_LISTENING, STATUS_DICTATING, STATUS_PAUSED, STATUS_WAITING_PARENT, STATUS_FEEDBACK];
         if (validStates.indexOf(updates.status) === -1) {
           return false;
         }
@@ -274,6 +276,7 @@
   SessionStateManager.STATUS_IDLE = STATUS_IDLE;
   SessionStateManager.STATUS_LISTENING = STATUS_LISTENING;
   SessionStateManager.STATUS_DICTATING = STATUS_DICTATING;
+  SessionStateManager.STATUS_PAUSED = STATUS_PAUSED;
   SessionStateManager.STATUS_WAITING_PARENT = STATUS_WAITING_PARENT;
   SessionStateManager.STATUS_FEEDBACK = STATUS_FEEDBACK;
 
