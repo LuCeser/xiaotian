@@ -1,6 +1,7 @@
 package mimo
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -82,8 +83,10 @@ func defaultTTSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate mock audio data
-	audioData := base64.StdEncoding.EncodeToString([]byte("mock_pcm_audio_data"))
+	// Generate mock audio data — a realistic-size PCM16 payload so the
+	// client-derived duration math (bytes/2/24kHz) produces non-zero values
+	mockAudio := bytes.Repeat([]byte{0x00, 0x01}, 24000) // 1s @ 24kHz 16-bit mono
+	audioData := base64.StdEncoding.EncodeToString(mockAudio)
 
 	response := TTSResponse{
 		Choices: []Choice{
@@ -91,13 +94,7 @@ func defaultTTSHandler(w http.ResponseWriter, r *http.Request) {
 				Message: AudioMessage{
 					Role: "assistant",
 					Audio: AudioData{
-						Data:     audioData,
-						Duration: 1500, // 1.5 seconds
-						Format:   "pcm16",
-					},
-					Metadata: AudioMetadata{
-						Voice:      req.Audio.Voice,
-						SampleRate: req.Audio.SampleRate,
+						Data: audioData,
 					},
 				},
 			},
@@ -283,11 +280,13 @@ func TestClient_Synthesize(t *testing.T) {
 				if result.Format != "pcm16" {
 					t.Errorf("expected format 'pcm16', got '%s'", result.Format)
 				}
-				if result.SampleRate != 16000 {
-					t.Errorf("expected sample rate 16000, got %d", result.SampleRate)
+				// pcm16 output is fixed 24kHz 16-bit mono per official docs;
+				// the mock payload is 48000 bytes = 1s of audio
+				if result.SampleRate != 24000 {
+					t.Errorf("expected sample rate 24000, got %d", result.SampleRate)
 				}
-				if result.Duration != 1500 {
-					t.Errorf("expected duration 1500ms, got %d", result.Duration)
+				if result.Duration != 1000 {
+					t.Errorf("expected duration 1000ms, got %d", result.Duration)
 				}
 			},
 		},

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -132,22 +133,24 @@ func (c *mimoClient) SynthesizeStream(ctx context.Context, text string, callback
 	// Build request with streaming enabled
 	req := c.buildTTSRequest(text, append(opts, WithTTSStream())...)
 
-	// Execute streaming request
-	result := &StreamResult{
-		ChunkCount: 0,
-		TotalDuration: 0,
-	}
+	// Execute streaming request. Cumulative duration is tracked here from
+	// decoded byte counts — the wire chunks carry no timing information.
+	result := &StreamResult{}
+	var totalBytes int
 
 	err := c.executeTTSStreamRequest(ctx, req, func(chunk StreamChunk) error {
-		result.ChunkCount++
-		result.TotalDuration = chunk.Duration
+		totalBytes += base64.StdEncoding.DecodedLen(len(chunk.AudioData))
+		chunk.Duration = totalBytes * 1000 / (2 * 24000) // 24kHz PCM16LE mono per docs
 
 		if chunk.IsFinal {
-			result.Error = nil
+			result.TotalDuration = chunk.Duration
 			return nil
 		}
 
-		// Call user callback
+		// ChunkCount tracks chunks delivered to the caller's callback; the
+		// finish_reason terminator is protocol bookkeeping, not a data chunk
+		result.ChunkCount++
+
 		if callback != nil {
 			if err := callback(chunk); err != nil {
 				return errors.Wrap(err, "stream callback failed")
@@ -156,6 +159,12 @@ func (c *mimoClient) SynthesizeStream(ctx context.Context, text string, callback
 
 		return nil
 	})
+
+	// Streams that end without an explicit finish_reason chunk ([DONE] or
+	// plain EOF) still deserve an accurate total duration
+	if err == nil && result.TotalDuration == 0 {
+		result.TotalDuration = totalBytes * 1000 / (2 * 24000)
+	}
 
 	if err != nil {
 		result.Error = err
@@ -412,12 +421,61 @@ func (c *mimoClient) executeTTSRequest(ctx context.Context, req TTSRequest) (Dec
 		return DecodedAudioData{}, errors.Wrap(ErrDecodingFailed, "failed to decode base64 audio")
 	}
 
-	return DecodedAudioData{
-		Samples:    audioBytes,
-		Format:      audioMsg.Audio.Format,
-		SampleRate:  audioMsg.Metadata.SampleRate,
-		Duration:    audioMsg.Audio.Duration,
-	}, nil
+	// The API response carries only the audio bytes (no format/sample_rate/
+	// duration), so derive playback metadata from the bytes and the requested
+	// format.
+	return newDecodedAudio(audioBytes, req.Audio.Format), nil
+}
+
+// newDecodedAudio derives playback metadata from the audio bytes themselves.
+// WAV: sample rate and duration come from the RIFF header. pcm16: the official
+// docs pin the output at 24kHz 16-bit mono, so duration = bytes/2/24000.
+func newDecodedAudio(samples []byte, format string) DecodedAudioData {
+	d := DecodedAudioData{Samples: samples, Format: format}
+	if format == "wav" {
+		if sr, ms, ok := parseWAV(samples); ok {
+			d.SampleRate = sr
+			d.Duration = ms
+			return d
+		}
+	}
+	// pcm16 (and unrecognized formats): fixed 24kHz 16-bit mono per docs
+	d.SampleRate = 24000
+	d.Duration = len(samples) * 1000 / (2 * 24000)
+	return d
+}
+
+// parseWAV extracts sample rate and duration from a RIFF/WAVE header by
+// walking the chunk list. Returns ok=false for malformed input so callers
+// can fall back to the pcm16 assumption.
+func parseWAV(b []byte) (sampleRate, durationMs int, ok bool) {
+	if len(b) < 12 || string(b[0:4]) != "RIFF" || string(b[8:12]) != "WAVE" {
+		return 0, 0, false
+	}
+	var byteRate, dataSize int
+	pos := 12
+	for pos+8 <= len(b) {
+		id := string(b[pos : pos+4])
+		size := int(binary.LittleEndian.Uint32(b[pos+4 : pos+8]))
+		body := pos + 8
+		if size < 0 || body+size > len(b) {
+			break // truncated/corrupt chunk
+		}
+		switch id {
+		case "fmt ":
+			if size >= 16 {
+				sampleRate = int(binary.LittleEndian.Uint32(b[body+4 : body+8]))
+				byteRate = int(binary.LittleEndian.Uint32(b[body+8 : body+12]))
+			}
+		case "data":
+			dataSize = size
+		}
+		pos = body + size + (size & 1) // chunks are word-aligned
+	}
+	if sampleRate <= 0 || byteRate <= 0 || dataSize <= 0 {
+		return 0, 0, false
+	}
+	return sampleRate, dataSize * 1000 / byteRate, true
 }
 
 // executeTTSStreamRequest executes a streaming TTS request
@@ -574,6 +632,11 @@ func (c *mimoClient) parseSSEStream(reader io.Reader, callback func(StreamChunk)
 		}
 
 		data := strings.TrimPrefix(line, "data: ")
+
+		// OpenAI-compatible streams terminate with the [DONE] sentinel
+		if data == "[DONE]" {
+			break
+		}
 
 		// Parse JSON chunk
 		var chunk StreamChunk

@@ -90,15 +90,17 @@ func (e *APIError) Unwrap() error {
 	return e.Err
 }
 
-// Is implements error comparison for errors.Is
+// Is implements error comparison for errors.Is. Status codes are matched
+// alongside vendor-specific type strings because the live API does not always
+// populate type consistently (e.g. 401 arrives with type "invalid_key").
 func (e *APIError) Is(target error) bool {
 	switch target {
 	case ErrInvalidRequest:
-		return e.Type == "invalid_request_error"
+		return e.Type == "invalid_request_error" || e.StatusCode == 400
 	case ErrAuthentication:
-		return e.Type == "authentication_error"
+		return e.Type == "authentication_error" || e.StatusCode == 401
 	case ErrRateLimit, ErrQuotaExceeded:
-		return e.Type == "rate_limit_error" || e.Code == "quota_exceeded"
+		return e.Type == "rate_limit_error" || e.Code == "quota_exceeded" || e.StatusCode == 429
 	case ErrServiceUnavailable:
 		return e.StatusCode >= 500 || e.Type == "service_unavailable"
 	case ErrModelNotAvailable:

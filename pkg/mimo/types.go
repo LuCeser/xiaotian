@@ -54,17 +54,24 @@ type Choice struct {
 
 // AudioMessage contains the base64-encoded audio data
 type AudioMessage struct {
-	Role     string       `json:"role"`
-	Content  string       `json:"content,omitempty"`
-	Audio    AudioData    `json:"audio,omitempty"`
-	Metadata AudioMetadata `json:"metadata,omitempty"`
+	Role    string    `json:"role"`
+	Content string    `json:"content,omitempty"`
+	Audio   AudioData `json:"audio,omitempty"`
 }
 
-// AudioData contains the base64 audio and metadata (API response format)
+// AudioData mirrors the API's audio object verbatim. The service returns only
+// id/data/expires_at/transcript — format, sample rate, and duration are NOT
+// in the response and must be derived client-side from the bytes (see
+// newDecodedAudio).
 type AudioData struct {
-	Data     string `json:"data"`     // Base64-encoded audio
-	Duration int    `json:"duration"` // Audio duration in milliseconds
-	Format   string `json:"format"`   // Audio format
+	// ID is the server-side audio identifier
+	ID string `json:"id,omitempty"`
+	// Data contains base64-encoded audio
+	Data string `json:"data"`
+	// ExpiresAt is the optional expiry timestamp (null for TTS)
+	ExpiresAt *int64 `json:"expires_at,omitempty"`
+	// Transcript is the optional text transcript (null for TTS)
+	Transcript *string `json:"transcript,omitempty"`
 }
 
 // DecodedAudioData represents decoded audio data ready for playback (client output)
@@ -77,12 +84,6 @@ type DecodedAudioData struct {
 	SampleRate int
 	// Duration is the audio duration in milliseconds
 	Duration int
-}
-
-// AudioMetadata provides additional information about the generated audio
-type AudioMetadata struct {
-	Voice      string `json:"voice"`
-	SampleRate int    `json:"sample_rate"`
 }
 
 // Usage tracks token consumption for the request
@@ -175,14 +176,18 @@ func (r *ASRResponse) ExtractText() string {
 	return r.Choices[0].Message.Content
 }
 
-// StreamChunk represents a chunk of streaming audio data
+// StreamChunk represents a chunk of streaming audio data delivered to the
+// caller's callback. The wire format is OpenAI-style chat.completion.chunk
+// (choices[].delta.audio.data + finish_reason); UnmarshalJSON maps that shape
+// into these client-facing fields. Duration is cumulative and filled in by
+// the client from decoded byte counts — the wire never carries it.
 type StreamChunk struct {
-	// AudioData contains base64-encoded audio chunk
-	AudioData string `json:"audio_data"`
-	// IsFinal indicates if this is the last chunk
-	IsFinal bool `json:"is_final"`
-	// Duration provides cumulative audio duration
-	Duration int `json:"duration"`
+	// AudioData contains base64-encoded audio chunk ("" on the final chunk)
+	AudioData string
+	// IsFinal indicates if this is the last chunk (finish_reason == "stop")
+	IsFinal bool
+	// Duration provides cumulative audio duration in milliseconds so far
+	Duration int
 }
 
 // ClientConfig configures the Mimo API client
@@ -281,22 +286,34 @@ func WithASRLanguage(lang string) ASROption {
 	}
 }
 
-// UnmarshalJSON implements custom JSON unmarshaling for stream chunks
+// UnmarshalJSON maps an OpenAI-style chat.completion.chunk SSE payload onto
+// StreamChunk. Expected wire shape:
+//
+//	{"choices":[{"index":0,"delta":{"role":"assistant",
+//	  "audio":{"id":"...","data":"<base64>"}},
+//	  "finish_reason":null}]}
+//
+// The terminating chunk carries finish_reason:"stop" and usually no audio.
 func (s *StreamChunk) UnmarshalJSON(data []byte) error {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	var wire struct {
+		Choices []struct {
+			Delta struct {
+				Audio struct {
+					ID   string `json:"id"`
+					Data string `json:"data"`
+				} `json:"audio"`
+			} `json:"delta"`
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
 
-	if audioData, ok := raw["audio_data"].(string); ok {
-		s.AudioData = audioData
+	if len(wire.Choices) > 0 {
+		choice := wire.Choices[0]
+		s.AudioData = choice.Delta.Audio.Data
+		s.IsFinal = choice.FinishReason != nil && *choice.FinishReason == "stop"
 	}
-	if isFinal, ok := raw["is_final"].(bool); ok {
-		s.IsFinal = isFinal
-	}
-	if duration, ok := raw["duration"].(float64); ok {
-		s.Duration = int(duration)
-	}
-
 	return nil
 }

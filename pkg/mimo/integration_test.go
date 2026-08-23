@@ -122,8 +122,10 @@ func TestIntegration_Synthesize_RealAPI(t *testing.T) {
 				if result.Format != "pcm16" {
 					t.Errorf("expected format 'pcm16', got '%s'", result.Format)
 				}
-				if result.SampleRate != 16000 {
-					t.Errorf("expected sample rate 16000, got %d", result.SampleRate)
+				// pcm16 output is fixed 24kHz per official docs; duration is
+				// derived from the byte count client-side
+				if result.SampleRate != 24000 {
+					t.Errorf("expected sample rate 24000, got %d", result.SampleRate)
 				}
 				if result.Duration <= 0 {
 					t.Errorf("expected positive duration, got %d", result.Duration)
