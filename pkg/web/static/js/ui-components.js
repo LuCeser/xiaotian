@@ -774,8 +774,10 @@
      * DICTATING, LISTENING, or PAUSED; otherwise hides the container and
      * returns early. While visible, toggles the pause/resume button's
      * label, aria-label, and colors from isPaused (PAUSED → "▶ 继续" with a
-     * blue background/border, otherwise "⏸ 暂停" with white), and disables
-     * the next-word button when status is WAITING_PARENT.
+     * blue background/border, otherwise "⏸ 暂停" with white). The trailing
+     * next-word disable targets WAITING_PARENT, which the early return above
+     * already excludes — that line is unreachable today and is kept solely
+     * as a guard in case the show condition ever widens.
      *
      * @param {object} state - snapshot from SessionStateManager.
      */

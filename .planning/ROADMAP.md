@@ -304,16 +304,17 @@ Plans:
 
 **Superseded** (2026-08-23 user decision — ticket set supersedes prior planning):
 - Backend auto-advance design (D-01/D-02/D-03 Option A, 08.1-CONTEXT.md) → replaced by the student-paced model
-- 08.1-01-PLAN.md / 08.1-02-PLAN.md → not executed, obsolete; re-plan via /gsd-plan-phase 8.1
+- 08.1-01-PLAN.md / 08.1-02-PLAN.md → not executed, obsolete; superseded by the direct ticket-02 delivery below (no re-plan)
 - Retained from 08-06 delivery: progress_update/word_complete/session_complete emission + frontend play_word/next_word triggers (client-driven foundation this phase builds on)
 
 **Note**: Phase 8 UAT test 7 (WebSocket reconnection / session resume) remains blocked and is owned by the existing **Phase 11** (Error Handling & Resilience, success criterion #1: "gracefully handles WebSocket disconnections").
 
-**Plans**: 0 plans (re-planning required after re-scope)
+**Plans**: delivered directly as ticket 02 (2026-08-23) — no GSD plan files
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 8.1)
+- [x] Ticket 02 — core dictation flow (Mimo TTS) delivered directly: be653a4 (student-paced flow: adaptive 8-15s writing time, Next/Repeat/Pause-Resume controls) + dual-axis review fixes 3a1fc59 (stale WordComplete stream-generation race), 799de7c (PausedStateTimeout config), f8e5e31 (single-writer invariant docs), d6c046b (DictationControls JSDoc), 45435bb (review cleanup set #5/5); issue `.scratch/speech-recognition-redesign/issues/02-core-dictation-flow-tts.md` closed done 2026-08-23, 6/7 acceptance items
+- [ ] iPad real-device UAT — the only unchecked acceptance item (<1.5s audio latency end-to-end + real Safari audio/touch); run before or alongside Phase 8.2
 
 **UI hint**: yes
 
