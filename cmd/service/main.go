@@ -290,6 +290,14 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	// This prevents goroutine leaks (MemoryMonitor + WorkerPool) when any component
 	// constructed after server.Start fails. If server.Start succeeds, we MUST call
 	// server.Shutdown on any early-return, otherwise those goroutines run forever.
+	// The HTTP/WS server handles are declared in the outer scope so the shutdown
+	// sequence below can reference them after the closure returns.
+	var (
+		wsServer  *ws.Server
+		publicSrv *http.Server
+		healthSrv *http.Server
+	)
+
 	shutdownErr := func() error {
 		// ------------------------------------------------------------------
 		// Public WebSocket server (P0-1). Phase 2 delivered the pkg/ws library
@@ -374,7 +382,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			)
 			return err
 		}
-		wsServer, err := ws.NewServer(hub, router, serverCfg, wsLogger)
+		wsServer, err = ws.NewServer(hub, router, serverCfg, wsLogger)
 		if err != nil {
 			logger.Error("ws server construction failed",
 				infra.F("component", "infra.main"),
@@ -417,7 +425,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		} else {
 			publicMux.HandleFunc("/", serveDebugRoot)
 		}
-		publicSrv := &http.Server{
+		publicSrv = &http.Server{
 			Addr:              cfg.Server.Addr,
 			Handler:           publicMux,
 			ReadHeaderTimeout: 5 * time.Second,
@@ -443,7 +451,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		healthMux := http.NewServeMux()
 		healthMux.Handle("/health", infra.RecoveryMiddleware(logger, infra.HealthHandler(server, logger)))
 		healthMux.Handle("/metrics", infra.RecoveryMiddleware(logger, infra.MetricsHandler(server, logger)))
-		healthSrv := &http.Server{
+		healthSrv = &http.Server{
 			Addr:              cfg.Server.HealthAddr,
 			Handler:           healthMux,
 			ReadHeaderTimeout: 5 * time.Second,
