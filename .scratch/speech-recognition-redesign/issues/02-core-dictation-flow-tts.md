@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Xiaomi Mimo Service Integration Layer
 
-**Status:** done (2026-08-23, commits: be653a4, 3a1fc59, 799de7c, f8e5e31, d6c046b, 45435bb)
+**Status:** done (2026-08-23, commits: be653a4, 3a1fc59, 799de7c, f8e5e31, d6c046b, 45435bb, 4f5c644, 0ff7cca)
 
 - [x] Student can request dictation session and hear words read via Xiaomi Mimo TTS — 取舍备注：会话级流式 TTS 管线经 fakeStreamer 测试验证（StreamCalls 断言）；真实 iPad 音频播放待 UAT 实测
 - [x] System provides adaptive writing time (8-15 seconds) based on word length and complexity
@@ -19,5 +19,6 @@
 - 验证方式：`go test ./pkg/session/ ./cmd/service/ -count=1`
 - 2026-08-23 实测：两包全绿——ok github.com/xiaotian/home-tutor-agent/pkg/session 1.498s、ok github.com/xiaotian/home-tutor-agent/cmd/service 2.268s（-v 复核共 45 个测试函数全部 PASS、0 失败）；其中 timing 12 个表驱动用例（TestAdaptiveTimeout 覆盖 0-20 字词）、fsm 11 个测试（pause/resume、repeat、PAUSED 态 next_word/最后一词/非法事件、prevState 追踪）、session 集成含 fakeStreamer StreamCalls 断言（流式 TTS 管线在会话层打通）
 - 双轴 code review（Standards + Spec）发现 5 项问题已全部修复（快速任务 260823-sdx/t13/ti8/tyq/u8t）
-- 相关提交：be653a4（实现：AdaptiveTimeout + FSM pause/resume/repeat + DictationControls）、3a1fc59（#1/5 repeat 竞态跳词——按流代数丢弃过期 WordComplete 事件）、799de7c（#2/5 PAUSED 超时提取到 SessionTimeout.PausedStateTimeout，默认 5 分钟）、f8e5e31（#3/5 文档化 onTransition 无锁读 repeatPending/prevState 的单写者不变量）、d6c046b（#4/5 补全 DictationControls 六个方法 JSDoc）、45435bb（#5/5 DictationControls 触控高度对齐 iOS HIG 60px、TestPrevState_Tracked 补 transition 错误检查、_applyPaused 补 payload 防护、sendPausedFrame godoc 补 Sequence TODO 说明）
+- 相关提交：be653a4（实现：AdaptiveTimeout + FSM pause/resume/repeat + DictationControls）、3a1fc59（#1/5 repeat 竞态跳词——按流代数丢弃过期 WordComplete 事件）、799de7c（#2/5 PAUSED 超时提取到 SessionTimeout.PausedStateTimeout，默认 5 分钟）、f8e5e31（#3/5 文档化 onTransition 无锁读 repeatPending/prevState 的单写者不变量）、d6c046b（#4/5 补全 DictationControls 六个方法 JSDoc）、45435bb（#5/5 DictationControls 触控高度对齐 iOS HIG 60px、TestPrevState_Tracked 补 transition 错误检查、_applyPaused 补 payload 防护、sendPausedFrame godoc 补 Sequence TODO 说明）、4f5c644（终局清理：update() JSDoc 如实描述不可达分支、_applyPaused JSDoc 收紧为类型校验、StaleWordCompleteDropped 测试改确定性等待）、0ff7cca（ROADMAP Phase 8.1 节按 ticket 02 直接交付实况对齐）
+- 终审（2026-08-23，双轴复核 be653a4..HEAD）通过：原 5 项 finding 全部 resolved、无新功能性问题；遗留 5 条轻微 judgement call 中 4 条经 260823-vn9 清理集处理（JSDoc×2 如实化、测试去时序依赖、ROADMAP 8.1 对齐），1 条（session.go 单写者不变量注释 4 处复述）按 f8e5e31 裁决保留
 - 遗留 UAT：<1.5s 延迟实测与真实 iPad 音频播放/触控交互（验收第 5 条未勾选，说明见该条行内备注）
