@@ -348,7 +348,7 @@ func (s *Session) run(ctx context.Context) {
 			// Reset the deadline so the timer doesn't keep firing.
 			if s.State() == database.StatePaused {
 				s.mu.Lock()
-				s.deadline = time.Now().Add(5 * time.Minute)
+				s.deadline = time.Now().Add(s.cfg.SessionTimeout.PausedStateTimeout)
 				s.mu.Unlock()
 				continue
 			}
@@ -855,8 +855,9 @@ func (s *Session) LockUnit() string { return s.lockUnit }
 
 // timeoutFor returns the per-state timeout from cfg.SessionTimeout (D-08, D-09).
 // For DICTATING state, returns the adaptive timeout based on the current word's
-// length (Ticket 02 DICT-06: 8-15 seconds). For PAUSED state, returns a long
-// timeout (5 minutes) since the student controls when to resume.
+// length (Ticket 02 DICT-06: 8-15 seconds). For PAUSED state, returns the
+// paused-state timeout configured on cfg.SessionTimeout (default 5m) since the
+// student controls when to resume.
 // Called by the event loop (onTransition) to reset the deadline on each
 // transition, and by the sweeper (cleanupLeaked) to compute the 2× threshold.
 func (s *Session) timeoutFor(state database.SessionState) time.Duration {
@@ -881,7 +882,7 @@ func (s *Session) timeoutFor(state database.SessionState) time.Duration {
 		return s.cfg.SessionTimeout.DictatingStateTimeout
 	case database.StatePaused:
 		// Ticket 02 DICT-07: no dictation timeout while paused.
-		return 5 * time.Minute
+		return s.cfg.SessionTimeout.PausedStateTimeout
 	case database.StateWaitingParent:
 		return s.cfg.SessionTimeout.WaitingParentStateTimeout
 	case database.StateFeedback:

@@ -2,9 +2,12 @@ package session
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 )
 
@@ -333,5 +336,40 @@ func TestPrevState_Tracked(t *testing.T) {
 	s.transition(SessionEvent{Type: EventControlFrame, ControlType: "resume"})
 	if s.prevState != database.StatePaused {
 		t.Errorf("prevState after PAUSED→DICTATING = %s, want PAUSED", s.prevState)
+	}
+}
+
+// TestTimeoutFor_PausedStateFromConfig: the PAUSED-state timeout is sourced
+// solely from cfg.SessionTimeout.PausedStateTimeout — no hardcoded 5m literal
+// may survive in session.go (ticket 02 review fix #2/5 guard).
+func TestTimeoutFor_PausedStateFromConfig(t *testing.T) {
+	// Assertion 1: default-value contract — DefaultConfig pins 5m so
+	// unconfigured deployments keep the pre-refactor behavior exactly.
+	if got := infra.DefaultConfig().SessionTimeout.PausedStateTimeout; got != 5*time.Minute {
+		t.Errorf("DefaultConfig().SessionTimeout.PausedStateTimeout = %v, want 5m", got)
+	}
+
+	// Assertion 2: timeoutFor(StatePaused) reads the config verbatim. 7m is
+	// deliberately non-default so a hardcoded-5m regression fails here.
+	cfg := infra.DefaultConfig()
+	cfg.SessionTimeout.PausedStateTimeout = 7 * time.Minute
+	s := &Session{cfg: cfg}
+	if got := s.timeoutFor(database.StatePaused); got != 7*time.Minute {
+		t.Errorf("timeoutFor(StatePaused) = %v, want 7m (must read cfg.SessionTimeout.PausedStateTimeout)", got)
+	}
+
+	// Assertion 3: Validate rejects a zero PausedStateTimeout with an error
+	// wrapping ErrConfigInvalid (D-04 fail-fast, malformed env fails at boot).
+	invalid := infra.DefaultConfig().SessionTimeout
+	invalid.PausedStateTimeout = 0
+	err := invalid.Validate()
+	if err == nil {
+		t.Fatal("SessionTimeoutConfig.Validate() returned nil for zero PausedStateTimeout, want ErrConfigInvalid")
+	}
+	if !errors.Is(err, infra.ErrConfigInvalid) {
+		t.Errorf("Validate() error does not wrap ErrConfigInvalid: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pausedStateTimeout") {
+		t.Errorf("Validate() error %q does not mention pausedStateTimeout", err)
 	}
 }
