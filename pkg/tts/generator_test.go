@@ -249,8 +249,8 @@ func TestGenerateForSession_PregenerateFails(t *testing.T) {
 	}
 }
 
-// Test 4: GenerateForSession with a fake Executor returning 3 paths but the codec failing on the 2nd path still generates and caches words 1 and 3 (the 2nd is skipped after retries)
-// With retry logic implemented (Task 2), this test verifies that word2 fails all retry attempts while word1 and word3 succeed.
+// Test 4: GenerateForSession with a fake Executor returning 3 paths but the codec failing on the 2nd path returns ErrTTSGenerationFailed
+// (not all words have audio — the session must fail instead of silently skipping word2).
 func TestGenerateForSession_CodecFailsOnSecondWord(t *testing.T) {
 	exec := &fakeExecutor{
 		pregenerateResult: pybridge.PregenResult{
@@ -291,40 +291,17 @@ func TestGenerateForSession_CodecFailsOnSecondWord(t *testing.T) {
 	words := []string{"word1", "word2", "word3"}
 
 	result, err := generator.GenerateForSession(ctx, sessionID, words)
-	if err != nil {
-		t.Fatalf("GenerateForSession failed: %v", err)
-	}
-
-	// Should have 2 successful results (word1 and word3)
-	if len(result) != 2 {
-		t.Errorf("expected 2 results (word1 and word3), got %d", len(result))
-	}
-
-	// Verify word1 and word3 are in the result
-	if _, ok := result["word1"]; !ok {
-		t.Error("result missing key 'word1' (should have succeeded)")
-	}
-	if _, ok := result["word2"]; ok {
-		t.Error("result has key 'word2' (should have been skipped after retries)")
-	}
-	if _, ok := result["word3"]; !ok {
-		t.Error("result missing key 'word3' (should have succeeded)")
-	}
-
-	// Verify word1 and word3 can be loaded from cache
-	_, err = cache.Load(sessionID, "word1")
-	if err != nil {
-		t.Errorf("word1 should be cached, got error: %v", err)
-	}
-
-	_, err = cache.Load(sessionID, "word2")
+	// Should return ErrTTSGenerationFailed because word2 has no audio
 	if err == nil {
-		t.Error("word2 should NOT be cached (all retries failed)")
+		t.Fatal("expected error when not all words have audio, got nil")
+	}
+	if !errors.Is(err, ErrTTSGenerationFailed) {
+		t.Errorf("expected ErrTTSGenerationFailed, got %v", err)
 	}
 
-	_, err = cache.Load(sessionID, "word3")
-	if err != nil {
-		t.Errorf("word3 should be cached, got error: %v", err)
+	// Result map should have 2 entries (word1 and word3 were cached before the error)
+	if len(result) != 2 {
+		t.Errorf("expected 2 results (word1 and word3 cached before error), got %d", len(result))
 	}
 }
 
@@ -381,7 +358,7 @@ func TestGenerateForSession_EmptyWordList(t *testing.T) {
 func TestGenerateForSession_PregenOpts(t *testing.T) {
 	exec := &fakeExecutor{
 		pregenerateResult: pybridge.PregenResult{
-			Paths: []string{"/tmp/word1.mp3"},
+			Paths: []string{"/tmp/apple.mp3", "/tmp/banana.mp3", "/tmp/cherry.mp3"},
 		},
 	}
 
@@ -455,7 +432,8 @@ func TestNewGenerator_NilExecutor(t *testing.T) {
 
 // Task 2 Tests: Retry-skip logic + error classification + session cleanup helper
 
-// Test 1: retryConvert with convertFn failing ErrFFmpegNotFound on all 3 attempts returns ErrFFmpegNotFound and does not succeed (ffmpeg missing is not retryable)
+// Test 1: retryConvert with convertFn failing ErrFFmpegNotFound on all 3 attempts returns ErrTTSGenerationFailed
+// (not all words have audio — the session must fail instead of silently skipping).
 func TestRetryConvert_FFmpegNotFound_NoRetry(t *testing.T) {
 	exec := &fakeExecutor{
 		pregenerateResult: pybridge.PregenResult{
@@ -488,9 +466,12 @@ func TestRetryConvert_FFmpegNotFound_NoRetry(t *testing.T) {
 	words := []string{"word1"}
 
 	result, err := generator.GenerateForSession(ctx, sessionID, words)
-	// Should succeed overall but skip the word
-	if err != nil {
-		t.Fatalf("GenerateForSession should succeed with skipped words, got error: %v", err)
+	// Should return ErrTTSGenerationFailed because word1 has no audio
+	if err == nil {
+		t.Fatal("expected error when word has no audio, got nil")
+	}
+	if !errors.Is(err, ErrTTSGenerationFailed) {
+		t.Errorf("expected ErrTTSGenerationFailed, got %v", err)
 	}
 
 	// Result should be empty (word was skipped)
@@ -561,7 +542,8 @@ func TestRetryConvert_PCMConversionFailed_RetriesSucceed(t *testing.T) {
 	}
 }
 
-// Test 3: retryConvert with convertFn failing context.DeadlineExceeded on all attempts skips after MaxRetries and logs each attempt
+// Test 3: retryConvert with convertFn failing context.DeadlineExceeded on all attempts returns ErrTTSGenerationFailed
+// (not all words have audio — the session must fail instead of silently skipping).
 func TestRetryConvert_Timeout_SkipsAfterRetries(t *testing.T) {
 	exec := &fakeExecutor{
 		pregenerateResult: pybridge.PregenResult{
@@ -594,9 +576,12 @@ func TestRetryConvert_Timeout_SkipsAfterRetries(t *testing.T) {
 	words := []string{"word1"}
 
 	result, err := generator.GenerateForSession(ctx, sessionID, words)
-	// Should succeed overall but skip the word
-	if err != nil {
-		t.Fatalf("GenerateForSession should succeed with skipped words, got error: %v", err)
+	// Should return ErrTTSGenerationFailed because word1 has no audio
+	if err == nil {
+		t.Fatal("expected error when word has no audio, got nil")
+	}
+	if !errors.Is(err, ErrTTSGenerationFailed) {
+		t.Errorf("expected ErrTTSGenerationFailed, got %v", err)
 	}
 
 	// Result should be empty (word was skipped after retries)
@@ -611,7 +596,7 @@ func TestRetryConvert_Timeout_SkipsAfterRetries(t *testing.T) {
 	}
 }
 
-// Test 4: GenerateForSession logs a warning with word_id and error_type fields for each skipped word
+// Test 4: GenerateForSession logs an error with word_id and error_type fields for skipped words
 func TestRetryConvert_LogsWarningForSkippedWords(t *testing.T) {
 	exec := &fakeExecutor{
 		pregenerateResult: pybridge.PregenResult{
@@ -629,11 +614,15 @@ func TestRetryConvert_LogsWarningForSkippedWords(t *testing.T) {
 		return PCMData{}, ErrPCMConversionFailed
 	}
 
-	// Use a logger that captures warnings
+	// Use a logger that captures warnings and errors
 	var loggedWarnings []string
+	var loggedErrors []string
 	logger := &captureLogger{
 		warnFunc: func(msg string, fields ...infra.Field) {
 			loggedWarnings = append(loggedWarnings, msg)
+		},
+		errorFunc: func(msg string, fields ...infra.Field) {
+			loggedErrors = append(loggedErrors, msg)
 		},
 	}
 
@@ -651,13 +640,19 @@ func TestRetryConvert_LogsWarningForSkippedWords(t *testing.T) {
 	words := []string{"word1"}
 
 	_, err = generator.GenerateForSession(ctx, sessionID, words)
-	if err != nil {
-		t.Fatalf("GenerateForSession should succeed with skipped words, got error: %v", err)
+	// Should return error because word1 has no audio
+	if err == nil {
+		t.Fatal("expected error when word has no audio, got nil")
 	}
 
 	// Should have logged at least one warning for the skipped word
 	if len(loggedWarnings) == 0 {
 		t.Error("expected warning log for skipped word, got none")
+	}
+
+	// Should have logged at least one error for incomplete generation
+	if len(loggedErrors) == 0 {
+		t.Error("expected error log for incomplete TTS generation, got none")
 	}
 }
 
@@ -720,7 +715,8 @@ func TestCleanupSession_Idempotent(t *testing.T) {
 
 // captureLogger is a test helper that captures log calls for verification
 type captureLogger struct {
-	warnFunc func(msg string, fields ...infra.Field)
+	warnFunc  func(msg string, fields ...infra.Field)
+	errorFunc func(msg string, fields ...infra.Field)
 }
 
 func (l *captureLogger) Debug(msg string, fields ...infra.Field) {
@@ -738,7 +734,9 @@ func (l *captureLogger) Warn(msg string, fields ...infra.Field) {
 }
 
 func (l *captureLogger) Error(msg string, fields ...infra.Field) {
-	// Ignore error logs
+	if l.errorFunc != nil {
+		l.errorFunc(msg, fields...)
+	}
 }
 
 func (l *captureLogger) With(fields ...infra.Field) infra.Logger {

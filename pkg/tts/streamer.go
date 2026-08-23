@@ -2,7 +2,6 @@ package tts
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"time"
 
@@ -74,6 +73,10 @@ func (s *Streamer) StreamWord(ctx context.Context, client Sender, sessionID stri
 		pcm, err = s.cache.Load(sessionID, wordID)
 		if err != nil {
 			if errors.Is(err, ErrWordNotCached) {
+				s.logger.Warn("tts streamer: word not cached, no audio available",
+					infra.F("component", "tts.streamer"),
+					infra.F("session_id", sessionID),
+					infra.F("word_id", wordID))
 				return ErrWordNotCached
 			}
 			return errors.Wrap(err, "tts streamer: load pcm")
@@ -98,10 +101,10 @@ func (s *Streamer) StreamWord(ctx context.Context, client Sender, sessionID stri
 	if startIndex < 0 {
 		startIndex = 0
 	}
-	// If startIndex is out of range there is nothing to stream — emit
-	// word_complete so the client still advances its state machine.
+	// If startIndex is out of range there is nothing to stream. The word_complete
+	// notification is owned by the session event loop (LISTENING→DICTATING on
+	// EventWordComplete), so the streamer does NOT emit it here (08-06 dedup).
 	if startIndex >= len(frames) {
-		s.sendWordComplete(ctx, client, wordID)
 		return nil
 	}
 
@@ -150,46 +153,9 @@ func (s *Streamer) StreamWord(ctx context.Context, client Sender, sessionID stri
 		}
 	}
 
-	// 5. Send end-of-word notification frame
-	s.sendWordComplete(ctx, client, wordID)
-
+	// 5. No end-of-word notification here — the session event loop owns the
+	// word_complete control frame (08-06 dedup: streamer no longer emits status frames).
 	return nil
-}
-
-// sendWordComplete sends a status frame indicating audio has finished for this word.
-func (s *Streamer) sendWordComplete(ctx context.Context, client Sender, wordID string) {
-	// Build JSON payload
-	payload := map[string]string{
-		"type":   "word_complete",
-		"word_id": wordID,
-	}
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		s.logger.Warn("tts streamer: failed to marshal word_complete payload",
-			infra.F("word_id", wordID),
-			infra.F("error", err))
-		return
-	}
-
-	// Build status frame
-	header := ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    ws.MsgTypeStatus,
-		Sequence:   0, // Status frames don't need sequence numbers
-		Timestamp:  uint32(time.Now().UnixMicro()),
-		PayloadLen: uint16(len(jsonData)),
-		Reserved:   0,
-	}
-
-	encodedFrame := ws.EncodeFrame(&header, jsonData)
-	if err := client.Send(encodedFrame); err != nil {
-		// Status frame send is informational - log and continue
-		if !errors.Is(err, ErrSendBufferFull) && !errors.Is(err, ErrClientClosing) {
-			s.logger.Warn("tts streamer: failed to send word_complete status",
-				infra.F("word_id", wordID),
-				infra.F("error", err))
-		}
-	}
 }
 
 // PrefetchNext pre-loads upcoming words' PCM into memory (D-04).

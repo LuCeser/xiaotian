@@ -90,6 +90,26 @@ func (g *Generator) GenerateForSession(ctx context.Context, sessionID string, wo
 		return result, ErrTTSGenerationFailed
 	}
 
+	// Validate path count matches word count — a mismatch means the Python
+	// script returned fewer audio files than requested (partial TTS failure,
+	// flock contention, or --words-per-segment batching). Without this check,
+	// words beyond the path count silently get no audio (StreamWord returns
+	// ErrWordNotCached, spawnStreamWord pushes WordComplete anyway, session
+	// advances with no audio).
+	//
+	// Returning an error here prevents the "only first word plays" bug:
+	// the session fails to initialize instead of silently advancing through
+	// uncached words with no audio.
+	if len(pregenResult.Paths) < len(words) {
+		g.logger.Error("TTS pregenerate returned fewer paths than words — aborting session",
+			infra.F("component", "tts.generator"),
+			infra.F("path_count", len(pregenResult.Paths)),
+			infra.F("word_count", len(words)),
+			infra.F("missing_words", words[len(pregenResult.Paths):]),
+		)
+		return result, ErrTTSGenerationFailed
+	}
+
 	// Convert each MP3 to PCM and store in cache
 	// Word IDs come from the input word list (position-based mapping)
 	for i, mp3Path := range pregenResult.Paths {
@@ -132,6 +152,32 @@ func (g *Generator) GenerateForSession(ctx context.Context, sessionID string, wo
 
 		// Add to result map
 		result[wordID] = filepath.Join(g.cache.SessionDir(sessionID), wordID+".pcm")
+	}
+
+	// Final validation: all words must have audio. If any word was skipped
+	// due to codec failure (retryConvert exhausted retries), the result map
+	// will have fewer entries than the input word list. Returning an error
+	// here prevents the "only first word plays" bug: the session fails to
+	// initialize instead of silently advancing through uncached words.
+	if len(result) < len(words) {
+		// Collect missing words for diagnostic logging
+		cached := make(map[string]bool, len(result))
+		for k := range result {
+			cached[k] = true
+		}
+		var missing []string
+		for _, w := range words {
+			if !cached[w] {
+				missing = append(missing, w)
+			}
+		}
+		g.logger.Error("TTS generation incomplete — not all words have audio",
+			infra.F("component", "tts.generator"),
+			infra.F("cached_count", len(result)),
+			infra.F("word_count", len(words)),
+			infra.F("missing_words", missing),
+		)
+		return result, ErrTTSGenerationFailed
 	}
 
 	return result, nil
