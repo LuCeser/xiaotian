@@ -98,8 +98,10 @@ type ASRRequest struct {
 	Model string `json:"model"`
 	// Messages contains the conversation with audio input
 	Messages []ASRMessage `json:"messages"`
-	// ExtraBody contains additional parameters like asr_options
-	ExtraBody ASRExtraBody `json:"extra_body,omitempty"`
+	// ASROptions carries recognition tuning (top-level "asr_options"; the
+	// official Python SDK's extra_body is flattened to the top level of the
+	// JSON body, so the wire field is "asr_options", NOT "extra_body")
+	ASROptions ASROptions `json:"asr_options,omitempty"`
 }
 
 // ASRMessage represents a message in ASR request (OpenAI-compatible format)
@@ -114,27 +116,18 @@ type MessageContent struct {
 	InputAudio *AudioInput `json:"input_audio,omitempty"`
 }
 
-// ASRExtraBody contains additional ASR parameters (asr_options)
-type ASRExtraBody struct {
-	ASROptions ASROptions `json:"asr_options"`
-}
-
 // AudioInput represents input audio data with Data URL format
 type AudioInput struct {
 	// Data contains Data URL formatted audio (e.g., "data:audio/wav;base64,xxx")
 	Data string `json:"data"`
 }
 
-// ASROptions configures speech recognition behavior (placed in extra_body.asr_options)
+// ASROptions configures speech recognition behavior (top-level asr_options).
+// Only language is documented by the official API; undocumented fields risk
+// HTTP 400 "Param Incorrect", so they are intentionally absent.
 type ASROptions struct {
-	// Language configures recognition language (default: "zh", options: "auto", "zh", "en")
+	// Language configures recognition language (options: "auto", "zh", "en"; unset = auto-detect)
 	Language string `json:"language,omitempty"`
-	// EnablePunctuation enables automatic punctuation generation
-	EnablePunctuation bool `json:"enable_punctuation,omitempty"`
-	// EnableDialectDetection enables Chinese dialect detection
-	EnableDialectDetection bool `json:"enable_dialect_detection,omitempty"`
-	// ChildrenVoiceMode optimizes for children's voices
-	ChildrenVoiceMode bool `json:"children_voice_mode,omitempty"`
 }
 
 // ASRResponse represents the response from an ASR request (OpenAI-compatible format)
@@ -281,35 +274,10 @@ func WithStyleInstruction(instruction string) TTSOption {
 	}
 }
 
-// WithASRLanguage sets the ASR language (placed in extra_body.asr_options)
+// WithASRLanguage sets the ASR recognition language (top-level asr_options.language)
 func WithASRLanguage(lang string) ASROption {
 	return func(req *ASRRequest) {
-		// Set default language if not specified
-		if req.ExtraBody.ASROptions.Language == "" {
-			req.ExtraBody.ASROptions.Language = "zh"
-		}
-		req.ExtraBody.ASROptions.Language = lang
-	}
-}
-
-// WithPunctuation enables punctuation in ASR (placed in extra_body.asr_options)
-func WithPunctuation() ASROption {
-	return func(req *ASRRequest) {
-		req.ExtraBody.ASROptions.EnablePunctuation = true
-	}
-}
-
-// WithChildrenVoice enables children voice optimization for ASR (placed in extra_body.asr_options)
-func WithChildrenVoice() ASROption {
-	return func(req *ASRRequest) {
-		req.ExtraBody.ASROptions.ChildrenVoiceMode = true
-	}
-}
-
-// WithDialectDetection enables dialect detection for ASR (placed in extra_body.asr_options)
-func WithDialectDetection() ASROption {
-	return func(req *ASRRequest) {
-		req.ExtraBody.ASROptions.EnableDialectDetection = true
+		req.ASROptions.Language = lang
 	}
 }
 

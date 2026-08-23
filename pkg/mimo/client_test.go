@@ -410,19 +410,11 @@ func TestClient_Transcribe(t *testing.T) {
 			},
 		},
 		{
-			name:      "with punctuation option",
+			name:      "with language option",
 			handler:   defaultASRHandler,
 			audioData: []byte("mock_audio"),
 			format:    "wav",
-			opts:      []ASROption{WithPunctuation()},
-			wantErr:   nil,
-		},
-		{
-			name:      "with children voice optimization",
-			handler:   defaultASRHandler,
-			audioData: []byte("mock_audio"),
-			format:    "pcm16",
-			opts:      []ASROption{WithChildrenVoice()},
+			opts:      []ASROption{WithASRLanguage("en")},
 			wantErr:   nil,
 		},
 		{
@@ -634,33 +626,19 @@ func TestTTSOptions(t *testing.T) {
 // TestASROptions tests ASR option functions
 func TestASROptions(t *testing.T) {
 	req := ASRRequest{
-		ExtraBody: ASRExtraBody{
-			ASROptions: ASROptions{},
-		},
+		ASROptions: ASROptions{},
 	}
 
 	// Test WithASRLanguage
 	WithASRLanguage("en")(&req)
-	if req.ExtraBody.ASROptions.Language != "en" {
-		t.Errorf("WithASRLanguage() expected language 'en', got '%s'", req.ExtraBody.ASROptions.Language)
+	if req.ASROptions.Language != "en" {
+		t.Errorf("WithASRLanguage() expected language 'en', got '%s'", req.ASROptions.Language)
 	}
 
-	// Test WithPunctuation
-	WithPunctuation()(&req)
-	if !req.ExtraBody.ASROptions.EnablePunctuation {
-		t.Error("WithPunctuation() expected EnablePunctuation=true, got false")
-	}
-
-	// Test WithChildrenVoice
-	WithChildrenVoice()(&req)
-	if !req.ExtraBody.ASROptions.ChildrenVoiceMode {
-		t.Error("WithChildrenVoice() expected ChildrenVoiceMode=true, got false")
-	}
-
-	// Test WithDialectDetection
-	WithDialectDetection()(&req)
-	if !req.ExtraBody.ASROptions.EnableDialectDetection {
-		t.Error("WithDialectDetection() expected EnableDialectDetection=true, got false")
+	// Switching language replaces the previous value
+	WithASRLanguage("zh")(&req)
+	if req.ASROptions.Language != "zh" {
+		t.Errorf("WithASRLanguage() expected language 'zh', got '%s'", req.ASROptions.Language)
 	}
 }
 

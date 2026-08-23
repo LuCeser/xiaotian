@@ -168,23 +168,22 @@ var (
 	}
 )
 
-// ASR preset configurations
+// ASR preset configurations. The official API documents only
+// asr_options.language ("auto"/"zh"/"en"); dialects and punctuation are
+// handled server-side and need no client flags.
 var (
-	// PresetChildrenDictation is optimized for children's dictation
+	// PresetChildrenDictation is optimized for children's dictation (Chinese)
 	PresetChildrenDictation = []ASROption{
-		WithChildrenVoice(),
-		WithPunctuation(),
+		WithASRLanguage("zh"),
 	}
 
 	// PresetStandardRecognition is for general speech recognition
 	PresetStandardRecognition = []ASROption{
-		WithPunctuation(),
+		WithASRLanguage("auto"),
 	}
 
-	// PresetDialectSupport includes dialect detection
+	// PresetDialectSupport enables Chinese dialect recognition (server-native)
 	PresetDialectSupport = []ASROption{
-		WithChildrenVoice(),
-		WithPunctuation(),
-		WithDialectDetection(),
+		WithASRLanguage("zh"),
 	}
 )

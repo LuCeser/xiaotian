@@ -332,13 +332,8 @@ func (c *mimoClient) buildASRRequest(audio []byte, format string, opts ...ASROpt
 				},
 			},
 		},
-		ExtraBody: ASRExtraBody{
-			ASROptions: ASROptions{
-				Language:                 "zh", // Default to Chinese
-				EnablePunctuation:        true, // Enable punctuation by default
-				EnableDialectDetection:   false,
-				ChildrenVoiceMode:        true, // Optimize for children's voices
-			},
+		ASROptions: ASROptions{
+			Language: "zh", // Default to Chinese; override via WithASRLanguage
 		},
 	}
 

@@ -1,6 +1,7 @@
 package mimo
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,51 @@ import (
 
 // skipIntegration is set to false to enable integration tests when MIMO_API_KEY is provided
 const skipIntegration = false
+
+// TestMain loads the repo-root .env into this test process's environment
+// before any test runs, so `go test` picks up MIMO_API_KEY the same way the
+// dev workflow expects. Precedence: real environment always wins — .env only
+// fills variables that are unset (D-05: secrets travel via live env; this
+// loader never overrides and never logs key material).
+func TestMain(m *testing.M) {
+	// Go tests run with cwd = package dir (pkg/mimo), so the repo root is ../..
+	loadDotEnv("../../.env")
+	os.Exit(m.Run())
+}
+
+// loadDotEnv reads a minimal KEY=VALUE .env file into os.Environment.
+// It tolerates comments (#), blank lines, and surrounding quotes, and skips
+// any key that is already set in the environment. Missing file is not an
+// error — getTestAPIKey's t.Skip handles the no-key case.
+func loadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, `"'`)
+		if key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); exists {
+			continue // live environment takes precedence over .env
+		}
+		os.Setenv(key, value)
+	}
+}
 
 // getTestAPIKey retrieves the API key from environment or skips the test
 func getTestAPIKey(t *testing.T) string {
@@ -237,6 +283,28 @@ func TestIntegration_SynthesizeStream_RealAPI(t *testing.T) {
 		result.ChunkCount, result.TotalDuration)
 }
 
+// ttsRoundTripAudio synthesizes text via the real TTS API and returns WAV
+// bytes suitable for feeding straight back into ASR. The official ASR only
+// accepts wav/mp3, so the dictation round-trip is tested with real audio
+// rather than synthetic bytes (which the server rejects with 400).
+func ttsRoundTripAudio(t *testing.T, client Client, text string) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	audio, err := client.Synthesize(ctx, text,
+		WithVoice("冰糖"),
+		WithAudioFormat("wav"),
+	)
+	if err != nil {
+		t.Fatalf("ttsRoundTripAudio: synthesis failed: %v", err)
+	}
+	if len(audio.Samples) == 0 {
+		t.Fatal("ttsRoundTripAudio: synthesis returned empty audio")
+	}
+	return audio.Samples
+}
+
 // TestIntegration_Transcribe_RealAPI tests ASR transcription with real API
 func TestIntegration_Transcribe_RealAPI(t *testing.T) {
 	if skipIntegration {
@@ -271,31 +339,11 @@ func TestIntegration_Transcribe_RealAPI(t *testing.T) {
 		wantErr        bool
 	}{
 		{
-			name:      "Chinese transcription with children voice optimization",
-			audioData: []byte("mock_audio_data_for_chinese_test"), // Replace with real audio
-			format:    "pcm16",
-			opts: []ASROption{
-				WithChildrenVoice(),
-				WithPunctuation(),
-			},
-			validateResult: func(t *testing.T, result ASRResponse) {
-				text := result.ExtractText()
-				if text == "" {
-					t.Error("expected non-empty transcription text")
-				}
-				if len(result.Choices) == 0 {
-					t.Error("expected at least one choice in response")
-				}
-			},
-			wantErr: false,
-		},
-		{
-			name:      "English transcription",
-			audioData: []byte("mock_audio_data_for_english_test"), // Replace with real audio
+			name:      "Chinese transcription round-trip from TTS",
+			audioData: ttsRoundTripAudio(t, client, "小朋友们好，我们来听写吧"),
 			format:    "wav",
 			opts: []ASROption{
-				WithASRLanguage("en"),
-				WithPunctuation(),
+				WithASRLanguage("zh"),
 			},
 			validateResult: func(t *testing.T, result ASRResponse) {
 				text := result.ExtractText()
@@ -408,12 +456,13 @@ func TestIntegration_EndToEnd_RealAPI(t *testing.T) {
 
 	t.Log("=== End-to-End Dictation Workflow Test ===")
 
-	// Step 1: Teacher speaks the word (TTS)
-	t.Log("Step 1: Generating teacher audio for word 'apple'")
 	ctx := context.Background()
 
+	// Step 1: Teacher speaks the word (TTS, wav so ASR can consume it)
+	t.Log("Step 1: Generating teacher audio for word 'apple'")
 	teacherAudio, err := client.Synthesize(ctx, "Please spell the word: apple",
 		WithVoice("茉莉"),
+		WithAudioFormat("wav"),
 		WithStyleInstruction("Use a clear, encouraging teacher voice."),
 	)
 	if err != nil {
@@ -422,15 +471,11 @@ func TestIntegration_EndToEnd_RealAPI(t *testing.T) {
 	}
 	t.Logf("Generated teacher audio: %d bytes, duration=%dms", len(teacherAudio.Samples), teacherAudio.Duration)
 
-	// Step 2: Student attempts pronunciation (simulate with placeholder)
-	t.Log("Step 2: Processing student pronunciation (simulated)")
-	studentAudio := []byte("simulated_student_pronunciation_data")
-
-	// Step 3: Transcribe student speech
-	t.Log("Step 3: Transcribing student speech")
-	transcription, err := client.Transcribe(ctx, studentAudio, "pcm16",
-		WithChildrenVoice(),
-		WithPunctuation(),
+	// Step 2: Student listens and speaks the word back. Simulated by feeding
+	// the teacher's own audio to ASR — real wav bytes, real recognition.
+	t.Log("Step 2: Transcribing student speech (TTS→ASR round-trip)")
+	transcription, err := client.Transcribe(ctx, teacherAudio.Samples, "wav",
+		WithASRLanguage("en"),
 	)
 	if err != nil {
 		t.Errorf("failed to transcribe student speech: %v", err)
