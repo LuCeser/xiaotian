@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -64,11 +65,13 @@ type Session struct {
 	connID string
 
 	// --- FSM state (protected by mu for cross-goroutine reads) ---
-	mu        sync.RWMutex
-	state     database.SessionState
-	wordQueue []pybridge.DueCard
-	wordIndex int
-	deadline  time.Time
+	mu               sync.RWMutex
+	state            database.SessionState
+	wordQueue        []pybridge.DueCard
+	wordIndex        int
+	deadline         time.Time
+	currentWordID    string    // Track current word for progress frames (08-06)
+	sessionStartTime time.Time // Track session start time for duration calculation (08-06)
 
 	// --- FSRS lock scope (captured at NewSession, replayed at exit — Pitfall 4) ---
 	lockCategory string
@@ -187,28 +190,55 @@ func NewSession(
 
 	// --- Step 5: Build the Session struct. ---
 	s := &Session{
-		id:           sessionID,
-		connID:       connID,
-		state:        database.StateIdle,
-		wordQueue:    cards,
-		wordIndex:    0,
-		deadline:     time.Now().Add(cfg.SessionTimeout.IdleStateTimeout),
-		lockCategory: resolvedCategory,
-		lockUnit:     resolvedUnit,
-		client:       client,
-		fsrsSvc:      fsrsSvc,
-		gen:          gen,
-		streamer:     streamer,
-		repo:         repo,
-		pool:         pool,
-		hub:          hub,
-		logger:       logger,
-		cfg:          cfg,
-		events:       make(chan SessionEvent, eventBufferSize),
+		id:               sessionID,
+		connID:           connID,
+		state:            database.StateIdle,
+		wordQueue:        cards,
+		wordIndex:        0,
+		deadline:         time.Now().Add(cfg.SessionTimeout.IdleStateTimeout),
+		lockCategory:     resolvedCategory,
+		lockUnit:         resolvedUnit,
+		client:           client,
+		fsrsSvc:          fsrsSvc,
+		gen:              gen,
+		streamer:         streamer,
+		repo:             repo,
+		pool:             pool,
+		hub:              hub,
+		logger:           logger,
+		cfg:              cfg,
+		events:           make(chan SessionEvent, eventBufferSize),
+		currentWordID:    "",         // Initialize current word ID tracker (08-06)
+		sessionStartTime: time.Now(), // Track session start for progress frames (08-06)
 	}
 
-	// --- Step 6: Audit Create (fire-and-forget via pool.Submit, D-06). ---
-	s.auditCreate()
+	// --- Step 6: Audit Create (synchronous to capture dbID). ---
+	// FIX: Make Create synchronous to capture the returned database ID into s.dbID.
+	// The original fire-and-forget approach left s.dbID at 0, causing
+	// "update state for session 0: session not found" errors in subsequent
+	// database operations (auditState, auditEvent).
+	if s.repo != nil {
+		dbID, err := s.repo.Create(ctx, database.Session{
+			ConnectionID: s.connID,
+			State:        database.StateIdle,
+			WordCount:    len(s.wordQueue),
+		})
+		if err != nil {
+			s.logger.Error("session: audit create failed",
+				infra.F("component", "session"),
+				infra.F("conn_id", s.connID),
+				infra.ErrField(err),
+			)
+			// Continue anyway - session can function without audit trail
+		} else {
+			s.dbID = dbID // Store the database ID for subsequent operations
+			s.logger.Debug("session: audit create succeeded",
+				infra.F("component", "session"),
+				infra.F("conn_id", s.connID),
+				infra.F("db_id", dbID),
+			)
+		}
+	}
 
 	// Do NOT spawn go s.run(ctx) — the caller does via Start(ctx).
 	return s, nil
@@ -292,6 +322,18 @@ func (s *Session) run(ctx context.Context) {
 		// time.After is re-evaluated on every loop iteration so an onTransition
 		// deadline update is reflected immediately.
 		case <-time.After(time.Until(s.Deadline())):
+			// DICTATING timeout means the student didn't answer in time: skip
+			// the word by pushing a synthetic next_word event and keep the
+			// session alive. Any other state timeout terminates the session
+			// (existing behavior).
+			if s.State() == database.StateDictating {
+				s.logger.Debug("session: dictating timeout, skipping word",
+					infra.F("component", "session"),
+					infra.F("session_id", s.id),
+				)
+				s.Push(SessionEvent{Type: EventControlFrame, ControlType: "next_word"})
+				continue
+			}
 			return
 
 		case <-ctx.Done():
@@ -340,13 +382,39 @@ func (s *Session) handleEvent(ev SessionEvent) {
 // onTransition is called after a successful FSM transition. It resets the
 // per-state deadline (D-08), fires the state-change audit (D-06), and spawns
 // the D-13 StreamWord side channel if the new state is LISTENING.
+// Additionally sends progress frames for real-time feedback (08-06).
 func (s *Session) onTransition() {
 	s.mu.Lock()
-	s.deadline = time.Now().Add(s.timeoutFor(s.state))
+	deadliner := time.Now().Add(s.timeoutFor(s.state))
 	newState := s.state
 	s.mu.Unlock()
 
+	s.mu.Lock()
+	s.deadline = deadliner
+	s.mu.Unlock()
+
 	s.auditState(newState)
+
+	// 08-06: Emit progress_update when entering LISTENING (starting word streaming)
+	if newState == database.StateListening {
+		s.sendProgressFrame() // Notify client that word streaming is starting
+	}
+
+	// 08-06: Emit word_complete when entering DICTATING (word streaming finished)
+	if newState == database.StateDictating {
+		s.mu.RLock()
+		wordID := s.currentWordID
+		s.mu.RUnlock()
+		if wordID != "" {
+			s.sendWordCompleteFrame(wordID) // Notify client that word completed
+			s.sendProgressFrame()           // Update progress display
+		}
+	}
+
+	// 08-06: Emit session_complete when entering FEEDBACK (all words completed)
+	if newState == database.StateFeedback {
+		s.sendSessionCompleteFrame() // Notify client that session completed
+	}
 
 	// D-13: on entering LISTENING, the Session owns the StreamWord call. On its
 	// return, a goroutine pushes WordComplete onto the events channel, driving
@@ -368,7 +436,15 @@ func (s *Session) spawnStreamWord() {
 		s.streamCancel()
 	}
 
-	wordID := s.wordQueue[s.wordIndex].Word
+	// Get current word for progress tracking (08-06)
+	var wordID string
+	if s.wordIndex >= 0 && s.wordIndex < len(s.wordQueue) {
+		wordID = s.wordQueue[s.wordIndex].Word
+		s.mu.Lock()
+		s.currentWordID = wordID // Track current word for completion frames (08-06)
+		s.mu.Unlock()
+	}
+
 	streamCtx, cancel := context.WithCancel(s.runCtx)
 	s.streamCancel = cancel
 
@@ -488,6 +564,22 @@ func (s *Session) Deadline() time.Time {
 	return s.deadline
 }
 
+// CurrentWord returns the word string currently being dictated.
+// Returns "" if no word is active. Thread-safe (takes RLock).
+func (s *Session) CurrentWord() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.wordIndex >= 0 && s.wordIndex < len(s.wordQueue) {
+		return s.wordQueue[s.wordIndex].Word
+	}
+	return ""
+}
+
+// Category returns the session's FSRS category.
+func (s *Session) Category() string {
+	return s.lockCategory
+}
+
 // Done returns a channel that is closed when run() exits. Tests and the sweeper
 // use it to detect session liveness without polling.
 func (s *Session) Done() <-chan struct{} { return s.done }
@@ -503,6 +595,143 @@ func (s *Session) Words() []string {
 		words[i] = card.Word
 	}
 	return words
+}
+
+// ---------------------------------------------------------------------------
+// Progress frame emission (08-06: Backend Progress Frame Emission)
+// ---------------------------------------------------------------------------
+
+// sendProgressFrame sends a progress_update control frame to the client (08-06).
+func (s *Session) sendProgressFrame() {
+	if s.client == nil {
+		return // No client in tests
+	}
+
+	s.mu.RLock()
+	currentWord := s.wordIndex + 1 // 1-indexed for display
+	completedWords := s.wordIndex  // Words fully completed
+	totalWords := len(s.wordQueue)
+	sessionID := s.id
+	s.mu.RUnlock()
+
+	// Build progress frame JSON. Field names use camelCase to match the
+	// frontend's _applyProgressUpdate parser (websocket-client.js).
+	progressMsg := map[string]interface{}{
+		"type":           "progress_update",
+		"session_id":     sessionID,
+		"currentWord":    currentWord,
+		"completedWords": completedWords,
+		"totalWords":     totalWords,
+	}
+
+	jsonBytes, err := json.Marshal(progressMsg)
+	if err != nil {
+		s.logger.Warn("session: failed to marshal progress frame",
+			infra.F("session_id", s.id),
+			infra.ErrField(err),
+		)
+		return
+	}
+
+	// Send as control frame
+	header := &ws.FrameHeader{
+		Version:    ws.ProtocolVersion,
+		MsgType:    ws.MsgTypeControl,
+		Sequence:   0, // TODO: atomic counter for monotonic sequences
+		PayloadLen: uint16(len(jsonBytes)),
+	}
+	frame := ws.EncodeFrame(header, jsonBytes)
+
+	if err := s.client.Send(frame); err != nil {
+		s.logger.Warn("session: failed to send progress frame",
+			infra.F("session_id", s.id),
+			infra.ErrField(err),
+		)
+	}
+}
+
+// sendWordCompleteFrame sends a word_complete control frame to the client (08-06).
+func (s *Session) sendWordCompleteFrame(wordID string) {
+	if s.client == nil {
+		return // No client in tests
+	}
+
+	// Build word_complete frame JSON
+	wordCompleteMsg := map[string]interface{}{
+		"type":       "word_complete",
+		"session_id": s.id,
+		"word_id":    wordID,
+	}
+
+	jsonBytes, err := json.Marshal(wordCompleteMsg)
+	if err != nil {
+		s.logger.Warn("session: failed to marshal word_complete frame",
+			infra.F("session_id", s.id),
+			infra.F("word_id", wordID),
+			infra.ErrField(err),
+		)
+		return
+	}
+
+	// Send as control frame
+	header := &ws.FrameHeader{
+		Version:    ws.ProtocolVersion,
+		MsgType:    ws.MsgTypeControl,
+		Sequence:   0, // TODO: atomic counter for monotonic sequences
+		PayloadLen: uint16(len(jsonBytes)),
+	}
+	frame := ws.EncodeFrame(header, jsonBytes)
+
+	if err := s.client.Send(frame); err != nil {
+		s.logger.Warn("session: failed to send word_complete frame",
+			infra.F("session_id", s.id),
+			infra.F("word_id", wordID),
+			infra.ErrField(err),
+		)
+	}
+}
+
+// sendSessionCompleteFrame sends a session_complete control frame to the client (08-06).
+func (s *Session) sendSessionCompleteFrame() {
+	if s.client == nil {
+		return // No client in tests
+	}
+
+	durationMs := time.Since(s.sessionStartTime).Milliseconds()
+
+	// Build session_complete frame JSON. Field names use camelCase to match
+	// the frontend's _applySessionComplete parser (websocket-client.js).
+	sessionCompleteMsg := map[string]interface{}{
+		"type":       "session_complete",
+		"session_id": s.id,
+		"totalWords": len(s.wordQueue),
+		"durationMs": durationMs,
+	}
+
+	jsonBytes, err := json.Marshal(sessionCompleteMsg)
+	if err != nil {
+		s.logger.Warn("session: failed to marshal session_complete frame",
+			infra.F("session_id", s.id),
+			infra.ErrField(err),
+		)
+		return
+	}
+
+	// Send as control frame
+	header := &ws.FrameHeader{
+		Version:    ws.ProtocolVersion,
+		MsgType:    ws.MsgTypeControl,
+		Sequence:   0, // TODO: atomic counter for monotonic sequences
+		PayloadLen: uint16(len(jsonBytes)),
+	}
+	frame := ws.EncodeFrame(header, jsonBytes)
+
+	if err := s.client.Send(frame); err != nil {
+		s.logger.Warn("session: failed to send session_complete frame",
+			infra.F("session_id", s.id),
+			infra.ErrField(err),
+		)
+	}
 }
 
 // LockCategory returns the resolved FSRS lock category captured at NewSession

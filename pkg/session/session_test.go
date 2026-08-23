@@ -175,6 +175,17 @@ func shortTimeoutCfg() infra.Config {
 	return cfg
 }
 
+// multiWordTimeoutCfg returns a Config with longer timeouts for tests that exercise
+// multi-word progression (need time to push events between state transitions).
+func multiWordTimeoutCfg() infra.Config {
+	cfg := testCfg()
+	cfg.SessionTimeout.IdleStateTimeout = 5 * time.Second
+	cfg.SessionTimeout.ListeningStateTimeout = 5 * time.Second
+	cfg.SessionTimeout.DictatingStateTimeout = 5 * time.Second
+	cfg.SessionTimeout.WaitingParentStateTimeout = 5 * time.Second
+	return cfg
+}
+
 // waitForState polls the session state until it matches want or timeout expires.
 func waitForState(t *testing.T, s *session.Session, want database.SessionState, timeout time.Duration) {
 	t.Helper()
@@ -248,6 +259,45 @@ func TestEventLoop_LastWord(t *testing.T) {
 	waitForState(t, s, database.StateDictating, 2*time.Second)
 	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "next_word"})
 	waitForState(t, s, database.StateWaitingParent, 2*time.Second)
+}
+
+// TestEventLoop_MultiWordFlow: exercises the full 2-word dictation cycle:
+// play_word → LISTENING → DICTATING → next_word → LISTENING → DICTATING → next_word (last) → WAITING_PARENT.
+func TestEventLoop_MultiWordFlow(t *testing.T) {
+	streamer := &fakeStreamer{}
+	hub := &fakeHub{}
+	twoCards := []pybridge.DueCard{{ID: 1, Word: "apple"}, {ID: 2, Word: "banana"}}
+	fsrsSvc := &fakeFSRSService{dueCards: twoCards}
+	gen := &fakeTTSGenerator{}
+	repo := newFakeSessionRepository()
+
+	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, streamer, repo, nil, hub, nil, multiWordTimeoutCfg(), fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	// Step 1: play_word → IDLE → LISTENING → (D-13) DICTATING
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "play_word"})
+	waitForState(t, s, database.StateDictating, 2*time.Second)
+	time.Sleep(10 * time.Millisecond) // let event loop settle after D-13 StreamWord completes
+
+	// Step 2: next_word (first word done) → DICTATING → LISTENING → (D-13) DICTATING
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "next_word"})
+	waitForState(t, s, database.StateDictating, 2*time.Second)
+	time.Sleep(10 * time.Millisecond) // let event loop settle after D-13 StreamWord completes
+
+	// Step 3: next_word (last word) → DICTATING → WAITING_PARENT
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "next_word"})
+	waitForState(t, s, database.StateWaitingParent, 2*time.Second)
+
+	// Verify StreamWord was called for each word (at least 2 calls)
+	if streamer.StreamCalls() < 2 {
+		t.Errorf("StreamCalls = %d, want >= 2 (two words streamed)", streamer.StreamCalls())
+	}
 }
 
 // TestEventLoop_Timeout: no events → per-state deadline fires → defer chain runs → lock released.
