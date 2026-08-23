@@ -571,8 +571,9 @@
 
     /**
      * @private apply a paused frame → set status to PAUSED. T-08-05 validates
-     * session_id; a rejected frame is surfaced via errorHandler and does NOT
-     * mutate state.
+     * the session_id field's type (a string); it does not check that the id
+     * matches the active session. A rejected frame is surfaced via
+     * errorHandler and does NOT mutate state.
      */
     _applyPaused(payload) {
       if (typeof payload.session_id !== 'string') {

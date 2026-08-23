@@ -201,6 +201,21 @@ func waitForState(t *testing.T, s *session.Session, want database.SessionState, 
 	t.Fatalf("waitForState: state still %q, want %q after %v", s.State(), want, timeout)
 }
 
+// waitForLog polls the recordingLogger until a message containing sub has
+// been recorded or the timeout expires (same deadline-loop shape as
+// waitForState: 2ms interval, hard failure on timeout).
+func waitForLog(t *testing.T, lg *recordingLogger, sub string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if lg.hasMessage(sub) {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waitForLog: no message containing %q within %v", sub, timeout)
+}
+
 // waitDone waits for the session goroutine to exit (Done channel closed) or timeout.
 func waitDone(t *testing.T, s *session.Session, timeout time.Duration) {
 	t.Helper()
@@ -610,8 +625,9 @@ func TestEventLoop_Repeat_StaleWordCompleteDropped(t *testing.T) {
 	fsrsSvc := &fakeFSRSService{dueCards: twoCards}
 	gen := &fakeTTSGenerator{}
 	repo := newFakeSessionRepository()
+	lg := &recordingLogger{}
 
-	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, gs, repo, nil, hub, nil, multiWordTimeoutCfg(), fsrs.SelectOpts{})
+	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, gs, repo, nil, hub, lg, multiWordTimeoutCfg(), fsrs.SelectOpts{})
 	if err != nil {
 		t.Fatalf("NewSession() error: %v", err)
 	}
@@ -647,10 +663,13 @@ func TestEventLoop_Repeat_StaleWordCompleteDropped(t *testing.T) {
 	waitForStreamCalls(t, gs, 3)
 
 	// Step 4: let the cancelled gen2 finish — its goroutine pushes a stale
-	// WordComplete onto the events channel.
+	// WordComplete onto the events channel; then poll until the event loop
+	// has consumed AND dropped it. The drop path's debug log is the only
+	// synchronous signal (emitted on the event-loop goroutine), so
+	// consumption is proven before the Step 5 assertions — no wall clock.
 	gs.release(1)
 	gs.waitReturned(t, 1)
-	time.Sleep(100 * time.Millisecond) // let the event loop consume the stale event
+	waitForLog(t, lg, "dropping stale word_complete", 2*time.Second)
 
 	// Step 5 (discriminating assertion): the stale WordComplete(gen2) must be
 	// dropped — still LISTENING, still on the second word.

@@ -2,10 +2,12 @@ package session_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/tts"
@@ -271,3 +273,46 @@ func (f *fakeHub) UnregisterCount() int {
 }
 
 var _ session.SessionHub = (*fakeHub)(nil)
+
+// recordingLogger implements infra.Logger for tests: appends every message
+// text to an in-memory slice so tests can poll for a specific entry (used to
+// observe the event loop's stale-event drop path, whose debug log is the only
+// synchronous signal that an event was consumed).
+type recordingLogger struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (l *recordingLogger) Debug(msg string, fields ...infra.Field) { l.record(msg) }
+func (l *recordingLogger) Info(msg string, fields ...infra.Field)  { l.record(msg) }
+func (l *recordingLogger) Warn(msg string, fields ...infra.Field)  { l.record(msg) }
+func (l *recordingLogger) Error(msg string, fields ...infra.Field) { l.record(msg) }
+
+// With returns the receiver itself, dropping the context fields — tests only
+// assert on message text, and returning the receiver guarantees every entry
+// lands in the same slice.
+func (l *recordingLogger) With(fields ...infra.Field) infra.Logger { return l }
+
+// Sync is a no-op for an in-memory logger.
+func (l *recordingLogger) Sync() error { return nil }
+
+// record appends a message text under the lock.
+func (l *recordingLogger) record(msg string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.msgs = append(l.msgs, msg)
+}
+
+// hasMessage reports whether any recorded message contains sub.
+func (l *recordingLogger) hasMessage(sub string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, m := range l.msgs {
+		if strings.Contains(m, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+var _ infra.Logger = (*recordingLogger)(nil)
