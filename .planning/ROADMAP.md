@@ -267,7 +267,7 @@ Plans:
   3. Responsive design works optimally on iPad Safari browser
   4. Interface handles WebSocket reconnections gracefully
 
-**Plans**: 5/5 plans executed
+**Plans**: 6/7 plans executed (08-07 manual iPad UAT pending real device)
 
 **Wave 1**
 
@@ -279,45 +279,138 @@ Plans:
 **Gap Closure Wave**
 
 - [x] 08-05-PLAN.md — Fix static file serving 404 errors (gap G-08-2)
+- [x] 08-06-PLAN.md — Backend progress frames (progress_update/word_complete/session_complete) + currentWordId tracking + frontend progress display & audio controller fixes (WEB-02)
+
+**Manual Verification Wave** (requires physical iPad)
+
+- [ ] 08-07-PLAN.md — iPad Safari manual UAT: 9 previously blocked tests, portrait/landscape screenshots, real-device audio playback & touch verification (WEB-04)
 
 **PROJECT_MODE**: mvp
 **UI hint**: yes
 
-### Phase 8.1: Multi-Word Dictation Flow (INSERTED)
+### Phase 8.1: Core Dictation Flow with Mimo TTS (INSERTED)
 
-**Goal:** Wire the end-to-end multi-word dictation playback — student taps "I want to dictate 30 words" → system sequentially reads all words with real-time progress → session completes. Closes the integration gap between the backend multi-word FSM (Phase 7) and the student frontend (Phase 8). Unblocks Phase 8 UAT test 8.
+**Goal:** Student-paced core dictation flow — students hear words one by one via Xiaomi Mimo TTS with adaptive writing time (8-15s by word difficulty) and student controls (Next Word / Repeat Word / Pause/Resume), preserving the traditional teacher-student dictation rhythm. Wires pkg/mimo (ticket 01, verified 2026-08-23) into the session pipeline, building on Phase 08-06's client-driven triggers (play_word/next_word) and progress frames.
+**Source of truth:** `.scratch/speech-recognition-redesign/issues/02-core-dictation-flow-tts.md` (user decision 2026-08-23: ticket set is the single source of truth)
 **Depends on**: Phase 8
-**Requirements**: DICT-01 (full), DICT-03, DICT-05 (multi-word), WEB-02 (real-time progress)
+**Requirements**: DICT-01, DICT-03, DICT-05, DICT-06, DICT-07, WEB-02
 **Success Criteria** (what must be TRUE):
 
-  1. After session_ready, words play sequentially 1→N without further user interaction
-  2. Real-time progress display advances word-by-word (progress bar 0%→100%, word counter)
-  3. session_complete frame emitted and UI transitions to post-session state
-  4. currentWordId correctly set so audio frames are not dropped (resolves audio-controller.js:157-159 frame-drop)
-  5. Unblocks Phase 8 UAT test 8 (real-time progress display)
+  1. Student can request dictation session and hear words read via Xiaomi Mimo TTS (pkg/mimo becomes the dictation audio source)
+  2. Adaptive writing time (8-15s) computed from word length and complexity
+  3. Next Word / Repeat Word / Pause/Resume controls work over the existing WebSocket protocol and session management patterns
+  4. Session FSM handles LISTENING → DICTATING → PAUSED transitions
+  5. Audio latency <1.5s; real-time progress display advances word-by-word (retains 08-06 progress frames)
 
-**Open design decision** (for /gsd-discuss-phase): auto-advance (backend drives the word loop after start_session) vs client-driven (frontend orchestrates play_word/next_word).
-
-**Scope** (from Phase 8 UAT re-examination evidence):
-- Backend: emit progress_update (per word) + session_complete (on last word → WAITING_PARENT/FEEDBACK); currently 0 emit sites in cmd/+pkg/
-- Backend: decide auto-advance mode vs client-driven orchestration
-- Frontend: send play_word/next_word (if client-driven) OR handle auto-advance frames; currently ui-components.js:145-148 sends only start_session
-- Frontend: set currentWordId before audio frames arrive (state-manager.js:62 init null; audio-controller.js:270 setCurrentWord has zero callers)
+**Superseded** (2026-08-23 user decision — ticket set supersedes prior planning):
+- Backend auto-advance design (D-01/D-02/D-03 Option A, 08.1-CONTEXT.md) → replaced by the student-paced model
+- 08.1-01-PLAN.md / 08.1-02-PLAN.md → not executed, obsolete; re-plan via /gsd-plan-phase 8.1
+- Retained from 08-06 delivery: progress_update/word_complete/session_complete emission + frontend play_word/next_word triggers (client-driven foundation this phase builds on)
 
 **Note**: Phase 8 UAT test 7 (WebSocket reconnection / session resume) remains blocked and is owned by the existing **Phase 11** (Error Handling & Resilience, success criterion #1: "gracefully handles WebSocket disconnections").
 
-**Plans**: 2/2 plans (Wave 1 tracer + Wave 2 wire-fidelity expansion)
+**Plans**: 0 plans (re-planning required after re-scope)
 
 Plans:
-**Wave 1**
 
-- [ ] 08.1-01-PLAN.md — Tracer: backend auto-advance core (D-02 FSM + D-04/D-06 emission + D-03 Option A trigger) + FSM unit table + end-to-end event-loop test + frontend currentWordId wiring (DICT-01, DICT-03, DICT-05, WEB-02)
+- [ ] TBD (run /gsd-plan-phase 8.1)
 
-**Wave 2** *(blocked on Wave 1)*
+**UI hint**: yes
 
-- [ ] 08.1-02-PLAN.md — Real-WS wire-fidelity expansion: full N-word frame sequence + D-04 ordering invariant (progress_update.word_id precedes audio) + D-06 session_complete proof (DICT-01, DICT-03, WEB-02)
+### Phase 8.2: Voice Command Recognition via Mimo ASR (INSERTED)
 
-**UI hint**: yes (--skip-ui: frontend change is one additive setState line; ProgressDisplay built in Phase 8, unchanged)
+**Goal:** Students control dictation with natural voice commands ("好了", "重读", "暂停", "不会写") — Xiaomi Mimo ASR transcription + LLM intent analysis replaces the unreliable Web Speech API, with button-control fallback.
+**Source of truth:** `.scratch/speech-recognition-redesign/issues/03-voice-command-recognition-intent.md`
+**Depends on**: Phase 8.1
+**Requirements**: VOICE-01, VOICE-02, VOICE-03, VOICE-04
+**Success Criteria** (what must be TRUE):
+
+  1. System captures audio via Web Audio API on iPad Safari and Mimo ASR transcribes student commands accurately
+  2. LLM intent analysis maps varied natural expressions (beyond fixed phrases) to the 4 core commands and triggers correct session state transitions
+  3. Failed recognition falls back to button controls
+  4. Voice control works reliably for children's voices (ages 6-12)
+
+**Plans**: 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 8.2)
+
+### Phase 8.3: Photo OCR Answer Submission (INSERTED)
+
+**Goal:** Students submit written answers by photographing their work with the iPad camera; OCR extracts the text with confidence scores, manual input remains the fallback. Preserves traditional handwriting practice with modern automation.
+**Source of truth:** `.scratch/speech-recognition-redesign/issues/04-photo-ocr-answer-submission.md`
+**Depends on**: Phase 8.1
+**Requirements**: SUBMIT-01, SUBMIT-02, SUBMIT-03
+**Success Criteria** (what must be TRUE):
+
+  1. Students can capture photos of written answers via iPad camera on a Safari-optimized interface
+  2. OCR extracts text with ≥85% accuracy for typical elementary handwriting, results include confidence scores
+  3. Manual input option available when OCR confidence is low or fails; system validates submitted answer format and completeness
+  4. Camera permission and image processing failures handled gracefully
+
+**Plans**: 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 8.3)
+
+### Phase 8.4: Batch Answer Submission Workflow (INSERTED)
+
+**Goal:** Students write all words first and submit together at the end — the authentic classroom dictation rhythm (write all → submit all → grade all). Session FSM gains DICTATING → SUBMISSION → FEEDBACK transitions.
+**Source of truth:** `.scratch/speech-recognition-redesign/issues/05-batch-answer-submission-workflow.md`
+**Depends on**: Phase 8.3
+**Requirements**: SUBMIT-04, SUBMIT-05
+**Success Criteria** (what must be TRUE):
+
+  1. Student can submit all answers together after completing dictation
+  2. Batch submission processes multiple words efficiently with progress indicators
+  3. Session FSM handles DICTATING → SUBMISSION → FEEDBACK transitions
+  4. Submission interface supports both OCR and manual input; all answers validated before processing
+
+**Plans**: 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 8.4)
+
+### Phase 8.5: Automatic Grading and Analysis Reports (INSERTED)
+
+**Goal:** System automatically grades submitted answers (character-level comparison tolerant of common mistakes) and delivers detailed analysis reports — error patterns, learning suggestions, performance trends — with scores and encouraging feedback read aloud via TTS. Removes the parent bottleneck for immediate feedback; results feed FSRS updates and parent review (Phase 10).
+**Source of truth:** `.scratch/speech-recognition-redesign/issues/06-automatic-grading-detailed-analysis.md`
+**Depends on**: Phase 8.4
+**Requirements**: GRADE-01, GRADE-02, GRADE-03, GRADE-04
+**Success Criteria** (what must be TRUE):
+
+  1. Character-level comparison between submitted and correct answers, tolerant of minor variations and common mistakes
+  2. Detailed analysis reports show error patterns, character-level error highlighting, and learning suggestions
+  3. Final scores and encouraging feedback read aloud via TTS
+  4. Results stored for FSRS updates and parent review; performance trends tracked over multiple sessions
+
+**Plans**: 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 8.5)
+
+### Phase 8.6: Multi-User Session Isolation and Scaling (INSERTED)
+
+**Goal:** Multiple students run concurrent dictation sessions with proper isolation — data boundaries across database, WebSocket connections, and service integrations — preparing for classroom deployment beyond single-user.
+**Source of truth:** `.scratch/speech-recognition-redesign/issues/07-multi-user-session-isolation-scaling.md`
+**Depends on**: Phase 8.5
+**Requirements**: RES-01 (multi-user), RES-03 (50 concurrent)
+**Success Criteria** (what must be TRUE):
+
+  1. Multiple students can have active dictation sessions simultaneously with properly isolated session data
+  2. Memory stays within the 150MB Go service budget under expected load; resource pooling prevents leaks
+  3. Performance testing validates 50 concurrent student capacity
+  4. Graceful degradation when approaching capacity limits
+
+**Plans**: 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 8.6)
 
 ### Phase 9: Parent Vocabulary Management
 
@@ -338,14 +431,14 @@ Plans:
 
 ### Phase 10: Parent Feedback System
 
-**Goal**: Post-dictation review interface for performance ratings and progress statistics
-**Depends on**: Phase 7, Phase 8
-**Requirements**: FEED-01, FEED-02, FEED-03, FEED-04, WEB-03
+**Goal**: Parent review interface over auto-graded dictation results (Phase 8.5) — view detailed analysis reports, verify or override per-word grades, and track progress statistics. Parent confirmation remains the FSRS authority; auto-grading pre-fills the ratings (removes the parent bottleneck without removing parent control).
+**Depends on**: Phase 7, Phase 8, Phase 8.5
+**Requirements**: FEED-01, FEED-02, FEED-03, FEED-04, GRADE-04, WEB-03
 **Success Criteria** (what must be TRUE):
 
-  1. Parent can review completed dictation session results
-  2. Parent can rate each word performance (good/hard/again/easy)
-  3. Feedback ratings automatically update FSRS algorithm parameters
+  1. Parent can review completed dictation session results with auto-grading analysis attached (error patterns, suggestions, confidence)
+  2. Parent can verify or override each word's auto-assessed performance (good/hard/again/easy, pre-filled from grading)
+  3. Confirmed feedback ratings update FSRS algorithm parameters (RunReview path unchanged)
   4. System displays progress statistics and vocabulary retention metrics
 
 **Plans**: TBD
@@ -371,15 +464,17 @@ Plans:
 
 ### Phase 12: End-to-End Validation
 
-**Goal**: Complete user flow verification with performance testing and resource validation
-**Depends on**: Phase 11
+**Goal**: Complete user flow verification with performance testing and resource validation on target hardware — absorbs speech-recognition-redesign ticket 08 scope (children's voices, real handwriting samples, real iPad Safari workflows).
+**Source of truth (extension):** `.scratch/speech-recognition-redesign/issues/08-end-to-end-integration-testing.md`
+**Depends on**: Phase 11, Phase 8.6
 **Requirements**: All v1 requirements
 **Success Criteria** (what must be TRUE):
 
-  1. Complete student flow works: session request → dictation → parent review → feedback
-  2. Complete parent flow works: vocabulary management → session monitoring → feedback
-  3. System operates within 150MB memory budget under 100 concurrent sessions
-  4. All 32 v1 requirements validated with observable user behaviors
+  1. Complete student flow works on actual iPad Safari devices: session request → dictation → voice commands → photo/batch submission → auto-grading → feedback
+  2. Complete parent flow works: vocabulary management → session monitoring → review/override auto-grades → feedback
+  3. Voice command recognition tested with children's voices (ages 6-12); OCR accuracy validated with real elementary handwriting samples
+  4. Performance benchmarks meet latency (<1.5s) and memory (150MB) requirements; error scenarios degrade gracefully with fallbacks
+  5. All v1 requirements validated with observable user behaviors; system ready for single-student production deployment
 
 **Plans**: TBD
 
@@ -388,7 +483,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 8.1 → 8.2 → 8.3 → 8.4 → 8.5 → 8.6 → 9 → 10 → 11 → 12
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -400,8 +495,13 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 6. TTS Audio Streaming | 4/4 | Complete    | 2026-08-08 |
 | 7. Session State Management | 3/3 | Complete    | 2026-08-08 |
 | 07.1. iOS WebSocket Audio Playback Fix (INSERTED) | 4/4 | Complete    | 2026-08-09 |
-| 8. Student Web Interface | 5/5 | In Progress|  |
-| 8.1. Multi-Word Dictation Flow (INSERTED) | 0/2 | In Progress|  |
+| 8. Student Web Interface | 6/7 | In Progress|  |
+| 8.1. Core Dictation Flow with Mimo TTS (INSERTED) | 0/0 | Not started (re-planning after re-scope) | - |
+| 8.2. Voice Command Recognition via Mimo ASR (INSERTED) | 0/0 | Not started | - |
+| 8.3. Photo OCR Answer Submission (INSERTED) | 0/0 | Not started | - |
+| 8.4. Batch Answer Submission Workflow (INSERTED) | 0/0 | Not started | - |
+| 8.5. Automatic Grading and Analysis Reports (INSERTED) | 0/0 | Not started | - |
+| 8.6. Multi-User Session Isolation and Scaling (INSERTED) | 0/0 | Not started | - |
 | 9. Parent Vocabulary Management | 0/0 | Not started | - |
 | 10. Parent Feedback System | 0/0 | Not started | - |
 | 11. Error Handling & Resilience | 0/0 | Not started | - |
@@ -416,6 +516,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (promote with /gsd-review-backlog when ready)
 
 **问题描述：** `go build` 和 `go test` 执行时间异常长，怀疑代码中存在设置了长时间超时条件的测试用例（如 `time.Sleep`、`time.After`、自定义超时），导致每次构建/测试都需要等待超时才能完成。需要专题排查所有测试文件中的 time-related 阻塞模式，将其改为可控的 mock 或缩短超时。

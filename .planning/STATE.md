@@ -5,12 +5,12 @@ milestone_name: milestone
 current_phase: 08
 current_phase_name: Student Web Interface
 status: executing
-stopped_at: Phase 8.1 context gathered (pi design advisor + user confirmation)
-last_updated: "2026-08-23T06:10:00.000Z"
+stopped_at: Phase 8.1 re-scoped to ticket 02 (student-paced Mimo TTS); awaiting /gsd-plan-phase 8.1 after 2026-08-23 ticket-set calibration
+last_updated: "2026-08-23T05:57:44.662Z"
 last_activity: 2026-08-23
-last_activity_desc: Completed quick task 260823-j2n (Ticket 01 closeout)
+last_activity_desc: "Completed quick task 260823-j2n: 收尾 speech-recognition-redesign Ticket 01 状态文档"
 progress:
-  total_phases: 10
+  total_phases: 15
   completed_phases: 8
   total_plans: 43
   completed_plans: 40
@@ -27,13 +27,13 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 
 ## Current Position
 
-Phase: 08 (Student Web Interface) — EXECUTING
-Plans: 4 of 4 complete
-Status: Executing Phase 08
+Phase: 08 (Student Web Interface) — EXECUTING (08-07 manual iPad UAT pending real device)
+Plans: 6 of 7 complete
+Status: Phase 08 near-complete; roadmap calibrated 2026-08-23 to speech-recognition-redesign ticket set (single source of truth)
 Last activity: 2026-08-23 — Completed quick task 260823-j2n: 收尾 speech-recognition-redesign Ticket 01 状态文档
-Next: Phase 8 (Student Web Interface) — not yet planned.
+Next: /gsd-plan-phase 8.1 — re-plan after re-scope to ticket 02 (student-paced Mimo TTS dictation; prior auto-advance plans superseded)
 
-Progress: [██████████] 100%
+Progress: [█████▒▒▒▒▒] 53%
 
 ## Performance Metrics
 
@@ -131,6 +131,8 @@ None yet.
 ### Roadmap Evolution
 
 - Phase 07.1 inserted after Phase 7: Research and fix iOS WebSocket audio playback issues for iPad Safari browsers (URGENT)
+- Phase 8.1 edited: Re-scoped to ticket 02 (student-paced Mimo TTS dictation); auto-advance plans superseded by user decision 2026-08-23
+- Phase 8.6 inserted after Phase 8: Phases 8.2-8.6 inserted from speech-recognition-redesign tickets 03-07 (voice commands, photo OCR, batch submission, auto grading, multi-user); ticket 08 absorbed into Phase 12; FEED re-sourced in Phase 10. Ticket set = single source of truth (user decision 2026-08-23)
 
 ## Deferred Items
 
@@ -142,6 +144,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-10T03:55:46.562Z
-Stopped at: Phase 8.1 context gathered (pi design advisor + user confirmation)
-Resume file: .planning/phases/08.1-multi-word-dictation-flow-inserted/08.1-CONTEXT.md
+Last session: 2026-08-23
+Stopped at: Roadmap calibrated to speech-recognition-redesign ticket set (user decision 2026-08-23); Phase 8.1 awaiting re-plan
+Resume file: .planning/ROADMAP.md (Phase 8.1 section) — next action /gsd-plan-phase 8.1

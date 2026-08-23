@@ -28,13 +28,39 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 - [x] **DICT-03**: System delivers individual word prompts via TTS audio streaming
 - [x] **DICT-04**: System maintains session state (IDLE → LISTENING → DICTATING → WAITING_PARENT → FEEDBACK)
 - [x] **DICT-05**: System achieves <1.5 second latency for audio responses
+- [ ] **DICT-06**: System provides adaptive writing time (8-15 seconds) based on word length and complexity
+- [ ] **DICT-07**: Student can control dictation pace with Next Word / Repeat Word / Pause/Resume buttons
+
+> **2026-08-23 校准**（speech-recognition-redesign ticket 集为唯一真相源）：DICT-03 的音频源由 Python-bridge TTS 迁移至小米 Mimo 直连（`pkg/mimo`，ticket 01 已交付验证）；听写循环采用**学生控速模型**，取代 Phase 8.1 原后端自动推进设计。
 
 ### Parent Feedback
 
-- [ ] **FEED-01**: Parent can review completed dictation session results
-- [ ] **FEED-02**: Parent can rate each word performance (good/hard/again/easy)
-- [ ] **FEED-03**: System submits feedback ratings to FSRS algorithm for parameter updates
+- [ ] **FEED-01**: Parent can review completed dictation session results with auto-grading analysis attached (error patterns, suggestions, confidence)
+- [ ] **FEED-02**: Parent can verify or override each word's auto-assessed performance (good/hard/again/easy, pre-filled from Phase 8.5 auto-grading)
+- [ ] **FEED-03**: Confirmed feedback ratings update FSRS algorithm parameters (RunReview path unchanged)
 - [ ] **FEED-04**: System displays progress statistics and vocabulary retention metrics
+
+### Voice Commands
+
+- [ ] **VOICE-01**: System captures student audio via Web Audio API on iPad Safari for command recognition
+- [ ] **VOICE-02**: Xiaomi Mimo ASR transcribes student voice commands accurately, including children's voices (ages 6-12)
+- [ ] **VOICE-03**: LLM intent analysis maps varied natural expressions to the 4 core commands ("好了", "重读", "暂停", "不会写") and triggers correct session state transitions
+- [ ] **VOICE-04**: Failed recognition falls back to button controls
+
+### Answer Submission
+
+- [ ] **SUBMIT-01**: Students can capture photos of written answers via iPad camera on a Safari-optimized interface
+- [ ] **SUBMIT-02**: OCR extracts text with ≥85% accuracy for typical elementary handwriting, with confidence scores
+- [ ] **SUBMIT-03**: Manual input available when OCR fails or confidence is low; system validates answer format and completeness
+- [ ] **SUBMIT-04**: Student submits all answers together after dictation (write all → submit all → grade all); session FSM handles DICTATING → SUBMISSION → FEEDBACK
+- [ ] **SUBMIT-05**: Batch submission processes multiple words efficiently with progress indicators, supporting both OCR and manual input
+
+### Automatic Grading
+
+- [ ] **GRADE-01**: System performs character-level comparison between submitted and correct answers, tolerant of minor variations and common mistakes
+- [ ] **GRADE-02**: Detailed analysis reports show error patterns, character-level error highlighting, and learning suggestions
+- [ ] **GRADE-03**: Final scores and encouraging feedback are read aloud via TTS
+- [ ] **GRADE-04**: Results stored for FSRS updates and parent review; performance trends tracked over multiple sessions
 
 ### WebSocket Communication
 
@@ -61,7 +87,7 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 
 - [ ] **WEB-01**: Parent interface for vocabulary management (add/edit/organize)
 - [x] **WEB-02**: Student interface for dictation session requests and progress display
-  - **Completed Phase 08-06** (2025-08-15): Backend now emits progress_update, word_complete, and session_complete control frames. Frontend already implements play_word/next_word triggers. Real-time progress bar updates and gapless audio playback are now functional.
+  - **Completed Phase 08-06** (2026-08-23): Backend now emits progress_update, word_complete, and session_complete control frames. Frontend already implements play_word/next_word triggers. Real-time progress bar updates and gapless audio playback are now functional.
 - [ ] **WEB-03**: Parent review interface for post-dictation feedback
 - [x] **WEB-04**: Responsive design optimized for iPad Safari browser
 
@@ -119,6 +145,21 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DICT-03 | Phase 6 | Complete |
 | DICT-04 | Phase 7 | Complete |
 | DICT-05 | Phase 6 | Complete |
+| DICT-06 | Phase 8.1 | Pending |
+| DICT-07 | Phase 8.1 | Pending |
+| VOICE-01 | Phase 8.2 | Pending |
+| VOICE-02 | Phase 8.2 | Pending |
+| VOICE-03 | Phase 8.2 | Pending |
+| VOICE-04 | Phase 8.2 | Pending |
+| SUBMIT-01 | Phase 8.3 | Pending |
+| SUBMIT-02 | Phase 8.3 | Pending |
+| SUBMIT-03 | Phase 8.3 | Pending |
+| SUBMIT-04 | Phase 8.4 | Pending |
+| SUBMIT-05 | Phase 8.4 | Pending |
+| GRADE-01 | Phase 8.5 | Pending |
+| GRADE-02 | Phase 8.5 | Pending |
+| GRADE-03 | Phase 8.5 | Pending |
+| GRADE-04 | Phase 8.5 / Phase 10 | Pending |
 | FEED-01 | Phase 10 | Pending |
 | FEED-02 | Phase 10 | Pending |
 | FEED-03 | Phase 10 | Pending |
@@ -146,10 +187,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 **Coverage:**
 
-- v1 requirements: 32 total
-- Mapped to phases: 32 (100% coverage ✓)
+- v1 requirements: 47 total (32 original + 15 added 2026-08-23 from speech-recognition-redesign calibration)
+- Mapped to phases: 47 (100% coverage ✓)
 - Unmapped: 0
 
 ---
 *Requirements defined: 2025-07-18*
-*Last updated: 2025-07-18 after roadmap creation*
+*Last updated: 2026-08-23 — calibrated to speech-recognition-redesign ticket set (single source of truth): added DICT-06/07, VOICE-01..04, SUBMIT-01..05, GRADE-01..04; re-sourced FEED-01..03 to auto-grading + parent confirm/override*
