@@ -250,8 +250,12 @@ def cmd_due(db, args):
     due_cards = []
     for row in rows:
         fsrs_card = Card.from_json(row["fsrs_card"])
+        # Ensure fsrs_card.due is timezone-aware for comparison
+        due = fsrs_card.due
+        if due.tzinfo is None:
+            due = due.replace(tzinfo=timezone.utc)
         # Card is due if its due date has passed (new cards have due=now, so always due)
-        if fsrs_card.due <= now:
+        if due <= now:
             due_cards.append({
                 "id": row["id"],
                 "word": row["word"],
@@ -259,7 +263,7 @@ def cmd_due(db, args):
                 "example": row["example"],
                 "unit": row["unit"],
                 "state": fsrs_card.state.name,
-                "due": fsrs_card.due.astimezone(CST).strftime("%Y-%m-%d %H:%M"),
+                "due": due.astimezone(CST).strftime("%Y-%m-%d %H:%M"),
                 "stability": round(fsrs_card.stability, 2) if fsrs_card.stability else 0,
                 "difficulty": round(fsrs_card.difficulty, 2) if fsrs_card.difficulty else 0,
             })
