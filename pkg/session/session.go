@@ -829,6 +829,8 @@ func (s *Session) sendSessionCompleteFrame() {
 }
 
 // sendPausedFrame sends a paused control frame to the client (Ticket 02 DICT-07).
+// Like the other send*Frame helpers, the frame header is sent with Sequence 0;
+// TODO: atomic counter for monotonic sequences.
 func (s *Session) sendPausedFrame() {
 	if s.client == nil {
 		return // No client in tests
