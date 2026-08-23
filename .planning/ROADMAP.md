@@ -313,7 +313,7 @@ Plans:
 
 Plans:
 
-- [x] Ticket 02 — core dictation flow (Mimo TTS) delivered directly: be653a4 (student-paced flow: adaptive 8-15s writing time, Next/Repeat/Pause-Resume controls) + dual-axis review fixes 3a1fc59 (stale WordComplete stream-generation race), 799de7c (PausedStateTimeout config), f8e5e31 (single-writer invariant docs), d6c046b (DictationControls JSDoc), 45435bb (review cleanup set #5/5); issue `.scratch/speech-recognition-redesign/issues/02-core-dictation-flow-tts.md` closed done 2026-08-23, 6/7 acceptance items
+- [x] Ticket 02 — core dictation flow (Mimo TTS) delivered directly: be653a4 (student-paced flow: adaptive 8-15s writing time, Next/Repeat/Pause-Resume controls) + dual-axis review fixes 3a1fc59 (stale WordComplete stream-generation race), 799de7c (PausedStateTimeout config), f8e5e31 (single-writer invariant docs), d6c046b (DictationControls JSDoc), 45435bb (review cleanup set #5/5), 4f5c644 (final-review cleanup: JSDoc truthfulness x2 + deterministic test wait), 0ff7cca (docs: Phase 8.1 section aligned to delivery reality); issue `.scratch/speech-recognition-redesign/issues/02-core-dictation-flow-tts.md` closed done 2026-08-23, 6/7 acceptance items
 - [ ] iPad real-device UAT — the only unchecked acceptance item (<1.5s audio latency end-to-end + real Safari audio/touch); run before or alongside Phase 8.2
 
 **UI hint**: yes
