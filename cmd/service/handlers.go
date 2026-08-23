@@ -9,8 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync/atomic"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
@@ -70,6 +72,7 @@ type sessionReadyResponse struct {
 	Type      string   `json:"type"`
 	SessionID string   `json:"session_id"`
 	Words     []string `json:"words"`
+	Category  string   `json:"category"`
 }
 
 // selectDueCardsResultResponse is the control frame response for FSRS queries.
@@ -93,6 +96,22 @@ type unlockResultResponse struct {
 type submitReviewParams struct {
 	Ratings  map[string]string `json:"ratings"`
 	Category string            `json:"category"`
+}
+
+// submitAnswerParams are the parameters for submitting a student's spoken answer.
+type submitAnswerParams struct {
+	WordID     string `json:"word_id"`
+	Transcript string `json:"transcript"`
+}
+
+// answerResultResponse is the control frame response for answer judgment.
+type answerResultResponse struct {
+	Type     string `json:"type"`
+	WordID   string `json:"word_id"`
+	Correct  bool   `json:"correct"`
+	Expected string `json:"expected"`
+	Heard    string `json:"heard"`
+	Rating   string `json:"rating"` // "good" or "again"
 }
 
 // submitReviewResultResponse wraps the FSRS ReviewResult for the client.
@@ -151,6 +170,9 @@ func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, logger infr
 			case "unlock_cards":
 				return handleUnlockCards(ctx, client, control.Params, fsrsSvc, logger)
 
+			case "submit_answer":
+				return handleSubmitAnswer(ctx, client, control.Params, manager, logger)
+
 			default:
 				logger.Warn("unknown control type",
 					infra.F("type", control.Type),
@@ -172,13 +194,58 @@ func handleStartSession(ctx context.Context, client *ws.Client, params json.RawM
 		return nil
 	}
 
+	// Enhanced diagnostic logging before session creation
+	logger.Info("attempting session creation",
+		infra.F("client_id", clientConnID(client)),
+		infra.F("limit", p.Limit),
+		infra.F("category", p.Category),
+	)
+
 	s, err := manager.NewSession(ctx, client, clientConnID(client), fsrs.SelectOpts{
 		Limit:    p.Limit,
 		Category: p.Category,
 	})
+
+	// Log session creation outcome with details
 	if err != nil {
-		logger.Warn("session creation failed", infra.ErrField(err))
-		sendErrorFrame(client, "session creation failed")
+		// Error case handled in the next block
+		logger.Warn("session creation returned error",
+			infra.F("client_id", clientConnID(client)),
+			infra.F("request_params", fmt.Sprintf("limit=%d, category=%s", p.Limit, p.Category)),
+		)
+	} else {
+		logger.Info("session creation succeeded",
+			infra.F("session_id", s.ID()),
+			infra.F("client_id", clientConnID(client)),
+			infra.F("words_count", len(s.Words())),
+		)
+	}
+	if err != nil {
+		// Enhanced error logging with detailed diagnostics
+		logger.Error("session creation failed",
+			infra.F("client_id", clientConnID(client)),
+			infra.F("limit", p.Limit),
+			infra.F("category", p.Category),
+			infra.F("error_type", fmt.Sprintf("%T", err)),
+			infra.F("error_message", err.Error()),
+			infra.ErrField(err),
+		)
+
+		// Send specific error message to client
+		errorMsg := "session creation failed"
+		if err.Error() != "" {
+			// Provide more specific error for common cases
+			switch {
+			case err.Error() == "no due words":
+				errorMsg = "no available words for dictation - please add vocabulary first"
+			case strings.Contains(err.Error(), "fetch lock"):
+				errorMsg = "vocabulary database is locked - please try again"
+			default:
+				errorMsg = fmt.Sprintf("session creation failed: %s", err.Error())
+			}
+		}
+
+		sendErrorFrame(client, errorMsg)
 		return nil
 	}
 
@@ -187,6 +254,7 @@ func handleStartSession(ctx context.Context, client *ws.Client, params json.RawM
 		Type:      "session_ready",
 		SessionID: s.ID(),
 		Words:     s.Words(),
+		Category:  s.Category(),
 	}
 	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
 		logger.Warn("failed to send session_ready response",
@@ -356,6 +424,112 @@ func handleUnlockCards(ctx context.Context, client *ws.Client, params json.RawMe
 	}
 
 	return nil
+}
+
+// handleSubmitAnswer processes a student's spoken answer, compares it to the
+// expected word, and returns the judgment. Does NOT push FSM events — the
+// client sends next_word separately to advance the session.
+func handleSubmitAnswer(ctx context.Context, client *ws.Client, params json.RawMessage, manager *session.Manager, logger infra.Logger) error {
+	var p submitAnswerParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		logger.Warn("invalid submit_answer params", infra.ErrField(err))
+		sendErrorFrame(client, "invalid submit_answer params")
+		return nil
+	}
+
+	// Look up the session for this connection
+	connID := clientConnID(client)
+	s := manager.Lookup(connID)
+	if s == nil {
+		sendErrorFrame(client, "no active session")
+		return nil
+	}
+
+	// Guard: must be in DICTATING state
+	if s.State() != database.StateDictating {
+		logger.Warn("submit_answer in wrong state",
+			infra.F("state", string(s.State())),
+			infra.F("conn_id", connID),
+		)
+		sendErrorFrame(client, "not in dictating state")
+		return nil
+	}
+
+	// Get the current word from the session
+	currentWord := s.CurrentWord()
+	if currentWord == "" {
+		sendErrorFrame(client, "no current word")
+		return nil
+	}
+
+	// Determine language from session config (default to english)
+	lang := "en"
+	if s.Category() == "chinese" || s.Category() == "zh" {
+		lang = "zh"
+	}
+
+	// Compare
+	correct, rating := compareAnswer(currentWord, p.Transcript, lang)
+
+	logger.Info("answer judged",
+		infra.F("word", currentWord),
+		infra.F("transcript", p.Transcript),
+		infra.F("correct", correct),
+		infra.F("rating", rating),
+	)
+
+	response := answerResultResponse{
+		Type:     "answer_result",
+		WordID:   p.WordID,
+		Correct:  correct,
+		Expected: currentWord,
+		Heard:    p.Transcript,
+		Rating:   rating,
+	}
+
+	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
+		logger.Warn("failed to send answer_result", infra.ErrField(err))
+	}
+
+	return nil
+}
+
+// compareAnswer compares a student's spoken transcript against the expected word.
+// Returns (correct, rating). For now uses simple normalized string comparison.
+// Language-aware: en strips non-alphanumeric, zh strips punctuation/whitespace only.
+func compareAnswer(expected, transcript, lang string) (bool, string) {
+	normExpected := normalizeForCompare(expected, lang)
+	normTranscript := normalizeForCompare(transcript, lang)
+	if normExpected == normTranscript {
+		return true, "good"
+	}
+	return false, "again"
+}
+
+// normalizeForCompare normalizes a word for comparison based on language.
+func normalizeForCompare(word, lang string) string {
+	w := strings.ToLower(strings.TrimSpace(word))
+	if lang == "zh" || lang == "zh-CN" || lang == "chinese" {
+		// Chinese: strip punctuation and whitespace only (preserve CJK chars)
+		w = strings.ReplaceAll(w, " ", "")
+		w = strings.ReplaceAll(w, "，", "")
+		w = strings.ReplaceAll(w, "。", "")
+		w = strings.ReplaceAll(w, "！", "")
+		w = strings.ReplaceAll(w, "？", "")
+		w = strings.ReplaceAll(w, ",", "")
+		w = strings.ReplaceAll(w, ".", "")
+		w = strings.ReplaceAll(w, "!", "")
+		w = strings.ReplaceAll(w, "?", "")
+		return w
+	}
+	// English: strip non-alphanumeric
+	var b strings.Builder
+	for _, r := range w {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // sendControlFrame is a helper for sending JSON control frames.

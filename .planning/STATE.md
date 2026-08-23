@@ -6,14 +6,14 @@ current_phase: 08
 current_phase_name: Student Web Interface
 status: executing
 stopped_at: Phase 8.1 context gathered (pi design advisor + user confirmation)
-last_updated: "2026-08-10T03:55:46.575Z"
-last_activity: 2026-08-09
-last_activity_desc: Phase 08 execution started
+last_updated: "2026-08-22T05:20:53.418Z"
+last_activity: 2026-08-22
+last_activity_desc: Phase 08 execution resumed (wave continue)
 progress:
   total_phases: 10
-  completed_phases: 9
-  total_plans: 39
-  completed_plans: 39
+  completed_phases: 8
+  total_plans: 43
+  completed_plans: 40
 ---
 
 # Project State
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 Phase: 08 (Student Web Interface) — EXECUTING
 Plans: 4 of 4 complete
 Status: Executing Phase 08
-Last activity: 2026-08-09 — Phase 08 execution started
+Last activity: 2026-08-22 — Phase 08 execution resumed (wave continue)
 Next: Phase 8 (Student Web Interface) — not yet planned.
 
 Progress: [██████████] 100%
@@ -124,6 +124,7 @@ None yet.
 | 260801-ge1 | 接入 WebSocket 运行时(P0-1) | 2026-08-01 | bfb24d3 | Verified | [260801-ge1-websocket-p0-1](./quick/260801-ge1-websocket-p0-1/) |
 | 260801-kdq | 根治 ws TestHubStopsOnContextCancel flake | 2026-08-01 | b65ad5e | | [260801-kdq-ws-testhubstopsoncontextcancel-flake](./quick/260801-kdq-ws-testhubstopsoncontextcancel-flake/) |
 | 260802-ldq | 创建最小化前端验证界面，用于测试WebSocket连接、FSRS单词选择和TTS音频流播放 | 2026-08-02 | ad599a5 | Verified | [260802-ldq-websocket-fsrs-tts](./quick/260802-ldq-websocket-fsrs-tts/) |
+| 260823-cff | Fix category field in session_ready response for correct speech recognition language | 2026-08-23 | pending | complete | [20260823-category-field-fix](./quick/20260823-category-field-fix/) |
 
 ### Roadmap Evolution
 
