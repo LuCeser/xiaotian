@@ -18,4 +18,13 @@ var (
 	// ErrAudioOverflow is returned by Assembler.Add when a chunk would push
 	// the recording past the configured byte cap (1C1G memory guard).
 	ErrAudioOverflow = errors.New("voice: recording exceeds max bytes")
+
+	// ErrEmptyRecording is returned by Pipeline.Process when the caller
+	// triggers a command on a recording with no accumulated audio (silent
+	// mic, dropped frames) — surfaced instead of a wasted ASR round trip.
+	ErrEmptyRecording = errors.New("voice: empty recording")
+
+	// errNilSeam is returned by Pipeline.Process when the pipeline was built
+	// without a Transcriber or Classifier (wiring bug).
+	errNilSeam = errors.New("voice: pipeline has a nil seam")
 )
