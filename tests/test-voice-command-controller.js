@@ -136,7 +136,8 @@ function makeController(rate) {
   assert.ok(c._overflowed, 'overflow flagged at cap');
   assert.strictEqual(c._chunkQueue.length, 0, 'queue dropped at overflow');
   c.stop();
-  assert.strictEqual(c.wsClient.sends.length, 0, 'no voice_command after overflow');
+  assert.ok(!c.wsClient.sends.some((s) => s.type === 'voice_command'),
+    'no voice_command after overflow (a voice_cancel is sent — test 7b)');
   assert.strictEqual(c.isProcessing, false, 'processing lock not held');
   // Buffers reset: a fresh recording starts from sequence 1 again.
   c.isRecording = true;
@@ -146,17 +147,43 @@ function makeController(rate) {
 }
 
 // ---------------------------------------------------------------------
-// 7. cancel(): no trigger, everything released
+// 7. cancel(): no trigger, everything released — and a voice_cancel is
+//    sent ONLY when chunks had shipped (stale server audio must be
+//    discarded; an empty abort must not spam the server)
 // ---------------------------------------------------------------------
 {
   const c = makeController(16000);
-  c._handleAudio(new Float32Array(320));
   c.cancel();
-  assert.strictEqual(c.wsClient.sends.length, 0, 'cancel does not trigger ASR');
-  assert.strictEqual(c.isRecording, false);
-  assert.strictEqual(c.isProcessing, false);
-  assert.strictEqual(c._tail.length, 0);
-  assert.strictEqual(c._chunkQueue.length, 0);
+  assert.strictEqual(c.wsClient.sends.length, 0, 'cancel with nothing shipped sends nothing');
+
+  const c2 = makeController(16000);
+  c2._handleAudio(new Float32Array(320)); // ships one chunk
+  assert.strictEqual(c2._shipped, 1, 'shipment tracked');
+  c2.cancel();
+  assert.strictEqual(c2.wsClient.sends.length, 1, 'cancel sends exactly one control');
+  assert.deepStrictEqual(c2.wsClient.sends[0], { type: 'voice_cancel', params: {} });
+  assert.strictEqual(c2.isRecording, false);
+  assert.strictEqual(c2.isProcessing, false);
+  assert.strictEqual(c2._tail.length, 0);
+  assert.strictEqual(c2._chunkQueue.length, 0);
+  assert.strictEqual(c2._shipped, 0, 'shipment counter reset for next recording');
+}
+
+// ---------------------------------------------------------------------
+// 7b. overflow: stop() sends voice_cancel (not voice_command), and the
+//     processor guard stops accumulating after the cap
+// ---------------------------------------------------------------------
+{
+  const c = makeController(16000);
+  const big = new Float32Array(640 * 40);
+  while (!c._overflowed) c._handleAudio(big);
+  const tailLenBefore = c._tail.length;
+  c._handleAudio(new Float32Array(320)); // post-overflow buffer: ignored
+  assert.strictEqual(c._tail.length, tailLenBefore, 'no accumulation after overflow');
+  c.stop();
+  const types = c.wsClient.sends.map((s) => s.type);
+  assert.ok(types.includes('voice_cancel'), 'overflow stop sends voice_cancel, got: ' + JSON.stringify(types));
+  assert.ok(!types.includes('voice_command'), 'overflow stop never triggers ASR');
 }
 
 // ---------------------------------------------------------------------

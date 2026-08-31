@@ -95,21 +95,12 @@
       this._chunkQueue = [];     // complete 320-sample chunks awaiting send
       this._byteCount = 0;       // PCM bytes shipped this recording (cap guard)
       this._seq = 0;             // audio-frame sequence, monotonic per recording
+      this._shipped = 0;         // frames shipped this recording (cancel signal)
       this._overflowed = false;
 
-      /** @type {function|null} Called with the voice_result payload. */
-      this._onResult = null;
       /** @type {function|null} Called with an errorType string. */
       this._onError = null;
     }
-
-    /**
-     * Register the voice_result callback (payload = parsed voice_result
-     * frame; also invoked with {type:'voice_unavailable'} when the backend
-     * rejects voice_command because it is disabled).
-     * @param {function} fn
-     */
-    onResult(fn) { this._onResult = fn; }
 
     /**
      * Register the error callback (errorType: 'not-supported' |
@@ -215,9 +206,11 @@
       this._flushChunks();
 
       if (this._overflowed) {
-        // The server already spoiled the recording; do not trigger ASR.
+        // The server already spoiled the recording on its side; discard the
+        // re-created buffer its lazy Add may have started and stop.
         this._overflowed = false;
         this.isProcessing = false;
+        this._notifyCancel();
         this._resetBuffers();
         this._emitError('overflow');
         return;
@@ -229,13 +222,18 @@
 
     /**
      * Abort the current recording WITHOUT triggering ASR (e.g. session
-     * ended, page hidden). Also clears the processing lock.
+     * ended, page hidden). Also clears the processing lock. If chunks were
+     * already streamed, tells the server to discard them — otherwise the
+     * assembler would absorb this recording's sequence numbers (which
+     * restart at 1) into the NEXT recording as duplicates and transcribe
+     * the canceled audio instead of the new command.
      */
     cancel() {
       this.isRecording = false;
       this.isProcessing = false;
       this._overflowed = false;
       this._teardownStream();
+      this._notifyCancel();
       this._resetBuffers();
     }
 
@@ -244,7 +242,6 @@
      */
     cleanup() {
       this.cancel();
-      this._onResult = null;
       this._onError = null;
     }
 
@@ -254,12 +251,14 @@
 
     /**
      * One native-rate Float32 buffer from the processor: convert to Int16,
-     * run the resampler, ship whatever chunks became complete.
+     * run the resampler, ship whatever chunks became complete. Stops
+     * processing entirely once the cap tripped — the recording is spoiled,
+     * so further chunks would only feed the server's re-created buffer.
      * @private
      * @param {Float32Array} input
      */
     _handleAudio(input) {
-      if (!this.isRecording) return;
+      if (!this.isRecording || this._overflowed) return;
       var samples = new Int16Array(input.length);
       for (var i = 0; i < input.length; i++) {
         var s = input[i];
@@ -330,6 +329,20 @@
         this.wsClient.sendFrame(msgType, this._seq,
           new Uint8Array(chunk.buffer, chunk.byteOffset, bytes));
         this._byteCount += bytes;
+        this._shipped++;
+      }
+    }
+
+    /**
+     * Tell the server to discard this recording's buffered chunks (abort
+     * paths only — the normal stop() path is discarded server-side after
+     * the voice_command is served). Best-effort and sent only when chunks
+     * actually shipped.
+     * @private
+     */
+    _notifyCancel() {
+      if (this._shipped > 0) {
+        this.wsClient.send({ type: 'voice_cancel', params: {} });
       }
     }
 
@@ -343,6 +356,7 @@
       this._tail = new Int16Array(0);
       this._byteCount = 0;
       this._seq = 0;
+      this._shipped = 0;
     }
 
     /**

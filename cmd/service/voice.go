@@ -50,25 +50,30 @@ type voiceService struct {
 	requestTimeout time.Duration
 }
 
-// newVoiceService adapts the mimo client onto the pkg/voice func seams
-// (Transcriber/Chatter) and composes the production pipeline. classifier is
-// injected so tests can run rules-only without a Chatter; production passes
-// voice.NewHybridClassifier(voice.NewLLMClassifier(chatter)).
-func newVoiceService(mc mimo.Client, classifier voice.Classifier, sessions sessionPusher, logger infra.Logger, cfg infra.VoiceConfig) *voiceService {
-	transcriber := func(ctx context.Context, wav []byte) (string, error) {
+// newVoiceService composes the voice pipeline from the pkg/voice seams.
+// transcribe is the Transcriber seam (mimoTranscriber adapts the production
+// client; tests inject a plain closure); classifier is injected so tests can
+// run rules-only — production passes voice.NewHybridClassifier.
+func newVoiceService(transcribe voice.Transcriber, classifier voice.Classifier, sessions sessionPusher, logger infra.Logger, cfg infra.VoiceConfig) *voiceService {
+	return &voiceService{
+		buffers:        voice.NewBuffers(cfg.MaxRecordingBytes, voiceBufferIdleTTL),
+		pipeline:       voice.NewPipeline(transcribe, classifier),
+		sessions:       sessions,
+		logger:         logger,
+		assembleWait:   cfg.AssembleWait,
+		requestTimeout: cfg.RequestTimeout,
+	}
+}
+
+// mimoTranscriber adapts the mimo ASR call onto the voice.Transcriber seam,
+// keeping the mimo dependency out of the service layer's test surface.
+func mimoTranscriber(mc mimo.Client) voice.Transcriber {
+	return func(ctx context.Context, wav []byte) (string, error) {
 		resp, err := mc.Transcribe(ctx, wav, "wav")
 		if err != nil {
 			return "", err
 		}
 		return resp.ExtractText(), nil
-	}
-	return &voiceService{
-		buffers:        voice.NewBuffers(cfg.MaxRecordingBytes, voiceBufferIdleTTL),
-		pipeline:       voice.NewPipeline(transcriber, classifier),
-		sessions:       sessions,
-		logger:         logger,
-		assembleWait:   cfg.AssembleWait,
-		requestTimeout: cfg.RequestTimeout,
 	}
 }
 
@@ -170,6 +175,37 @@ func (vs *voiceService) handleVoiceCommand(ctx context.Context, client *ws.Clien
 		Source:     intent.Source,
 		Confidence: intent.Confidence,
 	})
+}
+
+// voiceCancelOKResponse acks a voice_cancel so the client (and tests) can
+// sequence a restart AFTER the discard. The ack matters because audio and
+// control frames travel separate router routes: a fresh recording's chunks
+// can be processed before the cancel, and a blind Drop would then wipe them
+// too. The production client fire-and-forgets (a human re-press outlasts the
+// control route's drain time), but the ordering hazard is real and the ack
+// makes it closable.
+type voiceCancelOKResponse struct {
+	Type string `json:"type"` // "voice_cancel_ok"
+}
+
+// handleVoiceCancel discards the connection's in-flight recording (the
+// client aborted its push-to-talk: browser cancelled the gesture, page went
+// to background, or the client-side byte cap tripped). Without this the
+// assembler keeps the canceled chunks and the NEXT recording's sequence
+// numbers (which restart at 1) are absorbed as duplicates — Assemble would
+// then sort the stale audio ahead of the fresh audio and transcribe the
+// wrong command. Nil receiver is a no-op: with voice disabled there is no
+// buffer to discard.
+func (vs *voiceService) handleVoiceCancel(_ context.Context, client *ws.Client, _ []byte) error {
+	if vs == nil {
+		return nil
+	}
+	connID := clientConnID(client)
+	vs.buffers.Drop(connID)
+	vs.logger.Debug("voice recording canceled",
+		infra.F("conn_id", connID),
+	)
+	return sendControlFrame(client, ws.MsgTypeControl, voiceCancelOKResponse{Type: "voice_cancel_ok"})
 }
 
 // settlePCM waits for straggler audio chunks before assembly. The audio and

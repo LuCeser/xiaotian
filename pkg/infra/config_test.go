@@ -225,7 +225,7 @@ func TestDefaultConfig(t *testing.T) {
 				cfg.Voice.BaseURL)
 		}
 		if cfg.Voice.ChatModel != "mimo-v2.5" {
-			t.Errorf("Voice.ChatModel = %q, want mimo-v2.5 (mimo.DefaultChatModel)",
+			t.Errorf("Voice.ChatModel = %q, want mimo-v2.5 (deliberate duplicate of the pkg/mimo default; see VoiceConfig docs)",
 				cfg.Voice.ChatModel)
 		}
 		if cfg.Voice.MaxRecordingBytes != 327680 {

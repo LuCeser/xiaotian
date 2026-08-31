@@ -187,6 +187,11 @@ func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, voiceCmd *v
 				// ASR + intent analysis and dispatch the FSM verb.
 				return voiceCmd.handleVoiceCommand(ctx, client, control.Params)
 
+			case "voice_cancel":
+				// Ticket 03: student aborted the recording; discard the
+				// buffered audio so it cannot poison the next command.
+				return voiceCmd.handleVoiceCancel(ctx, client, control.Params)
+
 			default:
 				logger.Warn("unknown control type",
 					infra.F("type", control.Type),

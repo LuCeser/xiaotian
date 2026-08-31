@@ -91,7 +91,7 @@ func TestPipeline_Process_WAVContract(t *testing.T) {
 		t.Fatalf("transcriber called %d times, want 1", len(tr.wavs))
 	}
 	if !validWAVHeader(tr.wavs[0], len(pcm)) {
-		t.Errorf("transcriber received non-contract WAV: % x", tr.wavs[0][:min(44, len(tr.wavs[0]))])
+		t.Errorf("transcriber received non-contract WAV: % x", tr.wavs[0][:44])
 	}
 	if got := tr.wavs[0][44:]; string(got) != string(pcm) {
 		t.Errorf("WAV payload = % x, want PCM verbatim % x", got, pcm)
@@ -174,13 +174,4 @@ func TestPipeline_Process_TranscriberError(t *testing.T) {
 	if len(cl.calls) != 0 {
 		t.Errorf("classifier called despite ASR failure, want 0 calls")
 	}
-}
-
-// min returns the smaller of two ints (Go 1.21 has it as a builtin only from
-// 1.21; keep local to avoid bumping the toolchain for a test helper).
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

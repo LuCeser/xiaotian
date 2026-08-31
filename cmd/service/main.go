@@ -399,7 +399,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			}
 			defer func() { _ = mimoClient.Close() }()
 			voiceCmd = newVoiceService(
-				mimoClient,
+				mimoTranscriber(mimoClient),
 				voice.NewHybridClassifier(voice.NewLLMClassifier(mimoChatter(mimoClient, cfg.Voice.ChatModel))),
 				manager,
 				logger,

@@ -177,10 +177,13 @@ type VoiceConfig struct {
 	// be dequeued first). Default 2s. MUST be > 0.
 	AssembleWait time.Duration `json:"assembleWait" mapstructure:"assembleWait"`
 
-	// RequestTimeout bounds each Mimo API call (ASR transcribe, LLM chat)
-	// made while serving one voice command. Default 15s — longer than the
-	// interactive ideal but bounded so a wedged upstream cannot pin router
-	// workers (WR-02 bounds Close, not individual handlers). MUST be > 0.
+	// RequestTimeout bounds the WHOLE Mimo API sequence (ASR transcribe,
+	// then the LLM chat fallback when the keyword fast path misses) served
+	// under one voice command — one context spans both calls, so a slow ASR
+	// eats into the LLM's budget rather than extending the total. Default
+	// 15s: longer than the interactive ideal but bounded so a wedged
+	// upstream cannot pin router workers (WR-02 bounds Close, not
+	// individual handlers). MUST be > 0.
 	RequestTimeout time.Duration `json:"requestTimeout" mapstructure:"requestTimeout"`
 }
 

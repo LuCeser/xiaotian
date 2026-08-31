@@ -2,9 +2,9 @@ package main
 
 // Voice-command wiring tests (Ticket 03): end-to-end through a real router
 // + WebSocket connection, using the httptest scaffold pattern from
-// handlers_test.go. The mimo client is faked at the interface seam (only
-// Transcribe is exercised by the voice path) and the classifier runs
-// rules-only (voice.NewHybridClassifier(nil)) so no LLM call is involved.
+// handlers_test.go. The ASR is faked at the voice.Transcriber seam (a plain
+// closure) and the classifier runs rules-only (voice.NewHybridClassifier(nil))
+// so no LLM call is involved.
 
 import (
 	"context"
@@ -12,51 +12,49 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
-	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/voice"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 	"go.uber.org/zap"
 )
 
-// fakeMimoClient implements mimo.Client for the voice path: Transcribe
-// records the WAV it received and replies with a fixed transcript. Every
-// other method is a stub — the voice handlers never call them.
-type fakeMimoClient struct {
+// captureTranscriber records every WAV it received and replies with a fixed
+// transcript (the fake at the voice.Transcriber seam).
+type captureTranscriber struct {
+	mu         sync.Mutex
 	transcript string
-	err        error
 	wavs       [][]byte
 }
 
-func (f *fakeMimoClient) Synthesize(context.Context, string, ...mimo.TTSOption) (mimo.DecodedAudioData, error) {
-	return mimo.DecodedAudioData{}, nil
+func (c *captureTranscriber) transcribe(_ context.Context, wav []byte) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	w := make([]byte, len(wav))
+	copy(w, wav)
+	c.wavs = append(c.wavs, w)
+	return c.transcript, nil
 }
 
-func (f *fakeMimoClient) SynthesizeStream(context.Context, string, mimo.StreamCallback, ...mimo.TTSOption) (*mimo.StreamResult, error) {
-	return nil, nil
+func (c *captureTranscriber) wavCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.wavs)
 }
 
-func (f *fakeMimoClient) Transcribe(_ context.Context, audio []byte, _ string, _ ...mimo.ASROption) (mimo.ASRResponse, error) {
-	w := make([]byte, len(audio))
-	copy(w, audio)
-	f.wavs = append(f.wavs, w)
-	if f.err != nil {
-		return mimo.ASRResponse{}, f.err
+func (c *captureTranscriber) lastWAV() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.wavs) == 0 {
+		return nil
 	}
-	return mimo.ASRResponse{Choices: []mimo.ASRChoice{{Message: mimo.ASRMessageContent{Content: f.transcript}}}}, nil
+	return c.wavs[len(c.wavs)-1]
 }
-
-func (f *fakeMimoClient) Chat(context.Context, []mimo.Message, ...mimo.ChatOption) (mimo.ChatResponse, error) {
-	return mimo.ChatResponse{}, nil
-}
-
-func (f *fakeMimoClient) HealthCheck(context.Context) error { return nil }
-func (f *fakeMimoClient) Close() error                      { return nil }
 
 // recordingPusher records every pushed session event (fake sessionPusher).
 type recordingPusher struct {
@@ -188,9 +186,9 @@ func testVoiceConfig(maxBytes int) infra.VoiceConfig {
 // control routes are separate worker pools, so this also covers the straggler
 // settle path for free.
 func TestVoiceCommand_RuleFastPath(t *testing.T) {
-	fakeMimo := &fakeMimoClient{transcript: "写好了"}
+	tr := &captureTranscriber{transcript: "写好了"}
 	pusher := &recordingPusher{}
-	vs := newVoiceService(fakeMimo, voice.NewHybridClassifier(nil), pusher,
+	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
 		infra.NewNoOpLogger(), testVoiceConfig(0))
 
 	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
@@ -235,10 +233,10 @@ func TestVoiceCommand_RuleFastPath(t *testing.T) {
 	}
 
 	// The transcriber received one WAV carrying both chunks in order.
-	if len(fakeMimo.wavs) != 1 {
-		t.Fatalf("transcriber called %d times, want 1", len(fakeMimo.wavs))
+	if tr.wavCount() != 1 {
+		t.Fatalf("transcriber called %d times, want 1", tr.wavCount())
 	}
-	wav := fakeMimo.wavs[0]
+	wav := tr.lastWAV()
 	if len(wav) != 44+2*ws.AudioFrameSize {
 		t.Errorf("WAV length = %d, want %d", len(wav), 44+2*ws.AudioFrameSize)
 	}
@@ -247,13 +245,79 @@ func TestVoiceCommand_RuleFastPath(t *testing.T) {
 	}
 }
 
+// TestVoiceCancel_DiscardsRecording is the regression test for the canceled-
+// recording poisoning bug: the client aborts mid-recording (voice_cancel)
+// and starts a NEW recording whose sequence numbers restart at 1. Without
+// the server-side Drop the assembler would absorb the new chunks as
+// duplicates of the canceled ones and transcribe the stale audio; with it,
+// the second command's WAV must contain ONLY the second recording's bytes.
+func TestVoiceCancel_DiscardsRecording(t *testing.T) {
+	tr := &captureTranscriber{transcript: "重读"}
+	pusher := &recordingPusher{}
+	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
+		infra.NewNoOpLogger(), testVoiceConfig(0))
+
+	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
+	defer teardown()
+
+	// First (canceled) recording: one chunk, then the client aborts.
+	sendAudioFrame(t, conn, 1, bytesFill(0xAA))
+	sendControlJSON(t, conn, `{"type":"voice_cancel","params":{}}`)
+
+	// Wait for the cancel ack BEFORE streaming the next recording: audio and
+	// control frames cross router routes, so recording 2's chunks could
+	// otherwise be processed first and wiped by the Drop.
+	ackHeader, ackPayload := readFrame(t, conn)
+	if ackHeader.MsgType != ws.MsgTypeControl || !strings.Contains(string(ackPayload), "voice_cancel_ok") {
+		t.Fatalf("voice_cancel ack = %s %s, want control voice_cancel_ok", ackHeader.MsgType, ackPayload)
+	}
+
+	// Second recording: sequence restarts at 1, two chunks of 0x55.
+	sendAudioFrame(t, conn, 1, bytesFill(0x55))
+	sendAudioFrame(t, conn, 2, bytesFill(0x55))
+	sendControlJSON(t, conn, `{"type":"voice_command","params":{}}`)
+
+	header, payload := readFrame(t, conn)
+	if header.MsgType != ws.MsgTypeControl {
+		t.Fatalf("reply msg type = %s, want control", header.MsgType)
+	}
+	var result voiceResultResponse
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatalf("voice_result JSON decode: %v", err)
+	}
+	if result.Action != string(voice.ActionRepeat) {
+		t.Errorf("action = %q, want repeat (重读)", result.Action)
+	}
+
+	// The transcribed WAV must carry ONLY the second recording: no 0xAA
+	// payload byte may survive (44-byte header + 2×640 PCM).
+	wav := tr.lastWAV()
+	if len(wav) != 44+2*ws.AudioFrameSize {
+		t.Fatalf("WAV length = %d, want %d (canceled chunk leaked?)", len(wav), 44+2*ws.AudioFrameSize)
+	}
+	for i, b := range wav[44:] {
+		if b != 0x55 {
+			t.Fatalf("WAV payload byte %d = 0x%02x, want 0x55 — canceled recording leaked into the new one", i, b)
+		}
+	}
+}
+
+// bytesFill builds an AudioFrameSize payload filled with one byte value.
+func bytesFill(v byte) []byte {
+	b := make([]byte, ws.AudioFrameSize)
+	for i := range b {
+		b[i] = v
+	}
+	return b
+}
+
 // TestVoiceCommand_NotACommand: a transcript that is not a command yields
 // action "none", no FSM push, and still a voice_result frame (the client
 // shows the fallback hint from it).
 func TestVoiceCommand_NotACommand(t *testing.T) {
-	fakeMimo := &fakeMimoClient{transcript: "苹果"} // not a command
+	tr := &captureTranscriber{transcript: "苹果"} // not a command
 	pusher := &recordingPusher{}
-	vs := newVoiceService(fakeMimo, voice.NewHybridClassifier(nil), pusher,
+	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
 		infra.NewNoOpLogger(), testVoiceConfig(0))
 
 	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
@@ -304,9 +368,9 @@ func TestVoiceCommand_Disabled(t *testing.T) {
 // replies voice_result (action none) — the client shows the retry/fallback
 // hint rather than hanging.
 func TestVoiceCommand_EmptyRecording(t *testing.T) {
-	fakeMimo := &fakeMimoClient{transcript: "写好了"}
+	tr := &captureTranscriber{transcript: "写好了"}
 	pusher := &recordingPusher{}
-	vs := newVoiceService(fakeMimo, voice.NewHybridClassifier(nil), pusher,
+	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
 		infra.NewNoOpLogger(), testVoiceConfig(0))
 
 	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
@@ -322,7 +386,7 @@ func TestVoiceCommand_EmptyRecording(t *testing.T) {
 	if result.Action != string(voice.ActionNone) {
 		t.Errorf("action = %q, want none for empty recording", result.Action)
 	}
-	if len(fakeMimo.wavs) != 0 {
+	if tr.wavCount() != 0 {
 		t.Errorf("transcriber called on empty recording, want 0 calls")
 	}
 	if len(pusher.events) != 0 {
@@ -334,10 +398,10 @@ func TestVoiceCommand_EmptyRecording(t *testing.T) {
 // the whole recording buffer (a follow-up trigger reports an empty recording,
 // not a truncated one) and tells the client.
 func TestHandleAudioFrame_OverflowSpoilsRecording(t *testing.T) {
-	fakeMimo := &fakeMimoClient{transcript: "好了"}
+	tr := &captureTranscriber{transcript: "好了"}
 	pusher := &recordingPusher{}
 	// Cap fits exactly one 640-byte chunk.
-	vs := newVoiceService(fakeMimo, voice.NewHybridClassifier(nil), pusher,
+	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
 		infra.NewNoOpLogger(), testVoiceConfig(ws.AudioFrameSize))
 
 	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
@@ -366,7 +430,7 @@ func TestHandleAudioFrame_OverflowSpoilsRecording(t *testing.T) {
 	if result.Action != string(voice.ActionNone) {
 		t.Errorf("action = %q, want none after overflow spoiled the recording", result.Action)
 	}
-	if len(fakeMimo.wavs) != 0 {
-		t.Errorf("transcriber called %d times, want 0 (recording was spoiled)", len(fakeMimo.wavs))
+	if tr.wavCount() != 0 {
+		t.Errorf("transcriber called %d times, want 0 (recording was spoiled)", tr.wavCount())
 	}
 }

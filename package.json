@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "test": "node tests/test-voice-command-controller.js && node tests/test-pcm-conversion.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}

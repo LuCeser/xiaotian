@@ -2,15 +2,11 @@ package main
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
-	"go.uber.org/zap"
 )
 
 // TestSendControlFrame_MonotonicSeq verifies D-12: consecutive sendControlFrame
@@ -27,16 +23,6 @@ import (
 // (research A4) and other cmd/service tests may have advanced it. The contract
 // under test is strict monotonic increase, not specific starting values.
 func TestSendControlFrame_MonotonicSeq(t *testing.T) {
-	logger := zap.NewNop()
-
-	hub, err := ws.NewHub(ws.HubConfig{Limit: 10, RegisterBuffer: 32, UnregisterBuffer: 32}, logger)
-	if err != nil {
-		t.Fatalf("failed to create hub: %v", err)
-	}
-	hubCtx, hubCancel := context.WithCancel(context.Background())
-	defer hubCancel()
-	go hub.Run(hubCtx)
-
 	// serverClient receives the server-side *ws.Client of the first connection.
 	// The router handler stashes it so the test can call sendControlFrame
 	// directly (the same shape ws.Handler expects in production wiring).
@@ -51,33 +37,9 @@ func TestSendControlFrame_MonotonicSeq(t *testing.T) {
 		},
 	}
 
-	router, err := ws.NewRouter(handlers, ws.RouterConfig{RouteBuffer: 32, WorkerConcurrency: 4}, logger)
-	if err != nil {
-		t.Fatalf("failed to create router: %v", err)
-	}
-	defer router.Close()
-
-	server, err := ws.NewServer(hub, router, ws.ServerConfig{
-		AllowedOrigins:  []string{"localhost"},
-		MaxMessageBytes: 65536,
-	}, logger)
-	if err != nil {
-		t.Fatalf("failed to create server: %v", err)
-	}
-
-	testServer := httptest.NewServer(http.HandlerFunc(server.HandleWebSocket))
-	defer testServer.Close()
-	wsURL := "ws://" + strings.TrimPrefix(testServer.URL, "http://") + "/ws"
-
-	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer dialCancel()
-	headers := http.Header{}
-	headers.Set("Origin", "http://localhost")
-	conn, _, err := websocket.DefaultDialer.DialContext(dialCtx, wsURL, headers)
-	if err != nil {
-		t.Fatalf("WebSocket upgrade failed: %v", err)
-	}
-	defer conn.Close()
+	// Shared hub/router/server/dial scaffold (voice_test.go).
+	conn, teardown := dialVoiceTestServer(t, handlers)
+	defer teardown()
 
 	// Probe: send one inbound control frame so the router handler stashes the
 	// server-side *ws.Client. The probe itself produces no reply.
