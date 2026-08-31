@@ -68,5 +68,5 @@
   },
   "search_gitignored": false,
   "response_language": "Chinese",
-  "firecrawl": "REDACTED-FIRECRAWL-API-KEY"
+  "firecrawl": true
 }
