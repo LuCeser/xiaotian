@@ -51,6 +51,10 @@
   // the session still works without pause/resume/repeat buttons.
   var hasDictationControls = !!window.DictationControls;
 
+  // Ticket 03: VoiceCommandController/Button are optional the same way —
+  // without them (or without getUserMedia) the buttons are the controls.
+  var hasVoiceCommand = !!window.VoiceCommandController && !!window.VoiceCommandButton;
+
   // Plan 08-04 Task 4: global error handlers for production resilience
   window.addEventListener('error', function (event) {
     console.error('[app] Global error:', event.error || event.message);
@@ -71,6 +75,10 @@
     // Stop any in-progress speech recognition
     if (speechController) {
       speechController.cleanup();
+    }
+    // Release the mic if a voice command is mid-recording (Ticket 03)
+    if (voiceController) {
+      voiceController.cleanup();
     }
     // Disconnect WebSocket cleanly
     if (wsClient) {
@@ -119,6 +127,15 @@
         audioController.handleVisibilityChange();
       } catch (visErr) {
         console.error('[app] visibility change handler error:', visErr);
+      }
+      // Ticket 03: backgrounding mid-recording freezes the audio thread's
+      // event delivery on iOS — abort the capture rather than ship a hole.
+      try {
+        if (voiceController && voiceController.isRecording && document.hidden) {
+          voiceController.cancel();
+        }
+      } catch (voiceVisErr) {
+        console.error('[app] voice cancel on hidden error:', voiceVisErr);
       }
     });
   } catch (audioErr) {
@@ -197,6 +214,36 @@
     }
     originalHandleControlFrame(payload);
   };
+
+  // ------------------------------------------------------------------
+  // Voice commands: push-to-talk mic → server ASR + intent (Ticket 03).
+  // voice_result is an unknown type to WebSocketClient's dispatcher, so it
+  // is forwarded to handleMessage (same path as answer_result); app.js
+  // routes it to the mic button's feedback renderer.
+  // ------------------------------------------------------------------
+  var voiceController = null;
+  var voiceButton = null;
+  if (hasVoiceCommand) {
+    try {
+      voiceController = new window.VoiceCommandController(wsClient);
+      voiceController.onError(handleVoiceError);
+      var voiceHost = document.getElementById('voice-command-container');
+      if (voiceHost) {
+        voiceButton = new window.VoiceCommandButton(voiceHost, stateManager, voiceController);
+        stateManager.subscribe(function (state) {
+          try {
+            voiceButton.update(state);
+          } catch (voiceUpdateErr) {
+            console.error('[app] voice button update error:', voiceUpdateErr);
+          }
+        });
+        console.log('[app] VoiceCommandController supported:', voiceController.supported);
+      }
+    } catch (voiceErr) {
+      console.error('[app] voice command initialization failed:', voiceErr);
+      // Non-critical: session works with the button controls.
+    }
+  }
 
   // ------------------------------------------------------------------
   // Session button: subscribes to the state manager for its visual states
@@ -323,7 +370,7 @@
   });
 
   // Expose for console debugging and cross-script coupling (Plan 08-04 Task 2).
-  window.__app = { stateManager: stateManager, wsClient: wsClient, audioController: audioController, speechController: speechController };
+  window.__app = { stateManager: stateManager, wsClient: wsClient, audioController: audioController, speechController: speechController, voiceController: voiceController };
   // Expose audioController globally for websocket-client.js access (Plan 08-04 Task 2).
   window.audioController = audioController;
   window.speechController = speechController;
@@ -406,9 +453,48 @@
         handleAnswerResult(parsed);
         return;
       }
+      // Voice command result (Ticket 03) — render the heard/transcript hint.
+      if (parsed.type === 'voice_result') {
+        handleVoiceResult(parsed);
+        return;
+      }
     }
     // Forwarded control frame (unknown type) or legacy path — log it.
     console.debug('[app] control message received:', data);
+  }
+
+  /**
+   * Voice command result from the backend (Ticket 03). The FSM effect of a
+   * recognized command arrives separately through the regular state frames
+   * (paused status, next word audio); this only renders what was heard and
+   * unlocks the mic button.
+   */
+  function handleVoiceResult(result) {
+    if (voiceButton) {
+      voiceButton.handleResult(result);
+    }
+  }
+
+  /**
+   * Mic capture failures (Ticket 03): permission denials and hardware
+   * problems keep the session alive — surface a hint pointing at the button
+   * fallback, which the acceptance criteria make the always-available path.
+   * The hint renders inside the voice button's status line (local to the
+   * mic affordance), not the session-level lastError surface.
+   */
+  function handleVoiceError(errorType) {
+    var messages = {
+      'not-supported': '此浏览器不支持语音命令，请用按钮',
+      'mic-denied': '麦克风权限被拒绝，请用按钮或在设置中允许麦克风',
+      'mic-unavailable': '麦克风不可用，请用按钮',
+      'overflow': '录音太长了，请短一点再说',
+      'start-failed': '录音启动失败，请用按钮'
+    };
+    var msg = messages[errorType] || '语音命令失败，请用按钮';
+    console.warn('[voice] error:', errorType);
+    if (voiceButton) {
+      voiceButton.showError(msg);
+    }
   }
 
   /**

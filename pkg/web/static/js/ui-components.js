@@ -816,5 +816,232 @@
     }
   }
 
+  /**
+   * VoiceCommandButton — push-to-talk mic control for voice commands
+   * (Ticket 03). Hold to record, release to ship: the
+   * VoiceCommandController streams PCM frames while held and sends the
+   * voice_command trigger on release; the backend replies voice_result,
+   * which handleResult() renders as a heard/transcript hint. Action "none"
+   * or an ASR failure shows the retry hint — the DictationControls buttons
+   * remain the full fallback, so this component HIDES itself entirely when
+   * the controller reports !supported (no getUserMedia: insecure context,
+   * denied permission, unsupported browser).
+   *
+   * Kept next to DictationControls because it shares the 60px-touch-target
+   * styling and the "labels follow authoritative backend state" rule: the
+   * FSM effect of a command arrives as regular state frames (paused/word
+   * audio), never from this component.
+   *
+   * @class
+   */
+  class VoiceCommandButton {
+    /**
+     * @param {HTMLElement} container - mount point (#voice-command-container).
+     * @param {SessionStateManager} stateManager - authoritative session state.
+     * @param {VoiceCommandController} controller - mic capture controller.
+     */
+    constructor(container, stateManager, controller) {
+      if (!container) throw new Error('VoiceCommandButton requires a container element');
+      this.container = container;
+      this.stateManager = stateManager;
+      this.controller = controller;
+
+      this.micBtn = null;
+      this.statusText = null;
+      /** Last voice_result payload (kept for re-renders). */
+      this.lastResult = null;
+
+      this.render();
+    }
+
+    /**
+     * Build the mic button + status line. The button uses Pointer Events
+     * (iPad Safari 13+) so one code path covers touch/mouse/pen; Space/Enter
+     * via keydown/keyup (no repeat) mirrors it for keyboard users.
+     * Rendering is skipped when the controller is unsupported — the button
+     * fallback owns that mode entirely.
+     */
+    render() {
+      while (this.container.firstChild) {
+        this.container.removeChild(this.container.firstChild);
+      }
+      if (!this.controller || !this.controller.supported) {
+        this.micBtn = null;
+        this.statusText = null;
+        return;
+      }
+
+      var wrapper = document.createElement('div');
+      wrapper.className = 'voice-command';
+      wrapper.setAttribute('role', 'group');
+      wrapper.setAttribute('aria-label', '语音命令');
+      wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px 0;';
+
+      var self = this;
+      this.micBtn = document.createElement('button');
+      this.micBtn.type = 'button';
+      this.micBtn.className = 'kid-button voice-command-button';
+      this.micBtn.textContent = '🎙 按住说话';
+      this.micBtn.setAttribute('aria-label', '按住说话，松开发送语音命令');
+      // iOS HIG touch-target parity with DictationControls (60px minimum);
+      // touch-action:none keeps Safari from synthesizing scrolls/long-press
+      // menus out of the hold gesture.
+      this.micBtn.style.cssText = 'min-width:160px;min-height:60px;font-size:18px;padding:12px 24px;border-radius:30px;border:2px solid #93c5fd;background:#eff6ff;color:#1d4ed8;cursor:pointer;touch-action:none;user-select:none;-webkit-user-select:none;';
+      this.micBtn.addEventListener('pointerdown', function (e) { self._onHoldStart(e); });
+      this.micBtn.addEventListener('pointerup', function (e) { self._onHoldEnd(e); });
+      this.micBtn.addEventListener('pointercancel', function () { self._onHoldCancel(); });
+      this.micBtn.addEventListener('pointerleave', function (e) { self._onHoldEnd(e); });
+      // Suppress the context menu a long hold triggers on touch devices.
+      this.micBtn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+      // Keyboard parity: hold Space/Enter, release to send.
+      this.micBtn.addEventListener('keydown', function (e) {
+        if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) {
+          e.preventDefault();
+          self._onHoldStart(e);
+        }
+      });
+      this.micBtn.addEventListener('keyup', function (e) {
+        if (e.key === ' ' || e.key === 'Enter') {
+          e.preventDefault();
+          self._onHoldEnd(e);
+        }
+      });
+
+      this.statusText = document.createElement('p');
+      this.statusText.className = 'voice-command-status';
+      this.statusText.setAttribute('role', 'status');
+      this.statusText.setAttribute('aria-live', 'polite');
+      this.statusText.style.cssText = 'min-height:24px;margin:0;font-size:16px;color:#6b7280;';
+      this.statusText.textContent = '可以说：好了 / 重读 / 暂停 / 不会写';
+
+      wrapper.appendChild(this.micBtn);
+      wrapper.appendChild(this.statusText);
+      this.container.appendChild(wrapper);
+
+      if (this.stateManager) {
+        this.update(this.stateManager.getState());
+      }
+    }
+
+    /**
+     * State-driven re-render (called via stateManager.subscribe). Enables the
+     * mic only during dictation-eligible statuses; keeps the label synced
+     * with the controller's recording/processing lifecycle. A backend error
+     * arriving while a command is pending also clears the processing lock —
+     * the disabled-mode "voice commands unavailable" error frame is a reply
+     * voice_result never comes for.
+     *
+     * @param {object} state - SessionStateManager snapshot.
+     */
+    update(state) {
+      if (!this.micBtn || !this.controller) return;
+      state = state || {};
+
+      if (state.lastError && this.controller.isProcessing) {
+        this.controller.resultReceived();
+        this._setStatus('语音命令不可用：' + state.lastError + '（请用下面的按钮）');
+      }
+
+      var active = state.sessionActive &&
+        (state.status === 'DICTATING' || state.status === 'LISTENING' || state.status === 'PAUSED');
+      var busy = this.controller.isRecording || this.controller.isProcessing;
+      this.micBtn.disabled = !active || busy;
+      this.micBtn.style.opacity = this.micBtn.disabled ? '0.5' : '1';
+
+      if (this.controller.isRecording) {
+        this.micBtn.textContent = '🎙 录音中…松开发送';
+      } else if (this.controller.isProcessing) {
+        this.micBtn.textContent = '⏳ 识别中…';
+      } else {
+        this.micBtn.textContent = '🎙 按住说话';
+      }
+    }
+
+    /**
+     * Render a voice_result payload (called from app.js's handler; also
+     * unlocks the controller's processing lock).
+     *
+     * @param {object} result - {action, transcript, source, confidence}.
+     */
+    handleResult(result) {
+      this.lastResult = result;
+      if (this.controller) this.controller.resultReceived();
+      var labels = {
+        next_word: '下一个 ⏭',
+        repeat: '再读一遍 🔁',
+        pause: '暂停 ⏸',
+        resume: '继续 ▶',
+        cannot_write: '跳过这个词 ✏️'
+      };
+      if (result && labels[result.action]) {
+        this._setStatus('听到了「' + (result.transcript || '') + '」→ ' + labels[result.action]);
+      } else {
+        // Action "none" (or unrecognized): the acceptance-critical fallback
+        // hint — try again or use the buttons.
+        this._setStatus('没听清，请再试一次，或点下面的按钮');
+      }
+      if (this.stateManager) this.update(this.stateManager.getState());
+    }
+
+    /**
+     * Surface a mic-capture failure hint (called from app.js's onError
+     * wiring). Kept local to this component — a mic problem must not paint
+     * the session-level error surfaces, which lastError drives.
+     *
+     * @param {string} message - user-facing Chinese hint.
+     */
+    showError(message) {
+      this._setStatus(message);
+      if (this.stateManager) this.update(this.stateManager.getState());
+    }
+
+    /**
+     * Hold started (pointerdown / keydown): begin capture. The permission
+     * prompt resolves after the gesture; failures surface via the
+     * controller's onError callback (wired by app.js).
+     *
+     * @private
+     * @param {Event} e
+     */
+    _onHoldStart(e) {
+      if (e.cancelable) e.preventDefault();
+      if (this.micBtn.disabled) return;
+      this.controller.start();
+      this.update(this.stateManager ? this.stateManager.getState() : {});
+    }
+
+    /**
+     * Hold ended normally (pointerup / pointerleave / keyup): stop + ship.
+     * @private
+     * @param {Event} e
+     */
+    _onHoldEnd(e) {
+      if (e.cancelable) e.preventDefault();
+      if (!this.controller.isRecording) return;
+      this.controller.stop();
+      this.update(this.stateManager ? this.stateManager.getState() : {});
+    }
+
+    /**
+     * Hold aborted (browser cancelled the gesture): drop the recording
+     * without triggering ASR.
+     * @private
+     */
+    _onHoldCancel() {
+      if (!this.controller.isRecording) return;
+      this.controller.cancel();
+      this._setStatus('录音取消 — 请再试一次，或点下面的按钮');
+      this.update(this.stateManager ? this.stateManager.getState() : {});
+    }
+
+    /**
+     * @private
+     */
+    _setStatus(text) {
+      if (this.statusText) this.statusText.textContent = text;
+    }
+  }
+
   global.DictationControls = DictationControls;
+  global.VoiceCommandButton = VoiceCommandButton;
 })(typeof window !== 'undefined' ? window : this);

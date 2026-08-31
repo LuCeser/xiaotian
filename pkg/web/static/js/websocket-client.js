@@ -303,6 +303,30 @@
       return this._fallbackSeq >>> 0;
     }
 
+    /**
+     * Send a binary frame with an explicit message type and sequence — the
+     * outbound path for streaming audio frames (Ticket 03 mic capture).
+     * Unlike send(), the payload is raw bytes (not JSON), and the frame is
+     * NOT queued while disconnected: microphone audio is only meaningful
+     * live, and buffering it would grow the memory budget on exactly the
+     * unstable networks where queueing bites.
+     *
+     * @param {number} msgType - FrameCodec.MSG_TYPE value (AUDIO for mic).
+     * @param {number} sequence - monotonic uint32 owned by the caller (the
+     *        audio stream has its own counter, independent of control
+     *        frames, so the server can reassemble chunks by order).
+     * @param {Uint8Array} payloadBytes - frame payload (640 bytes for AUDIO).
+     * @returns {boolean} true when written; false when not connected (the
+     *          caller drops the chunk).
+     */
+    sendFrame(msgType, sequence, payloadBytes) {
+      if (this.state === STATE_CONNECTED && this.ws && this.ws.readyState === global.WebSocket.OPEN) {
+        this.ws.send(FrameCodec.encode(msgType, sequence, payloadBytes));
+        return true;
+      }
+      return false;
+    }
+
     /** @private flush queued messages after a (re)connection. */
     _flushQueue() {
       while (this.messageQueue.length > 0 && this.state === STATE_CONNECTED) {
