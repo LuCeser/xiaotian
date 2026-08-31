@@ -128,14 +128,14 @@ type errorResponse struct {
 
 // ttsHandlers returns the per-MsgType handler map handed to ws.NewRouter.
 // It composes the FSRS service, TTS generator, and streamer to deliver the
-// end-to-end TTS audio streaming pipeline.
-func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, logger infra.Logger) map[ws.MessageType]ws.Handler {
+// end-to-end TTS audio streaming pipeline. voice may be nil (voice commands
+// disabled — no MIMO_API_KEY): the audio route no-ops and voice_command
+// rejects with an error frame (see voice.go).
+func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, voiceCmd *voiceService, logger infra.Logger) map[ws.MessageType]ws.Handler {
 	return map[ws.MessageType]ws.Handler{
-		// MsgTypeAudio: inbound PCM frames. Placeholder until Phase 7+
-		// processes client microphone audio.
-		ws.MsgTypeAudio: func(_ context.Context, _ *ws.Client, _ *ws.FrameHeader, _ []byte) error {
-			return nil
-		},
+		// MsgTypeAudio: inbound microphone PCM frames (Ticket 03 voice
+		// commands). Delegates to the voice pipeline's buffer registry.
+		ws.MsgTypeAudio: voiceCmd.handleAudioFrame,
 
 		// MsgTypeControl: session control messages for TTS streaming.
 		ws.MsgTypeControl: func(ctx context.Context, client *ws.Client, header *ws.FrameHeader, payload []byte) error {
@@ -181,6 +181,11 @@ func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, logger infr
 
 			case "submit_answer":
 				return handleSubmitAnswer(ctx, client, control.Params, manager, logger)
+
+			case "voice_command":
+				// Ticket 03: student finished a push-to-talk recording; run
+				// ASR + intent analysis and dispatch the FSM verb.
+				return voiceCmd.handleVoiceCommand(ctx, client, control.Params)
 
 			default:
 				logger.Warn("unknown control type",

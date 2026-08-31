@@ -31,9 +31,11 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/tts"
+	"github.com/xiaotian/home-tutor-agent/pkg/voice"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
@@ -374,7 +376,46 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 
 		go manager.Start(ctx)
 
-		router, err := ws.NewRouter(ttsHandlers(manager, fsrsSvc, logger), routerCfg, wsLogger)
+		// ------------------------------------------------------------------
+		// Phase 8.2 (Ticket 03): voice-command pipeline — streamed mic audio
+		// → Mimo ASR → intent classification → session FSM dispatch.
+		// MIMO_API_KEY stays environment-only (D-05/D-24, same invariant as
+		// the pybridge secrets); no key ⇒ voice disabled, the service boots
+		// and the button controls remain the full fallback.
+		// ------------------------------------------------------------------
+		var voiceCmd *voiceService
+		if apiKey := os.Getenv("MIMO_API_KEY"); apiKey != "" {
+			mimoClient, err := mimo.NewClient(mimo.ClientConfig{
+				APIKey:  apiKey,
+				BaseURL: cfg.Voice.BaseURL,
+				Timeout: cfg.Voice.RequestTimeout,
+			}, logger)
+			if err != nil {
+				logger.Error("mimo client construction failed",
+					infra.F("component", "infra.main"),
+					infra.ErrField(err),
+				)
+				return err
+			}
+			defer func() { _ = mimoClient.Close() }()
+			voiceCmd = newVoiceService(
+				mimoClient,
+				voice.NewHybridClassifier(voice.NewLLMClassifier(mimoChatter(mimoClient, cfg.Voice.ChatModel))),
+				manager,
+				logger,
+				cfg.Voice,
+			)
+			logger.Info("voice command pipeline enabled",
+				infra.F("component", "infra.main"),
+				infra.F("chat_model", cfg.Voice.ChatModel),
+			)
+		} else {
+			logger.Warn("MIMO_API_KEY not set — voice commands disabled; button controls remain",
+				infra.F("component", "infra.main"),
+			)
+		}
+
+		router, err := ws.NewRouter(ttsHandlers(manager, fsrsSvc, voiceCmd, logger), routerCfg, wsLogger)
 		if err != nil {
 			logger.Error("ws router construction failed",
 				infra.F("component", "infra.main"),
