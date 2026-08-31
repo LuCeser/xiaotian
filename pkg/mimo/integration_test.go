@@ -79,6 +79,55 @@ func getTestBaseURL() string {
 	return baseURL
 }
 
+// TestIntegration_Chat_RealAPI tests LLM chat completion with the real API
+// (Ticket 03: intent-analysis path). Skipped without MIMO_API_KEY.
+func TestIntegration_Chat_RealAPI(t *testing.T) {
+	if skipIntegration {
+		t.Skip("Skipping integration tests (set MIMO_API_KEY to enable)")
+	}
+
+	apiKey := getTestAPIKey(t)
+	config := ClientConfig{
+		APIKey:     apiKey,
+		BaseURL:    getTestBaseURL(),
+		Timeout:    60 * time.Second,
+		MaxRetries: 2,
+		RetryDelay: 2 * time.Second,
+	}
+	client, err := NewClient(config, infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	messages := []Message{
+		{
+			Role: "system",
+			Content: "你是听写课堂的命令识别器。把学生说的话归类为以下动作之一：" +
+				"next_word(写完了/好了), repeat(再读一遍), pause(暂停), resume(继续), " +
+				"cannot_write(不会写), none(其他)。只输出 JSON：{\"action\":\"...\",\"confidence\":0.0}",
+		},
+		{Role: "user", Content: "老师我写好了"},
+	}
+
+	resp, err := client.Chat(context.Background(), messages, WithMaxTokens(512))
+	if err != nil {
+		t.Fatalf("Chat() failed: %v", err)
+	}
+
+	text := resp.Text()
+	if text == "" {
+		t.Fatal("expected non-empty chat response text")
+	}
+	t.Logf("chat response: %s", text)
+
+	// The classifier contract only needs an "action" token somewhere in the
+	// response; verify the model followed the JSON instruction loosely.
+	if !strings.Contains(text, "action") {
+		t.Errorf("response does not contain \"action\": %s", text)
+	}
+}
+
 // TestIntegration_Synthesize_RealAPI tests TTS synthesis with real API
 func TestIntegration_Synthesize_RealAPI(t *testing.T) {
 	if skipIntegration {

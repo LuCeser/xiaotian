@@ -235,6 +235,119 @@ func (c *mimoClient) Transcribe(ctx context.Context, audio []byte, format string
 	return ASRResponse{}, errors.Wrap(lastErr, "ASR transcription exhausted retries")
 }
 
+// Chat runs an LLM chat completion request and returns the parsed response
+// (Ticket 03: voice-command intent analysis). Mirrors Transcribe's retry
+// contract: retries transient failures up to config.MaxRetries with
+// exponential backoff, fails fast on non-retryable errors.
+func (c *mimoClient) Chat(ctx context.Context, messages []Message, opts ...ChatOption) (ChatResponse, error) {
+	if c.isClosed() {
+		return ChatResponse{}, errors.New("client is closed")
+	}
+	if len(messages) == 0 {
+		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "chat requires at least one message")
+	}
+
+	req := c.buildChatRequest(messages, opts...)
+
+	var lastErr error
+	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
+		if attempt > 0 {
+			c.logger.Debug("chat completion retry attempt",
+				infra.F("component", "mimo.client"),
+				infra.F("attempt", attempt),
+				infra.F("max_retries", c.config.MaxRetries),
+				infra.ErrField(lastErr),
+			)
+
+			delay := c.config.RetryDelay * time.Duration(1<<uint(attempt-1))
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return ChatResponse{}, errors.Wrap(ErrContextCancelled, "chat retry cancelled")
+			}
+		}
+
+		result, err := c.executeChatRequest(ctx, req)
+		if err == nil {
+			return result, nil
+		}
+
+		lastErr = err
+
+		// Don't retry non-retryable errors
+		if !IsRetryable(err) {
+			c.logger.Warn("chat completion failed with non-retryable error",
+				infra.F("component", "mimo.client"),
+				infra.F("model", req.Model),
+				infra.ErrField(err),
+			)
+			return ChatResponse{}, err
+		}
+
+		c.logger.Debug("chat completion attempt failed, will retry",
+			infra.F("component", "mimo.client"),
+			infra.F("attempt", attempt),
+		)
+	}
+
+	return ChatResponse{}, errors.Wrap(lastErr, "chat completion exhausted retries")
+}
+
+// buildChatRequest creates a chat completion request from messages and options
+func (c *mimoClient) buildChatRequest(messages []Message, opts ...ChatOption) ChatRequest {
+	req := ChatRequest{
+		Model:    DefaultChatModel,
+		Messages: messages,
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(&req)
+	}
+
+	return req
+}
+
+// executeChatRequest executes a chat completion request and returns the response
+func (c *mimoClient) executeChatRequest(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return ChatResponse{}, errors.Wrap(ErrEncodingFailed, "failed to marshal chat request")
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return ChatResponse{}, errors.Wrap(err, "failed to create chat HTTP request")
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ChatResponse{}, errors.Wrap(ErrContextCancelled, "chat request cancelled")
+		}
+		return ChatResponse{}, errors.Wrap(ErrNetworkError, err.Error())
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ChatResponse{}, c.handleAPIError(resp)
+	}
+
+	var chatResp ChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "failed to decode chat response")
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "no choices in chat response")
+	}
+
+	return chatResp, nil
+}
+
 // HealthCheck verifies API connectivity
 func (c *mimoClient) HealthCheck(ctx context.Context) error {
 	if c.isClosed() {

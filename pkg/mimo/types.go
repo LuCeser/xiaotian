@@ -176,6 +176,52 @@ func (r *ASRResponse) ExtractText() string {
 	return r.Choices[0].Message.Content
 }
 
+// ChatRequest represents an LLM chat completion request to the Xiaomi Mimo
+// API (OpenAI-compatible /chat/completions, Ticket 03 — voice-command intent
+// analysis).
+type ChatRequest struct {
+	// Model specifies the LLM to use (e.g. "mimo-v2.5", "mimo-v2.5-pro")
+	Model string `json:"model"`
+	// Messages carries the conversation (system prompt + user turns)
+	Messages []Message `json:"messages"`
+	// MaxTokens caps the completion length (0 = server default)
+	MaxTokens int `json:"max_tokens,omitempty"`
+	// Temperature tunes sampling (0 = omitted; mimo-v2.5 thinking mode
+	// ignores it server-side anyway per the official docs)
+	Temperature float64 `json:"temperature,omitempty"`
+}
+
+// ChatMessageContent mirrors an assistant message in a chat completion
+// response. Thinking models may populate ReasoningContent with the chain of
+// thought while the final answer lands in Content.
+type ChatMessageContent struct {
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+}
+
+// ChatResponse represents the response from an LLM chat completion request.
+type ChatResponse struct {
+	Choices []struct {
+		Message ChatMessageContent `json:"message"`
+		Index   int                `json:"index"`
+	} `json:"choices"`
+	Usage Usage `json:"usage,omitempty"`
+}
+
+// Text returns the response's answer text: Choices[0].Message.Content, or the
+// reasoning content when the model returned an empty content (mirrors
+// ASRResponse.ExtractText's convenience contract).
+func (r *ChatResponse) Text() string {
+	if len(r.Choices) == 0 {
+		return ""
+	}
+	if r.Choices[0].Message.Content != "" {
+		return r.Choices[0].Message.Content
+	}
+	return r.Choices[0].Message.ReasoningContent
+}
+
 // StreamChunk represents a chunk of streaming audio data delivered to the
 // caller's callback. The wire format is OpenAI-style chat.completion.chunk
 // (choices[].delta.audio.data + finish_reason); UnmarshalJSON maps that shape
@@ -231,6 +277,10 @@ type Client interface {
 	// Transcribe converts audio to text
 	Transcribe(ctx context.Context, audio []byte, format string, opts ...ASROption) (ASRResponse, error)
 
+	// Chat runs an LLM chat completion and returns the response (Ticket 03:
+	// voice-command intent analysis).
+	Chat(ctx context.Context, messages []Message, opts ...ChatOption) (ChatResponse, error)
+
 	// HealthCheck verifies API connectivity
 	HealthCheck(ctx context.Context) error
 
@@ -243,6 +293,36 @@ type TTSOption func(*TTSRequest)
 
 // ASROption configures ASR recognition behavior
 type ASROption func(*ASRRequest)
+
+// ChatOption configures LLM chat completion behavior
+type ChatOption func(*ChatRequest)
+
+// DefaultChatModel is the default LLM for chat completions. mimo-v2.5 (not
+// -pro) keeps per-command intent classification fast and cheap on the 1C1G
+// VPS budget; override per call via WithChatModel.
+const DefaultChatModel = "mimo-v2.5"
+
+// WithChatModel sets the chat completion model (e.g. "mimo-v2.5-pro")
+func WithChatModel(model string) ChatOption {
+	return func(req *ChatRequest) {
+		req.Model = model
+	}
+}
+
+// WithMaxTokens caps the completion length
+func WithMaxTokens(n int) ChatOption {
+	return func(req *ChatRequest) {
+		req.MaxTokens = n
+	}
+}
+
+// WithTemperature sets sampling temperature (mimo-v2.5 thinking mode forces
+// 1.0 server-side per the official docs — this is a no-op there)
+func WithTemperature(t float64) ChatOption {
+	return func(req *ChatRequest) {
+		req.Temperature = t
+	}
+}
 
 // WithVoice sets the TTS voice
 func WithVoice(voice string) TTSOption {
