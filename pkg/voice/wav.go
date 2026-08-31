@@ -1,0 +1,40 @@
+package voice
+
+import "encoding/binary"
+
+// wavHeaderSize is the canonical 44-byte RIFF/WAVE header length written by
+// WrapWAV.
+const wavHeaderSize = 44
+
+// WrapWAV prepends a 44-byte RIFF/WAVE header to raw signed 16-bit
+// little-endian PCM samples, producing a self-describing WAV the Mimo ASR
+// accepts (its audio input is a data:audio/wav;base64 URL — a bare PCM
+// payload with a wav MIME type is not a container).
+//
+// channels is the channel count (1 for the dictation mic path); sampleRate
+// is the capture rate (16000 for the protocol's PCM frames).
+func WrapWAV(pcm []byte, sampleRate, channels int) []byte {
+	byteRate := sampleRate * channels * 2 // 16-bit samples
+	blockAlign := channels * 2
+
+	out := make([]byte, wavHeaderSize+len(pcm))
+
+	copy(out[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(out[4:8], uint32(36+len(pcm)))
+	copy(out[8:12], "WAVE")
+
+	copy(out[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(out[16:20], 16) // PCM fmt chunk size
+	binary.LittleEndian.PutUint16(out[20:22], 1)  // audio format: PCM
+	binary.LittleEndian.PutUint16(out[22:24], uint16(channels))
+	binary.LittleEndian.PutUint32(out[24:28], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(out[28:32], uint32(byteRate))
+	binary.LittleEndian.PutUint16(out[32:34], uint16(blockAlign))
+	binary.LittleEndian.PutUint16(out[34:36], 16) // bits per sample
+
+	copy(out[36:40], "data")
+	binary.LittleEndian.PutUint32(out[40:44], uint32(len(pcm)))
+	copy(out[wavHeaderSize:], pcm)
+
+	return out
+}
