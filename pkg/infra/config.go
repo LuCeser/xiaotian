@@ -142,6 +142,71 @@ type Config struct {
 	// service boots and serves a sensible session with NO tts: block in
 	// config.yaml.
 	TTS TTSConfig `json:"tts" mapstructure:"tts"`
+
+	// Voice tunes the voice-command pipeline (Phase 8.2 / Ticket 03): Mimo
+	// ASR + LLM intent analysis over streamed microphone audio. Operational
+	// fields only — the MIMO_API_KEY secret is deliberately absent and read
+	// from the live environment by the consuming code (D-05/D-24, same
+	// invariant TestTTSConfigHasNoSecretFields enforces for TTS).
+	Voice VoiceConfig `json:"voice" mapstructure:"voice"`
+}
+
+// VoiceConfig tunes the voice-command pipeline (Phase 8.2, Ticket 03). It
+// carries only operational fields; MIMO_API_KEY stays environment-only per
+// the D-24 no-secret invariant. Every field has a working default so the
+// service boots with NO voice: block in config.yaml.
+type VoiceConfig struct {
+	// BaseURL is the Mimo API endpoint root (no trailing slash). Default
+	// "https://api.xiaomimimo.com/v1" — same default as pkg/mimo.NewClient;
+	// duplicated here so the infra layer stays the operator-facing surface.
+	BaseURL string `json:"baseUrl" mapstructure:"baseUrl"`
+
+	// ChatModel is the LLM used for intent classification of voice commands
+	// that miss the keyword fast path. Default "mimo-v2.5" (the -pro variant
+	// costs more latency than a 4-way classification justifies).
+	ChatModel string `json:"chatModel" mapstructure:"chatModel"`
+
+	// MaxRecordingBytes caps one voice-command recording's accumulated PCM
+	// (memory guard on the 1C1G VPS). Default 327680 bytes ≈ 10.2s of
+	// 16kHz 16-bit mono — far beyond any "好了" utterance. MUST be > 0.
+	MaxRecordingBytes int `json:"maxRecordingBytes" mapstructure:"maxRecordingBytes"`
+
+	// AssembleWait bounds how long the voice_command handler waits for the
+	// final streamed audio chunks to land after the trigger arrives (the
+	// audio and control routes are separate worker pools, so the trigger can
+	// be dequeued first). Default 2s. MUST be > 0.
+	AssembleWait time.Duration `json:"assembleWait" mapstructure:"assembleWait"`
+
+	// RequestTimeout bounds each Mimo API call (ASR transcribe, LLM chat)
+	// made while serving one voice command. Default 15s — longer than the
+	// interactive ideal but bounded so a wedged upstream cannot pin router
+	// workers (WR-02 bounds Close, not individual handlers). MUST be > 0.
+	RequestTimeout time.Duration `json:"requestTimeout" mapstructure:"requestTimeout"`
+}
+
+// Validate enforces the VoiceConfig field ranges (D-04 fail-fast). On any
+// failure it returns an error wrapping ErrConfigInvalid so callers branch
+// with errors.Is(err, infra.ErrConfigInvalid).
+func (c VoiceConfig) Validate() error {
+	if c.BaseURL == "" {
+		return errors.Wrap(ErrConfigInvalid, "voice.baseUrl is required")
+	}
+	if c.ChatModel == "" {
+		return errors.Wrap(ErrConfigInvalid, "voice.chatModel is required")
+	}
+	if c.MaxRecordingBytes <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("voice.maxRecordingBytes must be > 0, got %d", c.MaxRecordingBytes))
+	}
+	if c.AssembleWait <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("voice.assembleWait must be > 0, got %v", c.AssembleWait))
+	}
+	if c.RequestTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("voice.requestTimeout must be > 0, got %v", c.RequestTimeout))
+	}
+	return nil
 }
 
 // DatabaseConfig tunes the SQLite storage layer (Phase 4). Holds only the
@@ -690,6 +755,21 @@ func DefaultConfig() Config {
 			// D-04: prefetch next 2 words to eliminate network latency
 			PrefetchCount: 2,
 		},
+		Voice: VoiceConfig{
+			// Same default as pkg/mimo.NewClient — duplicated so operators
+			// see the surface at the infra layer (see VoiceConfig docs).
+			BaseURL: "https://api.xiaomimimo.com/v1",
+			// mimo-v2.5: intent classification is a 4-way choice; -pro's
+			// extra capability buys latency we do not want per command.
+			ChatModel: "mimo-v2.5",
+			// ~10.2s of 16kHz 16-bit mono — generous for a spoken command.
+			MaxRecordingBytes: 327680,
+			// Audio and control routes are separate worker pools; the
+			// trigger can be dequeued before the last audio chunks.
+			AssembleWait: 2 * time.Second,
+			// Bounded per-call so a wedged upstream cannot pin workers.
+			RequestTimeout: 15 * time.Second,
+		},
 	}
 }
 
@@ -984,6 +1064,13 @@ func (c Config) Validate() error {
 		return err
 	}
 
+	// Voice-command pipeline (Phase 8.2, Ticket 03). VoiceConfig.Validate
+	// enforces field ranges so a malformed HTA_VOICE_* value fails boot
+	// rather than producing an unbounded recording buffer (D-04 fail-fast).
+	if err := c.Voice.Validate(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1093,6 +1180,13 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"tts.maxRetries",
 		"tts.generationTimeout",
 		"tts.prefetchCount",
+		// Phase 8.2 voice-command pipeline (Ticket 03). Pitfall 6: every leaf
+		// MUST be bound explicitly or HTA_VOICE_* env vars are silently inert.
+		"voice.baseUrl",
+		"voice.chatModel",
+		"voice.maxRecordingBytes",
+		"voice.assembleWait",
+		"voice.requestTimeout",
 		// Phase 7 session FSM per-state timeouts (D-09). Pitfall 6: every leaf
 		// MUST be bound explicitly or HTA_SESSIONTIMEOUT_* env vars are silently
 		// inert. Keys mirror the mapstructure path of SessionTimeoutConfig

@@ -218,6 +218,31 @@ func TestDefaultConfig(t *testing.T) {
 				cfg.WS.WorkerConcurrency)
 		}
 	})
+
+	t.Run("voice defaults — boots with no voice: block (Ticket 03)", func(t *testing.T) {
+		if cfg.Voice.BaseURL != "https://api.xiaomimimo.com/v1" {
+			t.Errorf("Voice.BaseURL = %q, want pkg/mimo.NewClient default",
+				cfg.Voice.BaseURL)
+		}
+		if cfg.Voice.ChatModel != "mimo-v2.5" {
+			t.Errorf("Voice.ChatModel = %q, want mimo-v2.5 (mimo.DefaultChatModel)",
+				cfg.Voice.ChatModel)
+		}
+		if cfg.Voice.MaxRecordingBytes != 327680 {
+			t.Errorf("Voice.MaxRecordingBytes = %d, want 327680 (~10.2s 16kHz PCM)",
+				cfg.Voice.MaxRecordingBytes)
+		}
+		if cfg.Voice.AssembleWait != 2*time.Second {
+			t.Errorf("Voice.AssembleWait = %v, want 2s", cfg.Voice.AssembleWait)
+		}
+		if cfg.Voice.RequestTimeout != 15*time.Second {
+			t.Errorf("Voice.RequestTimeout = %v, want 15s", cfg.Voice.RequestTimeout)
+		}
+		// Defaults must satisfy Validate (boots from defaults, D-04).
+		if err := cfg.Voice.Validate(); err != nil {
+			t.Errorf("default VoiceConfig fails Validate: %v", err)
+		}
+	})
 }
 
 // TestLoadConfigDefaults verifies the lowest precedence layer: with no file
@@ -940,4 +965,58 @@ func TestTTSConfigHasNoSecretFields(t *testing.T) {
 	if typ.NumField() == 0 {
 		t.Fatal("TTSConfig has zero fields — reflect guard has nothing to inspect")
 	}
+}
+
+// TestVoiceConfigHasNoSecretFields guards the D-24 invariant for the voice
+// pipeline: MIMO_API_KEY travels via os.Getenv in the consuming code, never
+// through VoiceConfig (mirrors TestTTSConfigHasNoSecretFields).
+func TestVoiceConfigHasNoSecretFields(t *testing.T) {
+	secretSubstrings := []string{"secret", "password", "apikey", "token"}
+	typ := reflect.TypeOf(VoiceConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name := strings.ToLower(field.Name)
+		for _, sub := range secretSubstrings {
+			if strings.Contains(name, sub) {
+				t.Fatalf("D-24 violation: VoiceConfig.%s field name contains "+
+					"secret substring %q — secrets MUST travel through os.Getenv, "+
+					"never through this struct (D-24)",
+					field.Name, sub)
+			}
+		}
+	}
+	if typ.NumField() == 0 {
+		t.Fatal("VoiceConfig has zero fields — reflect guard has nothing to inspect")
+	}
+}
+
+// TestVoiceConfigValidate covers the fail-fast ranges (D-04): every
+// operational field must be non-zero for the service to boot.
+func TestVoiceConfigValidate(t *testing.T) {
+	valid := DefaultConfig().Voice
+
+	cases := []struct {
+		name string
+		mut  func(c *VoiceConfig)
+	}{
+		{"baseUrl empty", func(c *VoiceConfig) { c.BaseURL = "" }},
+		{"chatModel empty", func(c *VoiceConfig) { c.ChatModel = "" }},
+		{"maxRecordingBytes zero", func(c *VoiceConfig) { c.MaxRecordingBytes = 0 }},
+		{"assembleWait zero", func(c *VoiceConfig) { c.AssembleWait = 0 }},
+		{"requestTimeout zero", func(c *VoiceConfig) { c.RequestTimeout = 0 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := valid
+			tc.mut(&c)
+			if err := c.Validate(); err == nil {
+				t.Fatal("Validate() = nil, want error")
+			}
+		})
+	}
+	t.Run("defaults pass", func(t *testing.T) {
+		if err := valid.Validate(); err != nil {
+			t.Fatalf("default VoiceConfig Validate() = %v, want nil", err)
+		}
+	})
 }
