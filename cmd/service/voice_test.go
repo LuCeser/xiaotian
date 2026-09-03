@@ -75,12 +75,20 @@ func (p *recordingPusher) Push(connID string, ev session.SessionEvent) {
 // and a teardown func.
 func dialVoiceTestServer(t *testing.T, handlers map[ws.MessageType]ws.Handler) (*websocket.Conn, func()) {
 	t.Helper()
-	logger := zap.NewNop()
-
-	hub, err := ws.NewHub(ws.HubConfig{Limit: 10, RegisterBuffer: 32, UnregisterBuffer: 32}, logger)
+	hub, err := ws.NewHub(ws.HubConfig{Limit: 10, RegisterBuffer: 32, UnregisterBuffer: 32}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("failed to create hub: %v", err)
 	}
+	return dialVoiceTestServerOnHub(t, hub, handlers)
+}
+
+// dialVoiceTestServerOnHub is dialVoiceTestServer for a caller-supplied hub —
+// needed when the test's service objects (e.g. a real session.Manager) must
+// share the hub the ws server registers connections on.
+func dialVoiceTestServerOnHub(t *testing.T, hub *ws.Hub, handlers map[ws.MessageType]ws.Handler) (*websocket.Conn, func()) {
+	t.Helper()
+	logger := zap.NewNop()
+
 	hubCtx, hubCancel := context.WithCancel(context.Background())
 	go hub.Run(hubCtx)
 

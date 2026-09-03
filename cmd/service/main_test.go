@@ -342,6 +342,46 @@ func TestMainBootsWithNoWSConfigBlock(t *testing.T) {
 	}
 }
 
+// TestMainBootsWithVoiceEnabled covers the Ticket-03 voice-enabled boot
+// path: with MIMO_API_KEY present, run() must construct the mimo client,
+// the hybrid classifier, and the voiceService, then boot and shut down
+// cleanly — a construction failure anywhere in that chain returns exit
+// code 1, so exit 0 is the assertion. The key value is never used at boot
+// (mimo.NewClient is a pure constructor; no API call happens until a
+// voice_command arrives), so a syntactically-valid dummy key suffices.
+func TestMainBootsWithVoiceEnabled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test, skipped in -short mode")
+	}
+	runMu.Lock()
+	defer runMu.Unlock()
+	clearHTAEnv(t)
+	t.Setenv("MIMO_API_KEY", "test-key-boot-verification-only")
+
+	healthAddr, err := freePortAddr()
+	if err != nil {
+		t.Fatalf("freePortAddr: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan int, 1)
+	go func() { done <- run(ctx, "config-does-not-exist.yaml", healthAddr) }()
+
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Errorf("exit code: got %d, want 0 (voice-enabled boot must succeed)", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return within 10s of ctx cancel")
+	}
+}
+
 // clearHTAEnv removes every HTA_* env var so tests start from a known
 // baseline. t.Cleanup restores the originally-cleared state.
 func clearHTAEnv(t *testing.T) {

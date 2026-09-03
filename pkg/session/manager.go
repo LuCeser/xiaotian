@@ -10,7 +10,6 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
-	"github.com/xiaotian/home-tutor-agent/pkg/tts"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
@@ -22,7 +21,7 @@ type Manager struct {
 	// --- Service deps (immutable after NewManager) ---
 	hub      SessionHub
 	fsrsSvc  fsrs.FSRSService
-	gen      *tts.Generator
+	gen      TTSSessionGenerator
 	streamer SessionStreamer
 	repo     database.SessionRepository
 	pool     *infra.WorkerPool
@@ -36,12 +35,16 @@ type Manager struct {
 }
 
 // NewManager constructs a Manager with nil-guarded dependencies (D-42 DI shape,
-// mirroring NewFSRSService / NewConnectionRegistry).
+// mirroring NewFSRSService / NewConnectionRegistry). gen and streamer take the
+// same narrow interfaces NewSession consumes (D-05): production passes the
+// concrete *tts.Generator / *tts.Streamer, which satisfy them structurally —
+// callers compile unchanged — and integration tests elsewhere can inject
+// fakes without constructing a Python-backed TTS stack.
 func NewManager(
 	hub *ws.Hub,
 	fsrsSvc fsrs.FSRSService,
-	gen *tts.Generator,
-	streamer *tts.Streamer,
+	gen TTSSessionGenerator,
+	streamer SessionStreamer,
 	repo database.SessionRepository,
 	pool *infra.WorkerPool,
 	logger infra.Logger,
