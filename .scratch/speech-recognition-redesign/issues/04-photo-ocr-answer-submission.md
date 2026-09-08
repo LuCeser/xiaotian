@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Xiaomi Mimo Service Integration Layer
 
-**Status:** done (2026-09-08, commits: 1ceba56, a7b26f7, d588386, 47a668b, 4536cff, dec6cab)
+**Status:** done (2026-09-08, commits: 1ceba56, a7b26f7, d588386, 47a668b, 4536cff, dec6cab; review 修复 2d15bef)
 
 - [x] Students can capture photos of written answers via iPad camera — 取舍备注：`<input type=file capture=environment>`（iPad Safari 标准相机路径，无需 getUserMedia、无前置权限弹窗、http 局域网可测——与语音端 secure-context 限制相反）；canvas 降采样阶梯（1600px@q0.8→1024px@q0.5，≤768KiB）后 32KiB IMAGE 帧（MsgType 0x07）分块上行 + photo_submit 触发。真实 iPad 相机采集待 UAT
 - [x] OCR service extracts text from images with ≥85% accuracy for typical elementary handwriting — 取舍备注：Mimo 官方 image-understanding 路径（mimo-v2.5 视觉，base64 data URI，pkg/mimo ChatVision）；活体验证（TestPhotoOCR_LiveRealVision，gated on MIMO_API_KEY）：英文 apple 0.99 / 中文 漂亮 0.95，经真实 router+socket+分块重组。合成字迹样本 ≠ 真实 6-12 岁手写，真实准确率留 UAT（验收含 ≥85% 量化项，需真机真迹统计）
@@ -21,3 +21,4 @@
 - 架构备注：pkg/ocr 零 mimo 依赖（Reader func seam，cmd/service 适配 ChatVision）；分块重组复用 voice.Buffers（第二实例、独立 1MiB 上限）；settleAssembled 从 settlePCM 提取共用（图/控路由分离的触发先到竞态）；judgeAnswer 从 handleSubmitAnswer 提取（语音/照片共用会话守卫+比对）；共享 mimo client HTTP 超时取 max(voice 15s, photo 20s)
 - 活体抓到并修复的真缺陷：①mimoReader 的 MaxTokens=256 截断思考模型（只出 reasoning 无最终 JSON）→去掉上限；②提示词只说"手写"→模型纠结工整字迹不算手写几乎回空 →"手写或印刷都算"；③parseOCRJSON 增加 decoder-scan 层（思考文本中埋 JSON/尾随垃圾大括号也能带自身 confidence 解出）
 - 遗留 UAT：真实 iPad Safari 相机采集与触控交互、真实儿童手写 ≥85% 准确率统计、低置信→手动修改的完整人工流
+- 双轴 code review（2026-09-08，Standards + Spec 并行子代理，1832148...HEAD）：Standards 1 硬伤（judgeAnswer 提取丢 spoken 路径 not-judged 日志）+ 6 判断项（4 处已修/已收：settlePCM 中间人、类型归位 handlers.go、双重隐藏机制；3 处裁决保留：重试循环第 4 拷贝=仓库惯例、mimeType 参数=测试与线格式诚实、提示词对=继承 seam）；Spec 4 项 finding（2 修：空 transcript 改为拒绝而非判错 + photo_result.Fallback 区分"手动可解"与"守卫拒绝"避免死胡同表单；2 记录：≥85% 需真迹统计属 UAT、无 key 时拍照按钮可见但报错=与 ticket 03 语音按钮同款已接受取舍）。修复见 2d15bef，受影响三包复测全绿
