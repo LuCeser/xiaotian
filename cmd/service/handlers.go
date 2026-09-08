@@ -501,9 +501,23 @@ func handleSubmitAnswer(ctx context.Context, client *ws.Client, params json.RawM
 		return nil
 	}
 
+	// Completeness guard (Ticket 04 review): an empty transcript is an
+	// incomplete submission, not a wrong answer — reject it outright so the
+	// client can demand real input instead of recording a spurious "again".
+	if strings.TrimSpace(p.Transcript) == "" {
+		sendErrorFrame(client, "answer is empty")
+		return nil
+	}
+
 	connID := clientConnID(client)
 	j, reject := judgeAnswer(manager, connID, p.Transcript)
 	if reject != "" {
+		// Restore the pre-extraction observability: the spoken path logged
+		// state mismatches (the photo path logs its own twin below).
+		logger.Warn("submit_answer not judged",
+			infra.F("conn_id", connID),
+			infra.F("reason", reject),
+		)
 		sendErrorFrame(client, reject)
 		return nil
 	}
@@ -530,6 +544,23 @@ func handleSubmitAnswer(ctx context.Context, client *ws.Client, params json.RawM
 
 	return nil
 }
+
+// answerJudgement is the outcome of comparing a submitted answer against the
+// session's current dictation word (shared by the spoken submit_answer path
+// and the photo path).
+type answerJudgement struct {
+	Expected string
+	Lang     string // "en" | "zh" (informational)
+	Correct  bool
+	Rating   string // FSRS rating verb ("good"/"again")
+}
+
+// answerJudger judges a transcript against the connection's current word.
+// It returns a non-empty reject message when judging is impossible (no
+// active session, wrong state, no current word) — the reply frames surface
+// that message. *session.Manager satisfies it via judgeAnswer; tests inject
+// a plain closure (mirrors the sessionPusher seam, D-05).
+type answerJudger func(connID, transcript string) (answerJudgement, string)
 
 // judgeAnswer performs the session lookup + state guard + word comparison
 // shared by the spoken (submit_answer) and photo (photo_submit, Ticket 04)

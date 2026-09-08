@@ -550,9 +550,15 @@
     }
 
     if (result.error) {
-      if (manualForm) {
+      // Manual input only helps when the OCR itself failed (fallback
+      // "manual"). A session-guard reject ("no active session", "not in
+      // dictating state") would fail identically on resubmit — surface it
+      // as a status hint instead of a dead-end form.
+      if (result.fallback === 'manual' && manualForm) {
         manualForm.setHint(result.error);
         manualForm.show('');
+      } else if (photoButton) {
+        photoButton.showError(result.error);
       }
       return;
     }

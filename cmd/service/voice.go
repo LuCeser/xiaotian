@@ -135,7 +135,7 @@ func (vs *voiceService) handleVoiceCommand(ctx context.Context, client *ws.Clien
 	}
 	connID := clientConnID(client)
 
-	pcm := vs.settlePCM(connID)
+	pcm := settleAssembled(vs.buffers, connID, vs.assembleWait)
 
 	// Bound the ASR + LLM calls so a wedged upstream cannot pin router
 	// workers (WR-02 bounds Close, not individual handlers).
@@ -206,16 +206,6 @@ func (vs *voiceService) handleVoiceCancel(_ context.Context, client *ws.Client, 
 		infra.F("conn_id", connID),
 	)
 	return sendControlFrame(client, ws.MsgTypeControl, voiceCancelOKResponse{Type: "voice_cancel_ok"})
-}
-
-// settlePCM waits for the connection's audio before assembly. The audio and
-// control routes are separate worker pools, so the voice_command trigger can
-// be dequeued BEFORE the recording's chunks — even before the FIRST one, in
-// which case no assembler exists yet. Both cases are handled by the shared
-// settleAssembled poll. Bounded by assembleWait; returns nil only when no
-// audio landed in the whole window (a genuinely silent recording).
-func (vs *voiceService) settlePCM(connID string) []byte {
-	return settleAssembled(vs.buffers, connID, vs.assembleWait)
 }
 
 // settleAssembled waits for a connection's streamed chunks before assembly.

@@ -24,23 +24,6 @@ import (
 // photos are larger, so reclamation matters more on the 1C1G VPS).
 const photoBufferIdleTTL = 30 * time.Second
 
-// answerJudgement is the outcome of comparing a submitted answer against the
-// session's current dictation word (shared by the spoken submit_answer path
-// and the photo path).
-type answerJudgement struct {
-	Expected string
-	Lang     string // "en" | "zh" (informational)
-	Correct  bool
-	Rating   string // FSRS rating verb ("good"/"again")
-}
-
-// answerJudger judges a transcript against the connection's current word.
-// It returns a non-empty reject message when judging is impossible (no
-// active session, wrong state, no current word) — the reply frames surface
-// that message. *session.Manager satisfies it via judgeAnswer; tests inject
-// a plain closure (mirrors the sessionPusher seam, D-05).
-type answerJudger func(connID, transcript string) (answerJudgement, string)
-
 // photoService carries the photo-OCR pipeline dependencies for the ws
 // handlers. A nil *photoService means photo submission is disabled (no
 // MIMO_API_KEY): the image-frame handler becomes a no-op and photo_submit
@@ -116,13 +99,16 @@ func (ps *photoService) handlePhotoChunk(_ context.Context, client *ws.Client, h
 //   - judged:     OCR confident → Correct/Expected/Rating valid
 //   - low conf:   LowConfidence=true, Text carries the best guess (prefill
 //     the manual input)
-//   - failed:     Error carries the reason (manual input fallback)
+//   - failed:     Error carries the reason; Fallback="manual" when manual
+//     input can actually resolve it (OCR failed), empty when it cannot
+//     (session guard rejected — resubmitting text would hit the same guard)
 type photoResultResponse struct {
 	Type          string  `json:"type"` // "photo_result"
 	Text          string  `json:"text"`
 	Confidence    float64 `json:"confidence"`
 	LowConfidence bool    `json:"low_confidence"`
 	Error         string  `json:"error,omitempty"`
+	Fallback      string  `json:"fallback,omitempty"` // "manual" | "" (see above)
 
 	// Judged distinguishes "judged incorrect" (Judged=true, Correct=false)
 	// from "not judged at all" (low confidence / failure).
@@ -192,8 +178,9 @@ func (ps *photoService) handlePhotoSubmit(ctx context.Context, client *ws.Client
 			infra.ErrField(err),
 		)
 		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
-			Type:  "photo_result",
-			Error: "识别失败，请手动输入",
+			Type:     "photo_result",
+			Error:    "识别失败，请手动输入",
+			Fallback: "manual",
 		})
 	}
 }

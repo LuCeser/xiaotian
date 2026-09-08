@@ -106,8 +106,10 @@
         <div id="photo-answer-container"></div>
         <div id="dictation-controls-container"></div>
         <!-- Manual-input fallback (Ticket 04): prefilled from the OCR best
-             guess when confidence is low; submits via submit_answer. -->
-        <div id="manual-answer-container" hidden></div>
+             guess when confidence is low; submits via submit_answer. Hidden
+             via the form's own display:none from construction (single
+             visibility mechanism). -->
+        <div id="manual-answer-container"></div>
       </section>
 
       <!-- Dictation feedback section: shows recording/wrong/correct per word -->

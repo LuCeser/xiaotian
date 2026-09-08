@@ -225,6 +225,11 @@ func TestPhotoSubmit_JudgeRejects(t *testing.T) {
 	if result.Error != "not in dictating state" {
 		t.Errorf("error = %q, want not in dictating state", result.Error)
 	}
+	// A guard reject must NOT offer the manual fallback — resubmitting text
+	// would hit the same guard (dead end).
+	if result.Fallback != "" {
+		t.Errorf("fallback = %q, want empty for a guard reject", result.Fallback)
+	}
 	if result.Judged {
 		t.Error("judged = true, want false when the judger rejects")
 	}
@@ -255,6 +260,10 @@ func TestPhotoSubmit_NotJPEG(t *testing.T) {
 	}
 	if result.Error == "" {
 		t.Error("error = empty, want a non-empty OCR failure reason")
+	}
+	// An OCR failure CAN be resolved by manual input — the frame says so.
+	if result.Fallback != "manual" {
+		t.Errorf("fallback = %q, want manual for an OCR failure", result.Fallback)
 	}
 	if rd.jpegCount() != 0 {
 		t.Errorf("reader called %d times, want 0 (validation fails first)", rd.jpegCount())

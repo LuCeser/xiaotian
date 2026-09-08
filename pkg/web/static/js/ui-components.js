@@ -1266,7 +1266,6 @@
      */
     show(prefill) {
       this.input.value = prefill || '';
-      this.container.removeAttribute('hidden');
       this.form.style.display = 'flex';
       try { this.input.focus(); } catch (e) { /* focus is best-effort */ }
     }
