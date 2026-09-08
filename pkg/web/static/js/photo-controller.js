@@ -90,8 +90,13 @@
      * Open the system camera / photo picker. One tap: the picked file is
      * downscaled and submitted immediately — a bad photo simply comes back
      * as low-confidence/failed OCR and the manual input takes over.
+     *
+     * @param {string} [trigger] - control type sent after the frames:
+     *        "photo_submit" (default — judge against the current word) or
+     *        "photo_ocr" (Ticket 05 — OCR only, the batch form fills the
+     *        word's input with the recognized text).
      */
-    pickPhoto() {
+    pickPhoto(trigger) {
       if (!this.supported) {
         this._emitError('not-supported');
         return;
@@ -109,7 +114,7 @@
         // Remove the picker regardless of outcome — a fresh pick must get a
         // fresh input (some Safari versions never reset .value otherwise).
         if (input.parentNode) input.parentNode.removeChild(input);
-        if (file) self._handleFile(file);
+        if (file) self._handleFile(file, trigger);
       });
       global.document.body.appendChild(input);
       input.click();
@@ -143,8 +148,9 @@
      * Validate, downscale, and ship one picked file.
      * @private
      * @param {File} file
+     * @param {string} [trigger] - control type sent after the frames
      */
-    async _handleFile(file) {
+    async _handleFile(file, trigger) {
       if (!file.type || String(file.type).indexOf('image/') !== 0) {
         this._emitError('not-an-image');
         return;
@@ -161,7 +167,7 @@
         this._emitError('too-large');
         return;
       }
-      this._ship(jpeg);
+      this._ship(jpeg, trigger);
     }
 
     /**
@@ -194,11 +200,12 @@
 
     /**
      * Ship the JPEG as CHUNK_BYTES IMAGE frames (sequence from 1) and send
-     * the photo_submit trigger. Refuses an oversize image without shipping.
+     * the trigger control frame. Refuses an oversize image without shipping.
      * @private
      * @param {Uint8Array} jpeg
+     * @param {string} [trigger] - control type ("photo_submit" default)
      */
-    _ship(jpeg) {
+    _ship(jpeg, trigger) {
       if (jpeg.length > MAX_UPLOAD_BYTES) {
         this._emitError('too-large');
         return;
@@ -212,7 +219,7 @@
         this._shipped++;
       }
       this.isProcessing = true;
-      this.wsClient.send({ type: 'photo_submit', params: {} });
+      this.wsClient.send({ type: trigger || 'photo_submit', params: {} });
     }
 
     /**

@@ -541,10 +541,18 @@
         this.errorHandler(new Error('malformed progress frame: completedWords exceeds totalWords'));
         return;
       }
-      this.stateManager.setState({
+      var updates = {
         currentWord: payload.currentWord,
         completedWords: payload.completedWords
-      });
+      };
+      // Ticket 05: progress frames now echo the FSM status (the only signal
+      // for WAITING_PARENT/SUBMISSION — no other frame carries them).
+      // Optional so older frames still parse; invalid values are rejected
+      // downstream by the state manager's validStates guard.
+      if (typeof payload.status === 'string') {
+        updates.status = payload.status;
+      }
+      this.stateManager.setState(updates);
     }
 
     /**

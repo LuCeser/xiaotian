@@ -61,6 +61,17 @@
 
         <!-- SessionButton (ui-components.js) mounts here -->
         <div id="session-button-container" role="group" aria-label="会话控制按钮"></div>
+
+        <!--
+          Batch mode toggle (Ticket 05): check this to write every word on
+          paper through the dictation and submit/grade everything at the end
+          (the traditional classroom rhythm). Unchecked = per-word answering
+          (speech / photo / manual). Read at flow time, not session start.
+        -->
+        <label class="batch-mode-toggle" style="display:inline-flex;align-items:center;gap:8px;margin-top:12px;font-size:16px;color:#374151;cursor:pointer;">
+          <input type="checkbox" id="batch-mode-toggle" style="width:22px;height:22px;">
+          ✍️ 批量模式：全部听完后一起提交
+        </label>
       </section>
 
       <!--
@@ -110,6 +121,9 @@
              via the form's own display:none from construction (single
              visibility mechanism). -->
         <div id="manual-answer-container"></div>
+        <!-- Batch submission form (Ticket 05): one numbered row per word,
+             shown at WAITING_PARENT in batch mode. -->
+        <div id="batch-submission-container"></div>
       </section>
 
       <!-- Dictation feedback section: shows recording/wrong/correct per word -->

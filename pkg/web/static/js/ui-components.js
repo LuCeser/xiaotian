@@ -1287,8 +1287,250 @@
     }
   }
 
+  /**
+   * BatchSubmissionForm — the 写完一起交 affordance (Ticket 05).
+   *
+   * Renders one numbered row per dictation word (number only — showing the
+   * word would give the answer away): a text input plus a 📷 button whose
+   * photo_ocr result fills the row. Submitting sends submit_answers with
+   * {word: text}; the batch_result reply renders per-row ✓/✗ marks
+   * (the "progress indicators during submission"), and session_complete
+   * (FEEDBACK) ends the flow through the existing path.
+   *
+   * Rows are index-keyed and mapped to words at submit time via
+   * buildAnswers() — the mapping lives in one pure, Node-tested function.
+   *
+   * @class
+   */
+  class BatchSubmissionForm {
+    /**
+     * @param {HTMLElement} container - mount point (#batch-submission-container).
+     * @param {function} onSubmit - called with the answers map on 提交全部.
+     * @param {function} onPickOCR - called with the row index when its 📷 is
+     *        tapped (app.js points the PhotoAnswerController at photo_ocr).
+     */
+    constructor(container, onSubmit, onPickOCR) {
+      if (!container) throw new Error('BatchSubmissionForm requires a container element');
+      this.container = container;
+      this.onSubmit = typeof onSubmit === 'function' ? onSubmit : function () {};
+      this.onPickOCR = typeof onPickOCR === 'function' ? onPickOCR : function () {};
+
+      this.form = null;
+      this.inputs = [];
+      this.rowMarks = [];
+      this.hintText = null;
+      this.words = [];
+      this.submitted = false;
+
+      this.render([]);
+      this.hide();
+    }
+
+    /**
+     * Build the form skeleton: hint + rows + submit button. Rows are
+     * (re)built by show(words).
+     */
+    render() {
+      var self = this;
+      this.form = document.createElement('form');
+      this.form.className = 'batch-submission-form';
+      this.form.setAttribute('role', 'group');
+      this.form.setAttribute('aria-label', '批量提交答案');
+      this.form.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px 0;';
+
+      this.hintText = document.createElement('p');
+      this.hintText.className = 'batch-submission-hint';
+      this.hintText.setAttribute('role', 'status');
+      this.hintText.setAttribute('aria-live', 'polite');
+      this.hintText.style.cssText = 'min-height:22px;margin:0;font-size:16px;color:#1d4ed8;';
+      this.hintText.textContent = '把每个词的答案填进来（可以拍照识别），全部填好后一起提交';
+
+      this.rowsHost = document.createElement('div');
+      this.rowsHost.style.cssText = 'display:flex;flex-direction:column;gap:10px;max-height:44vh;overflow-y:auto;width:min(420px, 92vw);';
+
+      this.submitBtn = document.createElement('button');
+      this.submitBtn.type = 'submit';
+      this.submitBtn.className = 'kid-button batch-submission-submit';
+      this.submitBtn.textContent = '✅ 提交全部答案';
+      this.submitBtn.style.cssText = 'min-height:60px;min-width:220px;font-size:18px;padding:12px 24px;border-radius:30px;border:2px solid #93c5fd;background:#eff6ff;color:#1d4ed8;cursor:pointer;touch-action:manipulation;';
+
+      this.form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        if (self.submitted) return;
+        var answers = BatchSubmissionForm.buildAnswers(self.words, self.values());
+        if (!answers) {
+          self.setHint('至少填一个答案哦（没写出来的可以空着）');
+          return;
+        }
+        self.submitted = true;
+        self.submitBtn.disabled = true;
+        self.submitBtn.textContent = '⏳ 批改中…';
+        self.setHint('正在批改…');
+        self.onSubmit(answers);
+      });
+
+      this.form.appendChild(this.hintText);
+      this.form.appendChild(this.rowsHost);
+      this.form.appendChild(this.submitBtn);
+      this.container.appendChild(this.form);
+    }
+
+    /**
+     * Rebuild the rows for a word list and reveal the form.
+     * @param {string[]} words - the session's dictation queue
+     */
+    show(words) {
+      this.words = (words || []).slice();
+      this.submitted = false;
+      this.submitBtn.disabled = false;
+      this.submitBtn.textContent = '✅ 提交全部答案';
+      this.setHint('把每个词的答案填进来（可以拍照识别），全部填好后一起提交');
+
+      var self = this;
+      this.rowsHost.textContent = '';
+      this.inputs = [];
+      this.rowMarks = [];
+      for (var i = 0; i < this.words.length; i++) {
+        this.inputs.push(null);
+        this.rowMarks.push(null);
+      }
+      this.words.forEach(function (word, i) {
+        var row = document.createElement('div');
+        row.className = 'batch-row';
+        row.style.cssText = 'display:flex;align-items:center;gap:10px;';
+
+        var label = document.createElement('span');
+        label.textContent = '第 ' + (i + 1) + ' 题';
+        label.style.cssText = 'min-width:64px;font-size:16px;font-weight:600;color:#374151;';
+
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.setAttribute('aria-label', '第 ' + (i + 1) + ' 题答案');
+        input.setAttribute('autocomplete', 'off');
+        input.setAttribute('autocapitalize', 'none');
+        input.setAttribute('autocorrect', 'off');
+        input.style.cssText = 'flex:1;font-size:16px;min-height:48px;padding:8px 12px;border-radius:12px;border:2px solid #d1d5db;text-align:center;';
+
+        var camBtn = document.createElement('button');
+        camBtn.type = 'button';
+        camBtn.textContent = '📷';
+        camBtn.setAttribute('aria-label', '拍照识别第 ' + (i + 1) + ' 题答案');
+        camBtn.style.cssText = 'min-height:48px;min-width:48px;font-size:20px;border-radius:12px;border:2px solid #86efac;background:#f0fdf4;cursor:pointer;touch-action:manipulation;';
+        camBtn.addEventListener('click', function () {
+          self.onPickOCR(i);
+        });
+
+        var mark = document.createElement('span');
+        mark.style.cssText = 'min-width:26px;font-size:18px;text-align:center;';
+        row.appendChild(label);
+        row.appendChild(input);
+        row.appendChild(camBtn);
+        row.appendChild(mark);
+        self.rowsHost.appendChild(row);
+        self.inputs[i] = input;
+        self.rowMarks[i] = mark;
+      });
+
+      this.form.style.display = 'flex';
+    }
+
+    /**
+     * Hide the form.
+     */
+    hide() {
+      this.form.style.display = 'none';
+    }
+
+    /**
+     * Whether the form is currently revealed.
+     * @returns {boolean}
+     */
+    isVisible() {
+      return this.form.style.display !== 'none';
+    }
+
+    /**
+     * Collect the current input values (index-keyed).
+     * @returns {string[]}
+     */
+    values() {
+      return this.inputs.map(function (input) { return input ? input.value : ''; });
+    }
+
+    /**
+     * Fill one row from a photo_ocr result.
+     * @param {number} index - row index
+     * @param {object} result - photo_ocr_result payload
+     */
+    fillRow(index, result) {
+      if (index < 0 || index >= this.inputs.length) return;
+      if (result.error) {
+        this.setHint('第 ' + (index + 1) + ' 题：' + result.error);
+        return;
+      }
+      if (result.text) {
+        this.inputs[index].value = result.text;
+      }
+      if (result.low_confidence) {
+        this.setHint('第 ' + (index + 1) + ' 题不太确定（' + Math.round((result.confidence || 0) * 100) + '%），请核对');
+      }
+    }
+
+    /**
+     * Render the batch_result judgments: per-row ✓/✗ + heard text + summary
+     * hint (the submission progress indicator).
+     * @param {object} result - batch_result payload
+     */
+    showResults(result) {
+      var self = this;
+      (result.results || []).forEach(function (r, i) {
+        if (i >= self.rowMarks.length) return;
+        var mark = self.rowMarks[i];
+        mark.textContent = r.correct ? '✅' : '❌';
+        mark.title = r.heard ? '你写的是：' + r.heard : '没有作答';
+        if (self.inputs[i]) {
+          self.inputs[i].disabled = true;
+        }
+      });
+      this.submitBtn.textContent = '批改完成';
+      this.setHint('批改完成：' + (result.correct_count || 0) + ' / ' + (result.total || this.words.length) + ' 正确');
+    }
+
+    /**
+     * Update the hint line.
+     * @param {string} text
+     */
+    setHint(text) {
+      if (this.hintText) this.hintText.textContent = text;
+    }
+
+    /**
+     * Map index-keyed input values onto the word-keyed answers map for
+     * submit_answers. Pure/static so Node tests pin the contract: entries
+     * are trimmed, empty entries are omitted (a blank grades incorrect
+     * server-side), and an all-empty submission returns null (client-side
+     * validation BEFORE the wire).
+     *
+     * @param {string[]} words - session word queue
+     * @param {string[]} values - index-keyed input values
+     * @returns {Object<string,string>|null}
+     */
+    static buildAnswers(words, values) {
+      var answers = {};
+      var any = false;
+      for (var i = 0; i < (words || []).length; i++) {
+        var text = ((values && values[i]) || '').trim();
+        if (text === '') continue;
+        answers[words[i]] = text;
+        any = true;
+      }
+      return any ? answers : null;
+    }
+  }
+
   global.DictationControls = DictationControls;
   global.VoiceCommandButton = VoiceCommandButton;
   global.PhotoAnswerButton = PhotoAnswerButton;
   global.ManualAnswerForm = ManualAnswerForm;
+  global.BatchSubmissionForm = BatchSubmissionForm;
 })(typeof window !== 'undefined' ? window : this);

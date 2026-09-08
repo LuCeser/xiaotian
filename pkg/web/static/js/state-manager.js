@@ -33,6 +33,7 @@
   var STATUS_DICTATING = 'DICTATING';
   var STATUS_PAUSED = 'PAUSED';
   var STATUS_WAITING_PARENT = 'WAITING_PARENT';
+  var STATUS_SUBMISSION = 'SUBMISSION'; // Ticket 05: batch answers being graded
   var STATUS_FEEDBACK = 'FEEDBACK';
 
   // Connection status mirrors WebSocketClient's five-state machine so app.js
@@ -253,7 +254,7 @@
 
       // Status must be a valid FSM state
       if (updates.status) {
-        var validStates = [STATUS_IDLE, STATUS_LISTENING, STATUS_DICTATING, STATUS_PAUSED, STATUS_WAITING_PARENT, STATUS_FEEDBACK];
+        var validStates = [STATUS_IDLE, STATUS_LISTENING, STATUS_DICTATING, STATUS_PAUSED, STATUS_WAITING_PARENT, STATUS_SUBMISSION, STATUS_FEEDBACK];
         if (validStates.indexOf(updates.status) === -1) {
           return false;
         }
@@ -278,6 +279,7 @@
   SessionStateManager.STATUS_DICTATING = STATUS_DICTATING;
   SessionStateManager.STATUS_PAUSED = STATUS_PAUSED;
   SessionStateManager.STATUS_WAITING_PARENT = STATUS_WAITING_PARENT;
+  SessionStateManager.STATUS_SUBMISSION = STATUS_SUBMISSION;
   SessionStateManager.STATUS_FEEDBACK = STATUS_FEEDBACK;
 
   SessionStateManager.CONN_DISCONNECTED = CONN_DISCONNECTED;

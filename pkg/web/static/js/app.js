@@ -59,6 +59,9 @@
   // without canvas imaging) the manual input is the answer fallback.
   var hasPhotoAnswer = !!window.PhotoAnswerController && !!window.PhotoAnswerButton && !!window.ManualAnswerForm;
 
+  // Ticket 05: BatchSubmissionForm is optional the same way.
+  var hasBatchForm = !!window.BatchSubmissionForm;
+
   // Plan 08-04 Task 4: global error handlers for production resilience
   window.addEventListener('error', function (event) {
     console.error('[app] Global error:', event.error || event.message);
@@ -154,6 +157,12 @@
 
   // Wire playback end → dictation recognition
   audioController.setOnPlaybackEnd(function () {
+    // Ticket 05 batch mode: the student writes on paper through the whole
+    // dictation — no per-word speech capture. The server's per-word dictating
+    // timeout advances the queue; the batch form opens at WAITING_PARENT.
+    if (batchModeEnabled()) {
+      return;
+    }
     var state = stateManager.getState();
     var wordId = state.currentWordId;
     if (wordId && state.sessionActive && state.status === 'DICTATING') {
@@ -163,6 +172,13 @@
       }, 300);
     }
   });
+
+  // Ticket 05: batch mode toggle (checked at flow time, not session start,
+  // so flipping it mid-session still does the sane thing).
+  function batchModeEnabled() {
+    var toggle = document.getElementById('batch-mode-toggle');
+    return !!(toggle && toggle.checked);
+  }
 
   // ------------------------------------------------------------------
   // Speech recognition: Web Speech API for dictation answers
@@ -297,6 +313,51 @@
       // Non-critical: manual input + buttons remain.
     }
   }
+
+  // ------------------------------------------------------------------
+  // Batch submission (Ticket 05): write all → submit all → grade all. The
+  // form opens when the session reaches WAITING_PARENT in batch mode (the
+  // status now travels in progress_update frames). Per-row 📷 reuses the
+  // PhotoAnswerController with the photo_ocr trigger (OCR fill, no judging).
+  // ------------------------------------------------------------------
+  var batchForm = null;
+  var pendingOCRIndex = -1; // row awaiting a photo_ocr_result
+  if (hasBatchForm) {
+    try {
+      var batchHost = document.getElementById('batch-submission-container');
+      if (batchHost) {
+        batchForm = new window.BatchSubmissionForm(
+          batchHost,
+          function onBatchSubmit(answers) {
+            if (wsClient && typeof wsClient.send === 'function') {
+              wsClient.send({ type: 'submit_answers', params: { answers: answers } });
+            }
+          },
+          function onPickOCR(index) {
+            if (!photoController) return;
+            pendingOCRIndex = index;
+            photoController.pickPhoto('photo_ocr');
+          }
+        );
+      }
+    } catch (batchErr) {
+      console.error('[app] batch form initialization failed:', batchErr);
+      // Non-critical: per-word answering remains.
+    }
+  }
+
+  // WAITING_PARENT in batch mode → open the form (once). The per-word mode's
+  // auto-ratings subscriber below is ratings-gated and stays inert in batch
+  // mode (nothing answered per-word).
+  stateManager.subscribe(function (state) {
+    if (!batchForm || !batchModeEnabled()) return;
+    if (state.status === 'WAITING_PARENT' && state.sessionActive && batchForm.form.style.display === 'none') {
+      if (speechController) {
+        speechController.stopListening();
+      }
+      batchForm.show(state.words || []);
+    }
+  });
 
   // ------------------------------------------------------------------
   // Session button: subscribes to the state manager for its visual states
@@ -447,6 +508,7 @@
         pendingAnswerWordId !== null ||
         feedbackTimer !== null ||
         !!state.dictationState ||
+        (batchForm && batchForm.isVisible()) ||
         state.lastAnswerCorrect !== null && state.lastAnswerCorrect !== undefined ||
         state.lastExpected !== null && state.lastExpected !== undefined ||
         state.lastHeard !== null && state.lastHeard !== undefined;
@@ -466,6 +528,11 @@
       if (manualForm) {
         manualForm.hide();
       }
+      // Hide the batch form + reset OCR row tracking (Ticket 05).
+      if (batchForm) {
+        batchForm.hide();
+      }
+      pendingOCRIndex = -1;
       stateManager.setState({ dictationState: null, lastAnswerCorrect: null, lastExpected: null, lastHeard: null });
     }
   });
@@ -518,6 +585,16 @@
       // Photo answer result (Ticket 04) — judged / low-confidence / failed.
       if (parsed.type === 'photo_result') {
         handlePhotoResult(parsed);
+        return;
+      }
+      // OCR-only photo result (Ticket 05) — fills the batch form row.
+      if (parsed.type === 'photo_ocr_result') {
+        handlePhotoOCRResult(parsed);
+        return;
+      }
+      // Batch submission result (Ticket 05) — per-word judgments.
+      if (parsed.type === 'batch_result') {
+        handleBatchResult(parsed);
         return;
       }
     }
@@ -598,6 +675,30 @@
     }
     if (manualForm) {
       manualForm.hide();
+    }
+  }
+
+  /**
+   * OCR-only photo result (Ticket 05): fill the pending batch-form row with
+   * the recognized text. The controller unlock mirrors handlePhotoResult.
+   */
+  function handlePhotoOCRResult(result) {
+    if (photoController) {
+      photoController.resultReceived();
+    }
+    if (batchForm && pendingOCRIndex >= 0) {
+      batchForm.fillRow(pendingOCRIndex, result);
+    }
+    pendingOCRIndex = -1;
+  }
+
+  /**
+   * Batch submission result (Ticket 05): render per-row marks + summary.
+   * session_complete (FEEDBACK) follows through the existing end path.
+   */
+  function handleBatchResult(result) {
+    if (batchForm) {
+      batchForm.showResults(result);
     }
   }
 
