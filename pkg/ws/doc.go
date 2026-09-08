@@ -4,8 +4,8 @@ package ws
 
 import (
 	_ "github.com/gorilla/websocket" // Preserved for protocol implementation
-	_ "go.uber.org/zap"               // Preserved for logging
-	_ "github.com/pkg/errors"         // Preserved for error wrapping
+	_ "github.com/pkg/errors"        // Preserved for error wrapping
+	_ "go.uber.org/zap"              // Preserved for logging
 )
 
 // This file ensures dependencies are retained when go mod tidy is run.

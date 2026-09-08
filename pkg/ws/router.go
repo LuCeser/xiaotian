@@ -179,7 +179,7 @@ func (r *Router) Route(ctx context.Context, c *Client, h *FrameHeader, payload [
 	case <-r.ctx.Done():
 		return ErrRouterShuttingDown
 	default:
-		r.overloaded.Add(1) // WR-09: observable server-side backpressure counter
+		r.overloaded.Add(1)        // WR-09: observable server-side backpressure counter
 		return ErrRouterOverloaded // D-73 drop-oldest backpressure
 	}
 }

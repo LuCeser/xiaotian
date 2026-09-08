@@ -59,8 +59,8 @@ func setupIntegrationServer(t *testing.T, hubCfg ws.HubConfig, routerCfg ws.Rout
 	go hub.Run(hubCtx)
 
 	cleanup := func() {
-		hubCancel()     // Stop Hub event loop
-		router.Close()   // Stop Router workers
+		hubCancel()                       // Stop Hub event loop
+		router.Close()                    // Stop Router workers
 		time.Sleep(50 * time.Millisecond) // Give goroutines time to exit
 	}
 
@@ -70,7 +70,7 @@ func setupIntegrationServer(t *testing.T, hubCfg ws.HubConfig, routerCfg ws.Rout
 // TestIntegration_AudioFrameRoundTrip tests end-to-end 640B audio frame round-trip
 func TestIntegration_AudioFrameRoundTrip(t *testing.T) {
 	hubCfg := ws.HubConfig{
-		Limit:           10,
+		Limit:            10,
 		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
@@ -142,11 +142,10 @@ func TestIntegration_AudioFrameRoundTrip(t *testing.T) {
 	t.Log("Audio frame sent successfully - handler routing works")
 }
 
-
 // TestIntegration_ControlFrameRoundTrip tests control message round-trip
 func TestIntegration_ControlFrameRoundTrip(t *testing.T) {
 	hubCfg := ws.HubConfig{
-		Limit:           10,
+		Limit:            10,
 		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
@@ -211,7 +210,7 @@ func TestIntegration_ControlFrameRoundTrip(t *testing.T) {
 // TestIntegration_CRCMismatchDropped tests that corrupted frames are dropped
 func TestIntegration_CRCMismatchDropped(t *testing.T) {
 	hubCfg := ws.HubConfig{
-		Limit:           10,
+		Limit:            10,
 		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
@@ -284,7 +283,7 @@ func TestIntegration_CRCMismatchDropped(t *testing.T) {
 // TestIntegration_ConcurrentConnectionsAtLimit tests 100 connection limit
 func TestIntegration_ConcurrentConnectionsAtLimit(t *testing.T) {
 	hubCfg := ws.HubConfig{
-		Limit:           100,
+		Limit:            100,
 		RegisterBuffer:   128,
 		UnregisterBuffer: 128,
 	}
@@ -400,7 +399,7 @@ func TestIntegration_ConcurrentConnectionsAtLimit(t *testing.T) {
 // TestIntegration_ServerShutdownCleansAllGoroutines tests graceful shutdown
 func TestIntegration_ServerShutdownCleansAllGoroutines(t *testing.T) {
 	hubCfg := ws.HubConfig{
-		Limit:           10,
+		Limit:            10,
 		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}
@@ -505,7 +504,7 @@ func TestIntegration_ServerShutdownCleansAllGoroutines(t *testing.T) {
 // TestIntegration_BackpressureSignalPath tests backpressure under load
 func TestIntegration_BackpressureSignalPath(t *testing.T) {
 	hubCfg := ws.HubConfig{
-		Limit:           10,
+		Limit:            10,
 		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}

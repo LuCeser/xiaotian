@@ -64,8 +64,8 @@ func TestNewServerValidatesConfig(t *testing.T) {
 func TestNewServerAcceptsValidConfig(t *testing.T) {
 	logger := zap.NewNop()
 	hub, err := NewHub(HubConfig{
-		Limit:           100,
-		RegisterBuffer:  32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}, logger)
 	if err != nil {
@@ -96,8 +96,8 @@ func TestNewServerAcceptsValidConfig(t *testing.T) {
 func TestServerUpgraderCompressionDisabled(t *testing.T) {
 	logger := zap.NewNop()
 	hub, err := NewHub(HubConfig{
-		Limit:           100,
-		RegisterBuffer:  32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}, logger)
 	if err != nil {
@@ -124,8 +124,8 @@ func TestServerUpgraderCompressionDisabled(t *testing.T) {
 func TestServerUpgraderCheckOriginUnknown(t *testing.T) {
 	logger := zap.NewNop()
 	hub, err := NewHub(HubConfig{
-		Limit:           100,
-		RegisterBuffer:  32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}, logger)
 	if err != nil {
@@ -157,8 +157,8 @@ func TestServerUpgraderCheckOriginUnknown(t *testing.T) {
 func TestServerUpgraderCheckOriginWhitelisted(t *testing.T) {
 	logger := zap.NewNop()
 	hub, err := NewHub(HubConfig{
-		Limit:           100,
-		RegisterBuffer:  32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}, logger)
 	if err != nil {
@@ -221,10 +221,10 @@ func TestServerUpgraderCheckOriginWithPort(t *testing.T) {
 	}
 
 	acceptOrigins := []string{
-		"http://localhost:8080",  // non-default port + port-less whitelist entry
+		"http://localhost:8080", // non-default port + port-less whitelist entry
 		"https://localhost:8443",
 		"http://127.0.0.1:8080",
-		"http://localhost",       // exact match still works (regression guard)
+		"http://localhost", // exact match still works (regression guard)
 	}
 	for _, origin := range acceptOrigins {
 		req := httptest.NewRequest("GET", "/ws", nil)
@@ -247,8 +247,8 @@ func TestServerUpgraderCheckOriginWithPort(t *testing.T) {
 func TestServerHandleWebSocketUpgradeSuccess(t *testing.T) {
 	logger := zap.NewNop()
 	hub, err := NewHub(HubConfig{
-		Limit:           100,
-		RegisterBuffer:  32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}, logger)
 	if err != nil {
@@ -319,8 +319,8 @@ func TestServerHandleWebSocketUpgradeSuccess(t *testing.T) {
 func TestServerHandleWebSocketOriginRejected(t *testing.T) {
 	logger := zap.NewNop()
 	hub, err := NewHub(HubConfig{
-		Limit:           100,
-		RegisterBuffer:  32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}, logger)
 	if err != nil {
@@ -380,8 +380,8 @@ func TestServerHandleWebSocketOriginRejected(t *testing.T) {
 func TestServerHandleWebSocketParameterHandshake(t *testing.T) {
 	logger := zap.NewNop()
 	hub, err := NewHub(HubConfig{
-		Limit:           100,
-		RegisterBuffer:  32,
+		Limit:            100,
+		RegisterBuffer:   32,
 		UnregisterBuffer: 32,
 	}, logger)
 	if err != nil {

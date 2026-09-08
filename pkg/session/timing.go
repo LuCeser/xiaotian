@@ -13,7 +13,7 @@ func AdaptiveTimeout(word string) time.Duration {
 	const (
 		baseSeconds = 8
 		perCharSec  = 1
-		minChars    = 4  // words ≤ this get base timeout
+		minChars    = 4 // words ≤ this get base timeout
 		maxSeconds  = 15
 	)
 

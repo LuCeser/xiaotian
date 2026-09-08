@@ -28,13 +28,13 @@ type ServerConfig struct {
 	// include the port explicitly (e.g. "tutor.example.com:8443"). Security
 	// stays host-whitelist-bound: the port-less origin must still be listed,
 	// and D-24's wildcard ban holds (IN-03).
-	AllowedOrigins []string
-	MaxMessageBytes int64    // Default 65551 (HeaderSize + max uint16 payload; IN-02)
-	ReadBufferSize  int      // Default 4096
-	WriteBufferSize int      // Default 4096
-	HandshakeTimeout time.Duration // Default 10s
+	AllowedOrigins    []string
+	MaxMessageBytes   int64         // Default 65551 (HeaderSize + max uint16 payload; IN-02)
+	ReadBufferSize    int           // Default 4096
+	WriteBufferSize   int           // Default 4096
+	HandshakeTimeout  time.Duration // Default 10s
 	HeartbeatInterval time.Duration // Default DefaultHeartbeatInterval (Plan 02)
-	ClientCfg       ClientConfig // Passed to NewClient
+	ClientCfg         ClientConfig  // Passed to NewClient
 }
 
 // Validate checks if the configuration is valid

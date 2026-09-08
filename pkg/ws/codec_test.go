@@ -176,9 +176,9 @@ func TestEncodeFrameSetsPayloadLen(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		payloadLen    int
-		expectedLen   uint16
+		name        string
+		payloadLen  int
+		expectedLen uint16
 	}{
 		{"zero payload", 0, 0},
 		{"small payload", 32, 32},
@@ -267,11 +267,11 @@ func TestDecodeFrameAudioSizeMismatch(t *testing.T) {
 func TestDecodeFramePayloadLenMismatch(t *testing.T) {
 	// Create a valid frame first
 	header := &FrameHeader{
-		Version:    0x01,
-		MsgType:    MsgTypeControl,
-		Sequence:   12345,
-		Timestamp:  1678901234,
-		Reserved:   0,
+		Version:   0x01,
+		MsgType:   MsgTypeControl,
+		Sequence:  12345,
+		Timestamp: 1678901234,
+		Reserved:  0,
 	}
 
 	payload := make([]byte, 16)

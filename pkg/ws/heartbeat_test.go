@@ -14,7 +14,7 @@ import (
 // fakeConnForHeartbeat is a specialized fake for Heartbeat testing.
 // Focuses on WriteControl behavior (Ping/Close messages).
 type fakeConnForHeartbeat struct {
-	writeControlCallCount atomic.Int32
+	writeControlCallCount  atomic.Int32
 	lastControlMessageType atomic.Int32
 	writeControlError      error
 }

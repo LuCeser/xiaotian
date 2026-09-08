@@ -135,7 +135,7 @@ func (h *Hub) Run(ctx context.Context) {
 
 			// Accept client
 			h.clients[c] = true
-			h.totalAccepted.Add(1) // D-04: track for /metrics
+			h.totalAccepted.Add(1)  // D-04: track for /metrics
 			total := len(h.clients) // CR-07: capture under lock; reading after Unlock races future writers
 			h.mu.Unlock()
 			h.logger.Info("hub registered client",
@@ -146,7 +146,7 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mu.Lock()
 			if _, ok := h.clients[c]; ok {
 				delete(h.clients, c)
-				h.totalCleaned.Add(1) // D-04: track for /metrics
+				h.totalCleaned.Add(1)   // D-04: track for /metrics
 				total := len(h.clients) // CR-07: capture under lock
 				h.mu.Unlock()
 				// Signal writePump to exit by closing the send channel (close-safe, CR-04)
