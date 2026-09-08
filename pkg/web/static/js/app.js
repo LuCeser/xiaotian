@@ -55,6 +55,10 @@
   // without them (or without getUserMedia) the buttons are the controls.
   var hasVoiceCommand = !!window.VoiceCommandController && !!window.VoiceCommandButton;
 
+  // Ticket 04: PhotoAnswerController/Button are optional — without them (or
+  // without canvas imaging) the manual input is the answer fallback.
+  var hasPhotoAnswer = !!window.PhotoAnswerController && !!window.PhotoAnswerButton && !!window.ManualAnswerForm;
+
   // Plan 08-04 Task 4: global error handlers for production resilience
   window.addEventListener('error', function (event) {
     console.error('[app] Global error:', event.error || event.message);
@@ -79,6 +83,10 @@
     // Release the mic if a voice command is mid-recording (Ticket 03)
     if (voiceController) {
       voiceController.cleanup();
+    }
+    // Discard a half-shipped photo upload (Ticket 04)
+    if (photoController) {
+      photoController.cleanup();
     }
     // Disconnect WebSocket cleanly
     if (wsClient) {
@@ -246,6 +254,51 @@
   }
 
   // ------------------------------------------------------------------
+  // Photo answers + manual input (Ticket 04): one-tap camera capture →
+  // IMAGE frames → Mimo vision OCR; photo_result is an unknown type to
+  // WebSocketClient's dispatcher, so it arrives in handleMessage like
+  // voice_result. The ManualAnswerForm is the low-confidence/failed-OCR
+  // fallback (and the always-available keyboard path): it submits through
+  // the existing submit_answer wire path, so the reply reuses the shared
+  // answer_result feedback flow.
+  // ------------------------------------------------------------------
+  var photoController = null;
+  var photoButton = null;
+  var manualForm = null;
+  if (hasPhotoAnswer) {
+    try {
+      photoController = new window.PhotoAnswerController(wsClient);
+      photoController.onError(handlePhotoError);
+      var photoHost = document.getElementById('photo-answer-container');
+      if (photoHost) {
+        photoButton = new window.PhotoAnswerButton(photoHost, stateManager, photoController, function onPick() {
+          // The photo replaces the auto-started mic answer for this word —
+          // stop listening so a late speech result cannot judge the NEXT
+          // word against this word's submission.
+          if (speechController) {
+            speechController.stopListening();
+          }
+        });
+        stateManager.subscribe(function (state) {
+          try {
+            photoButton.update(state);
+          } catch (photoUpdateErr) {
+            console.error('[app] photo button update error:', photoUpdateErr);
+          }
+        });
+        console.log('[app] PhotoAnswerController supported:', photoController.supported);
+      }
+      var manualHost = document.getElementById('manual-answer-container');
+      if (manualHost) {
+        manualForm = new window.ManualAnswerForm(manualHost, handleManualSubmit);
+      }
+    } catch (photoErr) {
+      console.error('[app] photo answer initialization failed:', photoErr);
+      // Non-critical: manual input + buttons remain.
+    }
+  }
+
+  // ------------------------------------------------------------------
   // Session button: subscribes to the state manager for its visual states
   // Wire audio unlock into session button click (D-03 3-condition iOS unlock)
   // ------------------------------------------------------------------
@@ -370,7 +423,7 @@
   });
 
   // Expose for console debugging and cross-script coupling (Plan 08-04 Task 2).
-  window.__app = { stateManager: stateManager, wsClient: wsClient, audioController: audioController, speechController: speechController, voiceController: voiceController };
+  window.__app = { stateManager: stateManager, wsClient: wsClient, audioController: audioController, speechController: speechController, voiceController: voiceController, photoController: photoController };
   // Expose audioController globally for websocket-client.js access (Plan 08-04 Task 2).
   window.audioController = audioController;
   window.speechController = speechController;
@@ -408,6 +461,10 @@
       }
       if (speechController) {
         speechController.stopListening();
+      }
+      // Hide the manual-input fallback on session end (Ticket 04).
+      if (manualForm) {
+        manualForm.hide();
       }
       stateManager.setState({ dictationState: null, lastAnswerCorrect: null, lastExpected: null, lastHeard: null });
     }
@@ -458,6 +515,11 @@
         handleVoiceResult(parsed);
         return;
       }
+      // Photo answer result (Ticket 04) — judged / low-confidence / failed.
+      if (parsed.type === 'photo_result') {
+        handlePhotoResult(parsed);
+        return;
+      }
     }
     // Forwarded control frame (unknown type) or legacy path — log it.
     console.debug('[app] control message received:', data);
@@ -472,6 +534,83 @@
   function handleVoiceResult(result) {
     if (voiceButton) {
       voiceButton.handleResult(result);
+    }
+  }
+
+  /**
+   * Photo answer result from the backend (Ticket 04). Three outcomes:
+   *   judged        → reuse the shared answer_result feedback flow;
+   *   low confidence→ show the manual input prefilled with the best guess;
+   *   failed        → show the manual input empty, with the reason as hint.
+   * Every path unlocks the photo button.
+   */
+  function handlePhotoResult(result) {
+    if (photoController) {
+      photoController.resultReceived();
+    }
+
+    if (result.error) {
+      if (manualForm) {
+        manualForm.setHint(result.error);
+        manualForm.show('');
+      }
+      return;
+    }
+
+    if (result.low_confidence) {
+      if (manualForm) {
+        var pct = Math.round((result.confidence || 0) * 100);
+        manualForm.setHint('不太确定（' + pct + '%），请核对或修改后提交');
+        manualForm.show(result.text || '');
+      }
+      return;
+    }
+
+    if (result.judged) {
+      // Same feedback flow as the spoken path: ratings accumulate, the
+      // feedback card shows the outcome, the timer advances the session.
+      handleAnswerResult({
+        word_id: stateManager.getState().currentWordId,
+        correct: result.correct,
+        expected: result.expected,
+        heard: result.text,
+        rating: result.rating
+      });
+    }
+  }
+
+  /**
+   * Manual input submission (Ticket 04): rides the existing submit_answer
+   * wire path; the answer_result reply re-enters through handleAnswerResult.
+   */
+  function handleManualSubmit(text) {
+    if (wsClient && typeof wsClient.send === 'function') {
+      wsClient.send({
+        type: 'submit_answer',
+        params: { word_id: stateManager.getState().currentWordId, transcript: text }
+      });
+    }
+    if (manualForm) {
+      manualForm.hide();
+    }
+  }
+
+  /**
+   * Photo capture/encode failures (Ticket 04): the session keeps running —
+   * surface a hint pointing at the manual input, which stays available.
+   */
+  function handlePhotoError(errorType) {
+    var messages = {
+      'not-supported': '此浏览器不支持拍照提交，请手动输入',
+      'not-an-image': '选择的不是图片，请重新拍照',
+      'too-large': '照片太大了，请离近一点重拍',
+      'read-failed': '照片读取失败，请重拍',
+      'encode-failed': '照片处理失败，请重拍或手动输入'
+    };
+    var msg = messages[errorType] || '拍照提交失败，请手动输入';
+    console.warn('[photo] error:', errorType);
+    if (photoButton) {
+      photoButton.showError(msg);
     }
   }
 
@@ -566,7 +705,9 @@
    * Handle answer_result from server. Show feedback, then advance.
    */
   function handleAnswerResult(data) {
-    var wordId = data.word_id;
+    // Photo-path calls (Ticket 04) carry no word_id — the session's current
+    // word is authoritative anyway (D-13).
+    var wordId = data.word_id || stateManager.getState().currentWordId;
     var correct = data.correct;
     var expected = data.expected;
     var heard = data.heard;

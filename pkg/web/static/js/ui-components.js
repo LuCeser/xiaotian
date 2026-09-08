@@ -1042,6 +1042,254 @@
     }
   }
 
+  /**
+   * PhotoAnswerButton — the 拍照提交 affordance (Ticket 04).
+   *
+   * One tap opens the iPad camera via the hidden file input inside
+   * PhotoAnswerController; the picked photo ships automatically and a
+   * photo_result frame arrives separately (judged / low-confidence /
+   * failed). This component only opens the picker and tracks the
+   * processing lock — the outcome renders through the shared dictation
+   * feedback and the ManualAnswerForm, never here.
+   *
+   * Rendering is skipped when the controller reports !supported (no canvas
+   * imaging) — the manual input and buttons remain the fallback.
+   *
+   * @class
+   */
+  class PhotoAnswerButton {
+    /**
+     * @param {HTMLElement} container - mount point (#photo-answer-container).
+     * @param {SessionStateManager} stateManager - authoritative session state.
+     * @param {PhotoAnswerController} controller - photo capture controller.
+     * @param {function} onPick - called on tap, before the picker opens
+     *        (app.js stops speech recognition there: the photo path replaces
+     *        the auto-started mic answer for this word).
+     */
+    constructor(container, stateManager, controller, onPick) {
+      if (!container) throw new Error('PhotoAnswerButton requires a container element');
+      this.container = container;
+      this.stateManager = stateManager;
+      this.controller = controller;
+      this.onPick = typeof onPick === 'function' ? onPick : function () {};
+
+      this.photoBtn = null;
+      this.statusText = null;
+
+      this.render();
+    }
+
+    /**
+     * Build the camera button + status line. iOS HIG 60px touch-target
+     * parity with the mic/button controls.
+     */
+    render() {
+      while (this.container.firstChild) {
+        this.container.removeChild(this.container.firstChild);
+      }
+      if (!this.controller || !this.controller.supported) {
+        this.photoBtn = null;
+        this.statusText = null;
+        return;
+      }
+
+      var wrapper = document.createElement('div');
+      wrapper.className = 'photo-answer';
+      wrapper.setAttribute('role', 'group');
+      wrapper.setAttribute('aria-label', '拍照提交答案');
+      wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px 0;';
+
+      var self = this;
+      this.photoBtn = document.createElement('button');
+      this.photoBtn.type = 'button';
+      this.photoBtn.className = 'kid-button photo-answer-button';
+      this.photoBtn.textContent = '📷 拍照提交';
+      this.photoBtn.setAttribute('aria-label', '把写好的答案拍照上传');
+      this.photoBtn.style.cssText = 'min-width:160px;min-height:60px;font-size:18px;padding:12px 24px;border-radius:30px;border:2px solid #86efac;background:#f0fdf4;color:#15803d;cursor:pointer;touch-action:manipulation;user-select:none;-webkit-user-select:none;';
+      this.photoBtn.addEventListener('click', function () {
+        if (self.controller.isProcessing) return;
+        self.onPick();
+        self.controller.pickPhoto();
+        self.update(self.stateManager ? self.stateManager.getState() : {});
+      });
+
+      this.statusText = document.createElement('p');
+      this.statusText.className = 'photo-answer-status';
+      this.statusText.setAttribute('role', 'status');
+      this.statusText.setAttribute('aria-live', 'polite');
+      this.statusText.style.cssText = 'min-height:24px;margin:0;font-size:16px;color:#6b7280;';
+      this.statusText.textContent = '写好后拍下来，自动识别';
+
+      wrapper.appendChild(this.photoBtn);
+      wrapper.appendChild(this.statusText);
+      this.container.appendChild(wrapper);
+
+      if (this.stateManager) {
+        this.update(this.stateManager.getState());
+      }
+    }
+
+    /**
+     * State-driven re-render. Photo answering is enabled exactly while the
+     * spoken path is (DICTATING/LISTENING); the FSM stays untouched —
+     * photo_result only feeds the shared feedback flow.
+     *
+     * @param {object} state - SessionStateManager snapshot.
+     */
+    update(state) {
+      if (!this.photoBtn || !this.controller) return;
+      state = state || {};
+
+      if (state.lastError && this.controller.isProcessing) {
+        this.controller.resultReceived();
+        this._setStatus('拍照提交不可用：' + state.lastError + '（请手动输入）');
+      }
+
+      var active = state.sessionActive &&
+        (state.status === 'DICTATING' || state.status === 'LISTENING');
+      this.photoBtn.disabled = !active || this.controller.isProcessing;
+      this.photoBtn.style.opacity = this.photoBtn.disabled ? '0.5' : '1';
+
+      if (this.controller.isProcessing) {
+        this.photoBtn.textContent = '⏳ 识别中…';
+      } else {
+        this.photoBtn.textContent = '📷 拍照提交';
+      }
+    }
+
+    /**
+     * Surface a capture/encode failure in the local status line.
+     * @param {string} message - already-localized hint text.
+     */
+    showError(message) {
+      this._setStatus(message);
+    }
+
+    /**
+     * @private
+     */
+    _setStatus(text) {
+      if (this.statusText) this.statusText.textContent = text;
+    }
+  }
+
+  /**
+   * ManualAnswerForm — the manual-input fallback (Ticket 04).
+   *
+   * Shown when OCR is low-confidence or fails (photo_result), and always
+   * available to the keyboard answer path: a prefilled text input + submit
+   * button that sends submit_answer (the existing spoken-answer wire path —
+   * the reply is the same answer_result feedback). Event-driven, not
+   * state-driven: app.js shows/hides it around the photo flow and on session
+   * end, so there is no stateManager subscription here.
+   *
+   * The 16px input font is the iOS zoom-on-focus defense (see index.html
+   * viewport note); the 60px submit button keeps HIG touch-target parity.
+   *
+   * @class
+   */
+  class ManualAnswerForm {
+    /**
+     * @param {HTMLElement} container - mount point (#manual-answer-container).
+     * @param {function} onSubmit - called with the typed text on 提交.
+     */
+    constructor(container, onSubmit) {
+      if (!container) throw new Error('ManualAnswerForm requires a container element');
+      this.container = container;
+      this.onSubmit = typeof onSubmit === 'function' ? onSubmit : function () {};
+
+      this.form = null;
+      this.input = null;
+      this.hintText = null;
+
+      this.render();
+      this.hide();
+    }
+
+    /**
+     * Build the hidden form: hint line + input + submit.
+     */
+    render() {
+      var self = this;
+      this.form = document.createElement('form');
+      this.form.className = 'manual-answer-form';
+      this.form.setAttribute('role', 'group');
+      this.form.setAttribute('aria-label', '手动输入答案');
+      this.form.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:10px;padding:16px 0;';
+
+      this.hintText = document.createElement('p');
+      this.hintText.className = 'manual-answer-hint';
+      this.hintText.setAttribute('role', 'status');
+      this.hintText.setAttribute('aria-live', 'polite');
+      this.hintText.style.cssText = 'min-height:22px;margin:0;font-size:16px;color:#92400e;';
+      this.hintText.textContent = '请输入你写的答案';
+
+      var row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:center;';
+
+      this.input = document.createElement('input');
+      this.input.type = 'text';
+      this.input.className = 'manual-answer-input';
+      this.input.setAttribute('aria-label', '答案');
+      this.input.setAttribute('autocomplete', 'off');
+      this.input.setAttribute('autocapitalize', 'none');
+      this.input.setAttribute('autocorrect', 'off');
+      // 16px font is the iOS zoom-on-focus defense.
+      this.input.style.cssText = 'font-size:16px;min-height:48px;padding:8px 16px;border-radius:14px;border:2px solid #fcd34d;width:min(280px, 70vw);text-align:center;';
+
+      var submitBtn = document.createElement('button');
+      submitBtn.type = 'submit';
+      submitBtn.className = 'kid-button manual-answer-submit';
+      submitBtn.textContent = '✓ 提交';
+      submitBtn.style.cssText = 'min-height:60px;min-width:96px;font-size:18px;padding:12px 20px;border-radius:30px;border:2px solid #fcd34d;background:#fffbeb;color:#92400e;cursor:pointer;touch-action:manipulation;';
+
+      this.form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var text = (self.input.value || '').trim();
+        if (!text) {
+          self.setHint('先写下答案再提交哦');
+          return;
+        }
+        self.onSubmit(text);
+      });
+
+      row.appendChild(this.input);
+      row.appendChild(submitBtn);
+      this.form.appendChild(this.hintText);
+      this.form.appendChild(row);
+      this.container.appendChild(this.form);
+    }
+
+    /**
+     * Show the form, optionally prefilled with the OCR best guess.
+     * @param {string} [prefill] - OCR text to correct (empty when OCR failed).
+     */
+    show(prefill) {
+      this.input.value = prefill || '';
+      this.container.removeAttribute('hidden');
+      this.form.style.display = 'flex';
+      try { this.input.focus(); } catch (e) { /* focus is best-effort */ }
+    }
+
+    /**
+     * Hide the form and clear the input.
+     */
+    hide() {
+      this.input.value = '';
+      this.form.style.display = 'none';
+    }
+
+    /**
+     * Update the hint line (why manual input is showing / what to fix).
+     * @param {string} text
+     */
+    setHint(text) {
+      if (this.hintText) this.hintText.textContent = text;
+    }
+  }
+
   global.DictationControls = DictationControls;
   global.VoiceCommandButton = VoiceCommandButton;
+  global.PhotoAnswerButton = PhotoAnswerButton;
+  global.ManualAnswerForm = ManualAnswerForm;
 })(typeof window !== 'undefined' ? window : this);

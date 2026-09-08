@@ -97,7 +97,17 @@
           three buttons below stay the always-available fallback.
         -->
         <div id="voice-command-container"></div>
+        <!--
+          Photo answer (Ticket 04): one-tap camera capture of the handwritten
+          answer, streamed as IMAGE frames for Mimo vision OCR.
+          PhotoAnswerButton mounts here; when OCR is low-confidence or fails,
+          the ManualAnswerForm (below the controls) takes over prefilled.
+        -->
+        <div id="photo-answer-container"></div>
         <div id="dictation-controls-container"></div>
+        <!-- Manual-input fallback (Ticket 04): prefilled from the OCR best
+             guess when confidence is low; submits via submit_answer. -->
+        <div id="manual-answer-container" hidden></div>
       </section>
 
       <!-- Dictation feedback section: shows recording/wrong/correct per word -->
@@ -123,6 +133,7 @@
       audio-controller.js → window.AudioController (Web Audio API integration)
       speech-controller.js→ window.SpeechController (Web Speech API answers)
       voice-command-controller.js → window.VoiceCommandController (mic capture)
+      photo-controller.js → window.PhotoAnswerController (camera answer, Ticket 04)
       ui-components.js    → window.SessionButton (uses the state store)
       app.js              → wires them together
   -->
@@ -132,6 +143,7 @@
   <script src="js/audio-controller.js" defer></script>
   <script src="js/speech-controller.js" defer></script>
   <script src="js/voice-command-controller.js" defer></script>
+  <script src="js/photo-controller.js" defer></script>
   <script src="js/ui-components.js" defer></script>
   <script src="js/app.js" defer></script>
 </body>

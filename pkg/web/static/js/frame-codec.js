@@ -12,7 +12,7 @@
  * Wire format (big-endian, 16-byte header):
  *   byte  0     : Version    (0x01)
  *   byte  1     : MsgType    (1=audio, 2=control, 3=error, 4=heartbeat,
- *                             5=session, 6=status)
+ *                             5=session, 6=status, 7=image)
  *   bytes 2-5   : Sequence   (uint32, monotonic per sender)
  *   bytes 6-9   : Timestamp  (uint32 microseconds, optional — encoded as 0)
  *   bytes 10-11 : PayloadLen (uint16, payload byte length)
@@ -40,7 +40,8 @@
     ERROR: 0x03,
     HEARTBEAT: 0x04,
     SESSION: 0x05,
-    STATUS: 0x06
+    STATUS: 0x06,
+    IMAGE: 0x07 // photo-answer JPEG chunks (Ticket 04)
   };
 
   /**
