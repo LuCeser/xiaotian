@@ -104,6 +104,32 @@ type submitAnswerParams struct {
 	Transcript string `json:"transcript"`
 }
 
+// submitAnswersParams are the parameters for a batch answer submission
+// (Ticket 05). Answers maps word → the student's written answer for it; the
+// map may be partial — unanswered words grade incorrect (classroom
+// semantics: a blank is wrong).
+type submitAnswersParams struct {
+	Answers map[string]string `json:"answers"`
+}
+
+// batchWordResult is one word's judgment inside a batch_result frame.
+type batchWordResult struct {
+	Word    string `json:"word"`
+	Heard   string `json:"heard"` // "" when the word was left unanswered
+	Correct bool   `json:"correct"`
+	Rating  string `json:"rating"` // "good" | "again"
+}
+
+// batchResultResponse is the control frame reply to a submit_answers trigger
+// (Ticket 05): per-word judgments in dictation-queue order plus summary
+// counts. The session_complete frame (SUBMISSION → FEEDBACK) follows.
+type batchResultResponse struct {
+	Type         string            `json:"type"` // "batch_result"
+	Results      []batchWordResult `json:"results"`
+	CorrectCount int               `json:"correct_count"`
+	Total        int               `json:"total"`
+}
+
 // answerResultResponse is the control frame response for answer judgment.
 type answerResultResponse struct {
 	Type     string `json:"type"`
@@ -186,6 +212,10 @@ func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, voiceCmd *v
 
 			case "submit_answer":
 				return handleSubmitAnswer(ctx, client, control.Params, manager, logger)
+
+			case "submit_answers":
+				// Ticket 05: batch submission — grade every queue word at once.
+				return handleSubmitAnswers(ctx, client, control.Params, manager, fsrsSvc, logger)
 
 			case "voice_command":
 				// Ticket 03: student finished a push-to-talk recording; run
@@ -597,6 +627,128 @@ func judgeAnswer(manager *session.Manager, connID, transcript string) (answerJud
 
 	correct, rating := compareAnswer(currentWord, transcript, lang)
 	return answerJudgement{Expected: currentWord, Lang: lang, Correct: correct, Rating: rating}, ""
+}
+
+// handleSubmitAnswers serves the Ticket 05 batch submission: validate the
+// answers map, grade EVERY queue word (unanswered = incorrect, the classroom
+// blank-is-wrong semantic), reply batch_result, submit the ratings to FSRS
+// server-side (one call — no client roundtrip), and drive the FSM spine
+// DICTATING|WAITING_PARENT → SUBMISSION → FEEDBACK. The reply is sent BEFORE
+// the FSRS call and event pushes so a slow Python bridge cannot delay the
+// student's feedback.
+func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.RawMessage, manager *session.Manager, fsrsSvc fsrs.FSRSService, logger infra.Logger) error {
+	var p submitAnswersParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		logger.Warn("invalid submit_answers params", infra.ErrField(err))
+		sendErrorFrame(client, "invalid submit_answers params")
+		return nil
+	}
+
+	if manager == nil {
+		sendErrorFrame(client, "no active session")
+		return nil
+	}
+	connID := clientConnID(client)
+	s := manager.Lookup(connID)
+	if s == nil {
+		sendErrorFrame(client, "no active session")
+		return nil
+	}
+	// Mirror the FSM's submit_answers edges (DICTATING | WAITING_PARENT) —
+	// the guard keeps the error message helpful; the FSM remains the
+	// authority and would drop the event anyway.
+	switch s.State() {
+	case database.StateDictating, database.StateWaitingParent:
+	default:
+		logger.Warn("submit_answers in wrong state",
+			infra.F("conn_id", connID),
+			infra.F("state", string(s.State())),
+		)
+		sendErrorFrame(client, "session is not accepting answers")
+		return nil
+	}
+
+	// Validation (Ticket 05: all answers validated before any processing):
+	// non-empty map, keys limited to this session's queue, non-empty values.
+	// First failure rejects the WHOLE submission — partial acceptance would
+	// silently strand the rest.
+	words := s.Words()
+	if len(p.Answers) == 0 {
+		sendErrorFrame(client, "answers map is empty")
+		return nil
+	}
+	known := make(map[string]bool, len(words))
+	for _, w := range words {
+		known[w] = true
+	}
+	for w, text := range p.Answers {
+		if !known[w] {
+			sendErrorFrame(client, fmt.Sprintf("unknown word %q", w))
+			return nil
+		}
+		if strings.TrimSpace(text) == "" {
+			sendErrorFrame(client, fmt.Sprintf("answer for %q is empty", w))
+			return nil
+		}
+	}
+
+	// Grade in queue order so the client can render results 1..N matching
+	// the dictation sequence. Unanswered words grade incorrect/again.
+	lang := "en"
+	if s.Category() == "chinese" || s.Category() == "zh" {
+		lang = "zh"
+	}
+	response := batchResultResponse{Type: "batch_result", Total: len(words)}
+	ratings := make(map[string]string, len(words))
+	for _, w := range words {
+		heard := p.Answers[w] // "" when unanswered
+		correct, rating := compareAnswer(w, heard, lang)
+		if heard == "" {
+			correct, rating = false, "again"
+		}
+		response.Results = append(response.Results, batchWordResult{
+			Word: w, Heard: heard, Correct: correct, Rating: rating,
+		})
+		if correct {
+			response.CorrectCount++
+		}
+		ratings[w] = rating
+	}
+
+	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
+		logger.Warn("failed to send batch_result", infra.ErrField(err))
+	}
+
+	// Server-side FSRS submission (one batched call, mirrors what the client
+	// did per-word via submit_review). Failure logs and continues — the
+	// grading result is already delivered and stranding the student in
+	// SUBMISSION over a scheduling hiccup would be worse.
+	if _, err := fsrsSvc.UpdateRatings(ctx, ratings, s.Category()); err != nil {
+		logger.Warn("batch FSRS ratings update failed",
+			infra.F("conn_id", connID),
+			infra.F("words", len(ratings)),
+			infra.ErrField(err),
+		)
+	}
+
+	// FSM spine: the two pushes are order-stable on the session's single
+	// event channel — SUBMISSION entry emits the status-bearing progress
+	// frame, FEEDBACK entry emits session_complete.
+	manager.Push(connID, session.SessionEvent{
+		Type:        session.EventControlFrame,
+		ControlType: "submit_answers",
+	})
+	manager.Push(connID, session.SessionEvent{
+		Type: session.EventBatchGraded,
+	})
+
+	logger.Info("batch answers graded",
+		infra.F("conn_id", connID),
+		infra.F("submitted", len(p.Answers)),
+		infra.F("total", response.Total),
+		infra.F("correct", response.CorrectCount),
+	)
+	return nil
 }
 
 // compareAnswer compares a student's spoken transcript against the expected word.
