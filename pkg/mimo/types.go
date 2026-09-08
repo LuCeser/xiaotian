@@ -222,6 +222,52 @@ func (r *ChatResponse) Text() string {
 	return r.Choices[0].Message.ReasoningContent
 }
 
+// ChatContentPart is one part of a multipart chat message content
+// (Ticket 04 — photo OCR). Exactly one payload field is set per Type: Text
+// for "text", ImageURL for "image_url".
+type ChatContentPart struct {
+	// Type is the part kind: "text" or "image_url"
+	Type string `json:"type"`
+	// Text carries the part text when Type == "text"
+	Text string `json:"text,omitempty"`
+	// ImageURL carries the image reference when Type == "image_url". The URL
+	// may be public https or a base64 data URI ("data:image/jpeg;base64,...")
+	// per the official image-understanding docs.
+	ImageURL *ChatContentPartImage `json:"image_url,omitempty"`
+}
+
+// ChatContentPartImage holds the image reference of an "image_url" content
+// part.
+type ChatContentPartImage struct {
+	// URL is the image location: https URL or data URI
+	URL string `json:"url"`
+}
+
+// ChatVisionRequest represents a vision-capable LLM chat completion request
+// (Ticket 04 — photo OCR). Same endpoint and option vocabulary as
+// ChatRequest; only the user message content differs (image + text parts).
+type ChatVisionRequest struct {
+	// Model specifies the vision-capable LLM (default: mimo-v2.5)
+	Model string `json:"model"`
+	// Messages carries the conversation. ChatVision builds a system message
+	// (plain string content) plus a user message (image_url + text parts) —
+	// the exact wire shape of the official image-understanding examples.
+	Messages []VisionMessage `json:"messages"`
+	// MaxTokens caps the completion length (0 = server default)
+	MaxTokens int `json:"max_tokens,omitempty"`
+}
+
+// VisionMessage is one message of a ChatVisionRequest. Content is
+// polymorphic on the wire — a plain string for system turns, a
+// []ChatContentPart array for the vision user turn — so it is typed `any`
+// here. ChatVision constructs both shapes itself; callers never build one.
+type VisionMessage struct {
+	// Role is "system" or "user"
+	Role string `json:"role"`
+	// Content is either string (system) or []ChatContentPart (user vision)
+	Content any `json:"content"`
+}
+
 // StreamChunk represents a chunk of streaming audio data delivered to the
 // caller's callback. The wire format is OpenAI-style chat.completion.chunk
 // (choices[].delta.audio.data + finish_reason); UnmarshalJSON maps that shape
@@ -280,6 +326,11 @@ type Client interface {
 	// Chat runs an LLM chat completion and returns the response (Ticket 03:
 	// voice-command intent analysis).
 	Chat(ctx context.Context, messages []Message, opts ...ChatOption) (ChatResponse, error)
+
+	// ChatVision runs a vision-capable chat completion over one image and
+	// returns the response (Ticket 04: photo OCR). The image is sent as a
+	// base64 data URI per the official image-understanding wire format.
+	ChatVision(ctx context.Context, systemPrompt, userPrompt string, image []byte, mimeType string, opts ...ChatOption) (ChatResponse, error)
 
 	// HealthCheck verifies API connectivity
 	HealthCheck(ctx context.Context) error

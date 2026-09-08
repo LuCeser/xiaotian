@@ -348,6 +348,135 @@ func (c *mimoClient) executeChatRequest(ctx context.Context, req ChatRequest) (C
 	return chatResp, nil
 }
 
+// ChatVision runs a vision-capable chat completion over one image (Ticket 04:
+// photo OCR). The system prompt goes out as a plain-string content message
+// and the user turn as an image_url+text parts array — the exact wire shape
+// of the official image-understanding examples — with the image encoded as a
+// base64 data URI. Mirrors Chat's retry contract.
+func (c *mimoClient) ChatVision(ctx context.Context, systemPrompt, userPrompt string, image []byte, mimeType string, opts ...ChatOption) (ChatResponse, error) {
+	if c.isClosed() {
+		return ChatResponse{}, errors.New("client is closed")
+	}
+	if len(image) == 0 {
+		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "vision chat requires image bytes")
+	}
+
+	req := c.buildChatVisionRequest(systemPrompt, userPrompt, image, mimeType, opts...)
+
+	var lastErr error
+	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
+		if attempt > 0 {
+			c.logger.Debug("vision chat retry attempt",
+				infra.F("component", "mimo.client"),
+				infra.F("attempt", attempt),
+				infra.F("max_retries", c.config.MaxRetries),
+				infra.ErrField(lastErr),
+			)
+
+			delay := c.config.RetryDelay * time.Duration(1<<uint(attempt-1))
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return ChatResponse{}, errors.Wrap(ErrContextCancelled, "vision chat retry cancelled")
+			}
+		}
+
+		result, err := c.executeChatVisionRequest(ctx, req)
+		if err == nil {
+			return result, nil
+		}
+
+		lastErr = err
+
+		// Don't retry non-retryable errors
+		if !IsRetryable(err) {
+			c.logger.Warn("vision chat failed with non-retryable error",
+				infra.F("component", "mimo.client"),
+				infra.F("model", req.Model),
+				infra.ErrField(err),
+			)
+			return ChatResponse{}, err
+		}
+
+		c.logger.Debug("vision chat attempt failed, will retry",
+			infra.F("component", "mimo.client"),
+			infra.F("attempt", attempt),
+		)
+	}
+
+	return ChatResponse{}, errors.Wrap(lastErr, "vision chat exhausted retries")
+}
+
+// buildChatVisionRequest assembles the vision request. ChatOptions are
+// applied to a ChatRequest first so the shared option vocabulary
+// (WithChatModel/WithMaxTokens/WithTemperature) configures the vision
+// request's matching fields; Temperature is dropped because the vision model
+// runs in thinking mode server-side (same rationale as WithTemperature's doc).
+func (c *mimoClient) buildChatVisionRequest(systemPrompt, userPrompt string, image []byte, mimeType string, opts ...ChatOption) ChatVisionRequest {
+	base := ChatRequest{Model: DefaultChatModel}
+	for _, opt := range opts {
+		opt(&base)
+	}
+
+	return ChatVisionRequest{
+		Model: base.Model,
+		Messages: []VisionMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: []ChatContentPart{
+				{
+					Type: "image_url",
+					ImageURL: &ChatContentPartImage{
+						URL: "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(image),
+					},
+				},
+				{Type: "text", Text: userPrompt},
+			}},
+		},
+		MaxTokens: base.MaxTokens,
+	}
+}
+
+// executeChatVisionRequest posts the vision request to /chat/completions and
+// decodes the (shared) ChatResponse shape.
+func (c *mimoClient) executeChatVisionRequest(ctx context.Context, req ChatVisionRequest) (ChatResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return ChatResponse{}, errors.Wrap(ErrEncodingFailed, "failed to marshal vision chat request")
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return ChatResponse{}, errors.Wrap(err, "failed to create vision chat HTTP request")
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ChatResponse{}, errors.Wrap(ErrContextCancelled, "vision chat request cancelled")
+		}
+		return ChatResponse{}, errors.Wrap(ErrNetworkError, err.Error())
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ChatResponse{}, c.handleAPIError(resp)
+	}
+
+	var chatResp ChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "failed to decode vision chat response")
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "no choices in vision chat response")
+	}
+
+	return chatResp, nil
+}
+
 // HealthCheck verifies API connectivity
 func (c *mimoClient) HealthCheck(ctx context.Context) error {
 	if c.isClosed() {
