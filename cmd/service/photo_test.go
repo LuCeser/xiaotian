@@ -449,3 +449,85 @@ func TestMimoReader_IsReaderSeam(t *testing.T) {
 		t.Fatal("mimoReader returned nil")
 	}
 }
+
+// TestPhotoOCR_EndToEnd (Ticket 05): the OCR-only variant drives the same
+// assemble → OCR core but NEVER invokes the judger — the batch form fills
+// the word's input with the recognized text instead of judging against the
+// session's current word.
+func TestPhotoOCR_EndToEnd(t *testing.T) {
+	rd := &captureReader{reply: `{"text":"apple","confidence":0.93}`}
+	judger := func(connID, transcript string) (answerJudgement, string) {
+		t.Error("judger must not run in the OCR-only path")
+		return answerJudgement{}, ""
+	}
+	ps := newPhotoService(rd.read, judger, infra.NewNoOpLogger(), testPhotoConfig(0))
+
+	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, nil, ps, infra.NewNoOpLogger()))
+	defer teardown()
+
+	sendImageFrame(t, conn, 1, photoJPEG(0x11, 64))
+	sendControlJSON(t, conn, `{"type":"photo_ocr","params":{}}`)
+
+	header, payload := readFrame(t, conn)
+	if header.MsgType != ws.MsgTypeControl {
+		t.Fatalf("reply msg type = %s, want control", header.MsgType)
+	}
+	var result photoResultResponse
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatalf("photo_ocr_result JSON decode: %v", err)
+	}
+	if result.Type != "photo_ocr_result" {
+		t.Fatalf("reply type = %q, want photo_ocr_result", result.Type)
+	}
+	if result.Text != "apple" || result.Confidence != 0.93 {
+		t.Errorf("text/confidence = %q/%v, want apple/0.93", result.Text, result.Confidence)
+	}
+	if result.Judged || result.LowConfidence || result.Error != "" {
+		t.Errorf("unexpected fields for a clean OCR: %+v", result)
+	}
+}
+
+// TestPhotoOCR_LowConfidence: below threshold the best guess still ships
+// (prefill) with low_confidence=true — the form decides how to mark it.
+func TestPhotoOCR_LowConfidence(t *testing.T) {
+	rd := &captureReader{reply: `{"text":"appl?","confidence":0.4}`}
+	ps := newPhotoService(rd.read, func(connID, transcript string) (answerJudgement, string) {
+		t.Error("judger must not run in the OCR-only path")
+		return answerJudgement{}, ""
+	}, infra.NewNoOpLogger(), testPhotoConfig(0))
+
+	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, nil, ps, infra.NewNoOpLogger()))
+	defer teardown()
+
+	sendImageFrame(t, conn, 1, photoJPEG(0x33, 64))
+	sendControlJSON(t, conn, `{"type":"photo_ocr","params":{}}`)
+
+	_, payload := readFrame(t, conn)
+	var result photoResultResponse
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatalf("photo_ocr_result JSON decode: %v", err)
+	}
+	if !result.LowConfidence || result.Text != "appl?" {
+		t.Errorf("low-confidence OCR = %+v, want low_confidence + best guess", result)
+	}
+	if result.Judged {
+		t.Error("judged = true, want false")
+	}
+}
+
+// TestPhotoOCR_Disabled: no photo service → error frame, no crash.
+func TestPhotoOCR_Disabled(t *testing.T) {
+	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, nil, nil, infra.NewNoOpLogger()))
+	defer teardown()
+
+	sendImageFrame(t, conn, 1, photoJPEG(0x55, 64))
+	sendControlJSON(t, conn, `{"type":"photo_ocr","params":{}}`)
+
+	header, payload := readFrame(t, conn)
+	if header.MsgType != ws.MsgTypeError {
+		t.Fatalf("reply msg type = %s, want error", header.MsgType)
+	}
+	if !strings.Contains(string(payload), "photo OCR unavailable") {
+		t.Errorf("error payload = %s, want photo OCR unavailable", payload)
+	}
+}

@@ -237,6 +237,11 @@ func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, voiceCmd *v
 				// buffered chunks so they cannot poison the next photo.
 				return photoCmd.handlePhotoCancel(ctx, client, control.Params)
 
+			case "photo_ocr":
+				// Ticket 05: OCR-only photo read — the batch form fills the
+				// word's input with the recognized text, no judging.
+				return photoCmd.handlePhotoOCR(ctx, client, control.Params)
+
 			default:
 				logger.Warn("unknown control type",
 					infra.F("type", control.Type),

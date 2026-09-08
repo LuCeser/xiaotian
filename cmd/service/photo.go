@@ -118,6 +118,23 @@ type photoResultResponse struct {
 	Rating   string `json:"rating"` // "" when not judged
 }
 
+// ocrPhoto settles the connection's buffered image chunks and runs the OCR
+// pipeline once; the caller owns the reply shape. The upload is consumed
+// either way — never let one photo's chunks bleed into the next. Shared by
+// the judging path (photo_submit, Ticket 04) and the OCR-only path
+// (photo_ocr, Ticket 05).
+func (ps *photoService) ocrPhoto(ctx context.Context, connID string) (res ocr.Result, jpegLen int, err error) {
+	jpeg := settleAssembled(ps.buffers, connID, ps.assembleWait)
+
+	// Bound the vision call so a wedged upstream cannot pin router workers.
+	callCtx, cancel := context.WithTimeout(ctx, ps.requestTimeout)
+	res, err = ps.pipeline.Process(callCtx, jpeg)
+	cancel()
+
+	ps.buffers.Drop(connID)
+	return res, len(jpeg), err
+}
+
 // handlePhotoSubmit serves the photo_submit control trigger: wait for any
 // straggler image chunks, run the OCR pipeline, judge the recognized text
 // against the session's current word, reply. Nil receiver (photo disabled)
@@ -129,16 +146,7 @@ func (ps *photoService) handlePhotoSubmit(ctx context.Context, client *ws.Client
 	}
 	connID := clientConnID(client)
 
-	jpeg := settleAssembled(ps.buffers, connID, ps.assembleWait)
-
-	// Bound the vision call so a wedged upstream cannot pin router workers.
-	callCtx, cancel := context.WithTimeout(ctx, ps.requestTimeout)
-	res, err := ps.pipeline.Process(callCtx, jpeg)
-	cancel()
-
-	// The upload is consumed either way — never let one photo's chunks bleed
-	// into the next.
-	ps.buffers.Drop(connID)
+	res, jpegLen, err := ps.ocrPhoto(ctx, connID)
 
 	switch {
 	case err == nil:
@@ -174,12 +182,54 @@ func (ps *photoService) handlePhotoSubmit(ctx context.Context, client *ws.Client
 	default:
 		ps.logger.Warn("photo OCR failed",
 			infra.F("conn_id", connID),
-			infra.F("jpeg_bytes", len(jpeg)),
+			infra.F("jpeg_bytes", jpegLen),
 			infra.ErrField(err),
 		)
 		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
 			Type:     "photo_result",
 			Error:    "识别失败，请手动输入",
+			Fallback: "manual",
+		})
+	}
+}
+
+// handlePhotoOCR serves the photo_ocr control trigger (Ticket 05): run the
+// OCR pipeline WITHOUT judging — the batch-submission form fills the word's
+// input with the recognized text, so there is no session/current-word guard
+// and no rating. Replies carry the same shape as photo_result but the type
+// "photo_ocr_result" so the client routes them to the form, not the
+// per-word feedback flow.
+func (ps *photoService) handlePhotoOCR(ctx context.Context, client *ws.Client, _ []byte) error {
+	if ps == nil {
+		sendErrorFrame(client, "photo OCR unavailable")
+		return nil
+	}
+	connID := clientConnID(client)
+
+	res, jpegLen, err := ps.ocrPhoto(ctx, connID)
+
+	switch {
+	case err == nil:
+		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
+			Type: "photo_ocr_result", Text: res.Text, Confidence: res.Confidence,
+		})
+
+	case err == ocr.ErrLowConfidence:
+		// The best guess still prefill's the form field; the form marks it.
+		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
+			Type: "photo_ocr_result", Text: res.Text, Confidence: res.Confidence,
+			LowConfidence: true,
+		})
+
+	default:
+		ps.logger.Warn("photo OCR (form fill) failed",
+			infra.F("conn_id", connID),
+			infra.F("jpeg_bytes", jpegLen),
+			infra.ErrField(err),
+		)
+		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
+			Type:     "photo_ocr_result",
+			Error:    "识别失败，请直接输入",
 			Fallback: "manual",
 		})
 	}
