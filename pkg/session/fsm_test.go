@@ -385,3 +385,92 @@ func TestTimeoutFor_PausedStateFromConfig(t *testing.T) {
 		t.Errorf("Validate() error %q does not mention pausedStateTimeout", err)
 	}
 }
+
+// TestTransition_BatchSubmission (Ticket 05): the batch workflow's FSM spine —
+// DICTATING|WAITING_PARENT + submit_answers → SUBMISSION, then SUBMISSION +
+// batch_graded → FEEDBACK. WAITING_PARENT entry covers the natural flow (all
+// words dictated, nothing answered per-word); DICTATING entry covers the
+// student finishing early on the last word.
+func TestTransition_BatchSubmission(t *testing.T) {
+	queue3 := []pybridge.DueCard{{Word: "apple"}, {Word: "banana"}, {Word: "cherry"}}
+
+	valid := []struct {
+		name      string
+		from      database.SessionState
+		queue     []pybridge.DueCard
+		index     int
+		ev        SessionEvent
+		wantState database.SessionState
+		wantIndex int
+	}{
+		{
+			name:      "DICTATING to SUBMISSION on submit_answers (last word)",
+			from:      database.StateDictating,
+			queue:     queue3,
+			index:     2,
+			ev:        SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"},
+			wantState: database.StateSubmission,
+			wantIndex: 2,
+		},
+		{
+			name:      "WAITING_PARENT to SUBMISSION on submit_answers",
+			from:      database.StateWaitingParent,
+			queue:     queue3,
+			index:     2,
+			ev:        SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"},
+			wantState: database.StateSubmission,
+			wantIndex: 2,
+		},
+		{
+			name:      "SUBMISSION to FEEDBACK on batch_graded",
+			from:      database.StateSubmission,
+			queue:     queue3,
+			index:     2,
+			ev:        SessionEvent{Type: EventBatchGraded},
+			wantState: database.StateFeedback,
+			wantIndex: 2,
+		},
+	}
+
+	for _, tt := range valid {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Session{state: tt.from, wordQueue: tt.queue, wordIndex: tt.index}
+			if err := s.transition(tt.ev); err != nil {
+				t.Fatalf("transition() returned unexpected error: %v", err)
+			}
+			if s.state != tt.wantState {
+				t.Errorf("state = %s, want %s", s.state, tt.wantState)
+			}
+			if s.wordIndex != tt.wantIndex {
+				t.Errorf("wordIndex = %d, want %d", s.wordIndex, tt.wantIndex)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name string
+		from database.SessionState
+		ev   SessionEvent
+	}{
+		{"PAUSED plus submit_answers", database.StatePaused, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
+		{"SUBMISSION plus submit_answers (double submit)", database.StateSubmission, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
+		{"FEEDBACK plus submit_answers", database.StateFeedback, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
+		{"IDLE plus batch_graded", database.StateIdle, SessionEvent{Type: EventBatchGraded}},
+		{"DICTATING plus batch_graded (skipped SUBMISSION)", database.StateDictating, SessionEvent{Type: EventBatchGraded}},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Session{state: tt.from, wordQueue: queue3, wordIndex: 2}
+			err := s.transition(tt.ev)
+			if err == nil {
+				t.Fatal("transition() returned nil, want ErrInvalidTransition")
+			}
+			if !errors.Is(err, ErrInvalidTransition) {
+				t.Errorf("transition() error does not wrap ErrInvalidTransition: %v", err)
+			}
+			if s.state != tt.from {
+				t.Errorf("state mutated: got %s, want %s", s.state, tt.from)
+			}
+		})
+	}
+}

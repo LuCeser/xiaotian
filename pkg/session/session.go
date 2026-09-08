@@ -456,6 +456,15 @@ func (s *Session) onTransition() {
 		s.sendSessionCompleteFrame() // Notify client that session completed
 	}
 
+	// Ticket 05: WAITING_PARENT entry now emits a progress frame too — it
+	// carries the status field, which is how the batch-submission UI (and the
+	// per-word mode's auto-ratings submitter) learn the session reached the
+	// all-words-dictated point. SUBMISSION entry does the same so the client
+	// can show the grading-in-progress indicator.
+	if newState == database.StateWaitingParent || newState == database.StateSubmission {
+		s.sendProgressFrame()
+	}
+
 	// Ticket 02 DICT-07: Notify client when entering PAUSED state.
 	if newState == database.StatePaused {
 		s.sendPausedFrame()
@@ -706,6 +715,7 @@ func (s *Session) sendProgressFrame() {
 	completedWords := s.wordIndex  // Words fully completed
 	totalWords := len(s.wordQueue)
 	sessionID := s.id
+	status := s.state // Ticket 05: FSM status echo (see _applyProgressUpdate)
 	s.mu.RUnlock()
 
 	// Build progress frame JSON. Field names use camelCase to match the
@@ -716,6 +726,7 @@ func (s *Session) sendProgressFrame() {
 		"currentWord":    currentWord,
 		"completedWords": completedWords,
 		"totalWords":     totalWords,
+		"status":         string(status),
 	}
 
 	jsonBytes, err := json.Marshal(progressMsg)
@@ -912,6 +923,11 @@ func (s *Session) timeoutFor(state database.SessionState) time.Duration {
 		// Ticket 02 DICT-07: no dictation timeout while paused.
 		return s.cfg.SessionTimeout.PausedStateTimeout
 	case database.StateWaitingParent:
+		return s.cfg.SessionTimeout.WaitingParentStateTimeout
+	case database.StateSubmission:
+		// Ticket 05: SUBMISSION is a transient pass-through (grading is a
+		// synchronous comparison pass), so the waiting-parent budget amply
+		// covers it — a dedicated config knob would be knob-per-state noise.
 		return s.cfg.SessionTimeout.WaitingParentStateTimeout
 	case database.StateFeedback:
 		return s.cfg.SessionTimeout.FeedbackStateTimeout

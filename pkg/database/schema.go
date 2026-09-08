@@ -19,6 +19,9 @@ package database
 //	IDLE → LISTENING → DICTATING → WAITING_PARENT → FEEDBACK → IDLE
 //
 // Ticket 02 adds PAUSED: DICTATING ↔ PAUSED (student-driven pause/resume).
+// Ticket 05 adds SUBMISSION: DICTATING|WAITING_PARENT → SUBMISSION → FEEDBACK
+// (batch answer submission — the student writes all words on paper, then
+// submits and grades everything at once).
 type SessionState string
 
 const (
@@ -33,6 +36,10 @@ const (
 	StatePaused SessionState = "PAUSED"
 	// StateWaitingParent means the session is waiting for parent feedback.
 	StateWaitingParent SessionState = "WAITING_PARENT"
+	// StateSubmission means a batch answer submission is being processed
+	// (Ticket 05). Transient by design: grading is a synchronous comparison
+	// pass, so the session passes through on its way to FEEDBACK.
+	StateSubmission SessionState = "SUBMISSION"
 	// StateFeedback means the system is delivering post-session feedback.
 	StateFeedback SessionState = "FEEDBACK"
 )

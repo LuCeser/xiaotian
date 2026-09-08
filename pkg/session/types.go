@@ -50,6 +50,10 @@ const (
 	EventCancel EventType = 0x04
 	// EventParentReview is the parent-review event driving WAITING_PARENT→FEEDBACK.
 	EventParentReview EventType = 0x05
+	// EventBatchGraded signals that a batch answer submission has been
+	// graded, driving SUBMISSION→FEEDBACK (Ticket 05). System-driven: pushed
+	// by the submit_answers handler after the batch_result frame went out.
+	EventBatchGraded EventType = 0x06
 )
 
 // String returns a human-readable name for the EventType (structured-logging
@@ -66,6 +70,8 @@ func (e EventType) String() string {
 		return "cancel"
 	case EventParentReview:
 		return "parent_review"
+	case EventBatchGraded:
+		return "batch_graded"
 	default:
 		return fmt.Sprintf("unknown(0x%02x)", uint8(e))
 	}

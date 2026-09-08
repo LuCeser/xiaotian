@@ -94,6 +94,13 @@ func (s *Session) transition(ev SessionEvent) error {
 				// Set repeatPending so onTransition re-spawns StreamWord.
 				s.repeatPending = true
 				return nil
+			case "submit_answers":
+				// Ticket 05: batch submission from the last word's DICTATING
+				// (student finished writing everything). Index unchanged —
+				// grading reads the whole queue, not the cursor.
+				s.state = database.StateSubmission
+				s.prevState = prevState
+				return nil
 			}
 		}
 
@@ -128,6 +135,26 @@ func (s *Session) transition(ev SessionEvent) error {
 	case database.StateWaitingParent:
 		switch ev.Type {
 		case EventParentReview:
+			s.state = database.StateFeedback
+			s.prevState = prevState
+			return nil
+		case EventControlFrame:
+			if ev.ControlType == "submit_answers" {
+				// Ticket 05: batch submission — the student wrote all words on
+				// paper and submits everything at once instead of the per-word
+				// answer loop (which is what landed the session here with an
+				// empty ratings map).
+				s.state = database.StateSubmission
+				s.prevState = prevState
+				return nil
+			}
+		}
+
+	case database.StateSubmission:
+		switch ev.Type {
+		case EventBatchGraded:
+			// Ticket 05: grading finished (the handler already sent the
+			// batch_result frame) — deliver feedback like parent_review does.
 			s.state = database.StateFeedback
 			s.prevState = prevState
 			return nil
