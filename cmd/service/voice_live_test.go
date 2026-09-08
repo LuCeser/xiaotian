@@ -31,9 +31,10 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
-// liveAPIKey loads the repo-root .env (live env wins, same contract as
-// pkg/mimo's TestMain loader) and returns the Mimo key, or "" when absent —
-// the caller skips.
+// liveAPIKey loads the repo-root .env and returns the Mimo key, or "" when
+// absent — the caller skips. Twin of pkg/mimo's TestMain loader (live env
+// wins), diverging only on empty-set vars: overridden here (Getenv == ""),
+// kept by that loader (LookupEnv).
 func liveAPIKey(t *testing.T) string {
 	t.Helper()
 	if f, err := os.Open("../../.env"); err == nil {
@@ -79,21 +80,23 @@ func synthesizeCommandPCM(t *testing.T, client mimo.Client, text string) []byte 
 	if err != nil {
 		t.Fatalf("live TTS for %q failed: %v", text, err)
 	}
-	pcm, rate := wavPCM(audio.Samples)
-	if len(pcm) == 0 || rate == 0 {
+	pcm := wavPCM(audio.Samples)
+	if len(pcm) == 0 {
 		t.Fatalf("live TTS returned no parsable WAV (%d bytes)", len(audio.Samples))
 	}
-	if rate != 16000 {
+	// parseWAV already put the true header rate on the decoded result.
+	if rate := audio.SampleRate; rate != 16000 {
 		pcm = resamplePCM(t, pcm, rate, 16000)
 	}
 	return pcm
 }
 
-// wavPCM extracts the data-chunk PCM and fmt-chunk sample rate from a
-// RIFF/WAVE byte stream (self-contained test twin of mimo.parseWAV).
-func wavPCM(wav []byte) (pcm []byte, sampleRate int) {
+// wavPCM extracts the data-chunk PCM from a RIFF/WAVE byte stream. Twin of
+// mimo.parseWAV's chunk walk, kept self-contained because parseWAV discards
+// the data payload; the sample rate travels in DecodedAudioData.SampleRate.
+func wavPCM(wav []byte) []byte {
 	if len(wav) < 12 || string(wav[0:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {
-		return nil, 0
+		return nil
 	}
 	pos := 12
 	for pos+8 <= len(wav) {
@@ -103,17 +106,12 @@ func wavPCM(wav []byte) (pcm []byte, sampleRate int) {
 		if size < 0 || body+size > len(wav) {
 			break
 		}
-		switch id {
-		case "fmt ":
-			if size >= 16 {
-				sampleRate = int(binary.LittleEndian.Uint32(wav[body+4 : body+8]))
-			}
-		case "data":
-			pcm = wav[body : body+size]
+		if id == "data" {
+			return wav[body : body+size]
 		}
 		pos = body + size + (size & 1)
 	}
-	return pcm, sampleRate
+	return nil
 }
 
 // resamplePCM linearly resamples 16-bit LE mono PCM between rates.
@@ -145,7 +143,7 @@ func resamplePCM(t *testing.T, in []byte, from, to int) []byte {
 func streamPCMChunks(t *testing.T, conn *websocket.Conn, pcm []byte, startSeq uint32) {
 	t.Helper()
 	for off, seq := 0, startSeq; off < len(pcm); off, seq = off+ws.AudioFrameSize, seq+1 {
-		end := off + ws.AudioFrameSize
+		end := min(off+ws.AudioFrameSize, len(pcm))
 		chunk := pcm[off:end]
 		if len(chunk) < ws.AudioFrameSize {
 			padded := make([]byte, ws.AudioFrameSize)

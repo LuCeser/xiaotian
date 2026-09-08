@@ -25,8 +25,8 @@ import (
 // while capping orphaned memory on the 1C1G VPS.
 const voiceBufferIdleTTL = 30 * time.Second
 
-// settlePollInterval is how often settlePCM re-checks the assembler length
-// while waiting for straggler audio chunks.
+// settlePollInterval is how often settlePCM re-checks the buffer registry:
+// first for the assembler to appear at all, then for its length to go quiet.
 const settlePollInterval = 50 * time.Millisecond
 
 // sessionPusher is the narrow seam voiceService needs from the session

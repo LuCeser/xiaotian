@@ -276,20 +276,22 @@ func TestVoiceCancel_DiscardsRecording(t *testing.T) {
 	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
 		infra.NewNoOpLogger(), testVoiceConfig(0))
 
-	// Capture the server-side client via the audio route so the test can
-	// wait for the canceled chunk to LAND before sending the cancel — in
-	// production the client's cancel is TCP-ordered after all its chunks, so
-	// the contract under test is "cancel discards landed audio"; only
-	// router-internal worker reordering remains, which the ack below covers.
+	// Wrap the audio route so the test can wait for the canceled chunk to
+	// LAND before sending the cancel — in production the client's cancel is
+	// TCP-ordered after all its chunks, so the contract under test is "cancel
+	// discards landed audio"; only router-internal worker reordering remains,
+	// which the ack below covers. handleAudioFrame adds to the buffer
+	// synchronously, so handler-return means landed.
 	handlers := ttsHandlers(nil, nil, vs, infra.NewNoOpLogger())
-	serverClient := make(chan *ws.Client, 1)
+	landed := make(chan struct{}, 1)
 	audioHandler := handlers[ws.MsgTypeAudio]
 	handlers[ws.MsgTypeAudio] = func(ctx context.Context, c *ws.Client, h *ws.FrameHeader, p []byte) error {
+		err := audioHandler(ctx, c, h, p)
 		select {
-		case serverClient <- c:
+		case landed <- struct{}{}:
 		default:
 		}
-		return audioHandler(ctx, c, h, p)
+		return err
 	}
 
 	conn, teardown := dialVoiceTestServer(t, handlers)
@@ -297,26 +299,9 @@ func TestVoiceCancel_DiscardsRecording(t *testing.T) {
 
 	// First (canceled) recording: one chunk.
 	sendAudioFrame(t, conn, 1, bytesFill(0xAA))
-
-	var sc *ws.Client
 	select {
-	case sc = <-serverClient:
+	case <-landed:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out capturing server-side client")
-	}
-	connID := clientConnID(sc)
-
-	// Deterministic wait for the chunk to land in the server buffer.
-	landed := false
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if asm := vs.buffers.Get(connID); asm != nil && asm.Len() == ws.AudioFrameSize {
-			landed = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !landed {
 		t.Fatal("canceled chunk never landed in the server buffer")
 	}
 
@@ -429,8 +414,12 @@ func TestVoiceCommand_Disabled(t *testing.T) {
 func TestVoiceCommand_EmptyRecording(t *testing.T) {
 	tr := &captureTranscriber{transcript: "写好了"}
 	pusher := &recordingPusher{}
+	// No audio ever lands, so settlePCM's appear-wait would poll the whole
+	// 2s AssembleWait for a buffer that cannot appear; 100ms is enough.
+	cfg := testVoiceConfig(0)
+	cfg.AssembleWait = 100 * time.Millisecond
 	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
-		infra.NewNoOpLogger(), testVoiceConfig(0))
+		infra.NewNoOpLogger(), cfg)
 
 	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
 	defer teardown()
@@ -459,9 +448,13 @@ func TestVoiceCommand_EmptyRecording(t *testing.T) {
 func TestHandleAudioFrame_OverflowSpoilsRecording(t *testing.T) {
 	tr := &captureTranscriber{transcript: "好了"}
 	pusher := &recordingPusher{}
-	// Cap fits exactly one 640-byte chunk.
+	// Cap fits exactly one 640-byte chunk. The overflow drops the buffer, so
+	// the follow-up trigger's appear-wait polls for a buffer that cannot
+	// (re)appear — a short AssembleWait avoids the full-2s poll.
+	cfg := testVoiceConfig(ws.AudioFrameSize)
+	cfg.AssembleWait = 100 * time.Millisecond
 	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
-		infra.NewNoOpLogger(), testVoiceConfig(ws.AudioFrameSize))
+		infra.NewNoOpLogger(), cfg)
 
 	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
 	defer teardown()
