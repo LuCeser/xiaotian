@@ -135,7 +135,7 @@ func (vs *voiceService) handleVoiceCommand(ctx context.Context, client *ws.Clien
 	}
 	connID := clientConnID(client)
 
-	pcm := vs.settlePCM(vs.buffers.Get(connID))
+	pcm := vs.settlePCM(connID)
 
 	// Bound the ASR + LLM calls so a wedged upstream cannot pin router
 	// workers (WR-02 bounds Close, not individual handlers).
@@ -208,17 +208,26 @@ func (vs *voiceService) handleVoiceCancel(_ context.Context, client *ws.Client, 
 	return sendControlFrame(client, ws.MsgTypeControl, voiceCancelOKResponse{Type: "voice_cancel_ok"})
 }
 
-// settlePCM waits for straggler audio chunks before assembly. The audio and
+// settlePCM waits for the connection's audio before assembly. The audio and
 // control routes are separate worker pools, so the voice_command trigger can
-// be dequeued while the last audio chunks still sit in the audio route's
-// channel. The assembler length is polled until one interval passes with no
-// growth (audio streams at 50 frames/s, so 50ms of silence means the stream
-// is done), bounded by assembleWait for the pathological case.
-func (vs *voiceService) settlePCM(asm *voice.Assembler) []byte {
+// be dequeued BEFORE the recording's chunks — even before the FIRST one, in
+// which case no assembler exists yet. Both cases are handled by polling:
+// first for the buffer to appear at all, then until one interval passes with
+// no length growth (audio streams at 50 frames/s, so 50ms of silence means
+// the stream is done). Bounded by assembleWait; returns nil only when no
+// audio landed in the whole window (a genuinely silent recording).
+func (vs *voiceService) settlePCM(connID string) []byte {
+	deadline := time.Now().Add(vs.assembleWait)
+
+	asm := vs.buffers.Get(connID)
+	for asm == nil && time.Now().Before(deadline) {
+		time.Sleep(settlePollInterval)
+		asm = vs.buffers.Get(connID)
+	}
 	if asm == nil {
 		return nil
 	}
-	deadline := time.Now().Add(vs.assembleWait)
+
 	lastLen := asm.Len()
 	for time.Now().Before(deadline) {
 		time.Sleep(settlePollInterval)

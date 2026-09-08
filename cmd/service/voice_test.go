@@ -161,9 +161,18 @@ func sendControlJSON(t *testing.T, conn *websocket.Conn, payload string) {
 }
 
 // readFrame reads one server frame and returns its decoded header + payload.
+// The 5s deadline suits the offline tests; live AI paths take ~6-10s — use
+// readFrameWithTimeout there.
 func readFrame(t *testing.T, conn *websocket.Conn) (*ws.FrameHeader, []byte) {
 	t.Helper()
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	return readFrameWithTimeout(t, conn, 5*time.Second)
+}
+
+// readFrameWithTimeout is readFrame with a caller-chosen read deadline
+// (live-AI tests need tens of seconds for the ASR+LLM round trip).
+func readFrameWithTimeout(t *testing.T, conn *websocket.Conn, timeout time.Duration) (*ws.FrameHeader, []byte) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		t.Fatalf("failed to set read deadline: %v", err)
 	}
 	_, raw, err := conn.ReadMessage()
@@ -177,10 +186,12 @@ func readFrame(t *testing.T, conn *websocket.Conn) (*ws.FrameHeader, []byte) {
 	return header, payload
 }
 
-// testVoiceConfig returns a fast VoiceConfig for tests (short settle bounds).
+// testVoiceConfig returns a VoiceConfig for the offline tests. AssembleWait
+// keeps the production 2s: settle exits on its 50ms quiet window anyway, and
+// a shorter bound made the tests flake under full-suite load (audio frames
+// landing past the deadline read as an empty recording).
 func testVoiceConfig(maxBytes int) infra.VoiceConfig {
 	cfg := infra.DefaultConfig().Voice
-	cfg.AssembleWait = 300 * time.Millisecond
 	cfg.RequestTimeout = 2 * time.Second
 	if maxBytes > 0 {
 		cfg.MaxRecordingBytes = maxBytes
@@ -265,11 +276,51 @@ func TestVoiceCancel_DiscardsRecording(t *testing.T) {
 	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
 		infra.NewNoOpLogger(), testVoiceConfig(0))
 
-	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
+	// Capture the server-side client via the audio route so the test can
+	// wait for the canceled chunk to LAND before sending the cancel — in
+	// production the client's cancel is TCP-ordered after all its chunks, so
+	// the contract under test is "cancel discards landed audio"; only
+	// router-internal worker reordering remains, which the ack below covers.
+	handlers := ttsHandlers(nil, nil, vs, infra.NewNoOpLogger())
+	serverClient := make(chan *ws.Client, 1)
+	audioHandler := handlers[ws.MsgTypeAudio]
+	handlers[ws.MsgTypeAudio] = func(ctx context.Context, c *ws.Client, h *ws.FrameHeader, p []byte) error {
+		select {
+		case serverClient <- c:
+		default:
+		}
+		return audioHandler(ctx, c, h, p)
+	}
+
+	conn, teardown := dialVoiceTestServer(t, handlers)
 	defer teardown()
 
-	// First (canceled) recording: one chunk, then the client aborts.
+	// First (canceled) recording: one chunk.
 	sendAudioFrame(t, conn, 1, bytesFill(0xAA))
+
+	var sc *ws.Client
+	select {
+	case sc = <-serverClient:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out capturing server-side client")
+	}
+	connID := clientConnID(sc)
+
+	// Deterministic wait for the chunk to land in the server buffer.
+	landed := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if asm := vs.buffers.Get(connID); asm != nil && asm.Len() == ws.AudioFrameSize {
+			landed = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !landed {
+		t.Fatal("canceled chunk never landed in the server buffer")
+	}
+
+	// The client aborts.
 	sendControlJSON(t, conn, `{"type":"voice_cancel","params":{}}`)
 
 	// Wait for the cancel ack BEFORE streaming the next recording: audio and

@@ -181,9 +181,10 @@ type VoiceConfig struct {
 	// then the LLM chat fallback when the keyword fast path misses) served
 	// under one voice command — one context spans both calls, so a slow ASR
 	// eats into the LLM's budget rather than extending the total. Default
-	// 15s: longer than the interactive ideal but bounded so a wedged
-	// upstream cannot pin router workers (WR-02 bounds Close, not
-	// individual handlers). MUST be > 0.
+	// 15s, sized on live observation: ASR ~2s + a mimo-v2.5 thinking-model
+	// classification ~8s ≈ 10s, leaving retry headroom; bounded so a wedged
+	// upstream cannot pin router workers (WR-02 bounds Close, not individual
+	// handlers). MUST be > 0.
 	RequestTimeout time.Duration `json:"requestTimeout" mapstructure:"requestTimeout"`
 }
 
