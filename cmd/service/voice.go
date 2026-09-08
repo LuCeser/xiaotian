@@ -211,18 +211,28 @@ func (vs *voiceService) handleVoiceCancel(_ context.Context, client *ws.Client, 
 // settlePCM waits for the connection's audio before assembly. The audio and
 // control routes are separate worker pools, so the voice_command trigger can
 // be dequeued BEFORE the recording's chunks — even before the FIRST one, in
-// which case no assembler exists yet. Both cases are handled by polling:
-// first for the buffer to appear at all, then until one interval passes with
-// no length growth (audio streams at 50 frames/s, so 50ms of silence means
-// the stream is done). Bounded by assembleWait; returns nil only when no
+// which case no assembler exists yet. Both cases are handled by the shared
+// settleAssembled poll. Bounded by assembleWait; returns nil only when no
 // audio landed in the whole window (a genuinely silent recording).
 func (vs *voiceService) settlePCM(connID string) []byte {
-	deadline := time.Now().Add(vs.assembleWait)
+	return settleAssembled(vs.buffers, connID, vs.assembleWait)
+}
 
-	asm := vs.buffers.Get(connID)
+// settleAssembled waits for a connection's streamed chunks before assembly.
+// The data (audio/image) and control routes are separate worker pools, so a
+// submit trigger can be dequeued BEFORE the payload's chunks — even before
+// the FIRST one, in which case no assembler exists yet. Both cases are
+// handled by polling: first for the buffer to appear at all, then until one
+// interval passes with no length growth (the stream is done). Bounded by
+// assembleWait; returns nil only when nothing landed in the whole window.
+// Shared by the voice (Ticket 03) and photo (Ticket 04) pipelines.
+func settleAssembled(buffers *voice.Buffers, connID string, assembleWait time.Duration) []byte {
+	deadline := time.Now().Add(assembleWait)
+
+	asm := buffers.Get(connID)
 	for asm == nil && time.Now().Before(deadline) {
 		time.Sleep(settlePollInterval)
-		asm = vs.buffers.Get(connID)
+		asm = buffers.Get(connID)
 	}
 	if asm == nil {
 		return nil

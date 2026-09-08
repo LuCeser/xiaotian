@@ -204,6 +204,7 @@ func TestMessageTypeString(t *testing.T) {
 		{MsgTypeHeartbeat, "heartbeat"},
 		{MsgTypeSession, "session"},
 		{MsgTypeStatus, "status"},
+		{MsgTypeImage, "image"},
 		{0xFF, "unknown(0xff)"}, // Unknown type
 	}
 

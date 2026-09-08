@@ -130,12 +130,17 @@ type errorResponse struct {
 // It composes the FSRS service, TTS generator, and streamer to deliver the
 // end-to-end TTS audio streaming pipeline. voice may be nil (voice commands
 // disabled — no MIMO_API_KEY): the audio route no-ops and voice_command
-// rejects with an error frame (see voice.go).
-func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, voiceCmd *voiceService, logger infra.Logger) map[ws.MessageType]ws.Handler {
+// rejects with an error frame (see voice.go). photo may be nil the same way
+// (see photo.go).
+func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, voiceCmd *voiceService, photoCmd *photoService, logger infra.Logger) map[ws.MessageType]ws.Handler {
 	return map[ws.MessageType]ws.Handler{
 		// MsgTypeAudio: inbound microphone PCM frames (Ticket 03 voice
 		// commands). Delegates to the voice pipeline's buffer registry.
 		ws.MsgTypeAudio: voiceCmd.handleAudioFrame,
+
+		// MsgTypeImage: inbound photo-answer JPEG chunks (Ticket 04).
+		// Delegates to the photo pipeline's buffer registry.
+		ws.MsgTypeImage: photoCmd.handlePhotoChunk,
 
 		// MsgTypeControl: session control messages for TTS streaming.
 		ws.MsgTypeControl: func(ctx context.Context, client *ws.Client, header *ws.FrameHeader, payload []byte) error {
@@ -191,6 +196,16 @@ func ttsHandlers(manager *session.Manager, fsrsSvc fsrs.FSRSService, voiceCmd *v
 				// Ticket 03: student aborted the recording; discard the
 				// buffered audio so it cannot poison the next command.
 				return voiceCmd.handleVoiceCancel(ctx, client, control.Params)
+
+			case "photo_submit":
+				// Ticket 04: student uploaded a photo of the written answer;
+				// run OCR + answer judging and reply photo_result.
+				return photoCmd.handlePhotoSubmit(ctx, client, control.Params)
+
+			case "photo_cancel":
+				// Ticket 04: student aborted the upload (retake); discard the
+				// buffered chunks so they cannot poison the next photo.
+				return photoCmd.handlePhotoCancel(ctx, client, control.Params)
 
 			default:
 				logger.Warn("unknown control type",
@@ -486,29 +501,61 @@ func handleSubmitAnswer(ctx context.Context, client *ws.Client, params json.RawM
 		return nil
 	}
 
-	// Look up the session for this connection
 	connID := clientConnID(client)
+	j, reject := judgeAnswer(manager, connID, p.Transcript)
+	if reject != "" {
+		sendErrorFrame(client, reject)
+		return nil
+	}
+
+	logger.Info("answer judged",
+		infra.F("word", j.Expected),
+		infra.F("transcript", p.Transcript),
+		infra.F("correct", j.Correct),
+		infra.F("rating", j.Rating),
+	)
+
+	response := answerResultResponse{
+		Type:     "answer_result",
+		WordID:   p.WordID,
+		Correct:  j.Correct,
+		Expected: j.Expected,
+		Heard:    p.Transcript,
+		Rating:   j.Rating,
+	}
+
+	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
+		logger.Warn("failed to send answer_result", infra.ErrField(err))
+	}
+
+	return nil
+}
+
+// judgeAnswer performs the session lookup + state guard + word comparison
+// shared by the spoken (submit_answer) and photo (photo_submit, Ticket 04)
+// answer paths. It returns the judgement and, when judging is impossible, a
+// non-empty reject message naming the reason (no active session / not in
+// dictating state / no current word). A nil manager is a "no active session"
+// — the disabled-mode wiring passes nil and the reply stays graceful.
+func judgeAnswer(manager *session.Manager, connID, transcript string) (answerJudgement, string) {
+	if manager == nil {
+		return answerJudgement{}, "no active session"
+	}
+
 	s := manager.Lookup(connID)
 	if s == nil {
-		sendErrorFrame(client, "no active session")
-		return nil
+		return answerJudgement{}, "no active session"
 	}
 
 	// Guard: must be in DICTATING state
 	if s.State() != database.StateDictating {
-		logger.Warn("submit_answer in wrong state",
-			infra.F("state", string(s.State())),
-			infra.F("conn_id", connID),
-		)
-		sendErrorFrame(client, "not in dictating state")
-		return nil
+		return answerJudgement{}, "not in dictating state"
 	}
 
 	// Get the current word from the session
 	currentWord := s.CurrentWord()
 	if currentWord == "" {
-		sendErrorFrame(client, "no current word")
-		return nil
+		return answerJudgement{}, "no current word"
 	}
 
 	// Determine language from session config (default to english)
@@ -517,30 +564,8 @@ func handleSubmitAnswer(ctx context.Context, client *ws.Client, params json.RawM
 		lang = "zh"
 	}
 
-	// Compare
-	correct, rating := compareAnswer(currentWord, p.Transcript, lang)
-
-	logger.Info("answer judged",
-		infra.F("word", currentWord),
-		infra.F("transcript", p.Transcript),
-		infra.F("correct", correct),
-		infra.F("rating", rating),
-	)
-
-	response := answerResultResponse{
-		Type:     "answer_result",
-		WordID:   p.WordID,
-		Correct:  correct,
-		Expected: currentWord,
-		Heard:    p.Transcript,
-		Rating:   rating,
-	}
-
-	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
-		logger.Warn("failed to send answer_result", infra.ErrField(err))
-	}
-
-	return nil
+	correct, rating := compareAnswer(currentWord, transcript, lang)
+	return answerJudgement{Expected: currentWord, Lang: lang, Correct: correct, Rating: rating}, ""
 }
 
 // compareAnswer compares a student's spoken transcript against the expected word.

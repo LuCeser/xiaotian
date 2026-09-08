@@ -1,0 +1,222 @@
+package main
+
+// Photo-answer OCR wiring (Phase 8.2, Ticket 04): routes streamed photo
+// chunks into a voice.Buffers assembler registry, and serves the
+// photo_submit control trigger end-to-end — assemble → JPEG validation →
+// Mimo vision OCR → answer judging against the session's current word, with
+// a photo_result frame back to the client on every path (judged,
+// low-confidence with best guess, or failed) so the UI can always fall back
+// to the manual input.
+
+import (
+	"context"
+	"time"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
+	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
+	"github.com/xiaotian/home-tutor-agent/pkg/voice"
+	"github.com/xiaotian/home-tutor-agent/pkg/ws"
+)
+
+// photoBufferIdleTTL bounds how long an abandoned per-connection photo
+// buffer survives its last chunk (same rationale as voiceBufferIdleTTL; the
+// photos are larger, so reclamation matters more on the 1C1G VPS).
+const photoBufferIdleTTL = 30 * time.Second
+
+// answerJudgement is the outcome of comparing a submitted answer against the
+// session's current dictation word (shared by the spoken submit_answer path
+// and the photo path).
+type answerJudgement struct {
+	Expected string
+	Lang     string // "en" | "zh" (informational)
+	Correct  bool
+	Rating   string // FSRS rating verb ("good"/"again")
+}
+
+// answerJudger judges a transcript against the connection's current word.
+// It returns a non-empty reject message when judging is impossible (no
+// active session, wrong state, no current word) — the reply frames surface
+// that message. *session.Manager satisfies it via judgeAnswer; tests inject
+// a plain closure (mirrors the sessionPusher seam, D-05).
+type answerJudger func(connID, transcript string) (answerJudgement, string)
+
+// photoService carries the photo-OCR pipeline dependencies for the ws
+// handlers. A nil *photoService means photo submission is disabled (no
+// MIMO_API_KEY): the image-frame handler becomes a no-op and photo_submit
+// rejects with an error frame — the manual input remains the full fallback.
+type photoService struct {
+	buffers        *voice.Buffers
+	pipeline       *ocr.Pipeline
+	judge          answerJudger
+	logger         infra.Logger
+	assembleWait   time.Duration
+	requestTimeout time.Duration
+}
+
+// newPhotoService composes the photo pipeline from the pkg/ocr seams. read
+// is the Reader seam (mimoReader adapts the production client; tests inject
+// a plain closure); judge is the answer-judging seam over the session
+// Manager.
+func newPhotoService(read ocr.Reader, judge answerJudger, logger infra.Logger, cfg infra.PhotoConfig) *photoService {
+	return &photoService{
+		// Second Buffers instance (independent of voice's): keyed by the same
+		// connIDs but capped and swept for image sizes.
+		buffers:        voice.NewBuffers(cfg.MaxImageBytes, photoBufferIdleTTL),
+		pipeline:       ocr.NewPipeline(read, cfg.ConfidenceThreshold),
+		judge:          judge,
+		logger:         logger,
+		assembleWait:   cfg.AssembleWait,
+		requestTimeout: cfg.RequestTimeout,
+	}
+}
+
+// mimoReader adapts the mimo ChatVision call onto the ocr.Reader seam,
+// keeping the mimo dependency out of the service layer's test surface. The
+// 256-token cap is ample for a {"text","confidence"} reply and keeps a
+// chatty thinking model from stalling the request budget.
+func mimoReader(mc mimo.Client, model string) ocr.Reader {
+	return func(ctx context.Context, systemPrompt, userPrompt string, imageJPEG []byte) (string, error) {
+		resp, err := mc.ChatVision(ctx, systemPrompt, userPrompt, imageJPEG, "image/jpeg",
+			mimo.WithChatModel(model), mimo.WithMaxTokens(256))
+		if err != nil {
+			return "", err
+		}
+		return resp.Text(), nil
+	}
+}
+
+// handlePhotoChunk buffers one inbound JPEG chunk (MsgTypeImage). Nil
+// receiver (photo disabled) drops the frame — the photo UI is hidden in that
+// mode, so stray frames are silent.
+func (ps *photoService) handlePhotoChunk(_ context.Context, client *ws.Client, header *ws.FrameHeader, payload []byte) error {
+	if ps == nil {
+		return nil
+	}
+	connID := clientConnID(client)
+	if err := ps.buffers.Add(connID, header.Sequence, payload); err != nil {
+		// Cap exceeded: the upload is spoiled. Drop the whole entry so a
+		// follow-up photo_submit reports no photo rather than a truncated
+		// one, and tell the client to stop.
+		ps.buffers.Drop(connID)
+		ps.logger.Warn("photo upload overflowed cap",
+			infra.F("conn_id", connID),
+			infra.ErrField(err),
+		)
+		sendErrorFrame(client, "photo too large")
+	}
+	return nil
+}
+
+// photoResultResponse is the control frame reply to a photo_submit trigger,
+// sent on every path so the client UI can always show an outcome:
+//
+//   - judged:     OCR confident → Correct/Expected/Rating valid
+//   - low conf:   LowConfidence=true, Text carries the best guess (prefill
+//     the manual input)
+//   - failed:     Error carries the reason (manual input fallback)
+type photoResultResponse struct {
+	Type          string  `json:"type"` // "photo_result"
+	Text          string  `json:"text"`
+	Confidence    float64 `json:"confidence"`
+	LowConfidence bool    `json:"low_confidence"`
+	Error         string  `json:"error,omitempty"`
+
+	// Judged distinguishes "judged incorrect" (Judged=true, Correct=false)
+	// from "not judged at all" (low confidence / failure).
+	Judged   bool   `json:"judged"`
+	Correct  bool   `json:"correct"`
+	Expected string `json:"expected"`
+	Rating   string `json:"rating"` // "" when not judged
+}
+
+// handlePhotoSubmit serves the photo_submit control trigger: wait for any
+// straggler image chunks, run the OCR pipeline, judge the recognized text
+// against the session's current word, reply. Nil receiver (photo disabled)
+// rejects with an error frame.
+func (ps *photoService) handlePhotoSubmit(ctx context.Context, client *ws.Client, _ []byte) error {
+	if ps == nil {
+		sendErrorFrame(client, "photo submission unavailable")
+		return nil
+	}
+	connID := clientConnID(client)
+
+	jpeg := settleAssembled(ps.buffers, connID, ps.assembleWait)
+
+	// Bound the vision call so a wedged upstream cannot pin router workers.
+	callCtx, cancel := context.WithTimeout(ctx, ps.requestTimeout)
+	res, err := ps.pipeline.Process(callCtx, jpeg)
+	cancel()
+
+	// The upload is consumed either way — never let one photo's chunks bleed
+	// into the next.
+	ps.buffers.Drop(connID)
+
+	switch {
+	case err == nil:
+		j, reject := ps.judge(connID, res.Text)
+		if reject != "" {
+			ps.logger.Warn("photo answer not judged",
+				infra.F("conn_id", connID),
+				infra.F("reason", reject),
+			)
+			return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
+				Type: "photo_result", Text: res.Text, Confidence: res.Confidence,
+				Error: reject,
+			})
+		}
+		ps.logger.Info("photo answer judged",
+			infra.F("conn_id", connID),
+			infra.F("text", res.Text),
+			infra.F("confidence", res.Confidence),
+			infra.F("correct", j.Correct),
+		)
+		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
+			Type: "photo_result", Text: res.Text, Confidence: res.Confidence,
+			Judged: true, Correct: j.Correct, Expected: j.Expected, Rating: j.Rating,
+		})
+
+	case err == ocr.ErrLowConfidence:
+		// Best guess still ships — the client prefills the manual input.
+		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
+			Type: "photo_result", Text: res.Text, Confidence: res.Confidence,
+			LowConfidence: true,
+		})
+
+	default:
+		ps.logger.Warn("photo OCR failed",
+			infra.F("conn_id", connID),
+			infra.F("jpeg_bytes", len(jpeg)),
+			infra.ErrField(err),
+		)
+		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
+			Type:  "photo_result",
+			Error: "识别失败，请手动输入",
+		})
+	}
+}
+
+// photoCancelOKResponse acks a photo_cancel so the client (and tests) can
+// sequence a restart AFTER the discard — same cross-route ordering hazard
+// and contract as voice_cancel_ok.
+type photoCancelOKResponse struct {
+	Type string `json:"type"` // "photo_cancel_ok"
+}
+
+// handlePhotoCancel discards the connection's in-flight upload (the client
+// aborted: retake, session ended, page hidden). Without this the assembler
+// keeps the canceled chunks and the NEXT upload's sequence numbers (which
+// restart at 1) are absorbed as duplicates — Assemble would then sort the
+// stale bytes ahead of the fresh ones and OCR the wrong photo. Nil receiver
+// is a no-op: with photo disabled there is no buffer to discard.
+func (ps *photoService) handlePhotoCancel(_ context.Context, client *ws.Client, _ []byte) error {
+	if ps == nil {
+		return nil
+	}
+	connID := clientConnID(client)
+	ps.buffers.Drop(connID)
+	ps.logger.Debug("photo upload canceled",
+		infra.F("conn_id", connID),
+	)
+	return sendControlFrame(client, ws.MsgTypeControl, photoCancelOKResponse{Type: "photo_cancel_ok"})
+}

@@ -210,7 +210,7 @@ func TestVoiceCommand_RuleFastPath(t *testing.T) {
 	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
 		infra.NewNoOpLogger(), testVoiceConfig(0))
 
-	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
+	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, nil, infra.NewNoOpLogger()))
 	defer teardown()
 
 	// Stream two chunks (sequence order exercises assembler ordering).
@@ -282,7 +282,7 @@ func TestVoiceCancel_DiscardsRecording(t *testing.T) {
 	// discards landed audio"; only router-internal worker reordering remains,
 	// which the ack below covers. handleAudioFrame adds to the buffer
 	// synchronously, so handler-return means landed.
-	handlers := ttsHandlers(nil, nil, vs, infra.NewNoOpLogger())
+	handlers := ttsHandlers(nil, nil, vs, nil, infra.NewNoOpLogger())
 	landed := make(chan struct{}, 1)
 	audioHandler := handlers[ws.MsgTypeAudio]
 	handlers[ws.MsgTypeAudio] = func(ctx context.Context, c *ws.Client, h *ws.FrameHeader, p []byte) error {
@@ -364,7 +364,7 @@ func TestVoiceCommand_NotACommand(t *testing.T) {
 	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
 		infra.NewNoOpLogger(), testVoiceConfig(0))
 
-	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
+	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, nil, infra.NewNoOpLogger()))
 	defer teardown()
 
 	sendAudioFrame(t, conn, 1, make([]byte, ws.AudioFrameSize))
@@ -387,7 +387,7 @@ func TestVoiceCommand_NotACommand(t *testing.T) {
 // MIMO_API_KEY), voice_command rejects with an error frame instead of a
 // voice_result, and audio frames are silently dropped (no crash).
 func TestVoiceCommand_Disabled(t *testing.T) {
-	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, nil, infra.NewNoOpLogger()))
+	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, nil, nil, infra.NewNoOpLogger()))
 	defer teardown()
 
 	sendAudioFrame(t, conn, 1, make([]byte, ws.AudioFrameSize))
@@ -421,7 +421,7 @@ func TestVoiceCommand_EmptyRecording(t *testing.T) {
 	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
 		infra.NewNoOpLogger(), cfg)
 
-	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
+	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, nil, infra.NewNoOpLogger()))
 	defer teardown()
 
 	sendControlJSON(t, conn, `{"type":"voice_command","params":{}}`)
@@ -456,7 +456,7 @@ func TestHandleAudioFrame_OverflowSpoilsRecording(t *testing.T) {
 	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), pusher,
 		infra.NewNoOpLogger(), cfg)
 
-	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
+	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, nil, infra.NewNoOpLogger()))
 	defer teardown()
 
 	sendAudioFrame(t, conn, 1, make([]byte, ws.AudioFrameSize)) // fits

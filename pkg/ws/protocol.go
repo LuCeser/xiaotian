@@ -27,12 +27,13 @@ type MessageType uint8
 
 // MessageType constants (D-06 extended message type set, ordered by byte value)
 const (
-	MsgTypeAudio    MessageType = 0x01 // Audio data frame
-	MsgTypeControl  MessageType = 0x02 // Control message
-	MsgTypeError    MessageType = 0x03 // Error message
+	MsgTypeAudio     MessageType = 0x01 // Audio data frame
+	MsgTypeControl   MessageType = 0x02 // Control message
+	MsgTypeError     MessageType = 0x03 // Error message
 	MsgTypeHeartbeat MessageType = 0x04 // Heartbeat/ping
-	MsgTypeSession  MessageType = 0x05 // Session management
-	MsgTypeStatus   MessageType = 0x06 // Status update
+	MsgTypeSession   MessageType = 0x05 // Session management
+	MsgTypeStatus    MessageType = 0x06 // Status update
+	MsgTypeImage     MessageType = 0x07 // Image data frame (Ticket 04 photo chunks)
 )
 
 // String returns a human-readable name for the MessageType (D-40, structured logging friendly)
@@ -50,6 +51,8 @@ func (mt MessageType) String() string {
 		return "session"
 	case MsgTypeStatus:
 		return "status"
+	case MsgTypeImage:
+		return "image"
 	default:
 		return fmt.Sprintf("unknown(0x%02x)", uint8(mt))
 	}
@@ -57,13 +60,13 @@ func (mt MessageType) String() string {
 
 // FrameHeader represents the 16-byte fixed header of a WebSocket frame (D-05, D-11)
 type FrameHeader struct {
-	Version    uint8      // Protocol version (D-11)
+	Version    uint8       // Protocol version (D-11)
 	MsgType    MessageType // Message type (D-06)
-	Sequence   uint32     // Sequence number (D-07, 32-bit consecutive)
-	Timestamp  uint32     // Microsecond timestamp (optional)
-	PayloadLen uint16     // Payload length in bytes (D-09, variable-length control messages)
-	Reserved   uint16     // Reserved for future use (D-05)
-	CRC16      uint16     // CRC-16-CCITT checksum (D-08, auto-filled by EncodeHeader)
+	Sequence   uint32      // Sequence number (D-07, 32-bit consecutive)
+	Timestamp  uint32      // Microsecond timestamp (optional)
+	PayloadLen uint16      // Payload length in bytes (D-09, variable-length control messages)
+	Reserved   uint16      // Reserved for future use (D-05)
+	CRC16      uint16      // CRC-16-CCITT checksum (D-08, auto-filled by EncodeHeader)
 }
 
 // Sentinel errors for frame validation (D-44 centralized validation)

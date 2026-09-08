@@ -140,7 +140,7 @@ func TestVoiceCommand_PauseReachesRealFSM(t *testing.T) {
 	tr := &captureTranscriber{transcript: "暂停"}
 	vs := newVoiceService(tr.transcribe, voice.NewHybridClassifier(nil), manager, logger, testVoiceConfig(0))
 
-	handlers := ttsHandlers(manager, fakeFSRS, vs, logger)
+	handlers := ttsHandlers(manager, fakeFSRS, vs, nil, logger)
 
 	// Capture the server-side *ws.Client through the audio route so the test
 	// can compute the connID the session is registered under (the Manager

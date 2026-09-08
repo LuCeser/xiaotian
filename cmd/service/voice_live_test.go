@@ -187,7 +187,7 @@ func runLiveVoiceCommand(t *testing.T, spokenText string) voiceResultResponse {
 		cfg,
 	)
 
-	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, infra.NewNoOpLogger()))
+	conn, teardown := dialVoiceTestServer(t, ttsHandlers(nil, nil, vs, nil, infra.NewNoOpLogger()))
 	defer teardown()
 
 	pcm := synthesizeCommandPCM(t, client, spokenText)

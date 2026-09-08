@@ -379,16 +379,26 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// ------------------------------------------------------------------
 		// Phase 8.2 (Ticket 03): voice-command pipeline — streamed mic audio
 		// → Mimo ASR → intent classification → session FSM dispatch.
-		// MIMO_API_KEY stays environment-only (D-05/D-24, same invariant as
-		// the pybridge secrets); no key ⇒ voice disabled, the service boots
-		// and the button controls remain the full fallback.
+		// Phase 8.2 (Ticket 04): photo-answer OCR pipeline — streamed photo
+		// chunks → Mimo vision → answer judging. Both share ONE mimo client
+		// (same endpoint and env-only MIMO_API_KEY, D-05/D-24); no key ⇒ both
+		// disabled, the service boots and the button controls + manual input
+		// remain the full fallback.
 		// ------------------------------------------------------------------
 		var voiceCmd *voiceService
+		var photoCmd *photoService
 		if apiKey := os.Getenv("MIMO_API_KEY"); apiKey != "" {
+			// The shared client's HTTP timeout must cover the slowest caller:
+			// photo's vision OCR (20s) over voice's ASR+LLM sequence (15s).
+			// Each pipeline still bounds its own calls via its request ctx.
+			mimoTimeout := cfg.Voice.RequestTimeout
+			if cfg.Photo.RequestTimeout > mimoTimeout {
+				mimoTimeout = cfg.Photo.RequestTimeout
+			}
 			mimoClient, err := mimo.NewClient(mimo.ClientConfig{
 				APIKey:  apiKey,
 				BaseURL: cfg.Voice.BaseURL,
-				Timeout: cfg.Voice.RequestTimeout,
+				Timeout: mimoTimeout,
 			}, logger)
 			if err != nil {
 				logger.Error("mimo client construction failed",
@@ -405,17 +415,30 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 				logger,
 				cfg.Voice,
 			)
+			photoCmd = newPhotoService(
+				mimoReader(mimoClient, cfg.Photo.ChatModel),
+				func(connID, transcript string) (answerJudgement, string) {
+					return judgeAnswer(manager, connID, transcript)
+				},
+				logger,
+				cfg.Photo,
+			)
 			logger.Info("voice command pipeline enabled",
 				infra.F("component", "infra.main"),
 				infra.F("chat_model", cfg.Voice.ChatModel),
 			)
+			logger.Info("photo OCR pipeline enabled",
+				infra.F("component", "infra.main"),
+				infra.F("chat_model", cfg.Photo.ChatModel),
+				infra.F("confidence_threshold", cfg.Photo.ConfidenceThreshold),
+			)
 		} else {
-			logger.Warn("MIMO_API_KEY not set — voice commands disabled; button controls remain",
+			logger.Warn("MIMO_API_KEY not set — voice commands and photo OCR disabled; buttons and manual input remain",
 				infra.F("component", "infra.main"),
 			)
 		}
 
-		router, err := ws.NewRouter(ttsHandlers(manager, fsrsSvc, voiceCmd, logger), routerCfg, wsLogger)
+		router, err := ws.NewRouter(ttsHandlers(manager, fsrsSvc, voiceCmd, photoCmd, logger), routerCfg, wsLogger)
 		if err != nil {
 			logger.Error("ws router construction failed",
 				infra.F("component", "infra.main"),
