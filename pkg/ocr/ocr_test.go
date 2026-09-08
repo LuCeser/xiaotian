@@ -153,6 +153,10 @@ func TestParseOCRJSON(t *testing.T) {
 		{name: "fenced json", reply: "```json\n{\"text\":\"漂亮\",\"confidence\":0.7}\n```", wantText: "漂亮", wantConf: 0.7, wantOK: true},
 		{name: "leading whitespace json", reply: "\n\n  {\"text\":\"a\",\"confidence\":0.8}", wantText: "a", wantConf: 0.8, wantOK: true},
 		{name: "regex fallback when json invalid", reply: `the text is {"text":"apple" somewhere`, wantText: "apple", wantConf: 0.5, wantOK: true},
+		// Live-observed thinking-model shape: the JSON object with trailing
+		// garbage braces breaks the outermost span, but the decoder scan
+		// recovers the object (and its confidence, not the regex default).
+		{name: "json buried with trailing brace garbage", reply: `思考：我认为 {"note":"x"} 最终答案是 {"text":"apple","confidence":0.9} 就这样 } 完毕`, wantText: "apple", wantConf: 0.9, wantOK: true},
 		{name: "escaped quotes in text", reply: `{"text":"he said \"hi\"","confidence":0.8}`, wantText: `he said "hi"`, wantConf: 0.8, wantOK: true},
 		{name: "confidence clamped above 1", reply: `{"text":"a","confidence":1.7}`, wantText: "a", wantConf: 1, wantOK: true},
 		{name: "confidence clamped below 0", reply: `{"text":"a","confidence":-0.2}`, wantText: "a", wantConf: 0, wantOK: true},

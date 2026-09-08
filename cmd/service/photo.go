@@ -72,13 +72,15 @@ func newPhotoService(read ocr.Reader, judge answerJudger, logger infra.Logger, c
 }
 
 // mimoReader adapts the mimo ChatVision call onto the ocr.Reader seam,
-// keeping the mimo dependency out of the service layer's test surface. The
-// 256-token cap is ample for a {"text","confidence"} reply and keeps a
-// chatty thinking model from stalling the request budget.
+// keeping the mimo dependency out of the service layer's test surface. NO
+// MaxTokens cap: mimo-v2.5 runs in thinking mode, whose reasoning alone can
+// exceed a few hundred tokens — a 256 cap (live-observed) truncated the
+// model mid-thought with no final JSON at all. The wall-clock bound is the
+// handler's requestTimeout; the reply itself is a tiny JSON object.
 func mimoReader(mc mimo.Client, model string) ocr.Reader {
 	return func(ctx context.Context, systemPrompt, userPrompt string, imageJPEG []byte) (string, error) {
 		resp, err := mc.ChatVision(ctx, systemPrompt, userPrompt, imageJPEG, "image/jpeg",
-			mimo.WithChatModel(model), mimo.WithMaxTokens(256))
+			mimo.WithChatModel(model))
 		if err != nil {
 			return "", err
 		}

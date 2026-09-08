@@ -24,12 +24,14 @@ type Result struct {
 }
 
 // ocrSystemPrompt instructs the model to transcribe a dictation student's
-// handwritten answer verbatim. The output contract is strict JSON so
+// written answer verbatim. The output contract is strict JSON so
 // parseOCRJSON can extract it leniently. Verbatim matters: the answer is
 // JUDGED against the expected word afterwards, so a "corrected" transcription
-// would mask the student's actual mistake.
+// would mask the student's actual mistake. "手写或印刷都算" closes a live-
+// observed ambiguity: the model otherwise debated whether neatly-written
+// text counted as handwriting and nearly answered empty.
 const ocrSystemPrompt = `你是小学听写课的作业识别器。学生把听写答案写在纸上并拍照上传。
-请原样转录照片上手写的文字：不要纠正错别字、不要补全、不要翻译、不要加标点说明。
+请原样转录照片上写着的答案文字（手写或印刷都算）：不要纠正错别字、不要补全、不要翻译、不要加标点说明。
 学生可能是6-12岁儿童，笔迹可能不工整，请尽力辨认。
 如果照片里没有可辨认的文字，text 为空字符串。
 只输出一个 JSON 对象，格式：{"text":"apple","confidence":0.9}
@@ -109,20 +111,34 @@ func isJPEG(b []byte) bool {
 var textPattern = regexp.MustCompile(`"text"\s*:\s*"((?:[^"\\]|\\.)*)"`)
 
 // parseOCRJSON leniently extracts {"text": "...", "confidence": 0.x} from a
-// model reply. It first tries the outermost {...} span as JSON; on failure it
-// falls back to a regex for the text field alone (confidence defaults to
-// 0.5, below any sane threshold, so a mangled reply routes to manual input).
-// Mirrors voice.parseActionJSON's tolerance for model verbosity.
+// model reply. Strategy, most-to-least trusting:
+//  1. the outermost {...} span as one JSON object;
+//  2. a decoder scan from every '{' offset — json.Decoder accepts one value
+//     and ignores trailing data, so a JSON object buried in thinking-model
+//     reasoning or fenced with prose still parses (live-observed shape);
+//  3. a regex for the text field alone (confidence defaults to 0.5, below
+//     any sane threshold, so a mangled reply routes to manual input).
 func parseOCRJSON(reply string) (string, float64, bool) {
+	type ocrJSON struct {
+		Text       string  `json:"text"`
+		Confidence float64 `json:"confidence"`
+	}
+
 	start := strings.Index(reply, "{")
 	end := strings.LastIndex(reply, "}")
 	if start >= 0 && end > start {
-		var parsed struct {
-			Text       string  `json:"text"`
-			Confidence float64 `json:"confidence"`
+		var parsed ocrJSON
+		if err := json.Unmarshal([]byte(reply[start:end+1]), &parsed); err == nil && parsed.Text != "" {
+			return parsed.Text, clamp01(parsed.Confidence), true
 		}
-		if err := json.Unmarshal([]byte(reply[start:end+1]), &parsed); err == nil {
-			return parsed.Text, clamp01(parsed.Confidence), parsed.Text != ""
+	}
+	for i := 0; i < len(reply); i++ {
+		if reply[i] != '{' {
+			continue
+		}
+		var parsed ocrJSON
+		if err := json.NewDecoder(strings.NewReader(reply[i:])).Decode(&parsed); err == nil && parsed.Text != "" {
+			return parsed.Text, clamp01(parsed.Confidence), true
 		}
 	}
 	if m := textPattern.FindStringSubmatch(reply); m != nil {
