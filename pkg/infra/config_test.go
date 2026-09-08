@@ -243,6 +243,30 @@ func TestDefaultConfig(t *testing.T) {
 			t.Errorf("default VoiceConfig fails Validate: %v", err)
 		}
 	})
+
+	t.Run("photo defaults — boots with no photo: block (Ticket 04)", func(t *testing.T) {
+		if cfg.Photo.ChatModel != "mimo-v2.5" {
+			t.Errorf("Photo.ChatModel = %q, want mimo-v2.5 (vision-capable, same default as voice)",
+				cfg.Photo.ChatModel)
+		}
+		if cfg.Photo.MaxImageBytes != 1048576 {
+			t.Errorf("Photo.MaxImageBytes = %d, want 1048576 (1MiB cap, 1C1G memory guard)",
+				cfg.Photo.MaxImageBytes)
+		}
+		if cfg.Photo.AssembleWait != 2*time.Second {
+			t.Errorf("Photo.AssembleWait = %v, want 2s", cfg.Photo.AssembleWait)
+		}
+		if cfg.Photo.RequestTimeout != 20*time.Second {
+			t.Errorf("Photo.RequestTimeout = %v, want 20s", cfg.Photo.RequestTimeout)
+		}
+		if cfg.Photo.ConfidenceThreshold != 0.6 {
+			t.Errorf("Photo.ConfidenceThreshold = %v, want 0.6", cfg.Photo.ConfidenceThreshold)
+		}
+		// Defaults must satisfy Validate (boots from defaults, D-04).
+		if err := cfg.Photo.Validate(); err != nil {
+			t.Errorf("default PhotoConfig fails Validate: %v", err)
+		}
+	})
 }
 
 // TestLoadConfigDefaults verifies the lowest precedence layer: with no file
@@ -865,10 +889,10 @@ func TestFSRSConfigHasNoSecretFields(t *testing.T) {
 // TestTTSConfigValid asserts that a well-formed TTSConfig passes validation.
 func TestTTSConfigValid(t *testing.T) {
 	cfg := TTSConfig{
-		SessionDir:         "/tmp/tts",
-		MaxRetries:         3,
-		GenerationTimeout:  30 * time.Second,
-		PrefetchCount:      2,
+		SessionDir:        "/tmp/tts",
+		MaxRetries:        3,
+		GenerationTimeout: 30 * time.Second,
+		PrefetchCount:     2,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("TTSConfig.Validate() with valid config returned error: %v", err)
@@ -878,10 +902,10 @@ func TestTTSConfigValid(t *testing.T) {
 // TestTTSConfigEmptySessionDir asserts that empty SessionDir fails validation.
 func TestTTSConfigEmptySessionDir(t *testing.T) {
 	cfg := TTSConfig{
-		SessionDir:         "",
-		MaxRetries:         3,
-		GenerationTimeout:  30 * time.Second,
-		PrefetchCount:      2,
+		SessionDir:        "",
+		MaxRetries:        3,
+		GenerationTimeout: 30 * time.Second,
+		PrefetchCount:     2,
 	}
 	err := cfg.Validate()
 	if err == nil {
@@ -895,10 +919,10 @@ func TestTTSConfigEmptySessionDir(t *testing.T) {
 // TestTTSConfigZeroMaxRetries asserts that MaxRetries=0 fails validation.
 func TestTTSConfigZeroMaxRetries(t *testing.T) {
 	cfg := TTSConfig{
-		SessionDir:         "/tmp/tts",
-		MaxRetries:         0,
-		GenerationTimeout:  30 * time.Second,
-		PrefetchCount:      2,
+		SessionDir:        "/tmp/tts",
+		MaxRetries:        0,
+		GenerationTimeout: 30 * time.Second,
+		PrefetchCount:     2,
 	}
 	err := cfg.Validate()
 	if err == nil {
@@ -912,10 +936,10 @@ func TestTTSConfigZeroMaxRetries(t *testing.T) {
 // TestTTSConfigNegativeMaxRetries asserts that negative MaxRetries fails validation.
 func TestTTSConfigNegativeMaxRetries(t *testing.T) {
 	cfg := TTSConfig{
-		SessionDir:         "/tmp/tts",
-		MaxRetries:         -1,
-		GenerationTimeout:  30 * time.Second,
-		PrefetchCount:      2,
+		SessionDir:        "/tmp/tts",
+		MaxRetries:        -1,
+		GenerationTimeout: 30 * time.Second,
+		PrefetchCount:     2,
 	}
 	err := cfg.Validate()
 	if err == nil {
@@ -929,10 +953,10 @@ func TestTTSConfigNegativeMaxRetries(t *testing.T) {
 // TestTTSConfigZeroGenerationTimeout asserts that GenerationTimeout=0 fails validation.
 func TestTTSConfigZeroGenerationTimeout(t *testing.T) {
 	cfg := TTSConfig{
-		SessionDir:         "/tmp/tts",
-		MaxRetries:         3,
-		GenerationTimeout:  0,
-		PrefetchCount:      2,
+		SessionDir:        "/tmp/tts",
+		MaxRetries:        3,
+		GenerationTimeout: 0,
+		PrefetchCount:     2,
 	}
 	err := cfg.Validate()
 	if err == nil {
@@ -1017,6 +1041,63 @@ func TestVoiceConfigValidate(t *testing.T) {
 	t.Run("defaults pass", func(t *testing.T) {
 		if err := valid.Validate(); err != nil {
 			t.Fatalf("default VoiceConfig Validate() = %v, want nil", err)
+		}
+	})
+}
+
+// TestPhotoConfigHasNoSecretFields guards the D-24 invariant for the photo
+// pipeline: MIMO_API_KEY travels via os.Getenv in the consuming code, never
+// through PhotoConfig (mirrors TestVoiceConfigHasNoSecretFields).
+func TestPhotoConfigHasNoSecretFields(t *testing.T) {
+	secretSubstrings := []string{"secret", "password", "apikey", "token"}
+	typ := reflect.TypeOf(PhotoConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		name := strings.ToLower(field.Name)
+		for _, sub := range secretSubstrings {
+			if strings.Contains(name, sub) {
+				t.Fatalf("D-24 violation: PhotoConfig.%s field name contains "+
+					"secret substring %q — secrets MUST travel through os.Getenv, "+
+					"never through this struct (D-24)",
+					field.Name, sub)
+			}
+		}
+	}
+	if typ.NumField() == 0 {
+		t.Fatal("PhotoConfig has zero fields — reflect guard has nothing to inspect")
+	}
+}
+
+// TestPhotoConfigValidate covers the fail-fast ranges (D-04): every
+// operational field must be non-zero for the service to boot, and the
+// confidence threshold must sit in the open interval (0, 1).
+func TestPhotoConfigValidate(t *testing.T) {
+	valid := DefaultConfig().Photo
+
+	cases := []struct {
+		name string
+		mut  func(c *PhotoConfig)
+	}{
+		{"chatModel empty", func(c *PhotoConfig) { c.ChatModel = "" }},
+		{"maxImageBytes zero", func(c *PhotoConfig) { c.MaxImageBytes = 0 }},
+		{"assembleWait zero", func(c *PhotoConfig) { c.AssembleWait = 0 }},
+		{"requestTimeout zero", func(c *PhotoConfig) { c.RequestTimeout = 0 }},
+		{"confidenceThreshold zero", func(c *PhotoConfig) { c.ConfidenceThreshold = 0 }},
+		{"confidenceThreshold at one", func(c *PhotoConfig) { c.ConfidenceThreshold = 1 }},
+		{"confidenceThreshold above one", func(c *PhotoConfig) { c.ConfidenceThreshold = 1.5 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := valid
+			tc.mut(&c)
+			if err := c.Validate(); err == nil {
+				t.Fatal("Validate() = nil, want error")
+			}
+		})
+	}
+	t.Run("defaults pass", func(t *testing.T) {
+		if err := valid.Validate(); err != nil {
+			t.Fatalf("default PhotoConfig Validate() = %v, want nil", err)
 		}
 	})
 }

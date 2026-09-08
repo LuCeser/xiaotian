@@ -149,6 +149,13 @@ type Config struct {
 	// from the live environment by the consuming code (D-05/D-24, same
 	// invariant TestTTSConfigHasNoSecretFields enforces for TTS).
 	Voice VoiceConfig `json:"voice" mapstructure:"voice"`
+
+	// Photo tunes the photo-answer OCR pipeline (Phase 8.2 / Ticket 04):
+	// streamed photo chunks reassembled into one JPEG, read through the Mimo
+	// vision API, judged against the current dictation word. Shares the
+	// voice pipeline's mimo client (voice.baseURL and the env-only
+	// MIMO_API_KEY), so PhotoConfig carries no endpoint or secret of its own.
+	Photo PhotoConfig `json:"photo" mapstructure:"photo"`
 }
 
 // VoiceConfig tunes the voice-command pipeline (Phase 8.2, Ticket 03). It
@@ -209,6 +216,68 @@ func (c VoiceConfig) Validate() error {
 	if c.RequestTimeout <= 0 {
 		return errors.Wrap(ErrConfigInvalid,
 			fmt.Sprintf("voice.requestTimeout must be > 0, got %v", c.RequestTimeout))
+	}
+	return nil
+}
+
+// PhotoConfig tunes the photo-answer OCR pipeline (Phase 8.2, Ticket 04).
+// It carries only operational fields; the mimo endpoint and MIMO_API_KEY
+// come from the shared voice pipeline wiring (env-only per the D-24
+// no-secret invariant). Every field has a working default so the service
+// boots with NO photo: block in config.yaml.
+type PhotoConfig struct {
+	// ChatModel is the vision-capable LLM used for OCR. Default
+	// "mimo-v2.5" — the official image-understanding examples run this
+	// model, keeping voice/ photo/ on one deployment shape.
+	ChatModel string `json:"chatModel" mapstructure:"chatModel"`
+
+	// MaxImageBytes caps one photo's reassembled JPEG size (memory guard on
+	// the 1C1G VPS — the chunk assembler spoils any upload past the cap).
+	// Default 1048576 (1MiB). The web controller downscales to ~768KiB before
+	// chunking, so 1MiB leaves decode headroom. MUST be > 0.
+	MaxImageBytes int `json:"maxImageBytes" mapstructure:"maxImageBytes"`
+
+	// AssembleWait bounds how long the photo_submit handler waits for the
+	// final streamed chunks after the trigger arrives (image and control
+	// routes are separate worker pools, so the trigger can be dequeued
+	// first). Default 2s. MUST be > 0.
+	AssembleWait time.Duration `json:"assembleWait" mapstructure:"assembleWait"`
+
+	// RequestTimeout bounds the Mimo vision OCR call served under one
+	// photo_submit. Default 20s — a thinking model over an image takes
+	// noticeably longer than the text-only voice classification (15s);
+	// bounded so a wedged upstream cannot pin router workers. MUST be > 0.
+	RequestTimeout time.Duration `json:"requestTimeout" mapstructure:"requestTimeout"`
+
+	// ConfidenceThreshold is the OCR confidence floor: results below it
+	// report low-confidence to the client, which offers the manual-input
+	// fallback prefilled with the best guess. Default 0.6. MUST be in (0, 1)
+	// — 0 would auto-accept garbage, 1 would always demand manual input.
+	ConfidenceThreshold float64 `json:"confidenceThreshold" mapstructure:"confidenceThreshold"`
+}
+
+// Validate enforces the PhotoConfig field ranges (D-04 fail-fast). On any
+// failure it returns an error wrapping ErrConfigInvalid so callers branch
+// with errors.Is(err, infra.ErrConfigInvalid).
+func (c PhotoConfig) Validate() error {
+	if c.ChatModel == "" {
+		return errors.Wrap(ErrConfigInvalid, "photo.chatModel is required")
+	}
+	if c.MaxImageBytes <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("photo.maxImageBytes must be > 0, got %d", c.MaxImageBytes))
+	}
+	if c.AssembleWait <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("photo.assembleWait must be > 0, got %v", c.AssembleWait))
+	}
+	if c.RequestTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("photo.requestTimeout must be > 0, got %v", c.RequestTimeout))
+	}
+	if c.ConfidenceThreshold <= 0 || c.ConfidenceThreshold >= 1 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("photo.confidenceThreshold must be in (0, 1), got %v", c.ConfidenceThreshold))
 	}
 	return nil
 }
@@ -725,16 +794,16 @@ func DefaultConfig() Config {
 			// Dev-safe origins so the service boots with NO ws: block in
 			// config.yaml (P0-1 must-have). Operators MUST set production
 			// origins; the wildcard "*" is rejected at both layers (D-24).
-			AllowedOrigins:     []string{"localhost", "127.0.0.1"},
-			HeartbeatInterval:  30 * time.Second, // == ws.DefaultHeartbeatInterval
-			MaxMessageBytes:    0,                // 0 → ws.NewServer fills 65551
-			ReadBufferSize:     0,                // 0 → ws.NewServer fills 4096
-			WriteBufferSize:    0,                // 0 → ws.NewServer fills 4096
-			HubLimit:           100,              // D-04 / session.maxConcurrent parity
-			HubRegisterBuffer:  32,
+			AllowedOrigins:      []string{"localhost", "127.0.0.1"},
+			HeartbeatInterval:   30 * time.Second, // == ws.DefaultHeartbeatInterval
+			MaxMessageBytes:     0,                // 0 → ws.NewServer fills 65551
+			ReadBufferSize:      0,                // 0 → ws.NewServer fills 4096
+			WriteBufferSize:     0,                // 0 → ws.NewServer fills 4096
+			HubLimit:            100,              // D-04 / session.maxConcurrent parity
+			HubRegisterBuffer:   32,
 			HubUnregisterBuffer: 32,
-			RouteBuffer:        32, // ws.RouterConfig default
-			WorkerConcurrency:  4,  // ws.RouterConfig default
+			RouteBuffer:         32, // ws.RouterConfig default
+			WorkerConcurrency:   4,  // ws.RouterConfig default
 		},
 		Database: DatabaseConfig{
 			Path: "", // empty → database.Open resolves to $HOME/.home-tutor-agent/vocab.db
@@ -773,6 +842,22 @@ func DefaultConfig() Config {
 			AssembleWait: 2 * time.Second,
 			// Bounded per-call so a wedged upstream cannot pin workers.
 			RequestTimeout: 15 * time.Second,
+		},
+		Photo: PhotoConfig{
+			// Vision-capable per the official image-understanding docs; same
+			// deployment shape as the voice intent classifier.
+			ChatModel: "mimo-v2.5",
+			// 1MiB cap — the client re-encodes to ~768KiB max, leaving
+			// headroom. Bounds orphaned-buffer memory on the 1C1G VPS.
+			MaxImageBytes: 1048576,
+			// Same separate-routes rationale as voice.assembleWait.
+			AssembleWait: 2 * time.Second,
+			// Vision thinking over an image runs slower than text-only
+			// classification (voice: 15s); 20s with headroom.
+			RequestTimeout: 20 * time.Second,
+			// Below 0.6 the client offers manual input prefilled with the
+			// best guess rather than auto-judging.
+			ConfidenceThreshold: 0.6,
 		},
 	}
 }
@@ -1075,6 +1160,13 @@ func (c Config) Validate() error {
 		return err
 	}
 
+	// Photo-answer OCR pipeline (Phase 8.2, Ticket 04). PhotoConfig.Validate
+	// enforces field ranges so a malformed HTA_PHOTO_* value fails boot
+	// rather than producing an unbounded photo buffer (D-04 fail-fast).
+	if err := c.Photo.Validate(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1191,6 +1283,14 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"voice.maxRecordingBytes",
 		"voice.assembleWait",
 		"voice.requestTimeout",
+		// Phase 8.2 photo-answer OCR pipeline (Ticket 04). Same Pitfall 6:
+		// every leaf MUST be bound explicitly or HTA_PHOTO_* env vars are
+		// silently inert.
+		"photo.chatModel",
+		"photo.maxImageBytes",
+		"photo.assembleWait",
+		"photo.requestTimeout",
+		"photo.confidenceThreshold",
 		// Phase 7 session FSM per-state timeouts (D-09). Pitfall 6: every leaf
 		// MUST be bound explicitly or HTA_SESSIONTIMEOUT_* env vars are silently
 		// inert. Keys mirror the mapstructure path of SessionTimeoutConfig
