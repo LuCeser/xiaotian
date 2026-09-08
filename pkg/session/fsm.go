@@ -95,12 +95,16 @@ func (s *Session) transition(ev SessionEvent) error {
 				s.repeatPending = true
 				return nil
 			case "submit_answers":
-				// Ticket 05: batch submission from the last word's DICTATING
-				// (student finished writing everything). Index unchanged —
-				// grading reads the whole queue, not the cursor.
-				s.state = database.StateSubmission
-				s.prevState = prevState
-				return nil
+				// Ticket 05: batch submission leaving the last word's
+				// DICTATING (the dictation is fully heard — an early submit
+				// would grade never-dictated words, so earlier words reject).
+				// Index unchanged — grading reads the whole queue, not the
+				// cursor.
+				if s.wordIndex >= len(s.wordQueue)-1 {
+					s.state = database.StateSubmission
+					s.prevState = prevState
+					return nil
+				}
 			}
 		}
 
@@ -159,11 +163,10 @@ func (s *Session) transition(ev SessionEvent) error {
 			s.prevState = prevState
 			return nil
 		}
-
-		// FEEDBACK is terminal — no transitions out (a new session is created
-		// for the next round). Any event in FEEDBACK falls through to the
-		// invalid-transition error below.
 	}
 
+	// FEEDBACK is terminal — no transitions out (a new session is created
+	// for the next round). Any event in FEEDBACK falls through to the
+	// invalid-transition error below.
 	return fmt.Errorf("%w: state=%s event=%v", ErrInvalidTransition, s.state, ev.Type)
 }

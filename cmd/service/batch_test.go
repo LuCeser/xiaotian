@@ -61,8 +61,9 @@ func (f *batchFSRS) snapshot() (map[string]string, int) {
 // bootBatchSession boots the real-Manager stack (voice_fsm_test pattern),
 // starts a two-word session, plays it to the WAITING_PARENT state, and
 // returns the dialed connection + manager + the connID the session is
-// registered under + teardown.
-func bootBatchSession(t *testing.T, fakeFSRS *batchFSRS) (*websocket.Conn, *session.Manager, string, func()) {
+// registered under + teardown. stopAtFirstWord returns instead at word 1's
+// DICTATING (mid-dictation).
+func bootBatchSession(t *testing.T, fakeFSRS *batchFSRS, stopAtFirstWord bool) (*websocket.Conn, *session.Manager, string, func()) {
 	t.Helper()
 	logger := infra.NewNoOpLogger()
 	zapLogger := zap.NewNop()
@@ -127,6 +128,9 @@ func bootBatchSession(t *testing.T, fakeFSRS *batchFSRS) (*websocket.Conn, *sess
 	// LISTENING is dropped by the FSM as invalid.
 	sendControlJSON(t, conn, `{"type":"play_word","params":{"word_id":"苹果"}}`)
 	waitBatchWord(t, manager, connID, database.StateDictating, "苹果")
+	if stopAtFirstWord {
+		return conn, manager, connID, teardown
+	}
 	sendControlJSON(t, conn, `{"type":"next_word","params":{}}`)
 	waitBatchWord(t, manager, connID, database.StateDictating, "香蕉")
 	sendControlJSON(t, conn, `{"type":"next_word","params":{}}`)
@@ -185,7 +189,7 @@ func readErrorUntil(t *testing.T, conn *websocket.Conn, substr string) string {
 // session_complete.
 func TestSubmitAnswers_BatchToFeedback(t *testing.T) {
 	fakeFSRS := &batchFSRS{}
-	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS)
+	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, false)
 	defer teardown()
 
 	sendControlJSON(t, conn, `{"type":"submit_answers","params":{"answers":{"苹果":"苹果","香蕉":"香焦"}}}`)
@@ -242,7 +246,7 @@ func TestSubmitAnswers_BatchToFeedback(t *testing.T) {
 // (classroom semantics: a blank is wrong), the session still completes.
 func TestSubmitAnswers_PartialAnswers(t *testing.T) {
 	fakeFSRS := &batchFSRS{}
-	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS)
+	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, false)
 	defer teardown()
 
 	sendControlJSON(t, conn, `{"type":"submit_answers","params":{"answers":{"苹果":"苹果"}}}`)
@@ -274,7 +278,7 @@ func TestSubmitAnswers_PartialAnswers(t *testing.T) {
 // frames and leave the session in WAITING_PARENT (no grading, no FSRS call).
 func TestSubmitAnswers_Validation(t *testing.T) {
 	fakeFSRS := &batchFSRS{}
-	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS)
+	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, false)
 	defer teardown()
 
 	cases := []struct {
@@ -321,5 +325,27 @@ func TestSubmitAnswers_NoSession(t *testing.T) {
 	}
 	if !strings.Contains(string(payload), "no active session") {
 		t.Errorf("error payload = %s, want no active session", payload)
+	}
+}
+
+// TestSubmitAnswers_EarlyDictatingRejected: submitting while still on a
+// NON-last word rejects (an early submit would grade never-dictated words);
+// the session stays in DICTATING and a later, legal submission path remains.
+func TestSubmitAnswers_EarlyDictatingRejected(t *testing.T) {
+	fakeFSRS := &batchFSRS{}
+	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, true)
+	defer teardown()
+
+	sendControlJSON(t, conn, `{"type":"submit_answers","params":{"answers":{"苹果":"苹果"}}}`)
+	if payload := readErrorUntil(t, conn, "dictation is not finished yet"); payload == "" {
+		t.Fatal("no rejection for an early-DICTATING batch submit")
+	}
+
+	// Untouched: still dictating word 1, no FSRS write.
+	if s := manager.Lookup(connID); s == nil || s.State() != database.StateDictating {
+		t.Error("early submit mutated the session state")
+	}
+	if _, calls := fakeFSRS.snapshot(); calls != 0 {
+		t.Errorf("UpdateRatings calls = %d, want 0", calls)
 	}
 }

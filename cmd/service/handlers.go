@@ -624,14 +624,19 @@ func judgeAnswer(manager *session.Manager, connID, transcript string) (answerJud
 		return answerJudgement{}, "no current word"
 	}
 
-	// Determine language from session config (default to english)
-	lang := "en"
-	if s.Category() == "chinese" || s.Category() == "zh" {
-		lang = "zh"
-	}
-
+	lang := langForCategory(s.Category())
 	correct, rating := compareAnswer(currentWord, transcript, lang)
 	return answerJudgement{Expected: currentWord, Lang: lang, Correct: correct, Rating: rating}, ""
+}
+
+// langForCategory maps a session category onto the compareAnswer language
+// selector (default English — the zh/en split mirrors normalizeForCompare's
+// two normalization regimes).
+func langForCategory(category string) string {
+	if category == "chinese" || category == "zh" {
+		return "zh"
+	}
+	return "en"
 }
 
 // handleSubmitAnswers serves the Ticket 05 batch submission: validate the
@@ -659,11 +664,20 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 		sendErrorFrame(client, "no active session")
 		return nil
 	}
-	// Mirror the FSM's submit_answers edges (DICTATING | WAITING_PARENT) —
-	// the guard keeps the error message helpful; the FSM remains the
-	// authority and would drop the event anyway.
+	// Mirror the FSM's submit_answers edges — the guard keeps the error
+	// message helpful; the FSM remains the authority and would drop the
+	// event anyway. The DICTATING edge is last-word-only (an early submit
+	// would grade never-dictated words); the word-equality mirror below can
+	// false-accept a duplicated queue word, which the FSM's index check then
+	// rejects.
 	switch s.State() {
-	case database.StateDictating, database.StateWaitingParent:
+	case database.StateWaitingParent:
+	case database.StateDictating:
+		words := s.Words()
+		if len(words) == 0 || s.CurrentWord() != words[len(words)-1] {
+			sendErrorFrame(client, "dictation is not finished yet")
+			return nil
+		}
 	default:
 		logger.Warn("submit_answers in wrong state",
 			infra.F("conn_id", connID),
@@ -699,10 +713,7 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 
 	// Grade in queue order so the client can render results 1..N matching
 	// the dictation sequence. Unanswered words grade incorrect/again.
-	lang := "en"
-	if s.Category() == "chinese" || s.Category() == "zh" {
-		lang = "zh"
-	}
+	lang := langForCategory(s.Category())
 	response := batchResultResponse{Type: "batch_result", Total: len(words)}
 	ratings := make(map[string]string, len(words))
 	for _, w := range words {

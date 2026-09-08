@@ -448,19 +448,21 @@ func TestTransition_BatchSubmission(t *testing.T) {
 	}
 
 	invalid := []struct {
-		name string
-		from database.SessionState
-		ev   SessionEvent
+		name  string
+		from  database.SessionState
+		index int
+		ev    SessionEvent
 	}{
-		{"PAUSED plus submit_answers", database.StatePaused, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
-		{"SUBMISSION plus submit_answers (double submit)", database.StateSubmission, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
-		{"FEEDBACK plus submit_answers", database.StateFeedback, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
-		{"IDLE plus batch_graded", database.StateIdle, SessionEvent{Type: EventBatchGraded}},
-		{"DICTATING plus batch_graded (skipped SUBMISSION)", database.StateDictating, SessionEvent{Type: EventBatchGraded}},
+		{"PAUSED plus submit_answers", database.StatePaused, 2, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
+		{"SUBMISSION plus submit_answers (double submit)", database.StateSubmission, 2, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
+		{"FEEDBACK plus submit_answers", database.StateFeedback, 2, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
+		{"DICTATING early submit (not last word)", database.StateDictating, 0, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
+		{"IDLE plus batch_graded", database.StateIdle, 2, SessionEvent{Type: EventBatchGraded}},
+		{"DICTATING plus batch_graded (skipped SUBMISSION)", database.StateDictating, 2, SessionEvent{Type: EventBatchGraded}},
 	}
 	for _, tt := range invalid {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &Session{state: tt.from, wordQueue: queue3, wordIndex: 2}
+			s := &Session{state: tt.from, wordQueue: queue3, wordIndex: tt.index}
 			err := s.transition(tt.ev)
 			if err == nil {
 				t.Fatal("transition() returned nil, want ErrInvalidTransition")

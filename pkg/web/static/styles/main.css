@@ -465,3 +465,20 @@ body {
     transition: none;
   }
 }
+
+/* ---------- Batch mode toggle (Ticket 05) ---------- */
+
+.batch-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 16px;
+  color: #374151;
+  cursor: pointer;
+}
+
+.batch-mode-toggle input[type='checkbox'] {
+  width: 22px;
+  height: 22px;
+}

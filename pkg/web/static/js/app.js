@@ -158,8 +158,10 @@
   // Wire playback end → dictation recognition
   audioController.setOnPlaybackEnd(function () {
     // Ticket 05 batch mode: the student writes on paper through the whole
-    // dictation — no per-word speech capture. The server's per-word dictating
-    // timeout advances the queue; the batch form opens at WAITING_PARENT.
+    // dictation — no per-word speech capture. The queue still advances per
+    // word: _applyWordComplete auto-sends next_word (websocket-client.js),
+    // and the server's dictating timeout is the backstop. The batch form
+    // opens at WAITING_PARENT.
     if (batchModeEnabled()) {
       return;
     }
@@ -298,6 +300,11 @@
         stateManager.subscribe(function (state) {
           try {
             photoButton.update(state);
+            // Ticket 05: in batch mode the per-word photo affordance hides —
+            // answering is the batch form's job at the end (voice COMMANDS
+            // like 暂停/重读 stay available; they are flow controls, not
+            // answers). The controller stays live for the form's 📷 rows.
+            photoHost.style.display = batchModeEnabled() ? 'none' : '';
           } catch (photoUpdateErr) {
             console.error('[app] photo button update error:', photoUpdateErr);
           }

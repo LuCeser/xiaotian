@@ -1316,13 +1316,15 @@
       this.onPickOCR = typeof onPickOCR === 'function' ? onPickOCR : function () {};
 
       this.form = null;
+      this.rowsHost = null;
+      this.submitBtn = null;
       this.inputs = [];
       this.rowMarks = [];
       this.hintText = null;
       this.words = [];
       this.submitted = false;
 
-      this.render([]);
+      this.render();
       this.hide();
     }
 
@@ -1343,7 +1345,7 @@
       this.hintText.setAttribute('role', 'status');
       this.hintText.setAttribute('aria-live', 'polite');
       this.hintText.style.cssText = 'min-height:22px;margin:0;font-size:16px;color:#1d4ed8;';
-      this.hintText.textContent = '把每个词的答案填进来（可以拍照识别），全部填好后一起提交';
+      this.hintText.textContent = BatchSubmissionForm.DEFAULT_HINT;
 
       this.rowsHost = document.createElement('div');
       this.rowsHost.style.cssText = 'display:flex;flex-direction:column;gap:10px;max-height:44vh;overflow-y:auto;width:min(420px, 92vw);';
@@ -1384,7 +1386,7 @@
       this.submitted = false;
       this.submitBtn.disabled = false;
       this.submitBtn.textContent = '✅ 提交全部答案';
-      this.setHint('把每个词的答案填进来（可以拍照识别），全部填好后一起提交');
+      this.setHint(BatchSubmissionForm.DEFAULT_HINT);
 
       var self = this;
       this.rowsHost.textContent = '';
@@ -1415,7 +1417,9 @@
         camBtn.type = 'button';
         camBtn.textContent = '📷';
         camBtn.setAttribute('aria-label', '拍照识别第 ' + (i + 1) + ' 题答案');
-        camBtn.style.cssText = 'min-height:48px;min-width:48px;font-size:20px;border-radius:12px;border:2px solid #86efac;background:#f0fdf4;cursor:pointer;touch-action:manipulation;';
+        // 60px touch target (iOS HIG parity with every other button); the
+        // compact 52px width keeps dense rows readable.
+        camBtn.style.cssText = 'min-height:60px;min-width:52px;font-size:20px;border-radius:12px;border:2px solid #86efac;background:#f0fdf4;cursor:pointer;touch-action:manipulation;';
         camBtn.addEventListener('click', function () {
           self.onPickOCR(i);
         });
@@ -1502,6 +1506,14 @@
      */
     setHint(text) {
       if (this.hintText) this.hintText.textContent = text;
+    }
+
+    /**
+     * The default hint line (shared by render and show so the text lives
+     * once).
+     */
+    static get DEFAULT_HINT() {
+      return '把每个词的答案填进来（可以拍照识别），全部填好后一起提交';
     }
 
     /**
