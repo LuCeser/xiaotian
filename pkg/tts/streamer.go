@@ -18,11 +18,8 @@ type Streamer struct {
 	cache *SessionCache
 	// logger is the structured logger
 	logger infra.Logger
-	// cfg holds TTS configuration (prefetch count, timeouts)
+	// cfg holds TTS configuration (timeouts)
 	cfg infra.TTSConfig
-	// prefetch is an in-memory cache of upcoming words' PCM (D-04 prefetch)
-	prefetch    map[string][]byte
-	prefetchMu  sync.RWMutex
 	// seqCounters holds per-session monotonic audio frame sequence counters
 	// (D-11 fix). Each entry is incremented on every frame send for that
 	// session, replacing the old per-StreamWord reset (currentSeq = i+1).
@@ -48,39 +45,26 @@ func NewStreamer(cache *SessionCache, logger infra.Logger, cfg infra.TTSConfig) 
 		cache:       cache,
 		logger:      logger,
 		cfg:         cfg,
-		prefetch:    make(map[string][]byte),
 		seqCounters: make(map[string]uint32),
 	}, nil
 }
 
 // StreamWord delivers audio for a single word to the given client.
-// It reads PCM bytes from cache (or prefetch), slices them into frames,
+// It reads PCM bytes from cache, slices them into frames,
 // encodes each as a WS binary frame, and sends via Sender.Send with 20ms
 // frame pacing. The startSeq parameter enables D-06 breakpoint resume.
 func (s *Streamer) StreamWord(ctx context.Context, client Sender, sessionID string, wordID string, startSeq uint32) error {
-	// 1. Load PCM bytes: first check prefetch map, then cache
-	var pcm []byte
-
-	// Check prefetch map first (D-04)
-	s.prefetchMu.RLock()
-	if cached, ok := s.prefetch[wordID]; ok {
-		pcm = cached
-		s.prefetchMu.RUnlock()
-	} else {
-		s.prefetchMu.RUnlock()
-		// Not in prefetch, load from disk
-		var err error
-		pcm, err = s.cache.Load(sessionID, wordID)
-		if err != nil {
-			if errors.Is(err, ErrWordNotCached) {
-				s.logger.Warn("tts streamer: word not cached, no audio available",
-					infra.F("component", "tts.streamer"),
-					infra.F("session_id", sessionID),
-					infra.F("word_id", wordID))
-				return ErrWordNotCached
-			}
-			return errors.Wrap(err, "tts streamer: load pcm")
+	// 1. Load PCM bytes from the session cache
+	pcm, err := s.cache.Load(sessionID, wordID)
+	if err != nil {
+		if errors.Is(err, ErrWordNotCached) {
+			s.logger.Warn("tts streamer: word not cached, no audio available",
+				infra.F("component", "tts.streamer"),
+				infra.F("session_id", sessionID),
+				infra.F("word_id", wordID))
+			return ErrWordNotCached
 		}
+		return errors.Wrap(err, "tts streamer: load pcm")
 	}
 
 	// 2. Slice PCM into frames
@@ -158,48 +142,10 @@ func (s *Streamer) StreamWord(ctx context.Context, client Sender, sessionID stri
 	return nil
 }
 
-// PrefetchNext pre-loads upcoming words' PCM into memory (D-04).
-// Best-effort: failures are logged but do not error.
-func (s *Streamer) PrefetchNext(sessionID string, wordIDs []string) {
-	s.prefetchMu.Lock()
-	defer s.prefetchMu.Unlock()
-
-	for _, wordID := range wordIDs {
-		// Skip if already prefetched
-		if _, exists := s.prefetch[wordID]; exists {
-			continue
-		}
-
-		// Load from cache
-		pcm, err := s.cache.Load(sessionID, wordID)
-		if err != nil {
-			// Best-effort: log and continue
-			s.logger.Debug("tts streamer: prefetch skipped",
-				infra.F("word_id", wordID),
-				infra.F("error", err))
-			continue
-		}
-
-		// Store in prefetch map
-		s.prefetch[wordID] = pcm
-	}
-}
-
-// ClearPrefetch removes words from the prefetch map.
-func (s *Streamer) ClearPrefetch(wordIDs ...string) {
-	s.prefetchMu.Lock()
-	defer s.prefetchMu.Unlock()
-
-	for _, wordID := range wordIDs {
-		delete(s.prefetch, wordID)
-	}
-}
-
 // nextSeq returns the next monotonic audio frame sequence number for the given
 // session (D-11). The per-session counter is incremented on every call so frame
 // sequences stay unique across multiple StreamWord calls sharing one sessionID —
-// replacing the old per-StreamWord reset (currentSeq = i+1). Mirrors the
-// PrefetchNext locking discipline.
+// replacing the old per-StreamWord reset (currentSeq = i+1).
 func (s *Streamer) nextSeq(sessionID string) uint32 {
 	s.seqCountersMu.Lock()
 	defer s.seqCountersMu.Unlock()
@@ -210,7 +156,7 @@ func (s *Streamer) nextSeq(sessionID string) uint32 {
 
 // ClearSeqCounter removes the sequence counter entry for a session (D-11
 // teardown hook, RESEARCH Pitfall 5). Called on session exit so seqCounters does
-// not grow unboundedly under the 100-concurrent budget. Mirrors ClearPrefetch.
+// not grow unboundedly under the 100-concurrent budget.
 func (s *Streamer) ClearSeqCounter(sessionID string) {
 	s.seqCountersMu.Lock()
 	defer s.seqCountersMu.Unlock()
