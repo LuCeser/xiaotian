@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 Phase: 08 (Student Web Interface) — EXECUTING (08-07 manual iPad UAT pending real device)
 Plans: 6 of 7 complete
 Status: Phase 08 near-complete; roadmap calibrated 2026-08-23 to speech-recognition-redesign ticket set (single source of truth)
-Last activity: 2026-08-23 — Completed quick task 260823-x38: 补齐 ticket 02 生命周期文档提交清单（issue/STATE/ROADMAP 四处清单补终审+清理提交，ticket 02 文档全链路闭环）
+Last activity: 2026-09-09 — Completed quick task 260909-rih: 验证并提交工作区清理改动（Rating 下线/DictationFinished 收敛/测试辅助重构，commit 2fa555f）
 Next: /gsd-plan-phase 8.2 — ticket 03 语音指令（voice commands via Mimo ASR，source of truth .scratch/speech-recognition-redesign/issues/03-voice-command-recognition-intent.md）；或先做 ticket 02 的 iPad 真机 UAT（<1.5s 延迟实测 + 音频播放/触控交互，验收项 5 未勾）
 
 Progress: [█████▒▒▒▒▒] 53%
@@ -135,6 +135,7 @@ None yet.
 | 260823-urr | 收尾 ticket 02 状态文档（issue 置 done 6/7 勾选 + Completion note；STATE 转向 Phase 8.2/iPad UAT） | 2026-08-23 | 3d2cb6f | complete | [260823-urr-ticket-02](./quick/260823-urr-ticket-02/) |
 | 260823-vn9 | ticket 02 评审终局清理集（update() JSDoc 死分支如实描述/_applyPaused JSDoc 收紧为类型校验/StaleWordCompleteDropped 测试去时序依赖/ROADMAP 8.1 对齐实况） | 2026-08-23 | 4f5c644,0ff7cca | complete | [260823-vn9-ticket-02-code-review-1-ui-components-js](./quick/260823-vn9-ticket-02-code-review-1-ui-components-js/) |
 | 260823-x38 | 补齐 ticket 02 生命周期文档提交清单（issue 02 Status/Completion note 补终审结论、STATE stopped_at×2、ROADMAP 8.1 ticket 行——均补 4f5c644/0ff7cca） | 2026-08-23 | a1ae3f6,f7b92fd,d3b5fa2 | complete | [260823-x38-ticket-02-4f5c644-0ff7cca-roadmap-8-1-e0](./quick/260823-x38-ticket-02-4f5c644-0ff7cca-roadmap-8-1-e0/) |
+| 260909-rih | 验证并提交工作区清理改动：Rating 字段下线、DictationFinished 收敛、测试辅助重构 | 2026-09-09 | 2fa555f | complete | [260909-rih-rating-dictationfinished](./quick/260909-rih-rating-dictationfinished/) |
 
 ### Roadmap Evolution
 
@@ -152,6 +153,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-23
-Stopped at: Ticket 02 implemented + reviewed + fixed (be653a4, 3a1fc59, 799de7c, f8e5e31, d6c046b, 45435bb, 4f5c644, 0ff7cca); ticket 02 status doc closed — awaiting iPad UAT
-Resume file: .scratch/speech-recognition-redesign/issues/03-voice-command-recognition-intent.md (Phase 8.2 source of truth) — next action /gsd-plan-phase 8.2；或先做 iPad UAT（ticket 02 验收项 5）
+Last session: 2026-09-09
+Stopped at: Ticket 05 完成实现+评审+修复+后续协议清理（2fa555f）；工作区清理完毕；仓库卫生总纲 todo 已扩容（833e574）；ticket 06（自动评分）已解除阻塞
+Resume file: .scratch/speech-recognition-redesign/issues/06-automatic-grading-detailed-analysis.md — next action：新会话 /implement ticket 06（或对应 GSD phase）；此前积累的 iPad UAT 项仍待做
