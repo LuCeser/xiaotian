@@ -3,6 +3,7 @@ package tts
 import (
 	"context"
 	"path/filepath"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
@@ -80,7 +81,7 @@ func (g *Generator) GenerateForSession(ctx context.Context, sessionID string, wo
 		// so paths[i] <-> words[i] maps to the bare word the per-word Play
 		// button should play. Kept separate from the full-dictation "fragments"
 		// mode which adds opening/number/closing narration.
-		GenerationMode:  "bare",
+		GenerationMode: "bare",
 	})
 	if err != nil {
 		g.logger.Error("TTS batch generation failed",
@@ -151,7 +152,7 @@ func (g *Generator) GenerateForSession(ctx context.Context, sessionID string, wo
 		}
 
 		// Add to result map
-		result[wordID] = filepath.Join(g.cache.SessionDir(sessionID), wordID+".pcm")
+		result[wordID] = g.cache.Path(sessionID, wordID)
 	}
 
 	// Final validation: all words must have audio. If any word was skipped
@@ -181,6 +182,57 @@ func (g *Generator) GenerateForSession(ctx context.Context, sessionID string, wo
 	}
 
 	return result, nil
+}
+
+// GenerateText synthesizes one arbitrary spoken text — not a dictation word —
+// into the session cache, returning its cache path. This is the spoken-
+// feedback path (Ticket 06): the encouragement sentence is passed as-is and
+// the text itself is the cache key (SessionCache hashes non-identifier keys
+// into safe filenames). language selects the TTS voice profile
+// ("english"|"chinese") — the word pipeline always synthesizes English, so
+// feedback needs its own entry point to speak Chinese sentences.
+//
+// Unlike GenerateForSession this does NOT hard-fail the session on error —
+// callers treat spoken feedback as best-effort.
+func (g *Generator) GenerateText(ctx context.Context, sessionID, text, language string) (string, error) {
+	if strings.TrimSpace(text) == "" {
+		return "", errors.Wrap(ErrTTSGenerationFailed, "tts.generator: empty feedback text")
+	}
+	if language == "" {
+		language = "english"
+	}
+
+	pregenResult, err := g.exec.RunPregenerate(ctx, pybridge.PregenOpts{
+		Words:           []string{text},
+		Language:        language,
+		WordsPerSegment: 1,
+		// "bare" = the text verbatim plus trailing silence, no intro/scene
+		// narration — exactly what a feedback sentence wants.
+		GenerationMode: "bare",
+	})
+	if err != nil {
+		g.logger.Error("TTS feedback generation failed",
+			infra.F("component", "tts.generator"),
+			infra.F("language", language),
+			infra.ErrField(err),
+		)
+		return "", ErrTTSGenerationFailed
+	}
+	if len(pregenResult.Paths) == 0 {
+		g.logger.Error("TTS feedback generation returned no paths",
+			infra.F("component", "tts.generator"),
+		)
+		return "", ErrTTSGenerationFailed
+	}
+
+	pcmData, err := g.retryConvert(ctx, pregenResult.Paths[0])
+	if err != nil {
+		return "", errors.Wrap(err, "tts feedback convert")
+	}
+	if err := g.cache.Store(sessionID, text, pcmData.Samples); err != nil {
+		return "", errors.Wrap(err, "tts feedback cache")
+	}
+	return g.cache.Path(sessionID, text), nil
 }
 
 // retryConvert attempts to convert an MP3 file to PCM with retries.

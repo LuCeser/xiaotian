@@ -1,6 +1,8 @@
 package tts
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,15 +12,15 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
-// identPattern is the allow-list for sessionID and wordID identifiers used to
-// form filesystem paths. Restricted to alphanumeric, hyphen, and underscore so
+// identPattern is the allow-list for sessionID identifiers used to form
+// filesystem paths. Restricted to alphanumeric, hyphen, and underscore so
 // that path separators ("/", "\") and traversal segments ("..") cannot reach
 // filepath.Join (T-06-02 path-traversal mitigation).
 var identPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// validateIdent rejects empty identifiers or any identifier containing
-// characters outside the allow-list. This prevents sessionID/wordID values
-// supplied via control frames from escaping baseDir through path traversal.
+// validateIdent rejects empty sessionIDs or any sessionID containing
+// characters outside the allow-list. This prevents sessionID values supplied
+// via control frames from escaping baseDir through path traversal.
 func validateIdent(name, value string) error {
 	if value == "" {
 		return errors.Errorf("%s cannot be empty", name)
@@ -27,6 +29,24 @@ func validateIdent(name, value string) error {
 		return errors.Errorf("%s contains invalid characters; only alphanumeric, hyphen, and underscore are allowed", name)
 	}
 	return nil
+}
+
+// cacheKey sanitizes a wordID into a filename-safe cache key. WordIDs are
+// CACHE KEYS, not filenames: Chinese dictation words and the Ticket-06
+// feedback sentences are arbitrary text, which the old allow-list rejected
+// (breaking zh sessions at TTS generation). Identifier-shaped keys keep their
+// readable name; everything else is hashed to a fixed-length hex name that no
+// separator or traversal sequence can survive. The "w_" prefix keeps hashed
+// names out of the identifier namespace entirely.
+func cacheKey(wordID string) (string, error) {
+	if wordID == "" {
+		return "", errors.New("wordID cannot be empty")
+	}
+	if identPattern.MatchString(wordID) {
+		return wordID, nil
+	}
+	sum := sha256.Sum256([]byte(wordID))
+	return "w_" + hex.EncodeToString(sum[:16]), nil
 }
 
 // SessionCache manages PCM file storage per D-02/D-08. Each session gets a
@@ -54,19 +74,21 @@ func NewSessionCache(baseDir string, logger infra.Logger) (*SessionCache, error)
 	}, nil
 }
 
-// Store writes pcm bytes to filepath.Join(baseDir, sessionID, wordID+".pcm").
-// Creates parent directories via os.MkdirAll with 0755 permissions. Returns an
-// error wrapping os.WriteFile failures.
+// Store writes pcm bytes to the cache path for (sessionID, wordID) — see
+// cacheKey for how arbitrary-text wordIDs map onto safe filenames. Creates
+// parent directories via os.MkdirAll with 0755 permissions. Returns an error
+// wrapping os.WriteFile failures.
 func (c *SessionCache) Store(sessionID string, wordID string, pcm []byte) error {
 	if err := validateIdent("sessionID", sessionID); err != nil {
 		return err
 	}
-	if err := validateIdent("wordID", wordID); err != nil {
+	key, err := cacheKey(wordID)
+	if err != nil {
 		return err
 	}
 
 	sessionDir := c.SessionDir(sessionID)
-	filePath := filepath.Join(sessionDir, wordID+".pcm")
+	filePath := filepath.Join(sessionDir, key+".pcm")
 
 	// Create parent directories if needed
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
@@ -81,18 +103,19 @@ func (c *SessionCache) Store(sessionID string, wordID string, pcm []byte) error 
 	return nil
 }
 
-// Load reads filepath.Join(baseDir, sessionID, wordID+".pcm"). If the file
-// does not exist (os.IsNotExist), returns ErrWordNotCached. Otherwise returns
-// the file bytes.
+// Load reads the cache path for (sessionID, wordID). If the file does not
+// exist (os.IsNotExist), returns ErrWordNotCached. Otherwise returns the file
+// bytes.
 func (c *SessionCache) Load(sessionID string, wordID string) ([]byte, error) {
 	if err := validateIdent("sessionID", sessionID); err != nil {
 		return nil, err
 	}
-	if err := validateIdent("wordID", wordID); err != nil {
+	key, err := cacheKey(wordID)
+	if err != nil {
 		return nil, err
 	}
 
-	filePath := filepath.Join(c.baseDir, sessionID, wordID+".pcm")
+	filePath := filepath.Join(c.baseDir, sessionID, key+".pcm")
 
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -103,6 +126,18 @@ func (c *SessionCache) Load(sessionID string, wordID string) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// Path returns the on-disk cache path for (sessionID, wordID) — the same path
+// Store writes and Load reads. The generator returns it as its result-map
+// value so callers never rebuild the filename mapping (which would drift from
+// cacheKey).
+func (c *SessionCache) Path(sessionID string, wordID string) string {
+	key, err := cacheKey(wordID)
+	if err != nil {
+		return "" // callers of Path pass through Store-validated wordIDs
+	}
+	return filepath.Join(c.baseDir, sessionID, key+".pcm")
 }
 
 // SessionDir returns filepath.Join(baseDir, sessionID). Used by the generator

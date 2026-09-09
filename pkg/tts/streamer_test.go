@@ -72,10 +72,10 @@ func TestStreamWord_Basic(t *testing.T) {
 	}
 
 	cfg := infra.TTSConfig{
-		SessionDir:       t.TempDir(),
-		MaxRetries:       3,
+		SessionDir:        t.TempDir(),
+		MaxRetries:        3,
 		GenerationTimeout: 120 * time.Second,
-		PrefetchCount:    3,
+		PrefetchCount:     3,
 	}
 
 	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
@@ -146,10 +146,10 @@ func TestStreamWord_StartSeq(t *testing.T) {
 	}
 
 	cfg := infra.TTSConfig{
-		SessionDir:       t.TempDir(),
-		MaxRetries:       3,
+		SessionDir:        t.TempDir(),
+		MaxRetries:        3,
 		GenerationTimeout: 120 * time.Second,
-		PrefetchCount:    3,
+		PrefetchCount:     3,
 	}
 
 	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
@@ -189,10 +189,10 @@ func TestStreamWord_StartSeqPartial(t *testing.T) {
 	}
 
 	cfg := infra.TTSConfig{
-		SessionDir:       t.TempDir(),
-		MaxRetries:       3,
+		SessionDir:        t.TempDir(),
+		MaxRetries:        3,
 		GenerationTimeout: 120 * time.Second,
-		PrefetchCount:    3,
+		PrefetchCount:     3,
 	}
 
 	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
@@ -239,10 +239,10 @@ func TestStreamWord_ContextCancellation(t *testing.T) {
 	}
 
 	cfg := infra.TTSConfig{
-		SessionDir:       t.TempDir(),
-		MaxRetries:       3,
+		SessionDir:        t.TempDir(),
+		MaxRetries:        3,
 		GenerationTimeout: 120 * time.Second,
-		PrefetchCount:    3,
+		PrefetchCount:     3,
 	}
 
 	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
@@ -280,10 +280,10 @@ func TestStreamWord_WordNotCached(t *testing.T) {
 	}
 
 	cfg := infra.TTSConfig{
-		SessionDir:       t.TempDir(),
-		MaxRetries:       3,
+		SessionDir:        t.TempDir(),
+		MaxRetries:        3,
 		GenerationTimeout: 120 * time.Second,
-		PrefetchCount:    3,
+		PrefetchCount:     3,
 	}
 
 	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
@@ -323,10 +323,10 @@ func TestStreamWord_SendBufferFull(t *testing.T) {
 	}
 
 	cfg := infra.TTSConfig{
-		SessionDir:       t.TempDir(),
-		MaxRetries:       3,
+		SessionDir:        t.TempDir(),
+		MaxRetries:        3,
 		GenerationTimeout: 120 * time.Second,
-		PrefetchCount:    3,
+		PrefetchCount:     3,
 	}
 
 	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
@@ -365,10 +365,10 @@ func TestStreamWord_ClientClosing(t *testing.T) {
 	}
 
 	cfg := infra.TTSConfig{
-		SessionDir:       t.TempDir(),
-		MaxRetries:       3,
+		SessionDir:        t.TempDir(),
+		MaxRetries:        3,
 		GenerationTimeout: 120 * time.Second,
-		PrefetchCount:    3,
+		PrefetchCount:     3,
 	}
 
 	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
@@ -400,10 +400,10 @@ func TestStreamer_CompileTimeCheck(t *testing.T) {
 // TestNewStreamer_InvalidArgs tests constructor validation
 func TestNewStreamer_InvalidArgs(t *testing.T) {
 	cfg := infra.TTSConfig{
-		SessionDir:       t.TempDir(),
-		MaxRetries:       3,
+		SessionDir:        t.TempDir(),
+		MaxRetries:        3,
 		GenerationTimeout: 120 * time.Second,
-		PrefetchCount:    3,
+		PrefetchCount:     3,
 	}
 
 	// Nil cache should fail
@@ -447,10 +447,10 @@ func TestStreamWord_SessionMonotonicSeq(t *testing.T) {
 	}
 
 	cfg := infra.TTSConfig{
-		SessionDir:       t.TempDir(),
-		MaxRetries:       3,
+		SessionDir:        t.TempDir(),
+		MaxRetries:        3,
 		GenerationTimeout: 120 * time.Second,
-		PrefetchCount:    3,
+		PrefetchCount:     3,
 	}
 
 	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)
@@ -497,10 +497,10 @@ func TestStreamer_ClearSeqCounter(t *testing.T) {
 	cache.Store("session1", "word1", pcm1)
 
 	cfg := infra.TTSConfig{
-		SessionDir:       t.TempDir(),
-		MaxRetries:       3,
+		SessionDir:        t.TempDir(),
+		MaxRetries:        3,
 		GenerationTimeout: 120 * time.Second,
-		PrefetchCount:    3,
+		PrefetchCount:     3,
 	}
 
 	streamer, err := NewStreamer(cache, infra.NewNoOpLogger(), cfg)

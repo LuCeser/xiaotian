@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -199,9 +200,12 @@ func TestSessionCache_FileNaming_WordsStoredAsWordIDpcm(t *testing.T) {
 	}
 }
 
-// TestSessionCache_RejectsPathTraversal_T0602 verifies T-06-02: Store and Load
-// must reject sessionID/wordID values that could escape baseDir via path
-// traversal ("..", "/", "\", dot segments) or contain disallowed characters.
+// TestSessionCache_RejectsPathTraversal_T0602 verifies T-06-02 for sessionIDs
+// (must reject values that could escape baseDir) and the Ticket-06 evolution
+// of the wordID contract: wordIDs are CACHE KEYS, not filenames — arbitrary
+// text (Chinese words, feedback sentences, slashes) is accepted and stored
+// under a filename-hashed safe name, so traversal via a wordID is neutralized
+// rather than rejected.
 func TestSessionCache_RejectsPathTraversal_T0602(t *testing.T) {
 	baseDir := t.TempDir()
 	cache, err := NewSessionCache(baseDir, nil)
@@ -209,41 +213,81 @@ func TestSessionCache_RejectsPathTraversal_T0602(t *testing.T) {
 		t.Fatalf("NewSessionCache() returned error: %v", err)
 	}
 
-	// Each entry must be rejected by both Store and Load.
-	malicious := []string{
+	// sessionID stays strict: it names the directory directly.
+	maliciousSessions := []string{
 		"..",
 		"../escape",
 		"foo/../bar",
 		"/etc/passwd",
 		"foo/bar",
 		`foo\bar`,
-		"word.pcm",      // dots not in allow-list
-		"session;rm -rf", // shell metacharacters
-		"",               // empty
+		"word.pcm",
+		"session;rm -rf",
+		"",
 		"has space",
 	}
-
-	for _, bad := range malicious {
+	for _, bad := range maliciousSessions {
 		if err := cache.Store(bad, "word", []byte{0x00}); err == nil {
 			t.Errorf("Store(sessionID=%q) returned nil, want validation error", bad)
-		}
-		if err := cache.Store("session-1", bad, []byte{0x00}); err == nil {
-			t.Errorf("Store(wordID=%q) returned nil, want validation error", bad)
 		}
 		if _, err := cache.Load(bad, "word"); err == nil {
 			t.Errorf("Load(sessionID=%q) returned nil, want validation error", bad)
 		}
-		if _, err := cache.Load("session-1", bad); err == nil {
-			t.Errorf("Load(wordID=%q) returned nil, want validation error", bad)
+	}
+
+	// Empty wordIDs are still rejected (nothing to key on).
+	if err := cache.Store("session-1", "", []byte{0x00}); err == nil {
+		t.Error("Store(wordID=\"\") returned nil, want validation error")
+	}
+	if _, err := cache.Load("session-1", ""); err == nil {
+		t.Error("Load(wordID=\"\") returned nil, want validation error")
+	}
+
+	// Arbitrary-text wordIDs: accepted, round-trippable, and stored INSIDE
+	// the session directory — no escape from baseDir regardless of content.
+	tricky := []string{
+		"..",
+		"../escape",
+		"/etc/passwd",
+		`foo\bar`,
+		"word.pcm",
+		"session;rm -rf",
+		"has space",
+		"苹果",
+		"太棒了！5 个词全部正确。",
+	}
+	for _, key := range tricky {
+		pcm := []byte{0x00, 0x01, 0x02}
+		if err := cache.Store("session-1", key, pcm); err != nil {
+			t.Errorf("Store(wordID=%q) returned error: %v", key, err)
+			continue
+		}
+		loaded, err := cache.Load("session-1", key)
+		if err != nil || len(loaded) != len(pcm) {
+			t.Errorf("Load(wordID=%q) = (%d bytes, %v), want round-trip", key, len(loaded), err)
+		}
+		rel, err := filepath.Rel(baseDir, cache.Path("session-1", key))
+		if err != nil {
+			t.Fatalf("Rel() error: %v", err)
+		}
+		if strings.HasPrefix(rel, "..") {
+			t.Errorf("wordID %q escaped baseDir: %s", key, rel)
+		}
+		// Defensive double-check: the file must sit under session-1/.
+		if !strings.HasPrefix(rel, filepath.Join("session-1", "")) {
+			t.Errorf("wordID %q stored outside its session dir: %s", key, rel)
 		}
 	}
 
 	// Sanity: valid identifiers (matching the server-generated session format
-	// and FSRS word strings) are still accepted.
+	// and FSRS word strings) are still accepted and keep readable filenames.
 	valid := []string{"session-1786173984419", "hello", "word_1", "A-B_c9"}
 	for _, good := range valid {
 		if err := cache.Store(good, good, []byte{0x00}); err != nil {
 			t.Errorf("Store(valid=%q) returned unexpected error: %v", good, err)
+		}
+		if got := cache.Path(good, good); filepath.Base(got) != good+".pcm" {
+			t.Errorf("Path(valid=%q) = %q, want readable %q.pcm filename", good, got, good)
 		}
 	}
 }
