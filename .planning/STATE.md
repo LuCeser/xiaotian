@@ -6,9 +6,9 @@ current_phase: 08
 current_phase_name: Student Web Interface
 status: executing
 stopped_at: Ticket 02 (Phase 8.1 scope) implemented be653a4 + dual-axis review fixes 5/5 + final-review cleanup 4f5c644/0ff7cca — done pending iPad UAT; next /gsd-plan-phase 8.2 (ticket 03) or UAT
-last_updated: "2026-08-23T16:04:49.000Z"
-last_activity: 2026-08-23
-last_activity_desc: "Completed quick task 260823-x38: 补齐 ticket 02 生命周期文档提交清单"
+last_updated: "2026-09-09T12:40:00.000Z"
+last_activity: 2026-09-09
+last_activity_desc: "Executed todo 2026-08-09-dead-code-cleanup: FrameSender 接口 + TTS 预取 + ws/doc.go 存根三批删除（73a8500/2fbbd93/c885353），净删约 300 行，测试全绿"
 progress:
   total_phases: 15
   completed_phases: 8
@@ -154,5 +154,5 @@ Items acknowledged and carried forward from previous milestone close:
 ## Session Continuity
 
 Last session: 2026-09-09
-Stopped at: Ticket 05 完成实现+评审+修复+后续协议清理（2fa555f）；工作区清理完毕；仓库卫生总纲 todo 已扩容（833e574）；ticket 06（自动评分）已解除阻塞
+Stopped at: Ticket 05 完成实现+评审+修复+后续协议清理（2fa555f）；死代码清理 todo 执行完毕（73a8500/2fbbd93/c885353，FrameSender/TTS 预取/ws doc.go，净删约 300 行）；ticket 06（自动评分）已解除阻塞
 Resume file: .scratch/speech-recognition-redesign/issues/06-automatic-grading-detailed-analysis.md — next action：新会话 /implement ticket 06（或对应 GSD phase）；此前积累的 iPad UAT 项仍待做
