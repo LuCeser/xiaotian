@@ -112,12 +112,13 @@ type submitAnswersParams struct {
 	Answers map[string]string `json:"answers"`
 }
 
-// batchWordResult is one word's judgment inside a batch_result frame.
+// batchWordResult is one word's judgment inside a batch_result frame. The
+// FSRS rating ("good"/"again") is fully derivable from Correct, so it travels
+// only in the server-side UpdateRatings call — not on the wire.
 type batchWordResult struct {
 	Word    string `json:"word"`
 	Heard   string `json:"heard"` // "" when the word was left unanswered
 	Correct bool   `json:"correct"`
-	Rating  string `json:"rating"` // "good" | "again"
 }
 
 // batchResultResponse is the control frame reply to a submit_answers trigger
@@ -667,14 +668,12 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 	// Mirror the FSM's submit_answers edges — the guard keeps the error
 	// message helpful; the FSM remains the authority and would drop the
 	// event anyway. The DICTATING edge is last-word-only (an early submit
-	// would grade never-dictated words); the word-equality mirror below can
-	// false-accept a duplicated queue word, which the FSM's index check then
-	// rejects.
+	// would grade never-dictated words); DictationFinished is the FSM's own
+	// edge condition, so the mirror cannot drift.
 	switch s.State() {
 	case database.StateWaitingParent:
 	case database.StateDictating:
-		words := s.Words()
-		if len(words) == 0 || s.CurrentWord() != words[len(words)-1] {
+		if !s.DictationFinished() {
 			sendErrorFrame(client, "dictation is not finished yet")
 			return nil
 		}
@@ -714,16 +713,24 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 	// Grade in queue order so the client can render results 1..N matching
 	// the dictation sequence. Unanswered words grade incorrect/again.
 	lang := langForCategory(s.Category())
-	response := batchResultResponse{Type: "batch_result", Total: len(words)}
+	response := batchResultResponse{
+		Type:    "batch_result",
+		Total:   len(words),
+		Results: make([]batchWordResult, 0, len(words)),
+	}
 	ratings := make(map[string]string, len(words))
 	for _, w := range words {
 		heard := p.Answers[w] // "" when unanswered
-		correct, rating := compareAnswer(w, heard, lang)
+		var correct bool
+		var rating string
 		if heard == "" {
+			// Unanswered grades incorrect/again — no compare needed.
 			correct, rating = false, "again"
+		} else {
+			correct, rating = compareAnswer(w, heard, lang)
 		}
 		response.Results = append(response.Results, batchWordResult{
-			Word: w, Heard: heard, Correct: correct, Rating: rating,
+			Word: w, Heard: heard, Correct: correct,
 		})
 		if correct {
 			response.CorrectCount++

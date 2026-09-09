@@ -157,15 +157,15 @@
 
   // Wire playback end → dictation recognition
   audioController.setOnPlaybackEnd(function () {
+    var state = stateManager.getState();
     // Ticket 05 batch mode: the student writes on paper through the whole
     // dictation — no per-word speech capture. The queue still advances per
     // word: _applyWordComplete auto-sends next_word (websocket-client.js),
     // and the server's dictating timeout is the backstop. The batch form
     // opens at WAITING_PARENT.
-    if (batchModeEnabled()) {
+    if (state.batchMode) {
       return;
     }
-    var state = stateManager.getState();
     var wordId = state.currentWordId;
     if (wordId && state.sessionActive && state.status === 'DICTATING') {
       // Small delay to let iOS audio session switch from playback to record
@@ -175,11 +175,26 @@
     }
   });
 
-  // Ticket 05: batch mode toggle (checked at flow time, not session start,
-  // so flipping it mid-session still does the sane thing).
-  function batchModeEnabled() {
-    var toggle = document.getElementById('batch-mode-toggle');
-    return !!(toggle && toggle.checked);
+  // Ticket 05: batch mode toggle. The checkbox is the input device; the
+  // state manager is the authority — the change listener syncs state.batchMode
+  // (and the per-word photo host visibility), and every flow gate reads the
+  // flag from state snapshots. Flipping it mid-session still does the sane
+  // thing. photoHost is assigned later in init but before any change event
+  // can fire.
+  var batchToggle = document.getElementById('batch-mode-toggle');
+  if (batchToggle) {
+    batchToggle.addEventListener('change', function () {
+      var on = batchToggle.checked;
+      stateManager.setState({ batchMode: on });
+      // In batch mode the per-word photo affordance hides — answering is the
+      // batch form's job at the end (voice COMMANDS like 暂停/重读 stay
+      // available; they are flow controls, not answers). The controller
+      // stays live for the form's 📷 rows.
+      if (photoHost) {
+        photoHost.style.display = on ? 'none' : '';
+      }
+    });
+    stateManager.setState({ batchMode: batchToggle.checked });
   }
 
   // ------------------------------------------------------------------
@@ -300,11 +315,6 @@
         stateManager.subscribe(function (state) {
           try {
             photoButton.update(state);
-            // Ticket 05: in batch mode the per-word photo affordance hides —
-            // answering is the batch form's job at the end (voice COMMANDS
-            // like 暂停/重读 stay available; they are flow controls, not
-            // answers). The controller stays live for the form's 📷 rows.
-            photoHost.style.display = batchModeEnabled() ? 'none' : '';
           } catch (photoUpdateErr) {
             console.error('[app] photo button update error:', photoUpdateErr);
           }
@@ -357,8 +367,8 @@
   // auto-ratings subscriber below is ratings-gated and stays inert in batch
   // mode (nothing answered per-word).
   stateManager.subscribe(function (state) {
-    if (!batchForm || !batchModeEnabled()) return;
-    if (state.status === 'WAITING_PARENT' && state.sessionActive && batchForm.form.style.display === 'none') {
+    if (!batchForm || !state.batchMode) return;
+    if (state.status === 'WAITING_PARENT' && state.sessionActive && !batchForm.isVisible()) {
       if (speechController) {
         speechController.stopListening();
       }

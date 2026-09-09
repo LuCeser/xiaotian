@@ -700,6 +700,23 @@ func (s *Session) Words() []string {
 	return words
 }
 
+// onLastWord reports whether the dictation cursor sits on the queue's final
+// word — the edge condition the FSM applies to next_word (→ WAITING_PARENT)
+// and submit_answers. Callers must hold s.mu (transition does).
+func (s *Session) onLastWord() bool {
+	return s.wordIndex >= len(s.wordQueue)-1
+}
+
+// DictationFinished reports whether the dictation has reached its final word
+// — the same edge condition the FSM applies to submit_answers, so
+// handler-side guards mirror the FSM exactly instead of re-encoding it.
+// Thread-safe (takes RLock).
+func (s *Session) DictationFinished() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.onLastWord()
+}
+
 // ---------------------------------------------------------------------------
 // Progress frame emission (08-06: Backend Progress Frame Emission)
 // ---------------------------------------------------------------------------

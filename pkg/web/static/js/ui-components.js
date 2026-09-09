@@ -1392,10 +1392,6 @@
       this.rowsHost.textContent = '';
       this.inputs = [];
       this.rowMarks = [];
-      for (var i = 0; i < this.words.length; i++) {
-        this.inputs.push(null);
-        this.rowMarks.push(null);
-      }
       this.words.forEach(function (word, i) {
         var row = document.createElement('div');
         row.className = 'batch-row';
@@ -1458,7 +1454,7 @@
      * @returns {string[]}
      */
     values() {
-      return this.inputs.map(function (input) { return input ? input.value : ''; });
+      return this.inputs.map(function (input) { return input.value; });
     }
 
     /**

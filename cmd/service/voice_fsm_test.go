@@ -89,21 +89,27 @@ func (r *fsmRepo) GetByID(_ context.Context, _ int64) (database.Session, error) 
 	return database.Session{}, database.ErrSessionNotFound
 }
 
-// readControlUntil reads server frames until a CONTROL frame whose payload
-// contains substr arrives, returning that payload. Fails the test on
+// readFrameUntil reads server frames until one of msgType arrives whose
+// payload contains substr, returning that payload. Fails the test on
 // timeout. Used to skip interleaved frames (voice_result, progress) while
 // waiting for a specific lifecycle frame.
-func readControlUntil(t *testing.T, conn *websocket.Conn, substr string) string {
+func readFrameUntil(t *testing.T, conn *websocket.Conn, msgType ws.MessageType, substr string) string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		header, payload := readFrame(t, conn)
-		if header.MsgType == ws.MsgTypeControl && strings.Contains(string(payload), substr) {
+		if header.MsgType == msgType && strings.Contains(string(payload), substr) {
 			return string(payload)
 		}
 	}
-	t.Fatalf("timed out waiting for control frame containing %q", substr)
+	t.Fatalf("timed out waiting for %d frame containing %q", msgType, substr)
 	return ""
+}
+
+// readControlUntil reads server frames until a CONTROL frame whose payload
+// contains substr arrives (readFrameUntil pinned to control frames).
+func readControlUntil(t *testing.T, conn *websocket.Conn, substr string) string {
+	return readFrameUntil(t, conn, ws.MsgTypeControl, substr)
 }
 
 // TestVoiceCommand_PauseReachesRealFSM is the full-stack loop: mic audio +

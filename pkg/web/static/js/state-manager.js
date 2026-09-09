@@ -64,6 +64,10 @@
       currentWordId: null, // word whose audio frames are currently being accumulated
       // Connection (driven by WebSocketClient.stateCallback).
       connectionStatus: CONN_DISCONNECTED,
+      // Ticket 05: batch mode (client-only preference — the 写完一起交
+      // flow). app.js syncs it from the #batch-mode-toggle checkbox; flow
+      // gates read it from state snapshots instead of polling the DOM.
+      batchMode: false,
       // Last backend error message (string) or null. Surfaced to the UI so a
       // failed session start explains itself instead of looking frozen.
       lastError: null

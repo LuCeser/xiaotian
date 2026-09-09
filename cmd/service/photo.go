@@ -209,16 +209,13 @@ func (ps *photoService) handlePhotoOCR(ctx context.Context, client *ws.Client, _
 	res, jpegLen, err := ps.ocrPhoto(ctx, connID)
 
 	switch {
-	case err == nil:
+	case err == nil || err == ocr.ErrLowConfidence:
+		// Success and low confidence both ship the recognized text — the
+		// form prefills either way; LowConfidence flags the guess so the
+		// form asks the student to double-check it.
 		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
 			Type: "photo_ocr_result", Text: res.Text, Confidence: res.Confidence,
-		})
-
-	case err == ocr.ErrLowConfidence:
-		// The best guess still prefill's the form field; the form marks it.
-		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
-			Type: "photo_ocr_result", Text: res.Text, Confidence: res.Confidence,
-			LowConfidence: true,
+			LowConfidence: err == ocr.ErrLowConfidence,
 		})
 
 	default:

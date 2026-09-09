@@ -169,18 +169,10 @@ func waitBatchState(t *testing.T, manager *session.Manager, connID string, want 
 }
 
 // readErrorUntil reads server frames until an ERROR frame whose payload
-// contains substr, returning that payload (twin of readControlUntil).
+// contains substr, returning that payload (readFrameUntil pinned to error
+// frames — twin of readControlUntil).
 func readErrorUntil(t *testing.T, conn *websocket.Conn, substr string) string {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		header, payload := readFrame(t, conn)
-		if header.MsgType == ws.MsgTypeError && strings.Contains(string(payload), substr) {
-			return string(payload)
-		}
-	}
-	t.Fatalf("timed out waiting for error frame containing %q", substr)
-	return ""
+	return readFrameUntil(t, conn, ws.MsgTypeError, substr)
 }
 
 // TestSubmitAnswers_BatchToFeedback: the full batch spine — submit_answers
@@ -209,11 +201,11 @@ func TestSubmitAnswers_BatchToFeedback(t *testing.T) {
 	if result.Results[0].Word != "苹果" || result.Results[1].Word != "香蕉" {
 		t.Errorf("results not in queue order: %+v", result.Results)
 	}
-	if !result.Results[0].Correct || result.Results[0].Rating != "good" {
-		t.Errorf("苹果 result = %+v, want correct/good", result.Results[0])
+	if !result.Results[0].Correct {
+		t.Errorf("苹果 result = %+v, want correct", result.Results[0])
 	}
-	if result.Results[1].Correct || result.Results[1].Rating != "again" {
-		t.Errorf("香蕉 (typo 香焦) result = %+v, want incorrect/again", result.Results[1])
+	if result.Results[1].Correct {
+		t.Errorf("香蕉 (typo 香焦) result = %+v, want incorrect", result.Results[1])
 	}
 	if result.Results[1].Heard != "香焦" {
 		t.Errorf("heard = %q, want 香焦", result.Results[1].Heard)
@@ -259,8 +251,8 @@ func TestSubmitAnswers_PartialAnswers(t *testing.T) {
 	if result.Total != 2 || result.CorrectCount != 1 {
 		t.Errorf("counts = %d/%d, want 1/2", result.CorrectCount, result.Total)
 	}
-	if result.Results[1].Heard != "" || result.Results[1].Correct || result.Results[1].Rating != "again" {
-		t.Errorf("unanswered word result = %+v, want empty heard / incorrect / again", result.Results[1])
+	if result.Results[1].Heard != "" || result.Results[1].Correct {
+		t.Errorf("unanswered word result = %+v, want empty heard / incorrect", result.Results[1])
 	}
 
 	ratings, _ := fakeFSRS.snapshot()

@@ -73,7 +73,7 @@ func (s *Session) transition(ev SessionEvent) error {
 		case EventControlFrame:
 			switch ev.ControlType {
 			case "next_word":
-				if s.wordIndex >= len(s.wordQueue)-1 {
+				if s.onLastWord() {
 					// Last word exhausted → wait for parent review (D-12: no
 					// UpdateRatings call).
 					s.state = database.StateWaitingParent
@@ -100,7 +100,7 @@ func (s *Session) transition(ev SessionEvent) error {
 				// would grade never-dictated words, so earlier words reject).
 				// Index unchanged — grading reads the whole queue, not the
 				// cursor.
-				if s.wordIndex >= len(s.wordQueue)-1 {
+				if s.onLastWord() {
 					s.state = database.StateSubmission
 					s.prevState = prevState
 					return nil
@@ -124,7 +124,7 @@ func (s *Session) transition(ev SessionEvent) error {
 				return nil
 			case "next_word":
 				// Ticket 02 DICT-07: skip word while paused.
-				if s.wordIndex >= len(s.wordQueue)-1 {
+				if s.onLastWord() {
 					s.state = database.StateWaitingParent
 					s.prevState = prevState
 					return nil
