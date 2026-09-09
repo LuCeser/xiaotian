@@ -129,15 +129,22 @@ func Normalize(word, lang string) string {
 // transpositions, which is how spelling mistakes actually happen
 // ("recieve", "香蕉"→"香焦" style single slips aside).
 func damerau(e, h []rune) int {
-	n, m := len(e), len(h)
-	if n == 0 {
-		return m
+	if len(e) == 0 {
+		return len(h)
 	}
-	if m == 0 {
-		return n
+	if len(h) == 0 {
+		return len(e)
 	}
+	dp := damerauDP(e, h)
+	return dp[len(e)][len(h)]
+}
 
-	// dp[i][j] = distance between e[:i] and h[:j].
+// damerauDP fills the OSA DP matrix: dp[i][j] = distance between e[:i] and
+// h[:j]. Shared by damerau (reads the corner) and alignment (backtraces it)
+// so the distance and the diff can never disagree (dictation words are short;
+// the O(len²) matrix is irrelevant).
+func damerauDP(e, h []rune) [][]int {
+	n, m := len(e), len(h)
 	dp := make([][]int, n+1)
 	for i := range dp {
 		dp[i] = make([]int, m+1)
@@ -169,15 +176,15 @@ func damerau(e, h []rune) int {
 			dp[i][j] = best
 		}
 	}
-	return dp[n][m]
+	return dp
 }
 
 // alignment produces the full char-level diff of the normalized forms by
-// backtracking the same DP damerau builds. Ties break in the fixed priority
-// match > swap > sub > del > ins so the emitted op sequence is deterministic
-// (tests pin exact sequences). For equal inputs the result is all matches —
-// GradeWord uses it for the correct case too, so the report can render any
-// word, right or wrong, the same way.
+// backtracking the same DP matrix damerau builds. Ties break in the fixed
+// priority match > swap > sub > del > ins so the emitted op sequence is
+// deterministic (tests pin exact sequences). For equal inputs the result is
+// all matches — GradeWord uses it for the correct case too, so the report
+// can render any word, right or wrong, the same way.
 func alignment(normE, normH string) []CharOp {
 	e := []rune(normE)
 	h := []rune(normH)
@@ -187,36 +194,7 @@ func alignment(normE, normH string) []CharOp {
 		return nil
 	}
 
-	// Rebuild the DP matrix (cheap: dictation words are short).
-	dp := make([][]int, n+1)
-	for i := range dp {
-		dp[i] = make([]int, m+1)
-		dp[i][0] = i
-	}
-	for j := 0; j <= m; j++ {
-		dp[0][j] = j
-	}
-	for i := 1; i <= n; i++ {
-		for j := 1; j <= m; j++ {
-			cost := 1
-			if e[i-1] == h[j-1] {
-				cost = 0
-			}
-			best := dp[i-1][j-1] + cost
-			if v := dp[i-1][j] + 1; v < best {
-				best = v
-			}
-			if v := dp[i][j-1] + 1; v < best {
-				best = v
-			}
-			if i > 1 && j > 1 && e[i-1] == h[j-2] && e[i-2] == h[j-1] {
-				if v := dp[i-2][j-2] + 1; v < best {
-					best = v
-				}
-			}
-			dp[i][j] = best
-		}
-	}
+	dp := damerauDP(e, h)
 
 	// Backtrace from (n, m), emitting ops in reverse then flipping.
 	var ops []CharOp

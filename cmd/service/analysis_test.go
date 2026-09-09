@@ -202,12 +202,35 @@ func TestApplyHistory_SkipsUnparsable(t *testing.T) {
 	analysis := buildAnalysisResponse("sess-1", report)
 	applyHistory(analysis, []database.SessionResult{
 		{SessionID: 9, CreatedAt: "2026-09-08 10:00:00", Payload: `not json`},
-	})
+	}, "chinese")
 	if len(analysis.Trends) != 1 {
 		t.Errorf("trends = %+v, want only the current entry", analysis.Trends)
 	}
 	if len(analysis.RepeatWords) != 0 {
 		t.Errorf("repeat words = %+v, want none from corrupt history", analysis.RepeatWords)
+	}
+}
+
+// TestApplyHistory_CategoryFilter: English sessions stay out of a Chinese
+// session's trend — mixed word sets would mislead.
+func TestApplyHistory_CategoryFilter(t *testing.T) {
+	report := grading.Analyze([]grading.WordInput{
+		{Word: "香蕉", Heard: "香焦", Judgment: grading.GradeWord("香蕉", "香焦", "zh")},
+	})
+	analysis := buildAnalysisResponse("sess-1", report)
+	applyHistory(analysis, []database.SessionResult{
+		{SessionID: 8, CreatedAt: "2026-09-08 10:00:00", Payload: `{"category":"english","correct_count":5,"total":5,"results":[]}`},
+		{SessionID: 7, CreatedAt: "2026-09-07 10:00:00", Payload: `{"category":"chinese","correct_count":1,"total":2,"results":[{"word":"香蕉","heard":"","correct":false}]}`},
+	}, "chinese")
+	if len(analysis.Trends) != 2 {
+		t.Fatalf("trends = %+v, want the chinese row + current only", analysis.Trends)
+	}
+	if analysis.Trends[0].Date != "09-07" {
+		t.Errorf("kept wrong history row: %+v", analysis.Trends[0])
+	}
+	// The english session's words never reach the repeat counts.
+	if len(analysis.RepeatWords) != 1 || analysis.RepeatWords[0].Word != "香蕉" {
+		t.Errorf("repeat words = %+v, want only 香蕉", analysis.RepeatWords)
 	}
 }
 
@@ -254,13 +277,19 @@ func TestShortDate(t *testing.T) {
 }
 
 func TestPercent(t *testing.T) {
-	if got := percent(0, 0); got != 0 {
-		t.Errorf("percent(0,0) = %d", got)
+	if got := grading.Percent(0, 0); got != 0 {
+		t.Errorf("Percent(0,0) = %d", got)
 	}
-	if got := percent(1, 2); got != 50 {
-		t.Errorf("percent(1,2) = %d", got)
+	if got := grading.Percent(1, 2); got != 50 {
+		t.Errorf("Percent(1,2) = %d", got)
 	}
-	if got := percent(2, 3); got != 67 {
-		t.Errorf("percent(2,3) = %d, want 67", got)
+	if got := grading.Percent(2, 3); got != 67 {
+		t.Errorf("Percent(2,3) = %d, want 67", got)
+	}
+	if !grading.RatingCountsAsCorrect("good") || !grading.RatingCountsAsCorrect("easy") {
+		t.Error("good/easy must count as correct")
+	}
+	if grading.RatingCountsAsCorrect("hard") || grading.RatingCountsAsCorrect("again") {
+		t.Error("hard/again must not count as correct")
 	}
 }

@@ -23,8 +23,9 @@ var (
 
 // SessionResult is one persisted grading outcome: the session row joined
 // with its batch_graded event (Ticket 06). Payload is the raw JSON the
-// grading handler wrote — per-word results, counts, and the diff — so trend
-// queries never re-derive it.
+// grading handler wrote — per-word results (word, heard, correct, near-miss)
+// and counts — so trend queries never re-derive it. The char diff is
+// deliberately absent: it re-derives purely from word+heard.
 type SessionResult struct {
 	SessionID int64
 	CreatedAt string

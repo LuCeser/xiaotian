@@ -4,7 +4,7 @@
 
 **Blocked by:** 05 — Batch Answer Submission Workflow
 
-**Status:** implemented (2026-09-10, commits 4f35ede, 1d63a17, bae4c03, b87bfe2, a8c75c6, c7bce18, 6ce1fb6; review pending)
+**Status:** done (2026-09-10, commits 4f35ede, 1d63a17, bae4c03, b87bfe2, a8c75c6, c7bce18, 6ce1fb6; review 修复见下)
 
 - [x] System performs character-level comparison between submitted and correct answers — pkg/grading.GradeWord：归一化（en/zh 两套，自 handlers.go 迁入）后 Damerau-Levenshtein（含相邻换位）对齐，输出完整 diff（match/sub/del/ins/swap 逐字符操作）+ 距离；blank 不比对
 - [x] Grading algorithm handles minor spelling variations and common mistakes — 归一化吃掉大小写/标点/空格；near-miss（距离≤1 且词长≥2：单错字/漏字/多字/换位）仍判错不涨分，但 FSRS 评 "hard" 而非 "again"，报告标「只差一点」；单字词不适用（错=全错）
@@ -21,3 +21,4 @@
 - 架构备注：pkg/grading 为纯函数判分权威（compareAnswer/normalizeForCompare 已删除），handler 层只做编排；answer_result（语音/拍照单词路径）也带上 near_miss+diff；analysis_result 在 batch_result 之后、session_complete 之前发出；持久化与会话事件走既有 sessions/session_events 表（无新表）；趋势上限 10（常量，不设配置项）
 - 范围取舍：逐词模式的历史不持久化（该路径 FSRS 即时调度、家长现场看）；trends 为文字列表非图表（儿童 UI 从简）；SUBMISSION 瞬态不变
 - 遗留 UAT：真实 iPad 全流程（含语音鼓励外放、报告滚动）；真实中文会话的 TTS 反馈音色（chinese 声音档）；zh 词表 TTS 路径此前未被真实执行过——本次修复后需真机确认
+- 双轴 code review（2026-09-10，Standards + Spec 并行子代理，7750bba...HEAD）：Spec 7 项 finding——3 修（趋势重复计入本场：历史查询先于持久化，本场 batch_graded 行不再回流自身趋势/重复错词计数；趋势混学科：applyHistory 按 category 过滤历史行（英语会话不进中文趋势线，附测试）；客户端 live-play 扩到 SUBMISSION 态，收窄 TTS 竞态）、4 记录（answer_result 的 near_miss/diff 已上 wire 但逐词反馈卡未渲染=前瞻布线；逐词路径无可视化报告（只有语音）——本票重心是批量判分流；家长查看端未建（存储即交付，读侧留给后续票）；near-miss→hard 有调度风险（非成功回忆拉长间隔）但作为差异化档保留，UAT 观察）。Standards 4 项 + 5 smell——3 修（T-06-02 威胁登记表更新 cacheKey 中性化语义；SessionResult 陈旧注释（"the diff"）；D-06 偏离在 RecordGradedResult 注释中显式记录：handler goroutine 同步写 vs 事件循环池写，刻意为之保证行先于应答落库）、4 清理（Damerau DP 提取 damerauDP 共享（距离与对齐永不漂移）；百分比算法三处归一为 grading.Percent；rating→correct 知识移入 grading.RatingCountsAsCorrect（handler 不再 envy）；spec 代理所称 package.json version bump 不实，仅 test 链追加）。D-02 RLock 不一致判定为接受（runCtx 写侧无锁，读侧加锁是表演；注册表锁链已注释）。修复后全 12 包 + npm 复测全绿

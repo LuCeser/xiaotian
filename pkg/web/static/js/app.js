@@ -599,10 +599,11 @@
         var sequence = view.getUint32(2, false); // Big-endian sequence at offset 2
         var payload = new Uint8Array(data, 16); // Skip 16-byte header
         var state = stateManager.getState();
-        // Ticket 06: in FEEDBACK the streaming audio is the spoken
-        // encouragement — no current word, no word_complete trigger, so it
-        // plays live as it arrives instead of accumulating.
-        if (state.status === 'FEEDBACK') {
+        // Ticket 06: in FEEDBACK (or the SUBMISSION pass-through on the way
+        // there) the streaming audio is the spoken encouragement — no current
+        // word, no word_complete trigger, so it plays live as it arrives
+        // instead of accumulating.
+        if (state.status === 'FEEDBACK' || state.status === 'SUBMISSION') {
           audioController.playLiveFrame(payload, sequence);
           return;
         }

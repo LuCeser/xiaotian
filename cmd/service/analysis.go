@@ -115,8 +115,10 @@ func marshalStoredResult(category string, inputs []grading.WordInput, report gra
 // their trend entries (oldest first, current stays last) and flags today's
 // wrong words that were also missed before. Past rows are newest-first from
 // ListRecentResults; unparsable payloads are skipped — history is an
-// enhancement, never a gate.
-func applyHistory(analysis *analysisResultResponse, past []database.SessionResult) {
+// enhancement, never a gate. Rows from a DIFFERENT category are skipped too:
+// an English session and a Chinese session are different word sets, and one
+// trend line over both would mislead.
+func applyHistory(analysis *analysisResultResponse, past []database.SessionResult, category string) {
 	if analysis == nil || len(past) == 0 {
 		return
 	}
@@ -128,6 +130,9 @@ func applyHistory(analysis *analysisResultResponse, past []database.SessionResul
 		if err := json.Unmarshal([]byte(row.Payload), &stored); err != nil {
 			continue
 		}
+		if stored.Category != category {
+			continue
+		}
 		for _, w := range stored.Results {
 			if !w.Correct {
 				missCount[w.Word]++
@@ -137,7 +142,7 @@ func applyHistory(analysis *analysisResultResponse, past []database.SessionResul
 			Date:    shortDate(row.CreatedAt),
 			Correct: stored.CorrectCount,
 			Total:   stored.Total,
-			Score:   percent(stored.CorrectCount, stored.Total),
+			Score:   grading.Percent(stored.CorrectCount, stored.Total),
 		})
 	}
 
@@ -168,13 +173,4 @@ func shortDate(createdAt string) string {
 		return createdAt[5:10]
 	}
 	return createdAt
-}
-
-// percent is the score arithmetic shared by history entries (0 for empty
-// sessions; rounded like grading.Analyze).
-func percent(correct, total int) int {
-	if total <= 0 {
-		return 0
-	}
-	return int(float64(correct)*100/float64(total) + 0.5)
 }

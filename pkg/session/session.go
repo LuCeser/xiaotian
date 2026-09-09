@@ -569,11 +569,17 @@ func (s *Session) SpeakFeedback(text, language string) {
 
 // RecordGradedResult persists a batch_graded event (JSON payload — per-word
 // results + counts, see cmd/service/analysis.go) against the session's audit
-// row so trends and parent review can query it later (Ticket 06). Synchronous
-// single SQLite insert on the caller's goroutine — the same weight class as
-// the FSRS UpdateRatings call the grading handler already makes. Best-effort
-// contract: the caller logs failures and continues, the student's grading
-// result is already delivered.
+// row so trends and parent review can query it later (Ticket 06).
+//
+// Deliberate deviation from the auditEvent pattern (D-06/Pitfall 5): the
+// audit wrappers route through the WorkerPool because the EVENT LOOP must
+// never block on SQLite. This method is called from the WS handler goroutine
+// (a router worker), not the event loop, and is a synchronous single insert —
+// the same weight class as the FSRS UpdateRatings subprocess call the grading
+// handler already makes. Synchronous on purpose: the write lands before the
+// connection answers, so the row exists by the time any later history query
+// runs. Best-effort contract: the caller logs failures and continues, the
+// student's grading result is already delivered.
 func (s *Session) RecordGradedResult(ctx context.Context, payload string) error {
 	if s.repo == nil {
 		return nil // audit-less mode (tests) — nothing to write to

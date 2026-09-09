@@ -79,7 +79,7 @@ func Analyze(words []WordInput) SessionReport {
 	}
 
 	if r.Total > 0 {
-		r.Score = int(math.Round(float64(r.CorrectCount) * 100 / float64(r.Total)))
+		r.Score = Percent(r.CorrectCount, r.Total)
 	}
 	r.Patterns = sessionPatterns(blanks, nearMisses, missingTails, len(r.Errors))
 	r.Suggestions = suggestions(r.Errors)
@@ -207,6 +207,23 @@ func suggestions(errors []WordError) []string {
 		out = append(out, "没写出来的词多听几遍音频："+list(blank))
 	}
 	return out
+}
+
+// Percent is the score arithmetic every caller shares (0 for empty sessions;
+// rounded half-up). Exported because the per-word completion path computes a
+// score from a ratings map, not from Analyze inputs.
+func Percent(correct, total int) int {
+	if total <= 0 {
+		return 0
+	}
+	return int(math.Round(float64(correct) * 100 / float64(total)))
+}
+
+// RatingCountsAsCorrect reports whether an FSRS rating verb represents a
+// successfully recalled word ("good"/"easy" yes; "hard" is a near-miss and
+// "again" a miss). The knowledge lives here so handlers never re-derive it.
+func RatingCountsAsCorrect(rating string) bool {
+	return rating == "good" || rating == "easy"
 }
 
 // Encouragement is the sentence spoken aloud (and shown) at grading time —

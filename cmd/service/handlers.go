@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 	"sync/atomic"
 
@@ -500,15 +499,11 @@ func handleSubmitReview(ctx context.Context, client *ws.Client, params json.RawM
 	if s := manager.Lookup(clientConnID(client)); s != nil {
 		correct, total := 0, len(p.Ratings)
 		for _, r := range p.Ratings {
-			if r == "good" || r == "easy" {
+			if grading.RatingCountsAsCorrect(r) {
 				correct++
 			}
 		}
-		score := 0
-		if total > 0 {
-			score = int(math.Round(float64(correct) * 100 / float64(total)))
-		}
-		s.SpeakFeedback(grading.Encouragement(score, correct, total), "chinese")
+		s.SpeakFeedback(grading.Encouragement(grading.Percent(correct, total), correct, total), "chinese")
 	}
 
 	// Push EventParentReview to drive WAITING_PARENT→FEEDBACK transition, which triggers session_complete frame.
@@ -777,7 +772,19 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 
 	// Ticket 06: analysis report + persistence + trends + spoken feedback.
 	// All best-effort after the batch_result — grading itself already landed.
+	// History is queried BEFORE persisting this round: the current session's
+	// row must not re-enter its own trend list or repeat-miss counts.
 	report := grading.Analyze(inputs)
+	analysis := buildAnalysisResponse(s.ID(), report)
+	if past, err := manager.RecentResults(ctx, trendHistoryLimit); err != nil {
+		// History is an enhancement, not a gate — the report ships without it.
+		logger.Warn("graded history query failed", infra.ErrField(err))
+	} else {
+		applyHistory(analysis, past, s.Category())
+	}
+	if err := sendControlFrame(client, ws.MsgTypeControl, analysis); err != nil {
+		logger.Warn("failed to send analysis_result", infra.ErrField(err))
+	}
 	if payload, err := marshalStoredResult(s.Category(), inputs, report); err == nil {
 		if err := s.RecordGradedResult(ctx, payload); err != nil {
 			logger.Warn("graded result not persisted",
@@ -787,16 +794,6 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 		}
 	} else {
 		logger.Warn("stored result marshal failed", infra.ErrField(err))
-	}
-	analysis := buildAnalysisResponse(s.ID(), report)
-	if past, err := manager.RecentResults(ctx, trendHistoryLimit); err != nil {
-		// History is an enhancement, not a gate — the report ships without it.
-		logger.Warn("graded history query failed", infra.ErrField(err))
-	} else {
-		applyHistory(analysis, past)
-	}
-	if err := sendControlFrame(client, ws.MsgTypeControl, analysis); err != nil {
-		logger.Warn("failed to send analysis_result", infra.ErrField(err))
 	}
 
 	// Server-side FSRS submission (one batched call, mirrors what the client
