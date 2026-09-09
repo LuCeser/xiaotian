@@ -8,6 +8,6 @@
 // The package deliberately has no dependency on pkg/mimo: the LLM classifier
 // takes a Chatter func seam and the pipeline a Transcriber func seam, and
 // the handler layer adapts the mimo client to both, mirroring the
-// FrameSender/SessionStreamer narrow-seam pattern used by pkg/session
-// (D-05).
+// TTSSessionGenerator/SessionStreamer narrow-seam pattern used by
+// pkg/session (D-05).
 package voice

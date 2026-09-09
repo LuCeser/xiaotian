@@ -28,7 +28,7 @@ const eventBufferSize = 32
 
 // SessionStreamer is the subset of *tts.Streamer the Session uses for D-13
 // word-audio streaming. *tts.Streamer satisfies it structurally. Defined as a
-// narrow seam so tests can inject a fake streamer (mirrors FrameSender, D-05).
+// narrow seam so tests can inject a fake streamer (mirrors tts.Sender, D-05).
 type SessionStreamer interface {
 	// StreamWord delivers audio for a single word to the given client. The
 	// Session owns this call per D-13 option B (server-side side channel).
@@ -42,7 +42,7 @@ type SessionStreamer interface {
 
 // SessionHub is the subset of *ws.Hub the Session uses for lifecycle cleanup.
 // *ws.Hub satisfies it structurally. Defined as a narrow seam so tests can
-// inject a fake hub (mirrors FrameSender, D-05).
+// inject a fake hub (mirrors TTSSessionGenerator, D-05).
 type SessionHub interface {
 	// Unregister removes the client from the hub. Non-blocking, idempotent
 	// per CR-01 (checks closed-flag before sending to the channel).
@@ -85,7 +85,7 @@ type Session struct {
 	lockUnit     string
 
 	// --- Service dependencies ---
-	client   *ws.Client // the FrameSender target + hub identity (D-05)
+	client   *ws.Client // frame-send target + hub identity (D-05)
 	fsrsSvc  fsrs.FSRSService
 	gen      TTSSessionGenerator // *tts.Generator satisfies structurally
 	streamer SessionStreamer     // *tts.Streamer satisfies structurally

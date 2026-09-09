@@ -71,15 +71,4 @@ func TestTypes(t *testing.T) {
 			}
 		}
 	})
-
-	t.Run("FrameSender_satisfied_by_fake", func(t *testing.T) {
-		var _ session.FrameSender = (*fakeFrameSender)(nil) // compile-time
-		s := &fakeFrameSender{}
-		if err := s.Send([]byte("hello")); err != nil {
-			t.Fatalf("Send returned error: %v", err)
-		}
-		if got := len(s.Sent()); got != 1 {
-			t.Fatalf("expected 1 captured message, got %d", got)
-		}
-	})
 }

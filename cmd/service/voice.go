@@ -30,9 +30,9 @@ const voiceBufferIdleTTL = 30 * time.Second
 const settlePollInterval = 50 * time.Millisecond
 
 // sessionPusher is the narrow seam voiceService needs from the session
-// Manager (mirrors session.FrameSender, D-05): push a control event onto the
-// connection's session. *session.Manager satisfies it structurally, tests
-// inject a recording fake.
+// Manager (mirrors session.TTSSessionGenerator, D-05): push a control event
+// onto the connection's session. *session.Manager satisfies it structurally,
+// tests inject a recording fake.
 type sessionPusher interface {
 	Push(connID string, ev session.SessionEvent)
 }

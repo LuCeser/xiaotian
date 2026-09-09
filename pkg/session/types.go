@@ -9,20 +9,10 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 )
 
-// FrameSender is the interface for sending binary WebSocket frames to a client
-// (extracted from ws.Client.Send so pkg/session need not depend on the send
-// contract from pkg/ws — mirroring the tts.Sender import-cycle seam, D-05).
-// *ws.Client satisfies this interface structurally.
-type FrameSender interface {
-	// Send sends a single binary WebSocket message. Returns an error if the
-	// send buffer is full or the connection is closed.
-	Send(msg []byte) error
-}
-
 // TTSSessionGenerator is the subset of *tts.Generator the Session uses for its
 // lifecycle (batch-generate at init, cleanup at exit). *tts.Generator satisfies
 // this interface structurally. Defined as a narrow seam so tests can inject a
-// fake generator (mirrors FrameSender, D-05/D-01) without constructing a real
+// fake generator (mirrors tts.Sender, D-05/D-01) without constructing a real
 // *tts.Generator with private pybridge internals.
 type TTSSessionGenerator interface {
 	// GenerateForSession batch-generates PCM audio for the word list.

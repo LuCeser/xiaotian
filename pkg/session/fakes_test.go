@@ -152,31 +152,6 @@ func (r *fakeSessionRepository) AppendEventCount() int {
 
 var _ database.SessionRepository = (*fakeSessionRepository)(nil)
 
-// fakeFrameSender implements session.FrameSender for tests: captures sent
-// messages + a configurable error.
-type fakeFrameSender struct {
-	mu      sync.Mutex
-	sent    [][]byte
-	sendErr error
-}
-
-func (s *fakeFrameSender) Send(msg []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sent = append(s.sent, msg)
-	return s.sendErr
-}
-
-func (s *fakeFrameSender) Sent() [][]byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([][]byte, len(s.sent))
-	copy(out, s.sent)
-	return out
-}
-
-var _ session.FrameSender = (*fakeFrameSender)(nil)
-
 // fakeTTSGenerator implements session.TTSSessionGenerator for tests: configurable
 // error from GenerateForSession (for the D-10 init-path unlock test) + call
 // counter. *tts.Generator satisfies the interface structurally in production.
