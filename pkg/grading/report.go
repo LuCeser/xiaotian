@@ -15,8 +15,9 @@ type WordInput struct {
 }
 
 // WordError is one wrong word's report entry: what happened and a concrete
-// Chinese hint for the student. Ops carries only the mismatch ops (no matches)
-// so the UI can highlight without filtering.
+// Chinese hint for the student. Ops is the FULL char alignment (matches
+// included) — the UI renders the whole word with matches normal and
+// mismatches highlighted, which needs the positional context.
 type WordError struct {
 	Word     string   `json:"word"`
 	Heard    string   `json:"heard"`
@@ -60,11 +61,7 @@ func Analyze(words []WordInput) SessionReport {
 			Heard:    w.Heard,
 			Blank:    w.Judgment.Blank,
 			NearMiss: w.Judgment.NearMiss,
-		}
-		for _, op := range w.Judgment.Diff {
-			if op.Kind != OpMatch {
-				we.Ops = append(we.Ops, op)
-			}
+			Ops:      w.Judgment.Diff,
 		}
 		we.Hint = wordHint(we)
 		r.Errors = append(r.Errors, we)
@@ -117,7 +114,7 @@ func wordHint(we WordError) string {
 	if len(subs) > 0 {
 		parts = append(parts, strings.Join(subs, "、"))
 	}
-	if allKind(we.Ops, OpSwap) {
+	if hasKind(we.Ops, OpSwap) {
 		parts = append(parts, "顺序颠倒了")
 	}
 	hint := strings.Join(parts, "；")
@@ -127,13 +124,16 @@ func wordHint(we WordError) string {
 	return hint
 }
 
-func allKind(ops []CharOp, kind string) bool {
+// hasKind reports whether any op in the (full) alignment has the kind — the
+// hint templates describe what went wrong, so one swap anywhere in the word
+// is "顺序颠倒了".
+func hasKind(ops []CharOp, kind string) bool {
 	for _, op := range ops {
-		if op.Kind != kind {
-			return false
+		if op.Kind == kind {
+			return true
 		}
 	}
-	return len(ops) > 0
+	return false
 }
 
 // isMissingTail reports whether the answer is the word minus its ending — the

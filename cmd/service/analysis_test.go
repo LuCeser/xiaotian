@@ -89,8 +89,9 @@ func TestSubmitAnswers_AnalysisResult(t *testing.T) {
 	if !e.NearMiss || e.Heard != "香焦" {
 		t.Errorf("error flags = %+v", e)
 	}
-	if len(e.Ops) != 1 || e.Ops[0].Kind != grading.OpSub || e.Ops[0].Expected != "蕉" || e.Ops[0].Heard != "焦" {
-		t.Errorf("ops = %+v, want one 蕉→焦 substitution", e.Ops)
+	if len(e.Ops) != 2 || e.Ops[0].Kind != grading.OpMatch || e.Ops[1].Kind != grading.OpSub ||
+		e.Ops[1].Expected != "蕉" || e.Ops[1].Heard != "焦" {
+		t.Errorf("ops = %+v, want full alignment [match 香, sub 蕉→焦]", e.Ops)
 	}
 	if !strings.Contains(e.Hint, "只差一点") || !strings.Contains(e.Hint, "「蕉」写成了「焦」") {
 		t.Errorf("hint = %q", e.Hint)

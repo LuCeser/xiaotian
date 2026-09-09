@@ -46,7 +46,9 @@ func TestAnalyze_ScoreAndErrors(t *testing.T) {
 }
 
 // Per-word hints: blank / substitution / missing / extra / transposition /
-// near-miss prefix. Errors carry only the mismatch ops.
+// near-miss prefix. Ops is the FULL alignment — matches included (the UI
+// renders whole words with highlights), so the op count equals the longer
+// normalized side.
 func TestAnalyze_WordHints(t *testing.T) {
 	cases := []struct {
 		name, word, heard, lang string
@@ -68,10 +70,12 @@ func TestAnalyze_WordHints(t *testing.T) {
 			if !strings.Contains(r.Errors[0].Hint, tc.wantSub) {
 				t.Errorf("hint = %q, want it to contain %q", r.Errors[0].Hint, tc.wantSub)
 			}
-			for _, op := range r.Errors[0].Ops {
-				if op.Kind == OpMatch {
-					t.Errorf("error ops contain a match: %+v", r.Errors[0].Ops)
+			if r.Errors[0].Blank {
+				if r.Errors[0].Ops != nil {
+					t.Errorf("blank ops = %+v, want nil", r.Errors[0].Ops)
 				}
+			} else if len(r.Errors[0].Ops) == 0 {
+				t.Errorf("ops empty for %q→%q", tc.word, tc.heard)
 			}
 		})
 	}
