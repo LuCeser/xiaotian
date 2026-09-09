@@ -39,6 +39,10 @@ func (r *trackingRepo) GetByID(ctx context.Context, id int64) (database.Session,
 	return database.Session{}, nil
 }
 
+func (r *trackingRepo) ListRecentResults(ctx context.Context, limit int) ([]database.SessionResult, error) {
+	return nil, nil
+}
+
 var _ database.SessionRepository = (*trackingRepo)(nil)
 
 // TestAuditViaWorkerPool proves D-06 (audit writes flow through pool.Submit,

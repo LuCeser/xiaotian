@@ -83,6 +83,7 @@ type fakeSessionRepository struct {
 
 	sessions map[int64]database.Session
 	nextID   int64
+	results  []database.SessionResult
 
 	createCnt      int
 	updateStateCnt int
@@ -132,6 +133,17 @@ func (r *fakeSessionRepository) GetByID(ctx context.Context, id int64) (database
 		return s, nil
 	}
 	return database.Session{}, database.ErrSessionNotFound
+}
+
+// results feeds ListRecentResults (Ticket 06 trends); tests that don't care
+// leave it empty.
+func (r *fakeSessionRepository) ListRecentResults(ctx context.Context, limit int) ([]database.SessionResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 || len(r.results) == 0 {
+		return nil, nil
+	}
+	return r.results, nil
 }
 
 func (r *fakeSessionRepository) CreateCount() int {

@@ -95,6 +95,9 @@ func (r *fsmRepo) AppendEvent(_ context.Context, _ database.SessionEvent) error 
 func (r *fsmRepo) GetByID(_ context.Context, _ int64) (database.Session, error) {
 	return database.Session{}, database.ErrSessionNotFound
 }
+func (r *fsmRepo) ListRecentResults(_ context.Context, _ int) ([]database.SessionResult, error) {
+	return nil, nil
+}
 
 // readFrameUntil reads server frames until one of msgType arrives whose
 // payload contains substr, returning that payload. Fails the test on

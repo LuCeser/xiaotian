@@ -21,6 +21,16 @@ var (
 	ErrEmptyConnectionID = errors.New("session: connection_id must not be empty")
 )
 
+// SessionResult is one persisted grading outcome: the session row joined
+// with its batch_graded event (Ticket 06). Payload is the raw JSON the
+// grading handler wrote — per-word results, counts, and the diff — so trend
+// queries never re-derive it.
+type SessionResult struct {
+	SessionID int64
+	CreatedAt string
+	Payload   string
+}
+
 // SessionRepository manages Go-owned session bookkeeping tables
 // (sessions, session_events). Write-separation contract (D-03-a):
 // Python never writes to these tables; SessionRepository is the sole
@@ -42,6 +52,11 @@ type SessionRepository interface {
 	// GetByID returns the session with the given database ID.
 	// Returns ErrSessionNotFound when no session exists.
 	GetByID(ctx context.Context, id int64) (Session, error)
+
+	// ListRecentResults returns up to limit graded sessions, newest first,
+	// each carrying its batch_graded event payload (Ticket 06 trends and
+	// repeat-miss analysis). limit <= 0 returns an empty slice, no error.
+	ListRecentResults(ctx context.Context, limit int) ([]SessionResult, error)
 }
 
 // Compile-time interface satisfaction check (D-43, mirrors pybridge pattern).
@@ -181,4 +196,50 @@ func (r *sqliteSessionRepository) AppendEvent(ctx context.Context, event Session
 	}
 
 	return nil
+}
+
+// ListRecentResults returns up to limit sessions carrying a batch_graded
+// event, newest first (highest event id first — insertion order within and
+// across sessions). Ungraded sessions never appear. limit <= 0 short-circuits
+// to an empty slice without touching the database.
+func (r *sqliteSessionRepository) ListRecentResults(ctx context.Context, limit int) ([]SessionResult, error) {
+	if limit <= 0 {
+		return []SessionResult{}, nil
+	}
+
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT s.id, s.created_at, e.payload
+		FROM sessions s
+		JOIN session_events e ON e.session_id = s.id
+		WHERE e.event_type = 'batch_graded'
+		ORDER BY e.id DESC
+		LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		r.logger.Error("session list recent results failed",
+			infra.F("component", "database/session_repo"),
+			infra.F("limit", limit),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "session list recent results")
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []SessionResult
+	for rows.Next() {
+		var res SessionResult
+		if err := rows.Scan(&res.SessionID, &res.CreatedAt, &res.Payload); err != nil {
+			r.logger.Error("session list recent results scan failed",
+				infra.F("component", "database/session_repo"),
+				infra.ErrField(err),
+			)
+			return nil, errors.Wrap(err, "session list recent results: scan")
+		}
+		out = append(out, res)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.Wrap(err, "session list recent results: rows")
+	}
+	return out, nil
 }
