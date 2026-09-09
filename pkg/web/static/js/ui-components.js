@@ -1477,8 +1477,10 @@
     }
 
     /**
-     * Render the batch_result judgments: per-row ✓/✗ + heard text + summary
-     * hint (the submission progress indicator).
+     * Render the batch_result judgments: per-row marks (✅ / 🟡 near-miss /
+     * ❌), heard text, and the summary hint (the submission progress
+     * indicator). Ticket 06 adds the near-miss tier — still wrong, but the
+     * mark tells the student it was one character away.
      * @param {object} result - batch_result payload
      */
     showResults(result) {
@@ -1486,8 +1488,14 @@
       (result.results || []).forEach(function (r, i) {
         if (i >= self.rowMarks.length) return;
         var mark = self.rowMarks[i];
-        mark.textContent = r.correct ? '✅' : '❌';
-        mark.title = r.heard ? '你写的是：' + r.heard : '没有作答';
+        if (r.correct) {
+          mark.textContent = '✅';
+        } else if (r.near_miss) {
+          mark.textContent = '🟡';
+        } else {
+          mark.textContent = '❌';
+        }
+        mark.title = r.heard ? (r.near_miss ? '只差一点！你写的是：' + r.heard : '你写的是：' + r.heard) : '没有作答';
         if (self.inputs[i]) {
           self.inputs[i].disabled = true;
         }
@@ -1536,9 +1544,271 @@
     }
   }
 
+  /**
+   * FeedbackReport — the post-grading analysis screen (Ticket 06).
+   *
+   * Renders the analysis_result frame: score headline + spoken encouragement,
+   * per-wrong-word cards with CHARACTER-LEVEL highlighting (server diff ops →
+   * colored spans on the correct spelling and the student's answer), error
+   * patterns, practice suggestions, and the cross-session trend list with
+   * repeat-miss words.
+   *
+   * Unlike the batch form (hidden by the session-end reset), the report IS
+   * the end-of-session display: it stays up after FEEDBACK and is hidden only
+   * when the next session starts (app.js hides it on session_ready).
+   *
+   * Char-span mapping lives in the pure static buildCharSpans so Node tests
+   * pin the diff→highlight contract without a DOM.
+   *
+   * @class
+   */
+  class FeedbackReport {
+    /**
+     * @param {HTMLElement} container - mount point (#feedback-report-container).
+     */
+    constructor(container) {
+      if (!container) throw new Error('FeedbackReport requires a container element');
+      this.container = container;
+      this.card = null;
+      this.render();
+      this.hide();
+    }
+
+    /**
+     * Build the card skeleton. Content is (re)built by show(analysis).
+     */
+    render() {
+      this.card = document.createElement('div');
+      this.card.className = 'feedback-report';
+      this.card.setAttribute('role', 'region');
+      this.card.setAttribute('aria-label', '听写报告');
+      this.container.appendChild(this.card);
+    }
+
+    /**
+     * Render an analysis_result payload and reveal the report.
+     * @param {object} analysis - analysis_result frame payload
+     */
+    show(analysis) {
+      if (!analysis || typeof analysis !== 'object') return;
+      var self = this;
+      var a = analysis;
+
+      this.card.textContent = '';
+
+      // Headline: emoji + score + counts + the spoken encouragement.
+      var head = document.createElement('div');
+      head.className = 'feedback-report-head';
+      var emoji = document.createElement('span');
+      emoji.className = 'feedback-report-emoji';
+      emoji.textContent = FeedbackReport.scoreEmoji(a.score);
+      var scoreLine = document.createElement('div');
+      scoreLine.className = 'feedback-report-score';
+      scoreLine.textContent = '得分 ' + (a.score || 0) + ' 分（' + (a.correct_count || 0) + ' / ' + (a.total || 0) + ' 个词）';
+      head.appendChild(emoji);
+      head.appendChild(scoreLine);
+      this.card.appendChild(head);
+
+      if (a.encouragement) {
+        var cheer = document.createElement('p');
+        cheer.className = 'feedback-report-cheer';
+        cheer.setAttribute('role', 'status');
+        cheer.textContent = a.encouragement;
+        this.card.appendChild(cheer);
+      }
+
+      // Wrong words with char-level highlights.
+      (a.errors || []).forEach(function (e) {
+        self.card.appendChild(FeedbackReport.buildErrorCard(e));
+      });
+
+      // Error patterns.
+      (a.patterns || []).forEach(function (p) {
+        var el = document.createElement('p');
+        el.className = 'feedback-report-pattern';
+        el.textContent = '🔍 ' + p;
+        self.card.appendChild(el);
+      });
+
+      // Practice suggestions.
+      (a.suggestions || []).forEach(function (s) {
+        var el = document.createElement('p');
+        el.className = 'feedback-report-suggestion';
+        el.textContent = '✏️ ' + s;
+        self.card.appendChild(el);
+      });
+
+      // Repeat-miss words.
+      (a.repeat_words || []).forEach(function (r) {
+        var el = document.createElement('p');
+        el.className = 'feedback-report-repeat';
+        el.textContent = '🔁 「' + r.word + '」之前也错过 ' + r.times + ' 次，重点复习';
+        self.card.appendChild(el);
+      });
+
+      // Trend list (oldest first, 今天 last) — textual, no chart.
+      var trends = a.trends || [];
+      if (trends.length > 0) {
+        var trendBox = document.createElement('div');
+        trendBox.className = 'feedback-report-trends';
+        var trendTitle = document.createElement('p');
+        trendTitle.className = 'feedback-report-trends-title';
+        trendTitle.textContent = '📈 最近成绩';
+        trendBox.appendChild(trendTitle);
+        trends.forEach(function (t, i) {
+          var line = document.createElement('div');
+          line.className = 'feedback-report-trend-line' + (i === trends.length - 1 ? ' current' : '');
+          var arrow = '';
+          if (i > 0) {
+            arrow = t.score > trends[i - 1].score ? ' ↑' : (t.score < trends[i - 1].score ? ' ↓' : ' —');
+          }
+          line.textContent = t.date + '：' + (t.correct || 0) + '/' + (t.total || 0) + '（' + (t.score || 0) + ' 分）' + arrow;
+          trendBox.appendChild(line);
+        });
+        this.card.appendChild(trendBox);
+      }
+
+      this.reveal(true);
+    }
+
+    /**
+     * Hide the report (called when the next session starts).
+     */
+    hide() {
+      this.reveal(false);
+    }
+
+    /**
+     * Whether the report is currently revealed.
+     * @returns {boolean}
+     */
+    isVisible() {
+      return this.card.style.display !== 'none';
+    }
+
+    /** @private show/hide the card + its wrapper section. */
+    reveal(on) {
+      this.card.style.display = on ? 'block' : 'none';
+      var section = this.container.closest ? this.container.closest('section') : null;
+      if (section) {
+        if (on) {
+          section.removeAttribute('hidden');
+        } else {
+          section.setAttribute('hidden', '');
+        }
+      }
+    }
+
+    /**
+     * One wrong word's card: word + near-miss badge, correct spelling with
+     * highlights, the student's answer with highlights, and the hint.
+     * @param {object} e - one analysis errors[] entry
+     * @returns {HTMLElement}
+     */
+    static buildErrorCard(e) {
+      var card = document.createElement('div');
+      card.className = 'feedback-report-error';
+
+      var title = document.createElement('p');
+      title.className = 'feedback-report-error-title';
+      title.textContent = e.word;
+      if (e.blank) {
+        title.textContent += '（没有作答）';
+      } else if (e.near_miss) {
+        title.textContent += ' 🟡只差一点';
+      } else {
+        title.textContent += ' ❌';
+      }
+      card.appendChild(title);
+
+      if (!e.blank) {
+        card.appendChild(FeedbackReport.buildCharRow('正确写法', e.ops ? FeedbackReport.buildCharSpans(e.ops, 'expected') : []));
+        card.appendChild(FeedbackReport.buildCharRow('你写的', e.ops ? FeedbackReport.buildCharSpans(e.ops, 'heard') : []));
+      }
+
+      if (e.hint) {
+        var hint = document.createElement('p');
+        hint.className = 'feedback-report-error-hint';
+        hint.textContent = '💡 ' + e.hint;
+        card.appendChild(hint);
+      }
+      return card;
+    }
+
+    /**
+     * One labeled char-highlight row.
+     * @private
+     */
+    static buildCharRow(label, spans) {
+      var row = document.createElement('p');
+      row.className = 'feedback-report-char-row';
+      var lbl = document.createElement('span');
+      lbl.className = 'feedback-report-char-label';
+      lbl.textContent = label + '：';
+      row.appendChild(lbl);
+      spans.forEach(function (s) {
+        var el = document.createElement('span');
+        el.className = 'feedback-report-char feedback-report-char-' + s.cls;
+        el.textContent = s.ch;
+        row.appendChild(el);
+      });
+      return row;
+    }
+
+    /**
+     * Map server diff ops onto highlight spans for one side of the word.
+     * Pure/static so Node tests pin the contract:
+     *   expected side — match: ok; sub/swap: bad; del: miss; ins: (nothing —
+     *     the expected word has no such char);
+     *   heard side — match: dim; sub/swap: bad; ins: extra; del: (nothing).
+     *
+     * @param {Object[]} ops - mismatch ops ({expected, heard, kind})
+     * @param {string} side - 'expected' | 'heard'
+     * @returns {Object[]} spans - [{ch, cls}]
+     */
+    static buildCharSpans(ops, side) {
+      var spans = [];
+      (ops || []).forEach(function (op) {
+        switch (op.kind) {
+          case 'match':
+            spans.push({ ch: op.expected, cls: side === 'expected' ? 'ok' : 'dim' });
+            break;
+          case 'sub':
+          case 'swap':
+            spans.push({ ch: side === 'expected' ? op.expected : op.heard, cls: 'bad' });
+            break;
+          case 'del':
+            if (side === 'expected') {
+              spans.push({ ch: op.expected, cls: 'miss' });
+            }
+            break;
+          case 'ins':
+            if (side === 'heard') {
+              spans.push({ ch: op.heard, cls: 'extra' });
+            }
+            break;
+        }
+      });
+      return spans;
+    }
+
+    /**
+     * Headline emoji by score tier.
+     * @param {number} score
+     * @returns {string}
+     */
+    static scoreEmoji(score) {
+      if (score >= 100) return '🏆';
+      if (score >= 80) return '🎉';
+      if (score >= 60) return '👍';
+      return '💪';
+    }
+  }
+
   global.DictationControls = DictationControls;
   global.VoiceCommandButton = VoiceCommandButton;
   global.PhotoAnswerButton = PhotoAnswerButton;
   global.ManualAnswerForm = ManualAnswerForm;
   global.BatchSubmissionForm = BatchSubmissionForm;
+  global.FeedbackReport = FeedbackReport;
 })(typeof window !== 'undefined' ? window : this);

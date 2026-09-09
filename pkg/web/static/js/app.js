@@ -62,6 +62,9 @@
   // Ticket 05: BatchSubmissionForm is optional the same way.
   var hasBatchForm = !!window.BatchSubmissionForm;
 
+  // Ticket 06: FeedbackReport is optional the same way (the analysis screen).
+  var hasFeedbackReport = !!window.FeedbackReport;
+
   // Plan 08-04 Task 4: global error handlers for production resilience
   window.addEventListener('error', function (event) {
     console.error('[app] Global error:', event.error || event.message);
@@ -248,10 +251,14 @@
   // is a known control type dispatched inside handleControlFrame, so it never
   // reaches handleMessage — wrap the dispatcher to observe it first. The
   // backend does not yet send a category field; this defaults gracefully.
+  // Ticket 06: a new session also retires the previous session's report.
   var originalHandleControlFrame = wsClient.handleControlFrame.bind(wsClient);
   wsClient.handleControlFrame = function (payload) {
     if (payload && payload.type === 'session_ready') {
       sessionCategory = payload.category || '';
+      if (feedbackReport) {
+        feedbackReport.hide();
+      }
     }
     originalHandleControlFrame(payload);
   };
@@ -375,6 +382,25 @@
       batchForm.show(state.words || []);
     }
   });
+
+  // ------------------------------------------------------------------
+  // Feedback report (Ticket 06): the analysis_result frame renders the
+  // post-grading report. It deliberately survives the session-end reset
+  // (it IS the end-of-session display) — only the NEXT session hides it,
+  // via the session_ready observer below.
+  // ------------------------------------------------------------------
+  var feedbackReport = null;
+  if (hasFeedbackReport) {
+    try {
+      var reportHost = document.getElementById('feedback-report-container');
+      if (reportHost) {
+        feedbackReport = new window.FeedbackReport(reportHost);
+      }
+    } catch (reportErr) {
+      console.error('[app] feedback report initialization failed:', reportErr);
+      // Non-critical: the batch form's ✓/✗ marks remain.
+    }
+  }
 
   // ------------------------------------------------------------------
   // Session button: subscribes to the state manager for its visual states
@@ -573,6 +599,13 @@
         var sequence = view.getUint32(2, false); // Big-endian sequence at offset 2
         var payload = new Uint8Array(data, 16); // Skip 16-byte header
         var state = stateManager.getState();
+        // Ticket 06: in FEEDBACK the streaming audio is the spoken
+        // encouragement — no current word, no word_complete trigger, so it
+        // plays live as it arrives instead of accumulating.
+        if (state.status === 'FEEDBACK') {
+          audioController.playLiveFrame(payload, sequence);
+          return;
+        }
         var wordId = state.currentWordId || null;
         audioController.handleAudioFrame(payload, sequence, wordId);
       } else {
@@ -612,6 +645,11 @@
       // Batch submission result (Ticket 05) — per-word judgments.
       if (parsed.type === 'batch_result') {
         handleBatchResult(parsed);
+        return;
+      }
+      // Analysis report (Ticket 06) — score, char-level errors, trends.
+      if (parsed.type === 'analysis_result') {
+        handleAnalysisResult(parsed);
         return;
       }
     }
@@ -716,6 +754,16 @@
   function handleBatchResult(result) {
     if (batchForm) {
       batchForm.showResults(result);
+    }
+  }
+
+  /**
+   * Analysis report (Ticket 06): render the post-grading report. The spoken
+   * encouragement arrives separately as live audio frames in FEEDBACK.
+   */
+  function handleAnalysisResult(analysis) {
+    if (feedbackReport) {
+      feedbackReport.show(analysis);
     }
   }
 

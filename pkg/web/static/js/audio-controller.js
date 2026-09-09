@@ -178,6 +178,50 @@
     }
 
     /**
+     * Play one live audio frame immediately (Ticket 06): the spoken
+     * encouragement streams in FEEDBACK, where there is no current word and
+     * no word_complete trigger for the accumulate-then-play path. The frame
+     * joins the same gapless schedule (D-04) and the same monotonic dedup
+     * (D-10/D-11) as word audio.
+     *
+     * @param {Uint8Array} data - PCM frame payload (640 bytes).
+     * @param {number} sequence - frame sequence number for dedup.
+     */
+    playLiveFrame(data, sequence) {
+      try {
+        if (!data || data.length !== this.AUDIO_FRAME_SIZE) {
+          console.warn('[audio] live frame ignored: wrong size');
+          return;
+        }
+        if (sequence <= this.lastSeq) {
+          console.debug('[audio] live frame duplicate: seq=' + sequence);
+          return;
+        }
+        if (this.lastSeq !== 0 && sequence > this.lastSeq + 1) {
+          console.warn('[audio] live frame gap: expected ' + (this.lastSeq + 1) + ', got ' + sequence);
+        }
+        this.lastSeq = sequence;
+
+        if (this.audioCtx && this.audioCtx.state === 'suspended') {
+          var self = this;
+          this.audioCtx.resume().then(function () {
+            self._scheduleWordPlayback('feedback', [new Uint8Array(data)]);
+          }).catch(function (resumeErr) {
+            console.error('[audio] resume() failed for live frame:', resumeErr);
+          });
+          return;
+        }
+        if (!this.isAudioCtxReady()) {
+          console.error('[audio] live frame but AudioContext not running — dropped');
+          return;
+        }
+        this._scheduleWordPlayback('feedback', [new Uint8Array(data)]);
+      } catch (liveErr) {
+        console.error('[audio] live frame playback failed:', liveErr);
+      }
+    }
+
+    /**
      * Play a completed word. Called when backend sends word_complete
      * control frame after streaming all audio frames for that word.
      *

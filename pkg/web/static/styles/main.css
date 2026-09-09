@@ -482,3 +482,151 @@ body {
   width: 22px;
   height: 22px;
 }
+
+/* ---------- Feedback report (Ticket 06) ---------- */
+
+.feedback-report-section {
+  padding: 8px 0 16px;
+}
+
+.feedback-report {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  margin: 0 auto;
+  width: min(560px, 94vw);
+  border-radius: 20px;
+  border: 2px solid #bfdbfe;
+  background: #f8fafc;
+  text-align: center;
+}
+
+.feedback-report-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.feedback-report-emoji {
+  font-size: 40px;
+  line-height: 1;
+}
+
+.feedback-report-score {
+  font-size: 22px;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+.feedback-report-cheer {
+  margin: 0;
+  font-size: 17px;
+  color: #166534;
+}
+
+.feedback-report-error {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 2px solid #fecaca;
+  background: #fff;
+  text-align: left;
+}
+
+.feedback-report-error-title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #374151;
+}
+
+.feedback-report-char-row {
+  margin: 4px 0;
+  font-size: 20px;
+  letter-spacing: 2px;
+}
+
+.feedback-report-char-label {
+  font-size: 14px;
+  color: #6b7280;
+  letter-spacing: normal;
+}
+
+/* Char-level highlighting: ok = normal, dim = matched but not the target
+   side, bad = wrong char, miss = char missing from the answer, extra = char
+   the answer added. Kid-readable colors with weight/underline, not color
+   alone (accessibility). */
+.feedback-report-char-ok {
+  color: #111827;
+}
+
+.feedback-report-char-dim {
+  color: #9ca3af;
+}
+
+.feedback-report-char-bad {
+  color: #dc2626;
+  font-weight: 800;
+  text-decoration: underline;
+}
+
+.feedback-report-char-miss {
+  color: #dc2626;
+  font-weight: 800;
+  background: #fee2e2;
+  border-radius: 4px;
+}
+
+.feedback-report-char-extra {
+  color: #d97706;
+  font-weight: 800;
+  text-decoration: line-through;
+}
+
+.feedback-report-error-hint {
+  margin: 6px 0 0;
+  font-size: 15px;
+  color: #92400e;
+}
+
+.feedback-report-pattern,
+.feedback-report-suggestion,
+.feedback-report-repeat {
+  margin: 0;
+  font-size: 16px;
+  color: #374151;
+  text-align: left;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.feedback-report-trends {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 2px solid #dbeafe;
+  background: #eff6ff;
+  text-align: left;
+}
+
+.feedback-report-trends-title {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #1e40af;
+}
+
+.feedback-report-trend-line {
+  font-size: 15px;
+  color: #1e3a8a;
+  line-height: 1.6;
+}
+
+.feedback-report-trend-line.current {
+  font-weight: 700;
+}

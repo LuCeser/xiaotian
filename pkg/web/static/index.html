@@ -132,6 +132,19 @@
         <h2 id="dictationFeedbackTitle" class="visually-hidden">听写反馈</h2>
         <div id="dictation-feedback-container"></div>
       </section>
+
+      <!--
+        Feedback report section (Ticket 06): the post-grading analysis screen.
+        FeedbackReport (ui-components.js) mounts here on analysis_result —
+        score, char-level error highlights, patterns, suggestions, trends.
+        Unlike the sections above it survives session end (it IS the
+        end-of-session display); it hides when the next session starts.
+      -->
+      <section class="feedback-report-section" id="feedbackReport"
+               role="region" aria-labelledby="feedbackReportTitle" hidden>
+        <h2 id="feedbackReportTitle" class="visually-hidden">听写报告</h2>
+        <div id="feedback-report-container"></div>
+      </section>
     </main>
 
     <!-- Footer with simple instructions -->
