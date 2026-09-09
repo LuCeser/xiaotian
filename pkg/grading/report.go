@@ -86,7 +86,7 @@ func Analyze(words []WordInput) SessionReport {
 	}
 	r.Patterns = sessionPatterns(blanks, nearMisses, missingTails, len(r.Errors))
 	r.Suggestions = suggestions(r.Errors)
-	r.Encouragement = encouragement(r.Score, r.CorrectCount, r.Total)
+	r.Encouragement = Encouragement(r.Score, r.CorrectCount, r.Total)
 	return r
 }
 
@@ -209,9 +209,10 @@ func suggestions(errors []WordError) []string {
 	return out
 }
 
-// encouragement is the sentence spoken aloud (and shown) at grading time.
-// Tiers: perfect / strong / okay / keep-trying.
-func encouragement(score, correct, total int) string {
+// Encouragement is the sentence spoken aloud (and shown) at grading time —
+// the tiers are perfect / strong / okay / keep-trying. Exported for the
+// per-word completion path, whose counts differ from Analyze inputs.
+func Encouragement(score, correct, total int) string {
 	switch {
 	case total > 0 && score == 100:
 		return fmt.Sprintf("太棒了！%d 个词全部正确，你是听写小达人！", total)

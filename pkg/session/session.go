@@ -567,6 +567,27 @@ func (s *Session) SpeakFeedback(text, language string) {
 	}()
 }
 
+// RecordGradedResult persists a batch_graded event (JSON payload — per-word
+// results + counts, see cmd/service/analysis.go) against the session's audit
+// row so trends and parent review can query it later (Ticket 06). Synchronous
+// single SQLite insert on the caller's goroutine — the same weight class as
+// the FSRS UpdateRatings call the grading handler already makes. Best-effort
+// contract: the caller logs failures and continues, the student's grading
+// result is already delivered.
+func (s *Session) RecordGradedResult(ctx context.Context, payload string) error {
+	if s.repo == nil {
+		return nil // audit-less mode (tests) — nothing to write to
+	}
+	if s.dbID == 0 {
+		return errors.New("session: no audit row to record graded result against")
+	}
+	return s.repo.AppendEvent(ctx, database.SessionEvent{
+		SessionID: s.dbID,
+		EventType: "batch_graded",
+		Payload:   payload,
+	})
+}
+
 // spawnStreamWord kicks off the D-13 server-side side channel: StreamWord runs
 // in a goroutine, and on its return pushes WordComplete onto the events channel.
 // An in-flight stream (from a replay request) is cancelled first.

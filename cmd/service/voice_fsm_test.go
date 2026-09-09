@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,10 +62,35 @@ func (g *fsmGen) GenerateForSession(_ context.Context, _ string, words []string)
 }
 
 // GenerateText satisfies the Ticket-06 feedback seam (TTSSessionGenerator);
-// the fsm tests do not exercise spoken feedback, so a canned success keeps
-// any handler-driven SpeakFeedback quiet.
+// tests that don't exercise spoken feedback get a canned success.
 func (g *fsmGen) GenerateText(_ context.Context, _, _, _ string) (string, error) {
 	return "/fake/feedback.pcm", nil
+}
+
+// recordingGen extends fsmGen with capture of the Ticket-06 feedback seam —
+// tests assert the encouragement sentence reached GenerateText.
+type recordingGen struct {
+	fsmGen
+
+	mu        sync.Mutex
+	textCalls int
+	lastText  string
+}
+
+// GenerateText overrides the canned fake to record what the handler asked to
+// speak.
+func (g *recordingGen) GenerateText(_ context.Context, _, text, _ string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.textCalls++
+	g.lastText = text
+	return "/fake/feedback.pcm", nil
+}
+
+func (g *recordingGen) feedback() (int, string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.textCalls, g.lastText
 }
 
 func (g *fsmGen) CleanupSession(_ context.Context, _ string) error { return nil }

@@ -1,10 +1,11 @@
 package main
 
-// Batch answer submission tests (Ticket 05): submit_answers through the REAL
-// Manager + REAL FSM — DICTATING/WAITING_PARENT → SUBMISSION → FEEDBACK —
-// with grading (compareAnswer) and the server-side FSRS UpdateRatings call
-// observed end-to-end on the client socket. Fakes: fsmGen/fsmStreamer/fsmRepo
-// from voice_fsm_test.go; batchFSRS below adds ratings capture.
+// Batch answer submission tests (Ticket 05 + Ticket 06): submit_answers
+// through the REAL Manager + REAL FSM — DICTATING/WAITING_PARENT → SUBMISSION
+// → FEEDBACK — with grading (pkg/grading), the server-side FSRS UpdateRatings
+// call, the analysis_result report, and result persistence observed
+// end-to-end on the client socket. Fakes: fsmGen/fsmStreamer/fsmRepo from
+// voice_fsm_test.go; batchFSRS below adds ratings capture.
 
 import (
 	"context"
@@ -62,8 +63,10 @@ func (f *batchFSRS) snapshot() (map[string]string, int) {
 // starts a two-word session, plays it to the WAITING_PARENT state, and
 // returns the dialed connection + manager + the connID the session is
 // registered under + teardown. stopAtFirstWord returns instead at word 1's
-// DICTATING (mid-dictation).
-func bootBatchSession(t *testing.T, fakeFSRS *batchFSRS, stopAtFirstWord bool) (*websocket.Conn, *session.Manager, string, func()) {
+// DICTATING (mid-dictation). repo is the Manager's SessionRepository and gen
+// its TTSSessionGenerator so Ticket-06 tests can inject recording fakes
+// (pass &fsmRepo{} / &fsmGen{} when the audit trail / speech is irrelevant).
+func bootBatchSession(t *testing.T, fakeFSRS *batchFSRS, repo database.SessionRepository, gen session.TTSSessionGenerator, stopAtFirstWord bool) (*websocket.Conn, *session.Manager, string, func()) {
 	t.Helper()
 	logger := infra.NewNoOpLogger()
 	zapLogger := zap.NewNop()
@@ -80,7 +83,7 @@ func bootBatchSession(t *testing.T, fakeFSRS *batchFSRS, stopAtFirstWord bool) (
 	}
 	t.Cleanup(func() { _ = pool.Shutdown(context.Background()) })
 
-	manager, err := session.NewManager(hub, fakeFSRS, &fsmGen{}, &fsmStreamer{}, &fsmRepo{}, pool, logger, cfg)
+	manager, err := session.NewManager(hub, fakeFSRS, gen, &fsmStreamer{}, repo, pool, logger, cfg)
 	if err != nil {
 		t.Fatalf("failed to create session manager: %v", err)
 	}
@@ -181,7 +184,7 @@ func readErrorUntil(t *testing.T, conn *websocket.Conn, substr string) string {
 // session_complete.
 func TestSubmitAnswers_BatchToFeedback(t *testing.T) {
 	fakeFSRS := &batchFSRS{}
-	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, false)
+	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, &fsmRepo{}, &fsmGen{}, false)
 	defer teardown()
 
 	sendControlJSON(t, conn, `{"type":"submit_answers","params":{"answers":{"苹果":"苹果","香蕉":"香焦"}}}`)
@@ -215,12 +218,14 @@ func TestSubmitAnswers_BatchToFeedback(t *testing.T) {
 	}
 
 	// The FSRS ratings were submitted server-side, one call, all words.
+	// 香蕉→香焦 is one edit away — a Ticket-06 near-miss, so it grades
+	// "hard" (the student almost had it), not "again".
 	ratings, calls := fakeFSRS.snapshot()
 	if calls != 1 {
 		t.Errorf("UpdateRatings calls = %d, want 1", calls)
 	}
-	if ratings["苹果"] != "good" || ratings["香蕉"] != "again" {
-		t.Errorf("ratings = %v, want 苹果:good 香蕉:again", ratings)
+	if ratings["苹果"] != "good" || ratings["香蕉"] != "hard" {
+		t.Errorf("ratings = %v, want 苹果:good 香蕉:hard", ratings)
 	}
 
 	// The FSM spine: session_complete (FEEDBACK) follows.
@@ -238,7 +243,7 @@ func TestSubmitAnswers_BatchToFeedback(t *testing.T) {
 // (classroom semantics: a blank is wrong), the session still completes.
 func TestSubmitAnswers_PartialAnswers(t *testing.T) {
 	fakeFSRS := &batchFSRS{}
-	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, false)
+	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, &fsmRepo{}, &fsmGen{}, false)
 	defer teardown()
 
 	sendControlJSON(t, conn, `{"type":"submit_answers","params":{"answers":{"苹果":"苹果"}}}`)
@@ -270,7 +275,7 @@ func TestSubmitAnswers_PartialAnswers(t *testing.T) {
 // frames and leave the session in WAITING_PARENT (no grading, no FSRS call).
 func TestSubmitAnswers_Validation(t *testing.T) {
 	fakeFSRS := &batchFSRS{}
-	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, false)
+	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, &fsmRepo{}, &fsmGen{}, false)
 	defer teardown()
 
 	cases := []struct {
@@ -325,7 +330,7 @@ func TestSubmitAnswers_NoSession(t *testing.T) {
 // the session stays in DICTATING and a later, legal submission path remains.
 func TestSubmitAnswers_EarlyDictatingRejected(t *testing.T) {
 	fakeFSRS := &batchFSRS{}
-	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, true)
+	conn, manager, connID, teardown := bootBatchSession(t, fakeFSRS, &fsmRepo{}, &fsmGen{}, true)
 	defer teardown()
 
 	sendControlJSON(t, conn, `{"type":"submit_answers","params":{"answers":{"苹果":"苹果"}}}`)

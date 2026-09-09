@@ -202,6 +202,13 @@ func (m *Manager) Lookup(connID string) *Session {
 	return m.sessions[connID]
 }
 
+// RecentResults returns the most recent graded sessions (newest first) from
+// the session repository — the Ticket 06 history feed for trend and
+// repeat-miss analysis in the grading handler.
+func (m *Manager) RecentResults(ctx context.Context, limit int) ([]database.SessionResult, error) {
+	return m.repo.ListRecentResults(ctx, limit)
+}
+
 // Push looks up the session for connID and pushes the event onto its channel.
 // No-op if the session is not found (the caller may log this at a higher layer).
 func (m *Manager) Push(connID string, ev SessionEvent) {

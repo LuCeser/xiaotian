@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/grading"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
@@ -117,8 +118,8 @@ func TestPhotoOCR_LiveRealVision(t *testing.T) {
 				t.Fatalf("photo_result not judged: %+v", result)
 			}
 
-			got := normalizeForCompare(result.Text, tc.lang)
-			want := normalizeForCompare(tc.wantWord, tc.lang)
+			got := grading.Normalize(result.Text, tc.lang)
+			want := grading.Normalize(tc.wantWord, tc.lang)
 			if got != want {
 				t.Errorf("live OCR text = %q (normalized %q), want %q", result.Text, got, want)
 			}

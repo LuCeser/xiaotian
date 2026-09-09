@@ -9,11 +9,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"sync/atomic"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
+	"github.com/xiaotian/home-tutor-agent/pkg/grading"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
@@ -113,12 +115,16 @@ type submitAnswersParams struct {
 }
 
 // batchWordResult is one word's judgment inside a batch_result frame. The
-// FSRS rating ("good"/"again") is fully derivable from Correct, so it travels
-// only in the server-side UpdateRatings call — not on the wire.
+// FSRS rating ("good"/"hard"/"again") is fully derivable from Correct and
+// NearMiss, so it travels only in the server-side UpdateRatings call — not
+// on the wire. Diff is the full char-level alignment (Ticket 06) the client
+// renders as per-character highlights.
 type batchWordResult struct {
-	Word    string `json:"word"`
-	Heard   string `json:"heard"` // "" when the word was left unanswered
-	Correct bool   `json:"correct"`
+	Word     string           `json:"word"`
+	Heard    string           `json:"heard"` // "" when the word was left unanswered
+	Correct  bool             `json:"correct"`
+	NearMiss bool             `json:"near_miss"`
+	Diff     []grading.CharOp `json:"diff,omitempty"`
 }
 
 // batchResultResponse is the control frame reply to a submit_answers trigger
@@ -133,12 +139,14 @@ type batchResultResponse struct {
 
 // answerResultResponse is the control frame response for answer judgment.
 type answerResultResponse struct {
-	Type     string `json:"type"`
-	WordID   string `json:"word_id"`
-	Correct  bool   `json:"correct"`
-	Expected string `json:"expected"`
-	Heard    string `json:"heard"`
-	Rating   string `json:"rating"` // "good" or "again"
+	Type     string           `json:"type"`
+	WordID   string           `json:"word_id"`
+	Correct  bool             `json:"correct"`
+	Expected string           `json:"expected"`
+	Heard    string           `json:"heard"`
+	Rating   string           `json:"rating"`         // "good" | "hard" | "again"
+	NearMiss bool             `json:"near_miss"`      // Ticket 06: one-edit-away wrong answer
+	Diff     []grading.CharOp `json:"diff,omitempty"` // Ticket 06: char-level alignment
 }
 
 // submitReviewResultResponse wraps the FSRS ReviewResult for the client.
@@ -486,6 +494,23 @@ func handleSubmitReview(ctx context.Context, client *ws.Client, params json.RawM
 		logger.Warn("failed to send submit_review_result", infra.ErrField(err))
 	}
 
+	// Ticket 06: the per-word completion path reads its summary aloud too
+	// (the batch path speaks inside handleSubmitAnswers). good/easy ratings
+	// are the correct answers; hard (near-miss) and again are not.
+	if s := manager.Lookup(clientConnID(client)); s != nil {
+		correct, total := 0, len(p.Ratings)
+		for _, r := range p.Ratings {
+			if r == "good" || r == "easy" {
+				correct++
+			}
+		}
+		score := 0
+		if total > 0 {
+			score = int(math.Round(float64(correct) * 100 / float64(total)))
+		}
+		s.SpeakFeedback(grading.Encouragement(score, correct, total), "chinese")
+	}
+
 	// Push EventParentReview to drive WAITING_PARENT→FEEDBACK transition, which triggers session_complete frame.
 	manager.Push(clientConnID(client), session.SessionEvent{
 		Type: session.EventParentReview,
@@ -572,6 +597,8 @@ func handleSubmitAnswer(ctx context.Context, client *ws.Client, params json.RawM
 		Expected: j.Expected,
 		Heard:    p.Transcript,
 		Rating:   j.Rating,
+		NearMiss: j.NearMiss,
+		Diff:     j.Diff,
 	}
 
 	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
@@ -588,7 +615,9 @@ type answerJudgement struct {
 	Expected string
 	Lang     string // "en" | "zh" (informational)
 	Correct  bool
-	Rating   string // FSRS rating verb ("good"/"again")
+	NearMiss bool
+	Diff     []grading.CharOp
+	Rating   string // FSRS rating verb ("good"/"hard"/"again")
 }
 
 // answerJudger judges a transcript against the connection's current word.
@@ -626,13 +655,20 @@ func judgeAnswer(manager *session.Manager, connID, transcript string) (answerJud
 	}
 
 	lang := langForCategory(s.Category())
-	correct, rating := compareAnswer(currentWord, transcript, lang)
-	return answerJudgement{Expected: currentWord, Lang: lang, Correct: correct, Rating: rating}, ""
+	j := grading.GradeWord(currentWord, transcript, lang)
+	return answerJudgement{
+		Expected: currentWord,
+		Lang:     lang,
+		Correct:  j.Correct,
+		NearMiss: j.NearMiss,
+		Diff:     j.Diff,
+		Rating:   j.Rating,
+	}, ""
 }
 
-// langForCategory maps a session category onto the compareAnswer language
-// selector (default English — the zh/en split mirrors normalizeForCompare's
-// two normalization regimes).
+// langForCategory maps a session category onto the grading language selector
+// (default English — the zh/en split mirrors grading.Normalize's two
+// normalization regimes).
 func langForCategory(category string) string {
 	if category == "chinese" || category == "zh" {
 		return "zh"
@@ -711,7 +747,9 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 	}
 
 	// Grade in queue order so the client can render results 1..N matching
-	// the dictation sequence. Unanswered words grade incorrect/again.
+	// the dictation sequence. Unanswered words grade incorrect/again
+	// (blank = wrong, classroom semantics); one-edit-away wrong answers are
+	// near-misses — still incorrect, but FSRS "hard" (Ticket 06).
 	lang := langForCategory(s.Category())
 	response := batchResultResponse{
 		Type:    "batch_result",
@@ -719,27 +757,46 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 		Results: make([]batchWordResult, 0, len(words)),
 	}
 	ratings := make(map[string]string, len(words))
+	inputs := make([]grading.WordInput, 0, len(words))
 	for _, w := range words {
 		heard := p.Answers[w] // "" when unanswered
-		var correct bool
-		var rating string
-		if heard == "" {
-			// Unanswered grades incorrect/again — no compare needed.
-			correct, rating = false, "again"
-		} else {
-			correct, rating = compareAnswer(w, heard, lang)
-		}
+		j := grading.GradeWord(w, heard, lang)
+		inputs = append(inputs, grading.WordInput{Word: w, Heard: heard, Judgment: j})
 		response.Results = append(response.Results, batchWordResult{
-			Word: w, Heard: heard, Correct: correct,
+			Word: w, Heard: heard, Correct: j.Correct, NearMiss: j.NearMiss, Diff: j.Diff,
 		})
-		if correct {
+		if j.Correct {
 			response.CorrectCount++
 		}
-		ratings[w] = rating
+		ratings[w] = j.Rating
 	}
 
 	if err := sendControlFrame(client, ws.MsgTypeControl, response); err != nil {
 		logger.Warn("failed to send batch_result", infra.ErrField(err))
+	}
+
+	// Ticket 06: analysis report + persistence + trends + spoken feedback.
+	// All best-effort after the batch_result — grading itself already landed.
+	report := grading.Analyze(inputs)
+	if payload, err := marshalStoredResult(s.Category(), inputs, report); err == nil {
+		if err := s.RecordGradedResult(ctx, payload); err != nil {
+			logger.Warn("graded result not persisted",
+				infra.F("conn_id", connID),
+				infra.ErrField(err),
+			)
+		}
+	} else {
+		logger.Warn("stored result marshal failed", infra.ErrField(err))
+	}
+	analysis := buildAnalysisResponse(s.ID(), report)
+	if past, err := manager.RecentResults(ctx, trendHistoryLimit); err != nil {
+		// History is an enhancement, not a gate — the report ships without it.
+		logger.Warn("graded history query failed", infra.ErrField(err))
+	} else {
+		applyHistory(analysis, past)
+	}
+	if err := sendControlFrame(client, ws.MsgTypeControl, analysis); err != nil {
+		logger.Warn("failed to send analysis_result", infra.ErrField(err))
 	}
 
 	// Server-side FSRS submission (one batched call, mirrors what the client
@@ -753,6 +810,11 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 			infra.ErrField(err),
 		)
 	}
+
+	// Ticket 06: read the encouragement aloud. The sentence is Chinese in
+	// every session (the product's UI language), so the TTS voice profile is
+	// always chinese. Best-effort — Session.SpeakFeedback drops failures.
+	s.SpeakFeedback(report.Encouragement, "chinese")
 
 	// FSM spine: the two pushes are order-stable on the session's single
 	// event channel — SUBMISSION entry emits the status-bearing progress
@@ -770,46 +832,9 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 		infra.F("submitted", len(p.Answers)),
 		infra.F("total", response.Total),
 		infra.F("correct", response.CorrectCount),
+		infra.F("score", report.Score),
 	)
 	return nil
-}
-
-// compareAnswer compares a student's spoken transcript against the expected word.
-// Returns (correct, rating). For now uses simple normalized string comparison.
-// Language-aware: en strips non-alphanumeric, zh strips punctuation/whitespace only.
-func compareAnswer(expected, transcript, lang string) (bool, string) {
-	normExpected := normalizeForCompare(expected, lang)
-	normTranscript := normalizeForCompare(transcript, lang)
-	if normExpected == normTranscript {
-		return true, "good"
-	}
-	return false, "again"
-}
-
-// normalizeForCompare normalizes a word for comparison based on language.
-func normalizeForCompare(word, lang string) string {
-	w := strings.ToLower(strings.TrimSpace(word))
-	if lang == "zh" || lang == "zh-CN" || lang == "chinese" {
-		// Chinese: strip punctuation and whitespace only (preserve CJK chars)
-		w = strings.ReplaceAll(w, " ", "")
-		w = strings.ReplaceAll(w, "，", "")
-		w = strings.ReplaceAll(w, "。", "")
-		w = strings.ReplaceAll(w, "！", "")
-		w = strings.ReplaceAll(w, "？", "")
-		w = strings.ReplaceAll(w, ",", "")
-		w = strings.ReplaceAll(w, ".", "")
-		w = strings.ReplaceAll(w, "!", "")
-		w = strings.ReplaceAll(w, "?", "")
-		return w
-	}
-	// English: strip non-alphanumeric
-	var b strings.Builder
-	for _, r := range w {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 // sendControlFrame is a helper for sending JSON control frames.
