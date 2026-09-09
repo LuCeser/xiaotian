@@ -10,13 +10,17 @@ import (
 )
 
 // TTSSessionGenerator is the subset of *tts.Generator the Session uses for its
-// lifecycle (batch-generate at init, cleanup at exit). *tts.Generator satisfies
-// this interface structurally. Defined as a narrow seam so tests can inject a
-// fake generator (mirrors tts.Sender, D-05/D-01) without constructing a real
-// *tts.Generator with private pybridge internals.
+// lifecycle (batch-generate at init, cleanup at exit) plus the spoken-feedback
+// synthesis (Ticket 06). *tts.Generator satisfies this interface structurally.
+// Defined as a narrow seam so tests can inject a fake generator (mirrors
+// tts.Sender, D-05/D-01) without constructing a real *tts.Generator with
+// private pybridge internals.
 type TTSSessionGenerator interface {
 	// GenerateForSession batch-generates PCM audio for the word list.
 	GenerateForSession(ctx context.Context, sessionID string, words []string) (map[string]string, error)
+	// GenerateText synthesizes one arbitrary spoken text (the encouragement
+	// sentence) into the session cache — see SpeakFeedback (Ticket 06).
+	GenerateText(ctx context.Context, sessionID, text, language string) (string, error)
 	// CleanupSession removes the session's TTS cache directory (idempotent).
 	CleanupSession(ctx context.Context, sessionID string) error
 }

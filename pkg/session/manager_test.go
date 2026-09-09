@@ -48,6 +48,10 @@ func (g *testGen) GenerateForSession(_ context.Context, _ string, _ []string) (m
 	return nil, nil
 }
 
+func (g *testGen) GenerateText(_ context.Context, _, _, _ string) (string, error) {
+	return "/fake/feedback.pcm", nil
+}
+
 func (g *testGen) CleanupSession(_ context.Context, _ string) error {
 	g.cleanupCalled.Add(1)
 	return nil

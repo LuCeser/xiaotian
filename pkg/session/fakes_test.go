@@ -154,12 +154,43 @@ var _ database.SessionRepository = (*fakeSessionRepository)(nil)
 
 // fakeTTSGenerator implements session.TTSSessionGenerator for tests: configurable
 // error from GenerateForSession (for the D-10 init-path unlock test) + call
-// counter. *tts.Generator satisfies the interface structurally in production.
+// counter. GenerateText (Ticket 06 spoken feedback) captures its arguments;
+// textErr simulates a synthesis failure without touching the word pipeline.
+// *tts.Generator satisfies the interface structurally in production.
 type fakeTTSGenerator struct {
 	mu           sync.Mutex
 	genErr       error
 	genCalls     int
 	cleanupCalls int
+
+	textErr   error
+	textCalls int
+	lastText  string
+	lastLang  string
+}
+
+func (g *fakeTTSGenerator) GenerateText(ctx context.Context, sessionID, text, language string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.textCalls++
+	g.lastText = text
+	g.lastLang = language
+	if g.textErr != nil {
+		return "", g.textErr
+	}
+	return "/fake/feedback.pcm", nil
+}
+
+func (g *fakeTTSGenerator) TextCalls() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.textCalls
+}
+
+func (g *fakeTTSGenerator) LastText() (string, string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.lastText, g.lastLang
 }
 
 func (g *fakeTTSGenerator) GenerateForSession(ctx context.Context, sessionID string, words []string) (map[string]string, error) {
@@ -198,19 +229,36 @@ func (g *fakeTTSGenerator) CleanupCalls() int {
 var _ session.TTSSessionGenerator = (*fakeTTSGenerator)(nil)
 
 // fakeStreamer implements session.SessionStreamer for tests. Records call count
-// + configurable error. *tts.Streamer satisfies the interface structurally in
-// production.
+// + configurable error + the last (sessionID, wordID) pair (Ticket 06 feedback
+// tests assert the streamed key). *tts.Streamer satisfies the interface
+// structurally in production.
 type fakeStreamer struct {
-	mu          sync.Mutex
-	streamCalls int
-	streamErr   error
+	mu            sync.Mutex
+	streamCalls   int
+	streamErr     error
+	lastSessionID string
+	lastWordID    string
 }
 
 func (f *fakeStreamer) StreamWord(ctx context.Context, client tts.Sender, sessionID string, wordID string, startSeq uint32) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.streamCalls++
+	f.lastSessionID = sessionID
+	f.lastWordID = wordID
 	return f.streamErr
+}
+
+func (f *fakeStreamer) LastWordID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastWordID
+}
+
+func (f *fakeStreamer) LastSessionID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastSessionID
 }
 
 // ClearSeqCounter satisfies the widened SessionStreamer interface (D-11 teardown

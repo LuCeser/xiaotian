@@ -60,6 +60,13 @@ func (g *fsmGen) GenerateForSession(_ context.Context, _ string, words []string)
 	return m, nil
 }
 
+// GenerateText satisfies the Ticket-06 feedback seam (TTSSessionGenerator);
+// the fsm tests do not exercise spoken feedback, so a canned success keeps
+// any handler-driven SpeakFeedback quiet.
+func (g *fsmGen) GenerateText(_ context.Context, _, _, _ string) (string, error) {
+	return "/fake/feedback.pcm", nil
+}
+
 func (g *fsmGen) CleanupSession(_ context.Context, _ string) error { return nil }
 
 // fsmStreamer fakes SessionStreamer: StreamWord succeeds instantly, which

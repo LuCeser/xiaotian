@@ -519,6 +519,54 @@ func (s *Session) onTransition() {
 	}
 }
 
+// SpeakFeedback generates and streams the spoken encouragement sentence
+// (Ticket 06) — "final scores and encouraging feedback read aloud via TTS".
+// Best-effort: generation or streaming failures log and drop, because the
+// visual report has already been delivered by the time this runs.
+//
+// It runs on its own goroutine so the pybridge subprocess cannot block the
+// caller (the WS handler that graded the answers), and is bounded by the
+// session's own lifetime: the ctx derives from runCtx (cancelled on session
+// exit — disconnect, sweep, or a new session on the same connection), plus a
+// 30s cap so a stuck subprocess cannot outlive the FEEDBACK window.
+//
+// runCtx is read without s.mu here: it is written exactly once in Start(),
+// BEFORE Manager.NewSession inserts the session into the registry map, and
+// callers reach this method through Manager.Lookup (RLock) — that lock pair
+// establishes the happens-before edge (D-02 discipline).
+func (s *Session) SpeakFeedback(text, language string) {
+	if s.gen == nil || s.streamer == nil {
+		return
+	}
+
+	runCtx := s.runCtx
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(runCtx, 30*time.Second)
+		defer cancel()
+
+		if _, err := s.gen.GenerateText(ctx, s.id, text, language); err != nil {
+			s.logger.Warn("session: feedback TTS generation failed",
+				infra.F("component", "session"),
+				infra.F("session_id", s.id),
+				infra.F("language", language),
+				infra.ErrField(err),
+			)
+			return
+		}
+		if err := s.streamer.StreamWord(ctx, s.client, s.id, text, 0); err != nil {
+			s.logger.Warn("session: feedback TTS stream failed",
+				infra.F("component", "session"),
+				infra.F("session_id", s.id),
+				infra.ErrField(err),
+			)
+		}
+	}()
+}
+
 // spawnStreamWord kicks off the D-13 server-side side channel: StreamWord runs
 // in a goroutine, and on its return pushes WordComplete onto the events channel.
 // An in-flight stream (from a replay request) is cancelled first.
