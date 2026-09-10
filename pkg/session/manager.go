@@ -218,6 +218,14 @@ func (m *Manager) Lookup(connID string) *Session {
 	return m.sessions[connID]
 }
 
+// ActiveCount returns the number of live sessions (the capacity gauge the
+// NewSession gate checks; tests use it to assert the registry drained).
+func (m *Manager) ActiveCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.sessions)
+}
+
 // RecentResults returns the most recent graded sessions (newest first) from
 // the session repository — the Ticket 06 history feed for trend and
 // repeat-miss analysis in the grading handler.
