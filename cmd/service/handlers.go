@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -296,6 +297,12 @@ func handleStartSession(ctx context.Context, client *ws.Client, params json.RawM
 			infra.F("client_id", clientConnID(client)),
 			infra.F("words_count", len(s.Words())),
 		)
+	}
+	// Ticket 07: capacity rejection gets its own friendly message — the
+	// service is healthy, the student should just retry shortly.
+	if errors.Is(err, session.ErrManagerAtCapacity) {
+		sendErrorFrame(client, "现在学习的人有点多，请稍等一分钟再试")
+		return nil
 	}
 	if err != nil {
 		// Enhanced error logging with detailed diagnostics

@@ -164,6 +164,22 @@ func (m *Manager) NewSession(
 	connID string,
 	selectOpts fsrs.SelectOpts,
 ) (*Session, error) {
+	// Capacity gate (Ticket 07): reject BEFORE acquiring FSRS locks or
+	// spawning TTS work. Slots free automatically — the session's onExit
+	// callback removes it from the registry on every exit path (D-10).
+	m.mu.RLock()
+	atCap := len(m.sessions) >= m.cfg.Session.MaxConcurrent
+	m.mu.RUnlock()
+	if atCap {
+		m.logger.Warn("session: rejected, manager at capacity",
+			infra.F("component", "session"),
+			infra.F("conn_id", connID),
+			infra.F("active", len(m.sessions)),
+			infra.F("max", m.cfg.Session.MaxConcurrent),
+		)
+		return nil, ErrManagerAtCapacity
+	}
+
 	s, err := NewSession(
 		ctx, client, connID,
 		m.fsrsSvc, m.gen, m.streamer, m.repo, m.pool,

@@ -113,4 +113,10 @@ var (
 	// ErrManagerAlreadyRunning is returned by Manager.Start when the sweeper is
 	// already running (CompareAndSwap guard).
 	ErrManagerAlreadyRunning = errors.New("session: manager already running")
+
+	// ErrManagerAtCapacity is returned by Manager.NewSession when the number
+	// of active sessions already equals cfg.Session.MaxConcurrent (Ticket 07:
+	// graceful degradation at the capacity limit — the student gets a friendly
+	// error instead of joining a degraded, oversubscribed service).
+	ErrManagerAtCapacity = errors.New("session: at capacity")
 )
