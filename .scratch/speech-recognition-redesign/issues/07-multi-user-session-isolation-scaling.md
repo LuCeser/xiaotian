@@ -4,7 +4,7 @@
 
 **Blocked by:** 06 — Automatic Grading and Detailed Analysis Reports
 
-**Status:** implemented (2026-09-10, commits: 见 git log 'ticket 07'; review pending)
+**Status:** done (2026-09-11, commits 4cb7e7b, ad4a09c, 5f8146b + review 修复；见 git log 'ticket 07')
 
 - [x] Multiple students can have active dictation sessions simultaneously — 会话按 connID（*ws.Client 指针）在 Manager 注册表隔离，天然多连接并发；同一 category 两名学生各拿互斥词组（fetch-lock 卡片级排他，词汇池足够时天然分流）；50 并发负载测试钉死（TestLoad_50ConcurrentSessions：全部到 FEEDBACK、注册表清空、42ms）
 - [x] Session data properly isolated between users with proper data boundaries — 核心隔离 bug 修复：会话退出原本按 category 全量解锁，会把其他学生进行中的锁一并打掉（第三个会话可能拿到第二名学生正在听写的词）——改为按卡片 ID 范围解锁（cmd_unlock --ids / UnlockOpts.IDs 全链路；NewSession 捕获锁定的卡片 ID，D-10 退出与 TTS 失败两条路径都范围释放；真实 vocab_manager.py+SQLite 冒烟验证）；语音/拍照 buffer 按 connID 隔离（既有）；审计行按 connection_id 归属
@@ -22,3 +22,4 @@
 - 范围取舍：负载测试为 Go 侧形状（FSRS/TTS 假件）——真实 pybridge/音频的端到端压测归 ticket 08（E2E）；不做连接排队或会话优先级
 - 已知边界：两名学生并发时词汇池需 ≥ 两人词数之和，否则第二人 ErrNoDueWords（FSRS 固有设计：同一张卡不给两人同时听写）；教室规模（>2 学生同 category）依赖词池规模
 - 遗留 UAT：真实 iPad×2 双设备并发全流程（互相不串词、先后退出后词池恢复正常）；1C/1G VPS 上 50 连接真实压测（内存/延迟达标）
+- 双轴 code review（2026-09-11，Standards + Spec 并行子代理，a06a5db...HEAD）：Spec 3 修——容量门 TOCTOU（RLock 查后放行，NewSession 秒级构造窗口内 N 个并发全过闸→超卖；改为写锁下预留槽位 reserved 计数，构造失败归还、成功转为注册表项，附 8 并发@cap7 恰好放行 7 的回归测试）；同 connID 重复 start 覆盖注册表（旧会话 onExit 无条件 delete 会删掉新会话的表项→容量计数失真/清扫器致盲；removeSession 改指针比较删除，附重启保活测试）；零 IDs 回退 sweep（releaseFSRSLock 空 lockCardIDs 时整体跳过而非回退类别清扫，pybridge unlockArgs 编组失败返回错误而非无过滤 argv——原回退恰好是本票要消灭的跨会话清障）。Spec 3 记录——50 并发测试为 FSM/注册表形状（假件绕过 pybridge 信号量/音频池，真容量验证归 ticket 08，工单已如实声明）；ListRecentResults 全局查询无学生身份维度（系统无 durable user id，同 category 两学生的历史互相可见——趋势按 category 过滤已是最大隔离，真隔离需引入用户身份，后续票）；"approaching capacity"的渐进降级即 D-18 内存脱落+Hub 拒连（既有），本票补充的是到达上限的友好拒绝。Standards 2 硬伤即上述 TOCTOU+锁外读 map（日志 len 移入锁内）；判断项全清——cardIDs 捕获循环上提去重、itoa→strconv、测试 var 卫语句改接口完备性断言、空白标识符。修复后全 12 包 + npm 复测全绿

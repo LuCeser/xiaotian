@@ -109,17 +109,19 @@ func dueArgs(cfg infra.PythonConfig, opts DueOpts) []string {
 //   - opts.Unit     -> --unit <value>     (omitted when empty)
 //
 // The function performs no I/O and no validation beyond the zero-value
-// checks -- it is a pure transform of (cfg, opts) into an argv slice.
-func unlockArgs(cfg infra.PythonConfig, opts UnlockOpts) []string {
+// checks -- it is a pure transform of (cfg, opts) into an argv slice. A
+// marshal failure (impossible for []int64) returns an error rather than a
+// filter-less argv: the Python default for an unfiltered unlock is a full
+// category sweep — the exact cross-session clobber Ticket 07 eliminated.
+func unlockArgs(cfg infra.PythonConfig, opts UnlockOpts) ([]string, error) {
 	args := []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "unlock"}
 	if len(opts.IDs) > 0 {
 		idsJSON, err := json.Marshal(opts.IDs)
 		if err != nil {
-			// []int64 cannot fail to marshal; keep the impossible branch honest.
-			return args
+			return nil, errors.Wrap(err, "marshal unlock ids")
 		}
 		args = append(args, "--ids", string(idsJSON))
-		return args
+		return args, nil
 	}
 	if opts.Category != "" {
 		args = append(args, "--category", opts.Category)
@@ -127,7 +129,7 @@ func unlockArgs(cfg infra.PythonConfig, opts UnlockOpts) []string {
 	if opts.Unit != "" {
 		args = append(args, "--unit", opts.Unit)
 	}
-	return args
+	return args, nil
 }
 
 // RunDue executes the vocab_manager.py `due` subcommand and returns the
@@ -384,7 +386,13 @@ func (b *Bridge) RunReview(ctx context.Context, opts ReviewOpts) (ReviewResult, 
 // N} JSON object vocab_manager.py prints.
 func (b *Bridge) RunUnlock(ctx context.Context, opts UnlockOpts) (UnlockResult, error) {
 	start := time.Now()
-	args := unlockArgs(b.cfg, opts)
+	args, argErr := unlockArgs(b.cfg, opts)
+	if argErr != nil {
+		// unlockArgs only fails on programmer error (ids marshal). No
+		// subprocess was spawned; do NOT invoke logResult (no run() happened,
+		// nosem held — same contract as RunPregenerate).
+		return UnlockResult{}, errors.Wrap(argErr, "build unlock argv")
+	}
 	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.DueTimeout,
 		b.cfg.Interpreter, args...)
 	defer b.logResult("unlock", start, stdout, stderr, exitCode, err)

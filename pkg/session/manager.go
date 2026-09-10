@@ -31,6 +31,7 @@ type Manager struct {
 	// --- Registry ---
 	mu       sync.RWMutex
 	sessions map[string]*Session // keyed by connID
+	reserved int                 // capacity slots held by in-flight NewSession constructions (Ticket 07: the cap must hold through the seconds-long construction window, not just at the instant of the check)
 	running  atomic.Bool         // CompareAndSwap guard for Start (D-08)
 }
 
@@ -164,23 +165,43 @@ func (m *Manager) NewSession(
 	connID string,
 	selectOpts fsrs.SelectOpts,
 ) (*Session, error) {
-	// Capacity gate (Ticket 07): reject BEFORE acquiring FSRS locks or
-	// spawning TTS work. Slots free automatically — the session's onExit
-	// callback removes it from the registry on every exit path (D-10).
-	m.mu.RLock()
-	atCap := len(m.sessions) >= m.cfg.Session.MaxConcurrent
-	m.mu.RUnlock()
-	if atCap {
+	// Capacity gate (Ticket 07): reserve the slot under the WRITE lock before
+	// the seconds-long construction (FSRS select + TTS pregen) — a check-then-
+	// act read lock would let MaxConcurrent simultaneous callers all pass and
+	// overshoot the cap. Slots free automatically: the reservation converts
+	// into a registry entry on success and is released on failure; the entry
+	// itself is removed by onExit on every exit path (D-10).
+	m.mu.Lock()
+	active := len(m.sessions) + m.reserved
+	if active >= m.cfg.Session.MaxConcurrent {
+		m.mu.Unlock()
 		m.logger.Warn("session: rejected, manager at capacity",
 			infra.F("component", "session"),
 			infra.F("conn_id", connID),
-			infra.F("active", len(m.sessions)),
+			infra.F("active", active),
 			infra.F("max", m.cfg.Session.MaxConcurrent),
 		)
 		return nil, ErrManagerAtCapacity
 	}
+	m.reserved++
+	m.mu.Unlock()
+	// On any failure path the reservation must be handed back; on success the
+	// deferred commit converts it into the registry entry (after `go run` is
+	// spawned, so the sweeper's RLock establishes happens-before with the
+	// lifecycle fields set below).
+	var s *Session
+	commit := false
+	defer func() {
+		m.mu.Lock()
+		m.reserved--
+		if commit {
+			m.sessions[connID] = s
+		}
+		m.mu.Unlock()
+	}()
 
-	s, err := NewSession(
+	var err error
+	s, err = NewSession(
 		ctx, client, connID,
 		m.fsrsSvc, m.gen, m.streamer, m.repo, m.pool,
 		m.hub, m.logger, m.cfg, selectOpts,
@@ -194,7 +215,7 @@ func (m *Manager) NewSession(
 	s.done = make(chan struct{})
 	s.runCtx, s.cancel = context.WithCancel(ctx)
 	s.onExit = func() {
-		m.removeSession(connID)
+		m.removeSession(connID, s)
 		// D-11 teardown: clear the streamer's per-session sequence counter on
 		// every session exit so seqCounters stays bounded under the
 		// 100-concurrent budget (RESEARCH Pitfall 5). Keyed by s.ID() — the same
@@ -203,9 +224,9 @@ func (m *Manager) NewSession(
 		m.streamer.ClearSeqCounter(s.ID())
 	}
 
-	m.mu.Lock()
-	m.sessions[connID] = s
-	m.mu.Unlock()
+	// Convert the reservation into the registry entry (the deferred commit
+	// runs after this return).
+	commit = true
 
 	go s.run(s.runCtx)
 	return s, nil
@@ -242,11 +263,16 @@ func (m *Manager) Push(connID string, ev SessionEvent) {
 	}
 }
 
-// removeSession removes the session from the registry. Called from the session's
-// onExit callback in the D-10 defer chain (fired when run() exits), so the map
-// entry is removed the instant the session terminates — regardless of exit cause.
-func (m *Manager) removeSession(connID string) {
+// removeSession removes the session from the registry — but only if the
+// entry still IS this session (Ticket 07): a same-connID restart replaces the
+// map entry, and the OLD session's exit must not delete the NEW one. Called
+// from the session's onExit callback in the D-10 defer chain (fired when
+// run() exits), so the entry is removed the instant the session terminates —
+// regardless of exit cause.
+func (m *Manager) removeSession(connID string, s *Session) {
 	m.mu.Lock()
-	delete(m.sessions, connID)
+	if m.sessions[connID] == s {
+		delete(m.sessions, connID)
+	}
 	m.mu.Unlock()
 }

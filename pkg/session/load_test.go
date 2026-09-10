@@ -10,6 +10,7 @@ package session_test
 import (
 	"context"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -129,7 +130,7 @@ func TestLoad_50ConcurrentSessions(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			connID := "load-conn-" + itoa(i)
+			connID := "load-conn-" + strconv.Itoa(i)
 			s, err := manager.NewSession(context.Background(), nil, connID, fsrs.SelectOpts{Limit: 2})
 			if err != nil {
 				t.Errorf("session %d: %v", i, err)
@@ -217,18 +218,4 @@ func waitLoadWord(t *testing.T, s *session.Session, want database.SessionState, 
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Errorf("%s: never reached %s at %s (at %s/%s)", connID, want, word, s.State(), s.CurrentWord())
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b [8]byte
-	p := len(b)
-	for i > 0 {
-		p--
-		b[p] = byte('0' + i%10)
-		i /= 10
-	}
-	return string(b[p:])
 }

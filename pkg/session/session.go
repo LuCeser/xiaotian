@@ -176,10 +176,15 @@ func NewSession(
 	}
 
 	// --- Step 3: TTS UUID + GenerateForSession (Pitfall 3: before the loop). ---
+	// The card IDs captured here are the lock scope replayed on BOTH unlock
+	// paths (Ticket 07): the TTS-failure init path below and the D-10 exit
+	// defer chain.
+	cardIDs := make([]int64, len(cards))
 	sessionID := newSessionID()
 	words := make([]string, len(cards))
 	for i, c := range cards {
 		words[i] = c.Word
+		cardIDs[i] = int64(c.ID)
 	}
 	if _, err := gen.GenerateForSession(ctx, sessionID, words); err != nil {
 		// --- Step 4: TTS failure — non-defer UnlockCards (D-10 init path). ---
@@ -189,10 +194,6 @@ func NewSession(
 		// run(), which needs a fresh ctx — Pitfall 1). Scoped to the card IDs
 		// this session locked (Ticket 07) — a category sweep would drop other
 		// sessions' locks.
-		cardIDs := make([]int64, len(cards))
-		for i, c := range cards {
-			cardIDs[i] = int64(c.ID)
-		}
 		if _, unlockErr := fsrsSvc.UnlockCards(ctx, fsrs.UnlockOpts{
 			Category: resolvedCategory,
 			Unit:     resolvedUnit,
@@ -209,10 +210,6 @@ func NewSession(
 	}
 
 	// --- Step 5: Build the Session struct. ---
-	cardIDs := make([]int64, len(cards))
-	for i, c := range cards {
-		cardIDs[i] = int64(c.ID)
-	}
 	s := &Session{
 		id:               sessionID,
 		connID:           connID,
@@ -684,8 +681,17 @@ func (s *Session) releaseFSRSLock() {
 	// category-wide sweep would also drop OTHER active sessions' locks in
 	// the same category — two students sharing a category is the supported
 	// multi-user posture, and clobbering a peer's lock could hand its words
-	// to a third session mid-dictation. lockCategory/lockUnit remain the
-	// log/fallback identity (Pitfall 4).
+	// to a third session mid-dictation. With no captured IDs there is
+	// nothing this session locked — skip entirely rather than fall back to
+	// a sweep (empty IDs currently can't happen — ErrNoDueWords guards —
+	// but a future path must not silently re-enable the clobber).
+	if len(s.lockCardIDs) == 0 {
+		s.logger.Warn("session: no card IDs captured, skipping FSRS unlock",
+			infra.F("component", "session"),
+			infra.F("session_id", s.id),
+		)
+		return
+	}
 	n, err := s.fsrsSvc.UnlockCards(ctx, fsrs.UnlockOpts{
 		Category: s.lockCategory,
 		Unit:     s.lockUnit,

@@ -147,8 +147,14 @@ func TestManager_Lifecycle_OnExit(t *testing.T) {
 		done:     make(chan struct{}),
 		runCtx:   ctx,
 		cancel:   cancel,
-		onExit:   func() { m.removeSession("c1") },
+		// Ticket 07: exit replays a card-ID-scoped unlock; a hand-built
+		// session carries one card so the unlock path fires (production
+		// sessions always have ≥1 — ErrNoDueWords guards the empty queue).
+		lockCardIDs: []int64{1},
 	}
+	// onExit assigned after construction: the pointer-compare guard needs the
+	// finished `s` (self-reference inside the literal is not in scope).
+	s.onExit = func() { m.removeSession("c1", s) }
 	m.sessions["c1"] = s
 
 	go s.run(ctx)

@@ -8,10 +8,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
-	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 	"go.uber.org/zap"
@@ -65,9 +63,6 @@ func TestStartSession_AtCapacityFriendlyError(t *testing.T) {
 	}
 }
 
-// sanity: unused import guards (pybridge/fsrs/database referenced via fakes).
-var (
-	_ = pybridge.DueCard{}
-	_ = fsrs.SelectOpts{}
-	_ = database.StateIdle
-)
+// The FSRS fake stays interface-complete (compile-time guard mirrors the
+// package convention).
+var _ fsrs.FSRSService = (*batchFSRS)(nil)
