@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/grading"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
@@ -205,11 +204,14 @@ func TestE2E_Story_PerWordVoiceFlow(t *testing.T) {
 }
 
 // nearMissOf swaps the first two runes of a 2+ rune word — a one-edit
-// transposition, guaranteed to land in the near-miss tier.
+// transposition, guaranteed to land in the near-miss tier. Single-rune
+// words cannot be near-missed by construction (grading requires len >= 2);
+// the test word pool is all 2-char words, so hitting this panic is a pool
+// edit mistake, not a runtime condition.
 func nearMissOf(w string) string {
 	r := []rune(w)
 	if len(r) < 2 {
-		return w + "x"
+		panic("nearMissOf requires a 2+ rune word — fix the test word pool")
 	}
 	r[0], r[1] = r[1], r[0]
 	return string(r)
@@ -228,7 +230,9 @@ func TestE2E_Story_BatchFrameOrder(t *testing.T) {
 	sendControlJSON(t, conn, `{"type":"start_session","params":{"limit":2,"category":"chinese"}}`)
 	readyPayload := readControlUntil(t, conn, "session_ready")
 	var ready sessionReadyResponse
-	_ = json.Unmarshal([]byte(readyPayload), &ready)
+	if err := json.Unmarshal([]byte(readyPayload), &ready); err != nil {
+		t.Fatalf("session_ready decode: %v", err)
+	}
 
 	sendControlJSON(t, conn, `{"type":"play_word","params":{"word_id":"`+ready.Words[0]+`"}}`)
 	readControlUntil(t, conn, `"type":"word_complete"`)
@@ -272,51 +276,63 @@ func TestE2E_Story_BatchFrameOrder(t *testing.T) {
 	}
 }
 
-// Story 3 — 两名学生并发: two connections run complete dictations at the
-// same time. The FSRS fake serves disjoint word sets; each student's exit
-// unlock touches ONLY its own cards (the Ticket-07 containment contract).
+// Story 3 — 两名学生并发: two connections hold live dictation sessions at
+// the same time. The FSRS fake serves disjoint word sets; each student's
+// exit unlock touches ONLY its own cards (the Ticket-07 containment
+// contract). Both sessions' event loops run concurrently regardless of who
+// sends frames, so the test drives the two connections INTERLEAVED from the
+// test goroutine — keeping every Fatalf-based helper on the goroutine Go's
+// testing package permits (helpers t.Fatalf; off-goroutine FailNow kills
+// only the student goroutine and wedges wg.Wait).
 func TestE2E_Story_TwoStudentsConcurrently(t *testing.T) {
 	fakeFSRS := newStoriesFSRS()
 	conns, _, teardown := bootStories(t, fakeFSRS, 2)
 	defer teardown()
 
-	runStudent := func(conn *websocket.Conn, answerWithNearMiss bool) {
+	// Both students start before either proceeds — the overlap is the point.
+	var ready [2]sessionReadyResponse
+	for i, conn := range conns {
 		sendControlJSON(t, conn, `{"type":"start_session","params":{"limit":2,"category":"chinese"}}`)
 		readyPayload := readControlUntil(t, conn, "session_ready")
-		var ready sessionReadyResponse
-		if err := json.Unmarshal([]byte(readyPayload), &ready); err != nil {
-			t.Errorf("session_ready decode: %v", err)
-			return
+		if err := json.Unmarshal([]byte(readyPayload), &ready[i]); err != nil {
+			t.Fatalf("student %d session_ready decode: %v", i, err)
 		}
-		if len(ready.Words) != 2 {
-			t.Errorf("words = %v", ready.Words)
-			return
+		if len(ready[i].Words) != 2 {
+			t.Fatalf("student %d words = %v, want 2", i, ready[i].Words)
 		}
+	}
 
-		sendControlJSON(t, conn, `{"type":"play_word","params":{"word_id":"`+ready.Words[0]+`"}}`)
-		readControlUntil(t, conn, `"type":"word_complete"`)
+	// Interleaved dictation: play word 1 on both, then advance both.
+	for i, conn := range conns {
+		sendControlJSON(t, conn, `{"type":"play_word","params":{"word_id":"`+ready[i].Words[0]+`"}}`)
+	}
+	for i, conn := range conns {
+		readControlUntil(t, conn, `"word_id":"`+ready[i].Words[0]+`"`)
 		sendControlJSON(t, conn, `{"type":"next_word","params":{}}`)
-		readControlUntil(t, conn, `"word_id":"`+ready.Words[1]+`"`)
+	}
+	for i, conn := range conns {
+		readControlUntil(t, conn, `"word_id":"`+ready[i].Words[1]+`"`)
 		sendControlJSON(t, conn, `{"type":"next_word","params":{}}`)
+	}
 
-		ans := make(map[string]string)
-		ans[ready.Words[0]] = ready.Words[0]
-		if answerWithNearMiss {
-			ans[ready.Words[1]] = nearMissOf(ready.Words[1])
-		} else {
-			ans[ready.Words[1]] = ready.Words[1]
+	// Student A all-correct; student B one near-miss.
+	ansA := map[string]string{ready[0].Words[0]: ready[0].Words[0], ready[0].Words[1]: ready[0].Words[1]}
+	ansB := map[string]string{ready[1].Words[0]: ready[1].Words[0], ready[1].Words[1]: nearMissOf(ready[1].Words[1])}
+	for i, conn := range conns {
+		ans := ansA
+		if i == 1 {
+			ans = ansB
 		}
-		payload, _ := json.Marshal(ans)
+		payload, err := json.Marshal(ans)
+		if err != nil {
+			t.Fatalf("marshal answers: %v", err)
+		}
 		sendControlJSON(t, conn, `{"type":"submit_answers","params":{"answers":`+string(payload)+`}}`)
+	}
+	for _, conn := range conns {
 		readControlUntil(t, conn, `"type":"analysis_result"`)
 		readControlUntil(t, conn, "session_complete")
 	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); runStudent(conns[0], false) }()
-	go func() { defer wg.Done(); runStudent(conns[1], true) }()
-	wg.Wait()
 
 	// Sessions sit in FEEDBACK until they exit — closing the connections
 	// cancels their per-connection ctxs, firing the D-10 chain (and the
@@ -376,7 +392,9 @@ func TestE2E_Story_ErrorScenarios(t *testing.T) {
 	sendControlJSON(t, conn, `{"type":"start_session","params":{"limit":2,"category":"chinese"}}`)
 	readyPayload := readControlUntil(t, conn, "session_ready")
 	var ready sessionReadyResponse
-	_ = json.Unmarshal([]byte(readyPayload), &ready)
+	if err := json.Unmarshal([]byte(readyPayload), &ready); err != nil {
+		t.Fatalf("session_ready decode: %v", err)
+	}
 
 	// Empty transcript answer is rejected as incomplete (not graded wrong).
 	sendControlJSON(t, conn, `{"type":"submit_answer","params":{"word_id":"x","transcript":"   "}}`)
@@ -412,7 +430,9 @@ func TestE2E_Story_GradingTiersOnTheWire(t *testing.T) {
 	sendControlJSON(t, conn, `{"type":"start_session","params":{"limit":2,"category":"chinese"}}`)
 	readyPayload := readControlUntil(t, conn, "session_ready")
 	var ready sessionReadyResponse
-	_ = json.Unmarshal([]byte(readyPayload), &ready)
+	if err := json.Unmarshal([]byte(readyPayload), &ready); err != nil {
+		t.Fatalf("session_ready decode: %v", err)
+	}
 
 	sendControlJSON(t, conn, `{"type":"play_word","params":{"word_id":"`+ready.Words[0]+`"}}`)
 	readControlUntil(t, conn, `"type":"word_complete"`)
@@ -457,5 +477,4 @@ func TestE2E_Story_GradingTiersOnTheWire(t *testing.T) {
 	}
 	readControlUntil(t, conn, "session_complete")
 
-	_ = database.StateIdle // referenced for the package doc block
 }
