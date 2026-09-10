@@ -40,11 +40,12 @@ type FSRSService interface {
 	// mapping decision belongs to a future phase (Pitfall 4).
 	UpdateRatings(ctx context.Context, ratings map[string]string, category string) (pybridge.ReviewResult, error)
 
-	// UnlockCards clears FSRS fetch locks for the given category (and
-	// optionally a single unit) via pybridge.Executor.RunUnlock. The opts
-	// fields are merged with FSRSConfig defaults: a zero-valued Category
-	// falls back to cfg.DefaultCategory. Returns the number of cards
-	// unlocked.
+	// UnlockCards clears FSRS fetch locks via pybridge.Executor.RunUnlock.
+	// With opts.IDs set, exactly those cards unlock (Ticket 07 scoped
+	// release — one session's exit must not drop another's locks).
+	// Otherwise the category/unit sweep applies, with a zero-valued
+	// Category falling back to cfg.DefaultCategory. Returns the number of
+	// cards unlocked.
 	UnlockCards(ctx context.Context, opts UnlockOpts) (int, error)
 }
 
@@ -72,6 +73,12 @@ type UnlockOpts struct {
 
 	// Unit restricts the unlock to one unit. Empty = all units.
 	Unit string
+
+	// IDs requests a scoped per-card release (Ticket 07): exactly these card
+	// IDs unlock, nothing else — one session's exit must not drop another
+	// session's in-flight locks. Non-empty IDs take precedence over
+	// Category/Unit.
+	IDs []int64
 }
 
 // Compile-time interface satisfaction check (D-43).
@@ -172,6 +179,21 @@ func (s *fsrsService) UpdateRatings(ctx context.Context, ratings map[string]stri
 // pybridge.Executor.RunUnlock. On success, returns the number of cards
 // unlocked.
 func (s *fsrsService) UnlockCards(ctx context.Context, opts UnlockOpts) (int, error) {
+	// Scoped per-card release (Ticket 07): IDs win, category defaults don't
+	// apply — the caller names exactly what it locked.
+	if len(opts.IDs) > 0 {
+		result, err := s.exec.RunUnlock(ctx, pybridge.UnlockOpts{IDs: opts.IDs})
+		if err != nil {
+			s.logger.Error("fsrs service: unlock cards failed",
+				infra.F("component", "fsrs"),
+				infra.F("ids", len(opts.IDs)),
+				infra.ErrField(err),
+			)
+			return 0, errors.Wrap(err, "fsrs service: unlock cards")
+		}
+		return result.Unlocked, nil
+	}
+
 	category := opts.Category
 	if category == "" {
 		category = s.cfg.DefaultCategory

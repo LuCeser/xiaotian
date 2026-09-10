@@ -62,7 +62,7 @@ import (
 //
 // Flag mapping (verified against pregenerate_dictation.py:1043-1051):
 //   - opts.Words            -> --words <jsonArray>  (REQUIRED; the whole
-//                            list is batched into one call per D-01.)
+//     list is batched into one call per D-01.)
 //   - opts.Language         -> --language <english|chinese>  (REQUIRED)
 //   - opts.WordsPerSegment  -> --words-per-segment <int>     (omitted when <= 0)
 //   - opts.Prefix           -> --prefix <value>              (omitted when empty)
@@ -144,17 +144,17 @@ func pregenArgs(cfg infra.PythonConfig, opts PregenOpts) ([]string, error) {
 //     (SC-4 field whitelist).
 //  6. Classify the outcome into one of the pybridge sentinels:
 //     - context.DeadlineExceeded -> ErrPythonTimeout (subprocess took too
-//       long; the process group was SIGKILLed by run()'s Cancel hook).
+//     long; the process group was SIGKILLed by run()'s Cancel hook).
 //     - exit != 0                -> ExitError wrapping ErrPythonExit
-//       (pregenerate/ffmpeg/Volcengine error; stderr carries the script's
-//       diagnostic).
+//     (pregenerate/ffmpeg/Volcengine error; stderr carries the script's
+//     diagnostic).
 //     - empty stdout on exit 0   -> ErrPythonEmpty (RESEARCH Pitfall 6
-//       acceptance: empty-success-stdout is the signature of flock
-//       contention OR a script bug; either way the bridge MUST NOT return
-//       a silent zero-path success -- surface as a typed error so callers
-//       can retry or surface upstream).
+//     acceptance: empty-success-stdout is the signature of flock
+//     contention OR a script bug; either way the bridge MUST NOT return
+//     a silent zero-path success -- surface as a typed error so callers
+//     can retry or surface upstream).
 //     - splitNonEmptyLines yields the path list. (No ErrPythonJSONParse
-//       here: pregenerate stdout is line-based, not JSON -- Pitfall 3.)
+//     here: pregenerate stdout is line-based, not JSON -- Pitfall 3.)
 //
 // On success the returned PregenResult.Paths mirrors the line-based stdout
 // the script emits at pregenerate_dictation.py:1147-1148

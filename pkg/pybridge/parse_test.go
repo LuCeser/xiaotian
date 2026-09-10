@@ -63,13 +63,13 @@ func TestExtractTrailingJSON(t *testing.T) {
 			wantValid: true,
 		},
 		{
-			name: "trailing whitespace after JSON is trimmed",
-			in:   append([]byte(`{"updated": []}`), ' ', '\n', '\t', ' '),
+			name:      "trailing whitespace after JSON is trimmed",
+			in:        append([]byte(`{"updated": []}`), ' ', '\n', '\t', ' '),
 			wantValid: true,
 		},
 		{
-			name: "JSON object value (not array)",
-			in:   []byte(`status: ok\n{"updated": [{"word": "hi", "rating": "good", "next_due": "x", "state": "Review", "stability": 1.0}]}`),
+			name:      "JSON object value (not array)",
+			in:        []byte(`status: ok\n{"updated": [{"word": "hi", "rating": "good", "next_due": "x", "state": "Review", "stability": 1.0}]}`),
 			wantValid: true,
 		},
 		{

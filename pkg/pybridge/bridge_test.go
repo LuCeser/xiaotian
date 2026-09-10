@@ -381,14 +381,14 @@ func TestLogResultNoSecretLeak(t *testing.T) {
 	// Whitelist of field keys the bridge is allowed to log. Anything else
 	// is a T-03-08 regression.
 	allowed := map[string]bool{
-		"component":    true,
-		"command":      true,
-		"exit_code":    true,
-		"duration_ms":  true,
-		"error_type":   true,
-		"stderr":       true,
-		"stdout":       true,
-		"error":        true, // ErrField for the "other" branch
+		"component":   true,
+		"command":     true,
+		"exit_code":   true,
+		"duration_ms": true,
+		"error_type":  true,
+		"stderr":      true,
+		"stdout":      true,
+		"error":       true, // ErrField for the "other" branch
 	}
 	for _, f := range fl.msgs[0].Fields {
 		if !allowed[f.Key] {

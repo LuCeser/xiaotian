@@ -103,6 +103,8 @@ func dueArgs(cfg infra.PythonConfig, opts DueOpts) []string {
 // a zero-valued field means "omit the flag".
 //
 // Flag mapping:
+//   - opts.IDs      -> --ids <json>       (scoped per-card release; wins over
+//     the category flags when non-empty — Ticket 07 session isolation)
 //   - opts.Category -> --category <value> (omitted when empty)
 //   - opts.Unit     -> --unit <value>     (omitted when empty)
 //
@@ -110,6 +112,15 @@ func dueArgs(cfg infra.PythonConfig, opts DueOpts) []string {
 // checks -- it is a pure transform of (cfg, opts) into an argv slice.
 func unlockArgs(cfg infra.PythonConfig, opts UnlockOpts) []string {
 	args := []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "unlock"}
+	if len(opts.IDs) > 0 {
+		idsJSON, err := json.Marshal(opts.IDs)
+		if err != nil {
+			// []int64 cannot fail to marshal; keep the impossible branch honest.
+			return args
+		}
+		args = append(args, "--ids", string(idsJSON))
+		return args
+	}
 	if opts.Category != "" {
 		args = append(args, "--category", opts.Category)
 	}
@@ -136,16 +147,16 @@ func unlockArgs(cfg infra.PythonConfig, opts UnlockOpts) []string {
 //     filter due-path entries in the log stream (SC-4 field whitelist).
 //  4. Classify the outcome into one of the pybridge sentinels:
 //     - context.DeadlineExceeded -> ErrPythonTimeout (subprocess took too
-//       long; the process group was SIGKILLed by run()'s Cancel hook).
+//     long; the process group was SIGKILLed by run()'s Cancel hook).
 //     - exit != 0                -> ExitError wrapping ErrPythonExit (FSRS
-//       or user error; stderr carries the script's diagnostic).
+//     or user error; stderr carries the script's diagnostic).
 //     - empty stdout on exit 0   -> ErrPythonEmpty (the script's contract
-//       is "exit 0 implies printable JSON"; an empty success stdout is a
-//       bridge-level error rather than a silent zero-card result).
+//     is "exit 0 implies printable JSON"; an empty success stdout is a
+//     bridge-level error rather than a silent zero-card result).
 //     - extractTrailingJSON fail -> ErrPythonJSONParse (stdout had no
-//       trailing JSON value -- likely the script crashed mid-print).
+//     trailing JSON value -- likely the script crashed mid-print).
 //     - json.Unmarshal fail      -> ErrPythonJSONParse (the trailing bytes
-//       were not a valid DueCard array).
+//     were not a valid DueCard array).
 //
 // On success the returned DueResult.Cards mirrors the JSON array
 // vocab_manager.py prints (verified shape: array of DueCard).

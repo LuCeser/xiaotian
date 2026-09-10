@@ -207,6 +207,12 @@ type PregenResult struct {
 type UnlockOpts struct {
 	Category string
 	Unit     string
+
+	// IDs requests a SCOPED per-card release (Ticket 07): exactly these card
+	// IDs are unlocked, nothing else in the category — one session exiting
+	// must not drop another session's in-flight locks. Non-empty IDs take
+	// precedence over Category/Unit, which are then ignored.
+	IDs []int64
 }
 
 // UnlockResult is the typed payload the unlock path returns. Unlocked

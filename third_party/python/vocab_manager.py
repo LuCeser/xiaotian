@@ -296,7 +296,34 @@ def cmd_due(db, args):
 
 
 def cmd_unlock(db, args):
-    """Clear fetch locks on cards (testing aid)."""
+    """Clear fetch locks on cards.
+
+    --ids '[1,2,3]' unlocks exactly those cards (scoped per-card release —
+    the session-exit path, so one student finishing cannot drop another
+    student's in-flight locks). Without --ids, the category/unit filter
+    applies (testing aid / admin sweep).
+    """
+    if args.ids:
+        try:
+            ids = json.loads(args.ids)
+        except ValueError:
+            print("Error: --ids must be a JSON array of integers")
+            sys.exit(1)
+        if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+            print("Error: --ids must be a JSON array of integers")
+            sys.exit(1)
+        if not ids:
+            print(json.dumps({"unlocked": 0, "ids": []}, ensure_ascii=False))
+            return
+        placeholders = ",".join("?" for _ in ids)
+        cur = db.execute(
+            f"UPDATE cards SET fetch_locked_until = NULL WHERE id IN ({placeholders})",
+            ids,
+        )
+        db.commit()
+        print(json.dumps({"unlocked": cur.rowcount, "ids": ids}, ensure_ascii=False))
+        return
+
     query = "UPDATE cards SET fetch_locked_until = NULL WHERE category = ?"
     params = [args.category or "english"]
     if args.unit:
@@ -807,9 +834,10 @@ def main():
     p_merge.add_argument("--category", default="english", help="Category (default: english)")
 
     # unlock
-    p_unlock = subparsers.add_parser("unlock", help="Clear fetch locks on cards (testing aid)")
-    p_unlock.add_argument("--category", default="english", help="Category (default: english)")
-    p_unlock.add_argument("--unit", default="", help="Filter by unit (default: all units)")
+    p_unlock = subparsers.add_parser("unlock", help="Clear fetch locks (scoped --ids release, or category/unit sweep)")
+    p_unlock.add_argument("--category", default="english", help="Category (default: english; ignored with --ids)")
+    p_unlock.add_argument("--unit", default="", help="Filter by unit (default: all units; ignored with --ids)")
+    p_unlock.add_argument("--ids", default="", help="JSON array of card IDs to unlock (scoped release; takes precedence over category/unit)")
 
     args = parser.parse_args()
     if not args.command:

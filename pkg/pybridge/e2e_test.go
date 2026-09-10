@@ -89,7 +89,7 @@ func TestMain(m *testing.M) {
 		e2eSkipReason = "runtime.Caller failed; cannot locate third_party/python"
 		os.Exit(m.Run())
 	}
-	pkgDir := filepath.Dir(file)               // .../pkg/pybridge
+	pkgDir := filepath.Dir(file)                   // .../pkg/pybridge
 	repoRoot := filepath.Dir(filepath.Dir(pkgDir)) // .../home-tutor-agent
 	e2eScriptsDir = filepath.Join(repoRoot, "third_party", "python")
 

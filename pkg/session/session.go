@@ -83,6 +83,11 @@ type Session struct {
 	// --- FSRS lock scope (captured at NewSession, replayed at exit — Pitfall 4) ---
 	lockCategory string
 	lockUnit     string
+	// lockCardIDs are the IDs SelectDueCards actually locked (one per queue
+	// card, Ticket 07). Exit replays them as a SCOPED unlock: a category-wide
+	// release would drop OTHER sessions' in-flight locks — two students
+	// dictating the same category is the supported multi-user posture.
+	lockCardIDs []int64
 
 	// --- Service dependencies ---
 	client   *ws.Client // frame-send target + hub identity (D-05)
@@ -181,10 +186,17 @@ func NewSession(
 		// The defer chain is NOT installed yet (run() hasn't started), so the
 		// unlock must happen explicitly here. Using the caller's ctx is correct
 		// because it is still live at init time (unlike the deferred unlock in
-		// run(), which needs a fresh ctx — Pitfall 1).
+		// run(), which needs a fresh ctx — Pitfall 1). Scoped to the card IDs
+		// this session locked (Ticket 07) — a category sweep would drop other
+		// sessions' locks.
+		cardIDs := make([]int64, len(cards))
+		for i, c := range cards {
+			cardIDs[i] = int64(c.ID)
+		}
 		if _, unlockErr := fsrsSvc.UnlockCards(ctx, fsrs.UnlockOpts{
 			Category: resolvedCategory,
 			Unit:     resolvedUnit,
+			IDs:      cardIDs,
 		}); unlockErr != nil {
 			logger.Error("session: failed to release FSRS lock after TTS failure",
 				infra.F("component", "session"),
@@ -197,6 +209,10 @@ func NewSession(
 	}
 
 	// --- Step 5: Build the Session struct. ---
+	cardIDs := make([]int64, len(cards))
+	for i, c := range cards {
+		cardIDs[i] = int64(c.ID)
+	}
 	s := &Session{
 		id:               sessionID,
 		connID:           connID,
@@ -206,6 +222,7 @@ func NewSession(
 		deadline:         time.Now().Add(cfg.SessionTimeout.IdleStateTimeout),
 		lockCategory:     resolvedCategory,
 		lockUnit:         resolvedUnit,
+		lockCardIDs:      cardIDs,
 		client:           client,
 		fsrsSvc:          fsrsSvc,
 		gen:              gen,
@@ -663,9 +680,16 @@ func (s *Session) releaseFSRSLock() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Scoped release (Ticket 07): only the cards this session locked. A
+	// category-wide sweep would also drop OTHER active sessions' locks in
+	// the same category — two students sharing a category is the supported
+	// multi-user posture, and clobbering a peer's lock could hand its words
+	// to a third session mid-dictation. lockCategory/lockUnit remain the
+	// log/fallback identity (Pitfall 4).
 	n, err := s.fsrsSvc.UnlockCards(ctx, fsrs.UnlockOpts{
 		Category: s.lockCategory,
 		Unit:     s.lockUnit,
+		IDs:      s.lockCardIDs,
 	})
 	if err != nil {
 		s.logger.Error("session: failed to release FSRS lock (will self-expire via 24h TTL)",
@@ -673,6 +697,7 @@ func (s *Session) releaseFSRSLock() {
 			infra.F("session_id", s.id),
 			infra.F("category", s.lockCategory),
 			infra.F("unit", s.lockUnit),
+			infra.F("card_ids", len(s.lockCardIDs)),
 			infra.ErrField(err),
 		)
 		return

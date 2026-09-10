@@ -357,7 +357,7 @@ func TestReviewArgs(t *testing.T) {
 
 	t.Run("category appended when set", func(t *testing.T) {
 		opts := ReviewOpts{
-			Results: map[string]string{"hello": "good"},
+			Results:  map[string]string{"hello": "good"},
 			Category: "chinese",
 		}
 		argv, cleanup, err := reviewArgs(cfg, opts)
