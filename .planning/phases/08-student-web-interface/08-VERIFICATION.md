@@ -141,6 +141,8 @@ Truths are merged from ROADMAP success criteria (authoritative) plus PLAN frontm
 | Backend emits session_complete | `grep -rn "Type.*\"session_complete\"" pkg/session/ cmd/service/` | 0 matches | FAIL — backend never emits this frame type |
 | No debt markers in phase files | `grep -nE "TBD\|FIXME\|XXX\|TODO\|HACK\|PLACEHOLDER" pkg/web/static/**/*.{js,html,css} pkg/infra/static.go` | 0 matches | PASS |
 
+> **注记(2026-09-12,归账时点):** 上表 4 条 FAIL(后端不发 progress_update / word_complete / session_complete;前端不发 play_word)在验证时点为真——本次验证早于 08-06 与 tickets 02–05 的后续交付,上述缺口现均已关闭。历史表格按当时实况保留,不做改写。当前代码证据(grep 复核):progress_update / word_complete / session_complete 发送点在 pkg/session/session.go;play_word 发送点在 pkg/web/static/js/websocket-client.js。
+
 Step 7b: Behavioral spot-checks for the live server (curl of `/`, `/styles/main.css`, `/js/app.js`, `/ws`) were performed during 08-05 execution and documented in 08-05-SUMMARY with all criteria passing. Re-running them would require starting the service (out of scope: "Keep verification fast. Use grep/file checks, not running the app."). The code paths they exercise (StaticFileServer + main.go mount) are verified by the substantive checks above.
 
 ### Probe Execution
