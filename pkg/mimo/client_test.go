@@ -130,15 +130,15 @@ func defaultASRHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := ASRResponse{
-			Choices: []ASRChoice{
-				{
-					Message: ASRMessageContent{
-						Role:    "assistant",
-						Content: "这是测试语音识别结果",
-					},
+		Choices: []ASRChoice{
+			{
+				Message: ASRMessageContent{
+					Role:    "assistant",
+					Content: "这是测试语音识别结果",
 				},
 			},
-		}
+		},
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -305,11 +305,11 @@ func TestClient_Synthesize(t *testing.T) {
 			wantErr: nil,
 		},
 		{
-			name:     "authentication failure",
-			handler:  defaultTTSHandler,
-			text:     "Test auth",
-			opts:     []TTSOption{},
-			wantErr:  ErrAuthentication,
+			name:    "authentication failure",
+			handler: defaultTTSHandler,
+			text:    "Test auth",
+			opts:    []TTSOption{},
+			wantErr: ErrAuthentication,
 		},
 		{
 			name:    "rate limit with retry",
@@ -425,8 +425,8 @@ func TestClient_Transcribe(t *testing.T) {
 			wantErr:   ErrAudioTooShort,
 		},
 		{
-			name:     "authentication failure",
-			handler:  defaultASRHandler,
+			name:      "authentication failure",
+			handler:   defaultASRHandler,
 			audioData: []byte("mock_audio"),
 			format:    "pcm16",
 			opts:      []ASROption{},

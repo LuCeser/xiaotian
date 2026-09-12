@@ -43,7 +43,7 @@ type AudioConfig struct {
 // TTSResponse represents the response from a TTS synthesis request
 type TTSResponse struct {
 	Choices []Choice `json:"choices"`
-	Usage   Usage     `json:"usage,omitempty"`
+	Usage   Usage    `json:"usage,omitempty"`
 }
 
 // Choice contains the generated audio data
@@ -107,8 +107,8 @@ type ASRRequest struct {
 
 // ASRMessage represents a message in ASR request (OpenAI-compatible format)
 type ASRMessage struct {
-	Role    string             `json:"role"` // "user"
-	Content []MessageContent   `json:"content"`
+	Role    string           `json:"role"` // "user"
+	Content []MessageContent `json:"content"`
 }
 
 // MessageContent represents content within a message (can be text or audio)
@@ -140,7 +140,7 @@ type ASRResponse struct {
 // ASRChoice represents a choice in ASR response
 type ASRChoice struct {
 	Message ASRMessageContent `json:"message"`
-	Index   int                `json:"index"`
+	Index   int               `json:"index"`
 }
 
 // ASRMessageContent represents the message content in ASR response
@@ -151,20 +151,20 @@ type ASRMessageContent struct {
 
 // DecodedASRText represents the decoded transcription text (convenience struct for clients)
 type DecodedASRText struct {
-	Text      string        `json:"text"`
-	Language  string        `json:"language,omitempty"`
-	Dialect   string        `json:"dialect,omitempty"`
-	Confidence float64      `json:"confidence,omitempty"`
-	Duration  int           `json:"duration,omitempty"`
-	Words     []WordSegment `json:"words,omitempty"`
-	Usage     Usage         `json:"usage,omitempty"`
+	Text       string        `json:"text"`
+	Language   string        `json:"language,omitempty"`
+	Dialect    string        `json:"dialect,omitempty"`
+	Confidence float64       `json:"confidence,omitempty"`
+	Duration   int           `json:"duration,omitempty"`
+	Words      []WordSegment `json:"words,omitempty"`
+	Usage      Usage         `json:"usage,omitempty"`
 }
 
 // WordSegment represents a recognized word with timing information
 type WordSegment struct {
-	Word      string  `json:"word"`
-	StartTime float64 `json:"start_time"`
-	EndTime   float64 `json:"end_time"`
+	Word       string  `json:"word"`
+	StartTime  float64 `json:"start_time"`
+	EndTime    float64 `json:"end_time"`
 	Confidence float64 `json:"confidence"`
 }
 
@@ -310,7 +310,6 @@ type StreamResult struct {
 	// Error contains any error that occurred during streaming
 	Error error
 }
-
 
 // Client is the interface for Mimo service operations
 type Client interface {

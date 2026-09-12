@@ -115,20 +115,26 @@ func TestLLMClassifier(t *testing.T) {
 		wantErr    bool
 	}{
 		{
-			name:       "strict json reply",
-			chatter:    func(context.Context, string, string) (string, error) { return `{"action":"repeat","confidence":0.9}`, nil },
+			name: "strict json reply",
+			chatter: func(context.Context, string, string) (string, error) {
+				return `{"action":"repeat","confidence":0.9}`, nil
+			},
 			transcript: "麻烦再念一次那个词",
 			want:       ActionRepeat,
 		},
 		{
-			name:       "prose-wrapped json reply",
-			chatter:    func(context.Context, string, string) (string, error) { return `好的，结果是 {"action":"pause","confidence":0.8} 请查收`, nil },
+			name: "prose-wrapped json reply",
+			chatter: func(context.Context, string, string) (string, error) {
+				return `好的，结果是 {"action":"pause","confidence":0.8} 请查收`, nil
+			},
 			transcript: "老师等我一下下",
 			want:       ActionPause,
 		},
 		{
-			name:       "regex fallback when json malformed",
-			chatter:    func(context.Context, string, string) (string, error) { return `result: "action": "next_word" (done)`, nil },
+			name: "regex fallback when json malformed",
+			chatter: func(context.Context, string, string) (string, error) {
+				return `result: "action": "next_word" (done)`, nil
+			},
 			transcript: "写完了啊",
 			want:       ActionNextWord,
 		},

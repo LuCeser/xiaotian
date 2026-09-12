@@ -30,3 +30,13 @@ third_party/python/.venv*/
 
 # Vendor (use modules)
 vendor/
+
+## ADE
+
+.agents
+# .claude holds committed shared config (CLAUDE.md) — ignore only the rest.
+.claude/*
+!.claude/CLAUDE.md
+.codex
+.hta-data
+.opencode

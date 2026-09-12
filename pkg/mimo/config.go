@@ -27,8 +27,8 @@ func DefaultMimoConfig() MimoConfig {
 	return MimoConfig{
 		BaseURL:           "https://api.xiaomimimo.com/v1",
 		TimeoutSeconds:    30,
-		MaxRetries:         3,
-		RetryDelaySeconds:  1,
+		MaxRetries:        3,
+		RetryDelaySeconds: 1,
 		EnableStreaming:   true,
 	}
 }
@@ -51,11 +51,11 @@ func (c MimoConfig) ToClientConfig() ClientConfig {
 	}
 
 	return ClientConfig{
-		APIKey:         c.APIKey,
-		BaseURL:        c.BaseURL,
-		Timeout:        durationSeconds(timeout),
-		MaxRetries:     retries,
-		RetryDelay:     durationSeconds(delay),
+		APIKey:          c.APIKey,
+		BaseURL:         c.BaseURL,
+		Timeout:         durationSeconds(timeout),
+		MaxRetries:      retries,
+		RetryDelay:      durationSeconds(delay),
 		EnableStreaming: c.EnableStreaming,
 	}
 }

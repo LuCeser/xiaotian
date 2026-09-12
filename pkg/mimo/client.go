@@ -545,7 +545,7 @@ func (c *mimoClient) buildTTSRequest(text string, opts ...TTSOption) TTSRequest 
 		},
 		Audio: AudioConfig{
 			Format:     "pcm16",
-			Voice:      "冰糖", // Default to children's voice
+			Voice:      "冰糖",  // Default to children's voice
 			SampleRate: 16000, // Match existing TTS pipeline
 		},
 		Stream: false,

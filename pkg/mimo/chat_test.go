@@ -53,12 +53,12 @@ func defaultChatHandler(w http.ResponseWriter, r *http.Request) {
 // and the empty-messages guard.
 func TestClient_Chat(t *testing.T) {
 	tests := []struct {
-		name    string
-		handler http.HandlerFunc
-		messages []Message
-		opts    []ChatOption
-		wantErr error
-		wantText string
+		name        string
+		handler     http.HandlerFunc
+		messages    []Message
+		opts        []ChatOption
+		wantErr     error
+		wantText    string
 		validateReq func(*testing.T, ChatRequest)
 	}{
 		{
@@ -84,8 +84,8 @@ func TestClient_Chat(t *testing.T) {
 			},
 		},
 		{
-			name:    "options applied (model, max tokens, temperature)",
-			handler: defaultChatHandler,
+			name:     "options applied (model, max tokens, temperature)",
+			handler:  defaultChatHandler,
 			messages: []Message{{Role: "user", Content: "hi"}},
 			opts: []ChatOption{
 				WithChatModel("mimo-v2.5-pro"),
