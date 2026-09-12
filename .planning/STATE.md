@@ -5,10 +5,10 @@ milestone_name: milestone
 current_phase: 08
 current_phase_name: Student Web Interface
 status: executing
-stopped_at: Ticket 02 (Phase 8.1 scope) implemented be653a4 + dual-axis review fixes 5/5 + final-review cleanup 4f5c644/0ff7cca — done pending iPad UAT; next /gsd-plan-phase 8.2 (ticket 03) or UAT
-last_updated: "2026-09-09T12:40:00.000Z"
-last_activity: 2026-09-09
-last_activity_desc: "Executed todo 2026-08-09-dead-code-cleanup: FrameSender 接口 + TTS 预取 + ws/doc.go 存根三批删除（73a8500/2fbbd93/c885353），净删约 300 行，测试全绿"
+stopped_at: Tickets 01–08(speech-recognition-redesign)全部实现完毕——最新 f79acdb(2026-09-11,ticket-08 review 修复);下一步 31 项 iPad 真机 UAT(.scratch/speech-recognition-redesign/UAT-CHECKLIST.md)
+last_updated: "2026-09-12T02:35:14.000Z"
+last_activity: 2026-09-12
+last_activity_desc: "Quick task 260912-eam 归账：9 文件工作区改动落库（mimo/voice gofmt、e2e stories helper、ADE gitignore，9e3057c）、ROADMAP 8.2–8.6 标记 tickets 03–07 直达交付（8411fa8）、08-VERIFICATION 过时 FAIL 注记（82e8aa8）"
 progress:
   total_phases: 15
   completed_phases: 8
@@ -30,8 +30,8 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 Phase: 08 (Student Web Interface) — EXECUTING (08-07 manual iPad UAT pending real device)
 Plans: 6 of 7 complete
 Status: Phase 08 near-complete; roadmap calibrated 2026-08-23 to speech-recognition-redesign ticket set (single source of truth)
-Last activity: 2026-09-09 — Completed quick task 260909-rih: 验证并提交工作区清理改动（Rating 下线/DictationFinished 收敛/测试辅助重构，commit 2fa555f）
-Next: /gsd-plan-phase 8.2 — ticket 03 语音指令（voice commands via Mimo ASR，source of truth .scratch/speech-recognition-redesign/issues/03-voice-command-recognition-intent.md）；或先做 ticket 02 的 iPad 真机 UAT（<1.5s 延迟实测 + 音频播放/触控交互，验收项 5 未勾）
+Last activity: 2026-09-12 — Completed quick task 260912-eam: 归账清理（9e3057c 工作区落库、8411fa8 ROADMAP 8.2–8.6、82e8aa8 VERIFICATION 注记）
+Next: iPad 真机 UAT——31 项清单 .scratch/speech-recognition-redesign/UAT-CHECKLIST.md（tickets 01–08 实现收尾后的唯一未决验收）
 
 Progress: [█████▒▒▒▒▒] 53%
 
@@ -136,6 +136,7 @@ None yet.
 | 260823-vn9 | ticket 02 评审终局清理集（update() JSDoc 死分支如实描述/_applyPaused JSDoc 收紧为类型校验/StaleWordCompleteDropped 测试去时序依赖/ROADMAP 8.1 对齐实况） | 2026-08-23 | 4f5c644,0ff7cca | complete | [260823-vn9-ticket-02-code-review-1-ui-components-js](./quick/260823-vn9-ticket-02-code-review-1-ui-components-js/) |
 | 260823-x38 | 补齐 ticket 02 生命周期文档提交清单（issue 02 Status/Completion note 补终审结论、STATE stopped_at×2、ROADMAP 8.1 ticket 行——均补 4f5c644/0ff7cca） | 2026-08-23 | a1ae3f6,f7b92fd,d3b5fa2 | complete | [260823-x38-ticket-02-4f5c644-0ff7cca-roadmap-8-1-e0](./quick/260823-x38-ticket-02-4f5c644-0ff7cca-roadmap-8-1-e0/) |
 | 260909-rih | 验证并提交工作区清理改动：Rating 字段下线、DictationFinished 收敛、测试辅助重构 | 2026-09-09 | 2fa555f | complete | [260909-rih-rating-dictationfinished](./quick/260909-rih-rating-dictationfinished/) |
+| 260912-eam | 归账清理：9 文件工作区改动落库（gofmt/e2e helper/gitignore）；ROADMAP 8.2–8.6 标记 tickets 03–07 直达交付；08-VERIFICATION 过时 FAIL 注记 | 2026-09-12 | 9e3057c,8411fa8,82e8aa8 | complete | [260912-eam-gofmt-roadmap-8-2-8-6-ticket-state-md-08](./quick/260912-eam-gofmt-roadmap-8-2-8-6-ticket-state-md-08/) |
 
 ### Roadmap Evolution
 
@@ -153,6 +154,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-09
-Stopped at: Ticket 05 完成实现+评审+修复+后续协议清理（2fa555f）；死代码清理 todo 执行完毕（73a8500/2fbbd93/c885353，FrameSender/TTS 预取/ws doc.go，净删约 300 行）；ticket 06（自动评分）已解除阻塞
-Resume file: .scratch/speech-recognition-redesign/issues/06-automatic-grading-detailed-analysis.md — next action：新会话 /implement ticket 06（或对应 GSD phase）；此前积累的 iPad UAT 项仍待做
+Last session: 2026-09-12
+Stopped at: tickets 01–08 全部实现完毕（f79acdb 为最新提交）；工作区 9 文件清理改动已随本 quick task 落库；31 项 iPad 真机 UAT 未做
+Resume file: .scratch/speech-recognition-redesign/UAT-CHECKLIST.md — next action：在 iPad 真机上逐项过 31 项 UAT 清单
