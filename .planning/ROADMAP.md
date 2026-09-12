@@ -331,11 +331,15 @@ Plans:
   3. Failed recognition falls back to button controls
   4. Voice control works reliably for children's voices (ages 6-12)
 
-**Plans**: 0 plans
+**Superseded** (2026-09-12 — delivered directly via ticket set):
+
+- ticket 03 → done 2026-08-31 + live verified 2026-09-08 (见 .scratch/speech-recognition-redesign/issues/03-voice-command-recognition-intent.md Status 行)
+
+**Plans**: delivered directly as ticket 03 (2026-08-31) — no GSD plan files
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 8.2)
+- [x] Ticket 03 — voice command recognition (Mimo ASR + LLM intent, button fallback) delivered directly: b178d99, 825d40d, 4594e59, c554f8a, 76ef58f, e598c60, 22a9ddc + live 验证 e3e7736, ab9f762 (2026-09-08); issue closed done 2026-08-31, live verified 2026-09-08
 
 ### Phase 8.3: Photo OCR Answer Submission (INSERTED)
 
@@ -350,11 +354,15 @@ Plans:
   3. Manual input option available when OCR confidence is low or fails; system validates submitted answer format and completeness
   4. Camera permission and image processing failures handled gracefully
 
-**Plans**: 0 plans
+**Superseded** (2026-09-12 — delivered directly via ticket set):
+
+- ticket 04 → done 2026-09-08 (见 .scratch/speech-recognition-redesign/issues/04-photo-ocr-answer-submission.md Status 行)
+
+**Plans**: delivered directly as ticket 04 (2026-09-08) — no GSD plan files
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 8.3)
+- [x] Ticket 04 — photo OCR answer submission (iPad camera capture + Mimo vision OCR, manual-input fallback) delivered directly: 1ceba56, a7b26f7, d588386, 47a668b, 4536cff, dec6cab + review 修复 2d15bef; issue closed done 2026-09-08
 
 ### Phase 8.4: Batch Answer Submission Workflow (INSERTED)
 
@@ -369,11 +377,15 @@ Plans:
   3. Session FSM handles DICTATING → SUBMISSION → FEEDBACK transitions
   4. Submission interface supports both OCR and manual input; all answers validated before processing
 
-**Plans**: 0 plans
+**Superseded** (2026-09-12 — delivered directly via ticket set):
+
+- ticket 05 → done 2026-09-09 (见 .scratch/speech-recognition-redesign/issues/05-batch-answer-submission-workflow.md Status 行)
+
+**Plans**: delivered directly as ticket 05 (2026-09-09) — no GSD plan files
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 8.4)
+- [x] Ticket 05 — batch answer submission workflow (write all → submit all → grade all) delivered directly: ae4c1d6, 87629b4, 33bb23c, 028b2c8 + review 修复 5848db4; issue closed done 2026-09-09
 
 ### Phase 8.5: Automatic Grading and Analysis Reports (INSERTED)
 
@@ -388,11 +400,15 @@ Plans:
   3. Final scores and encouraging feedback read aloud via TTS
   4. Results stored for FSRS updates and parent review; performance trends tracked over multiple sessions
 
-**Plans**: 0 plans
+**Superseded** (2026-09-12 — delivered directly via ticket set):
+
+- ticket 06 → done 2026-09-10 (见 .scratch/speech-recognition-redesign/issues/06-automatic-grading-detailed-analysis.md Status 行)
+
+**Plans**: delivered directly as ticket 06 (2026-09-10) — no GSD plan files
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 8.5)
+- [x] Ticket 06 — automatic grading and detailed analysis (char-level diff, error-pattern reports, TTS-read feedback) delivered directly: 4f35ede, 1d63a17, bae4c03, b87bfe2, a8c75c6, c7bce18, 6ce1fb6 (review 修复见 issue); issue closed done 2026-09-10
 
 ### Phase 8.6: Multi-User Session Isolation and Scaling (INSERTED)
 
@@ -407,11 +423,15 @@ Plans:
   3. Performance testing validates 50 concurrent student capacity
   4. Graceful degradation when approaching capacity limits
 
-**Plans**: 0 plans
+**Superseded** (2026-09-12 — delivered directly via ticket set):
+
+- ticket 07 → done 2026-09-11 (见 .scratch/speech-recognition-redesign/issues/07-multi-user-session-isolation-scaling.md Status 行)
+
+**Plans**: delivered directly as ticket 07 (2026-09-11) — no GSD plan files
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 8.6)
+- [x] Ticket 07 — multi-user session isolation and scaling (per-connID session isolation, 50-concurrent load validated) delivered directly: 4cb7e7b, ad4a09c, 5f8146b + review 修复 (见 git log 'ticket 07'); issue closed done 2026-09-11
 
 ### Phase 9: Parent Vocabulary Management
 
