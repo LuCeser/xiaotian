@@ -295,9 +295,10 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	// The HTTP/WS server handles are declared in the outer scope so the shutdown
 	// sequence below can reference them after the closure returns.
 	var (
-		wsServer  *ws.Server
-		publicSrv *http.Server
-		healthSrv *http.Server
+		wsServer   *ws.Server
+		publicSrv  *http.Server
+		healthSrv  *http.Server
+		mimoCloser func() error
 	)
 
 	shutdownErr := func() error {
@@ -407,7 +408,35 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 				)
 				return err
 			}
-			defer func() { _ = mimoClient.Close() }()
+			// Lifetime fix (2026-09-13 UAT): this wiring closure RETURNS while the
+		// HTTP/WS servers keep running in goroutines, so a defer HERE would
+		// close the client seconds after boot — every session then hit
+		// "client is closed" and silently fell back to Volcengine (voice
+		// commands / photo OCR would fail the same way). Bind Close to the
+		// real shutdown path below via mimoCloser instead.
+		mimoCloser = mimoClient.Close
+
+			// DICT-03 (Tickets 01/02): the SAME client doubles as the
+			// dictation word audio source — attach the per-word synthesizer
+			// to the generator. Mimo produces a single bare-word
+			// pronunciation per track (the frontend schedules the double
+			// play off word_complete's audio_plays hint); on the first
+			// per-word failure the generator falls back to the Volcengine
+			// whole-batch path internally, so this wiring cannot break
+			// session init when Mimo degrades.
+			wordSynth, err := tts.NewMimoWordSynthesizer(mimoClient, logger)
+			if err != nil {
+				logger.Error("mimo word synthesizer construction failed",
+					infra.F("component", "infra.main"),
+					infra.ErrField(err),
+				)
+				return err
+			}
+			gen.SetWordSynthesizer(wordSynth)
+			logger.Info("mimo dictation word source enabled (volcengine whole-batch fallback)",
+				infra.F("component", "infra.main"),
+			)
+
 			voiceCmd = newVoiceService(
 				mimoTranscriber(mimoClient),
 				voice.NewHybridClassifier(voice.NewLLMClassifier(mimoChatter(mimoClient, cfg.Voice.ChatModel))),
@@ -588,6 +617,16 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			infra.F("component", "infra.main"),
 			infra.ErrField(err),
 		)
+	}
+	// mimoClient lives until real process shutdown (see the lifetime note at
+	// its construction site).
+	if mimoCloser != nil {
+		if err := mimoCloser(); err != nil {
+			logger.Warn("mimo client close error",
+				infra.F("component", "infra.main"),
+				infra.ErrField(err),
+			)
+		}
 	}
 
 	logger.Info("shutdown complete",

@@ -74,6 +74,11 @@ var (
 	// retries.
 	ErrTTSGenerationFailed = errors.New("TTS generation failed")
 
+	// ErrUnsupportedSampleRate is returned when synthesized audio arrives at
+	// a sample rate the word pipeline cannot convert — only the 16kHz
+	// passthrough and the documented Mimo pcm16 24kHz are supported.
+	ErrUnsupportedSampleRate = errors.New("unsupported PCM sample rate")
+
 	// ErrSendBufferFull is returned when the WebSocket send buffer is full.
 	ErrSendBufferFull = errors.New("send buffer full")
 

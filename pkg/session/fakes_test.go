@@ -168,12 +168,15 @@ var _ database.SessionRepository = (*fakeSessionRepository)(nil)
 // error from GenerateForSession (for the D-10 init-path unlock test) + call
 // counter. GenerateText (Ticket 06 spoken feedback) captures its arguments;
 // textErr simulates a synthesis failure without touching the word pipeline.
+// source feeds the DICT-03 source annotation (default volcengine when unset);
 // *tts.Generator satisfies the interface structurally in production.
 type fakeTTSGenerator struct {
 	mu           sync.Mutex
 	genErr       error
 	genCalls     int
 	cleanupCalls int
+	source       tts.AudioSource
+	lastSource   tts.AudioSource
 
 	textErr   error
 	textCalls int
@@ -217,6 +220,24 @@ func (g *fakeTTSGenerator) GenerateForSession(ctx context.Context, sessionID str
 		result[w] = "/fake/" + w + ".pcm"
 	}
 	return result, nil
+}
+
+// GenerateForSessionWithSource satisfies the widened DICT-03 seam by
+// delegating to GenerateForSession (so GenCalls counts stay meaningful) and
+// reporting the configured source.
+func (g *fakeTTSGenerator) GenerateForSessionWithSource(ctx context.Context, sessionID string, words []string) (map[string]string, tts.AudioSource, error) {
+	paths, err := g.GenerateForSession(ctx, sessionID, words)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.lastSource = g.source
+	return paths, g.source, err
+}
+
+// LastSource returns the source reported by the most recent WithSource call.
+func (g *fakeTTSGenerator) LastSource() tts.AudioSource {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.lastSource
 }
 
 func (g *fakeTTSGenerator) CleanupSession(ctx context.Context, sessionID string) error {

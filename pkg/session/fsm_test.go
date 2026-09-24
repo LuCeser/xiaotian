@@ -286,7 +286,6 @@ func TestTransition_InvalidPaused(t *testing.T) {
 		name string
 		ev   SessionEvent
 	}{
-		{"word_complete in PAUSED", SessionEvent{Type: EventWordComplete}},
 		{"play_word in PAUSED", SessionEvent{Type: EventControlFrame, ControlType: "play_word"}},
 		{"parent_review in PAUSED", SessionEvent{Type: EventParentReview}},
 	}
@@ -305,6 +304,26 @@ func TestTransition_InvalidPaused(t *testing.T) {
 				t.Errorf("state mutated: got %s, want PAUSED", s.state)
 			}
 		})
+	}
+}
+
+// TestTransition_ReplayCompletionSelfLoops: a current-generation WordComplete
+// arriving in DICTATING or PAUSED (a repeat/resume re-stream finished) is a
+// valid self-loop — the session keeps its state and handleEvent sends the
+// word_complete frame after the replayed audio has streamed (2026-09-14 UAT
+// fix; previously an invalid transition that orphaned the replayed audio and
+// dead-ended the UI until the DICTATING timeout).
+func TestTransition_ReplayCompletionSelfLoops(t *testing.T) {
+	queue := []pybridge.DueCard{{Word: "apple"}}
+
+	for _, state := range []database.SessionState{database.StateDictating, database.StatePaused} {
+		s := &Session{state: state, wordQueue: queue, wordIndex: 0}
+		if err := s.transition(SessionEvent{Type: EventWordComplete}); err != nil {
+			t.Fatalf("transition(word_complete) in %s returned error: %v", state, err)
+		}
+		if s.state != state {
+			t.Errorf("self-loop mutated state: got %s, want %s", s.state, state)
+		}
 	}
 }
 

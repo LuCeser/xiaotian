@@ -89,6 +89,16 @@ type Session struct {
 	// dictating the same category is the supported multi-user posture.
 	lockCardIDs []int64
 
+	// --- Word audio source (captured at NewSession — DICT-03) ---
+	// audioSource records which TTS backend generated this session's word
+	// audio (tts.SourceMimo = single-pronunciation tracks; tts.SourceVolcengine
+	// = paired "word. word." tracks). Written once before run() starts and
+	// read only on the event-loop goroutine (sendWordCompleteFrame) plus the
+	// AudioSource() accessor from tests post-construction — the NewSession
+	// return / manager map insertion establishes happens-before, so no lock
+	// is needed (same discipline as wordQueue).
+	audioSource tts.AudioSource
+
 	// --- Service dependencies ---
 	client   *ws.Client // frame-send target + hub identity (D-05)
 	fsrsSvc  fsrs.FSRSService
@@ -175,10 +185,14 @@ func NewSession(
 		return nil, ErrNoDueWords
 	}
 
-	// --- Step 3: TTS UUID + GenerateForSession (Pitfall 3: before the loop). ---
+	// --- Step 3: TTS UUID + GenerateForSessionWithSource (Pitfall 3: before the loop). ---
 	// The card IDs captured here are the lock scope replayed on BOTH unlock
 	// paths (Ticket 07): the TTS-failure init path below and the D-10 exit
 	// defer chain.
+	// DICT-03: the WithSource variant also reports which backend produced
+	// the audio; the session remembers it so word_complete frames can carry
+	// the audio_plays hint (single-pronunciation mimo tracks need the
+	// frontend to schedule the double play, paired volcengine tracks do not).
 	cardIDs := make([]int64, len(cards))
 	sessionID := newSessionID()
 	words := make([]string, len(cards))
@@ -186,7 +200,10 @@ func NewSession(
 		words[i] = c.Word
 		cardIDs[i] = int64(c.ID)
 	}
-	if _, err := gen.GenerateForSession(ctx, sessionID, words); err != nil {
+	// The paths map is intentionally discarded — the streamer reads the cache
+	// by (sessionID, wordID), so only the source annotation travels forward.
+	_, audioSource, err := gen.GenerateForSessionWithSource(ctx, sessionID, words)
+	if err != nil {
 		// --- Step 4: TTS failure — non-defer UnlockCards (D-10 init path). ---
 		// The defer chain is NOT installed yet (run() hasn't started), so the
 		// unlock must happen explicitly here. Using the caller's ctx is correct
@@ -220,6 +237,7 @@ func NewSession(
 		lockCategory:     resolvedCategory,
 		lockUnit:         resolvedUnit,
 		lockCardIDs:      cardIDs,
+		audioSource:      audioSource,
 		client:           client,
 		fsrsSvc:          fsrsSvc,
 		gen:              gen,
@@ -345,8 +363,10 @@ func (s *Session) run(ctx context.Context) {
 			// skip it rather than let it drive the FSM at the wrong moment
 			// (e.g. cutting a new word's LISTENING short into DICTATING).
 			// Current-generation events are unaffected, including a
-			// WordComplete arriving while already DICTATING (invalid
-			// transition, dropped downstream by handleEvent as before).
+			// WordComplete arriving while already DICTATING or PAUSED (the
+			// replay-completion self-loops in the FSM accept these, and
+			// handleEvent sends the word_complete frame after the replayed
+			// audio has streamed).
 			if ev.Type == EventWordComplete && ev.StreamGen != s.streamGen {
 				s.logger.Debug("session: dropping stale word_complete event",
 					infra.F("component", "session"),
@@ -414,6 +434,7 @@ func (s *Session) handleEvent(ev SessionEvent) {
 				infra.F("component", "session"),
 				infra.F("session_id", s.id),
 				infra.F("event", ev.Type.String()),
+				infra.F("control_type", ev.ControlType),
 				infra.ErrField(err),
 			)
 			return
@@ -424,6 +445,25 @@ func (s *Session) handleEvent(ev SessionEvent) {
 			infra.ErrField(err),
 		)
 		return
+	}
+	// 2026-09-14 UAT fix: word_complete is EVENT-owned, not state-entry-owned.
+	// The old onTransition(DICTATING) send fired on resume/repeat BEFORE the
+	// re-stream produced any audio (the frontend dropped it on an empty
+	// rolling buffer), and the re-stream's own completion was then an invalid
+	// DICTATING transition — replayed audio was orphaned client-side and the
+	// UI stayed dead until the DICTATING timeout force-advanced. Sending on
+	// the EVENT covers both the normal LISTENING→DICTATING completion and the
+	// DICTATING/PAUSED replay self-loops, always after frames have streamed.
+	if ev.Type == EventWordComplete {
+		wordID := ev.WordID
+		if wordID == "" {
+			s.mu.RLock()
+			wordID = s.currentWordID
+			s.mu.RUnlock()
+		}
+		if wordID != "" {
+			s.sendWordCompleteFrame(wordID)
+		}
 	}
 	s.onTransition()
 }
@@ -454,14 +494,16 @@ func (s *Session) onTransition() {
 		s.sendProgressFrame() // Notify client that word streaming is starting
 	}
 
-	// 08-06: Emit word_complete when entering DICTATING (word streaming finished)
+	// 08-06: progress display on entering DICTATING. word_complete itself is
+	// EVENT-owned now (handleEvent sends it when an EventWordComplete
+	// transition succeeds — see the note there); sending it here fired on
+	// resume/repeat re-streams before any audio existed.
 	if newState == database.StateDictating {
 		s.mu.RLock()
 		wordID := s.currentWordID
 		s.mu.RUnlock()
 		if wordID != "" {
-			s.sendWordCompleteFrame(wordID) // Notify client that word completed
-			s.sendProgressFrame()           // Update progress display
+			s.sendProgressFrame() // Update progress display
 		}
 	}
 
@@ -789,6 +831,12 @@ func (s *Session) Category() string {
 	return s.lockCategory
 }
 
+// AudioSource returns the TTS backend that generated this session's word
+// audio (DICT-03): tts.SourceMimo when the Mimo per-word path produced it,
+// tts.SourceVolcengine for the pregenerate path (including fallbacks). Set
+// once at NewSession.
+func (s *Session) AudioSource() tts.AudioSource { return s.audioSource }
+
 // Done returns a channel that is closed when run() exits. Tests and the sweeper
 // use it to detect session liveness without polling.
 func (s *Session) Done() <-chan struct{} { return s.done }
@@ -878,7 +926,22 @@ func (s *Session) sendProgressFrame() {
 	}
 }
 
+// WordCompleteAudioPlays returns the audio_plays hint carried by the
+// word_complete control frame (DICT-03). Mimo word audio is a SINGLE bare
+// pronunciation, so the frontend schedules the dictation-standard double
+// play (2); the Volcengine pregenerate tracks are already paired
+// "word. word.", so the frontend plays once (1). Unknown/zero sources map
+// to 1 — the conservative choice: never double-play an already-paired track.
+func WordCompleteAudioPlays(source tts.AudioSource) int {
+	if source == tts.SourceMimo {
+		return 2
+	}
+	return 1
+}
+
 // sendWordCompleteFrame sends a word_complete control frame to the client (08-06).
+// The payload carries the additive audio_plays field (DICT-03) — clients
+// that ignore it behave exactly as before (volcengine behaviour).
 func (s *Session) sendWordCompleteFrame(wordID string) {
 	if s.client == nil {
 		return // No client in tests
@@ -886,9 +949,10 @@ func (s *Session) sendWordCompleteFrame(wordID string) {
 
 	// Build word_complete frame JSON
 	wordCompleteMsg := map[string]interface{}{
-		"type":       "word_complete",
-		"session_id": s.id,
-		"word_id":    wordID,
+		"type":        "word_complete",
+		"session_id":  s.id,
+		"word_id":     wordID,
+		"audio_plays": WordCompleteAudioPlays(s.audioSource),
 	}
 
 	jsonBytes, err := json.Marshal(wordCompleteMsg)
@@ -1015,6 +1079,17 @@ func (s *Session) LockUnit() string { return s.lockUnit }
 // Helpers
 // ---------------------------------------------------------------------------
 
+// dictatingGrace is the safety margin added to the adaptive DICTATING
+// timeout. 2026-09-14 UAT race fix: the frontend paces next_word with the
+// SAME AdaptiveTimeout formula (frontend batch gap starts at word_complete
+// receipt; the backend deadline starts at emission). With identical
+// durations the backend won by milliseconds, self-advanced the session, and
+// streamed word N+1 while the client still routed audio under word N —
+// every word after the first played silent. With the margin the client's
+// pacing timer is authoritative; the backend timeout remains the
+// dead-client backstop, just later.
+const dictatingGrace = 10 * time.Second
+
 // timeoutFor returns the per-state timeout from cfg.SessionTimeout (D-08, D-09).
 // For DICTATING state, returns the adaptive timeout based on the current word's
 // length (Ticket 02 DICT-06: 8-15 seconds). For PAUSED state, returns the
@@ -1029,13 +1104,13 @@ func (s *Session) timeoutFor(state database.SessionState) time.Duration {
 	case database.StateListening:
 		return s.cfg.SessionTimeout.ListeningStateTimeout
 	case database.StateDictating:
-		// Ticket 02 DICT-06: use adaptive timeout based on current word length,
-		// but respect the config timeout as an upper bound. This ensures tests
-		// with short DictatingStateTimeout still work while production gets
-		// the full 8-15s adaptive window.
+		// Ticket 02 DICT-06: use adaptive timeout based on current word length
+		// (plus dictatingGrace), but respect the config timeout as an upper
+		// bound. This ensures tests with short DictatingStateTimeout still work
+		// while production gets the full adaptive window plus margin.
 		word := s.CurrentWord()
 		if word != "" {
-			adaptive := AdaptiveTimeout(word)
+			adaptive := AdaptiveTimeout(word) + dictatingGrace
 			if adaptive < s.cfg.SessionTimeout.DictatingStateTimeout {
 				return adaptive
 			}

@@ -61,6 +61,26 @@ func (g *fsmGen) GenerateForSession(_ context.Context, _ string, words []string)
 	return m, nil
 }
 
+// GenerateForSessionWithSource satisfies the widened DICT-03 seam: the
+// default fake reports the Volcengine source (paired "word. word." tracks →
+// the word_complete audio_plays hint is 1).
+func (g *fsmGen) GenerateForSessionWithSource(_ context.Context, _ string, words []string) (map[string]string, tts.AudioSource, error) {
+	paths, err := g.GenerateForSession(context.Background(), "", words)
+	return paths, tts.SourceVolcengine, err
+}
+
+// mimoGen reports the Mimo word source so tests can assert the word_complete
+// audio_plays hint of 2 (single-pronunciation audio → the frontend
+// schedules the double play).
+type mimoGen struct {
+	fsmGen
+}
+
+func (g *mimoGen) GenerateForSessionWithSource(_ context.Context, _ string, words []string) (map[string]string, tts.AudioSource, error) {
+	paths, err := g.fsmGen.GenerateForSession(context.Background(), "", words)
+	return paths, tts.SourceMimo, err
+}
+
 // GenerateText satisfies the Ticket-06 feedback seam (TTSSessionGenerator);
 // tests that don't exercise spoken feedback get a canned success.
 func (g *fsmGen) GenerateText(_ context.Context, _, _, _ string) (string, error) {

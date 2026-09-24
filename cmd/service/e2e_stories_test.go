@@ -98,6 +98,13 @@ func int64In(ids []int64, v int64) bool {
 // manager and teardown. Distinct connections = distinct connIDs = distinct
 // registry entries (the multi-user posture).
 func bootStories(t *testing.T, fakeFSRS *storiesFSRS, students int) ([]*websocket.Conn, *session.Manager, func()) {
+	return bootStoriesWithGen(t, fakeFSRS, &fsmGen{}, students)
+}
+
+// bootStoriesWithGen is bootStories with an explicit TTSSessionGenerator —
+// the DICT-03 audio_plays tests inject mimoGen to flip the word_complete
+// hint without touching the other stories' default fake.
+func bootStoriesWithGen(t *testing.T, fakeFSRS *storiesFSRS, gen session.TTSSessionGenerator, students int) ([]*websocket.Conn, *session.Manager, func()) {
 	t.Helper()
 	logger := infra.NewNoOpLogger()
 	zapLogger := zap.NewNop()
@@ -113,7 +120,7 @@ func bootStories(t *testing.T, fakeFSRS *storiesFSRS, students int) ([]*websocke
 	}
 	t.Cleanup(func() { _ = pool.Shutdown(context.Background()) })
 
-	manager, err := session.NewManager(hub, fakeFSRS, &fsmGen{}, &fsmStreamer{}, &fsmRepo{}, pool, logger, cfg)
+	manager, err := session.NewManager(hub, fakeFSRS, gen, &fsmStreamer{}, &fsmRepo{}, pool, logger, cfg)
 	if err != nil {
 		t.Fatalf("manager: %v", err)
 	}

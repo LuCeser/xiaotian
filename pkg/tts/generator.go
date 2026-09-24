@@ -10,10 +10,31 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 )
 
+// AudioSource identifies which TTS backend produced a session's word audio.
+// The session layer threads it into the word_complete control frame so the
+// frontend knows how many times to play each track (see
+// session.WordCompleteAudioPlays).
+type AudioSource string
+
+const (
+	// SourceMimo marks audio synthesized per-word by the Mimo TTS client —
+	// a SINGLE bare-word pronunciation; the frontend schedules the
+	// dictation-standard double play.
+	SourceMimo AudioSource = "mimo"
+
+	// SourceVolcengine marks audio from the Volcengine whole-batch
+	// pregenerate path — paired "word. word." tracks; the frontend plays
+	// each track once. Also the reported source whenever no word
+	// synthesizer is attached or the Mimo path fell back.
+	SourceVolcengine AudioSource = "volcengine"
+)
+
 // Generator orchestrates batch TTS audio generation for a dictation session.
 // It calls the Python bridge's RunPregenerate to batch-generate MP3 files,
 // converts each MP3 to PCM using the injected convertFn, and stores results
-// in a SessionCache.
+// in a SessionCache. When a WordSynthesizer is attached (SetWordSynthesizer),
+// it is the PRIMARY per-word source (DICT-03: Mimo) and RunPregenerate
+// degrades to the whole-batch fallback.
 type Generator struct {
 	// exec is the Python bridge executor that runs pregenerate_dictation.py
 	exec pybridge.Executor
@@ -25,6 +46,12 @@ type Generator struct {
 	logger infra.Logger
 	// cfg holds TTS configuration (retries, timeouts)
 	cfg infra.TTSConfig
+	// synth is the OPTIONAL direct word synthesizer (Mimo). nil = the
+	// generator is Volcengine-only (backward compatible with every existing
+	// constructor call site). Written once during boot wiring via
+	// SetWordSynthesizer, before the first session exists, so it needs no
+	// lock — GenerateForSession calls only happen after wiring completes.
+	synth WordSynthesizer
 }
 
 // NewGenerator creates a new Generator with the given dependencies.
@@ -49,22 +76,104 @@ func NewGenerator(exec pybridge.Executor, cache *SessionCache, logger infra.Logg
 	}, nil
 }
 
-// GenerateForSession generates TTS audio for the given word list.
-// It calls RunPregenerate to batch-generate MP3 files, converts each MP3
-// to PCM, and stores results in the session cache. Returns a map of
-// wordID -> cache path for successfully generated words.
-//
-// If the word list is empty, returns an empty map without calling RunPregenerate.
-// If RunPregenerate fails, returns an empty map and an error wrapping ErrTTSGenerationFailed.
-// Individual word conversion failures are retried up to MaxRetries; words that exhaust
-// retries are skipped without aborting the entire session (D-05).
-func (g *Generator) GenerateForSession(ctx context.Context, sessionID string, words []string) (map[string]string, error) {
-	result := make(map[string]string)
+// SetWordSynthesizer attaches the optional PRIMARY word synthesizer (Mimo).
+// Call once during boot wiring, before the first GenerateForSession — the
+// field is deliberately lock-free because sessions only exist after wiring
+// completes. Passing nil detaches and restores Volcengine-only behaviour.
+func (g *Generator) SetWordSynthesizer(s WordSynthesizer) {
+	g.synth = s
+}
 
-	// Guard: empty word list → no subprocess spawn (same as pregenArgs in pregenerate.go)
+// GenerateForSession generates TTS audio for the given word list. Backward
+// compatible delegate for GenerateForSessionWithSource that discards the
+// source annotation (pre-DICT-03 callers and tests keep their signature).
+func (g *Generator) GenerateForSession(ctx context.Context, sessionID string, words []string) (map[string]string, error) {
+	paths, _, err := g.GenerateForSessionWithSource(ctx, sessionID, words)
+	return paths, err
+}
+
+// GenerateForSessionWithSource generates TTS audio for the given word list
+// and reports WHICH backend produced it.
+//
+// Source selection (DICT-03): when a word synthesizer is attached, every
+// word synthesizes through it SEQUENTIALLY — one bare pronunciation per
+// word, resampled to 16kHz, stored in the session cache — and the result is
+// annotated SourceMimo. The FIRST failure (synthesis, resample, or cache
+// write) logs a warning with the word and error, and the whole batch falls
+// back to the existing RunPregenerate path, annotated SourceVolcengine.
+// Discarding the partial Mimo cache entries is deliberately unnecessary:
+// the fallback re-Stores every word under the same sessionID and cache keys,
+// and SessionCache.Store writes via os.WriteFile, which truncates — a
+// successful fallback leaves no mixed Mimo/Volcengine files behind.
+//
+// If the word list is empty, returns an empty map, SourceVolcengine, and no
+// error without calling RunPregenerate (unchanged contract). If
+// RunPregenerate fails, returns an empty map and an error wrapping
+// ErrTTSGenerationFailed. Individual word conversion failures are retried up
+// to MaxRetries; words that exhaust retries are skipped without aborting the
+// entire session (D-05).
+func (g *Generator) GenerateForSessionWithSource(ctx context.Context, sessionID string, words []string) (map[string]string, AudioSource, error) {
+	// Guard: empty word list → no subprocess spawn, no synth calls (same as
+	// pregenArgs in pregenerate.go).
 	if len(words) == 0 {
-		return result, nil
+		return make(map[string]string), SourceVolcengine, nil
 	}
+
+	if g.synth != nil {
+		paths, err := g.generateViaSynth(ctx, sessionID, words)
+		if err == nil {
+			g.logger.Info("dictation words synthesized via mimo",
+				infra.F("component", "tts.generator"),
+				infra.F("session_id", sessionID),
+				infra.F("word_count", len(paths)),
+			)
+			return paths, SourceMimo, nil
+		}
+		// generateViaSynth already logged the failing word at Warn. Fall
+		// through to the whole-batch path; it overwrites any partial cache
+		// entries (see the Store-overwrite note in the doc comment above).
+	}
+
+	paths, err := g.generateViaPregenerate(ctx, sessionID, words)
+	return paths, SourceVolcengine, err
+}
+
+// generateViaSynth synthesizes each word through the attached
+// WordSynthesizer, one at a time. Sequential on purpose: the Mimo client
+// already owns retry/backoff, and per-word transient bytes keep the 150MB
+// memory budget flat (no batch buffering). Preserves the GenerateForSession
+// invariant — the returned map covers every word, or an error is returned.
+func (g *Generator) generateViaSynth(ctx context.Context, sessionID string, words []string) (map[string]string, error) {
+	result := make(map[string]string, len(words))
+	for _, word := range words {
+		pcm, err := g.synth.SynthesizeWord(ctx, word)
+		if err != nil {
+			g.logger.Warn("mimo word synthesis failed — falling back to batch TTS",
+				infra.F("component", "tts.generator"),
+				infra.F("word", word),
+				infra.ErrField(err),
+			)
+			return nil, err
+		}
+		if err := g.cache.Store(sessionID, word, pcm.Samples); err != nil {
+			g.logger.Warn("failed to cache mimo PCM — falling back to batch TTS",
+				infra.F("component", "tts.generator"),
+				infra.F("word", word),
+				infra.ErrField(err),
+			)
+			return nil, err
+		}
+		result[word] = g.cache.Path(sessionID, word)
+	}
+	return result, nil
+}
+
+// generateViaPregenerate is the pre-DICT-03 whole-batch path: RunPregenerate
+// batch-generates MP3 files (Volcengine on the Python side), each MP3 is
+// converted to PCM, and results land in the session cache. Returns a map of
+// wordID -> cache path, erroring unless every word has audio.
+func (g *Generator) generateViaPregenerate(ctx context.Context, sessionID string, words []string) (map[string]string, error) {
+	result := make(map[string]string)
 
 	// Call RunPregenerate to batch-generate MP3 files.
 	// WordsPerSegment:1 is REQUIRED — pregenerate_dictation.py concatenates

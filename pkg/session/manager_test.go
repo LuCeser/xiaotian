@@ -11,6 +11,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
+	"github.com/xiaotian/home-tutor-agent/pkg/tts"
 )
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,11 @@ type testGen struct {
 
 func (g *testGen) GenerateForSession(_ context.Context, _ string, _ []string) (map[string]string, error) {
 	return nil, nil
+}
+
+// GenerateForSessionWithSource satisfies the widened DICT-03 seam.
+func (g *testGen) GenerateForSessionWithSource(_ context.Context, _ string, _ []string) (map[string]string, tts.AudioSource, error) {
+	return nil, tts.SourceVolcengine, nil
 }
 
 func (g *testGen) GenerateText(_ context.Context, _, _, _ string) (string, error) {

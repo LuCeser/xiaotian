@@ -70,6 +70,21 @@ func (s *Session) transition(ev SessionEvent) error {
 
 	case database.StateDictating:
 		switch ev.Type {
+		case EventWordComplete:
+			// 2026-09-14 UAT fix: replay-completion self-loop. A repeat/resume
+			// re-stream finishes while the session is DICTATING (its stream
+			// generation was already validated upstream in run()); accepting
+			// the completion lets handleEvent send the word_complete frame
+			// AFTER the replayed audio actually streamed. Previously this was
+			// an invalid transition — replayed audio was orphaned client-side
+			// and the UI sat dead until the DICTATING timeout force-advanced.
+			//
+			// prevState MUST be refreshed here: without it, s.prevState stays
+			// PAUSED after a resume, and onTransition's resume-spawn condition
+			// (DICTATING + prevState==PAUSED) re-fires on EVERY self-loop —
+			// the resume replay loops forever (UAT: endless "banana").
+			s.prevState = prevState
+			return nil
 		case EventControlFrame:
 			switch ev.ControlType {
 			case "next_word":
@@ -110,6 +125,14 @@ func (s *Session) transition(ev SessionEvent) error {
 
 	case database.StatePaused:
 		switch ev.Type {
+		case EventWordComplete:
+			// 2026-09-14 UAT fix: replay-completion self-loop (repeat-from-
+			// PAUSED path) — same rationale as the DICTATING self-loop above:
+			// the replayed audio streamed, so the client deserves its
+			// word_complete even though the session stays PAUSED. prevState
+			// refresh prevents any stale prev-state condition from re-firing.
+			s.prevState = prevState
+			return nil
 		case EventControlFrame:
 			switch ev.ControlType {
 			case "resume":

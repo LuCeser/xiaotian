@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
+	"github.com/xiaotian/home-tutor-agent/pkg/tts"
 )
 
 // TTSSessionGenerator is the subset of *tts.Generator the Session uses for its
@@ -18,6 +19,11 @@ import (
 type TTSSessionGenerator interface {
 	// GenerateForSession batch-generates PCM audio for the word list.
 	GenerateForSession(ctx context.Context, sessionID string, words []string) (map[string]string, error)
+	// GenerateForSessionWithSource is the DICT-03 variant that also reports
+	// WHICH backend produced the audio (mimo single-pronunciation vs
+	// volcengine paired tracks) so the session can annotate the
+	// word_complete frame with the audio_plays hint.
+	GenerateForSessionWithSource(ctx context.Context, sessionID string, words []string) (map[string]string, tts.AudioSource, error)
 	// GenerateText synthesizes one arbitrary spoken text (the encouragement
 	// sentence) into the session cache — see SpeakFeedback (Ticket 06).
 	GenerateText(ctx context.Context, sessionID, text, language string) (string, error)
