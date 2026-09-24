@@ -5,10 +5,10 @@ milestone_name: milestone
 current_phase: 08
 current_phase_name: Student Web Interface
 status: executing
-stopped_at: Tickets 01–08(speech-recognition-redesign)全部实现完毕——最新 f79acdb(2026-09-11,ticket-08 review 修复);下一步 31 项 iPad 真机 UAT(.scratch/speech-recognition-redesign/UAT-CHECKLIST.md)
-last_updated: "2026-09-12T02:35:14.000Z"
-last_activity: 2026-09-12
-last_activity_desc: "Quick task 260912-eam 归账：9 文件工作区改动落库（mimo/voice gofmt、e2e stories helper、ADE gitignore，9e3057c）、ROADMAP 8.2–8.6 标记 tickets 03–07 直达交付（8411fa8）、08-VERIFICATION 过时 FAIL 注记（82e8aa8）"
+stopped_at: UAT 差距修复周期完成并真机验收（2026-09-24）——Mimo TTS 真接线/暂停恢复冒烟 v5 PASS/逐词沉默不再自动推进/批量词间间隔/收尾过渡均验证；UAT-CHECKLIST 勾 A1、A4(四按钮)、A5(主路径)；剩余 UAT：A2/A3/A6-A8、B 儿童段、C4 中文词表、D1/D2+F(VPS)；两周期全部改动已按 3 笔原子提交落库（fix/feat/docs，见 git log）
+last_updated: "2026-09-24T22:45:07.690Z"
+last_activity: 2026-09-24
+last_activity_desc: "UAT 修复-验证-归档周期：重建 ws-smoke-v5 冒烟（暂停恢复 PASS）；诊断并修复逐词沉默自动推进+播完自动交卷、批量间隔被双遍播放吃掉；designer 前端重设计（状态四色主题/节奏条/retry 卡）+交互缺陷清理；真机复测通过；UAT-CHECKLIST/STATE 归档"
 progress:
   total_phases: 15
   completed_phases: 8
@@ -30,8 +30,8 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 Phase: 08 (Student Web Interface) — EXECUTING (08-07 manual iPad UAT pending real device)
 Plans: 6 of 7 complete
 Status: Phase 08 near-complete; roadmap calibrated 2026-08-23 to speech-recognition-redesign ticket set (single source of truth)
-Last activity: 2026-09-12 — Completed quick task 260912-eam: 归账清理（9e3057c 工作区落库、8411fa8 ROADMAP 8.2–8.6、82e8aa8 VERIFICATION 注记）
-Next: iPad 真机 UAT——31 项清单 .scratch/speech-recognition-redesign/UAT-CHECKLIST.md（tickets 01–08 实现收尾后的唯一未决验收）
+Last activity: 2026-09-24 — UAT 差距修复周期完成：冒烟 v5 暂停恢复 PASS、Mimo 真接线确认、逐词沉默/批量间隔/收尾过渡真机验收通过、前端状态主题重设计；A1/A4/A5 已勾
+Next: ①用户授权后 git commit（真实改动 20 修改+若干新增，排除调试产物；node_modules 需入 .gitignore）②补测 UAT 缺口：A2 掐表/A3 出声路径/A6-A8、B 儿童段（需儿童）、C4 中文词表（现库仅 7 英文词）、D1/D2+F（VPS）
 
 Progress: [█████▒▒▒▒▒] 53%
 
@@ -154,6 +154,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-12
-Stopped at: tickets 01–08 全部实现完毕（f79acdb 为最新提交）；工作区 9 文件清理改动已随本 quick task 落库；31 项 iPad 真机 UAT 未做
-Resume file: .scratch/speech-recognition-redesign/UAT-CHECKLIST.md — next action：在 iPad 真机上逐项过 31 项 UAT 清单
+Last session: 2026-09-24
+Stopped at: UAT 修复周期验收通过；两周期全部修复（后端 Mimo/session + 前端重设计）已按 3 笔原子提交落库（见 git log）；工作区仅剩调试产物待仓库卫生批处理（已有 backlog todo）
+Resume file: .scratch/speech-recognition-redesign/UAT-CHECKLIST.md — next action：授权提交后补测剩余 UAT 缺口（A2/A3/A6-A8、B、C4、D/F）

@@ -31,6 +31,14 @@ third_party/python/.venv*/
 # Vendor (use modules)
 vendor/
 
+# UAT fix cycle hygiene (2026-09-24)
+node_modules/
+third_party/data/
+third_party/python/__pycache__/
+nul
+*.exe~
+
+
 ## ADE
 
 .agents
