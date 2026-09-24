@@ -158,6 +158,12 @@
     return;
   }
 
+  // Wire play-phase transitions → the "📢 第一遍 / 📢 第二遍" rhythm chip
+  // (2026-09-24). 1 = first pronunciation, 2 = second, 0 = playback over.
+  audioController.setOnPlayPhase(function (phase) {
+    stateManager.setState({ playPhase: phase });
+  });
+
   // Wire playback end → dictation recognition
   audioController.setOnPlaybackEnd(function () {
     var state = stateManager.getState();
@@ -221,6 +227,7 @@
 
   // Dictation loop state
   var dictationRatings = {};      // word → rating ("good"/"again")
+  var ratingsSent = false;        // submit_review already sent this session (send-once guard)
   var pendingAnswerWordId = null; // word waiting for speech recognition
   var feedbackTimer = null;       // timer for feedback display delay
   var sessionCategory = '';       // category from session_ready for language detection
@@ -314,10 +321,12 @@
         photoButton = new window.PhotoAnswerButton(photoHost, stateManager, photoController, function onPick() {
           // The photo replaces the auto-started mic answer for this word —
           // stop listening so a late speech result cannot judge the NEXT
-          // word against this word's submission.
+          // word against this word's submission. Also retire the retry
+          // prompt (2026-09-24): the student just answered with the camera.
           if (speechController) {
             speechController.stopListening();
           }
+          stateManager.setState({ dictationState: null, lastHeard: null });
         });
         stateManager.subscribe(function (state) {
           try {
@@ -372,15 +381,16 @@
 
   // WAITING_PARENT in batch mode → open the form (once). The per-word mode's
   // auto-ratings subscriber below is ratings-gated and stays inert in batch
-  // mode (nothing answered per-word).
+  // mode (nothing answered per-word). The gate is the pure, Node-tested
+  // shouldOpenForState() — the form lives in its own top-level section
+  // (index.html) so this status can actually reveal it.
   stateManager.subscribe(function (state) {
-    if (!batchForm || !state.batchMode) return;
-    if (state.status === 'WAITING_PARENT' && state.sessionActive && !batchForm.isVisible()) {
-      if (speechController) {
-        speechController.stopListening();
-      }
-      batchForm.show(state.words || []);
+    if (!batchForm) return;
+    if (!window.BatchSubmissionForm.shouldOpenForState(state, batchForm.isVisible())) return;
+    if (speechController) {
+      speechController.stopListening();
     }
+    batchForm.show(state.words || []);
   });
 
   // ------------------------------------------------------------------
@@ -526,6 +536,36 @@
     setConnectionState(toIndicatorState(state.connectionStatus));
   });
 
+  // ------------------------------------------------------------------
+  // State-aware theming + retry-prompt lifecycle (2026-09-24 redesign).
+  //
+  // Body data attributes let main.css theme the whole page by FSM status
+  // (DICTATING/PAUSED/WAITING_PARENT/FEEDBACK get distinct accent colors)
+  // and spotlight the 🔁/⏭ buttons while a retry prompt is up.
+  //
+  // The retry/listening prompt is only meaningful while dictation is live.
+  // When the FSM leaves the dictation-active states (e.g. the last word's
+  // silence prompt must not linger into WAITING_PARENT/FEEDBACK), clear it
+  // here. Guarded by the dirty check so it fires at most once per exit —
+  // setState notifies unconditionally, so an unguarded setState here would
+  // recurse (same hazard the session-end reset below documents).
+  // ------------------------------------------------------------------
+  stateManager.subscribe(function (state) {
+    if (document.body) {
+      document.body.setAttribute('data-session-state', state.status || 'IDLE');
+      document.body.setAttribute('data-batch-mode', state.batchMode ? 'true' : 'false');
+      if (state.dictationState) {
+        document.body.setAttribute('data-dictation-state', state.dictationState);
+      } else {
+        document.body.removeAttribute('data-dictation-state');
+      }
+    }
+    if (state.dictationState &&
+        state.status !== 'DICTATING' && state.status !== 'LISTENING' && state.status !== 'PAUSED') {
+      stateManager.setState({ dictationState: null, lastAnswerCorrect: null, lastExpected: null, lastHeard: null });
+    }
+  });
+
   // Expose for console debugging and cross-script coupling (Plan 08-04 Task 2).
   window.__app = { stateManager: stateManager, wsClient: wsClient, audioController: audioController, speechController: speechController, voiceController: voiceController, photoController: photoController };
   // Expose audioController globally for websocket-client.js access (Plan 08-04 Task 2).
@@ -536,21 +576,31 @@
   // Auto-submit ratings when entering WAITING_PARENT + reset dictation
   // state on session end.
   //
+  // Per-word mode sends at WAITING_PARENT even with an EMPTY ratings map
+  // (B2 fix): submitSessionRatings() backfills unanswered/skipped words
+  // with the classroom "again" rating, so the backend always accepts the
+  // review and pushes the WAITING_PARENT→FEEDBACK transition — the student
+  // is never stranded on "Waiting for parent" until the 30-min timeout.
+  //
   // NOTE: setState() notifies subscribers unconditionally (no change
   // detection), so this handler MUST NOT call setState on every pass or
   // it will recurse infinitely. The needsReset dirty-check below makes
-  // the reset path fire at most once per session end.
+  // the reset path fire at most once per session end, and the ratingsSent
+  // flag makes the auto-send fire at most once per session.
   // ------------------------------------------------------------------
   stateManager.subscribe(function (state) {
-    if (state.status === 'WAITING_PARENT' && Object.keys(dictationRatings).length > 0) {
+    if (state.status === 'WAITING_PARENT' && !ratingsSent &&
+        (!state.batchMode || Object.keys(dictationRatings).length > 0)) {
       submitSessionRatings();
     }
     // Reset dictation state on session end
     if (!state.sessionActive) {
       var needsReset = Object.keys(dictationRatings).length > 0 ||
+        ratingsSent ||
         pendingAnswerWordId !== null ||
         feedbackTimer !== null ||
         !!state.dictationState ||
+        !!state.playPhase ||
         (batchForm && batchForm.isVisible()) ||
         state.lastAnswerCorrect !== null && state.lastAnswerCorrect !== undefined ||
         state.lastExpected !== null && state.lastExpected !== undefined ||
@@ -559,6 +609,7 @@
         return;
       }
       dictationRatings = {};
+      ratingsSent = false;
       pendingAnswerWordId = null;
       if (feedbackTimer) {
         clearTimeout(feedbackTimer);
@@ -576,7 +627,7 @@
         batchForm.hide();
       }
       pendingOCRIndex = -1;
-      stateManager.setState({ dictationState: null, lastAnswerCorrect: null, lastExpected: null, lastHeard: null });
+      stateManager.setState({ dictationState: null, lastAnswerCorrect: null, lastExpected: null, lastHeard: null, playPhase: 0 });
     }
   });
 
@@ -607,8 +658,14 @@
           audioController.playLiveFrame(payload, sequence);
           return;
         }
-        var wordId = state.currentWordId || null;
-        audioController.handleAudioFrame(payload, sequence, wordId);
+        // Word audio: the AudioController accumulates EVERY frame since the
+        // last word_complete in one rolling buffer — the 16-byte frame header
+        // carries no word_id, so state.currentWordId can never be an
+        // authoritative routing key (it drifts when the backend self-advances
+        // milliseconds before the frontend). null is passed; wordId is
+        // log-only inside handleAudioFrame. currentWordId remains in state
+        // for progress display and submit_answer, never for frame routing.
+        audioController.handleAudioFrame(payload, sequence, null);
       } else {
         console.warn('[app] binary frame received but AudioController unavailable or frame too small');
       }
@@ -663,11 +720,34 @@
    * recognized command arrives separately through the regular state frames
    * (paused status, next word audio); this only renders what was heard and
    * unlocks the mic button.
+   *
+   * 2026-09-24: a recognized flow-control command replaces the current
+   * word's turn, so the in-flight dictation recognition must stop (a late
+   * result would be judged against the wrong word). Advancing commands
+   * ("好了"/"不会写") also sync currentWordId to the upcoming word — same
+   * bookkeeping as the ⏭ button and sendNextWord — and retire the retry
+   * prompt, because the student explicitly moved on.
    */
   function handleVoiceResult(result) {
     if (voiceButton) {
       voiceButton.handleResult(result);
     }
+    if (!result || !result.action || result.action === 'none') {
+      return;
+    }
+    var advancing = result.action === 'next_word' || result.action === 'cannot_write';
+    if (speechController) {
+      speechController.stopListening();
+    }
+    var updates = { dictationState: null, lastHeard: null };
+    if (advancing) {
+      var state = stateManager.getState();
+      var nextIndex = state.completedWords;
+      if (Array.isArray(state.words) && nextIndex < state.words.length) {
+        updates.currentWordId = state.words[nextIndex];
+      }
+    }
+    stateManager.setState(updates);
   }
 
   /**
@@ -721,8 +801,13 @@
   /**
    * Manual input submission (Ticket 04): rides the existing submit_answer
    * wire path; the answer_result reply re-enters through handleAnswerResult.
+   * Defensively stops the mic first (2026-09-24): the typed answer IS this
+   * word's turn, so a late speech result must not double-judge it.
    */
   function handleManualSubmit(text) {
+    if (speechController) {
+      speechController.stopListening();
+    }
     if (wsClient && typeof wsClient.send === 'function') {
       wsClient.send({
         type: 'submit_answer',
@@ -836,14 +921,35 @@
   /**
    * Start the dictation loop for a word. Called when word audio finishes playing.
    * Begins speech recognition for the current word.
+   *
+   * 2026-09-24 (缺陷 1 修复): when speech recognition is unavailable the
+   * session NO LONGER auto-advances after 1.5s. It parks on a persistent
+   * guidance card (with the manual-typing form open) until the student
+   * explicitly answers (photo/manual) or taps ⏭ — the backend's DICTATING
+   * timeout (adaptive + 10s) remains the last-resort backstop.
    */
   function startDictationForWord(wordId) {
     if (!speechController || !speechController.supported) {
-      console.warn('[dictation] speech not supported — auto-advancing');
-      // Skip to next word after a brief delay
-      feedbackTimer = setTimeout(function () {
-        sendNextWord(wordId);
-      }, 1500);
+      console.warn('[dictation] speech not supported — waiting for photo/manual answer');
+      // Point only at affordances that actually rendered: photo needs a
+      // supported controller, typing needs the manual form.
+      var canPhoto = !!(photoController && photoController.supported);
+      var hint;
+      if (canPhoto && manualForm) {
+        hint = '这台设备不能听你说话——写在纸上点 📷 拍照，或在下面打字提交；也可以点 ⏭ 下一个';
+      } else if (manualForm) {
+        hint = '这台设备不能听你说话——在下面打字提交；也可以点 ⏭ 下一个';
+      } else {
+        hint = '这台设备不能听你说话——点 ⏭ 下一个继续';
+      }
+      stateManager.setState({
+        dictationState: 'retry',
+        lastHeard: hint
+      });
+      if (manualForm) {
+        manualForm.setHint('打完字点提交');
+        manualForm.show('');
+      }
       return;
     }
 
@@ -906,39 +1012,77 @@
   }
 
   /**
-   * Handle speech recognition error. Show skip feedback, then advance.
+   * Handle speech recognition error. Show a persistent guidance card and
+   * WAIT for the student — no auto-advance (2026-09-24, 缺陷 1 修复).
+   *
+   * Old behavior: every silence/recognition error auto-sent next_word
+   * after 2.5s, so a quiet child watched the session race ahead ~3-5s per
+   * word and "finish" itself. New behavior: park on a gentle retry card.
+   * The student's explicit actions close the loop:
+   *   🔁 repeat → backend re-streams → playback end restarts recognition;
+   *   📷 photo / ✏️ typing → the photo/manual answer flows judge the word;
+   *   ⏭ next  → explicit advance (DictationControls syncs currentWordId).
+   * The backend's DICTATING timeout (adaptive 8-15s + 10s grace,
+   * session.go) synthesizes next_word if the student truly walks away, so
+   * the session can never hang — the frontend simply stops racing it.
    */
   function handleDictationError(wordId, errorType) {
+    // 'aborted' is the superseded-recognition artifact (startListening()
+    // aborts the previous session before starting the new one) — not a
+    // failure, and the new session is already listening. Never surface it.
+    if (errorType === 'aborted') {
+      return;
+    }
     console.warn('[dictation] recognition error: ' + errorType + ' for word ' + wordId);
     pendingAnswerWordId = null;
 
-    var messages = {
-      'no-speech': '没听到声音',
-      'not-allowed': '麦克风权限被拒绝',
-      'timeout': '录音超时',
-      'network': '网络错误',
-      'audio-capture': '麦克风不可用',
-      'start-failed': '录音启动失败',
-      'not-initialized': '语音识别未初始化'
-    };
-    var msg = messages[errorType] || '识别失败';
+    var micDead = errorType === 'not-allowed' || errorType === 'audio-capture';
+    var canPhoto = !!(photoController && photoController.supported);
+    var msg;
+    if (micDead && canPhoto && manualForm) {
+      msg = '麦克风不能用——写在纸上点 📷 拍照，或在下面打字提交；也可以点 ⏭ 下一个';
+    } else if (micDead && manualForm) {
+      msg = '麦克风不能用——请在下面打字提交；也可以点 ⏭ 下一个';
+    } else if (micDead) {
+      msg = '麦克风不能用——点 ⏭ 下一个继续';
+    } else if (errorType === 'no-speech' || errorType === 'timeout') {
+      msg = '没听到声音——点 🔁 再听一遍，听完大声说出来；也可以点 ⏭ 下一个';
+    } else {
+      msg = '没识别出来——点 🔁 再听一遍后说一次，或点 ⏭ 下一个';
+    }
 
     stateManager.setState({
-      dictationState: 'skipped',
+      dictationState: 'retry',
       lastHeard: msg
     });
 
-    // No rating for skipped words — advance after delay
-    feedbackTimer = setTimeout(function () {
-      stateManager.setState({ dictationState: null, lastHeard: null });
-      sendNextWord(wordId);
-    }, 2500);
+    // Mic-level failures won't heal by retrying — open the typing path.
+    if (micDead && manualForm) {
+      manualForm.setHint('麦克风不能用，请打字提交');
+      manualForm.show('');
+    }
   }
 
   /**
    * Send next_word to advance the session.
    */
   function sendNextWord(wordId) {
+    // P0-1: the WebSocket client no longer auto-advances currentWordId in
+    // per-word mode — the student-paced flow owns it. This advance is NOT
+    // for audio routing: the AudioController's rolling accumulator ignores
+    // currentWordId entirely (word_complete delimits which frames belong to
+    // which word, so routing is immune to drift when the backend
+    // self-advances). currentWordId is kept in sync so progress display,
+    // submit_answer word_id (photo/manual paths) and the answer_result
+    // fallback point at the word the backend is about to stream.
+    // words[completedWords] is the 0-based next word; absent when the
+    // just-answered word was the last (the backend replies with
+    // session_complete instead of more audio).
+    var state = stateManager.getState();
+    var nextIndex = state.completedWords;
+    if (Array.isArray(state.words) && nextIndex < state.words.length) {
+      stateManager.setState({ currentWordId: state.words[nextIndex] });
+    }
     if (wsClient && typeof wsClient.send === 'function') {
       wsClient.send({
         type: 'next_word',
@@ -948,20 +1092,43 @@
   }
 
   /**
-   * Submit accumulated ratings to FSRS when session completes.
+   * Submit accumulated ratings to FSRS when the session completes. Also the
+   * per-word WAITING_PARENT escape (B2): words the student never answered
+   * (speech errors, skipped, listen-only) are backfilled with "again" — the
+   * same blank-is-wrong classroom semantics the backend's own batch grader
+   * applies (handlers.go grades empty answers as incorrect/again). The
+   * backend rejects an empty ratings map (handlers.go: "ratings map is
+   * empty") WITHOUT pushing the WAITING_PARENT→FEEDBACK transition, so an
+   * always-non-empty payload is what lets the session complete.
    */
   function submitSessionRatings() {
-    if (Object.keys(dictationRatings).length === 0) {
+    // Backfill skipped/unanswered words from the session queue so the
+    // ratings map can never go out empty (an empty map would be rejected
+    // and leave the student in WAITING_PARENT).
+    var state = stateManager.getState();
+    var words = (state && state.words) || [];
+    for (var i = 0; i < words.length; i++) {
+      var word = words[i];
+      if (!Object.prototype.hasOwnProperty.call(dictationRatings, word)) {
+        dictationRatings[word] = 'again';
+      }
+    }
+    var count = Object.keys(dictationRatings).length;
+    if (count === 0) {
+      // No judged words AND no session queue known — nothing honest to
+      // submit; leave ratingsSent false so a later WAITING_PARENT pass
+      // (e.g. words arriving late via progress_update) can retry.
       console.log('[dictation] no ratings to submit');
       return;
     }
     if (wsClient && typeof wsClient.send === 'function') {
-      console.log('[dictation] submitting ' + Object.keys(dictationRatings).length + ' ratings');
+      console.log('[dictation] submitting ' + count + ' ratings');
       wsClient.send({
         type: 'submit_review',
         params: { ratings: dictationRatings, category: sessionCategory }
       });
     }
+    ratingsSent = true;
     dictationRatings = {};
   }
 

@@ -44,13 +44,25 @@
       // Playback state.
       this.isPlaying = false;
 
-      // Per-word PCM accumulation (D-05): wordId → Uint8Array[].
-      this.pendingPcm = new Map();
+      // P1-1: playback generation token. stop()/cleanup() increment it;
+      // onended handlers capture the value at schedule time and ignore
+      // their event if the generation has moved on, so a source scheduled
+      // before a stop (e.g. the first of a double play) can never fire a
+      // stale playback-end callback after teardown.
+      this._playbackGeneration = 0;
+
+      // Rolling PCM accumulator (D-05): every conforming audio frame is
+      // appended here in arrival order; word_complete consumes the ENTIRE
+      // buffer as the completing word's audio. Replaces the former
+      // per-wordId pendingPcm Map — see handleAudioFrame for why
+      // client-side wordId keying can never be authoritative.
+      this.rollingPcm = [];
 
       // Monotonic dedup state (D-10, D-11).
       this.lastSeq = 0;
 
-      // Current active word for frame routing.
+      // Current active word — informational/log-only (frames are NOT keyed
+      // or dropped by it; see the rolling accumulator in handleAudioFrame).
       this.currentWordId = null;
 
       // Tap-to-resume overlay (D-06).
@@ -59,6 +71,12 @@
       // Playback-end callback. Fired when the last scheduled buffer finishes playing.
       // Used by the dictation flow to start speech recognition after word audio ends.
       this._onPlaybackEnd = null;
+
+      // Play-phase callback (2026-09-24): fired as 1 = first pronunciation
+      // starts, 2 = second pronunciation (double play), 0 = playback over.
+      // Drives the "第一遍/第二遍" rhythm chip; never fires for live
+      // 'feedback' frames. Guarded by the same generation token as onended.
+      this._onPlayPhase = null;
 
       // Frame size: 20ms @ 16kHz 16-bit mono = 640 bytes.
       this.AUDIO_FRAME_SIZE = 640;
@@ -70,6 +88,16 @@
      */
     setOnPlaybackEnd(callback) {
       this._onPlaybackEnd = callback;
+    }
+
+    /**
+     * Register a callback that fires on play-phase transitions of WORD
+     * playback: 1 = first pronunciation, 2 = second pronunciation (double
+     * play), 0 = playback finished. Live 'feedback' frames never fire it.
+     * @param {function|null} callback - called as cb(phase).
+     */
+    setOnPlayPhase(callback) {
+      this._onPlayPhase = callback;
     }
 
     /**
@@ -141,12 +169,27 @@
     }
 
     /**
-     * Handle binary audio frame from WebSocket. Accumulates PCM chunks
-     * for the current word; scheduling happens on word_complete.
+     * Handle binary audio frame from WebSocket. Appends the PCM chunk to
+     * the single rolling accumulator; scheduling happens on word_complete.
+     *
+     * ROLLING ACCUMULATOR RATIONALE: the 16-byte frame header carries no
+     * word_id, so client-side keying (the former per-wordId pendingPcm Map)
+     * can never be authoritative — it silently dropped or mis-filed frames
+     * whenever the frontend's currentWordId drifted from what the backend
+     * was actually streaming (verified on iPad: the backend's DICTATING
+     * timeout fires milliseconds before the frontend's batch gap, the
+     * backend self-advances to word N+1 while currentWordId still points at
+     * word N, and frames pile up under the wrong key → silent words).
+     * The wire contract is "frames stream, then word_complete delimits the
+     * word": every frame since the previous word_complete belongs to the
+     * word now completing. Appending unconditionally is immune to
+     * currentWordId drift, backend self-advance, REPEAT_WORD re-streams,
+     * and routing races. wordId is accepted for LOGGING ONLY — a missing or
+     * mismatched wordId must never drop a frame.
      *
      * @param {Uint8Array} data - PCM frame payload (640 bytes for 20ms @ 16kHz).
      * @param {number} sequence - frame sequence number for dedup.
-     * @param {string} wordId - word identifier for frame routing.
+     * @param {string|null} [wordId] - log-only context; NOT used for routing.
      */
     handleAudioFrame(data, sequence, wordId) {
       if (!data || data.length !== this.AUDIO_FRAME_SIZE) {
@@ -165,16 +208,11 @@
       }
       this.lastSeq = sequence;
 
-      // Route frame to current word's PCM accumulator.
-      if (!wordId) {
-        console.warn('[audio] Frame received with no wordId — ignored (seq=' + sequence + ')');
-        return;
-      }
-
-      if (!this.pendingPcm.has(wordId)) {
-        this.pendingPcm.set(wordId, []);
-      }
-      this.pendingPcm.get(wordId).push(new Uint8Array(data));
+      // Append unconditionally to the rolling buffer (wordId is log-only —
+      // see the rationale above; frames are never dropped for routing).
+      this.rollingPcm.push(new Uint8Array(data));
+      console.debug('[audio] frame seq=' + sequence + ' buffered (wordId=' +
+        (wordId || 'none') + ', chunks=' + this.rollingPcm.length + ')');
     }
 
     /**
@@ -225,17 +263,48 @@
      * Play a completed word. Called when backend sends word_complete
      * control frame after streaming all audio frames for that word.
      *
-     * Plan 08-04 Task 4: enhanced error handling and audio subsystem validation.
+     * Takes the ENTIRE rolling accumulator as this word's audio and clears
+     * it before scheduling: the completing word owns every frame since the
+     * previous word_complete (wire contract — see handleAudioFrame). A
+     * REPEAT_WORD re-stream appends fresh frames to the now-cleared buffer,
+     * so the repeat's own word_complete plays ONLY the new audio — no stale
+     * double-append is possible.
      *
-     * @param {string} wordId - word identifier to play.
+     * Plan 08-04 Task 4: enhanced error handling and audio subsystem validation.
+     * P1-1: audio_plays threading — see @param plays.
+     *
+     * @param {string} wordId - word identifier (log-only; the buffer is global).
+     * @param {number} [plays] - 2 plays the pronunciation twice with a 1s
+     *        gap between pronunciations (backend audio_plays=2 for
+     *        single-pronunciation audio); 1/undefined plays once (legacy
+     *        paired audio). Any other value plays once.
+     * @returns {number} total scheduled playback time in ms (double play
+     *        includes the 1s gap); 0 when nothing was scheduled. The batch
+     *        pacing timer (websocket-client _applyWordComplete) adds this to
+     *        the writing gap so the gap is not eaten by the double play.
      */
-    playWordComplete(wordId) {
+    playWordComplete(wordId, plays) {
       try {
-        var chunks = this.pendingPcm.get(wordId);
-        if (!chunks || chunks.length === 0) {
+        // Hand off the whole rolling buffer, then swap in a fresh one so
+        // frames streamed for the NEXT word (or a REPEAT_WORD re-stream)
+        // accumulate from zero.
+        var chunks = this.rollingPcm;
+        this.rollingPcm = [];
+        if (chunks.length === 0) {
           console.warn('[audio] word_complete for "' + wordId + '" — no PCM accumulated');
-          return;
+          return 0;
         }
+
+        // Scheduled playback duration — identical math to
+        // _scheduleWordPlayback (numSamples/16000 per play, 1s gap between
+        // the two plays), computed up front so every return path below can
+        // report it even when scheduling is deferred (suspended ctx).
+        var totalLen = 0;
+        for (var i = 0; i < chunks.length; i++) {
+          totalLen += chunks[i].length;
+        }
+        var wordSec = (totalLen / 2) / 16000; // s16le mono @16kHz
+        var playbackMs = Math.round((plays === 2 ? wordSec * 2 + 1.0 : wordSec) * 1000);
 
         // If AudioContext is suspended (iOS D-03, app-switch D-06), attempt
         // resume() and defer playback until the context is running. resume()
@@ -245,22 +314,24 @@
           var self = this;
           this.audioCtx.resume().then(function () {
             console.log('[audio] resume() succeeded, now playing "' + wordId + '"');
-            self._scheduleWordPlayback(wordId, chunks);
+            self._scheduleWordPlayback(wordId, chunks, plays);
           }).catch(function (resumeErr) {
             console.error('[audio] resume() failed for "' + wordId + '":', resumeErr);
           });
-          return;
+          return playbackMs;
         }
 
         if (!this.isAudioCtxReady()) {
           console.error('[audio] word_complete for "' + wordId + '" but AudioContext not running — PCM dropped');
-          return;
+          return 0;
         }
 
-        this._scheduleWordPlayback(wordId, chunks);
+        this._scheduleWordPlayback(wordId, chunks, plays);
+        return playbackMs;
       } catch (playErr) {
         console.error('[audio] word_complete playback failed for "' + wordId + '":', playErr);
         this.isPlaying = false;
+        return 0;
       }
     }
 
@@ -268,13 +339,24 @@
      * @private Schedule PCM playback for a word. Extracted from playWordComplete
      * so it can be called directly or after an async resume().
      *
+     * Buffer lifecycle is the CALLER's job: playWordComplete hands off and
+     * clears the rolling accumulator; playLiveFrame passes an ad-hoc
+     * single-frame array. This method never touches this.rollingPcm.
+     * wordId is log-only (see handleAudioFrame).
+     *
+     * P1-1: when plays === 2, TWO BufferSources are created from the SAME
+     * buffer — the first at scheduledTime, the second one buffer-duration
+     * plus a 1s gap later — and scheduledTime advances to the end of the
+     * second play. The playback-end callback fires only after the LAST
+     * source ends (remaining-count closure). plays === 1 (default)
+     * preserves the single-source behavior exactly.
+     *
      * @param {string} wordId - word identifier (for logging).
      * @param {Uint8Array[]} chunks - accumulated PCM chunks for this word.
+     * @param {number} [plays] - 2 → double pronunciation with 1s gap;
+     *        anything else → single play.
      */
-    _scheduleWordPlayback(wordId, chunks) {
-      // Clear pending PCM for this word (Plan 08-04 Task 4: memory cleanup).
-      this.pendingPcm.delete(wordId);
-
+    _scheduleWordPlayback(wordId, chunks, plays) {
       // Merge PCM chunks into one s16le buffer.
       var totalLen = chunks.reduce(function (sum, chunk) { return sum + chunk.length; }, 0);
       var pcmBytes = new Uint8Array(totalLen);
@@ -297,46 +379,94 @@
       }
 
       // D-04 + D-18: gapless scheduling with underrun snap.
-      var src = this.audioCtx.createBufferSource();
-      src.buffer = buf;
-      src.connect(this.audioCtx.destination);
-
-      // Plan 08-04 Task 4: add error handler for source start failure
-      src.onerror = function (err) {
-        console.error('[audio] BufferSource playback error:', err);
-      };
-
-      // Snap scheduledTime forward on underrun so late PCM never schedules in the past.
       if (this.scheduledTime < this.audioCtx.currentTime) {
         this.scheduledTime = this.audioCtx.currentTime;
       }
 
-      src.start(this.scheduledTime);
-      this.scheduledTime += buf.duration;
-
-      // Fire playback-end callback when this buffer finishes.
+      // P1-1: playback-end fires ONLY after the last scheduled source ends.
+      // The generation token (incremented by stop()/cleanup()) invalidates
+      // handlers of sources scheduled before a teardown, so a stale source
+      // — e.g. the first play of a pair, stopped between plays — can never
+      // fire _onPlaybackEnd or clobber isPlaying.
+      var generation = this._playbackGeneration;
       var self = this;
-      src.onended = function () {
+      var remaining = plays === 2 ? 2 : 1;
+      // Play-phase transitions (第一遍/第二遍/结束) are word-playback only —
+      // live 'feedback' frames (the spoken encouragement) never fire them.
+      var isWord = wordId !== 'feedback';
+      var handleSourceEnd = function () {
+        if (self._playbackGeneration !== generation) {
+          return; // stop()/cleanup() happened after scheduling — stale source
+        }
+        remaining -= 1;
+        if (remaining > 0) {
+          // Double play: the first pronunciation just ended — the second
+          // one starts after the 1s gap.
+          if (isWord && typeof self._onPlayPhase === 'function') {
+            self._onPlayPhase(2);
+          }
+          return;
+        }
         self.isPlaying = false;
+        if (isWord && typeof self._onPlayPhase === 'function') {
+          self._onPlayPhase(0);
+        }
         if (typeof self._onPlaybackEnd === 'function') {
           self._onPlaybackEnd();
         }
       };
 
+      // Compute start times: double play = same buffer twice with a 1s gap
+      // between pronunciations; scheduledTime ends up at the second play's
+      // end so the next word stays gapless behind it.
+      var startTimes = [];
+      if (plays === 2) {
+        startTimes.push(this.scheduledTime);
+        startTimes.push(this.scheduledTime + buf.duration + 1.0);
+        this.scheduledTime = startTimes[1] + buf.duration;
+      } else {
+        startTimes.push(this.scheduledTime);
+        this.scheduledTime += buf.duration;
+      }
+
+      for (var s = 0; s < startTimes.length; s++) {
+        var src = this.audioCtx.createBufferSource();
+        src.buffer = buf;
+        src.connect(this.audioCtx.destination);
+
+        // Plan 08-04 Task 4: add error handler for source start failure
+        src.onerror = function (err) {
+          console.error('[audio] BufferSource playback error:', err);
+        };
+
+        src.onended = handleSourceEnd;
+        src.start(startTimes[s]);
+      }
+
       this.isPlaying = true;
 
+      // First pronunciation starts (scheduled at the audio clock — the tiny
+      // lead time is imperceptible, and it keeps the rhythm chip simple).
+      if (isWord && typeof this._onPlayPhase === 'function') {
+        this._onPlayPhase(1);
+      }
+
       console.log('[audio] word_complete: "' + wordId + '" — scheduled ' + numSamples +
-        ' samples (' + (buf.duration * 1000).toFixed(0) + 'ms) at audio clock t=' +
-        (this.scheduledTime - buf.duration).toFixed(3) + 's');
+        ' samples (' + (buf.duration * 1000).toFixed(0) + 'ms) x' + startTimes.length +
+        ' at audio clock t=' + startTimes[0].toFixed(3) + 's');
     }
 
     /**
-     * Stop playback and reset state. Clears pending PCM and resets
+     * Stop playback and reset state. Clears the rolling buffer and resets
      * the dedup counter.
      */
     stop() {
       this.isPlaying = false;
-      this.pendingPcm.clear();
+      // P1-1: invalidate onended handlers of any in-flight sources (a
+      // BufferSource cannot be cancelled via stop() references we keep —
+      // the generation token makes their callbacks no-ops instead).
+      this._playbackGeneration += 1;
+      this.rollingPcm = [];
       this.lastSeq = 0;
       this.currentWordId = null;
       // Reset scheduling clock to avoid large jumps on next play.
@@ -355,10 +485,11 @@
     }
 
     /**
-     * Set the current word ID for audio frame routing. Called before
-     * requesting audio frames from the backend.
+     * Set the current word ID. Informational only since the rolling
+     * accumulator replaced per-wordId routing — frames are never keyed or
+     * dropped by this value (see handleAudioFrame).
      *
-     * @param {string} wordId - word identifier for upcoming audio frames.
+     * @param {string} wordId - word identifier (log-only context).
      */
     setCurrentWord(wordId) {
       this.currentWordId = wordId;
@@ -449,11 +580,13 @@
      */
     cleanup() {
       try {
-        // Clear all pending PCM data (Plan 08-04 Task 4: memory cleanup).
-        this.pendingPcm.clear();
+        // Clear the rolling PCM accumulator (Plan 08-04 Task 4: memory cleanup).
+        this.rollingPcm = [];
 
         // Reset playback state.
         this.isPlaying = false;
+        // P1-1: same stale-onended invalidation as stop().
+        this._playbackGeneration += 1;
         this.lastSeq = 0;
         this.currentWordId = null;
         this.scheduledTime = 0;

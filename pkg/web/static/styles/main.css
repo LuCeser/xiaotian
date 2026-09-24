@@ -7,6 +7,15 @@
  *   - No zoom-on-focus: touch-action: manipulation everywhere (Pitfall 1).
  *   - No accidental tap highlight; instant, jank-free feedback.
  *   - No build step: plain CSS, cached as a static asset by the Go server.
+ *
+ * 2026-09-24 redesign — "whose turn is it" at a glance:
+ *   - The whole page is themed by the session FSM status via
+ *     body[data-session-state] (set by app.js): DICTATING = sky blue,
+ *     PAUSED = warm amber, WAITING_PARENT/SUBMISSION = violet wrap-up,
+ *     FEEDBACK = celebration green. One accent color per moment, applied
+ *     through the --state-* custom properties below.
+ *   - The retry prompt (body[data-dictation-state='retry']) spotlights the
+ *     repeat/next buttons with a soft glow instead of an error strip.
  */
 
 /* ---------- Reset & base ---------- */
@@ -17,6 +26,41 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+}
+
+/* State accent system: one dominant accent + one soft tint + one readable
+   ink per session moment. Components consume the variables; the body
+   attribute selector owns the switching. */
+:root {
+  --state-accent: #2563eb;
+  --state-soft: #dbeafe;
+  --state-ink: #1e3a8a;
+}
+
+body[data-session-state='DICTATING'],
+body[data-session-state='LISTENING'] {
+  --state-accent: #2563eb;
+  --state-soft: #dbeafe;
+  --state-ink: #1e3a8a;
+}
+
+body[data-session-state='PAUSED'] {
+  --state-accent: #d97706;
+  --state-soft: #fef3c7;
+  --state-ink: #92400e;
+}
+
+body[data-session-state='WAITING_PARENT'],
+body[data-session-state='SUBMISSION'] {
+  --state-accent: #7c3aed;
+  --state-soft: #ede9fe;
+  --state-ink: #5b21b6;
+}
+
+body[data-session-state='FEEDBACK'] {
+  --state-accent: #059669;
+  --state-soft: #d1fae5;
+  --state-ink: #065f46;
 }
 
 html {
@@ -288,16 +332,18 @@ body {
   cursor: wait;
 }
 
-/* ---------- Progress display ---------- */
+/* ---------- Progress display: the "stage" card ---------- */
 
 .progress-display-section {
-  background: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.92);
   border-radius: 22px;
   padding: 1.5rem 1.25rem;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
   text-align: center;
-  /* Plan 08-04 Task 3: enhanced accessibility and visual feedback */
-  transition: all 0.2s ease;
+  /* State accent bar: the card's top edge carries the moment's color so the
+     state switch is visible from across the room. */
+  border-top: 6px solid var(--state-accent);
+  transition: border-color 0.3s ease;
 }
 
 .progress-status {
@@ -305,12 +351,17 @@ body {
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
-  margin-bottom: 1rem;
+  margin-bottom: 0.75rem;
 }
 
 .status-icon {
   font-size: 1.5rem;
-  /* Plan 08-04 Task 3: animated icon for better feedback */
+}
+
+/* The icon bounces only while dictation is live — a "something is
+   happening" cue that goes still for paused/wrap-up states. */
+body[data-session-state='DICTATING'] .status-icon,
+body[data-session-state='LISTENING'] .status-icon {
   animation: bounce 1s ease-in-out infinite;
 }
 
@@ -322,7 +373,22 @@ body {
 .status-text {
   font-size: 1.2rem;
   font-weight: 600;
-  color: #1e3a8a;
+  color: var(--state-ink);
+  transition: color 0.3s ease;
+}
+
+/* Rhythm chip: "📢 第一遍 / 📢 第二遍 / 🎤 轮到你了 / ✍️ 写下来" — the
+   dictation beat as a tinted pill under the status line. */
+.play-phase {
+  display: inline-block;
+  margin: 0 auto 0.85rem;
+  padding: 0.35rem 1.1rem;
+  border-radius: 999px;
+  background: var(--state-soft);
+  color: var(--state-ink);
+  font-size: 1.05rem;
+  font-weight: 700;
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .progress-container {
@@ -357,6 +423,15 @@ body {
   line-height: 1.4;
 }
 
+/* Sub-hint: whose turn it is / what to do next, one quiet line under the
+   counter so the status line stays short. */
+.progress-subhint {
+  margin-top: 0.35rem;
+  font-size: 0.98rem;
+  color: #6b7280;
+  min-height: 1.4em;
+}
+
 .encouragement {
   margin-top: 0.5rem;
   font-size: 1.3rem;
@@ -365,6 +440,148 @@ body {
   color: #10b981;
   font-weight: 600;
   transition: all 0.3s ease;
+}
+
+/* ---------- Dictation controls (⏸ / 🔁 / ⏭) ---------- */
+
+.dictation-controls {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  padding: 16px 0;
+}
+
+.dictation-control-button {
+  min-width: 100px;
+  min-height: 60px;
+  font-size: 18px;
+  padding: 12px 20px;
+  border-radius: 14px;
+  border: 2px solid #e5e7eb;
+  background: #fff;
+  color: #374151;
+  box-shadow: 0 3px 0 #d1d5db, 0 4px 8px rgba(0, 0, 0, 0.06);
+}
+
+.dictation-control-button:active {
+  box-shadow: 0 1px 0 #d1d5db, 0 2px 4px rgba(0, 0, 0, 0.06);
+}
+
+.dictation-control-button.is-paused {
+  background: #dbeafe;
+  border-color: #3b82f6;
+  color: #1d4ed8;
+}
+
+/* While a retry prompt is up, the two buttons that resolve it get a soft
+   breathing glow — guidance, not alarm. */
+@keyframes dc-glow {
+  0%, 100% { box-shadow: 0 3px 0 #d1d5db, 0 0 0 0 rgba(245, 158, 11, 0.45); }
+  50% { box-shadow: 0 3px 0 #d1d5db, 0 0 0 12px rgba(245, 158, 11, 0); }
+}
+
+body[data-dictation-state='retry'] .dictation-control-button--repeat,
+body[data-dictation-state='retry'] .dictation-control-button--next {
+  border-color: #f59e0b;
+  color: #92400e;
+  animation: dc-glow 1.6s ease-out infinite;
+}
+
+/* ---------- Dictation feedback card (per-word) ---------- */
+
+.df-card {
+  text-align: center;
+  padding: 20px;
+  min-height: 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  border: 2px solid transparent;
+}
+
+.df-icon {
+  font-size: 34px;
+  line-height: 1;
+  margin-bottom: 8px;
+}
+
+.df-word {
+  font-size: 28px;
+  font-weight: 700;
+  color: #1f2937;
+  margin-bottom: 6px;
+}
+
+.df-message {
+  font-size: 17px;
+  color: #6b7280;
+  max-width: 32em;
+  line-height: 1.6;
+}
+
+/* Listening: calm blue, mic pulses gently — "your turn". */
+.df-listening {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+.df-listening .df-icon {
+  animation: df-pulse 1.2s ease-in-out infinite;
+}
+.df-listening .df-message {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+/* Correct: green pop. */
+.df-correct {
+  background: #d1fae5;
+  border-color: #6ee7b7;
+}
+.df-correct .df-icon {
+  color: #059669;
+  animation: df-pop 0.3s ease-out;
+}
+.df-correct .df-message {
+  color: #065f46;
+  font-weight: 700;
+}
+
+/* Incorrect: soft red, the correct spelling stays the visual anchor. */
+.df-incorrect {
+  background: #fee2e2;
+  border-color: #fca5a5;
+}
+.df-incorrect .df-icon {
+  color: #dc2626;
+}
+.df-incorrect .df-message {
+  color: #991b1b;
+}
+
+/* Retry (silence / recognition trouble): warm cream guidance card — NOT an
+   error strip. Not speaking up is normal; the card points at the glowing
+   🔁 / ⏭ buttons below and waits. */
+.df-retry {
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+.df-retry .df-message {
+  color: #92400e;
+  font-weight: 600;
+}
+
+@keyframes df-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@keyframes df-pop {
+  0% { transform: scale(0.5); }
+  70% { transform: scale(1.15); }
+  100% { transform: scale(1); }
 }
 
 /* ---------- iPad-specific enhancement (768x1024) ---------- */
@@ -388,10 +605,31 @@ body {
     font-size: 22px;
   }
 
+  .play-phase {
+    font-size: 1.25rem;
+  }
+
+  .progress-subhint {
+    font-size: 1.1rem;
+  }
+
   .kid-button {
     min-height: 72px;
     font-size: 1.4rem;
     border-radius: 22px;
+  }
+
+  .dictation-control-button {
+    font-size: 1.25rem;
+    border-radius: 18px;
+  }
+
+  .df-word {
+    font-size: 34px;
+  }
+
+  .df-message {
+    font-size: 19px;
   }
 
   .word-count-btn {
@@ -464,6 +702,14 @@ body {
   .progress-bar {
     transition: none;
   }
+
+  .status-icon,
+  .df-listening .df-icon,
+  .df-correct .df-icon,
+  body[data-dictation-state='retry'] .dictation-control-button--repeat,
+  body[data-dictation-state='retry'] .dictation-control-button--next {
+    animation: none;
+  }
 }
 
 /* ---------- Batch mode toggle (Ticket 05) ---------- */
@@ -481,6 +727,17 @@ body {
 .batch-mode-toggle input[type='checkbox'] {
   width: 22px;
   height: 22px;
+}
+
+/* ---------- Batch submission form (Ticket 05) ---------- */
+
+/* Wrap-up title inside the form: the form's appearance IS the end of the
+   dictation in batch mode — it says so out loud. */
+.batch-form-title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  color: #1e3a8a;
 }
 
 /* ---------- Feedback report (Ticket 06) ---------- */

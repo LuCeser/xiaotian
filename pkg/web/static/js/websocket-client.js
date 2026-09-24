@@ -83,6 +83,12 @@
       this.messageQueue = [];
       this.state = STATE_DISCONNECTED;
 
+      // P0-1: pending batch-mode next_word timer (adaptive writing gap).
+      // Cleared on session_ready / session_complete / socket close /
+      // disconnect so a stale next_word is never sent after the session
+      // ended or a new one started.
+      this._nextWordTimer = null;
+
       // Optional SessionStateManager (registered via setStateManager). When
       // present, inbound JSON control frames are dispatched into structured
       // state updates instead of being handed raw to messageHandler. Wave 2
@@ -242,6 +248,10 @@
 
     /** @private close handler: reconnect unless this was intentional. */
     _onClose() {
+      // P0-1: a socket drop ends the session's pacing — never let a pending
+      // next_word timer fire into the reconnect queue (send() would buffer
+      // it and flush a stale frame after the session died).
+      this._clearNextWordTimer();
       if (this._intentionalClose) {
         this._setState(STATE_DISCONNECTED);
         return;
@@ -385,6 +395,8 @@
         this._reconnectTimer = null;
       }
       this._clearConnectionTimer();
+      // P0-1: teardown cancels any pending batch-mode auto-advance.
+      this._clearNextWordTimer();
       if (this.ws) {
         try {
           this.ws.close();
@@ -404,6 +416,16 @@
       if (this._connectionTimer !== null) {
         global.clearTimeout(this._connectionTimer);
         this._connectionTimer = null;
+      }
+    }
+
+    /**
+     * @private clear the pending batch-mode next_word timer (P0-1), if any.
+     */
+    _clearNextWordTimer() {
+      if (this._nextWordTimer !== null) {
+        global.clearTimeout(this._nextWordTimer);
+        this._nextWordTimer = null;
       }
     }
 
@@ -488,6 +510,13 @@
         window.audioController.stop();
       }
 
+      // P0-1: a new session must not inherit the previous session's pending
+      // batch-mode next_word timer.
+      this._clearNextWordTimer();
+
+      // Replay guard: a new session starts with no completion memory.
+      this._lastCompletedWordId = null;
+
       var firstWordId = payload.words.length > 0 ? payload.words[0] : null;
       this.stateManager.setState({
         sessionActive: true,
@@ -557,42 +586,117 @@
 
     /**
      * @private apply a word_complete frame — increment completedWords by one
-     * AND trigger audio playback via the global AudioController (Plan 08-04 Task 2).
-     * Used by the backend's per-word streaming loop. word_id is informational
-     * (not stored). T-08-08: clamp the increment at totalWords so a sequence
-     * of word_complete frames cannot push progress past 100%.
+     * AND trigger audio playback via the global AudioController (Plan 08-04
+     * Task 2). T-08-08: clamp the increment at totalWords so a sequence of
+     * word_complete frames cannot push progress past 100%.
+     *
+     * P0-1 pacing fix — advancement is now mode-dependent:
+     *   - Per-word mode (batchMode false): do NOTHING here. The student
+     *     paces the session; app.js sends next_word from its answer_result
+     *     flow (1200ms/2500ms after feedback). The old unconditional
+     *     auto-advance left DICTATING before playback ended, so speech
+     *     recognition (gated on status === 'DICTATING' at playback end)
+     *     never started.
+     *   - Batch mode (batchMode true): keep the auto-advance, but delay it
+     *     by adaptiveWritingMs(justCompletedWord) so the next word is not
+     *     dictated while the student is still writing (same formula as the
+     *     backend's AdaptiveTimeout backstop, pkg/session/timing.go).
+     *
+     * P1-1: payload.audio_plays (2 = single-pronunciation audio → play
+     * twice; 1/absent = legacy paired audio → play once) is threaded to
+     * AudioController.playWordComplete.
      */
     _applyWordComplete(payload) {
-      var snapshot = this.stateManager.getState();
-      var total = snapshot.totalWords;
-      var next = snapshot.completedWords + 1;
-      if (total > 0 && next > total) {
-        next = total; // clamp at 100%
-      }
-      this.stateManager.setState({ completedWords: next });
-
-      // Plan 08-04 Task 2: trigger audio playback when word completes.
       var wordId = typeof payload.word_id === 'string' ? payload.word_id : null;
-      if (wordId && typeof window !== 'undefined' && window.audioController) {
-        window.audioController.playWordComplete(wordId);
+      // Replay guard (2026-09-14 UAT): a repeat/resume re-stream completes the
+      // SAME word again (backend replay-completion self-loops). A replay must
+      // NOT advance completedWords — the batch-mode next-word index derives
+      // from it, so a replay increment silently SKIPS a word, and in every
+      // mode it inflates the progress display (UAT: progress raced to 100%
+      // while "banana" replayed endlessly).
+      var isReplay = wordId !== null && wordId === this._lastCompletedWordId;
+
+      if (!isReplay) {
+        this._lastCompletedWordId = wordId;
+        var snapshot = this.stateManager.getState();
+        var total = snapshot.totalWords;
+        var next = snapshot.completedWords + 1;
+        if (total > 0 && next > total) {
+          next = total; // clamp at 100%
+        }
+        this.stateManager.setState({ completedWords: next });
       }
 
-      // CR-3 fix: Advance to next word and send next_word control frame.
-      // Same params-nesting requirement as play_word above.
-      // NOTE: read completedWords from live state (not the stale snapshot)
-      // because setState({completedWords: next}) above already updated it.
-      var words = this.stateManager.getState().words;
-      var completedNow = this.stateManager.getState().completedWords;
-      var nextWordIndex = completedNow; // 0-based index of the next word to play
-      if (nextWordIndex < words.length) {
-        var nextWordId = words[nextWordIndex];
-        this.stateManager.setState({ currentWordId: nextWordId });
-        this.send({ type: 'next_word', params: { word_id: nextWordId } });
+      // Plan 08-04 Task 2: trigger audio playback when word completes
+      // (replays included — the replayed audio is the whole point).
+      // playWordComplete returns the total scheduled playback time in ms
+      // (double play = duration×2 + 1s gap); the batch-mode writing gap
+      // below is extended by it so the student actually gets the full
+      // adaptive writing time AFTER listening, not minus the playback time
+      // (2026-09-24 pacing fix: previously the ~3.2s double play was eaten
+      // out of the writing gap for short words).
+      var plays = typeof payload.audio_plays === 'number' ? payload.audio_plays : 1;
+      var playbackMs = 0;
+      if (wordId && typeof window !== 'undefined' && window.audioController) {
+        playbackMs = window.audioController.playWordComplete(wordId, plays) || 0;
       }
+
+      // Read fresh state (completedWords was updated above).
+      var state = this.stateManager.getState();
+      if (!state.batchMode) {
+        // Per-word mode: the student-paced flow in app.js owns advancement
+        // (and the currentWordId update) — see its sendNextWord().
+        return;
+      }
+
+      // Batch-mode replay: audio played above; no progress change, no timer.
+      if (isReplay) {
+        return;
+      }
+
+      // Batch mode: auto-advance after the adaptive writing gap for the
+      // word just heard, PLUS the just-scheduled playback time so the
+      // writing gap starts when playback actually ends (still comfortably
+      // under the backend's adaptive+10s DICTATING backstop, so the client
+      // pacing remains authoritative). Word IDs are the word text.
+      var words = state.words;
+      var completedNow = state.completedWords;
+      var justCompletedWord = completedNow > 0 ? words[completedNow - 1] : null;
+      var writeMs = global.adaptiveWritingMs(
+        typeof justCompletedWord === 'string' ? justCompletedWord : ''
+      ) + playbackMs;
+
+      // Never stack timers: a re-delivered word_complete must not schedule
+      // a second next_word.
+      this._clearNextWordTimer();
+      var self = this;
+      this._nextWordTimer = global.setTimeout(function () {
+        self._nextWordTimer = null;
+        // Defense-in-depth: session_complete/session_ready during the gap
+        // must already have cleared this timer; the sessionActive check
+        // keeps a stale frame off the wire even if a future cleanup path
+        // forgets.
+        var live = self.stateManager.getState();
+        if (!live.sessionActive) {
+          return;
+        }
+        var nextWordIndex = live.completedWords; // 0-based index of the next word to play
+        if (nextWordIndex < live.words.length) {
+          var nextWordId = live.words[nextWordIndex];
+          // Update the audio router before sending: the backend starts
+          // streaming the next word's frames as soon as it processes
+          // next_word, and app.js routes binary frames by currentWordId.
+          self.stateManager.setState({ currentWordId: nextWordId });
+          self.send({ type: 'next_word', params: { word_id: nextWordId } });
+        }
+      }, writeMs);
     }
 
     /** @private apply a session_complete frame → end the session. */
     _applySessionComplete(payload) {
+      // P0-1: the session is over — a pending batch-mode next_word must not
+      // fire into a dead session.
+      this._clearNextWordTimer();
       var total = typeof payload.totalWords === 'number' ? payload.totalWords : 0;
       this.stateManager.setState({
         sessionActive: false,

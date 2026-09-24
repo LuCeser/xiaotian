@@ -31,7 +31,7 @@
   var LABEL_IDLE = 'I want to dictate 30 words';
   var LABEL_STARTING = 'Starting session...';
   var LABEL_ACTIVE = 'Session in progress...';
-  var LABEL_COMPLETE = 'Done! Start another?';
+  var LABEL_COMPLETE = '完成啦！再来一组？';
 
   /**
    * SessionButton renders the session-request CTA into a container element
@@ -164,6 +164,9 @@
      *
      * Transitions:
      *   - sessionActive true        → "Session in progress...", disabled
+     *   - FEEDBACK (session ended)  → "完成啦！再来一组？" (the wrap-up
+     *     invitation — 2026-09-24: previously unreachable, so the button
+     *     snapped back to the idle label the moment the report arrived)
      *   - requesting + new error    → revert to idle/enable + surface error
      *   - requesting (no error yet) → "Starting session...", disabled
      *   - otherwise                 → idle label, enabled
@@ -183,6 +186,14 @@
         this.requesting = false;
         this._lastSeenError = currentError;
         this.applyVisual(LABEL_ACTIVE, true);
+        return;
+      }
+
+      if (state && state.status === 'FEEDBACK') {
+        // Wrap-up: the report is on screen; invite another round instead of
+        // pretending nothing happened.
+        this._lastSeenError = currentError;
+        this.applyVisual(LABEL_COMPLETE, false);
         return;
       }
 
@@ -253,17 +264,43 @@
   // ==================================================================
 
   // Status message mapping (PLAN Task 1 spec). Each FSM status (Phase 7
-  // echoes) maps to a short, student-readable English string. These appear
-  // in the 22px status-text element on iPad per the plan's readability target.
+  // echoes) maps to a short, student-readable string. These appear in the
+  // 22px status-text element on iPad per the plan's readability target.
+  // 2026-09-24 redesign: plain Chinese a 6-12 year old parses at a glance —
+  // the status line says WHAT is happening, the sub-hint below says WHOSE
+  // turn it is.
   var PROGRESS_STATUS_MESSAGES = {
-    IDLE: 'Ready to start',
-    LISTENING: 'Listening...',
-    DICTATING: 'Dictation in progress',
-    PAUSED: 'Paused — tap resume to continue',
-    WAITING_PARENT: 'Waiting for parent',
-    FEEDBACK: 'Session complete!'
+    IDLE: '准备好啦',
+    LISTENING: '正在读词…',
+    DICTATING: '听写进行中',
+    PAUSED: '已暂停',
+    WAITING_PARENT: '本次听写结束',
+    SUBMISSION: '正在批改…',
+    FEEDBACK: '成绩出来啦！'
   };
-  var PROGRESS_ERROR_MESSAGE = 'Something went wrong';
+  var PROGRESS_ERROR_MESSAGE = '出了点问题';
+
+  // WAITING_PARENT is mode-aware (B1/B2 fix): the static map above keeps a
+  // mode-agnostic fallback, but the actionable hint depends on how the
+  // session was answered — batch students must fill and submit the form
+  // (visible at this status), per-word students are auto-completing while
+  // the review is submitted and the summary is generated.
+  var PROGRESS_WAITING_PARENT_MESSAGES = {
+    batch: '本次听写结束 —— 请填写答案并提交',
+    perWord: '本次听写结束，正在生成小结…'
+  };
+
+  // Per-status icon (2026-09-24 redesign): one glance tells the student
+  // which moment of the session they are in. Rendered in .status-icon.
+  var PROGRESS_STATUS_ICONS = {
+    IDLE: '📝',
+    LISTENING: '👂',
+    DICTATING: '🎧',
+    PAUSED: '⏸',
+    WAITING_PARENT: '🏁',
+    SUBMISSION: '⏳',
+    FEEDBACK: '🎉'
+  };
 
   /**
    * ProgressDisplay renders the dictation progress UI (status text, progress
@@ -288,10 +325,13 @@
       // Cached DOM references (populated by render()). Kept on the instance
       // so update() can mutate them without re-querying on every state change.
       this.statusRow = null;
+      this.statusIcon = null;
       this.statusText = null;
+      this.playPhaseEl = null;       // "第一遍/第二遍/轮到你了" rhythm chip
+      this.subHintEl = null;         // whose-turn-it-is guidance line
       this.progressContainer = null; // the role=progressbar outer track
       this.progressFill = null;      // the gradient inner fill
-      this.progressText = null;      // "X / Y words" counter
+      this.progressText = null;      // "已完成 X / Y 个词" counter
       this.encouragement = null;     // milestone praise line
 
       // Track the last percentage we rendered so encouragement only fires on
@@ -316,16 +356,27 @@
       // Status row: icon + readable status text (22px on iPad via CSS).
       this.statusRow = document.createElement('div');
       this.statusRow.className = 'progress-status';
-      var icon = document.createElement('span');
-      icon.className = 'status-icon';
-      icon.setAttribute('aria-hidden', 'true');
-      icon.textContent = '📝';
+      this.statusIcon = document.createElement('span');
+      this.statusIcon.className = 'status-icon';
+      this.statusIcon.setAttribute('aria-hidden', 'true');
+      this.statusIcon.textContent = PROGRESS_STATUS_ICONS.IDLE;
       this.statusText = document.createElement('span');
       this.statusText.className = 'status-text';
       // aria-live on the row so status transitions are announced together.
       this.statusRow.setAttribute('aria-live', 'polite');
-      this.statusRow.appendChild(icon);
+      this.statusRow.appendChild(this.statusIcon);
       this.statusRow.appendChild(this.statusText);
+
+      // Rhythm chip (2026-09-24): "📢 第一遍 / 📢 第二遍 / 🎤 轮到你了 /
+      // ✍️ 写下来" — the dictation beat made visible. Hidden when idle.
+      this.playPhaseEl = document.createElement('div');
+      this.playPhaseEl.className = 'play-phase';
+      this.playPhaseEl.setAttribute('role', 'status');
+      this.playPhaseEl.style.display = 'none';
+
+      // Sub-hint: whose turn it is / what to do next, one short line.
+      this.subHintEl = document.createElement('div');
+      this.subHintEl.className = 'progress-subhint';
 
       // Progress bar track (role=progressbar for AT). The fill lives inside.
       this.progressContainer = document.createElement('div');
@@ -351,8 +402,10 @@
       this.encouragement.setAttribute('aria-live', 'polite');
 
       this.container.appendChild(this.statusRow);
+      this.container.appendChild(this.playPhaseEl);
       this.container.appendChild(this.progressContainer);
       this.container.appendChild(this.progressText);
+      this.container.appendChild(this.subHintEl);
       this.container.appendChild(this.encouragement);
 
       // Apply the current state so the initial render matches (e.g. a
@@ -383,15 +436,32 @@
       var totalWords = state.totalWords || 0;
       var completedWords = state.completedWords || 0;
       var lastError = state.lastError || null;
+      var batchMode = !!state.batchMode;
 
-      // --- Status text ---
+      // --- Status text + icon ---
       // An error takes priority for the status line so the student sees what
       // went wrong, but we DO NOT reset the progress bar (PLAN Task 3: "On
       // error: show error message in status text, maintain current progress").
       if (lastError) {
         this.statusText.textContent = lastError;
       } else {
-        this.statusText.textContent = this._messageForStatus(status);
+        this.statusText.textContent = this._messageForStatus(status, batchMode);
+      }
+      this.statusIcon.textContent = PROGRESS_STATUS_ICONS.hasOwnProperty(status)
+        ? PROGRESS_STATUS_ICONS[status]
+        : PROGRESS_STATUS_ICONS.IDLE;
+
+      // --- Rhythm chip (2026-09-24) ---
+      // Priority: answering > playing > writing (batch) > hidden. The chip
+      // only lives while a session is actively dictating; everything else
+      // (idle, paused, wrap-up) hides it so it never lies about the beat.
+      this._updatePlayPhase(state, status);
+
+      // --- Sub-hint: whose turn / what next ---
+      if (lastError) {
+        this.subHintEl.textContent = '';
+      } else {
+        this.subHintEl.textContent = ProgressDisplay.subHint(status, batchMode);
       }
 
       // --- Progress percentage ---
@@ -412,8 +482,8 @@
       this.progressFill.style.width = percent + '%';
       this.progressContainer.setAttribute('aria-valuenow', String(percent));
 
-      // --- Word counter ("X / Y words") ---
-      this.progressText.textContent = completedWords + ' / ' + totalWords + ' words';
+      // --- Word counter ("已完成 X / Y 个词") ---
+      this.progressText.textContent = '已完成 ' + completedWords + ' / ' + totalWords + ' 个词';
 
       // --- Encouragement (milestone praise, fires only on crossing) ---
       this.encouragement.textContent = this._encouragementFor(percent, status);
@@ -424,16 +494,53 @@
     /**
      * Map an FSM status to its student-readable status string. Falls back to
      * the IDLE message for unknown values so the UI never shows "undefined".
+     * Thin delegate to the static statusMessage() so the pure resolution
+     * logic stays Node-testable without a DOM.
      *
      * @private
      * @param {string} status - one of SessionStateManager.STATUS_*.
+     * @param {boolean} batchMode - whether the session is in batch mode
+     *        (state.batchMode); picks the WAITING_PARENT hint.
      * @returns {string}
      */
-    _messageForStatus(status) {
-      if (PROGRESS_STATUS_MESSAGES.hasOwnProperty(status)) {
-        return PROGRESS_STATUS_MESSAGES[status];
+    _messageForStatus(status, batchMode) {
+      return ProgressDisplay.statusMessage(status, batchMode);
+    }
+
+    /**
+     * Render the rhythm chip from the state snapshot (2026-09-24).
+     *   1. Answering aloud beats everything ("🎤 轮到你了").
+     *   2. While word audio plays: "📢 第一遍" then "📢 第二遍" (double play).
+     *   3. In batch mode, playback over + still dictating = writing time
+     *      ("✍️ 写下来").
+     *   4. Anything else (idle, paused, waiting, feedback, retry prompt):
+     *      hidden — the chip never competes with other guidance.
+     *
+     * @private
+     * @param {object} state - SessionStateManager snapshot.
+     * @param {string} status - resolved FSM status string.
+     */
+    _updatePlayPhase(state, status) {
+      var chip = this.playPhaseEl;
+      if (!chip) return;
+      var text = '';
+      if (state.sessionActive && (status === 'DICTATING' || status === 'LISTENING')) {
+        if (!state.batchMode && state.dictationState === 'listening') {
+          text = '🎤 轮到你了';
+        } else if (state.playPhase === 1) {
+          text = '📢 第一遍';
+        } else if (state.playPhase === 2) {
+          text = '📢 第二遍';
+        } else if (state.batchMode) {
+          text = '✍️ 写下来';
+        }
       }
-      return PROGRESS_STATUS_MESSAGES.IDLE;
+      if (text) {
+        chip.textContent = text;
+        chip.style.display = '';
+      } else {
+        chip.style.display = 'none';
+      }
     }
 
     /**
@@ -448,24 +555,79 @@
      */
     _encouragementFor(percent, status) {
       if (status === 'FEEDBACK') {
-        return '🎉 Great job!';
+        return '🎉 完成啦，你真棒！';
       }
       if (status === 'PAUSED') {
-        return '⏸ Paused';
+        return '⏸ 休息一下';
       }
       // Only fire encouragement on a milestone crossing to avoid re-praising
       // on every word_complete / progress_update.
       var prev = this._lastPercent;
-      if (percent >= 75 && prev < 75) return '⭐ Almost there!';
-      if (percent >= 50 && prev < 50) return '👍 Halfway done!';
-      if (percent >= 25 && prev < 25) return '😊 Good start!';
+      if (percent >= 75 && prev < 75) return '⭐ 就快完成了！';
+      if (percent >= 50 && prev < 50) return '👍 完成一半啦！';
+      if (percent >= 25 && prev < 25) return '😊 好的开始！';
       return '';
     }
   }
 
-  // Expose the status map + error message for tests / introspection.
+  // Expose the status maps + error message for tests / introspection.
   ProgressDisplay.STATUS_MESSAGES = PROGRESS_STATUS_MESSAGES;
+  ProgressDisplay.WAITING_PARENT_MESSAGES = PROGRESS_WAITING_PARENT_MESSAGES;
+  ProgressDisplay.STATUS_ICONS = PROGRESS_STATUS_ICONS;
   ProgressDisplay.ERROR_MESSAGE = PROGRESS_ERROR_MESSAGE;
+
+  /**
+   * Resolve the status-line text for a state snapshot. Pure/static so Node
+   * tests pin the mode-aware WAITING_PARENT contract (batch → fill-the-form
+   * hint, per-word → auto-completing hint) without a DOM. All other statuses
+   * fall through to the static map; unknown values fall back to IDLE.
+   *
+   * @param {string} status - one of SessionStateManager.STATUS_*.
+   * @param {boolean} batchMode - state.batchMode for WAITING_PARENT.
+   * @returns {string}
+   */
+  ProgressDisplay.statusMessage = function (status, batchMode) {
+    if (status === 'WAITING_PARENT') {
+      return batchMode
+        ? PROGRESS_WAITING_PARENT_MESSAGES.batch
+        : PROGRESS_WAITING_PARENT_MESSAGES.perWord;
+    }
+    if (PROGRESS_STATUS_MESSAGES.hasOwnProperty(status)) {
+      return PROGRESS_STATUS_MESSAGES[status];
+    }
+    return PROGRESS_STATUS_MESSAGES.IDLE;
+  };
+
+  /**
+   * Sub-hint line: whose turn it is and what to do next (2026-09-24
+   * redesign). Mode-aware for DICTATING/WAITING_PARENT; pure/static so Node
+   * tests pin the copy contract without a DOM. '' means "no hint needed".
+   *
+   * @param {string} status - one of SessionStateManager.STATUS_*.
+   * @param {boolean} batchMode - state.batchMode.
+   * @returns {string}
+   */
+  ProgressDisplay.subHint = function (status, batchMode) {
+    switch (status) {
+      case 'LISTENING':
+      case 'DICTATING':
+        return batchMode
+          ? '仔细听，把每个词写在纸上'
+          : '仔细听，听完大声说出这个词';
+      case 'PAUSED':
+        return '点「▶ 继续」接着听写';
+      case 'WAITING_PARENT':
+        return batchMode
+          ? '把纸上写的答案填进下面的表格，填完一起提交'
+          : '成绩马上出来，请稍等';
+      case 'SUBMISSION':
+        return '正在批改…';
+      case 'FEEDBACK':
+        return '看看下面的听写报告';
+      default:
+        return '';
+    }
+  };
 
   global.ProgressDisplay = ProgressDisplay;
 
@@ -475,16 +637,27 @@
   // ==================================================================
 
   var DICTATION_FEEDBACK_MESSAGES = {
-    listening: '🎤 请说出来...',
-    correct: '✓',
-    incorrect: '✗',
-    skipped: '⏭ 跳过'
+    listening: '轮到你了——大声说出刚听到的词',
+    correct: '答对啦！',
+    incorrect: '✗'
   };
 
   /**
    * DictationFeedback renders the per-word dictation feedback UI:
    * recording indicator, correct/incorrect verdict, and the expected
    * answer when wrong.
+   *
+   * 2026-09-24 redesign:
+   *   - The answer word is NEVER shown while listening or waiting for a
+   *     retry — displaying it would give the dictation answer away (the
+   *     batch form hides words for the same reason). It only appears in
+   *     the correct/incorrect verdict, after the student has answered.
+   *   - New 'retry' state (replacing the old auto-advancing 'skipped'):
+   *     a gentle guidance card, not an error strip — a child not speaking
+   *     up is normal. It points at the repeat/next buttons and stays up
+   *     until the student acts.
+   *   - All styling lives in main.css (.df-card variants); no inline
+   *     cssText, no JS-injected keyframes.
    *
    * @class
    * @param {HTMLElement} container - element to mount into
@@ -497,16 +670,9 @@
       this.stateManager = stateManager;
 
       this.feedbackEl = null;
+      this.iconEl = null;
       this.wordDisplayEl = null;
       this.heardEl = null;
-
-      // Inject pulse animation CSS if not already present
-      if (!document.getElementById('dictation-feedback-styles')) {
-        var style = document.createElement('style');
-        style.id = 'dictation-feedback-styles';
-        style.textContent = '@keyframes df-pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }';
-        document.head.appendChild(style);
-      }
 
       this.render();
     }
@@ -516,22 +682,24 @@
         this.container.removeChild(this.container.firstChild);
       }
 
-      // Main feedback container
+      // Main feedback card (variant class swapped per state in update()).
       this.feedbackEl = document.createElement('div');
-      this.feedbackEl.className = 'dictation-feedback';
+      this.feedbackEl.className = 'dictation-feedback df-card';
       this.feedbackEl.setAttribute('aria-live', 'assertive');
-      this.feedbackEl.style.cssText = 'text-align:center;padding:20px;min-height:80px;display:flex;flex-direction:column;align-items:center;justify-content:center;';
 
-      // Word display (shows the current word being dictated)
+      this.iconEl = document.createElement('div');
+      this.iconEl.className = 'df-icon';
+      this.iconEl.setAttribute('aria-hidden', 'true');
+
+      // Word display — verdicts only (never while the answer is still due).
       this.wordDisplayEl = document.createElement('div');
-      this.wordDisplayEl.className = 'dictation-word';
-      this.wordDisplayEl.style.cssText = 'font-size:28px;font-weight:700;color:#1f2937;margin-bottom:12px;';
+      this.wordDisplayEl.className = 'dictation-word df-word';
 
-      // Feedback message
+      // Feedback message / guidance text.
       this.heardEl = document.createElement('div');
-      this.heardEl.className = 'dictation-heard';
-      this.heardEl.style.cssText = 'font-size:16px;color:#6b7280;';
+      this.heardEl.className = 'dictation-heard df-message';
 
+      this.feedbackEl.appendChild(this.iconEl);
       this.feedbackEl.appendChild(this.wordDisplayEl);
       this.feedbackEl.appendChild(this.heardEl);
       this.container.appendChild(this.feedbackEl);
@@ -547,10 +715,8 @@
       state = state || {};
 
       var dictationState = state.dictationState;
-      var currentWordId = state.currentWordId;
       var expected = state.lastExpected;
       var heard = state.lastHeard;
-      var correct = state.lastAnswerCorrect;
 
       // Show/hide based on dictation state
       if (!dictationState || !state.sessionActive) {
@@ -559,58 +725,51 @@
       }
       this.feedbackEl.style.display = 'flex';
 
-      // Word display
-      if (currentWordId) {
-        this.wordDisplayEl.textContent = currentWordId;
-        this.wordDisplayEl.style.display = 'block';
-      } else if (expected) {
-        this.wordDisplayEl.textContent = expected;
-        this.wordDisplayEl.style.display = 'block';
-      } else {
-        this.wordDisplayEl.style.display = 'none';
-      }
-
-      // Feedback styling
+      var word = '';
+      var icon = '';
+      var msg = '';
       switch (dictationState) {
         case 'listening':
-          this.feedbackEl.style.background = '#fef3c7';
-          this.feedbackEl.style.borderRadius = '12px';
-          this.heardEl.textContent = DICTATION_FEEDBACK_MESSAGES.listening;
-          this.heardEl.style.color = '#92400e';
-          // Add pulsing animation
-          this.heardEl.style.animation = 'df-pulse 1s infinite';
+          this.feedbackEl.className = 'dictation-feedback df-card df-listening';
+          icon = '🎤';
+          msg = DICTATION_FEEDBACK_MESSAGES.listening;
           break;
 
         case 'correct':
-          this.feedbackEl.style.background = '#d1fae5';
-          this.feedbackEl.style.borderRadius = '12px';
-          this.heardEl.textContent = DICTATION_FEEDBACK_MESSAGES.correct + ' 正确！';
-          this.heardEl.style.color = '#065f46';
-          this.heardEl.style.animation = 'none';
+          this.feedbackEl.className = 'dictation-feedback df-card df-correct';
+          icon = '✓';
+          word = expected || '';
+          msg = DICTATION_FEEDBACK_MESSAGES.correct;
           break;
 
         case 'incorrect':
-          this.feedbackEl.style.background = '#fee2e2';
-          this.feedbackEl.style.borderRadius = '12px';
-          var msg = DICTATION_FEEDBACK_MESSAGES.incorrect;
-          if (expected) msg += ' 正确答案: ' + expected;
-          if (heard) msg += ' (听到: ' + heard + ')';
-          this.heardEl.textContent = msg;
-          this.heardEl.style.color = '#991b1b';
-          this.heardEl.style.animation = 'none';
+          this.feedbackEl.className = 'dictation-feedback df-card df-incorrect';
+          icon = '✗';
+          word = expected || '';
+          msg = heard ? '你写的是：' + heard : '';
           break;
 
-        case 'skipped':
-          this.feedbackEl.style.background = '#f3f4f6';
-          this.feedbackEl.style.borderRadius = '12px';
-          this.heardEl.textContent = DICTATION_FEEDBACK_MESSAGES.skipped + (heard ? ' (' + heard + ')' : '');
-          this.heardEl.style.color = '#6b7280';
-          this.heardEl.style.animation = 'none';
+        case 'retry':
+          // Silence / recognition trouble: stay put, guide gently — the
+          // student advances explicitly via 🔁 / 📷 / ⏭ (no auto-advance).
+          this.feedbackEl.className = 'dictation-feedback df-card df-retry';
+          icon = '💡';
+          msg = heard || '没听到声音——点 🔁 再听一遍，或点 ⏭ 下一个';
           break;
 
         default:
           this.feedbackEl.style.display = 'none';
+          return;
       }
+
+      this.iconEl.textContent = icon;
+      if (word) {
+        this.wordDisplayEl.textContent = word;
+        this.wordDisplayEl.style.display = 'block';
+      } else {
+        this.wordDisplayEl.style.display = 'none';
+      }
+      this.heardEl.textContent = msg;
     }
   }
 
@@ -670,7 +829,6 @@
       wrapper.className = 'dictation-controls';
       wrapper.setAttribute('role', 'group');
       wrapper.setAttribute('aria-label', '听写控制');
-      wrapper.style.cssText = 'display:flex;gap:12px;justify-content:center;flex-wrap:wrap;padding:16px 0;';
 
       // Pause / Resume button (toggle)
       this.pauseResumeBtn = this._createButton('⏸ 暂停', this._handlePauseResume.bind(this));
@@ -679,10 +837,12 @@
       // Repeat button
       this.repeatBtn = this._createButton('🔁 再读一遍', this._handleRepeat.bind(this));
       this.repeatBtn.setAttribute('aria-label', '再读一遍当前单词');
+      this.repeatBtn.classList.add('dictation-control-button--repeat');
 
       // Next word button
       this.nextBtn = this._createButton('⏭ 下一个', this._handleNext.bind(this));
       this.nextBtn.setAttribute('aria-label', '跳到下一个单词');
+      this.nextBtn.classList.add('dictation-control-button--next');
 
       wrapper.appendChild(this.pauseResumeBtn);
       wrapper.appendChild(this.repeatBtn);
@@ -697,10 +857,9 @@
     /**
      * Button factory shared by the three controls. Creates a type=button
      * element with the kid-button + dictation-control-button classes, sets
-     * its textContent to label, applies the inline styles that keep every
-     * control a large iOS HIG touch target (min-width:100px,
-     * min-height:60px, font-size:18px, ...), binds the click listener, and
-     * returns the element.
+     * its textContent to label, binds the click listener, and returns the
+     * element. Sizing/visuals live in main.css (.dictation-control-button)
+     * so the 60px iOS HIG touch target is themeable.
      *
      * @private
      * @param {string} label - button textContent.
@@ -712,9 +871,21 @@
       btn.type = 'button';
       btn.className = 'kid-button dictation-control-button';
       btn.textContent = label;
-      btn.style.cssText = 'min-width:100px;min-height:60px;font-size:18px;padding:12px 20px;border-radius:12px;border:2px solid #e5e7eb;background:#fff;color:#374151;cursor:pointer;touch-action:manipulation;user-select:none;';
       btn.addEventListener('click', onClick);
       return btn;
+    }
+
+    /**
+     * Stop the in-flight dictation speech recognition, if any (the global
+     * SpeechController app.js exposes). Needed before any control that
+     * replaces the current word's turn — otherwise a late recognition
+     * result would be judged against the WRONG (next) word server-side.
+     * @private
+     */
+    _stopDictationListening() {
+      if (global.speechController && typeof global.speechController.stopListening === 'function') {
+        global.speechController.stopListening();
+      }
     }
 
     /**
@@ -726,6 +897,10 @@
      * trip to flow back through update(). Silently returns when wsClient is
      * missing or its send is not a function.
      *
+     * Pausing also stops the in-flight recognition (2026-09-24): an answer
+     * judged while PAUSED is rejected server-side, and the resume re-stream
+     * restarts recognition cleanly at playback end.
+     *
      * @private
      */
     _handlePauseResume() {
@@ -733,6 +908,7 @@
       if (this.isPaused) {
         this.wsClient.send({ type: 'resume', params: {} });
       } else {
+        this._stopDictationListening();
         this.wsClient.send({ type: 'pause', params: {} });
       }
     }
@@ -740,6 +916,9 @@
     /**
      * Repeat button click handler. Sends a "repeat" control frame (params:
      * empty object) asking the backend to re-read the current word.
+     * Clears the retry prompt immediately (2026-09-24): the re-stream's
+     * playback end restarts recognition, which is the retry closed loop —
+     * the prompt's job is done the moment the student asks for a replay.
      * Silently returns when wsClient is missing or its send is not a
      * function.
      *
@@ -747,15 +926,26 @@
      */
     _handleRepeat() {
       if (!this.wsClient || typeof this.wsClient.send !== 'function') return;
+      this._stopDictationListening();
+      if (this.stateManager) {
+        this.stateManager.setState({ dictationState: null, lastHeard: null });
+      }
       this.wsClient.send({ type: 'repeat', params: {} });
     }
 
     /**
-     * Next-word button click handler. Reads currentWordId from
-     * stateManager.getState() (falling back to an empty string when
-     * stateManager is missing or the field is absent) and sends it as
-     * word_id in a "next_word" control frame. Silently returns when
-     * wsClient is missing or its send is not a function.
+     * Next-word button click handler. Sends the current word_id in a
+     * "next_word" control frame, then (2026-09-24 fixes):
+     *   - stops the in-flight recognition so a late result cannot be judged
+     *     against the word the backend is about to stream;
+     *   - clears the retry prompt (the student DID act — this is the
+     *     explicit advance the prompt asks for);
+     *   - advances currentWordId to the upcoming word (same bookkeeping as
+     *     app.js's sendNextWord) so the next playback-end starts
+     *     recognition tagged with the right word and the feedback card
+     *     never displays the previous one.
+     * Silently returns when wsClient is missing or its send is not a
+     * function.
      *
      * @private
      */
@@ -763,6 +953,15 @@
       if (!this.wsClient || typeof this.wsClient.send !== 'function') return;
       var state = this.stateManager ? this.stateManager.getState() : {};
       var wordId = state.currentWordId || '';
+      this._stopDictationListening();
+      if (this.stateManager) {
+        var updates = { dictationState: null, lastHeard: null };
+        var nextIndex = state.completedWords;
+        if (Array.isArray(state.words) && nextIndex < state.words.length) {
+          updates.currentWordId = state.words[nextIndex];
+        }
+        this.stateManager.setState(updates);
+      }
       this.wsClient.send({ type: 'next_word', params: { word_id: wordId } });
     }
 
@@ -798,17 +997,15 @@
 
       if (!shouldShow) return;
 
-      // Update pause/resume button label
+      // Update pause/resume button label (visual variant via .is-paused)
       if (isPaused) {
         this.pauseResumeBtn.textContent = '▶ 继续';
         this.pauseResumeBtn.setAttribute('aria-label', '继续听写');
-        this.pauseResumeBtn.style.background = '#dbeafe';
-        this.pauseResumeBtn.style.borderColor = '#3b82f6';
+        this.pauseResumeBtn.classList.add('is-paused');
       } else {
         this.pauseResumeBtn.textContent = '⏸ 暂停';
         this.pauseResumeBtn.setAttribute('aria-label', '暂停听写');
-        this.pauseResumeBtn.style.background = '#fff';
-        this.pauseResumeBtn.style.borderColor = '#e5e7eb';
+        this.pauseResumeBtn.classList.remove('is-paused');
       }
 
       // Disable next button if waiting for parent
@@ -1340,6 +1537,13 @@
       this.form.setAttribute('aria-label', '批量提交答案');
       this.form.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px 0;';
 
+      // Visible wrap-up title (2026-09-24): the form appearing IS the
+      // end-of-dictation moment in batch mode — say so explicitly so it
+      // reads as the designed next step, not a surprise.
+      this.titleText = document.createElement('p');
+      this.titleText.className = 'batch-form-title';
+      this.titleText.textContent = '🏁 听写结束，该交卷啦';
+
       this.hintText = document.createElement('p');
       this.hintText.className = 'batch-submission-hint';
       this.hintText.setAttribute('role', 'status');
@@ -1371,6 +1575,7 @@
         self.onSubmit(answers);
       });
 
+      this.form.appendChild(this.titleText);
       this.form.appendChild(this.hintText);
       this.form.appendChild(this.rowsHost);
       this.form.appendChild(this.submitBtn);
@@ -1541,6 +1746,26 @@
         any = true;
       }
       return any ? answers : null;
+    }
+
+    /**
+     * Whether the form should open for a state-manager snapshot. Pure/static
+     * so Node tests pin the visibility gate without a DOM: batch mode +
+     * active session + WAITING_PARENT + not already open. The form mounts in
+     * its own top-level section (index.html) precisely so this status can
+     * reveal it — the dictation-controls section hides at WAITING_PARENT.
+     *
+     * @param {Object} state - SessionStateManager snapshot (status, batchMode,
+     *        sessionActive).
+     * @param {boolean} isFormVisible - current isVisible() of the form.
+     * @returns {boolean}
+     */
+    static shouldOpenForState(state, isFormVisible) {
+      return !!(state &&
+        state.batchMode &&
+        state.sessionActive &&
+        state.status === 'WAITING_PARENT' &&
+        !isFormVisible);
     }
   }
 

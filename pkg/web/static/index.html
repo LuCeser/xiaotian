@@ -21,7 +21,7 @@
   <meta name="theme-color" content="#4facfe">
   <meta name="description" content="小学生英语听写练习 — 听写小助手">
   <title>听写小助手</title>
-  <link rel="stylesheet" href="styles/main.css">
+  <link rel="stylesheet" href="styles/main.css?v=20260924">
 </head>
 <body>
   <!-- Skip to main content link for accessibility (Plan 08-04 Task 3) -->
@@ -121,8 +121,21 @@
              via the form's own display:none from construction (single
              visibility mechanism). -->
         <div id="manual-answer-container"></div>
-        <!-- Batch submission form (Ticket 05): one numbered row per word,
-             shown at WAITING_PARENT in batch mode. -->
+      </section>
+
+      <!--
+        Batch submission form (Ticket 05): one numbered row per word, shown
+        at WAITING_PARENT in batch mode. A top-level sibling of the sections
+        (NOT inside #dictationControls): the controls section is hidden
+        outside DICTATING/LISTENING/PAUSED, which would hide the form at
+        exactly the moment the student must fill it. The section carries no
+        [hidden] attribute — the form's own display:none from construction
+        is the single visibility mechanism (same as the manual-input
+        fallback above).
+      -->
+      <section class="batch-submission-section" id="batchSubmission"
+               role="region" aria-labelledby="batchSubmissionTitle">
+        <h2 id="batchSubmissionTitle" class="visually-hidden">批量提交答案</h2>
         <div id="batch-submission-container"></div>
       </section>
 
@@ -157,6 +170,7 @@
     Scripts: loaded with `defer` so they execute in order after the DOM is
     parsed. Load order matters (defer preserves it):
       frame-codec.js      → window.FrameCodec + SequenceCounter (wire format)
+      timing.js           → window.adaptiveWritingMs (P0-1 pacing helper)
       websocket-client.js → window.WebSocketClient (transport; uses FrameCodec)
       state-manager.js    → window.SessionStateManager (state store)
       audio-controller.js → window.AudioController (Web Audio API integration)
@@ -166,14 +180,15 @@
       ui-components.js    → window.SessionButton (uses the state store)
       app.js              → wires them together
   -->
-  <script src="js/frame-codec.js" defer></script>
-  <script src="js/websocket-client.js" defer></script>
-  <script src="js/state-manager.js" defer></script>
-  <script src="js/audio-controller.js" defer></script>
-  <script src="js/speech-controller.js" defer></script>
-  <script src="js/voice-command-controller.js" defer></script>
-  <script src="js/photo-controller.js" defer></script>
-  <script src="js/ui-components.js" defer></script>
-  <script src="js/app.js" defer></script>
+  <script src="js/frame-codec.js?v=20260924" defer></script>
+  <script src="js/timing.js?v=20260924" defer></script>
+  <script src="js/websocket-client.js?v=20260924" defer></script>
+  <script src="js/state-manager.js?v=20260924" defer></script>
+  <script src="js/audio-controller.js?v=20260924" defer></script>
+  <script src="js/speech-controller.js?v=20260924" defer></script>
+  <script src="js/voice-command-controller.js?v=20260924" defer></script>
+  <script src="js/photo-controller.js?v=20260924" defer></script>
+  <script src="js/ui-components.js?v=20260924" defer></script>
+  <script src="js/app.js?v=20260924" defer></script>
 </body>
 </html>
