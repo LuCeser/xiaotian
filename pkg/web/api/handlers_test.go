@@ -51,6 +51,18 @@ func (f *fakeExecutor) RunUnlock(_ context.Context, _ pybridge.UnlockOpts) (pybr
 	return pybridge.UnlockResult{}, nil
 }
 
+func (f *fakeExecutor) RunEdit(_ context.Context, _ pybridge.EditOpts) (pybridge.EditResult, error) {
+	return pybridge.EditResult{}, nil
+}
+
+func (f *fakeExecutor) RunRenameUnit(_ context.Context, _ pybridge.RenameUnitOpts) (pybridge.RenameUnitResult, error) {
+	return pybridge.RenameUnitResult{}, nil
+}
+
+func (f *fakeExecutor) RunDeleteWords(_ context.Context, _ pybridge.DeleteWordsOpts) (pybridge.DeleteWordsResult, error) {
+	return pybridge.DeleteWordsResult{}, nil
+}
+
 // fakeCardRepo is a manual fake for database.CardRepository that captures
 // the received filter and returns a canned slice.
 type fakeCardRepo struct {

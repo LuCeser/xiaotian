@@ -59,6 +59,18 @@ func (f *fakeExecutor) RunAdd(_ context.Context, _ pybridge.AddOpts) (pybridge.A
 	return pybridge.AddResult{}, nil
 }
 
+func (f *fakeExecutor) RunEdit(_ context.Context, _ pybridge.EditOpts) (pybridge.EditResult, error) {
+	return pybridge.EditResult{}, nil
+}
+
+func (f *fakeExecutor) RunRenameUnit(_ context.Context, _ pybridge.RenameUnitOpts) (pybridge.RenameUnitResult, error) {
+	return pybridge.RenameUnitResult{}, nil
+}
+
+func (f *fakeExecutor) RunDeleteWords(_ context.Context, _ pybridge.DeleteWordsOpts) (pybridge.DeleteWordsResult, error) {
+	return pybridge.DeleteWordsResult{}, nil
+}
+
 // --- NewFSRSService validation ---
 
 func TestNewFSRSServiceValidation(t *testing.T) {

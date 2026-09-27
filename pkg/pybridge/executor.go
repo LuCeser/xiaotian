@@ -62,6 +62,25 @@ type Executor interface {
 	// the script prints. Duplicate word+category pairs are silently skipped
 	// by the SQLite UNIQUE constraint and reported via Skipped.
 	RunAdd(ctx context.Context, opts AddOpts) (AddResult, error)
+
+	// RunEdit invokes the vocab_manager.py `edit` subcommand (Phase 9,
+	// VOC-01, Plan 09-03) and updates ONLY the text fields whose *string
+	// pointer is non-nil; nil pointers omit the flag so the script's
+	// COALESCE keeps the current column. Never touches FSRS state (D-07).
+	RunEdit(ctx context.Context, opts EditOpts) (EditResult, error)
+
+	// RunRenameUnit invokes the vocab_manager.py `rename-unit` subcommand
+	// (Plan 09-03) and renames every card's unit within one category,
+	// returning the {renamed, from, to} report.
+	RunRenameUnit(ctx context.Context, opts RenameUnitOpts) (RenameUnitResult, error)
+
+	// RunDeleteWords invokes the vocab_manager.py `delete-words` subcommand
+	// (Plan 09-03) targeting either an explicit word list (--words,
+	// comma-joined) or a whole unit (--unit) — exactly one, validated by
+	// the argv builder. The confirmation flag is appended unconditionally
+	// (Pitfall 1: no bridge code path may trigger the script's non-JSON
+	// dry-run preview).
+	RunDeleteWords(ctx context.Context, opts DeleteWordsOpts) (DeleteWordsResult, error)
 }
 
 // DueOpts carries the operational flags for the vocab_manager.py due
@@ -264,6 +283,94 @@ type AddOpts struct {
 type AddResult struct {
 	Added   int `json:"added"`
 	Skipped int `json:"skipped"`
+}
+
+// EditOpts carries the operational flags for the vocab_manager.py edit
+// subcommand (Phase 9, Plan 09-03). The None-vs-empty distinction is the
+// whole point of the CLI contract (Plan 09-02): a nil pointer means "omit
+// the flag, keep the current column" while a non-nil pointer — including
+// one to the empty string — means "emit the flag", and an explicit empty
+// string CLEARS the column via cmd_edit's COALESCE update. FSRS learning
+// state is never touched either way (D-07).
+type EditOpts struct {
+	// ID is the card id to edit. Forwarded as --id (decimal). Validated
+	// > 0 by Bridge.RunEdit before any subprocess spawn.
+	ID int64
+
+	// Word replaces the word text when non-nil. Forwarded as --word.
+	Word *string
+
+	// Meaning replaces the meaning when non-nil. Forwarded as --meaning.
+	Meaning *string
+
+	// Example replaces the example when non-nil. Forwarded as --example.
+	Example *string
+
+	// Unit moves the card to another unit when non-nil. Forwarded as
+	// --unit.
+	Unit *string
+}
+
+// EditResult is the typed payload the edit path returns. Edited mirrors
+// the nested {"edited": {"id": N, "word": "..."}} JSON object
+// vocab_manager.py's cmd_edit prints after committing (the post-update
+// word from a fresh SELECT — Plan 09-02 contract).
+type EditResult struct {
+	Edited struct {
+		ID   int64  `json:"id"`
+		Word string `json:"word"`
+	} `json:"edited"`
+}
+
+// RenameUnitOpts carries the operational flags for the vocab_manager.py
+// rename-unit subcommand (Plan 09-03). All three fields are required by
+// the script (argparse required=True / non-empty check); RunRenameUnit
+// pre-validates them non-empty.
+type RenameUnitOpts struct {
+	// OldUnit is the current unit name. Forwarded as --old-unit.
+	OldUnit string
+
+	// NewUnit is the replacement unit name. Forwarded as --new-unit.
+	NewUnit string
+
+	// Category scopes the rename. Forwarded as --category.
+	Category string
+}
+
+// RenameUnitResult is the typed payload the rename path returns. Field
+// tags align exactly with the script's json keys (verified against
+// vocab_manager.py cmd_rename_unit: {"renamed": N, "from": ..., "to": ...}).
+type RenameUnitResult struct {
+	Renamed int    `json:"renamed"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+}
+
+// DeleteWordsOpts carries the operational flags for the vocab_manager.py
+// delete-words subcommand (Plan 09-03). Exactly one target must be set —
+// Words (explicit word list) XOR Unit (whole unit) — enforced by
+// deleteWordsArgs before any argv is constructed (mirrors the script's
+// mutually-exclusive argparse group).
+type DeleteWordsOpts struct {
+	// Words is the explicit word list to delete. Forwarded as --words
+	// (comma-joined). Mutually exclusive with Unit.
+	Words []string
+
+	// Unit deletes every card in this unit. Forwarded as --unit. Mutually
+	// exclusive with Words.
+	Unit string
+
+	// Category scopes the deletion. Forwarded as --category.
+	Category string
+}
+
+// DeleteWordsResult is the typed payload the delete path return. Deleted
+// mirrors the {"deleted": N, ...} JSON object vocab_manager.py's
+// cmd_delete_words prints on a confirmed delete (the extra "unit"/"words"
+// echo keys the script appends are intentionally not modelled — the count
+// is the only field Plan 09-05's endpoints surface).
+type DeleteWordsResult struct {
+	Deleted int `json:"deleted"`
 }
 
 // Sentinel errors returned by the pybridge layer. Callers MUST detect
