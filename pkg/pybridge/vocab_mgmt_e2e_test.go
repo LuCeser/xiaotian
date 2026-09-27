@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite" // same pure-Go driver pkg/database uses (read fsrs_card bytes)
 )
@@ -273,5 +274,163 @@ func TestE2E_VocabEdit_ClearsWithEmptyString(t *testing.T) {
 	}
 	if rows[0]["word"] != "banana" {
 		t.Errorf("word = %v, want banana", rows[0]["word"])
+	}
+}
+
+// parseTrailingJSON extracts the JSON document from stdout that may carry
+// leading Warning lines — the same tolerance the bridge's extractTrailingJSON
+// implements for production traffic (the loader's Warning goes to stdout
+// BEFORE any command JSON).
+func parseTrailingJSON(t *testing.T, stdout string) json.RawMessage {
+	t.Helper()
+	s := strings.TrimSpace(stdout)
+	if json.Valid([]byte(s)) {
+		return json.RawMessage(s)
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		rest := strings.TrimSpace(s[i+1:])
+		if json.Valid([]byte(rest)) {
+			return json.RawMessage(rest)
+		}
+	}
+	t.Fatalf("stdout has no trailing JSON: %q", stdout)
+	return nil
+}
+
+// parseNextDue parses vocab_manager.py's next_due format (Asia/Shanghai,
+// "2006-01-02 15:04") into a comparable time.
+func parseNextDue(t *testing.T, s string) time.Time {
+	t.Helper()
+	ts, err := time.Parse("2006-01-02 15:04", s)
+	if err != nil {
+		t.Fatalf("parse next_due %q: %v", s, err)
+	}
+	return ts
+}
+
+// fsrsConfigFixture creates a temp data dir (+ optional fsrs_config.json
+// written into it) and a fresh DB with one seeded card, returning the child
+// env and DB path. The config lands at DICTATION_DATA_DIR/fsrs_config.json —
+// the exact path the Pitfall 8 single-resolution rule names (env forwarded by
+// Bridge.childEnv, read by DEFAULT_DATA_DIR in vocab_manager.py).
+func fsrsConfigFixture(t *testing.T, configJSON string) ([]string, string) {
+	t.Helper()
+	base := t.TempDir()
+	dataDir := filepath.Join(base, "data")
+	env := e2eMgmtEnv(t, dataDir)
+	dbPath := filepath.Join(base, "vocab.db")
+	if configJSON != "" {
+		if err := os.WriteFile(filepath.Join(dataDir, "fsrs_config.json"), []byte(configJSON), 0o644); err != nil {
+			t.Fatalf("write fsrs_config.json: %v", err)
+		}
+	}
+	seedCard(t, env, dbPath, "apple", "苹果", "", "U1")
+	return env, dbPath
+}
+
+// reviewFreshCard reviews the fixture's card 1 with rating "good" and returns
+// the reported next_due. Fresh cards schedule differently under different
+// desired_retention values, so next_due is the observable that proves whether
+// the config file actually drives the scheduler.
+func reviewFreshCard(t *testing.T, env []string, dbPath string) (time.Time, string) {
+	t.Helper()
+	stdout, stderr, code := runVocabManager(t, env, dbPath, "review", "--results", `{"1":"good"}`)
+	if code != 0 {
+		t.Fatalf("review exited %d:\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	var rep struct {
+		Updated []struct {
+			NextDue string `json:"next_due"`
+		} `json:"updated"`
+	}
+	if err := json.Unmarshal(parseTrailingJSON(t, stdout), &rep); err != nil {
+		t.Fatalf("parse review output %q: %v", stdout, err)
+	}
+	if len(rep.Updated) != 1 {
+		t.Fatalf("got %d updated entries, want 1: %s", len(rep.Updated), stdout)
+	}
+	return parseNextDue(t, rep.Updated[0].NextDue), stdout
+}
+
+// TestE2E_FSRSConfig_MissingFileDefaults proves the ABSENT config file falls
+// back SILENTLY: due exits 0 with valid trailing JSON and no Warning line —
+// defaults are not an error condition.
+func TestE2E_FSRSConfig_MissingFileDefaults(t *testing.T) {
+	env, dbPath := fsrsConfigFixture(t, "")
+
+	stdout, stderr, code := runVocabManager(t, env, dbPath, "due", "--category", "english")
+	if code != 0 {
+		t.Fatalf("due exited %d:\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	parseTrailingJSON(t, stdout)
+	if strings.Contains(stdout, "Warning") {
+		t.Errorf("absent config must fall back silently, stdout = %q", stdout)
+	}
+}
+
+// TestE2E_FSRSConfig_InvalidFallsBack proves malformed JSON degrades to
+// defaults with a Warning — the student dictation path NEVER breaks
+// (Pitfall 9, threat T-09-06).
+func TestE2E_FSRSConfig_InvalidFallsBack(t *testing.T) {
+	env, dbPath := fsrsConfigFixture(t, "{ this is not json")
+
+	stdout, stderr, code := runVocabManager(t, env, dbPath, "due", "--category", "english")
+	if code != 0 {
+		t.Fatalf("due exited %d with malformed config:\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	parseTrailingJSON(t, stdout)
+	if !strings.Contains(stdout, "Warning") {
+		t.Errorf("malformed config must print a Warning line, stdout = %q", stdout)
+	}
+}
+
+// TestE2E_FSRSConfig_OutOfRangeFallsBack proves an out-of-range value (the
+// fsrs library validates only its 21 weights, so OUR loader must range-check)
+// warns AND schedules identically to a defaults run — the bad value is
+// neither consumed nor fatal. next_due is compared with a 2-minute tolerance:
+// the two live runs are seconds apart, while a consumed retention of 1.7
+// would produce a wildly different (even negative) interval.
+func TestE2E_FSRSConfig_OutOfRangeFallsBack(t *testing.T) {
+	envBad, dbBad := fsrsConfigFixture(t, `{"desired_retention": 1.7}`)
+	envOK, dbOK := fsrsConfigFixture(t, "")
+
+	dueBad, stdoutBad := reviewFreshCard(t, envBad, dbBad)
+	if !strings.Contains(stdoutBad, "Warning") {
+		t.Errorf("out-of-range config must print a Warning line, stdout = %q", stdoutBad)
+	}
+	dueOK, _ := reviewFreshCard(t, envOK, dbOK)
+
+	if d := dueBad.Sub(dueOK); d > 2*time.Minute || d < -2*time.Minute {
+		t.Fatalf("out-of-range config changed scheduling (not fallen back): retention-1.7 due=%s, defaults due=%s (Δ=%s)", dueBad, dueOK, d)
+	}
+}
+
+// TestE2E_FSRSConfig_ValuesAreConsumed proves the file values actually drive
+// scheduling: two identical fresh cards in two data dirs configured with
+// DIFFERENT IN-RANGE retentions must produce different next_due dates.
+//
+// NOTE (deviation from the plan draft): the plan suggested 0.70 vs 0.99, but
+// 0.99 sits OUTSIDE the loader's locked [0.7, 0.95] range (D-13) and would
+// exercise the warn-and-fallback path, not consumption. 0.95 keeps both sides
+// in-range so the assertion measures what its name claims. Lower retention
+// schedules FURTHER out, so dueLo must not be before dueHi.
+func TestE2E_FSRSConfig_ValuesAreConsumed(t *testing.T) {
+	envLo, dbLo := fsrsConfigFixture(t, `{"desired_retention": 0.70}`)
+	envHi, dbHi := fsrsConfigFixture(t, `{"desired_retention": 0.95}`)
+
+	dueLo, stdoutLo := reviewFreshCard(t, envLo, dbLo)
+	if strings.Contains(stdoutLo, "Warning") {
+		t.Errorf("valid in-range config must be consumed silently, stdout = %q", stdoutLo)
+	}
+	dueHi, stdoutHi := reviewFreshCard(t, envHi, dbHi)
+	if strings.Contains(stdoutHi, "Warning") {
+		t.Errorf("valid in-range config must be consumed silently, stdout = %q", stdoutHi)
+	}
+
+	if dueLo.Equal(dueHi) {
+		t.Fatalf("next_due identical across retentions 0.70/0.95 (%s) — fsrs_config.json values are not driving the scheduler", dueLo)
+	}
+	if dueLo.Before(dueHi) {
+		t.Errorf("retention 0.70 scheduled earlier (%s) than 0.95 (%s) — scheduling direction inverted", dueLo, dueHi)
 	}
 }
