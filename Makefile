@@ -12,7 +12,7 @@ PY_VENV ?= third_party/python/.venv
 # the UV_INDEX_URL env var. See memory: china-mirror-installs.
 PY_INDEX ?= https://pypi.tuna.tsinghua.edu.cn/simple
 
-.PHONY: build run test test-short lint fmt vet cover clean tidy py-bootstrap py-sync py-e2e
+.PHONY: build run test test-short lint fmt vet cover clean tidy py-bootstrap py-sync py-e2e e2e
 
 build:
 	mkdir -p bin
@@ -40,6 +40,13 @@ test:
 
 test-short:
 	go test -v -short $(PKG)
+
+# e2e runs the Playwright browser-E2E suite (tests/e2e) against the REAL
+# service: the Playwright webServer boots run.ps1 (loads .env, frees :8080,
+# go run ./cmd/service), then Chromium drives the student UI at
+# http://localhost:8080. One-time setup: npx playwright install chromium.
+e2e:
+	npx playwright test
 
 lint:
 	golangci-lint run ./...
