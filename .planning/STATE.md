@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 08
-current_phase_name: Student Web Interface
+current_phase_name: student-web-interface
 status: executing
 stopped_at: UAT 差距修复周期完成并真机验收（2026-09-24）——Mimo TTS 真接线/暂停恢复冒烟 v5 PASS/逐词沉默不再自动推进/批量词间间隔/收尾过渡均验证；UAT-CHECKLIST 勾 A1、A4(四按钮)、A5(主路径)；剩余 UAT：A2/A3/A6-A8、B 儿童段、C4 中文词表、D1/D2+F(VPS)；两周期全部改动已按 3 笔原子提交落库（fix/feat/docs，见 git log）
-last_updated: "2026-09-24T22:45:07.690Z"
-last_activity: 2026-09-24
-last_activity_desc: "UAT 修复-验证-归档周期：重建 ws-smoke-v5 冒烟（暂停恢复 PASS）；诊断并修复逐词沉默自动推进+播完自动交卷、批量间隔被双遍播放吃掉；designer 前端重设计（状态四色主题/节奏条/retry 卡）+交互缺陷清理；真机复测通过；UAT-CHECKLIST/STATE 归档"
+last_updated: "2026-09-26T23:43:44.332Z"
+last_activity: 2026-09-27
+last_activity_desc: Phase 08 execution resumed (wave continue)
 progress:
-  total_phases: 15
+  total_phases: 16
   completed_phases: 8
   total_plans: 43
   completed_plans: 40
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-09)
 
 **Core value:** Students receive personalized, real-time dictation practice with immediate feedback while parents get detailed progress tracking and the ability to influence the learning algorithm through their reviews.
-**Current focus:** Phase 08 — Student Web Interface
+**Current focus:** Phase 08 — student-web-interface
 
 ## Current Position
 
-Phase: 08 (Student Web Interface) — EXECUTING (08-07 manual iPad UAT pending real device)
-Plans: 6 of 7 complete
-Status: Phase 08 near-complete; roadmap calibrated 2026-08-23 to speech-recognition-redesign ticket set (single source of truth)
-Last activity: 2026-09-24 — UAT 差距修复周期完成：冒烟 v5 暂停恢复 PASS、Mimo 真接线确认、逐词沉默/批量间隔/收尾过渡真机验收通过、前端状态主题重设计；A1/A4/A5 已勾
+Phase: 08 (student-web-interface) — EXECUTING
+Plans: 7 of 7 complete
+Status: Executing Phase 08
+Last activity: 2026-09-27 — Phase 08 execution resumed (wave continue)
 Next: ①用户授权后 git commit（真实改动 20 修改+若干新增，排除调试产物；node_modules 需入 .gitignore）②补测 UAT 缺口：A2 掐表/A3 出声路径/A6-A8、B 儿童段（需儿童）、C4 中文词表（现库仅 7 英文词）、D1/D2+F（VPS）
 
 Progress: [█████▒▒▒▒▒] 53%

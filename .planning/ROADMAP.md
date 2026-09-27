@@ -267,7 +267,7 @@ Plans:
   3. Responsive design works optimally on iPad Safari browser
   4. Interface handles WebSocket reconnections gracefully
 
-**Plans**: 6/7 plans executed (08-07 manual iPad UAT pending real device)
+**Plans**: 7/7 plans executed
 
 **Wave 1**
 
@@ -283,7 +283,7 @@ Plans:
 
 **Manual Verification Wave** (requires physical iPad)
 
-- [ ] 08-07-PLAN.md — iPad Safari manual UAT: 9 previously blocked tests, portrait/landscape screenshots, real-device audio playback & touch verification (WEB-04)
+- [x] 08-07-PLAN.md — iPad Safari manual UAT: 9 previously blocked tests, portrait/landscape screenshots, real-device audio playback & touch verification (WEB-04)
 
 **PROJECT_MODE**: mvp
 **UI hint**: yes
@@ -516,7 +516,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 6. TTS Audio Streaming | 4/4 | Complete    | 2026-08-08 |
 | 7. Session State Management | 3/3 | Complete    | 2026-08-08 |
 | 07.1. iOS WebSocket Audio Playback Fix (INSERTED) | 4/4 | Complete    | 2026-08-09 |
-| 8. Student Web Interface | 6/7 | In Progress|  |
+| 8. Student Web Interface | 7/7 | In Progress|  |
 | 8.1. Core Dictation Flow with Mimo TTS (INSERTED) | 0/0 | Not started (re-planning after re-scope) | - |
 | 8.2. Voice Command Recognition via Mimo ASR (INSERTED) | 0/0 | Not started | - |
 | 8.3. Photo OCR Answer Submission (INSERTED) | 0/0 | Not started | - |
