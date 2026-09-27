@@ -239,6 +239,59 @@ func deleteWordsArgs(cfg infra.PythonConfig, opts DeleteWordsOpts) ([]string, er
 	return args, nil
 }
 
+// classifyMgmtRun is the shared post-run classifier for the vocab_manager.py
+// management commands (add / edit / rename-unit / delete-words), extracted
+// to a pure function so all sentinel branches are table-testable without a
+// subprocess (classifyPregenResult precedent, Plan 03-05; Windows dev hosts
+// have no venv for the timeout branch).
+//
+// Classification rules (in order -- first match wins):
+//  1. runErr is context.DeadlineExceeded/Canceled -> ErrPythonTimeout
+//     (b.run's Cancel hook already killed the process group).
+//  2. exitCode != 0 -> *ExitError wrapping ErrPythonExit. The Stdout field
+//     carries the captured stdout bytes (Pitfall 2): rename-unit's "No
+//     cards found ..." diagnostic prints to STDOUT with exit 1, and
+//     surfacing it lets the API layer map the message to a user-facing
+//     not-found response instead of an empty failure. Stderr is captured
+//     as before.
+//  3. len(stdout) == 0 -> ErrPythonEmpty (the script's contract is
+//     "exit 0 implies printable JSON"; an empty success stdout is a
+//     bridge-level error, never a silent success — this is also what a
+//     stray dry-run would look like, so it must stay loud).
+//  4. extractTrailingJSON fail -> ErrPythonJSONParse (Warning-tolerant:
+//     the loader's Warning lines precede the JSON on the same stream).
+//  5. otherwise -> the extracted trailing JSON bytes with a nil error;
+//     the caller unmarshals into its typed result and maps any residual
+//     failure to ErrPythonJSONParse.
+//
+// The function performs no I/O and never logs (logResult owns the
+// structured-log side); cmd feeds both the wrap messages and
+// ExitError.Cmd.
+func classifyMgmtRun(cmd string, stdout, stderr []byte, exitCode int, runErr error) (json.RawMessage, error) {
+	if runErr != nil && (errors.Is(runErr, context.DeadlineExceeded) ||
+		errors.Is(runErr, context.Canceled)) {
+		return nil, errors.Wrap(ErrPythonTimeout, "run "+cmd)
+	}
+	if exitCode != 0 {
+		return nil, &ExitError{
+			Cmd:      cmd,
+			ExitCode: exitCode,
+			Stderr:   string(stderr),
+			Stdout:   string(stdout), // Pitfall 2: stdout diagnostics survive
+			Err:      ErrPythonExit,
+		}
+	}
+	if len(stdout) == 0 {
+		return nil, errors.Wrap(ErrPythonEmpty, "run "+cmd)
+	}
+
+	raw, parseErr := extractTrailingJSON(stdout)
+	if parseErr != nil {
+		return nil, errors.Wrap(ErrPythonJSONParse, "run "+cmd)
+	}
+	return raw, nil
+}
+
 // RunAdd executes the vocab_manager.py `add` subcommand and returns the
 // parsed {added, skipped} counts (Phase 9, VOC-01). It is the entry point
 // for parent vocabulary management writes.
@@ -288,27 +341,9 @@ func (b *Bridge) RunAdd(ctx context.Context, opts AddOpts) (AddResult, error) {
 		b.cfg.Interpreter, args...)
 	defer b.logResult("add", start, stdout, stderr, exitCode, err)
 
-	if err != nil && (errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled)) {
-		return AddResult{}, errors.Wrap(ErrPythonTimeout, "run add")
-	}
-	if exitCode != 0 {
-		return AddResult{}, &ExitError{
-			Cmd:      "add",
-			ExitCode: exitCode,
-			Stderr:   string(stderr),
-			Err:      ErrPythonExit,
-		}
-	}
-
-	// Empty-success-stdout guard (same rationale as RunDue).
-	if len(stdout) == 0 {
-		return AddResult{}, errors.Wrap(ErrPythonEmpty, "run add")
-	}
-
-	raw, parseErr := extractTrailingJSON(stdout)
-	if parseErr != nil {
-		return AddResult{}, errors.Wrap(ErrPythonJSONParse, "run add")
+	raw, clsErr := classifyMgmtRun("add", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return AddResult{}, clsErr
 	}
 
 	var result AddResult
@@ -346,25 +381,9 @@ func (b *Bridge) RunEdit(ctx context.Context, opts EditOpts) (EditResult, error)
 		b.cfg.Interpreter, args...)
 	defer b.logResult("edit", start, stdout, stderr, exitCode, err)
 
-	if err != nil && (errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled)) {
-		return EditResult{}, errors.Wrap(ErrPythonTimeout, "run edit")
-	}
-	if exitCode != 0 {
-		return EditResult{}, &ExitError{
-			Cmd:      "edit",
-			ExitCode: exitCode,
-			Stderr:   string(stderr),
-			Err:      ErrPythonExit,
-		}
-	}
-	if len(stdout) == 0 {
-		return EditResult{}, errors.Wrap(ErrPythonEmpty, "run edit")
-	}
-
-	raw, parseErr := extractTrailingJSON(stdout)
-	if parseErr != nil {
-		return EditResult{}, errors.Wrap(ErrPythonJSONParse, "run edit")
+	raw, clsErr := classifyMgmtRun("edit", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return EditResult{}, clsErr
 	}
 
 	var result EditResult
@@ -382,8 +401,9 @@ func (b *Bridge) RunEdit(ctx context.Context, opts EditOpts) (EditResult, error)
 // non-empty (the script independently checks them and would exit 1 with a
 // plain-text diagnostic). NOTE (Pitfall 2): when the old unit matches no
 // cards, the script prints its "No cards found ..." diagnostic to STDOUT
-// and exits 1 — the exit branch below captures only stderr into ExitError
-// until the ExitError.Stdout hardening lands (Plan 09-03 Task 2).
+// and exits 1 — classifyMgmtRun captures that stdout into ExitError.Stdout
+// so the API layer can map it to a not-found response with the real
+// message.
 func (b *Bridge) RunRenameUnit(ctx context.Context, opts RenameUnitOpts) (RenameUnitResult, error) {
 	if opts.OldUnit == "" || opts.NewUnit == "" || opts.Category == "" {
 		return RenameUnitResult{}, errors.New(
@@ -396,25 +416,9 @@ func (b *Bridge) RunRenameUnit(ctx context.Context, opts RenameUnitOpts) (Rename
 		b.cfg.Interpreter, args...)
 	defer b.logResult("rename-unit", start, stdout, stderr, exitCode, err)
 
-	if err != nil && (errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled)) {
-		return RenameUnitResult{}, errors.Wrap(ErrPythonTimeout, "run rename-unit")
-	}
-	if exitCode != 0 {
-		return RenameUnitResult{}, &ExitError{
-			Cmd:      "rename-unit",
-			ExitCode: exitCode,
-			Stderr:   string(stderr),
-			Err:      ErrPythonExit,
-		}
-	}
-	if len(stdout) == 0 {
-		return RenameUnitResult{}, errors.Wrap(ErrPythonEmpty, "run rename-unit")
-	}
-
-	raw, parseErr := extractTrailingJSON(stdout)
-	if parseErr != nil {
-		return RenameUnitResult{}, errors.Wrap(ErrPythonJSONParse, "run rename-unit")
+	raw, clsErr := classifyMgmtRun("rename-unit", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return RenameUnitResult{}, clsErr
 	}
 
 	var result RenameUnitResult
@@ -457,25 +461,9 @@ func (b *Bridge) RunDeleteWords(ctx context.Context, opts DeleteWordsOpts) (Dele
 		b.cfg.Interpreter, args...)
 	defer b.logResult("delete-words", start, stdout, stderr, exitCode, err)
 
-	if err != nil && (errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled)) {
-		return DeleteWordsResult{}, errors.Wrap(ErrPythonTimeout, "run delete-words")
-	}
-	if exitCode != 0 {
-		return DeleteWordsResult{}, &ExitError{
-			Cmd:      "delete-words",
-			ExitCode: exitCode,
-			Stderr:   string(stderr),
-			Err:      ErrPythonExit,
-		}
-	}
-	if len(stdout) == 0 {
-		return DeleteWordsResult{}, errors.Wrap(ErrPythonEmpty, "run delete-words")
-	}
-
-	raw, parseErr := extractTrailingJSON(stdout)
-	if parseErr != nil {
-		return DeleteWordsResult{}, errors.Wrap(ErrPythonJSONParse, "run delete-words")
+	raw, clsErr := classifyMgmtRun("delete-words", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return DeleteWordsResult{}, clsErr
 	}
 
 	var result DeleteWordsResult

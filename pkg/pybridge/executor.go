@@ -405,19 +405,33 @@ var (
 // ExitError is the typed error returned alongside ErrPythonExit (and
 // recoverable via errors.As on any wrapped pybridge error). It captures
 // the subprocess diagnostics the bridge needs to log: command, exit code,
-// and stderr text. The wrapped Err field is the classification sentinel
-// (typically ErrPythonExit) so callers can both errors.Is(err,
-// ErrPythonExit) AND errors.As(err, &exitErr) to pull out the structured
-// fields.
+// stderr text, and — since Plan 09-03 — the captured stdout text. The
+// wrapped Err field is the classification sentinel (typically
+// ErrPythonExit) so callers can both errors.Is(err, ErrPythonExit) AND
+// errors.As(err, &exitErr) to pull out the structured fields.
 //
-// Security note (V7 / SC-4): Cmd, ExitCode, and Stderr are safe to log;
-// secret values (VOLCENGINE_TTS_*) never appear in these fields -- they
-// ride in the subprocess env per D-05, never on argv or stdout.
+// Stdout exists because some vocab_manager.py failure diagnostics print to
+// STDOUT, not stderr: rename-unit's "No cards found ..." message goes to
+// stdout followed by exit 1 (Pitfall 2). Without this field the diagnostic
+// would be lost and the API layer could only report an empty failure.
+// Stdout is bounded command output (script diagnostics, never secrets —
+// T-09-07); API-layer consumers truncate before echoing it to clients.
+//
+// Security note (V7 / SC-4): Cmd, ExitCode, Stderr, and Stdout are safe to
+// log; secret values (VOLCENGINE_TTS_*) never appear in these fields --
+// they ride in the subprocess env per D-05, never on argv or stdout.
 type ExitError struct {
 	Cmd      string
 	ExitCode int
 	Stderr   string
-	Err      error
+
+	// Stdout carries the captured subprocess stdout bytes for commands
+	// whose failure diagnostics print to stdout (Pitfall 2). Empty for
+	// failures that emit nothing on stdout; populated only on the
+	// non-zero-exit branch of the management classifier.
+	Stdout string
+
+	Err error
 }
 
 // Error implements the error interface. The format is stable so log
