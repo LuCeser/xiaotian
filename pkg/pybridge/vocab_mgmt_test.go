@@ -1,12 +1,25 @@
-// vocab_mgmt_test.go exercises the Phase 9 management argv builder
-// (addArgs) declared in vocab_mgmt.go.
+// vocab_mgmt_test.go exercises the Phase 9 management argv builders
+// (addArgs / editArgs / renameUnitArgs / deleteWordsArgs) and the
+// management-command sentinel classifier declared in vocab_mgmt.go.
 //
-// Coverage (Plan 09-01 Task 2 behavior block):
+// Coverage (Plan 09-01 Task 2 + Plan 09-03 Task 1/Task 2 behavior blocks):
 //   - TestAddArgs: argv contract [VocabScript, --db, VocabDBPath, add],
 //     --category always present, --unit omitted-when-empty, list-mode
 //     JSON payload carrying word/meaning/example keys, and the
 //     inline --words vs temp-file --file threshold (mirrors
 //     TestReviewArgs in vocab_test.go).
+//   - TestEditArgs: [.., edit] head, --id always present (decimal),
+//     pointer fields emit flag+value ONLY when non-nil (nil -> flag
+//     absent; non-nil empty string -> flag with empty value, the
+//     None-vs-empty clear contract from Plan 09-02).
+//   - TestRenameUnitArgs: hyphenated rename-unit token with
+//     --old-unit/--new-unit/--category, --db before the subcommand.
+//   - TestDeleteWordsArgs: hyphenated delete-words token, --confirm in
+//     EVERY success case (Pitfall 1 — no dry-run argv possible), exactly
+//     one target (--words XOR --unit), comma-joined word list.
+//   - TestClassifyMgmtRun: the four sentinel classes (timeout / exit with
+//     Stdout diagnostics / empty stdout / garbage stdout) table-driven
+//     without a subprocess (classifyPregenResult precedent, Plan 03-05).
 //
 // Test framework: stdlib `testing` only, table-driven + t.Run subtests.
 // Reuses argvFind / assertDBBeforeSubcommand from vocab_test.go (same
@@ -16,6 +29,7 @@ package pybridge
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -217,4 +231,299 @@ func TestAddArgs(t *testing.T) {
 			t.Errorf("argv %v has --words for large byte-size payload, want --file only", argv)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Plan 09-03 Task 1: argv builders for edit / rename-unit / delete-words.
+// ---------------------------------------------------------------------------
+
+// strPtr is a test helper wrapping a string literal in a pointer so table
+// rows can express "field provided" (non-nil) vs "field absent" (nil) for
+// EditOpts's optional *string fields.
+func strPtr(s string) *string { return &s }
+
+// assertNoInlinePayload is the Plan 09-03 inline-payload absence check: none
+// of the edit / rename-unit / delete-words commands carry JSON payloads --
+// they are flags-only commands (delete-words' --words is a plain
+// comma-joined list, not JSON). The temp-file path (--file) and the JSON
+// batch flags used by add/review (--file/--results) must therefore never
+// appear.
+func assertNoInlinePayload(t *testing.T, argv []string, cmd string) {
+	t.Helper()
+	for _, banned := range []string{"--file", "--results"} {
+		if idx := argvFind(argv, banned); idx >= 0 {
+			t.Errorf("%s argv %v unexpectedly contains %q (flags-only command, no payload file)",
+				cmd, argv, banned)
+		}
+	}
+}
+
+// TestEditArgs covers editArgs argv construction (Plan 09-03 Task 1):
+// [VocabScript, --db, VocabDBPath, edit, --id <decimal>, ...flag pairs] where
+// each of --word/--meaning/--example/--unit appears with a value ONLY when
+// the corresponding *string field is non-nil. A non-nil pointer to the empty
+// string MUST emit the flag with an empty value -- that is the
+// provided-empty-clears contract from the Plan 09-02 CLI (cmd_edit's
+// COALESCE treats an absent flag as keep and an explicit empty string as
+// clear).
+func TestEditArgs(t *testing.T) {
+	cfg := infra.PythonConfig{
+		VocabScript: "vocab_manager.py",
+		VocabDBPath: "/var/lib/hta/vocab.db",
+	}
+
+	cases := []struct {
+		name    string
+		opts    EditOpts
+		present map[string]string // flag -> expected value
+		absent  []string          // flags that must NOT appear
+	}{
+		{
+			name:    "all pointers nil emits the minimal edit --id argv",
+			opts:    EditOpts{ID: 7},
+			present: map[string]string{"--id": "7"},
+			absent:  []string{"--word", "--meaning", "--example", "--unit"},
+		},
+		{
+			name: "word only",
+			opts: EditOpts{ID: 42, Word: strPtr("banana")},
+			present: map[string]string{
+				"--id":   "42",
+				"--word": "banana",
+			},
+			absent: []string{"--meaning", "--example", "--unit"},
+		},
+		{
+			name: "explicit empty string clears meaning (flag emitted with empty value)",
+			opts: EditOpts{ID: 1, Meaning: strPtr("")},
+			present: map[string]string{
+				"--id":      "1",
+				"--meaning": "",
+			},
+			absent: []string{"--word", "--example", "--unit"},
+		},
+		{
+			name: "all four fields set",
+			opts: EditOpts{
+				ID:      3,
+				Word:    strPtr("pear"),
+				Meaning: strPtr("梨"),
+				Example: strPtr("I eat a pear."),
+				Unit:    strPtr("U2"),
+			},
+			present: map[string]string{
+				"--id":      "3",
+				"--word":    "pear",
+				"--meaning": "梨",
+				"--example": "I eat a pear.",
+				"--unit":    "U2",
+			},
+			absent: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argv := editArgs(cfg, tc.opts)
+
+			// Global invariant: argv[0]=script, argv[1]=--db, argv[2]=dbPath,
+			// argv[3]="edit" (vocab_manager.py top-level --db contract).
+			if want := "vocab_manager.py"; argv[0] != want {
+				t.Errorf("argv[0] = %q, want %q", argv[0], want)
+			}
+			assertDBBeforeSubcommand(t, argv, "edit")
+
+			for flag, want := range tc.present {
+				idx := argvFind(argv, flag)
+				if idx < 0 {
+					t.Errorf("argv %v missing %q (want value %q)", argv, flag, want)
+					continue
+				}
+				if idx+1 >= len(argv) {
+					t.Errorf("argv %v: %q present but has no value", argv, flag)
+					continue
+				}
+				if got := argv[idx+1]; got != want {
+					t.Errorf("%s value = %q, want %q", flag, got, want)
+				}
+			}
+			for _, flag := range tc.absent {
+				if idx := argvFind(argv, flag); idx >= 0 {
+					t.Errorf("argv %v unexpectedly contains %q "+
+						"(nil pointer field must omit the flag)", argv, flag)
+				}
+			}
+
+			// --id is ALWAYS present with the decimal value, in every row.
+			idx := argvFind(argv, "--id")
+			if idx < 0 {
+				t.Errorf("argv %v missing --id (always-present contract)", argv)
+			} else if got := argv[idx+1]; got != strconv.FormatInt(tc.opts.ID, 10) {
+				t.Errorf("--id value = %q, want decimal %q", got, strconv.FormatInt(tc.opts.ID, 10))
+			}
+
+			assertNoInlinePayload(t, argv, "edit")
+			if idx := argvFind(argv, "--words"); idx >= 0 {
+				t.Errorf("edit argv %v unexpectedly contains --words (flags-only command)", argv)
+			}
+		})
+	}
+}
+
+// TestRenameUnitArgs covers renameUnitArgs argv construction (Plan 09-03
+// Task 1): the subcommand token is the HYPHENATED "rename-unit" (the Python
+// function name rename_unit is NOT the argv token — vocab_manager.py:897),
+// and --old-unit/--new-unit/--category are all present with the given
+// values, with --db before the subcommand.
+func TestRenameUnitArgs(t *testing.T) {
+	cfg := infra.PythonConfig{
+		VocabScript: "vocab_manager.py",
+		VocabDBPath: "/var/lib/hta/vocab.db",
+	}
+
+	t.Run("hyphenated subcommand token with all three flags", func(t *testing.T) {
+		argv := renameUnitArgs(cfg, RenameUnitOpts{
+			OldUnit:  "old-x",
+			NewUnit:  "new-x",
+			Category: "english",
+		})
+
+		if want := "vocab_manager.py"; argv[0] != want {
+			t.Errorf("argv[0] = %q, want %q", argv[0], want)
+		}
+		// assertDBBeforeSubcommand pins argv[3]: the hyphenated token, NOT
+		// rename_unit (CONTEXT.md's underscore form is the Python function
+		// name and would make argparse exit 2 "invalid choice").
+		assertDBBeforeSubcommand(t, argv, "rename-unit")
+
+		for flag, want := range map[string]string{
+			"--old-unit": "old-x",
+			"--new-unit": "new-x",
+			"--category": "english",
+		} {
+			idx := argvFind(argv, flag)
+			if idx < 0 {
+				t.Errorf("argv %v missing %q", argv, flag)
+				continue
+			}
+			if got := argv[idx+1]; got != want {
+				t.Errorf("%s value = %q, want %q", flag, got, want)
+			}
+		}
+
+		assertNoInlinePayload(t, argv, "rename-unit")
+		if idx := argvFind(argv, "--words"); idx >= 0 {
+			t.Errorf("rename-unit argv %v unexpectedly contains --words (flags-only command)", argv)
+		}
+	})
+}
+
+// TestDeleteWordsArgs covers deleteWordsArgs argv construction (Plan 09-03
+// Task 1): hyphenated delete-words token, exactly one target (--words comma-
+// joined XOR --unit), --category present, and --confirm present in EVERY
+// success case (Pitfall 1: without --confirm the script prints a non-JSON
+// preview and exits 0, which would masquerade as a parse crash downstream).
+// Both under-specified (no target) and over-specified (both targets) opts
+// return a validation error BEFORE any argv is constructed.
+func TestDeleteWordsArgs(t *testing.T) {
+	cfg := infra.PythonConfig{
+		VocabScript: "vocab_manager.py",
+		VocabDBPath: "/var/lib/hta/vocab.db",
+	}
+
+	cases := []struct {
+		name        string
+		opts        DeleteWordsOpts
+		wantErr     bool
+		presentKV   map[string]string // flag -> expected value
+		presentFlag []string          // valueless flags (e.g. --confirm)
+		absent      []string          // flags that must NOT appear
+	}{
+		{
+			name:    "no target at all is a validation error",
+			opts:    DeleteWordsOpts{Category: "english"},
+			wantErr: true,
+		},
+		{
+			name:    "words and unit together are mutually exclusive",
+			opts:    DeleteWordsOpts{Words: []string{"apple"}, Unit: "L10", Category: "english"},
+			wantErr: true,
+		},
+		{
+			name: "words mode joins with commas and always confirms",
+			opts: DeleteWordsOpts{
+				Words:    []string{"apple", "banana", "cherry"},
+				Category: "english",
+			},
+			presentKV: map[string]string{
+				"--words":    "apple,banana,cherry",
+				"--category": "english",
+			},
+			presentFlag: []string{"--confirm"},
+			absent:      []string{"--unit"},
+		},
+		{
+			name: "unit mode targets the unit and always confirms",
+			opts: DeleteWordsOpts{
+				Unit:     "L10",
+				Category: "chinese",
+			},
+			presentKV: map[string]string{
+				"--unit":     "L10",
+				"--category": "chinese",
+			},
+			presentFlag: []string{"--confirm"},
+			absent:      []string{"--words"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argv, err := deleteWordsArgs(cfg, tc.opts)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("deleteWordsArgs(%+v) = %v, want validation error", tc.opts, argv)
+				}
+				if argv != nil {
+					t.Errorf("deleteWordsArgs returned argv %v alongside error %v, want nil argv", argv, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("deleteWordsArgs returned unexpected error: %v", err)
+			}
+
+			if want := "vocab_manager.py"; argv[0] != want {
+				t.Errorf("argv[0] = %q, want %q", argv[0], want)
+			}
+			assertDBBeforeSubcommand(t, argv, "delete-words")
+
+			for flag, want := range tc.presentKV {
+				idx := argvFind(argv, flag)
+				if idx < 0 {
+					t.Errorf("argv %v missing %q (want value %q)", argv, flag, want)
+					continue
+				}
+				if got := argv[idx+1]; got != want {
+					t.Errorf("%s value = %q, want %q", flag, got, want)
+				}
+			}
+			for _, flag := range tc.presentFlag {
+				if idx := argvFind(argv, flag); idx < 0 {
+					// Pitfall 1 acceptance: EVERY success row must carry
+					// --confirm — a missing flag here means the Go layer
+					// can trigger the script's non-JSON dry-run preview.
+					t.Errorf("argv %v missing %q (Pitfall 1: delete MUST always confirm)", argv, flag)
+				}
+			}
+			for _, flag := range tc.absent {
+				if idx := argvFind(argv, flag); idx >= 0 {
+					t.Errorf("argv %v unexpectedly contains %q "+
+						"(delete-words takes exactly one target)", argv, flag)
+				}
+			}
+
+			assertNoInlinePayload(t, argv, "delete-words")
+		})
+	}
 }
