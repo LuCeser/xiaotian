@@ -456,7 +456,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 09-03-PLAN.md — Bridge expansion: RunEdit/RunRenameUnit/RunDeleteWords + --confirm guarantee + ExitError.Stdout diagnostics (VOC-01, VOC-02, Pitfalls 1/2)
+- [x] 09-03-PLAN.md — Bridge expansion: RunEdit/RunRenameUnit/RunDeleteWords + --confirm guarantee + ExitError.Stdout diagnostics (VOC-01, VOC-02, Pitfalls 1/2)
 - [ ] 09-04-PLAN.md — Unit reads: CardRepository.CountByUnit + GET /api/v1/units (VOC-02, D-12)
 
 **Wave 3** *(blocked on Wave 2)*
