@@ -638,6 +638,39 @@ def cmd_reset(db, args):
     print(json.dumps({"reset": card_id}))
 
 
+def cmd_edit(db, args):
+    """Edit a card's text fields WITHOUT touching FSRS state (D-07).
+
+    Absent flags keep the current value (argparse default None -> COALESCE
+    keeps the old column); an explicit empty string clears the column
+    (None-vs-empty distinction). The card's learning-state column is never
+    referenced here — editing text must never reset learning progress (VOC-01
+    edit intent; delete+re-add would wipe it, which is why this subcommand
+    exists).
+    """
+    card_id = args.id
+    row = db.execute("SELECT id FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if not row:
+        print(f"Card {card_id} not found")
+        sys.exit(1)
+
+    db.execute(
+        """
+        UPDATE cards
+        SET word = COALESCE(?, word),
+            meaning = COALESCE(?, meaning),
+            example = COALESCE(?, example),
+            unit = COALESCE(?, unit)
+        WHERE id = ?
+        """,
+        (args.word, args.meaning, args.example, args.unit, card_id),
+    )
+    db.commit()
+
+    updated = db.execute("SELECT word FROM cards WHERE id = ?", (card_id,)).fetchone()
+    print(json.dumps({"edited": {"id": card_id, "word": updated["word"]}}, ensure_ascii=False))
+
+
 def cmd_rename_unit(db, args):
     """Rename a unit across all cards in a category."""
     old_name = args.old_unit.strip()
@@ -819,6 +852,14 @@ def main():
     p_rename.add_argument("--new-unit", required=True, help="New unit name")
     p_rename.add_argument("--category", default="english", help="Category (default: english)")
 
+    # edit
+    p_edit = subparsers.add_parser("edit", help="Edit a card's text fields without touching FSRS state")
+    p_edit.add_argument("--id", type=int, required=True, help="Card ID to edit")
+    p_edit.add_argument("--word", default=None, help="New word text (absent keeps current; empty string clears)")
+    p_edit.add_argument("--meaning", default=None, help="New meaning (absent keeps current; empty string clears)")
+    p_edit.add_argument("--example", default=None, help="New example (absent keeps current; empty string clears)")
+    p_edit.add_argument("--unit", default=None, help="New unit (absent keeps current; empty string clears)")
+
     # delete-words
     p_delete = subparsers.add_parser("delete-words", help="Delete words by unit or word list (dry-run by default)")
     delete_target = p_delete.add_mutually_exclusive_group(required=True)
@@ -856,6 +897,7 @@ def main():
         "list": cmd_list,
         "export": cmd_export,
         "reset": cmd_reset,
+        "edit": cmd_edit,
         "rename-unit": cmd_rename_unit,
         "delete-words": cmd_delete_words,
         "merge-units": cmd_merge_units,
