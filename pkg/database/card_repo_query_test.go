@@ -10,11 +10,21 @@
 //   - english+chinese rows sharing one unit name are distinguishable via
 //     the category filter (RESEARCH Pitfall 7)
 //   - result order is (unit, id)-stable
+//
+// CountByUnit coverage (Plan 09-04 Task 1 behavior block):
+//   - category scoping: equal-named units across categories never merge
+//     their counts under a category filter (Pitfall 7 disposition)
+//   - empty category merges counts across categories by unit name
+//     (documented intentional merge, D-09 naming-convention semantics)
+//   - rows are ordered by unit name ascending
+//   - zero rows → empty NON-NIL slice; a one-word unit reports count 1
+//   - empty-string units (words added without a unit) are countable
 package database
 
 import (
 	"context"
 	"database/sql"
+	"reflect"
 	"testing"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
@@ -201,4 +211,147 @@ func TestCardRepoList(t *testing.T) {
 			t.Fatalf("List combined = %+v, want exactly under_score", cards)
 		}
 	})
+}
+
+// Expected CountByUnit shapes over newQueryTestRepo's fixtures:
+//
+//	english: unitA=3 (apple, banana, aardvark), unitB=2, unitC=1,
+//	         unitD=3 (under_score, 100%, back\slash)
+//	chinese: unitA=1 (春天)
+func TestCountByUnit_CategoryScoped(t *testing.T) {
+	repo, _ := newQueryTestRepo(t)
+
+	en, err := repo.CountByUnit(context.Background(), "english")
+	if err != nil {
+		t.Fatalf("CountByUnit(english) error = %v", err)
+	}
+	wantEn := []UnitCount{
+		{Unit: "unitA", Count: 3},
+		{Unit: "unitB", Count: 2},
+		{Unit: "unitC", Count: 1},
+		{Unit: "unitD", Count: 3},
+	}
+	if !reflect.DeepEqual(en, wantEn) {
+		t.Errorf("CountByUnit(english) = %+v, want %+v (unitA must be 3, not 4 — 春天 excluded, Pitfall 7)", en, wantEn)
+	}
+
+	zh, err := repo.CountByUnit(context.Background(), "chinese")
+	if err != nil {
+		t.Fatalf("CountByUnit(chinese) error = %v", err)
+	}
+	wantZh := []UnitCount{{Unit: "unitA", Count: 1}}
+	if !reflect.DeepEqual(zh, wantZh) {
+		t.Errorf("CountByUnit(chinese) = %+v, want %+v (no cross-category merge under a filter)", zh, wantZh)
+	}
+}
+
+func TestCountByUnit_AllCategories(t *testing.T) {
+	repo, _ := newQueryTestRepo(t)
+
+	got, err := repo.CountByUnit(context.Background(), "")
+	if err != nil {
+		t.Fatalf("CountByUnit(\"\") error = %v", err)
+	}
+	// unitA appears ONCE with the combined english+chinese count — the
+	// documented intentional merge-by-name across categories (Plan 09-04).
+	want := []UnitCount{
+		{Unit: "unitA", Count: 4},
+		{Unit: "unitB", Count: 2},
+		{Unit: "unitC", Count: 1},
+		{Unit: "unitD", Count: 3},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CountByUnit(\"\") = %+v, want %+v (unitA merged by name = 4)", got, want)
+	}
+}
+
+func TestCountByUnit_Ordering(t *testing.T) {
+	repo, _ := newQueryTestRepo(t)
+
+	got, err := repo.CountByUnit(context.Background(), "")
+	if err != nil {
+		t.Fatalf("CountByUnit(\"\") error = %v", err)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1].Unit >= got[i].Unit {
+			t.Fatalf("order violated at %d: %q before %q — want ORDER BY unit ascending",
+				i, got[i-1].Unit, got[i].Unit)
+		}
+	}
+}
+
+func TestCountByUnit_EmptyAndSingle(t *testing.T) {
+	t.Run("zero rows returns empty non-nil slice", func(t *testing.T) {
+		db := newTestDBWithCards(t)
+		if _, err := db.Exec("DELETE FROM cards"); err != nil {
+			t.Fatalf("clear cards: %v", err)
+		}
+		repo, _ := NewCardRepository(db, infra.NewNoOpLogger())
+
+		got, err := repo.CountByUnit(context.Background(), "")
+		if err != nil {
+			t.Fatalf("CountByUnit(\"\") error = %v", err)
+		}
+		if got == nil {
+			t.Fatal("CountByUnit on empty table returned nil, want empty non-nil slice")
+		}
+		if len(got) != 0 {
+			t.Fatalf("CountByUnit on empty table returned %d rows, want 0", len(got))
+		}
+	})
+
+	t.Run("one-word unit reports count 1", func(t *testing.T) {
+		db := newTestDBWithCards(t)
+		if _, err := db.Exec("DELETE FROM cards"); err != nil {
+			t.Fatalf("clear cards: %v", err)
+		}
+		if _, err := db.Exec(
+			"INSERT INTO cards (word, meaning, example, unit, category, fsrs_card) VALUES (?, ?, '', ?, ?, '')",
+			"solo", "唯一的词", "solo", "unitX", "english",
+		); err != nil {
+			t.Fatalf("seed solo card: %v", err)
+		}
+		repo, _ := NewCardRepository(db, infra.NewNoOpLogger())
+
+		got, err := repo.CountByUnit(context.Background(), "english")
+		if err != nil {
+			t.Fatalf("CountByUnit(english) error = %v", err)
+		}
+		want := []UnitCount{{Unit: "unitX", Count: 1}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("CountByUnit(english) = %+v, want %+v (one-word unit counts 1)", got, want)
+		}
+	})
+}
+
+func TestCountByUnit_EmptyStringUnit(t *testing.T) {
+	db := newTestDBWithCards(t)
+	// Two words added without a unit (unit = ''). UNIQUE(word, category)
+	// requires distinct words.
+	for _, w := range []string{"orphan1", "orphan2"} {
+		if _, err := db.Exec(
+			"INSERT INTO cards (word, meaning, example, unit, category, fsrs_card) VALUES (?, ?, '', ?, ?, '')",
+			w, "无单元词", "", "english",
+		); err != nil {
+			t.Fatalf("seed %q: %v", w, err)
+		}
+	}
+	repo, _ := NewCardRepository(db, infra.NewNoOpLogger())
+
+	got, err := repo.CountByUnit(context.Background(), "english")
+	if err != nil {
+		t.Fatalf("CountByUnit(english) error = %v", err)
+	}
+	// The empty-string unit row must exist with BOTH orphan words counted
+	// (countable, not dropped). ORDER BY unit puts "" first — it is the
+	// lexicographic minimum.
+	want := []UnitCount{
+		{Unit: "", Count: 2},
+		{Unit: "unitA", Count: 2},
+		{Unit: "unitB", Count: 2},
+		{Unit: "unitC", Count: 1},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CountByUnit(english) = %+v, want %+v (empty-string unit groups both orphans)", got, want)
+	}
 }
