@@ -36,8 +36,7 @@ WebSocket reconnection (Phase 11), photo OCR entry (v2).
   to student real-time dictation sessions. No correlation-id/timeout/retry
   machinery needs to be reinvented over WS. — **Reversibility:** reversible —
   additive routes; a later WS migration would not require data changes.
-- **D-02: `parent.html` in the SAME static dir, served by the existing
-  `infra.StaticFileServer` at the same port.** No new config, no new mount,
+- **D-02: `parent.html` in the SAME static dir, served by the existing `infra.StaticFileServer` at the same port.** No new config, no new mount,
   no SPA merge. — **Reversibility:** reversible.
 - **D-03: Responsive design covering phone → tablet → desktop** (CSS media
   queries, no framework, consistent with the Phase 8 vanilla-JS/no-build
@@ -86,12 +85,10 @@ WebSocket reconnection (Phase 11), photo OCR entry (v2).
   parsed to a preview table, confirmed once, then committed via the existing
   `add --words` JSON batch path. Typical parent flow is "one textbook lesson
   = 10–20 words in one go".
-- **D-11: Exposed organize operations: change unit (via edit), rename unit
-  (`rename_unit`), delete words (`delete_words`).** `merge_units` is NOT
+- **D-11: Exposed organize operations — change unit (via edit), rename unit (`rename_unit`), delete words (`delete_words`).** `merge_units` is NOT
   exposed in the UI (low-frequency, dangerous bulk op; achievable via two
   renames if ever needed).
-- **D-12: Default browse view = collapsible unit groups + top search
-  (word/meaning) + category filter.** Unit headers show word counts computed
+- **D-12: Default browse view = collapsible unit groups + top search (word/meaning) + category filter.** Unit headers show word counts computed
   by Go reading `cards` directly via `CardRepository` — NOT via Python
   subprocess calls (1C1G VPS: every Python invocation costs a process
   spawn). FSRS-state-per-unit stats were considered and deferred (would
@@ -99,8 +96,7 @@ WebSocket reconnection (Phase 11), photo OCR entry (v2).
 
 ### FSRS parameter exposure (VOC-03)
 
-- **D-13: Expose exactly TWO knobs: `desired_retention` (0.7–0.95 safe
-  slider) and `maximum_interval` (days).** Learning/relearning steps and
+- **D-13: Expose exactly TWO knobs: `desired_retention` (0.7–0.95 safe slider) and `maximum_interval` (days).** Learning/relearning steps and
   fuzzing stay internal. Note: FSRS "difficulty" is per-card emergent state
   (in `fsrs_card` JSON), not a global parameter — VOC-03's "difficulty,
   retention interval" maps to these two scheduler knobs. Parameter changes

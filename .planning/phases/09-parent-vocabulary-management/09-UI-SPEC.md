@@ -252,7 +252,7 @@ index.html.
 
 ## UI Considerations
 
-Applicable state considerations resolved: **12 covered, 2 backstop, 0
+Applicable state considerations resolved: **10 covered, 2 backstop, 0
 unresolved**.
 
 | Category | Element(s) | Status | Resolution / Reason |

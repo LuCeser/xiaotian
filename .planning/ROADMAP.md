@@ -446,7 +446,31 @@ Plans:
   3. Parent can configure FSRS parameters (difficulty, retention interval)
   4. Interface persists all changes to SQLite database
 
-**Plans**: TBD
+**Plans**: 8/8 plans executed
+
+Plans:
+**Wave 1**
+
+- [ ] 09-01-PLAN.md — [tracer] Single-word add end-to-end slice: parent.html → /api/v1 → pybridge.RunAdd → vocab_manager.py → SQLite → CardRepository → browse list (VOC-01, WEB-01, D-01/D-02/D-06/D-08/D-12)
+- [ ] 09-02-PLAN.md — Python engine: `edit` subcommand (D-07) + config-driven SCHEDULER from fsrs_config.json (D-13/D-14) (VOC-01, VOC-03)
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 09-03-PLAN.md — Bridge expansion: RunEdit/RunRenameUnit/RunDeleteWords + --confirm guarantee + ExitError.Stdout diagnostics (VOC-01, VOC-02, Pitfalls 1/2)
+- [ ] 09-04-PLAN.md — Unit reads: CardRepository.CountByUnit + GET /api/v1/units (VOC-02, D-12)
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 09-05-PLAN.md — Complete REST surface: edit/rename/delete endpoints + GET/PUT /api/v1/settings/fsrs with atomic write (VOC-01, VOC-02, VOC-03, D-11/D-13/D-14)
+- [ ] 09-06-PLAN.md — Add-words UI: batch paste parser (node-tested) + dual-mode 添加单词 card (VOC-01, WEB-01, D-10)
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 09-07-PLAN.md — Browse + organize UI (unit groups, search, edit/rename/delete modals) + 学习设置 card + responsive two-column layout (VOC-02, VOC-03, WEB-01, D-03/D-11/D-12/D-15)
+
+**Wave 5** *(blocked on Wave 4)*
+
+- [ ] 09-08-PLAN.md — E2E capstone: full parent flow + 3-viewport responsive matrix + backstop visual checks + phase full-suite gate (WEB-01 + VOC-01/02/03)
 
 **PROJECT_MODE**: mvp
 **UI hint**: yes

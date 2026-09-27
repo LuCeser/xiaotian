@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 08.1
 current_phase_name: Core Dictation Flow with Mimo TTS
-status: planning
-stopped_at: Phase 9 context gathered
-last_updated: "2026-09-27T01:19:37.331Z"
+status: executing
+stopped_at: Phase 9 UI-SPEC approved
+last_updated: "2026-09-27T09:08:51.890Z"
 last_activity: 2026-09-27
 last_activity_desc: Phase 08 complete, transitioned to Phase 08.1
 progress:
   total_phases: 16
   completed_phases: 9
-  total_plans: 43
+  total_plans: 51
   completed_plans: 41
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 
 Phase: 08.1 — Core Dictation Flow with Mimo TTS
 Plans: 7 of 7 complete
-Status: Ready to plan
+Status: Ready to execute
 Last activity: 2026-09-27 — Phase 08 complete, transitioned to Phase 08.1
 Next: ①用户授权后 git commit（真实改动 20 修改+若干新增，排除调试产物；node_modules 需入 .gitignore）②补测 UAT 缺口：A2 掐表/A3 出声路径/A6-A8、B 儿童段（需儿童）、C4 中文词表（现库仅 7 英文词）、D1/D2+F（VPS）
 
@@ -155,6 +155,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-27T01:19:37.323Z
-Stopped at: Phase 9 context gathered
-Resume file: .planning/phases/09-parent-vocabulary-management/09-CONTEXT.md
+Last session: 2026-09-27T01:56:12.866Z
+Stopped at: Phase 9 UI-SPEC approved
+Resume file: .planning/phases/09-parent-vocabulary-management/09-UI-SPEC.md

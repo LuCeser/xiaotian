@@ -441,21 +441,24 @@ function parseBatch(text) { /* returns {rows: [{word, meaning}], errors: [{line,
 | A6 | fsrs_config.json location = `cfg.Python.DataDir` (env `DICTATION_DATA_DIR`) | Pattern 3 / Pitfall 8 | Medium — if planner chooses script-relative instead, the manual-CLI divergence in Pitfall 8 inverts; either way ONE rule must be documented and e2e-tested |
 | A7 | Playwright suite can drive parent.html against the real service on this Windows dev host (`make e2e` previously used for student UI) | Validation Architecture | Low — same webServer boot path as existing specs; if chromium not installed, one-time `npx playwright install chromium` |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **fsrs_config.json canonical location** (A6)
    - What we know: both resolution inputs exist (`cfg.Python.DataDir` Go-side; `DICTATION_DATA_DIR` env forwarded; Python default `SKILL_DIR/data`).
    - What's unclear: whether manual CLI usage on the VPS (outside the service) needs the same file honored.
    - Recommendation: DataDir + env rule (Pitfall 8), document in code comment; planner decides — both are cheap.
+   - **(RESOLVED):** DataDir + `DICTATION_DATA_DIR` env-forwarding rule adopted as the single resolution rule (Pitfall 8; locked in Plan 09-05 key_link PUT /api/v1/settings/fsrs → cfg.Python.DataDir/fsrs_config.json).
 
 2. **Error response format** (D-01 discretion)
    - What we know: no in-repo REST error convention yet (health endpoint is success-only).
    - Recommendation: `{"error":{"code":"...","message":"..."}}` with codes `invalid_request|not_found|conflict|python_failed`; map bridge sentinels via `errors.Is` (ErrPythonExit→python_failed with stdout diagnostic per Pitfall 2).
+   - **(RESOLVED):** `{"error":{"code","message"}}` envelope locked; codes `invalid_request|not_found|python_failed|internal` (Plans 09-01/09-05 success_criteria — conflict dropped, internal added).
 
 3. **delete-words granularity in the UI** (D-11)
    - What we know: CLI supports by-unit and by-word-list delete; both need `--confirm`.
    - What's unclear: whether parent deletes individual words, whole units, or both in v1.
    - Recommendation: both (word-row delete + unit-header delete with count in the confirm dialog); the endpoint maps 1:1 to the two CLI modes.
+   - **(RESOLVED):** both modes exposed — word-row delete and unit-header delete with exact-count confirm dialogs (Plan 09-07 Task 2 against the Plan 09-05 XOR-body DELETE /api/v1/words).
 
 ## Environment Availability
 
