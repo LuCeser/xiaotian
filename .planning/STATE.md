@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 09
 current_phase_name: parent-vocabulary-management
 status: executing
-stopped_at: Completed 09-01-PLAN.md
-last_updated: "2026-09-27T10:03:26.784Z"
+stopped_at: Completed 09-02-PLAN.md
+last_updated: "2026-09-27T10:37:31.107Z"
 last_activity: 2026-09-27
 last_activity_desc: Plan 09-01 complete
 progress:
   total_phases: 16
   completed_phases: 9
   total_plans: 51
-  completed_plans: 42
+  completed_plans: 43
 ---
 
 # Project State
@@ -28,12 +28,12 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 ## Current Position
 
 Phase: 09 (parent-vocabulary-management) — EXECUTING
-Plan: 2 of 7 complete
+Plan: 3 of 7 complete
 Status: Ready to execute
 Last activity: 2026-09-27 — Plan 09-01 complete
 Next: ①用户授权后 git commit（真实改动 20 修改+若干新增，排除调试产物；node_modules 需入 .gitignore）②补测 UAT 缺口：A2 掐表/A3 出声路径/A6-A8、B 儿童段（需儿童）、C4 中文词表（现库仅 7 英文词）、D1/D2+F（VPS）
 
-Progress: [████████░░] 82%
+Progress: [████████░░] 84%
 
 ## Performance Metrics
 
@@ -75,6 +75,7 @@ Progress: [████████░░] 82%
 | Phase 04 P02 | ~15 | 2 tasks | 2 files |
 | Phase 08-student-web-interface P04 | 5.5 minutes | 4 tasks | 6 files |
 | Phase 09 P01 | 39min | 2 tasks | 22 files |
+| Phase 09 P02 | 24min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -101,6 +102,9 @@ Recent decisions affecting current work:
 - [Phase 04]: DatabaseConfig 仅含 Path 字段，pragmas（WAL/busy_timeout/foreign_keys）由 database.Open 拥有，不在 Config 中暴露
 - [Phase 04]: CGO_ENABLED=0 在 Makefile build target 和 CI workflow 中锁定，防止隐式 CGO 依赖
 - [Phase 09]: Plan 09-01: Go 默认 DB 路径优先用 python.vocabDBPath（database.path 为空时）——CardRepository 必须与 Python 写同一 vocab DB（多进程 WAL），否则读路径 "no such table: cards" — D-12 读路径（Go 经 CardRepository 读 SQLite）要求 Go 打开的库文件与 python.vocabDBPath 相同；旧的无条件 $HOME/.home-tutor-agent/vocab.db 默认值让读路径 500。同 commit 记录：addArgs 恒用 list-mode JSON 保住 example 字段；MgmtTimeout 为 Phase 9 管理命令共享超时
+- [Phase 09]: [Phase 09]: Plan 09-02: fsrs_config 加载器对缺失/非法 KEY 做整文件失效处理（两个旋钮一起回退默认），绝不做部分配置——与 plan 的 any-failure 语义一致 — 部分配置会让回退语义变得难推理；计划文本明确要求 any failure 时用完整默认值构造 Scheduler
+- [Phase 09]: [Phase 09]: Plan 09-02: loader 的 Warning 在模块导入时打到 stdout（先于命令 JSON），bridge 的 extractTrailingJSON 天然容忍——已由完整 py-e2e 套件验证而非假设 — Pitfall 9：损坏的 fsrs_config.json 不得弄垮学生听写路径；Warning+回退是唯一安全出口
+- [Phase 09]: [Phase 09]: Plan 09-02: cmd_edit 在 commit 后重新 SELECT 打印更新后的 word，JSON 契约始终反映已提交状态 — 09-03 的 RunEdit 直接依赖该 JSON 的真实性；打印旧值会造成契约谎言
 
 ### Pending Todos
 
@@ -157,6 +161,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-27T10:03:03.530Z
-Stopped at: Completed 09-01-PLAN.md
+Last session: 2026-09-27T10:37:31.092Z
+Stopped at: Completed 09-02-PLAN.md
 Resume file: None

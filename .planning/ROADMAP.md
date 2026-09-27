@@ -446,13 +446,13 @@ Plans:
   3. Parent can configure FSRS parameters (difficulty, retention interval)
   4. Interface persists all changes to SQLite database
 
-**Plans**: 1/8 plans executed
+**Plans**: 2/8 plans executed
 
 Plans:
 **Wave 1**
 
 - [x] 09-01-PLAN.md — [tracer] Single-word add end-to-end slice: parent.html → /api/v1 → pybridge.RunAdd → vocab_manager.py → SQLite → CardRepository → browse list (VOC-01, WEB-01, D-01/D-02/D-06/D-08/D-12)
-- [ ] 09-02-PLAN.md — Python engine: `edit` subcommand (D-07) + config-driven SCHEDULER from fsrs_config.json (D-13/D-14) (VOC-01, VOC-03)
+- [x] 09-02-PLAN.md — Python engine: `edit` subcommand (D-07) + config-driven SCHEDULER from fsrs_config.json (D-13/D-14) (VOC-01, VOC-03)
 
 **Wave 2** *(blocked on Wave 1)*
 
@@ -548,7 +548,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8.4. Batch Answer Submission Workflow (INSERTED) | 0/0 | Not started | - |
 | 8.5. Automatic Grading and Analysis Reports (INSERTED) | 0/0 | Not started | - |
 | 8.6. Multi-User Session Isolation and Scaling (INSERTED) | 0/0 | Not started | - |
-| 9. Parent Vocabulary Management | 1/8 | In Progress|  |
+| 9. Parent Vocabulary Management | 2/8 | In Progress|  |
 | 10. Parent Feedback System | 0/0 | Not started | - |
 | 11. Error Handling & Resilience | 0/0 | Not started | - |
 | 12. End-to-End Validation | 0/0 | Not started | - |
