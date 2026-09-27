@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 08
-current_phase_name: student-web-interface
-status: executing
-stopped_at: UAT 差距修复周期完成并真机验收（2026-09-24）——Mimo TTS 真接线/暂停恢复冒烟 v5 PASS/逐词沉默不再自动推进/批量词间间隔/收尾过渡均验证；UAT-CHECKLIST 勾 A1、A4(四按钮)、A5(主路径)；剩余 UAT：A2/A3/A6-A8、B 儿童段、C4 中文词表、D1/D2+F(VPS)；两周期全部改动已按 3 笔原子提交落库（fix/feat/docs，见 git log）
-last_updated: "2026-09-26T23:43:44.332Z"
+current_phase: 08.1
+current_phase_name: Core Dictation Flow with Mimo TTS
+status: planning
+stopped_at: UAT 修复周期验收通过；两周期全部修复（后端 Mimo/session + 前端重设计）已按 3 笔原子提交落库（见 git log）；工作区仅剩调试产物待仓库卫生批处理（已有 backlog todo）
+last_updated: "2026-09-27T00:42:57.326Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 08 execution resumed (wave continue)
+last_activity_desc: Phase 08 complete, transitioned to Phase 08.1
 progress:
   total_phases: 16
-  completed_phases: 8
+  completed_phases: 9
   total_plans: 43
-  completed_plans: 40
+  completed_plans: 41
 ---
 
 # Project State
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 
 ## Current Position
 
-Phase: 08 (student-web-interface) — EXECUTING
+Phase: 08.1 — Core Dictation Flow with Mimo TTS
 Plans: 7 of 7 complete
-Status: Executing Phase 08
-Last activity: 2026-09-27 — Phase 08 execution resumed (wave continue)
+Status: Ready to plan
+Last activity: 2026-09-27 — Phase 08 complete, transitioned to Phase 08.1
 Next: ①用户授权后 git commit（真实改动 20 修改+若干新增，排除调试产物；node_modules 需入 .gitignore）②补测 UAT 缺口：A2 掐表/A3 出声路径/A6-A8、B 儿童段（需儿童）、C4 中文词表（现库仅 7 英文词）、D1/D2+F（VPS）
 
 Progress: [█████▒▒▒▒▒] 53%
@@ -39,7 +39,7 @@ Progress: [█████▒▒▒▒▒] 53%
 
 **Velocity:**
 
-- Total plans completed: 30
+- Total plans completed: 37
 - Average duration: - min
 - Total execution time: 0.0 hours
 
@@ -54,6 +54,7 @@ Progress: [█████▒▒▒▒▒] 53%
 | 05 | 2 | - | - |
 | 06 | 4 | - | - |
 | 07 | 3 | - | - |
+| 08 | 7 | - | - |
 
 **Recent Trend:**
 

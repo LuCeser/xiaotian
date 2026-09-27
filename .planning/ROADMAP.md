@@ -20,7 +20,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 5: FSRS Core Implementation** - Automatic due word selection and parameter updates (completed 2026-08-02)
 - [x] **Phase 6: TTS Audio Streaming** - Real-time audio delivery with <1.5s latency (completed 2026-08-08)
 - [x] **Phase 7: Session State Management** - Complete session lifecycle and state transitions (completed 2026-08-08)
-- [ ] **Phase 8: Student Web Interface** - Responsive iPad-optimized student experience
+- [x] **Phase 8: Student Web Interface** - Responsive iPad-optimized student experience (completed 2026-09-27)
 - [ ] **Phase 9: Parent Vocabulary Management** - Add/edit/organize vocabulary with FSRS configuration
 - [ ] **Phase 10: Parent Feedback System** - Post-dictation review and performance ratings
 - [ ] **Phase 11: Error Handling & Resilience** - Graceful disconnections and structured logging
@@ -303,6 +303,7 @@ Plans:
   5. Audio latency <1.5s; real-time progress display advances word-by-word (retains 08-06 progress frames)
 
 **Superseded** (2026-08-23 user decision — ticket set supersedes prior planning):
+
 - Backend auto-advance design (D-01/D-02/D-03 Option A, 08.1-CONTEXT.md) → replaced by the student-paced model
 - 08.1-01-PLAN.md / 08.1-02-PLAN.md → not executed, obsolete; superseded by the direct ticket-02 delivery below (no re-plan)
 - Retained from 08-06 delivery: progress_update/word_complete/session_complete emission + frontend play_word/next_word triggers (client-driven foundation this phase builds on)
@@ -516,7 +517,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 6. TTS Audio Streaming | 4/4 | Complete    | 2026-08-08 |
 | 7. Session State Management | 3/3 | Complete    | 2026-08-08 |
 | 07.1. iOS WebSocket Audio Playback Fix (INSERTED) | 4/4 | Complete    | 2026-08-09 |
-| 8. Student Web Interface | 7/7 | In Progress|  |
+| 8. Student Web Interface | 7/7 | Complete    | 2026-09-27 |
 | 8.1. Core Dictation Flow with Mimo TTS (INSERTED) | 0/0 | Not started (re-planning after re-scope) | - |
 | 8.2. Voice Command Recognition via Mimo ASR (INSERTED) | 0/0 | Not started | - |
 | 8.3. Photo OCR Answer Submission (INSERTED) | 0/0 | Not started | - |

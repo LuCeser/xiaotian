@@ -140,7 +140,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FSRS-02 | Phase 5 | Complete |
 | FSRS-03 | Phase 5 | Complete |
 | FSRS-04 | Phase 5 | Complete |
-| DICT-01 | Phase 8 | Pending |
+| DICT-01 | Phase 8 | Complete |
 | DICT-02 | Phase 7 | Complete |
 | DICT-03 | Phase 6 | Complete |
 | DICT-04 | Phase 7 | Complete |
