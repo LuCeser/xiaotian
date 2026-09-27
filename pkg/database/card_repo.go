@@ -58,6 +58,14 @@ type CardRepository interface {
 	// Empty filter fields are omitted from the WHERE clause; the result
 	// is ordered by (unit, id) for stable rendering (Phase 9, D-12).
 	List(ctx context.Context, filter CardFilter) ([]Card, error)
+
+	// CountByUnit returns one UnitCount row per distinct unit, ordered by
+	// unit name ascending (port of vocab_manager.py:605). A non-empty
+	// category scopes the grouping to that category — equal-named units
+	// across categories keep separate counts (RESEARCH Pitfall 7); an
+	// empty category merges counts across ALL categories by unit name
+	// (documented intentional merge, D-09 naming-convention semantics).
+	CountByUnit(ctx context.Context, category string) ([]UnitCount, error)
 }
 
 // Compile-time interface satisfaction check (D-43, mirrors pybridge pattern).
@@ -203,6 +211,16 @@ func (r *sqliteCardRepository) ListByUnit(ctx context.Context, unit string) ([]C
 	return cards, nil
 }
 
+// UnitCount is one row of the unit grouping query (Phase 9, VOC-02/D-12):
+// a unit name and the number of cards in it. Units stay flat strings
+// grouped lexicographically (ORDER BY unit) — grouping is presentation-
+// only, never a server-side hierarchy (VOC-02 prohibition). JSON tags
+// serve the GET /api/v1/units response shape directly.
+type UnitCount struct {
+	Unit  string `json:"unit"`
+	Count int    `json:"count"`
+}
+
 // escapeLike escapes the SQL LIKE wildcards (%, _) and the ESCAPE character
 // itself (\) in a user-supplied query string so the pattern matches
 // literally (RESEARCH Pitfall 6). Use with `LIKE ? ESCAPE '\'`.
@@ -286,4 +304,54 @@ func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]C
 	}
 
 	return cards, nil
+}
+
+// CountByUnit returns one UnitCount row per distinct unit, ordered by unit
+// name ascending (Phase 9, VOC-02/D-12 — port of the vocab_manager.py:605
+// shape: SELECT unit, COUNT(*) ... GROUP BY unit ORDER BY unit). The
+// category filter is parameterized (never string-built, Shared Pattern 5)
+// and appended only when non-empty; read-only, no Python subprocess (D-12).
+func (r *sqliteCardRepository) CountByUnit(ctx context.Context, category string) ([]UnitCount, error) {
+	query := "SELECT unit, COUNT(*) as count FROM cards"
+	args := []any{}
+
+	if category != "" {
+		query += " WHERE category = ?"
+		args = append(args, category)
+	}
+	query += " GROUP BY unit ORDER BY unit"
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		r.logger.Error("card count by unit failed",
+			infra.F("component", "database/card_repo"),
+			infra.F("category", category),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "card count by unit")
+	}
+	defer rows.Close()
+
+	units := []UnitCount{}
+	for rows.Next() {
+		var uc UnitCount
+		if err := rows.Scan(&uc.Unit, &uc.Count); err != nil {
+			r.logger.Error("card count by unit scan failed",
+				infra.F("component", "database/card_repo"),
+				infra.ErrField(err),
+			)
+			return nil, errors.Wrap(err, "card count by unit: scan")
+		}
+		units = append(units, uc)
+	}
+
+	if err := rows.Err(); err != nil {
+		r.logger.Error("card count by unit iteration",
+			infra.F("component", "database/card_repo"),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "card count by unit: iteration")
+	}
+
+	return units, nil
 }
