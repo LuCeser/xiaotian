@@ -27,7 +27,9 @@
 package pybridge
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -524,6 +526,122 @@ func TestDeleteWordsArgs(t *testing.T) {
 			}
 
 			assertNoInlinePayload(t, argv, "delete-words")
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Plan 09-03 Task 2: shared sentinel classification for the management
+// commands (the classifyPregenResult precedent, Plan 03-05 — pure function
+// so all four sentinel branches are table-testable without a subprocess).
+// ---------------------------------------------------------------------------
+
+// TestClassifyMgmtRun covers classifyMgmtRun, the post-run classifier shared
+// by the vocab_manager.py management commands (add/edit/rename-unit/
+// delete-words):
+//   - context.DeadlineExceeded/Canceled -> ErrPythonTimeout
+//   - exitCode != 0 -> *ExitError wrapping ErrPythonExit whose Stdout field
+//     carries the captured stdout bytes (Pitfall 2: rename-unit's "No cards
+//     found ..." diagnostic prints to STDOUT with exit 1)
+//   - empty stdout on exit 0 -> ErrPythonEmpty
+//   - garbage stdout -> ErrPythonJSONParse
+//   - otherwise -> the extracted trailing JSON bytes, nil error
+func TestClassifyMgmtRun(t *testing.T) {
+	cases := []struct {
+		name         string
+		stdout       []byte
+		stderr       []byte
+		exitCode     int
+		runErr       error
+		wantSentinel error // sentinel the returned error must wrap; nil = success
+		wantExit     bool  // expect a recoverable *ExitError (errors.As)
+		wantStdout   string
+		wantRaw      string
+	}{
+		{
+			name:         "context deadline maps to ErrPythonTimeout",
+			runErr:       context.DeadlineExceeded,
+			wantSentinel: ErrPythonTimeout,
+		},
+		{
+			name:         "context canceled maps to ErrPythonTimeout",
+			runErr:       context.Canceled,
+			wantSentinel: ErrPythonTimeout,
+		},
+		{
+			name:         "nonzero exit wraps ErrPythonExit carrying stdout (Pitfall 2)",
+			stdout:       []byte("No cards found with unit 'old-x' in category 'english'"),
+			stderr:       []byte(""),
+			exitCode:     1,
+			wantSentinel: ErrPythonExit,
+			wantExit:     true,
+			wantStdout:   "No cards found with unit 'old-x' in category 'english'",
+		},
+		{
+			name:         "empty stdout on exit 0 maps to ErrPythonEmpty",
+			stdout:       nil,
+			exitCode:     0,
+			wantSentinel: ErrPythonEmpty,
+		},
+		{
+			name:         "garbage stdout maps to ErrPythonJSONParse",
+			stdout:       []byte("Traceback (most recent call last):"),
+			exitCode:     0,
+			wantSentinel: ErrPythonJSONParse,
+		},
+		{
+			name:       "warning-prefixed success returns the trailing JSON",
+			stdout:     []byte("Warning: invalid fsrs_config.json\n{\"deleted\": 2}"),
+			exitCode:   0,
+			wantRaw:    `{"deleted": 2}`,
+			wantStdout: "", // no ExitError on success
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := classifyMgmtRun("rename-unit", tc.stdout, tc.stderr, tc.exitCode, tc.runErr)
+
+			if tc.wantSentinel != nil {
+				if err == nil {
+					t.Fatalf("classifyMgmtRun(%q) = %s, nil error, want sentinel %v",
+						tc.stdout, raw, tc.wantSentinel)
+				}
+				if !errors.Is(err, tc.wantSentinel) {
+					t.Fatalf("err = %v, want errors.Is %v", err, tc.wantSentinel)
+				}
+				if raw != nil {
+					t.Errorf("raw = %s on an error path, want nil", raw)
+				}
+			} else if err != nil {
+				t.Fatalf("classifyMgmtRun(%q) returned unexpected error: %v", tc.stdout, err)
+			}
+
+			if tc.wantExit {
+				var ee *ExitError
+				if !errors.As(err, &ee) {
+					t.Fatalf("err = %v, want a recoverable *ExitError via errors.As", err)
+				}
+				if ee.Cmd != "rename-unit" {
+					t.Errorf("ExitError.Cmd = %q, want %q", ee.Cmd, "rename-unit")
+				}
+				if ee.ExitCode != tc.exitCode {
+					t.Errorf("ExitError.ExitCode = %d, want %d", ee.ExitCode, tc.exitCode)
+				}
+				if ee.Stdout != tc.wantStdout {
+					// Pitfall 2 acceptance: the captured stdout bytes MUST
+					// ride in ExitError.Stdout so the API layer can map the
+					// script's stdout diagnostics to a user-facing message.
+					t.Errorf("ExitError.Stdout = %q, want %q", ee.Stdout, tc.wantStdout)
+				}
+				if !errors.Is(ee, ErrPythonExit) {
+					t.Errorf("ExitError.Err does not unwrap to ErrPythonExit")
+				}
+			}
+
+			if tc.wantRaw != "" && string(raw) != tc.wantRaw {
+				t.Errorf("raw = %s, want %s", raw, tc.wantRaw)
+			}
 		})
 	}
 }

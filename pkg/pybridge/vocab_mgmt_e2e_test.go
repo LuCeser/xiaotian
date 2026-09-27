@@ -1,7 +1,8 @@
 //go:build e2e
 
 // Real-Python end-to-end tests for the Phase 9 vocab-management ENGINE
-// contracts (Plan 09-02):
+// contracts (Plan 09-02) and the Bridge management methods that ride them
+// (Plan 09-03):
 //
 //   - TestE2E_VocabEdit_* — the `edit` subcommand's edit-text-only semantics
 //     (D-07): update word/meaning/example/unit by card id, NEVER touch
@@ -9,12 +10,17 @@
 //   - TestE2E_FSRSConfig_* — the config-driven SCHEDULER loader (D-13/D-14):
 //     fsrs_config.json consumed at startup, silent defaults when absent,
 //     warn-and-fallback on malformed/out-of-range values (Pitfall 9).
+//   - TestE2E_RunEditRoundTrip / TestE2E_RunRenameUnit /
+//     TestE2E_RunRenameUnitNotFound / TestE2E_RunDeleteWords (Plan 09-03) —
+//     the Bridge.RunEdit / RunRenameUnit / RunDeleteWords methods driven
+//     THROUGH the real interpreter + script + SQLite stack, proving the argv
+//     contracts and the ExitError.Stdout diagnostics end-to-end.
 //
 // Build tag: compiled ONLY under `go test -tags=e2e` (make py-e2e), like
-// e2e_test.go. These tests shell the vendored vocab_manager.py DIRECTLY
-// (interpreter + script + --db argv) rather than through the Bridge — the
-// Bridge methods for these commands arrive in later Phase 9 plans and are
-// exercised there; here we pin the Python-side contract those methods ride on.
+// e2e_test.go. The Plan 09-02 tests shell the vendored vocab_manager.py
+// DIRECTLY (interpreter + script + --db argv) to pin the Python-side
+// contract; the Plan 09-03 tests go through the Bridge methods exactly as
+// production traffic will.
 //
 // Conventions follow e2e_test.go: shared uv-bootstrapped venv from TestMain
 // (e2eInterpreter / e2eSkipReason), per-test temp dirs, skip-cleanly when no
@@ -23,6 +29,7 @@ package pybridge
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -442,5 +449,203 @@ func TestE2E_FSRSConfig_ValuesAreConsumed(t *testing.T) {
 	}
 	if dueLo.Before(dueHi) {
 		t.Errorf("retention 0.70 scheduled earlier (%s) than 0.95 (%s) — scheduling direction inverted", dueLo, dueHi)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Plan 09-03 Task 2: Bridge.RunEdit / RunRenameUnit / RunDeleteWords driven
+// through the real interpreter + script + SQLite stack (e2eBridge → Bridge →
+// vocab_manager.py). Read-back goes through the script's `list` subcommand
+// via the direct-subprocess helpers above — the same file the Bridge wrote.
+// ---------------------------------------------------------------------------
+
+// mgmtListEnv derives the (env, ok) pair the direct-subprocess read helpers
+// need from a bridge test's cfg: DICTATION_DATA_DIR pointed at cfg.DataDir
+// (dropping any outer value — Pitfall 8 single-resolution rule) and
+// cfg.VocabDBPath as the DB the bridge just wrote.
+func mgmtListEnv(t *testing.T, dataDir string) []string {
+	return e2eMgmtEnv(t, dataDir)
+}
+
+// TestE2E_RunEditRoundTrip proves the edit path through the Bridge: add via
+// RunAdd, edit via RunEdit changing the word ONLY, then read back — other
+// columns unchanged, and EditResult.Edited mirrors the {"edited":{"id",
+// "word"}} contract (the post-update word from cmd_edit's fresh SELECT).
+func TestE2E_RunEditRoundTrip(t *testing.T) {
+	b, _, cfg := e2eBridge(t, nil)
+	env := mgmtListEnv(t, cfg.DataDir)
+
+	addRes, err := b.RunAdd(context.Background(), AddOpts{
+		Category: "english",
+		Unit:     "U1",
+		Entries:  []AddEntry{{Word: "apple", Meaning: "苹果", Example: "I eat an apple."}},
+	})
+	if err != nil {
+		t.Fatalf("RunAdd: %v", err)
+	}
+	if addRes.Added != 1 {
+		t.Fatalf("RunAdd added %d, want 1", addRes.Added)
+	}
+
+	word := "banana"
+	editRes, err := b.RunEdit(context.Background(), EditOpts{ID: 1, Word: &word})
+	if err != nil {
+		t.Fatalf("RunEdit: %v", err)
+	}
+	if editRes.Edited.ID != 1 || editRes.Edited.Word != "banana" {
+		t.Fatalf("EditResult.Edited = %+v, want {id:1 word:banana}", editRes.Edited)
+	}
+
+	rows := listCards(t, env, cfg.VocabDBPath)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	row := rows[0]
+	if row["word"] != "banana" {
+		t.Errorf("word = %v, want banana", row["word"])
+	}
+	if row["meaning"] != "苹果" {
+		t.Errorf("meaning changed by word-only edit: %q", row["meaning"])
+	}
+	if row["example"] != "I eat an apple." {
+		t.Errorf("example changed by word-only edit: %q", row["example"])
+	}
+	if row["unit"] != "U1" {
+		t.Errorf("unit changed by word-only edit: %q", row["unit"])
+	}
+}
+
+// TestE2E_RunRenameUnit proves the rename path through the Bridge: two words
+// added in unit old-x, RunRenameUnit old-x -> new-x returns
+// RenameUnitResult{Renamed:2, From:"old-x", To:"new-x"} and both rows now
+// carry the new unit.
+func TestE2E_RunRenameUnit(t *testing.T) {
+	b, _, cfg := e2eBridge(t, nil)
+	env := mgmtListEnv(t, cfg.DataDir)
+
+	addRes, err := b.RunAdd(context.Background(), AddOpts{
+		Category: "english",
+		Unit:     "old-x",
+		Entries: []AddEntry{
+			{Word: "apple", Meaning: "苹果"},
+			{Word: "banana", Meaning: "香蕉"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunAdd: %v", err)
+	}
+	if addRes.Added != 2 {
+		t.Fatalf("RunAdd added %d, want 2", addRes.Added)
+	}
+
+	res, err := b.RunRenameUnit(context.Background(), RenameUnitOpts{
+		OldUnit:  "old-x",
+		NewUnit:  "new-x",
+		Category: "english",
+	})
+	if err != nil {
+		t.Fatalf("RunRenameUnit: %v", err)
+	}
+	if res.Renamed != 2 || res.From != "old-x" || res.To != "new-x" {
+		t.Fatalf("RenameUnitResult = %+v, want {renamed:2 from:old-x to:new-x}", res)
+	}
+
+	rows := listCards(t, env, cfg.VocabDBPath)
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	for _, row := range rows {
+		if row["unit"] != "new-x" {
+			t.Errorf("word %v still in unit %q, want new-x", row["word"], row["unit"])
+		}
+	}
+}
+
+// TestE2E_RunRenameUnitNotFound is the Pitfall 2 proof at the Bridge level:
+// renaming a nonexistent unit makes the script print its "No cards found"
+// diagnostic to STDOUT and exit 1, so the typed error must be
+// errors.Is(ErrPythonExit) AND carry that diagnostic in ExitError.Stdout —
+// an empty message here means the diagnostic was lost and the API layer
+// could not tell the parent what went wrong.
+func TestE2E_RunRenameUnitNotFound(t *testing.T) {
+	b, _, _ := e2eBridge(t, nil)
+
+	_, err := b.RunRenameUnit(context.Background(), RenameUnitOpts{
+		OldUnit:  "ghost-unit",
+		NewUnit:  "phantom-unit",
+		Category: "english",
+	})
+	if err == nil {
+		t.Fatal("RunRenameUnit on a nonexistent unit returned nil error, want exit-1 error")
+	}
+	if !errors.Is(err, ErrPythonExit) {
+		t.Fatalf("err = %v, want errors.Is ErrPythonExit", err)
+	}
+	var ee *ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("err = %v, want recoverable *ExitError", err)
+	}
+	if !strings.Contains(ee.Stdout, "No cards found") {
+		t.Errorf("ExitError.Stdout = %q, want it to contain the 'No cards found' diagnostic "+
+			"(Pitfall 2: rename-unit prints it to STDOUT with exit 1)", ee.Stdout)
+	}
+}
+
+// TestE2E_RunDeleteWords proves the delete path through the Bridge: three
+// words added, two deleted by word list (Deleted:2, third remains), then the
+// rest deleted by unit. Every invocation's argv carried --confirm — asserted
+// VIA SUCCESS: without --confirm the script prints a non-JSON preview and
+// exits 0, which the bridge would surface as ErrPythonEmpty/ErrPythonJSONParse
+// instead of the typed Deleted count (Pitfall 1).
+func TestE2E_RunDeleteWords(t *testing.T) {
+	b, _, cfg := e2eBridge(t, nil)
+	env := mgmtListEnv(t, cfg.DataDir)
+
+	addRes, err := b.RunAdd(context.Background(), AddOpts{
+		Category: "english",
+		Unit:     "del-u",
+		Entries: []AddEntry{
+			{Word: "apple", Meaning: "苹果"},
+			{Word: "banana", Meaning: "香蕉"},
+			{Word: "cherry", Meaning: "樱桃"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunAdd: %v", err)
+	}
+	if addRes.Added != 3 {
+		t.Fatalf("RunAdd added %d, want 3", addRes.Added)
+	}
+
+	// Word-list mode: delete two of the three.
+	delRes, err := b.RunDeleteWords(context.Background(), DeleteWordsOpts{
+		Words:    []string{"apple", "banana"},
+		Category: "english",
+	})
+	if err != nil {
+		t.Fatalf("RunDeleteWords (words mode): %v", err)
+	}
+	if delRes.Deleted != 2 {
+		t.Fatalf("words-mode Deleted = %d, want 2", delRes.Deleted)
+	}
+	rows := listCards(t, env, cfg.VocabDBPath)
+	if len(rows) != 1 || rows[0]["word"] != "cherry" {
+		t.Fatalf("after words-mode delete rows = %v, want only cherry", rows)
+	}
+
+	// Unit mode: delete the remaining card via its unit.
+	delRes, err = b.RunDeleteWords(context.Background(), DeleteWordsOpts{
+		Unit:     "del-u",
+		Category: "english",
+	})
+	if err != nil {
+		t.Fatalf("RunDeleteWords (unit mode): %v", err)
+	}
+	if delRes.Deleted != 1 {
+		t.Fatalf("unit-mode Deleted = %d, want 1", delRes.Deleted)
+	}
+	rows = listCards(t, env, cfg.VocabDBPath)
+	if len(rows) != 0 {
+		t.Fatalf("after unit-mode delete rows = %v, want none", rows)
 	}
 }
