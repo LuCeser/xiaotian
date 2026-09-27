@@ -93,6 +93,8 @@ Students receive personalized, real-time dictation practice with immediate feedb
 
 This document evolves at phase transitions and milestone boundaries.
 
+**2026-09-27 — Phase 08 (Student Web Interface) complete.** DICT-01 / WEB-02 / WEB-04 validated (goal-backward verification passed: 28/31 must-have truths verified, 2 device-audition deferrals, VPS rehearsal → Phase 12). New browser-E2E layer: Playwright (`make e2e` / `npm run e2e`, commit 599c2a4). Phases 8.1–8.6 were delivered directly as speech-recognition-redesign tickets 01–07; next actionable phase with pending work: **9 (Parent Vocabulary Management)**. Carried residuals: UAT-CHECKLIST A2/A4-sub/A5 (next iPad session), session-resume-across-reconnect → Phase 11, VPS deployment → Phase 12.
+
 **After each phase transition** (via `/gsd-transition`):
 1. Requirements invalidated? → Move to Out of Scope with reason
 2. Requirements validated? → Move to Validated with phase reference
@@ -107,4 +109,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2025-07-18 after initialization*
+*Last updated: 2026-09-27 after Phase 08 completion*
