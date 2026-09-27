@@ -56,6 +56,12 @@ type Executor interface {
 	RunReview(ctx context.Context, opts ReviewOpts) (ReviewResult, error)
 	RunPregenerate(ctx context.Context, opts PregenOpts) (PregenResult, error)
 	RunUnlock(ctx context.Context, opts UnlockOpts) (UnlockResult, error)
+
+	// RunAdd invokes the vocab_manager.py `add` subcommand (Phase 9, VOC-01)
+	// with a batch of word entries and returns the {added, skipped} counts
+	// the script prints. Duplicate word+category pairs are silently skipped
+	// by the SQLite UNIQUE constraint and reported via Skipped.
+	RunAdd(ctx context.Context, opts AddOpts) (AddResult, error)
 }
 
 // DueOpts carries the operational flags for the vocab_manager.py due
@@ -220,6 +226,44 @@ type UnlockOpts struct {
 // successful unlock call.
 type UnlockResult struct {
 	Unlocked int `json:"unlocked"`
+}
+
+// AddEntry is one word entry in an AddOpts batch. Field tags align exactly
+// with the list-mode JSON keys vocab_manager.py's cmd_add reads
+// (verified against vocab_manager.py:166-179 -- word/meaning/example). The
+// bridge always marshals entries as a list of objects (list mode) so the
+// Example field survives; dict mode ({"word": "meaning"}) would silently
+// drop it (RESEARCH Pitfall 4).
+type AddEntry struct {
+	Word    string `json:"word"`
+	Meaning string `json:"meaning"`
+	Example string `json:"example"`
+}
+
+// AddOpts carries the operational flags for the vocab_manager.py add
+// subcommand (Phase 9, VOC-01).
+type AddOpts struct {
+	// Category scopes every entry in the batch. Forwarded as --category.
+	// Must be "english" or "chinese" (validated by callers / Bridge.RunAdd).
+	Category string
+
+	// Unit assigns the whole batch to one unit/lesson. Forwarded as
+	// --unit. Empty means omit the flag (script default "").
+	Unit string
+
+	// Entries is the word batch. Forwarded as list-mode JSON via
+	// --words (small payloads) or --file (large payloads) -- the same
+	// inline-vs-temp-file selection reviewArgs uses.
+	Entries []AddEntry
+}
+
+// AddResult is the typed payload the add path returns. Added/Skipped
+// mirror the {"added": N, "skipped": N} JSON object vocab_manager.py
+// prints on a successful add call (verified against vocab_manager.py:206).
+// Skipped counts duplicates (UNIQUE(word, category) violations).
+type AddResult struct {
+	Added   int `json:"added"`
+	Skipped int `json:"skipped"`
 }
 
 // Sentinel errors returned by the pybridge layer. Callers MUST detect

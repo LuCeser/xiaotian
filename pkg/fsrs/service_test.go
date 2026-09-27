@@ -55,6 +55,10 @@ func (f *fakeExecutor) RunUnlock(_ context.Context, _ pybridge.UnlockOpts) (pybr
 	return pybridge.UnlockResult{}, nil
 }
 
+func (f *fakeExecutor) RunAdd(_ context.Context, _ pybridge.AddOpts) (pybridge.AddResult, error) {
+	return pybridge.AddResult{}, nil
+}
+
 // --- NewFSRSService validation ---
 
 func TestNewFSRSServiceValidation(t *testing.T) {

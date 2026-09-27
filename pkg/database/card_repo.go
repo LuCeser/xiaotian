@@ -40,7 +40,7 @@ type Card struct {
 // Go NEVER writes to this table — FSRS state updates route through
 // pybridge.Executor.RunReview (D-01/D-03-a/D-09).
 //
-// The interface exposes exactly two read methods. There is deliberately no
+// The interface exposes read methods only. There is deliberately no
 // write method (INSERT/UPDATE/DELETE) — this is enforced at the type level.
 // All queries use an explicit column list, never SELECT *, so a Python-side
 // column change fails loudly rather than silently returning wrong data
@@ -53,6 +53,11 @@ type CardRepository interface {
 	// ListByUnit returns cards in the named unit. An empty unit string
 	// returns all cards.
 	ListByUnit(ctx context.Context, unit string) ([]Card, error)
+
+	// List returns cards matching the (optionally empty) CardFilter.
+	// Empty filter fields are omitted from the WHERE clause; the result
+	// is ordered by (unit, id) for stable rendering (Phase 9, D-12).
+	List(ctx context.Context, filter CardFilter) ([]Card, error)
 }
 
 // Compile-time interface satisfaction check (D-43, mirrors pybridge pattern).
@@ -84,6 +89,23 @@ func NewCardRepository(db *sql.DB, logger infra.Logger) (CardRepository, error) 
 // NEVER use SELECT * — explicit columns fail loudly on schema drift
 // (RESEARCH Pitfall 4).
 const cardColumns = "id, word, meaning, example, unit, category, fsrs_card, created_at, fetch_locked_until"
+
+// CardFilter narrows a CardRepository.List query. Every field is optional —
+// an empty field is omitted from the WHERE clause (empty filter = all
+// cards). Query is a substring match against word OR meaning (LIKE with
+// user-supplied wildcards escaped, RESEARCH Pitfall 6).
+type CardFilter struct {
+	// Category restricts to one vocabulary category ("english"/"chinese").
+	// Empty means all categories.
+	Category string
+
+	// Unit restricts to one unit (exact match). Empty means all units.
+	Unit string
+
+	// Query is a free-text substring matched against word OR meaning.
+	// Empty means no text filter.
+	Query string
+}
 
 // scanCard scans a single row into a Card struct. Shared by GetByID and
 // ListByUnit to avoid duplication.
@@ -176,6 +198,91 @@ func (r *sqliteCardRepository) ListByUnit(ctx context.Context, unit string) ([]C
 			infra.ErrField(err),
 		)
 		return nil, errors.Wrap(err, "card list by unit: iteration")
+	}
+
+	return cards, nil
+}
+
+// escapeLike escapes the SQL LIKE wildcards (%, _) and the ESCAPE character
+// itself (\) in a user-supplied query string so the pattern matches
+// literally (RESEARCH Pitfall 6). Use with `LIKE ? ESCAPE '\'`.
+func escapeLike(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\', '%', '_':
+			out = append(out, '\\', s[i])
+		default:
+			out = append(out, s[i])
+		}
+	}
+	return string(out)
+}
+
+// List returns cards matching the filter (Phase 9, D-12). WHERE parts are
+// appended per NON-EMPTY filter field, args are always parameterized
+// (never string-concatenated user input), and the result is ordered by
+// (unit, id) for a stable browse-list rendering. Empty filter = all cards.
+func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]Card, error) {
+	query := fmt.Sprintf("SELECT %s FROM cards", cardColumns)
+	args := []any{}
+
+	if filter.Category != "" {
+		query += " WHERE category = ?"
+		args = append(args, filter.Category)
+	}
+	if filter.Unit != "" {
+		if len(args) == 0 {
+			query += " WHERE"
+		} else {
+			query += " AND"
+		}
+		query += " unit = ?"
+		args = append(args, filter.Unit)
+	}
+	if filter.Query != "" {
+		pattern := "%" + escapeLike(filter.Query) + "%"
+		if len(args) == 0 {
+			query += " WHERE"
+		} else {
+			query += " AND"
+		}
+		query += " (word LIKE ? ESCAPE '\\' OR meaning LIKE ? ESCAPE '\\')"
+		args = append(args, pattern, pattern)
+	}
+	query += " ORDER BY unit, id"
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		r.logger.Error("card list failed",
+			infra.F("component", "database/card_repo"),
+			infra.F("category", filter.Category),
+			infra.F("unit", filter.Unit),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "card list")
+	}
+	defer rows.Close()
+
+	var cards []Card
+	for rows.Next() {
+		c, err := scanCard(rows)
+		if err != nil {
+			r.logger.Error("card scan row failed",
+				infra.F("component", "database/card_repo"),
+				infra.ErrField(err),
+			)
+			return nil, errors.Wrap(err, "card list: scan")
+		}
+		cards = append(cards, c)
+	}
+
+	if err := rows.Err(); err != nil {
+		r.logger.Error("card list iteration",
+			infra.F("component", "database/card_repo"),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "card list: iteration")
 	}
 
 	return cards, nil

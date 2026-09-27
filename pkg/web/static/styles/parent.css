@@ -1,0 +1,339 @@
+/**
+ * Parent Vocabulary Management styles (Phase 9) — NEW file, per UI-SPEC
+ * Design System. Do NOT import or extend the kid-themed main.css: the
+ * parent page is a neutral management tool (flat background, calm cards).
+ *
+ * Mobile-first (min-width media queries, same convention as main.css).
+ * The >=1024px two-column grid arrives in Plan 09-07.
+ */
+
+:root {
+  /* Neutral ramp (reused from student CSS so the pages read as one product) */
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  /* Semantic colors per UI-SPEC Color */
+  --accent: #2563eb;
+  --destructive: #dc2626;
+  --success: #059669;
+  --warning: #d97706;
+  --background: #f5f7fa;
+  --surface: #ffffff;
+  /* Category badge coding (student state tokens) */
+  --badge-en-bg: #dbeafe;
+  --badge-en-text: #1e3a8a;
+  --badge-zh-bg: #fef3c7;
+  --badge-zh-text: #92400e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: var(--background);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Accessibility utilities (main.css precedent)                        */
+/* ------------------------------------------------------------------ */
+
+.skip-to-content {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--surface);
+  color: var(--accent);
+  padding: 8px 16px;
+  border-radius: 0 0 12px 0;
+  z-index: 100;
+}
+
+.skip-to-content:focus {
+  left: 0;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Focus ring: 3px accent outline (UI-SPEC Accessibility Contract) */
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Layout                                                              */
+/* ------------------------------------------------------------------ */
+
+.container {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+}
+
+.app-header {
+  margin-bottom: 24px;
+}
+
+.page-title {
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0 0 4px;
+}
+
+.subtitle {
+  font-size: 14px;
+  color: var(--muted);
+  margin: 0;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 32px;
+}
+
+.card-title {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0 0 16px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Forms                                                               */
+/* ------------------------------------------------------------------ */
+
+.form-field {
+  margin-bottom: 16px;
+}
+
+.form-label {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin-bottom: 4px;
+}
+
+.form-input,
+.form-textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  font-size: 16px;
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.form-textarea {
+  resize: vertical;
+}
+
+.form-hint {
+  font-size: 14px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.form-error {
+  font-size: 14px;
+  color: var(--warning);
+  margin-top: 4px;
+}
+
+/* Category radio pair (segmented 英语|中文) */
+.category-options {
+  display: flex;
+  gap: 8px;
+}
+
+.category-option {
+  flex: 1;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 16px;
+  background: var(--surface);
+}
+
+.category-option input[type="radio"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.category-option.checked {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ */
+/* Buttons                                                             */
+/* ------------------------------------------------------------------ */
+
+.btn {
+  min-height: 44px;
+  padding: 8px 20px;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: inherit;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.btn-secondary {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--border);
+}
+
+/* ------------------------------------------------------------------ */
+/* Word rows / browse list                                             */
+/* ------------------------------------------------------------------ */
+
+.word-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 48px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.word-row:last-child {
+  border-bottom: none;
+}
+
+.word-text {
+  font-weight: 600;
+}
+
+.word-meaning {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.word-unit {
+  font-size: 14px;
+  color: var(--muted);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 0 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.badge-english {
+  background: var(--badge-en-bg);
+  color: var(--badge-en-text);
+}
+
+.badge-chinese {
+  background: var(--badge-zh-bg);
+  color: var(--badge-zh-text);
+}
+
+.list-empty {
+  color: var(--muted);
+  padding: 16px 0;
+}
+
+.list-error {
+  color: var(--warning);
+  padding: 16px 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Toast                                                               */
+/* ------------------------------------------------------------------ */
+
+.toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 90%;
+  padding: 8px 20px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-size: 16px;
+  border-radius: 999px;
+  z-index: 200;
+}
+
+.toast-success {
+  background: var(--success);
+  color: #ffffff;
+}
+
+.toast-error {
+  background: var(--destructive);
+  color: #ffffff;
+}
+
+/* ------------------------------------------------------------------ */
+/* >=1024px two-column grid arrives in Plan 09-07 (tracer is single    */
+/* column). Reduced-motion handling for consistency with main.css.     */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -55,6 +55,7 @@ func validPregenCfg() infra.PythonConfig {
 		DueTimeout:    10 * time.Second,
 		ReviewTimeout: 10 * time.Second,
 		PregenTimeout: 120 * time.Second,
+		MgmtTimeout:   10 * time.Second,
 		MaxConcurrent: 2,
 	}
 }

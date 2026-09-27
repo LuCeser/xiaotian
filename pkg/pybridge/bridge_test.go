@@ -40,6 +40,7 @@ func validTestCfg() infra.PythonConfig {
 		DueTimeout:    10 * time.Second,
 		ReviewTimeout: 10 * time.Second,
 		PregenTimeout: 120 * time.Second,
+		MgmtTimeout:   10 * time.Second,
 		MaxConcurrent: 2,
 	}
 }
@@ -119,6 +120,7 @@ func TestNewBridgeValidation(t *testing.T) {
 		{"dueTimeout zero", func(c *infra.PythonConfig) { c.DueTimeout = 0 }},
 		{"reviewTimeout zero", func(c *infra.PythonConfig) { c.ReviewTimeout = 0 }},
 		{"pregenTimeout negative", func(c *infra.PythonConfig) { c.PregenTimeout = -1 * time.Second }},
+		{"mgmtTimeout zero", func(c *infra.PythonConfig) { c.MgmtTimeout = 0 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

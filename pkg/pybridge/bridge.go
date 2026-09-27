@@ -158,6 +158,10 @@ func NewBridge(cfg infra.PythonConfig, logger infra.Logger) (*Bridge, error) {
 		return nil, errors.Wrap(infra.ErrConfigInvalid,
 			"python.pregenTimeout must be > 0 for Bridge")
 	}
+	if cfg.MgmtTimeout <= 0 {
+		return nil, errors.Wrap(infra.ErrConfigInvalid,
+			"python.mgmtTimeout must be > 0 for Bridge")
+	}
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}

@@ -36,6 +36,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/tts"
 	"github.com/xiaotian/home-tutor-agent/pkg/voice"
+	"github.com/xiaotian/home-tutor-agent/pkg/web/api"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
@@ -218,10 +219,19 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	}
 
 	// Phase 4 (D-09): open the shared SQLite database.
-	// The path comes from Config.Database.Path; when empty, resolve to
-	// $HOME/.home-tutor-agent/vocab.db (mirrors PythonConfig default philosophy).
-	// sql.DB lifetime = service lifetime. Closed during shutdown via defer.
+	// The path comes from Config.Database.Path. When empty, prefer the
+	// Python-owned vocab DB (python.vocabDBPath): the cards table Go reads
+	// via CardRepository lives THERE (D-12 read path, ADR write-separation —
+	// Python writes, Go reads the same file via multi-process WAL).
+	// Phase 9 fix: the old unconditional $HOME/.home-tutor-agent/vocab.db
+	// default pointed the read path at a different file than the Python
+	// bridge writes, so GET /api/v1/words always saw "no such table: cards".
+	// The legacy default remains only as a last resort when BOTH paths are
+	// empty. sql.DB lifetime = service lifetime. Closed during shutdown.
 	dbPath := cfg.Database.Path
+	if dbPath == "" {
+		dbPath = cfg.Python.VocabDBPath
+	}
 	if dbPath == "" {
 		dbPath = filepath.Join(homeDir(), ".home-tutor-agent", "vocab.db")
 	}
@@ -270,7 +280,6 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
-	_ = cardRepo // consumed by Phase 5 FSRS orchestration
 
 	if err := infra.RegisterMetrics(server); err != nil {
 		logger.Error("metrics registration failed",
@@ -409,12 +418,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 				return err
 			}
 			// Lifetime fix (2026-09-13 UAT): this wiring closure RETURNS while the
-		// HTTP/WS servers keep running in goroutines, so a defer HERE would
-		// close the client seconds after boot — every session then hit
-		// "client is closed" and silently fell back to Volcengine (voice
-		// commands / photo OCR would fail the same way). Bind Close to the
-		// real shutdown path below via mimoCloser instead.
-		mimoCloser = mimoClient.Close
+			// HTTP/WS servers keep running in goroutines, so a defer HERE would
+			// close the client seconds after boot — every session then hit
+			// "client is closed" and silently fell back to Volcengine (voice
+			// commands / photo OCR would fail the same way). Bind Close to the
+			// real shutdown path below via mimoCloser instead.
+			mimoCloser = mimoClient.Close
 
 			// DICT-03 (Tickets 01/02): the SAME client doubles as the
 			// dictation word audio source — attach the per-word synthesizer
@@ -494,6 +503,17 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// established design).
 		publicMux := http.NewServeMux()
 		publicMux.HandleFunc("/ws", wsServer.HandleWebSocket)
+
+		// Phase 9 (WEB-01): the /api/v1 REST surface, mounted ONCE here.
+		// All route logic (method patterns, validation, error envelope)
+		// lives inside pkg/web/api — future Phase 9 routes register in
+		// that package's internal mux, not in main.go.
+		publicMux.Handle("/api/v1/", http.StripPrefix("/api/v1",
+			api.NewHandler(pyBridge, cardRepo, logger)))
+		logger.Info("api v1 mounted",
+			infra.F("component", "infra.main"),
+			infra.F("route", "/api/v1/"),
+		)
 
 		// Phase 8 Plan 01: mount the student interface. When server.staticDir is
 		// configured, an http.FileServer serves index.html, /styles/*, /js/* from

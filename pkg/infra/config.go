@@ -410,6 +410,12 @@ type PythonConfig struct {
 	// and the call batches an entire word list (D-01).
 	PregenTimeout time.Duration `json:"pregenTimeout" mapstructure:"pregenTimeout"`
 
+	// MgmtTimeout caps the wall-clock duration of a vocab_manager.py
+	// management call (add/edit/rename-unit/delete-words — Phase 9, VOC-01).
+	// Units: seconds (parsed from strings like "10s"). Default 10s, matching
+	// DueTimeout: these are in-process fast SQLite operations.
+	MgmtTimeout time.Duration `json:"mgmtTimeout" mapstructure:"mgmtTimeout"`
+
 	// MaxConcurrent is the global bounded-semaphore cap on simultaneously
 	// running Python subprocesses (D-02). Prevents 50-100 concurrent sessions
 	// from fork-bombing the 1C/1G VPS. Default 2. MUST be in [1, 4].
@@ -788,6 +794,7 @@ func DefaultConfig() Config {
 			DueTimeout:    10 * time.Second,
 			ReviewTimeout: 10 * time.Second,
 			PregenTimeout: 120 * time.Second,
+			MgmtTimeout:   10 * time.Second,
 			MaxConcurrent: 2,
 		},
 		WS: WSConfig{
@@ -1114,6 +1121,9 @@ func (c Config) Validate() error {
 	if c.Python.PregenTimeout <= 0 {
 		return errors.Wrap(ErrConfigInvalid, "python.pregenTimeout must be > 0")
 	}
+	if c.Python.MgmtTimeout <= 0 {
+		return errors.Wrap(ErrConfigInvalid, "python.mgmtTimeout must be > 0")
+	}
 
 	// WS origin whitelist (D-24). The wildcard "*" is forbidden at this layer
 	// to mirror ws.ServerConfig.Validate; both layers reject it so a slip at
@@ -1253,6 +1263,7 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"python.dueTimeout",
 		"python.reviewTimeout",
 		"python.pregenTimeout",
+		"python.mgmtTimeout",
 		"python.maxConcurrent",
 		"ws.allowedOrigins",
 		"ws.heartbeatInterval",

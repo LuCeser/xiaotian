@@ -44,6 +44,10 @@ func (f *fakeExecutor) RunUnlock(_ context.Context, _ pybridge.UnlockOpts) (pybr
 	return pybridge.UnlockResult{}, nil
 }
 
+func (f *fakeExecutor) RunAdd(_ context.Context, _ pybridge.AddOpts) (pybridge.AddResult, error) {
+	return pybridge.AddResult{}, nil
+}
+
 // mockConvertFn is a mock MP3-to-PCM conversion function for testing.
 type mockConvertFn struct {
 	// pcmData is the PCM data to return on success.

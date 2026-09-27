@@ -132,9 +132,12 @@ python:
   # Subprocess wall-clock caps. vocab_manager is in-process fast (10s); the
   # pregenerate call batches TTS + ffmpeg for an entire word list so it is
   # allowed longer (D-01 spawn-per-call, cold-start amortised over the batch).
+  # mgmtTimeout covers the Phase 9 management commands (add/edit/rename/delete)
+  # — in-process SQLite writes, same 10s profile as due/review.
   dueTimeout: 10s
   reviewTimeout: 10s
   pregenTimeout: 120s
+  mgmtTimeout: 10s
 
   # Global bounded-semaphore cap on simultaneously running Python subprocesses
   # (D-02). Prevents 50-100 concurrent sessions from fork-bombing the 1C/1G
