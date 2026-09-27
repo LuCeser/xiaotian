@@ -5,8 +5,8 @@ milestone_name: milestone
 current_phase: 08.1
 current_phase_name: Core Dictation Flow with Mimo TTS
 status: planning
-stopped_at: UAT 修复周期验收通过；两周期全部修复（后端 Mimo/session + 前端重设计）已按 3 笔原子提交落库（见 git log）；工作区仅剩调试产物待仓库卫生批处理（已有 backlog todo）
-last_updated: "2026-09-27T00:42:57.326Z"
+stopped_at: Phase 9 context gathered
+last_updated: "2026-09-27T01:19:37.331Z"
 last_activity: 2026-09-27
 last_activity_desc: Phase 08 complete, transitioned to Phase 08.1
 progress:
@@ -155,6 +155,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-24
-Stopped at: UAT 修复周期验收通过；两周期全部修复（后端 Mimo/session + 前端重设计）已按 3 笔原子提交落库（见 git log）；工作区仅剩调试产物待仓库卫生批处理（已有 backlog todo）
-Resume file: .scratch/speech-recognition-redesign/UAT-CHECKLIST.md — next action：授权提交后补测剩余 UAT 缺口（A2/A3/A6-A8、B、C4、D/F）
+Last session: 2026-09-27T01:19:37.323Z
+Stopped at: Phase 9 context gathered
+Resume file: .planning/phases/09-parent-vocabulary-management/09-CONTEXT.md
