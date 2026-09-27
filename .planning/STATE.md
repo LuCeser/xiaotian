@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 08.1
-current_phase_name: Core Dictation Flow with Mimo TTS
+current_phase: 09
+current_phase_name: parent-vocabulary-management
 status: executing
-stopped_at: Phase 9 UI-SPEC approved
-last_updated: "2026-09-27T09:08:51.890Z"
+stopped_at: Completed 09-01-PLAN.md
+last_updated: "2026-09-27T10:03:26.784Z"
 last_activity: 2026-09-27
-last_activity_desc: Phase 08 complete, transitioned to Phase 08.1
+last_activity_desc: Plan 09-01 complete
 progress:
   total_phases: 16
   completed_phases: 9
   total_plans: 51
-  completed_plans: 41
+  completed_plans: 42
 ---
 
 # Project State
@@ -23,17 +23,17 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-09)
 
 **Core value:** Students receive personalized, real-time dictation practice with immediate feedback while parents get detailed progress tracking and the ability to influence the learning algorithm through their reviews.
-**Current focus:** Phase 08 — student-web-interface
+**Current focus:** Phase 09 — parent-vocabulary-management
 
 ## Current Position
 
-Phase: 08.1 — Core Dictation Flow with Mimo TTS
-Plans: 7 of 7 complete
+Phase: 09 (parent-vocabulary-management) — EXECUTING
+Plan: 2 of 7 complete
 Status: Ready to execute
-Last activity: 2026-09-27 — Phase 08 complete, transitioned to Phase 08.1
+Last activity: 2026-09-27 — Plan 09-01 complete
 Next: ①用户授权后 git commit（真实改动 20 修改+若干新增，排除调试产物；node_modules 需入 .gitignore）②补测 UAT 缺口：A2 掐表/A3 出声路径/A6-A8、B 儿童段（需儿童）、C4 中文词表（现库仅 7 英文词）、D1/D2+F（VPS）
 
-Progress: [█████▒▒▒▒▒] 53%
+Progress: [████████░░] 82%
 
 ## Performance Metrics
 
@@ -74,6 +74,7 @@ Progress: [█████▒▒▒▒▒] 53%
 | Phase 04 P01 | ~15 | 2 tasks | 6 files |
 | Phase 04 P02 | ~15 | 2 tasks | 2 files |
 | Phase 08-student-web-interface P04 | 5.5 minutes | 4 tasks | 6 files |
+| Phase 09 P01 | 39min | 2 tasks | 22 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,7 @@ Recent decisions affecting current work:
 - [Phase 04]: modernc.org/sqlite v1.55.0 作为纯 Go SQLite 驱动（CGO_ENABLED=0 跨平台契约）
 - [Phase 04]: DatabaseConfig 仅含 Path 字段，pragmas（WAL/busy_timeout/foreign_keys）由 database.Open 拥有，不在 Config 中暴露
 - [Phase 04]: CGO_ENABLED=0 在 Makefile build target 和 CI workflow 中锁定，防止隐式 CGO 依赖
+- [Phase 09]: Plan 09-01: Go 默认 DB 路径优先用 python.vocabDBPath（database.path 为空时）——CardRepository 必须与 Python 写同一 vocab DB（多进程 WAL），否则读路径 "no such table: cards" — D-12 读路径（Go 经 CardRepository 读 SQLite）要求 Go 打开的库文件与 python.vocabDBPath 相同；旧的无条件 $HOME/.home-tutor-agent/vocab.db 默认值让读路径 500。同 commit 记录：addArgs 恒用 list-mode JSON 保住 example 字段；MgmtTimeout 为 Phase 9 管理命令共享超时
 
 ### Pending Todos
 
@@ -155,6 +157,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-27T01:56:12.866Z
-Stopped at: Phase 9 UI-SPEC approved
-Resume file: .planning/phases/09-parent-vocabulary-management/09-UI-SPEC.md
+Last session: 2026-09-27T10:03:03.530Z
+Stopped at: Completed 09-01-PLAN.md
+Resume file: None
