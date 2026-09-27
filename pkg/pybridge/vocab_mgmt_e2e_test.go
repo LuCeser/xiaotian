@@ -114,7 +114,9 @@ func seedCard(t *testing.T, env []string, dbPath, word, meaning, example, unit s
 	var rep struct {
 		Added int `json:"added"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &rep); err != nil || rep.Added != 1 {
+	// parseTrailingJSON, not TrimSpace+Unmarshal: once the loader ships, any
+	// command's stdout may carry a leading Warning line (invalid config file).
+	if err := json.Unmarshal(parseTrailingJSON(t, stdout), &rep); err != nil || rep.Added != 1 {
 		t.Fatalf("seed add did not add exactly 1 card: out=%q err=%v", stdout, err)
 	}
 }
@@ -328,15 +330,21 @@ func fsrsConfigFixture(t *testing.T, configJSON string) ([]string, string) {
 	return env, dbPath
 }
 
-// reviewFreshCard reviews the fixture's card 1 with rating "good" and returns
-// the reported next_due. Fresh cards schedule differently under different
-// desired_retention values, so next_due is the observable that proves whether
-// the config file actually drives the scheduler.
+// reviewFreshCard graduates the fixture's card with two "good" reviews and
+// returns the second review's reported next_due. The FIRST review only
+// advances the hard-coded Learning steps (1min/10min — desired_retention does
+// not shape Learning-state intervals); the SECOND graduates the card to
+// Review state, where the configured desired_retention drives the interval.
+// next_due is therefore the observable that proves whether fsrs_config.json
+// actually drives the scheduler.
 func reviewFreshCard(t *testing.T, env []string, dbPath string) (time.Time, string) {
 	t.Helper()
+	if stdout, stderr, code := runVocabManager(t, env, dbPath, "review", "--results", `{"1":"good"}`); code != 0 {
+		t.Fatalf("first (learning-step) review exited %d:\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
 	stdout, stderr, code := runVocabManager(t, env, dbPath, "review", "--results", `{"1":"good"}`)
 	if code != 0 {
-		t.Fatalf("review exited %d:\nstdout: %s\nstderr: %s", code, stdout, stderr)
+		t.Fatalf("second (graduating) review exited %d:\nstdout: %s\nstderr: %s", code, stdout, stderr)
 	}
 	var rep struct {
 		Updated []struct {
@@ -415,8 +423,10 @@ func TestE2E_FSRSConfig_OutOfRangeFallsBack(t *testing.T) {
 // in-range so the assertion measures what its name claims. Lower retention
 // schedules FURTHER out, so dueLo must not be before dueHi.
 func TestE2E_FSRSConfig_ValuesAreConsumed(t *testing.T) {
-	envLo, dbLo := fsrsConfigFixture(t, `{"desired_retention": 0.70}`)
-	envHi, dbHi := fsrsConfigFixture(t, `{"desired_retention": 0.95}`)
+	// Both keys present, as the Go writer (Plan 09-05) always emits them —
+	// the loader treats a missing key as invalid and falls back entirely.
+	envLo, dbLo := fsrsConfigFixture(t, `{"desired_retention": 0.70, "maximum_interval": 180}`)
+	envHi, dbHi := fsrsConfigFixture(t, `{"desired_retention": 0.95, "maximum_interval": 180}`)
 
 	dueLo, stdoutLo := reviewFreshCard(t, envLo, dbLo)
 	if strings.Contains(stdoutLo, "Warning") {

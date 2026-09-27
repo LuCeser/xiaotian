@@ -71,17 +71,64 @@ DB_PATH = os.environ.get("DICTATION_DB_PATH", os.path.join(DEFAULT_DATA_DIR, "vo
 # Shanghai timezone
 CST = timezone(timedelta(hours=8))
 
-# Scheduler tuned for a young student:
-# - slightly lower desired_retention (0.85) to reduce pressure
-# - shorter learning steps
-# - max interval 180 days (6 months)
-SCHEDULER = Scheduler(
-    desired_retention=0.85,
-    learning_steps=(timedelta(minutes=1), timedelta(minutes=10)),
-    relearning_steps=(timedelta(minutes=5),),
-    maximum_interval=180,
-    enable_fuzzing=False,
-)
+# Scheduler tuned for a young student (D-13/D-14): only TWO knobs are
+# configurable — desired_retention and maximum_interval, read at startup from
+# DEFAULT_DATA_DIR/fsrs_config.json. Learning/relearning steps and fuzzing
+# stay hard-coded.
+#
+# Single-resolution rule (Pitfall 8): DEFAULT_DATA_DIR resolves
+# DICTATION_DATA_DIR first (below), the same env Bridge.childEnv forwards to
+# every subprocess (bridge.go:208-210). The Go writer side is
+# pkg/web/api (Plan 09-05), which writes cfg.Python.DataDir/fsrs_config.json
+# atomically (temp file + rename) — writer and reader land on ONE file.
+#
+# Warn-and-fallback (Pitfall 9): an absent file is SILENT (defaults are not
+# an error); malformed JSON, missing/wrong-typed keys, or out-of-range values
+# print a "Warning:" line to stdout and fall back to the tuned defaults —
+# no loader failure may ever propagate into command execution, or a corrupted
+# config would take down the student dictation path (due/review included).
+# The bridge tolerates Warning lines before the command JSON
+# (extractTrailingJSON). Range checks live here because the fsrs library
+# validates only its 21 model weights, not these kwargs.
+_DEFAULT_DESIRED_RETENTION = 0.85
+_DEFAULT_MAXIMUM_INTERVAL = 180
+
+
+def load_scheduler():
+    """Build the FSRS Scheduler from DataDir/fsrs_config.json (D-13/D-14)."""
+    config_path = os.path.join(DEFAULT_DATA_DIR, "fsrs_config.json")
+    desired_retention = _DEFAULT_DESIRED_RETENTION
+    maximum_interval = _DEFAULT_MAXIMUM_INTERVAL
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                raise TypeError(f"config must be a JSON object, got {type(cfg).__name__}")
+            dr = cfg["desired_retention"]
+            mi = cfg["maximum_interval"]
+            if isinstance(dr, bool) or not isinstance(dr, (int, float)) or not (0.7 <= dr <= 0.95):
+                raise ValueError(f"desired_retention must be a number in [0.7, 0.95], got {dr!r}")
+            if isinstance(mi, bool) or not isinstance(mi, int) or not (1 <= mi <= 36500):
+                raise ValueError(f"maximum_interval must be a positive int <= 36500, got {mi!r}")
+            desired_retention = float(dr)
+            maximum_interval = mi
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            print(
+                f"Warning: ignoring invalid fsrs config {config_path}: {e}; "
+                f"using defaults (desired_retention={_DEFAULT_DESIRED_RETENTION}, "
+                f"maximum_interval={_DEFAULT_MAXIMUM_INTERVAL})"
+            )
+    return Scheduler(
+        desired_retention=desired_retention,
+        learning_steps=(timedelta(minutes=1), timedelta(minutes=10)),
+        relearning_steps=(timedelta(minutes=5),),
+        maximum_interval=maximum_interval,
+        enable_fuzzing=False,
+    )
+
+
+SCHEDULER = load_scheduler()
 
 
 def get_db(db_path=DB_PATH):
