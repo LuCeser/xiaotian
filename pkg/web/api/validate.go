@@ -68,6 +68,79 @@ type AddRequest struct {
 	} `json:"entries"`
 }
 
+// EditRequest is the decoded PUT /words/{id} body shape (Plan 09-05).
+// Word is required; the other three fields are *string so "provided but
+// empty" (clear the column) stays distinguishable from "absent" (keep the
+// column) — the same None-vs-empty wire contract as pybridge.EditOpts and
+// Plan 09-02's cmd_edit COALESCE semantics. There is intentionally NO
+// category field: category is read-only per D-07, and decodeJSON's
+// DisallowUnknownFields turns any attempt to send one into a 400.
+type EditRequest struct {
+	Word    string  `json:"word"`
+	Meaning *string `json:"meaning"`
+	Example *string `json:"example"`
+	Unit    *string `json:"unit"`
+}
+
+// RenameRequest is the decoded POST /units/rename body shape (Plan 09-05).
+// All three fields are required.
+type RenameRequest struct {
+	OldUnit  string `json:"old_unit"`
+	NewUnit  string `json:"new_unit"`
+	Category string `json:"category"`
+}
+
+// validateEditRequest enforces the edit-path caps (Plan 09-05): word
+// required and ≤ maxWordRunes; each PROVIDED optional field within its cap
+// (an absent pointer is not checked — it means "keep the column"). Returns
+// "" on success or the error message naming the offending field.
+func validateEditRequest(req *EditRequest) string {
+	if req.Word == "" {
+		return "word is required"
+	}
+	if n := len([]rune(req.Word)); n > maxWordRunes {
+		return fmt.Sprintf("word exceeds %d characters", maxWordRunes)
+	}
+	if req.Meaning != nil {
+		if n := len([]rune(*req.Meaning)); n > maxMeaningRunes {
+			return fmt.Sprintf("meaning exceeds %d characters", maxMeaningRunes)
+		}
+	}
+	if req.Example != nil {
+		if n := len([]rune(*req.Example)); n > maxExampleRunes {
+			return fmt.Sprintf("example exceeds %d characters", maxExampleRunes)
+		}
+	}
+	if req.Unit != nil {
+		if n := len([]rune(*req.Unit)); n > maxUnitRunes {
+			return fmt.Sprintf("unit exceeds %d characters", maxUnitRunes)
+		}
+	}
+	return ""
+}
+
+// validateRenameRequest enforces the rename-path contract: all three fields
+// required (the script's argparse required=True), category enum-checked
+// (D-06), and both unit names within the unit rune cap.
+func validateRenameRequest(req *RenameRequest) string {
+	if err := ValidateCategory(req.Category); err != nil {
+		return "category must be \"english\" or \"chinese\""
+	}
+	if req.OldUnit == "" {
+		return "old_unit is required"
+	}
+	if req.NewUnit == "" {
+		return "new_unit is required"
+	}
+	if n := len([]rune(req.OldUnit)); n > maxUnitRunes {
+		return fmt.Sprintf("old_unit exceeds %d characters", maxUnitRunes)
+	}
+	if n := len([]rune(req.NewUnit)); n > maxUnitRunes {
+		return fmt.Sprintf("new_unit exceeds %d characters", maxUnitRunes)
+	}
+	return ""
+}
+
 // decodeJSON decodes a JSON request body strictly: the body is capped at
 // maxBodyBytes via http.MaxBytesReader (T-09-04) and unknown fields are
 // rejected (RESEARCH Pitfall 12 — a typo like "catagory" must 400, not be

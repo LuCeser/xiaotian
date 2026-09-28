@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
@@ -27,13 +29,22 @@ import (
 // Error codes locked by the wire contract (Plan 09-01; the parent page and
 // e2e specs depend on these strings):
 //   - invalid_request: client sent a malformed/invalid body or query.
+//   - not_found:       the edit/rename/delete target does not exist (the
+//     script's stdout diagnostic rides as the message — Pitfall 2).
 //   - python_failed:   the Python subprocess layer failed (sentinel error).
 //   - internal:        unexpected server-side failure.
 const (
 	codeInvalidRequest = "invalid_request"
+	codeNotFound       = "not_found"
 	codePythonFailed   = "python_failed"
 	codeInternal       = "internal"
 )
+
+// maxStdoutDiagnosticRunes bounds the stdout diagnostic echoed to clients
+// in the not_found message (T-09-07: bounded command output only — no
+// stderr dumps, no stack traces). ~300 runes covers the script's
+// diagnostics with headroom while capping response size.
+const maxStdoutDiagnosticRunes = 300
 
 // handler is the api package's http.Handler. Dependencies arrive via
 // constructor DI (D-42): the pybridge Executor for the write path
@@ -58,7 +69,137 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, logger in
 	mux.HandleFunc("GET /words", h.listWords)
 	mux.HandleFunc("POST /words", h.addWords)
 	mux.HandleFunc("GET /units", h.listUnits)
+	mux.HandleFunc("PUT /words/{id}", h.editWord)
+	mux.HandleFunc("POST /units/rename", h.renameUnit)
 	return mux
+}
+
+// stdoutNotFoundMsg inspects the captured subprocess stdout for the
+// not-found diagnostics vocab_manager.py prints to STDOUT with exit 1
+// (Pitfall 2):
+//   - "Card 42 not found"            (cmd_edit / cmd_reset shape)
+//   - "No cards found with unit ..." (rename-unit / delete-words unit mode)
+//
+// On a match it returns the message for the not_found envelope, truncated
+// to maxStdoutDiagnosticRunes (T-09-07). Any other stdout (or empty)
+// reports false so the caller falls through to the sentinel mapping.
+func stdoutNotFoundMsg(stdout string) (string, bool) {
+	trimmed := strings.TrimSpace(stdout)
+	if trimmed == "" {
+		return "", false
+	}
+	if !strings.Contains(trimmed, "not found") &&
+		!strings.Contains(trimmed, "No cards found") {
+		return "", false
+	}
+	if runes := []rune(trimmed); len(runes) > maxStdoutDiagnosticRunes {
+		trimmed = string(runes[:maxStdoutDiagnosticRunes])
+	}
+	return trimmed, true
+}
+
+// mapBridgeError maps a pybridge Executor error onto the HTTP error
+// envelope (shared by the editWord / renameUnit / deleteWords mutation
+// handlers):
+//  1. ExitError (ErrPythonExit) whose Stdout carries a not-found diagnostic
+//     → 404 not_found with the truncated stdout text as the message —
+//     Pitfall 2 closed end-to-end (Plan 09-03 added ExitError.Stdout).
+//  2. Any of the four pybridge sentinels → 502 python_failed (T-09-07:
+//     code+message only, never raw stderr).
+//  3. Anything else → 500 internal.
+func (h *handler) mapBridgeError(w http.ResponseWriter, op string, err error) {
+	var exitErr *pybridge.ExitError
+	if errors.Is(err, pybridge.ErrPythonExit) && errors.As(err, &exitErr) {
+		if msg, ok := stdoutNotFoundMsg(exitErr.Stdout); ok {
+			writeError(w, http.StatusNotFound, codeNotFound, msg)
+			return
+		}
+	}
+	switch {
+	case errors.Is(err, pybridge.ErrPythonExit),
+		errors.Is(err, pybridge.ErrPythonTimeout),
+		errors.Is(err, pybridge.ErrPythonJSONParse),
+		errors.Is(err, pybridge.ErrPythonEmpty):
+		h.logger.Error(op+": python bridge failed",
+			infra.F("component", "web/api"),
+			infra.ErrField(err),
+		)
+		writeError(w, http.StatusBadGateway, codePythonFailed,
+			"operation failed, please retry")
+	default:
+		h.logger.Error(op+" failed",
+			infra.F("component", "web/api"),
+			infra.ErrField(err),
+		)
+		writeError(w, http.StatusInternalServerError, codeInternal,
+			"internal error")
+	}
+}
+
+// editWord handles PUT /words/{id} with body {"word", "meaning?",
+// "example?", "unit?"} (Plan 09-05). The id is parsed from the path
+// (non-numeric or non-positive → 400 invalid_request); the body decodes
+// strictly (a "category" key is an unknown field → 400, D-07 read-only).
+// Pointer fields map straight onto pybridge.EditOpts so nil stays nil (keep
+// the column) and provided-empty clears it (Plan 09-02 COALESCE contract).
+// Success responds 200 with the script's {"edited":{"id","word"}} payload.
+func (h *handler) editWord(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest,
+			"invalid word id")
+		return
+	}
+
+	var req EditRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if msg := validateEditRequest(&req); msg != "" {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, msg)
+		return
+	}
+
+	result, err := h.exec.RunEdit(r.Context(), pybridge.EditOpts{
+		ID:      id,
+		Word:    &req.Word,
+		Meaning: req.Meaning,
+		Example: req.Example,
+		Unit:    req.Unit,
+	})
+	if err != nil {
+		h.mapBridgeError(w, "edit word", err)
+		return
+	}
+	writeJSON(w, result)
+}
+
+// renameUnit handles POST /units/rename with body {"old_unit", "new_unit",
+// "category"} (Plan 09-05). It dispatches straight to
+// pybridge.RunRenameUnit; when the old unit matches no cards, the script's
+// stdout diagnostic surfaces as a 404 not_found via mapBridgeError
+// (Pitfall 2 end-to-end). Success responds 200 with the script's
+// {"renamed","from","to"} payload.
+func (h *handler) renameUnit(w http.ResponseWriter, r *http.Request) {
+	var req RenameRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if msg := validateRenameRequest(&req); msg != "" {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, msg)
+		return
+	}
+
+	result, err := h.exec.RunRenameUnit(r.Context(), pybridge.RenameUnitOpts{
+		OldUnit:  req.OldUnit,
+		NewUnit:  req.NewUnit,
+		Category: req.Category,
+	})
+	if err != nil {
+		h.mapBridgeError(w, "rename unit", err)
+		return
+	}
+	writeJSON(w, result)
 }
 
 // wordJSON is one element of the GET /words response array. Field tags
