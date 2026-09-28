@@ -446,7 +446,7 @@ Plans:
   3. Parent can configure FSRS parameters (difficulty, retention interval)
   4. Interface persists all changes to SQLite database
 
-**Plans**: 2/8 plans executed
+**Plans**: 4/8 plans executed
 
 Plans:
 **Wave 1**
@@ -457,7 +457,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1)*
 
 - [x] 09-03-PLAN.md — Bridge expansion: RunEdit/RunRenameUnit/RunDeleteWords + --confirm guarantee + ExitError.Stdout diagnostics (VOC-01, VOC-02, Pitfalls 1/2)
-- [ ] 09-04-PLAN.md — Unit reads: CardRepository.CountByUnit + GET /api/v1/units (VOC-02, D-12)
+- [x] 09-04-PLAN.md — Unit reads: CardRepository.CountByUnit + GET /api/v1/units (VOC-02, D-12)
 
 **Wave 3** *(blocked on Wave 2)*
 
@@ -548,7 +548,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8.4. Batch Answer Submission Workflow (INSERTED) | 0/0 | Not started | - |
 | 8.5. Automatic Grading and Analysis Reports (INSERTED) | 0/0 | Not started | - |
 | 8.6. Multi-User Session Isolation and Scaling (INSERTED) | 0/0 | Not started | - |
-| 9. Parent Vocabulary Management | 2/8 | In Progress|  |
+| 9. Parent Vocabulary Management | 4/8 | In Progress|  |
 | 10. Parent Feedback System | 0/0 | Not started | - |
 | 11. Error Handling & Resilience | 0/0 | Not started | - |
 | 12. End-to-End Validation | 0/0 | Not started | - |
