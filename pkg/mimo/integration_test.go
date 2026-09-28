@@ -63,6 +63,9 @@ func loadDotEnv(path string) {
 
 // getTestAPIKey retrieves the API key from environment or skips the test
 func getTestAPIKey(t *testing.T) string {
+	if testing.Short() {
+		t.Skip("live test requires real services; skipped in -short mode")
+	}
 	apiKey := os.Getenv("MIMO_API_KEY")
 	if apiKey == "" {
 		t.Skip("Skipping integration test: MIMO_API_KEY not set. Set MIMO_API_KEY environment variable to enable integration tests.")
@@ -275,7 +278,7 @@ func TestIntegration_SynthesizeStream_RealAPI(t *testing.T) {
 		BaseURL:    baseURL,
 		Timeout:    60 * time.Second,
 		MaxRetries: 3,
-		RetryDelay: 2 * time.Second,
+		RetryDelay: 1 * time.Millisecond,
 	}
 
 	logger := infra.NewNoOpLogger()
@@ -371,7 +374,7 @@ func TestIntegration_Transcribe_RealAPI(t *testing.T) {
 		BaseURL:    baseURL,
 		Timeout:    60 * time.Second,
 		MaxRetries: 3,
-		RetryDelay: 2 * time.Second,
+		RetryDelay: 1 * time.Millisecond,
 	}
 
 	logger := infra.NewNoOpLogger()
@@ -495,7 +498,7 @@ func TestIntegration_EndToEnd_RealAPI(t *testing.T) {
 		BaseURL:    baseURL,
 		Timeout:    60 * time.Second,
 		MaxRetries: 3,
-		RetryDelay: 2 * time.Second,
+		RetryDelay: 1 * time.Millisecond,
 	}
 
 	logger := infra.NewNoOpLogger()
@@ -574,7 +577,7 @@ func TestIntegration_ConcurrentRequests_RealAPI(t *testing.T) {
 		BaseURL:    baseURL,
 		Timeout:    60 * time.Second,
 		MaxRetries: 3,
-		RetryDelay: 2 * time.Second,
+		RetryDelay: 1 * time.Millisecond,
 	}
 
 	logger := infra.NewNoOpLogger()
