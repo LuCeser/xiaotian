@@ -29,6 +29,14 @@ type fakeExecutor struct {
 	addResult pybridge.AddResult
 	addErr    error
 	addCalls  []pybridge.AddOpts
+
+	editResult pybridge.EditResult
+	editErr    error
+	editCalls  []pybridge.EditOpts
+
+	renameResult pybridge.RenameUnitResult
+	renameErr    error
+	renameCalls  []pybridge.RenameUnitOpts
 }
 
 func (f *fakeExecutor) RunAdd(_ context.Context, opts pybridge.AddOpts) (pybridge.AddResult, error) {
@@ -52,12 +60,14 @@ func (f *fakeExecutor) RunUnlock(_ context.Context, _ pybridge.UnlockOpts) (pybr
 	return pybridge.UnlockResult{}, nil
 }
 
-func (f *fakeExecutor) RunEdit(_ context.Context, _ pybridge.EditOpts) (pybridge.EditResult, error) {
-	return pybridge.EditResult{}, nil
+func (f *fakeExecutor) RunEdit(_ context.Context, opts pybridge.EditOpts) (pybridge.EditResult, error) {
+	f.editCalls = append(f.editCalls, opts)
+	return f.editResult, f.editErr
 }
 
-func (f *fakeExecutor) RunRenameUnit(_ context.Context, _ pybridge.RenameUnitOpts) (pybridge.RenameUnitResult, error) {
-	return pybridge.RenameUnitResult{}, nil
+func (f *fakeExecutor) RunRenameUnit(_ context.Context, opts pybridge.RenameUnitOpts) (pybridge.RenameUnitResult, error) {
+	f.renameCalls = append(f.renameCalls, opts)
+	return f.renameResult, f.renameErr
 }
 
 func (f *fakeExecutor) RunDeleteWords(_ context.Context, _ pybridge.DeleteWordsOpts) (pybridge.DeleteWordsResult, error) {
@@ -439,4 +449,265 @@ func TestListUnits(t *testing.T) {
 			t.Errorf("units = %+v, want verbatim passthrough of %+v", resp.Units, repo.unitCounts)
 		}
 	})
+}
+
+func TestEditWord(t *testing.T) {
+	t.Run("full body maps pointer fields and echoes the edited card", func(t *testing.T) {
+		exec := &fakeExecutor{}
+		exec.editResult.Edited.ID = 42
+		exec.editResult.Edited.Word = "apple"
+		h := newTestHandler(exec, &fakeCardRepo{})
+
+		body := `{"word":"apple","meaning":"苹果","example":"I eat an apple.","unit":"L1"}`
+		req := httptest.NewRequest(http.MethodPut, "/words/42", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Edited struct {
+				ID   int64  `json:"id"`
+				Word string `json:"word"`
+			} `json:"edited"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+		}
+		if resp.Edited.ID != 42 || resp.Edited.Word != "apple" {
+			t.Errorf("response edited = %+v, want {42 apple}", resp.Edited)
+		}
+		if len(exec.editCalls) != 1 {
+			t.Fatalf("RunEdit calls = %d, want 1", len(exec.editCalls))
+		}
+		got := exec.editCalls[0]
+		if got.ID != 42 {
+			t.Errorf("EditOpts.ID = %d, want 42", got.ID)
+		}
+		if got.Word == nil || *got.Word != "apple" {
+			t.Errorf("EditOpts.Word = %v, want &\"apple\"", got.Word)
+		}
+		if got.Meaning == nil || *got.Meaning != "苹果" {
+			t.Errorf("EditOpts.Meaning = %v, want &\"苹果\"", got.Meaning)
+		}
+		if got.Example == nil || *got.Example != "I eat an apple." {
+			t.Errorf("EditOpts.Example = %v, want the example pointer", got.Example)
+		}
+		if got.Unit == nil || *got.Unit != "L1" {
+			t.Errorf("EditOpts.Unit = %v, want &\"L1\"", got.Unit)
+		}
+	})
+
+	t.Run("absent optional fields stay nil pointers", func(t *testing.T) {
+		exec := &fakeExecutor{}
+		h := newTestHandler(exec, &fakeCardRepo{})
+
+		req := httptest.NewRequest(http.MethodPut, "/words/7",
+			strings.NewReader(`{"word":"pear"}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if len(exec.editCalls) != 1 {
+			t.Fatalf("RunEdit calls = %d, want 1", len(exec.editCalls))
+		}
+		got := exec.editCalls[0]
+		if got.Word == nil || *got.Word != "pear" {
+			t.Errorf("EditOpts.Word = %v, want &\"pear\"", got.Word)
+		}
+		if got.Meaning != nil || got.Example != nil || got.Unit != nil {
+			t.Errorf("optional pointers = %v/%v/%v, want all nil (absent = keep column)",
+				got.Meaning, got.Example, got.Unit)
+		}
+	})
+
+	t.Run("missing word returns 400 invalid_request", func(t *testing.T) {
+		h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodPut, "/words/1",
+			strings.NewReader(`{"meaning":"x"}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+			t.Errorf("body = %s, want invalid_request error envelope", rec.Body.String())
+		}
+	})
+
+	t.Run("empty word returns 400 invalid_request", func(t *testing.T) {
+		h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodPut, "/words/1",
+			strings.NewReader(`{"word":""}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+			t.Errorf("body = %s, want invalid_request error envelope", rec.Body.String())
+		}
+	})
+
+	t.Run("non-numeric id returns 400 invalid_request", func(t *testing.T) {
+		h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodPut, "/words/abc",
+			strings.NewReader(`{"word":"x"}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for id abc", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+			t.Errorf("body = %s, want invalid_request error envelope", rec.Body.String())
+		}
+	})
+
+	t.Run("category key in body returns 400 (read-only per D-07)", func(t *testing.T) {
+		// DisallowUnknownFields must reject "category" outright — the edit
+		// scope never moves a card between categories (D-07).
+		h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodPut, "/words/1",
+			strings.NewReader(`{"word":"x","category":"english"}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for unknown field category", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+			t.Errorf("body = %s, want invalid_request error envelope", rec.Body.String())
+		}
+	})
+}
+
+func TestEditWordNotFound(t *testing.T) {
+	exec := &fakeExecutor{editErr: &pybridge.ExitError{
+		Cmd: "edit", ExitCode: 1, Stdout: "Card 42 not found", Err: pybridge.ErrPythonExit,
+	}}
+	h := newTestHandler(exec, &fakeCardRepo{})
+
+	req := httptest.NewRequest(http.MethodPut, "/words/42",
+		strings.NewReader(`{"word":"x"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"not_found"`) {
+		t.Errorf("body = %s, want not_found error envelope", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Card 42 not found") {
+		t.Errorf("body = %s, want the script stdout diagnostic as message", rec.Body.String())
+	}
+}
+
+func TestRenameUnit(t *testing.T) {
+	t.Run("valid body forwards three fields and echoes renamed/from/to", func(t *testing.T) {
+		exec := &fakeExecutor{renameResult: pybridge.RenameUnitResult{
+			Renamed: 2, From: "L1", To: "L2",
+		}}
+		h := newTestHandler(exec, &fakeCardRepo{})
+
+		req := httptest.NewRequest(http.MethodPost, "/units/rename",
+			strings.NewReader(`{"old_unit":"L1","new_unit":"L2","category":"english"}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Renamed int    `json:"renamed"`
+			From    string `json:"from"`
+			To      string `json:"to"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+		}
+		if resp.Renamed != 2 || resp.From != "L1" || resp.To != "L2" {
+			t.Errorf("response = %+v, want {2 L1 L2}", resp)
+		}
+		if len(exec.renameCalls) != 1 {
+			t.Fatalf("RunRenameUnit calls = %d, want 1", len(exec.renameCalls))
+		}
+		got := exec.renameCalls[0]
+		if got.OldUnit != "L1" || got.NewUnit != "L2" || got.Category != "english" {
+			t.Errorf("forwarded RenameUnitOpts = %+v, want {L1 L2 english}", got)
+		}
+	})
+
+	t.Run("missing field returns 400", func(t *testing.T) {
+		cases := map[string]string{
+			"old_unit":  `{"new_unit":"L2","category":"english"}`,
+			"new_unit":  `{"old_unit":"L1","category":"english"}`,
+			"category":  `{"old_unit":"L1","new_unit":"L2"}`,
+			"empty old": `{"old_unit":"","new_unit":"L2","category":"english"}`,
+		}
+		for name, body := range cases {
+			t.Run(name, func(t *testing.T) {
+				h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
+				req := httptest.NewRequest(http.MethodPost, "/units/rename",
+					strings.NewReader(body))
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("%s: status = %d, want 400 (body=%s)", name, rec.Code, rec.Body.String())
+				}
+				if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+					t.Errorf("%s: body = %s, want invalid_request envelope", name, rec.Body.String())
+				}
+			})
+		}
+	})
+
+	t.Run("no-cards stdout diagnostic maps to 404 not_found (Pitfall 2)", func(t *testing.T) {
+		exec := &fakeExecutor{renameErr: &pybridge.ExitError{
+			Cmd:      "rename-unit",
+			ExitCode: 1,
+			Stdout:   `No cards found with unit 'L1' in category 'english'`,
+			Err:      pybridge.ErrPythonExit,
+		}}
+		h := newTestHandler(exec, &fakeCardRepo{})
+
+		req := httptest.NewRequest(http.MethodPost, "/units/rename",
+			strings.NewReader(`{"old_unit":"L1","new_unit":"L2","category":"english"}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"not_found"`) {
+			t.Errorf("body = %s, want not_found error envelope", rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "No cards found with unit 'L1'") {
+			t.Errorf("body = %s, want the stdout diagnostic as message", rec.Body.String())
+		}
+	})
+}
+
+func TestRenameUnitPythonFailure(t *testing.T) {
+	exec := &fakeExecutor{renameErr: pybridge.ErrPythonTimeout}
+	h := newTestHandler(exec, &fakeCardRepo{})
+
+	req := httptest.NewRequest(http.MethodPost, "/units/rename",
+		strings.NewReader(`{"old_unit":"L1","new_unit":"L2","category":"english"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 for ErrPythonTimeout", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"python_failed"`) {
+		t.Errorf("body = %s, want python_failed error envelope", rec.Body.String())
+	}
 }
