@@ -217,7 +217,7 @@ func TestNewClient(t *testing.T) {
 			config: ClientConfig{
 				APIKey:     "test-api-key",
 				MaxRetries: 5,
-				RetryDelay: 2 * time.Second,
+				RetryDelay: 1 * time.Millisecond,
 			},
 			logger:  newTestLogger(),
 			wantErr: nil,

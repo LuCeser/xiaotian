@@ -92,7 +92,7 @@ func TestIntegration_Chat_RealAPI(t *testing.T) {
 		BaseURL:    getTestBaseURL(),
 		Timeout:    60 * time.Second,
 		MaxRetries: 2,
-		RetryDelay: 2 * time.Second,
+		RetryDelay: 1 * time.Millisecond,
 	}
 	client, err := NewClient(config, infra.NewNoOpLogger())
 	if err != nil {
@@ -143,7 +143,7 @@ func TestIntegration_Synthesize_RealAPI(t *testing.T) {
 		BaseURL:    baseURL,
 		Timeout:    60 * time.Second,
 		MaxRetries: 3,
-		RetryDelay: 2 * time.Second,
+		RetryDelay: 1 * time.Millisecond,
 	}
 
 	logger := infra.NewNoOpLogger()
