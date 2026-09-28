@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 09
 current_phase_name: parent-vocabulary-management
 status: executing
-stopped_at: Completed 09-04-PLAN.md
-last_updated: "2026-09-28T12:00:25.617Z"
+stopped_at: Completed 09-05-PLAN.md
+last_updated: "2026-09-28T14:54:37.346Z"
 last_activity: 2026-09-28
 last_activity_desc: Plan 09-01 complete
 progress:
   total_phases: 16
   completed_phases: 9
   total_plans: 51
-  completed_plans: 45
+  completed_plans: 46
 ---
 
 # Project State
@@ -28,12 +28,12 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 ## Current Position
 
 Phase: 09 (parent-vocabulary-management) — EXECUTING
-Plan: 5 of 7 complete
+Plan: 6 of 7 complete
 Status: Ready to execute
-Last activity: 2026-09-27 — Plan 09-01 complete
-Next: ①用户授权后 git commit（真实改动 20 修改+若干新增，排除调试产物；node_modules 需入 .gitignore）②补测 UAT 缺口：A2 掐表/A3 出声路径/A6-A8、B 儿童段（需儿童）、C4 中文词表（现库仅 7 英文词）、D1/D2+F（VPS）
+Last activity: 2026-09-28 — Plan 09-05 complete
+Next: ①执行 09-06（添加单词 UI：批量粘贴解析器 + 添加单词 双模式卡片）②随后 09-07（浏览/整理 + 学习设置 UI）③09-08 收尾 E2E；注意 VOC-01/02/03 待 09-06/07/08 SUMMARY 落地后才在 REQUIREMENTS.md 翻 Complete（shared-ID gate）
 
-Progress: [█████████░] 88%
+Progress: [█████████░] 90%
 
 ## Performance Metrics
 
@@ -78,6 +78,7 @@ Progress: [█████████░] 88%
 | Phase 09 P02 | 24min | 2 tasks | 2 files |
 | Phase 09 P03 | 26min | 2 tasks | 7 files |
 | Phase 09 P04 | 26min | 2 tasks | 4 files |
+| Phase 09 P05 | 16min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -109,6 +110,8 @@ Recent decisions affecting current work:
 - [Phase 09]: [Phase 09]: Plan 09-02: cmd_edit 在 commit 后重新 SELECT 打印更新后的 word，JSON 契约始终反映已提交状态 — 09-03 的 RunEdit 直接依赖该 JSON 的真实性；打印旧值会造成契约谎言
 - [Phase 09]: unitsResponse reuses database.UnitCount directly so the GET /units wire shape has one definition and cannot drift — Handler-local duplicate structs drift silently when the repo type changes; embedding the repo type keeps endpoint and repository in lockstep (Plan 09-04)
 - [Phase 09]: Plan 09-04 resume: interrupted Task 2 work adopted after diff review instead of rewritten; only its seed INSERT arg-count bug fixed — The partial work already mirrored listWords conventions and the plan test spec; rewriting would discard sound design and add churn (Plan 09-04)
+- [Phase 09]: [Phase 09]: Plan 09-05 mutation handlers share one mapBridgeError — vocab_manager.py stdout diagnostics ("Card N not found"/"No cards found") map to 404 not_found truncated to 300 runes; the four pybridge sentinels map to 502 python_failed — One mapping cannot drift per-handler; Pitfall 2 closes end-to-end at the API layer and T-09-07 keeps subprocess output bounded in the error envelope
+- [Phase 09]: [Phase 09]: Plan 09-05 fsrs_config.json written atomically (same-directory temp + Sync + os.Rename, failure removes temp and preserves original); FSRSSettings struct declaration order fixes on-disk key order — A half-written config would poison every future vocab_manager.py spawn (loader falls back wholesale); atomic replace + fixed key order keeps the Go writer key-for-key with the Python reader (D-14)
 
 ### Pending Todos
 
@@ -166,6 +169,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-28T12:00:25.602Z
-Stopped at: Completed 09-04-PLAN.md
+Last session: 2026-09-28T14:54:37.331Z
+Stopped at: Completed 09-05-PLAN.md
 Resume file: None
