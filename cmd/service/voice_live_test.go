@@ -37,6 +37,9 @@ import (
 // kept by that loader (LookupEnv).
 func liveAPIKey(t *testing.T) string {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("live test requires real services; skipped in -short mode")
+	}
 	if f, err := os.Open("../../.env"); err == nil {
 		defer f.Close()
 		scanner := bufio.NewScanner(f)
