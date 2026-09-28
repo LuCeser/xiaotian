@@ -190,6 +190,23 @@ func validateRenameRequest(req *RenameRequest) string {
 	return ""
 }
 
+// ValidateFSRSSettings enforces the locked D-13 two-knob ranges
+// (Plan 09-05): desired_retention ∈ [0.7, 0.95] and maximum_interval an
+// integer in [1, 36500]. Message shape copies infra FSRSConfig.Validate:
+// fail-fast, first offender named with its value, so the parent UI can
+// show exactly which knob was rejected.
+func ValidateFSRSSettings(s FSRSSettings) error {
+	if s.DesiredRetention < fsrsRetentionMin || s.DesiredRetention > fsrsRetentionMax {
+		return fmt.Errorf("desired_retention must be in [%v, %v], got %v",
+			fsrsRetentionMin, fsrsRetentionMax, s.DesiredRetention)
+	}
+	if s.MaximumInterval < fsrsIntervalMin || s.MaximumInterval > fsrsIntervalMax {
+		return fmt.Errorf("maximum_interval must be an integer in [%d, %d], got %d",
+			fsrsIntervalMin, fsrsIntervalMax, s.MaximumInterval)
+	}
+	return nil
+}
+
 // decodeJSON decodes a JSON request body strictly: the body is capped at
 // maxBodyBytes via http.MaxBytesReader (T-09-04) and unknown fields are
 // rejected (RESEARCH Pitfall 12 — a typo like "catagory" must 400, not be

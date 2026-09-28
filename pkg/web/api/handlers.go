@@ -48,22 +48,25 @@ const maxStdoutDiagnosticRunes = 300
 
 // handler is the api package's http.Handler. Dependencies arrive via
 // constructor DI (D-42): the pybridge Executor for the write path
-// (Python is the sole writer, ADR write-separation) and the
-// CardRepository for the read path (D-12: zero Python spawns on reads).
+// (Python is the sole writer, ADR write-separation), the CardRepository
+// for the read path (D-12: zero Python spawns on reads), and the
+// PythonConfig whose DataDir anchors the fsrs_config.json write path
+// (Plan 09-05 — config-derived, never user input, T-09-10).
 type handler struct {
 	exec   pybridge.Executor
 	cards  database.CardRepository
+	cfg    infra.PythonConfig
 	logger infra.Logger
 }
 
 // NewHandler builds the /api/v1 handler with its internal method-pattern
 // ServeMux. Logger may be nil (NewNoOpLogger is substituted, D-47) so
 // tests can construct the handler cheaply.
-func NewHandler(exec pybridge.Executor, cards database.CardRepository, logger infra.Logger) http.Handler {
+func NewHandler(exec pybridge.Executor, cards database.CardRepository, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}
-	h := &handler{exec: exec, cards: cards, logger: logger}
+	h := &handler{exec: exec, cards: cards, cfg: cfg, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /words", h.listWords)
@@ -72,6 +75,8 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, logger in
 	mux.HandleFunc("PUT /words/{id}", h.editWord)
 	mux.HandleFunc("POST /units/rename", h.renameUnit)
 	mux.HandleFunc("DELETE /words", h.deleteWords)
+	mux.HandleFunc("GET /settings/fsrs", h.getFSRS)
+	mux.HandleFunc("PUT /settings/fsrs", h.putFSRS)
 	return mux
 }
 

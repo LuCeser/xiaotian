@@ -114,7 +114,7 @@ func (f *fakeCardRepo) CountByUnit(_ context.Context, category string) ([]databa
 }
 
 func newTestHandler(exec pybridge.Executor, cards database.CardRepository) http.Handler {
-	return NewHandler(exec, cards, infra.NewNoOpLogger())
+	return NewHandler(exec, cards, infra.PythonConfig{}, infra.NewNoOpLogger())
 }
 
 func TestAddWords(t *testing.T) {

@@ -509,7 +509,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// lives inside pkg/web/api — future Phase 9 routes register in
 		// that package's internal mux, not in main.go.
 		publicMux.Handle("/api/v1/", http.StripPrefix("/api/v1",
-			api.NewHandler(pyBridge, cardRepo, logger)))
+			api.NewHandler(pyBridge, cardRepo, cfg.Python, logger)))
 		logger.Info("api v1 mounted",
 			infra.F("component", "infra.main"),
 			infra.F("route", "/api/v1/"),
