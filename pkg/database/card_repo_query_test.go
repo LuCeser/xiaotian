@@ -307,7 +307,7 @@ func TestCountByUnit_EmptyAndSingle(t *testing.T) {
 		}
 		if _, err := db.Exec(
 			"INSERT INTO cards (word, meaning, example, unit, category, fsrs_card) VALUES (?, ?, '', ?, ?, '')",
-			"solo", "唯一的词", "solo", "unitX", "english",
+			"solo", "唯一的词", "unitX", "english",
 		); err != nil {
 			t.Fatalf("seed solo card: %v", err)
 		}

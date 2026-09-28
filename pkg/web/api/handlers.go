@@ -57,6 +57,7 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, logger in
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /words", h.listWords)
 	mux.HandleFunc("POST /words", h.addWords)
+	mux.HandleFunc("GET /units", h.listUnits)
 	return mux
 }
 
@@ -208,4 +209,43 @@ func (h *handler) addWords(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, addResponse{Added: result.Added, Skipped: result.Skipped})
+}
+
+// unitsResponse is the GET /units response envelope. Elements reuse
+// database.UnitCount so the wire shape stays {"units":[{"unit":...,
+// "count":...}]} by construction — one definition, no drift.
+type unitsResponse struct {
+	Units []database.UnitCount `json:"units"`
+}
+
+// listUnits handles GET /units?category= (optional; empty = all categories
+// with the documented merge-by-name semantics from
+// CardRepository.CountByUnit). A non-empty category must pass the enum
+// check (D-06) or the request is rejected with 400 invalid_request (A5
+// log-and-reject). The read path goes straight to
+// CardRepository.CountByUnit — NO Python subprocess is spawned (D-12).
+// Ordering is the repository's ORDER BY unit, passed through untouched.
+func (h *handler) listUnits(w http.ResponseWriter, r *http.Request) {
+	category := r.URL.Query().Get("category")
+
+	if category != "" {
+		if err := ValidateCategory(category); err != nil {
+			writeError(w, http.StatusBadRequest, codeInvalidRequest,
+				"category must be \"english\" or \"chinese\"")
+			return
+		}
+	}
+
+	units, err := h.cards.CountByUnit(r.Context(), category)
+	if err != nil {
+		h.logger.Error("list units failed",
+			infra.F("component", "web/api"),
+			infra.ErrField(err),
+		)
+		writeError(w, http.StatusInternalServerError, codeInternal,
+			"failed to list units")
+		return
+	}
+
+	writeJSON(w, unitsResponse{Units: units})
 }

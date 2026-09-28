@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -64,14 +65,18 @@ func (f *fakeExecutor) RunDeleteWords(_ context.Context, _ pybridge.DeleteWordsO
 }
 
 // fakeCardRepo is a manual fake for database.CardRepository that captures
-// the received filter and returns a canned slice.
+// the received filter and returns a canned slice. CountByUnit captures the
+// requested category and returns the canned unitCounts (Plan 09-04).
 type fakeCardRepo struct {
-	cards     []database.Card
-	listErr   error
-	filters   []database.CardFilter
-	getErr    error
-	byUnit    []database.Card
-	unitsSeen []string
+	cards      []database.Card
+	listErr    error
+	filters    []database.CardFilter
+	getErr     error
+	byUnit     []database.Card
+	unitsSeen  []string
+	unitCounts []database.UnitCount
+	countErr   error
+	countsSeen []string
 }
 
 func (f *fakeCardRepo) GetByID(_ context.Context, _ int64) (database.Card, error) {
@@ -86,6 +91,11 @@ func (f *fakeCardRepo) ListByUnit(_ context.Context, unit string) ([]database.Ca
 func (f *fakeCardRepo) List(_ context.Context, filter database.CardFilter) ([]database.Card, error) {
 	f.filters = append(f.filters, filter)
 	return f.cards, f.listErr
+}
+
+func (f *fakeCardRepo) CountByUnit(_ context.Context, category string) ([]database.UnitCount, error) {
+	f.countsSeen = append(f.countsSeen, category)
+	return f.unitCounts, f.countErr
 }
 
 func newTestHandler(exec pybridge.Executor, cards database.CardRepository) http.Handler {
@@ -329,6 +339,104 @@ func TestListWords(t *testing.T) {
 		}
 		if !strings.Contains(rec.Body.String(), `"code":"internal"`) {
 			t.Errorf("body = %s, want internal error envelope", rec.Body.String())
+		}
+	})
+}
+
+func TestListUnits(t *testing.T) {
+	t.Run("no category forwards empty string and returns units envelope", func(t *testing.T) {
+		repo := &fakeCardRepo{unitCounts: []database.UnitCount{
+			{Unit: "unitA", Count: 3},
+			{Unit: "unitB", Count: 2},
+		}}
+		h := newTestHandler(&fakeExecutor{}, repo)
+
+		req := httptest.NewRequest(http.MethodGet, "/units", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if len(repo.countsSeen) != 1 || repo.countsSeen[0] != "" {
+			t.Fatalf("CountByUnit received %v, want exactly one call with empty category", repo.countsSeen)
+		}
+		var resp struct {
+			Units []struct {
+				Unit  string `json:"unit"`
+				Count int    `json:"count"`
+			} `json:"units"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+		}
+		if len(resp.Units) != 2 {
+			t.Fatalf("units length = %d, want 2", len(resp.Units))
+		}
+		if resp.Units[0].Unit != "unitA" || resp.Units[0].Count != 3 ||
+			resp.Units[1].Unit != "unitB" || resp.Units[1].Count != 2 {
+			t.Errorf("units = %+v, want the canned UnitCount rows", resp.Units)
+		}
+	})
+
+	t.Run("category=chinese forwards the category to the repo", func(t *testing.T) {
+		repo := &fakeCardRepo{unitCounts: []database.UnitCount{
+			{Unit: "unitA", Count: 1},
+		}}
+		h := newTestHandler(&fakeExecutor{}, repo)
+
+		req := httptest.NewRequest(http.MethodGet, "/units?category=chinese", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if len(repo.countsSeen) != 1 || repo.countsSeen[0] != "chinese" {
+			t.Fatalf("CountByUnit received %v, want exactly one call with category chinese", repo.countsSeen)
+		}
+	})
+
+	t.Run("unknown category returns 400 invalid_request", func(t *testing.T) {
+		h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodGet, "/units?category=francais", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for category %q", rec.Code, "francais")
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+			t.Errorf("body = %s, want invalid_request error envelope", rec.Body.String())
+		}
+	})
+
+	t.Run("ordering is passed through from the canned sorted data", func(t *testing.T) {
+		// Canned data is already ORDER BY unit ascending, mirroring the
+		// real repository contract — the handler must not reorder or drop.
+		repo := &fakeCardRepo{unitCounts: []database.UnitCount{
+			{Unit: "", Count: 2},
+			{Unit: "alpha", Count: 1},
+			{Unit: "beta", Count: 5},
+			{Unit: "zeta", Count: 3},
+		}}
+		h := newTestHandler(&fakeExecutor{}, repo)
+
+		req := httptest.NewRequest(http.MethodGet, "/units?category=english", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Units []database.UnitCount `json:"units"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+		}
+		if !reflect.DeepEqual(resp.Units, repo.unitCounts) {
+			t.Errorf("units = %+v, want verbatim passthrough of %+v", resp.Units, repo.unitCounts)
 		}
 	})
 }
