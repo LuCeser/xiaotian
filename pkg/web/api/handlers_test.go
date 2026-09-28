@@ -37,6 +37,10 @@ type fakeExecutor struct {
 	renameResult pybridge.RenameUnitResult
 	renameErr    error
 	renameCalls  []pybridge.RenameUnitOpts
+
+	deleteResult pybridge.DeleteWordsResult
+	deleteErr    error
+	deleteCalls  []pybridge.DeleteWordsOpts
 }
 
 func (f *fakeExecutor) RunAdd(_ context.Context, opts pybridge.AddOpts) (pybridge.AddResult, error) {
@@ -70,8 +74,9 @@ func (f *fakeExecutor) RunRenameUnit(_ context.Context, opts pybridge.RenameUnit
 	return f.renameResult, f.renameErr
 }
 
-func (f *fakeExecutor) RunDeleteWords(_ context.Context, _ pybridge.DeleteWordsOpts) (pybridge.DeleteWordsResult, error) {
-	return pybridge.DeleteWordsResult{}, nil
+func (f *fakeExecutor) RunDeleteWords(_ context.Context, opts pybridge.DeleteWordsOpts) (pybridge.DeleteWordsResult, error) {
+	f.deleteCalls = append(f.deleteCalls, opts)
+	return f.deleteResult, f.deleteErr
 }
 
 // fakeCardRepo is a manual fake for database.CardRepository that captures
@@ -706,6 +711,134 @@ func TestRenameUnitPythonFailure(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 for ErrPythonTimeout", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"python_failed"`) {
+		t.Errorf("body = %s, want python_failed error envelope", rec.Body.String())
+	}
+}
+
+func TestDeleteWordsByWordList(t *testing.T) {
+	exec := &fakeExecutor{deleteResult: pybridge.DeleteWordsResult{Deleted: 2}}
+	h := newTestHandler(exec, &fakeCardRepo{})
+
+	req := httptest.NewRequest(http.MethodDelete, "/words",
+		strings.NewReader(`{"category":"english","words":["a","b"]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Deleted int `json:"deleted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+	}
+	if resp.Deleted != 2 {
+		t.Errorf("deleted = %d, want 2 (fake passthrough)", resp.Deleted)
+	}
+	if len(exec.deleteCalls) != 1 {
+		t.Fatalf("RunDeleteWords calls = %d, want 1", len(exec.deleteCalls))
+	}
+	got := exec.deleteCalls[0]
+	if len(got.Words) != 2 || got.Words[0] != "a" || got.Words[1] != "b" {
+		t.Errorf("forwarded Words = %v, want [a b]", got.Words)
+	}
+	if got.Category != "english" {
+		t.Errorf("forwarded Category = %q, want english", got.Category)
+	}
+	if got.Unit != "" {
+		t.Errorf("forwarded Unit = %q, want empty in word-list mode", got.Unit)
+	}
+}
+
+func TestDeleteWordsByUnit(t *testing.T) {
+	exec := &fakeExecutor{deleteResult: pybridge.DeleteWordsResult{Deleted: 5}}
+	h := newTestHandler(exec, &fakeCardRepo{})
+
+	req := httptest.NewRequest(http.MethodDelete, "/words",
+		strings.NewReader(`{"category":"english","unit":"u1"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if len(exec.deleteCalls) != 1 {
+		t.Fatalf("RunDeleteWords calls = %d, want 1", len(exec.deleteCalls))
+	}
+	got := exec.deleteCalls[0]
+	if got.Unit != "u1" {
+		t.Errorf("forwarded Unit = %q, want u1 (unit mode)", got.Unit)
+	}
+	if len(got.Words) != 0 {
+		t.Errorf("forwarded Words = %v, want empty in unit mode", got.Words)
+	}
+}
+
+func TestDeleteWordsValidation(t *testing.T) {
+	cases := map[string]string{
+		"both targets":      `{"category":"english","words":["a"],"unit":"u1"}`,
+		"neither target":    `{"category":"english"}`,
+		"missing category":  `{"words":["a"]}`,
+		"unknown category":  `{"category":"francais","words":["a"]}`,
+		"empty words array": `{"category":"english","words":[]}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
+			req := httptest.NewRequest(http.MethodDelete, "/words",
+				strings.NewReader(body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("%s: status = %d, want 400 (body=%s)", name, rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+				t.Errorf("%s: body = %s, want invalid_request envelope", name, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("101 words returns 400", func(t *testing.T) {
+		var sb strings.Builder
+		sb.WriteString(`{"category":"english","words":[`)
+		for i := 0; i < 101; i++ {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(`"w"`)
+		}
+		sb.WriteString(`]}`)
+		h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodDelete, "/words", strings.NewReader(sb.String()))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for 101 words", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+			t.Errorf("body = %s, want invalid_request envelope", rec.Body.String())
+		}
+	})
+}
+
+func TestDeleteWordsPythonFailure(t *testing.T) {
+	exec := &fakeExecutor{deleteErr: &pybridge.ExitError{
+		Cmd: "delete-words", ExitCode: 1, Stderr: "boom", Err: pybridge.ErrPythonExit,
+	}}
+	h := newTestHandler(exec, &fakeCardRepo{})
+
+	req := httptest.NewRequest(http.MethodDelete, "/words",
+		strings.NewReader(`{"category":"english","words":["a"]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 for ExitError", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), `"code":"python_failed"`) {
 		t.Errorf("body = %s, want python_failed error envelope", rec.Body.String())
