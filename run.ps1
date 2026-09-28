@@ -88,5 +88,6 @@ $logPath = Join-Path $root 'server.log'
 Write-Host "[run.ps1] building service (incremental)..." -ForegroundColor Cyan
 go build -o .\bin\service.exe .\cmd\service
 if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: build failed" -ForegroundColor Red; exit 1 }
+Write-Host "[run.ps1] iPad URL: http://<host-LAN-IP>:8080/test-interface.html" -ForegroundColor Cyan
 Write-Host "[run.ps1] starting: .\bin\service.exe -config config.yaml  (tee -> server.log)" -ForegroundColor Cyan
 .\bin\service.exe -config config.yaml 2>&1 | Tee-Object -FilePath $logPath
