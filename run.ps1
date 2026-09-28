@@ -85,6 +85,8 @@ if ($listeners.Count -gt 0) {
 # at each start so server.log reflects only the current instance.
 $logPath = Join-Path $root 'server.log'
 "" | Set-Content $logPath -ErrorAction SilentlyContinue
-Write-Host "[run.ps1] starting: go run ./cmd/service -config config.yaml  (tee -> server.log)" -ForegroundColor Cyan
-Write-Host "[run.ps1] iPad URL: http://<host-LAN-IP>:8080/test-interface.html" -ForegroundColor Cyan
-go run ./cmd/service -config config.yaml 2>&1 | Tee-Object -FilePath $logPath
+Write-Host "[run.ps1] building service (incremental)..." -ForegroundColor Cyan
+go build -o .\bin\service.exe .\cmd\service
+if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: build failed" -ForegroundColor Red; exit 1 }
+Write-Host "[run.ps1] starting: .\bin\service.exe -config config.yaml  (tee -> server.log)" -ForegroundColor Cyan
+.\bin\service.exe -config config.yaml 2>&1 | Tee-Object -FilePath $logPath
