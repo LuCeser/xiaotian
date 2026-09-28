@@ -71,6 +71,7 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, logger in
 	mux.HandleFunc("GET /units", h.listUnits)
 	mux.HandleFunc("PUT /words/{id}", h.editWord)
 	mux.HandleFunc("POST /units/rename", h.renameUnit)
+	mux.HandleFunc("DELETE /words", h.deleteWords)
 	return mux
 }
 
@@ -197,6 +198,37 @@ func (h *handler) renameUnit(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.mapBridgeError(w, "rename unit", err)
+		return
+	}
+	writeJSON(w, result)
+}
+
+// deleteWords handles DELETE /words with body {"words": [...]} XOR
+// {"unit": ...} plus required {"category"} (Plan 09-05). The handler
+// performs NO preview/dry-run logic of any kind: confirmation is entirely
+// client-side (Plan 09-07's count-showing dialog), and this API is ALWAYS
+// the confirmed path — RunDeleteWords dispatches to a deleteWordsArgs
+// invocation that carries --confirm unconditionally (Plan 09-03 structural
+// guarantee, Pitfall 1). XOR target validation happens in
+// validateDeleteRequest (400 invalid_request) before any bridge call.
+// Success responds 200 with the script's {"deleted": N} payload.
+func (h *handler) deleteWords(w http.ResponseWriter, r *http.Request) {
+	var req DeleteRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if msg := validateDeleteRequest(&req); msg != "" {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, msg)
+		return
+	}
+
+	result, err := h.exec.RunDeleteWords(r.Context(), pybridge.DeleteWordsOpts{
+		Words:    req.Words,
+		Unit:     req.Unit,
+		Category: req.Category,
+	})
+	if err != nil {
+		h.mapBridgeError(w, "delete words", err)
 		return
 	}
 	writeJSON(w, result)

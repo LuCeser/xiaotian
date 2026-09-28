@@ -90,6 +90,55 @@ type RenameRequest struct {
 	Category string `json:"category"`
 }
 
+// DeleteRequest is the decoded DELETE /words body shape (Plan 09-05).
+// Exactly one target must be set — Words (explicit word list) XOR Unit
+// (whole unit) — mirroring the script's mutually-exclusive argparse group
+// and deleteWordsArgs' builder-level XOR rule. Category is always required
+// (an empty --category would override the script's "english" default and
+// silently match nothing — a misleading success for a destructive op).
+type DeleteRequest struct {
+	Words    []string `json:"words"`
+	Unit     string   `json:"unit"`
+	Category string   `json:"category"`
+}
+
+// validateDeleteRequest enforces the delete-path contract: category
+// required and enum-checked, exactly one of Words (1..maxEntries items,
+// each ≤ maxWordRunes) or Unit (≤ maxUnitRunes). Returns "" on success or
+// the error message naming the offending condition.
+func validateDeleteRequest(req *DeleteRequest) string {
+	if err := ValidateCategory(req.Category); err != nil {
+		return "category must be \"english\" or \"chinese\""
+	}
+	hasWords := len(req.Words) > 0
+	hasUnit := req.Unit != ""
+	if hasWords && hasUnit {
+		return "words and unit are mutually exclusive: set exactly one target"
+	}
+	if !hasWords && !hasUnit {
+		return "exactly one target is required: words (non-empty list) or unit"
+	}
+	if hasUnit {
+		if n := len([]rune(req.Unit)); n > maxUnitRunes {
+			return fmt.Sprintf("unit exceeds %d characters", maxUnitRunes)
+		}
+		return ""
+	}
+	if len(req.Words) > maxEntries {
+		return fmt.Sprintf("words must contain at most %d items, got %d",
+			maxEntries, len(req.Words))
+	}
+	for i, word := range req.Words {
+		if word == "" {
+			return fmt.Sprintf("words[%d] must not be empty", i)
+		}
+		if n := len([]rune(word)); n > maxWordRunes {
+			return fmt.Sprintf("words[%d] exceeds %d characters", i, maxWordRunes)
+		}
+	}
+	return ""
+}
+
 // validateEditRequest enforces the edit-path caps (Plan 09-05): word
 // required and ≤ maxWordRunes; each PROVIDED optional field within its cap
 // (an absent pointer is not checked — it means "keep the column"). Returns
