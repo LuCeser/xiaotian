@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 09
 current_phase_name: parent-vocabulary-management
 status: executing
-stopped_at: Completed 09-03-PLAN.md
-last_updated: "2026-09-27T11:16:27.092Z"
+stopped_at: Completed 09-04-PLAN.md
+last_updated: "2026-09-28T12:00:25.617Z"
 last_activity: 2026-09-27
 last_activity_desc: Plan 09-01 complete
 progress:
   total_phases: 16
   completed_phases: 9
   total_plans: 51
-  completed_plans: 43
+  completed_plans: 45
 ---
 
 # Project State
@@ -28,12 +28,12 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 ## Current Position
 
 Phase: 09 (parent-vocabulary-management) — EXECUTING
-Plan: 4 of 7 complete
+Plan: 5 of 7 complete
 Status: Ready to execute
 Last activity: 2026-09-27 — Plan 09-01 complete
 Next: ①用户授权后 git commit（真实改动 20 修改+若干新增，排除调试产物；node_modules 需入 .gitignore）②补测 UAT 缺口：A2 掐表/A3 出声路径/A6-A8、B 儿童段（需儿童）、C4 中文词表（现库仅 7 英文词）、D1/D2+F（VPS）
 
-Progress: [████████░░] 84%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -77,6 +77,7 @@ Progress: [████████░░] 84%
 | Phase 09 P01 | 39min | 2 tasks | 22 files |
 | Phase 09 P02 | 24min | 2 tasks | 2 files |
 | Phase 09 P03 | 26min | 2 tasks | 7 files |
+| Phase 09 P04 | 26min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -106,6 +107,8 @@ Recent decisions affecting current work:
 - [Phase 09]: [Phase 09]: Plan 09-02: fsrs_config 加载器对缺失/非法 KEY 做整文件失效处理（两个旋钮一起回退默认），绝不做部分配置——与 plan 的 any-failure 语义一致 — 部分配置会让回退语义变得难推理；计划文本明确要求 any failure 时用完整默认值构造 Scheduler
 - [Phase 09]: [Phase 09]: Plan 09-02: loader 的 Warning 在模块导入时打到 stdout（先于命令 JSON），bridge 的 extractTrailingJSON 天然容忍——已由完整 py-e2e 套件验证而非假设 — Pitfall 9：损坏的 fsrs_config.json 不得弄垮学生听写路径；Warning+回退是唯一安全出口
 - [Phase 09]: [Phase 09]: Plan 09-02: cmd_edit 在 commit 后重新 SELECT 打印更新后的 word，JSON 契约始终反映已提交状态 — 09-03 的 RunEdit 直接依赖该 JSON 的真实性；打印旧值会造成契约谎言
+- [Phase 09]: unitsResponse reuses database.UnitCount directly so the GET /units wire shape has one definition and cannot drift — Handler-local duplicate structs drift silently when the repo type changes; embedding the repo type keeps endpoint and repository in lockstep (Plan 09-04)
+- [Phase 09]: Plan 09-04 resume: interrupted Task 2 work adopted after diff review instead of rewritten; only its seed INSERT arg-count bug fixed — The partial work already mirrored listWords conventions and the plan test spec; rewriting would discard sound design and add churn (Plan 09-04)
 
 ### Pending Todos
 
@@ -162,6 +165,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-27T11:16:27.078Z
-Stopped at: Completed 09-03-PLAN.md
+Last session: 2026-09-28T12:00:25.602Z
+Stopped at: Completed 09-04-PLAN.md
 Resume file: None
