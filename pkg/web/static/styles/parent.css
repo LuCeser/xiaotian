@@ -4,7 +4,8 @@
  * parent page is a neutral management tool (flat background, calm cards).
  *
  * Mobile-first (min-width media queries, same convention as main.css).
- * The >=1024px two-column grid arrives in Plan 09-07.
+ * Plan 09-07 adds the browse toolbar/unit-groups/modal/skeleton styles
+ * and the >=1024px two-column grid (D-03).
  */
 
 :root {
@@ -237,8 +238,9 @@ body {
 
 .word-row {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   min-height: 48px;
   padding: 8px 0;
   border-bottom: 1px solid var(--border);
@@ -252,16 +254,21 @@ body {
   font-weight: 600;
 }
 
+/* Mobile: meaning wraps to its own line under the word (UI-SPEC
+   Responsive Behavior <768px row); >=768px single line. */
 .word-meaning {
+  flex-basis: 100%;
+  order: 5;
   color: var(--muted);
   overflow-wrap: anywhere;
 }
 
-.word-unit {
-  font-size: 14px;
-  color: var(--muted);
-  margin-left: auto;
-  white-space: nowrap;
+@media (min-width: 768px) {
+  .word-meaning {
+    flex-basis: auto;
+    order: 0;
+    flex: 1 1 auto;
+  }
 }
 
 .badge {
@@ -513,8 +520,271 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
-/* >=1024px two-column grid arrives in Plan 09-07 (tracer is single    */
-/* column). Reduced-motion handling for consistency with main.css.     */
+/* Browse toolbar (Plan 09-07): search with ✕ clear + category pills.  */
+/* Mobile-first: toolbar stacks; >=768px one row.                      */
+/* ------------------------------------------------------------------ */
+
+.browse-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.search-box {
+  position: relative;
+  display: flex;
+}
+
+.search-input {
+  flex: 1;
+  width: 100%;
+  min-height: 48px; /* 44px ✕ button fits inside */
+  padding: 8px 52px 8px 12px;
+  font-size: 16px;
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.search-clear {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.search-clear[hidden] {
+  display: none;
+}
+
+.category-pills {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pill {
+  min-height: 44px;
+  padding: 8px 16px;
+  font-size: 16px;
+  font-family: inherit;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.pill.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ */
+/* Unit groups (Plan 09-07): 48px aria-expanded header row + word rows */
+/* ------------------------------------------------------------------ */
+
+.unit-group {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 12px;
+}
+
+.unit-group:last-child {
+  margin-bottom: 0;
+}
+
+.unit-header {
+  display: flex;
+  align-items: center;
+}
+
+/* The toggle is the 48px aria-expanded button; the 重命名/删除 actions
+   (Plan 09-07 Task 2) are SIBLING buttons — nested buttons are invalid
+   HTML and break the accessibility tree. */
+.unit-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 4px 8px 4px 12px;
+  background: none;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  touch-action: manipulation;
+}
+
+.unit-chevron {
+  flex: 0 0 auto;
+  width: 1em;
+  color: var(--muted);
+}
+
+.unit-name {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unit-count {
+  flex: 0 0 auto;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--muted);
+  background: var(--background);
+  padding: 0 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.unit-body {
+  padding: 0 12px 8px;
+}
+
+.unit-body[hidden] {
+  display: none;
+}
+
+/* Inline row action (编辑; Plan 09-07 Task 2 adds 删除) — 44px hit
+   area via padding, accent text, no border (UI-SPEC Button — inline). */
+.row-actions {
+  margin-left: auto;
+  display: flex;
+}
+
+.row-action {
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 16px;
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 44px;
+  padding: 8px;
+  touch-action: manipulation;
+}
+
+/* ------------------------------------------------------------------ */
+/* Browse states (Plan 09-07): skeleton shimmer rows, empty/no-match   */
+/* copy, load-failure banner.                                          */
+/* ------------------------------------------------------------------ */
+
+.skeleton-row {
+  height: 48px;
+  margin: 8px 0;
+  border-radius: 12px;
+  background: linear-gradient(90deg, #eef1f5 25%, #e3e8ee 37%, #eef1f5 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.2s ease infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+
+.list-empty-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 16px 0 0;
+}
+
+.list-empty-hint {
+  font-size: 14px;
+  color: var(--muted);
+  margin: 4px 0 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Modal (Plan 09-07): centered, max-width 480px, overlay              */
+/* rgba(0,0,0,0.4); fade <=200ms; reduced-motion handled globally.     */
+/* ------------------------------------------------------------------ */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 300;
+  animation: modal-fade 160ms ease-out;
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  max-width: 480px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.modal-title {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0 0 16px;
+}
+
+.modal-message {
+  margin: 0 0 16px;
+  overflow-wrap: anywhere;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+@keyframes modal-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* >=1024px two-column grid (D-03) arrives in Plan 09-07 Task 3.       */
+/* Reduced-motion handling for consistency with main.css.              */
 /* ------------------------------------------------------------------ */
 
 @media (prefers-reduced-motion: reduce) {

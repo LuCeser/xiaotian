@@ -1,6 +1,6 @@
 /**
  * @file Parent Vocabulary Management — application entry point
- *       (Phase 9, Plans 01 + 06).
+ *       (Phase 9, Plans 01 + 06 + 07).
  *
  * Loaded with `defer` from parent.html after parent-batch-parser.js,
  * parent-modes.js and parent-browse.js so every constructor is available
@@ -9,15 +9,18 @@
  * Responsibilities:
  *   1. Provide the fetchJSON wrapper: AbortController timeout +
  *      normalization of the {"error":{code,message}} envelope into a
- *      thrown Error carrying the message.
+ *      thrown Error carrying the message (error.code rides along so the
+ *      browse modals can special-case not_found — Pitfall 2).
  *   2. Mount AddCard into #add-form-container (添加单词 card: 单个添加 |
  *      批量添加 tabs, Plan 09-06 D-10).
- *   3. Mount WordList into #word-list-container (浏览词库).
+ *   3. Mount BrowseView into #word-list-container (浏览词库: toolbar +
+ *      unit groups + edit/rename/delete modals, Plan 09-07).
  *   4. Populate the SHARED 单元 datalist (#unit-options) from
- *      GET /api/v1/units — on init (all categories) and whenever an
- *      add-form category radio changes (scoped to that category).
- *   5. After a successful add (single OR batch), refresh the browse list
- *      and the datalist so new words/units appear without a page reload.
+ *      GET /api/v1/units — on init (all categories), whenever an
+ *      add-form category radio changes, and for the edit modal's
+ *      单元 suggestions scoped to the edited word's category.
+ *   5. After a successful add OR mutation, refresh the browse view and
+ *      the datalist so changes appear without a page reload.
  */
 
 (function parentAppEntry() {
@@ -26,8 +29,8 @@
   // ------------------------------------------------------------------
   // Dependency availability checks (graceful degradation, app.js pattern)
   // ------------------------------------------------------------------
-  if (!window.AddCard || !window.WordList) {
-    console.error('[parent-app] AddCard/WordList unavailable — component scripts did not load.');
+  if (!window.AddCard || !window.BrowseView) {
+    console.error('[parent-app] AddCard/BrowseView unavailable — component scripts did not load.');
     return;
   }
 
@@ -46,7 +49,8 @@
    *   - Aborts via AbortController after REQUEST_TIMEOUT_MS.
    *   - Parses the JSON body; normalizes the {"error":{code,message}}
    *     envelope into a thrown Error carrying error.message (so toast copy
-   *     can surface the backend message directly, Pitfall 2).
+   *     can surface the backend message directly, Pitfall 2) and
+   *     error.code (not_found handling in the browse modals).
    *   - Resolves with the parsed body on 2xx (null for an empty body).
    */
   function fetchJSON(method, url, body) {
@@ -98,8 +102,9 @@
 
   // ------------------------------------------------------------------
   // Shared 单元 datalist: GET /api/v1/units?category=<selected> on init
-  // (all categories — both forms start with no selection, D-06) and on
-  // every add-form category radio change. Both add forms share the ONE
+  // (all categories — both forms start with no selection, D-06), on
+  // every add-form category radio change, and for the edit modal's
+  // suggestions. Both add forms AND the edit modal share the ONE
   // datalist element; option values are plain unit names (textContent
   // only, Pitfall 10). The empty-string unit row (words with no unit)
   // carries nothing to suggest and is skipped.
@@ -134,14 +139,51 @@
   }
 
   // ------------------------------------------------------------------
-  // Component wiring: browse list + tabbed add card, connected by the
-  // refresh hook so a successful add updates the list without a reload.
+  // Component wiring: browse view + tabbed add card, connected by the
+  // refresh hooks so a successful add or mutation updates the page
+  // without a reload.
   // ------------------------------------------------------------------
-  var wordList = new window.WordList(browseContainer, {
-    fetchWords: function () {
-      return fetchJSON('GET', '/api/v1/words').then(function (data) {
+  var browse = new window.BrowseView(browseContainer, {
+    fetchWords: function (category, q) {
+      var params = [];
+      if (category) {
+        params.push('category=' + encodeURIComponent(category));
+      }
+      if (q) {
+        params.push('q=' + encodeURIComponent(q));
+      }
+      var url = '/api/v1/words' + (params.length ? '?' + params.join('&') : '');
+      return fetchJSON('GET', url).then(function (data) {
         return (data && Array.isArray(data.words)) ? data.words : [];
       });
+    },
+    fetchUnits: function (category) {
+      var url = '/api/v1/units' +
+        (category ? ('?category=' + encodeURIComponent(category)) : '');
+      return fetchJSON('GET', url).then(function (data) {
+        return (data && Array.isArray(data.units)) ? data.units : [];
+      });
+    },
+    editWord: function (id, payload) {
+      return fetchJSON('PUT', '/api/v1/words/' + encodeURIComponent(id), payload);
+    },
+    renameUnit: function (oldUnit, newUnit, category) {
+      return fetchJSON('POST', '/api/v1/units/rename', {
+        old_unit: oldUnit,
+        new_unit: newUnit,
+        category: category,
+      });
+    },
+    deleteWords: function (payload) {
+      return fetchJSON('DELETE', '/api/v1/words', payload);
+    },
+    onMutated: function () {
+      // Edit/rename/delete can change which units exist — keep the add
+      // forms' unit suggestions in sync.
+      refreshUnitOptions(selectedCategory);
+    },
+    onUnitSuggestions: function (category) {
+      refreshUnitOptions(category);
     },
   });
 
@@ -156,7 +198,7 @@
         });
     },
     onCommitted: function () {
-      wordList.refresh();
+      browse.refresh();
       refreshUnitOptions(selectedCategory);
     },
     onCategoryChange: function (category) {
@@ -164,14 +206,14 @@
     },
   });
 
-  // Initial render: browse list + all-category unit suggestions.
-  wordList.refresh();
+  // Initial render: browse view + all-category unit suggestions.
+  browse.refresh();
   refreshUnitOptions('');
 
   // Debug exposure (app.js window.__app convention).
   window.__parentApp = {
     addCard: addCard,
-    wordList: wordList,
+    browse: browse,
     fetchJSON: fetchJSON,
     refreshUnitOptions: refreshUnitOptions,
   };

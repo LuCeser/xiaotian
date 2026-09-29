@@ -20,7 +20,7 @@
   <meta name="theme-color" content="#f5f7fa">
   <meta name="description" content="单词库管理 — 添加、整理孩子的听写词库">
   <title>单词库管理</title>
-  <link rel="stylesheet" href="styles/parent.css?v=20260928">
+  <link rel="stylesheet" href="styles/parent.css?v=20260929">
 </head>
 <body>
   <!-- Skip to main content link for accessibility (mirrors index.html) -->
@@ -74,13 +74,14 @@
       js/parent-modes.js        → window.SingleAddForm/BatchAddForm/AddCard
                                   (添加单词 card components; AddCard reads
                                   window.parseBatch when 解析并预览 is clicked)
-      js/parent-browse.js       → window.WordList (浏览词库 list component)
+      js/parent-browse.js       → window.BrowseView (浏览词库: toolbar +
+                                  unit groups + edit/rename/delete modals)
       js/parent-app.js          → wires them together (entry, fetchJSON,
                                   unit datalist population)
   -->
-  <script src="js/parent-batch-parser.js?v=20260928" defer></script>
-  <script src="js/parent-modes.js?v=20260928" defer></script>
-  <script src="js/parent-browse.js?v=20260928" defer></script>
-  <script src="js/parent-app.js?v=20260928" defer></script>
+  <script src="js/parent-batch-parser.js?v=20260929" defer></script>
+  <script src="js/parent-modes.js?v=20260929" defer></script>
+  <script src="js/parent-browse.js?v=20260929" defer></script>
+  <script src="js/parent-app.js?v=20260929" defer></script>
 </body>
 </html>
