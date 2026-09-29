@@ -1,29 +1,44 @@
 /**
- * @file Parent page — add-form component (Phase 9, Plan 01 tracer).
+ * @file Parent page — add-card components (Phase 9, Plans 01 + 06).
  *
- * SingleAddForm: the 单个添加 form for the 添加单词 card.
- * Mounted into a container by parent-app.js (class-per-component per
- * ui-components.js conventions).
+ * AddCard: the 添加单词 card body — tabs 单个添加 | 批量添加 (D-10)
+ * hosting the two entry forms.
+ * SingleAddForm: final single-word form (D-06 category required with
+ * 请选择分类 validation, D-08 only 单词 required, shared 单元 datalist,
+ * loading spinner, success toast).
+ * BatchAddForm: the textbook-lesson capture flow — paste → 解析并预览
+ * (client-side window.parseBatch) → preview table with per-line Warning
+ * rows → 确认添加（{n} 个） → result banner 已添加 {a} 个，跳过 {b} 个
+ * 重复单词 (one lesson = one unit, D-10).
  *
- * Contract (UI-SPEC + D-06/D-08):
- *   - Category radio pair 英语|中文 — REQUIRED, NO pre-selection (D-06);
- *     submitting without a choice shows 请选择分类.
- *   - 单词 input is the only required field (D-08); 意思/例句 optional;
- *     单元 is free text with an associated <datalist id="unit-options">
- *     (populated later in Plan 09-06).
- *   - Loading: submit button disabled, label KEPT (UI-SPEC Button contract).
- *   - Success: toast 已添加; word/meaning/example cleared while category
- *     and unit are RETAINED for rapid consecutive entry (auto-decided).
- *   - Error: toast 保存失败：{message}。内容没有保存，请检查后重试。
+ * Contracts (UI-SPEC + plan 09-06 must-haves):
+ *   - Category radio pair 英语|中文 — REQUIRED, NO pre-selection (D-06).
+ *   - Only 单词 is required (D-08); meaning/example empty is valid.
+ *   - Loading: submit buttons disabled + inline spinner, label KEPT.
+ *   - Success (single): toast 已添加; word/meaning/example cleared while
+ *     category and unit are RETAINED for rapid consecutive entry.
+ *   - Transparency prohibition: a batch import is NEVER reported as
+ *     plain success when words were skipped — both counts always render,
+ *     and when skipped > 0 the banner turns Warning and lists the
+ *     skipped words (derived from a pre-commit snapshot of the category,
+ *     because the API returns only {added, skipped} counts; skips are
+ *     UNIQUE(word, category), so skipped == pasted ∩ existing).
+ *   - A batch over the API's 100-entry cap is refused client-side with a
+ *     clear message (bounded request bodies, Plan 09-01).
  *
  * Security (Pitfall 10 / T-09-01): ALL data rendering goes through
- * document.createElement + Node.textContent — never innerHTML.
+ * document.createElement + Node.textContent — the raw-markup setter that
+ * Pitfall 10 bans is never used anywhere in this file.
+ * Containers clear via the firstChild-removeChild loop.
  */
 
 (function (global) {
   'use strict';
 
   var TOAST_DURATION_MS = 2500;
+
+  /** Per-request entry cap — mirrors pkg/web/api/validate.go maxEntries. */
+  var MAX_BATCH_ENTRIES = 100;
 
   /**
    * Show a transient top-center toast. Success (green) and error (red)
@@ -47,118 +62,44 @@
     }, TOAST_DURATION_MS);
   }
 
-  function SingleAddForm(container, options) {
-    options = options || {};
-    this.onSubmit = options.onSubmit || function () {
-      return Promise.reject(new Error('SingleAddForm: missing onSubmit handler'));
-    };
-    this.onSuccess = options.onSuccess || function () {};
-
-    this.form = document.createElement('form');
-    this.form.className = 'single-add-form';
-    this.form.noValidate = true;
-
-    // ---- Category radio pair (required, NO pre-selection, D-06) ----
-    var catField = document.createElement('div');
-    catField.className = 'form-field';
-
-    var catLabel = document.createElement('span');
-    catLabel.className = 'form-label';
-    catLabel.textContent = '分类';
-    catField.appendChild(catLabel);
-
-    this.categoryOptions = document.createElement('div');
-    this.categoryOptions.className = 'category-options';
-    this.categoryOptions.setAttribute('role', 'radiogroup');
-    this.categoryOptions.setAttribute('aria-label', '分类');
-
-    var self = this;
-    this.categoryRadios = [];
-    [
-      { value: 'english', text: '英语' },
-      { value: 'chinese', text: '中文' },
-    ].forEach(function (cat) {
-      var option = document.createElement('label');
-      option.className = 'category-option';
-      var radio = document.createElement('input');
-      radio.type = 'radio';
-      radio.name = 'parent-category';
-      radio.value = cat.value;
-      radio.addEventListener('change', function () {
-        self.categoryError.textContent = '';
-        self.categoryRadios.forEach(function (other) {
-          other.option.classList.toggle('checked', other.radio.checked);
-        });
-      });
-      var text = document.createElement('span');
-      text.textContent = cat.text;
-      option.appendChild(radio);
-      option.appendChild(text);
-      self.categoryOptions.appendChild(option);
-      self.categoryRadios.push({ radio: radio, option: option });
-    });
-    catField.appendChild(this.categoryOptions);
-
-    this.categoryError = document.createElement('p');
-    this.categoryError.className = 'form-error';
-    this.categoryError.setAttribute('aria-live', 'polite');
-    catField.appendChild(this.categoryError);
-    this.form.appendChild(catField);
-
-    // ---- 单词 (required, D-08) ----
-    this.form.appendChild(this.buildField(
-      '单词', 'parent-word', false, '请输入单词'));
-
-    // ---- 意思 (optional) ----
-    this.form.appendChild(this.buildField('意思', 'parent-meaning', false, ''));
-
-    // ---- 例句 (optional, textarea) ----
-    this.form.appendChild(this.buildField('例句', 'parent-example', true, ''));
-
-    // ---- 单元 (free text + datalist; options populated in Plan 09-06) ----
-    var unitField = document.createElement('div');
-    unitField.className = 'form-field';
-    var unitLabel = document.createElement('label');
-    unitLabel.className = 'form-label';
-    unitLabel.setAttribute('for', 'parent-unit');
-    unitLabel.textContent = '单元';
-    this.unitInput = document.createElement('input');
-    this.unitInput.className = 'form-input';
-    this.unitInput.id = 'parent-unit';
-    this.unitInput.name = 'unit';
-    this.unitInput.type = 'text';
-    this.unitInput.setAttribute('autocomplete', 'off');
-    this.unitInput.setAttribute('list', 'unit-options');
-    this.unitList = document.createElement('datalist');
-    this.unitList.id = 'unit-options';
-    unitField.appendChild(unitLabel);
-    unitField.appendChild(this.unitInput);
-    unitField.appendChild(this.unitList);
-    this.form.appendChild(unitField);
-
-    // ---- Submit button ----
-    this.submitBtn = document.createElement('button');
-    this.submitBtn.type = 'submit';
-    this.submitBtn.className = 'btn btn-primary';
-    this.submitBtn.textContent = '添加单词';
-    this.form.appendChild(this.submitBtn);
-
-    this.submitBtn.addEventListener('click', function (event) {
-      event.preventDefault();
-      self.handleSubmit();
-    });
-    this.form.addEventListener('submit', function (event) {
-      event.preventDefault();
-      self.handleSubmit();
-    });
-
-    container.appendChild(this.form);
+  /** Clear a container via the firstChild-removeChild loop (Pattern 4). */
+  function clearContainer(container) {
+    while (container.firstChild) {
+      container.removeChild(container.firstChild);
+    }
   }
 
   /**
-   * Build one labeled text field. Validation error copy is per-field.
+   * Build a primary submit button with an inline spinner span and a kept
+   * label (UI-SPEC Button — Loading contract). Toggling the `loading`
+   * class reveals the spinner; the label text never changes.
    */
-  SingleAddForm.prototype.buildField = function (labelText, id, isTextarea, requiredMessage) {
+  function buildLoadingButton(labelText) {
+    var btn = document.createElement('button');
+    btn.type = 'submit';
+    btn.className = 'btn btn-primary';
+    var spinner = document.createElement('span');
+    spinner.className = 'btn-spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    var label = document.createElement('span');
+    label.className = 'btn-label';
+    label.textContent = labelText;
+    btn.appendChild(spinner);
+    btn.appendChild(label);
+    return btn;
+  }
+
+  /** Toggle a loading button's disabled + spinner state. */
+  function setLoading(btn, loading) {
+    btn.disabled = loading;
+    btn.classList.toggle('loading', loading);
+  }
+
+  /**
+   * Build one labeled text field. Returns {field, input, error}.
+   * Validation error copy is per-field (aria-live polite).
+   */
+  function buildTextField(labelText, id, isTextarea) {
     var field = document.createElement('div');
     field.className = 'form-field';
     var label = document.createElement('label');
@@ -178,42 +119,199 @@
     input.id = id;
     input.name = id;
     input.setAttribute('autocomplete', 'off');
-    input.required = !!requiredMessage;
     var error = document.createElement('p');
     error.className = 'form-error';
     error.setAttribute('aria-live', 'polite');
     field.appendChild(label);
     field.appendChild(input);
     field.appendChild(error);
-    this[id + 'Input'] = input;
-    this[id + 'Error'] = error;
-    return field;
-  };
+    return { field: field, input: input, error: error };
+  }
 
-  SingleAddForm.prototype.selectedCategory = function () {
-    for (var i = 0; i < this.categoryRadios.length; i++) {
-      if (this.categoryRadios[i].radio.checked) {
-        return this.categoryRadios[i].radio.value;
+  /**
+   * Build the required category radio pair (D-06): 英语|中文, NO
+   * pre-selection, 请选择分类 inline validation. options.onSelected fires
+   * with the new value ('' before any selection) on every change.
+   * Returns {field, selected(), setError(message)}.
+   */
+  function buildCategoryField(radioName, onSelected) {
+    var field = document.createElement('div');
+    field.className = 'form-field';
+
+    var label = document.createElement('span');
+    label.className = 'form-label';
+    label.textContent = '分类';
+    field.appendChild(label);
+
+    var group = document.createElement('div');
+    group.className = 'category-options';
+    group.setAttribute('role', 'radiogroup');
+    group.setAttribute('aria-label', '分类');
+
+    var radios = [];
+    var error = document.createElement('p');
+    error.className = 'form-error';
+    error.setAttribute('aria-live', 'polite');
+
+    function selected() {
+      for (var i = 0; i < radios.length; i++) {
+        if (radios[i].radio.checked) {
+          return radios[i].radio.value;
+        }
       }
+      return '';
     }
-    return '';
-  };
+
+    [
+      { value: 'english', text: '英语' },
+      { value: 'chinese', text: '中文' },
+    ].forEach(function (cat) {
+      var option = document.createElement('label');
+      option.className = 'category-option';
+      var radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = radioName;
+      radio.value = cat.value;
+      radio.addEventListener('change', function () {
+        error.textContent = '';
+        radios.forEach(function (other) {
+          other.option.classList.toggle('checked', other.radio.checked);
+        });
+        if (onSelected) {
+          onSelected(selected());
+        }
+      });
+      var text = document.createElement('span');
+      text.textContent = cat.text;
+      option.appendChild(radio);
+      option.appendChild(text);
+      group.appendChild(option);
+      radios.push({ radio: radio, option: option });
+    });
+
+    field.appendChild(group);
+    field.appendChild(error);
+    return {
+      field: field,
+      selected: selected,
+      setError: function (message) {
+        error.textContent = message;
+      },
+    };
+  }
+
+  /**
+   * Build the 单元 free-text field associated with the SHARED datalist
+   * (#unit-options lives in parent.html; parent-app.js populates it from
+   * GET /api/v1/units for the currently selected category).
+   * Returns {field, input}.
+   */
+  function buildUnitField(inputId) {
+    var field = document.createElement('div');
+    field.className = 'form-field';
+    var label = document.createElement('label');
+    label.className = 'form-label';
+    label.setAttribute('for', inputId);
+    label.textContent = '单元';
+    var input = document.createElement('input');
+    input.className = 'form-input';
+    input.id = inputId;
+    input.name = inputId;
+    input.type = 'text';
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('list', 'unit-options');
+    field.appendChild(label);
+    field.appendChild(input);
+    return { field: field, input: input };
+  }
+
+  /**
+   * Human-readable status text for one parser error row. Reasons come
+   * from parent-batch-parser.js ('empty-word', 'word-too-long',
+   * 'duplicate:<firstLine>').
+   */
+  function describeParseError(err) {
+    if (err.reason === 'empty-word') {
+      return '这一行没有单词';
+    }
+    if (err.reason === 'word-too-long') {
+      return '单词超过 200 个字符';
+    }
+    if (/^duplicate:/.test(err.reason)) {
+      return '与第 ' + err.reason.slice('duplicate:'.length) + ' 行重复';
+    }
+    return err.reason;
+  }
+
+  // ------------------------------------------------------------------
+  // SingleAddForm — final shape (single tab)
+  // ------------------------------------------------------------------
+
+  /**
+   * options:
+   *   onSubmit(payload)   → Promise — POST /api/v1/words
+   *   onSuccess(result)   — fired after a successful add (refresh hook)
+   *   onCategoryChange(v) — fired when the category radio changes
+   */
+  function SingleAddForm(container, options) {
+    options = options || {};
+    this.onSubmit = options.onSubmit || function () {
+      return Promise.reject(new Error('SingleAddForm: missing onSubmit handler'));
+    };
+    this.onSuccess = options.onSuccess || function () {};
+    this.onCategoryChange = options.onCategoryChange || function () {};
+
+    this.form = document.createElement('form');
+    this.form.className = 'single-add-form';
+    this.form.noValidate = true;
+
+    this.category = buildCategoryField('parent-category-single', this.onCategoryChange);
+    this.form.appendChild(this.category.field);
+
+    // 单词 required (D-08); 意思/例句 optional (例句 textarea, 3 rows).
+    this.word = buildTextField('单词', 'parent-word', false);
+    this.meaning = buildTextField('意思', 'parent-meaning', false);
+    this.example = buildTextField('例句', 'parent-example', true);
+    this.form.appendChild(this.word.field);
+    this.form.appendChild(this.meaning.field);
+    this.form.appendChild(this.example.field);
+
+    // 单元 — free text over the SHARED datalist (id unit-options).
+    var unit = buildUnitField('parent-unit');
+    this.unitInput = unit.input;
+    this.form.appendChild(unit.field);
+
+    var self = this;
+    this.submitBtn = buildLoadingButton('添加单词');
+    this.form.appendChild(this.submitBtn);
+
+    this.submitBtn.addEventListener('click', function (event) {
+      event.preventDefault();
+      self.handleSubmit();
+    });
+    this.form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      self.handleSubmit();
+    });
+
+    container.appendChild(this.form);
+  }
 
   SingleAddForm.prototype.handleSubmit = function () {
     if (this.submitBtn.disabled) {
       return;
     }
-    this.categoryError.textContent = '';
-    this['parent-wordError'].textContent = '';
+    this.category.setError('');
+    this.word.error.textContent = '';
 
-    var category = this.selectedCategory();
+    var category = this.category.selected();
     if (!category) {
-      this.categoryError.textContent = '请选择分类';
+      this.category.setError('请选择分类');
       return;
     }
-    var word = this['parent-wordInput'].value.trim();
+    var word = this.word.input.value.trim();
     if (!word) {
-      this['parent-wordError'].textContent = '请输入单词';
+      this.word.error.textContent = '请输入单词';
       return;
     }
 
@@ -224,21 +322,21 @@
       entries: [
         {
           word: word,
-          meaning: this['parent-meaningInput'].value.trim(),
-          example: this['parent-exampleInput'].value,
+          meaning: this.meaning.input.value.trim(),
+          example: this.example.input.value,
         },
       ],
     };
 
-    // Loading: disabled + label kept (UI-SPEC Button contract).
-    this.submitBtn.disabled = true;
+    // Loading: disabled + spinner, label kept (UI-SPEC Button contract).
+    setLoading(this.submitBtn, true);
     this.onSubmit(payload)
       .then(function (result) {
         showToast('已添加', 'success');
         // Clear word/meaning/example; RETAIN category + unit (auto-decided).
-        self['parent-wordInput'].value = '';
-        self['parent-meaningInput'].value = '';
-        self['parent-exampleInput'].value = '';
+        self.word.input.value = '';
+        self.meaning.input.value = '';
+        self.example.input.value = '';
         self.onSuccess(result || { added: 0, skipped: 0 });
       })
       .catch(function (err) {
@@ -246,12 +344,409 @@
         showToast('保存失败：' + message + '。内容没有保存，请检查后重试。', 'error');
       })
       .then(function () {
-        self.submitBtn.disabled = false;
+        setLoading(self.submitBtn, false);
       });
   };
+
+  // ------------------------------------------------------------------
+  // BatchAddForm — paste → preview → commit (batch tab)
+  // ------------------------------------------------------------------
+
+  /**
+   * options:
+   *   submitWords(payload) → Promise — POST /api/v1/words
+   *   fetchWords(category) → Promise<Array> — GET /api/v1/words?category=
+   *       (pre-commit snapshot used to name the skipped words)
+   *   onCommitted(result)  — fired after a successful commit (refresh hook)
+   *   onCategoryChange(v)  — fired when the category radio changes
+   */
+  function BatchAddForm(container, options) {
+    options = options || {};
+    this.submitWords = options.submitWords || function () {
+      return Promise.reject(new Error('BatchAddForm: missing submitWords handler'));
+    };
+    this.fetchWords = options.fetchWords || function () {
+      return Promise.reject(new Error('BatchAddForm: missing fetchWords handler'));
+    };
+    this.onCommitted = options.onCommitted || function () {};
+    this.onCategoryChange = options.onCategoryChange || function () {};
+
+    this.form = document.createElement('form');
+    this.form.className = 'batch-add-form';
+    this.form.noValidate = true;
+
+    this.category = buildCategoryField('parent-category-batch', this.onCategoryChange);
+    this.form.appendChild(this.category.field);
+
+    // 单元 applies to the WHOLE pasted lesson (D-10 one-lesson-one-unit).
+    var unit = buildUnitField('parent-unit-batch');
+    this.unitInput = unit.input;
+    this.form.appendChild(unit.field);
+
+    // Paste area (textarea, 8 rows per UI-SPEC Component Inventory).
+    var pasteField = document.createElement('div');
+    pasteField.className = 'form-field';
+    var pasteLabel = document.createElement('label');
+    pasteLabel.className = 'form-label';
+    pasteLabel.setAttribute('for', 'parent-batch-paste');
+    pasteLabel.textContent = '粘贴单词';
+    var pasteHint = document.createElement('p');
+    pasteHint.className = 'form-hint';
+    pasteHint.textContent = '一行一个单词，可用 Tab 或空格分隔意思；# 开头的行会被忽略。';
+    this.pasteInput = document.createElement('textarea');
+    this.pasteInput.className = 'form-textarea';
+    this.pasteInput.id = 'parent-batch-paste';
+    this.pasteInput.name = 'parent-batch-paste';
+    this.pasteInput.rows = 8;
+    this.pasteInput.setAttribute('autocomplete', 'off');
+    this.pasteInput.setAttribute('spellcheck', 'false');
+    pasteField.appendChild(pasteLabel);
+    pasteField.appendChild(pasteHint);
+    pasteField.appendChild(this.pasteInput);
+    this.form.appendChild(pasteField);
+
+    // 解析并预览 (secondary — the accent stays on 确认添加).
+    this.parseBtn = document.createElement('button');
+    this.parseBtn.type = 'button';
+    this.parseBtn.className = 'btn btn-secondary';
+    this.parseBtn.textContent = '解析并预览';
+    this.form.appendChild(this.parseBtn);
+
+    // Preview: empty/unparsed state until the first parse (UI Consideration:
+    // 粘贴后点「解析并预览」, commit stays disabled).
+    this.preview = document.createElement('div');
+    this.preview.className = 'preview-scroll';
+    this.validRows = [];
+    this.parseErrors = [];
+    this.renderPreview({ rows: [], errors: [] }, '');
+    this.form.appendChild(this.preview);
+
+    // 确认添加（{n} 个） — disabled at zero valid rows.
+    this.commitBtn = buildLoadingButton('确认添加（0 个）');
+    this.commitBtn.disabled = true;
+    this.form.appendChild(this.commitBtn);
+
+    this.formError = document.createElement('p');
+    this.formError.className = 'form-error';
+    this.formError.setAttribute('aria-live', 'polite');
+    this.formError.hidden = true;
+    this.form.appendChild(this.formError);
+
+    // Result banner host (rendered after each commit).
+    this.banner = document.createElement('div');
+    this.form.appendChild(this.banner);
+
+    var self = this;
+    this.parseBtn.addEventListener('click', function () {
+      self.handleParse();
+    });
+    this.commitBtn.addEventListener('click', function (event) {
+      event.preventDefault();
+      self.handleCommit();
+    });
+    this.form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      self.handleCommit();
+    });
+
+    container.appendChild(this.form);
+  }
+
+  /** Show a one-line problem under the commit button. */
+  BatchAddForm.prototype.showFormError = function (message) {
+    this.formError.textContent = message;
+    this.formError.hidden = false;
+  };
+
+  /** Parse the paste box and render the preview table. */
+  BatchAddForm.prototype.handleParse = function () {
+    this.formError.hidden = true;
+    if (typeof global.parseBatch !== 'function') {
+      this.showFormError('解析器未加载，请刷新页面重试');
+      return;
+    }
+    var raw = this.pasteInput.value;
+    var result = global.parseBatch(raw);
+    this.validRows = result.rows;
+    this.parseErrors = result.errors;
+    this.renderPreview(result, raw);
+    this.updateCommitButton();
+  };
+
+  /**
+   * Render the preview table: valid rows first (numbered 1..n, status
+   * 将添加), then per-line problems as Warning rows (the # cell shows the
+   * source line number; error rows are excluded from the commit count).
+   */
+  BatchAddForm.prototype.renderPreview = function (result, raw) {
+    clearContainer(this.preview);
+
+    if (!result.rows.length && !result.errors.length) {
+      var note = document.createElement('p');
+      note.className = 'preview-empty';
+      note.textContent = raw.trim()
+        ? '没有可添加的单词，请检查格式'
+        : '粘贴后点「解析并预览」';
+      this.preview.appendChild(note);
+      return;
+    }
+
+    var table = document.createElement('table');
+    table.className = 'preview-table';
+
+    var thead = document.createElement('thead');
+    var headRow = document.createElement('tr');
+    ['#', '单词', '意思', '状态'].forEach(function (text) {
+      var th = document.createElement('th');
+      th.setAttribute('scope', 'col');
+      th.textContent = text;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    result.rows.forEach(function (row, i) {
+      var tr = document.createElement('tr');
+      tr.className = 'preview-row';
+      appendCell(tr, String(i + 1), 'preview-index');
+      appendCell(tr, row.word, 'preview-word');
+      appendCell(tr, row.meaning, 'preview-meaning');
+      appendCell(tr, '将添加', 'preview-status preview-status-valid');
+      tbody.appendChild(tr);
+    });
+    result.errors.forEach(function (err) {
+      var tr = document.createElement('tr');
+      tr.className = 'preview-row preview-row-warning';
+      appendCell(tr, String(err.line), 'preview-index');
+      appendCell(tr, '—', 'preview-word');
+      appendCell(tr, '', 'preview-meaning');
+      appendCell(tr, describeParseError(err), 'preview-status');
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    this.preview.appendChild(table);
+  };
+
+  /** td builder — textContent only (Pitfall 10). */
+  function appendCell(row, text, className) {
+    var td = document.createElement('td');
+    td.className = className;
+    td.textContent = text;
+    row.appendChild(td);
+    return td;
+  }
+
+  BatchAddForm.prototype.updateCommitButton = function () {
+    var label = this.commitBtn.querySelector('.btn-label');
+    var n = this.validRows.length;
+    if (label) {
+      label.textContent = '确认添加（' + n + ' 个）';
+    }
+    this.commitBtn.disabled = n === 0;
+  };
+
+  BatchAddForm.prototype.handleCommit = function () {
+    if (this.commitBtn.disabled) {
+      return;
+    }
+    this.formError.hidden = true;
+    clearContainer(this.banner);
+
+    var category = this.category.selected();
+    if (!category) {
+      this.category.setError('请选择分类');
+      return;
+    }
+    var rows = this.validRows;
+    if (!rows.length) {
+      this.showFormError('请先粘贴并点「解析并预览」');
+      return;
+    }
+    if (rows.length > MAX_BATCH_ENTRIES) {
+      this.showFormError(
+        '一次最多添加 ' + MAX_BATCH_ENTRIES + ' 个单词，请分两次粘贴');
+      return;
+    }
+
+    var self = this;
+    var unit = this.unitInput.value.trim();
+    var entries = rows.map(function (row) {
+      return { word: row.word, meaning: row.meaning, example: '' };
+    });
+
+    setLoading(this.commitBtn, true);
+    this.parseBtn.disabled = true;
+
+    // Pre-commit snapshot of the category's existing words so the result
+    // banner can NAME the skipped words (the API reports only {added,
+    // skipped} counts; skips are UNIQUE(word, category), so skipped ==
+    // pasted ∩ existing). Best-effort: on failure the banner still shows
+    // the honest counts with a generic note (transparency never depends
+    // on the snapshot succeeding).
+    this.fetchWords(category)
+      .catch(function () {
+        return [];
+      })
+      .then(function (existing) {
+        var existingSet = {};
+        (existing || []).forEach(function (w) {
+          if (w && w.word) {
+            existingSet[w.word] = true;
+          }
+        });
+        return self.submitWords({
+          category: category,
+          unit: unit,
+          entries: entries,
+        }).then(function (result) {
+          var outcome = result || { added: 0, skipped: 0 };
+          self.renderResult(outcome, rows, existingSet);
+          // Reset for the next paste; category + unit retained.
+          self.pasteInput.value = '';
+          self.validRows = [];
+          self.parseErrors = [];
+          self.renderPreview({ rows: [], errors: [] }, '');
+          self.updateCommitButton();
+          self.onCommitted(outcome);
+        });
+      })
+      .catch(function (err) {
+        var message = (err && err.message) ? err.message : '未知错误';
+        showToast('保存失败：' + message + '。内容没有保存，请检查后重试。', 'error');
+      })
+      .then(function () {
+        setLoading(self.commitBtn, false);
+        self.parseBtn.disabled = false;
+      });
+  };
+
+  /**
+   * Result banner per the transparency prohibition: 已添加 {a} 个，跳过
+   * {b} 个重复单词 — success colors when b=0, Warning colors plus the
+   * readable skipped-word list when b>0. Counts are always the server's.
+   */
+  BatchAddForm.prototype.renderResult = function (result, rows, existingSet) {
+    clearContainer(this.banner);
+    var added = result.added || 0;
+    var skipped = result.skipped || 0;
+
+    var box = document.createElement('div');
+    box.className = 'result-banner ' +
+      (skipped > 0 ? 'result-banner-warning' : 'result-banner-success');
+    box.setAttribute('role', 'status');
+    box.setAttribute('aria-live', 'polite');
+
+    var summary = document.createElement('p');
+    summary.className = 'result-summary';
+    summary.textContent = '已添加 ' + added + ' 个，跳过 ' + skipped + ' 个重复单词';
+    box.appendChild(summary);
+
+    if (skipped > 0) {
+      var skippedWords = rows
+        .map(function (row) {
+          return row.word;
+        })
+        .filter(function (word) {
+          return existingSet[word];
+        });
+      var detail = document.createElement('p');
+      detail.className = 'result-detail';
+      detail.textContent = skippedWords.length
+        ? '重复单词：' + skippedWords.join('、')
+        : '重复单词已跳过';
+      box.appendChild(detail);
+    }
+
+    this.banner.appendChild(box);
+  };
+
+  // ------------------------------------------------------------------
+  // AddCard — tabs 单个添加 | 批量添加 (D-10) hosting both forms
+  // ------------------------------------------------------------------
+
+  /**
+   * options:
+   *   submitWords(payload)     → Promise — shared POST /api/v1/words
+   *   fetchWords(category)     → Promise<Array> — batch snapshot source
+   *   onCommitted(result)      — fired after ANY successful add
+   *   onCategoryChange(value)  — fired when either form's radio changes
+   */
+  function AddCard(container, options) {
+    options = options || {};
+    var submitWords = options.submitWords || function () {
+      return Promise.reject(new Error('AddCard: missing submitWords handler'));
+    };
+    var fetchWords = options.fetchWords || function () {
+      return Promise.reject(new Error('AddCard: missing fetchWords handler'));
+    };
+    var onCommitted = options.onCommitted || function () {};
+    var onCategoryChange = options.onCategoryChange || function () {};
+
+    var tablist = document.createElement('div');
+    tablist.className = 'add-tabs';
+    tablist.setAttribute('role', 'tablist');
+    tablist.setAttribute('aria-label', '添加方式');
+
+    var panelSingle = document.createElement('div');
+    panelSingle.className = 'add-panel';
+    panelSingle.id = 'add-panel-single';
+    panelSingle.setAttribute('role', 'tabpanel');
+    panelSingle.setAttribute('aria-labelledby', 'add-tab-single');
+
+    var panelBatch = document.createElement('div');
+    panelBatch.className = 'add-panel';
+    panelBatch.id = 'add-panel-batch';
+    panelBatch.setAttribute('role', 'tabpanel');
+    panelBatch.setAttribute('aria-labelledby', 'add-tab-batch');
+    panelBatch.hidden = true;
+
+    var tabPairs = [];
+    [
+      { id: 'add-tab-single', text: '单个添加', panel: panelSingle },
+      { id: 'add-tab-batch', text: '批量添加', panel: panelBatch },
+    ].forEach(function (def, index) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'add-tab' + (index === 0 ? ' active' : '');
+      btn.id = def.id;
+      btn.setAttribute('role', 'tab');
+      btn.setAttribute('aria-selected', index === 0 ? 'true' : 'false');
+      btn.setAttribute('aria-controls', def.panel.id);
+      btn.textContent = def.text;
+      tabPairs.push({ btn: btn, panel: def.panel });
+      btn.addEventListener('click', function () {
+        tabPairs.forEach(function (pair) {
+          var active = pair.btn === btn;
+          pair.panel.hidden = !active;
+          pair.btn.classList.toggle('active', active);
+          pair.btn.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+      });
+      tablist.appendChild(btn);
+    });
+
+    this.single = new SingleAddForm(panelSingle, {
+      onSubmit: submitWords,
+      onSuccess: onCommitted,
+      onCategoryChange: onCategoryChange,
+    });
+    this.batch = new BatchAddForm(panelBatch, {
+      submitWords: submitWords,
+      fetchWords: fetchWords,
+      onCommitted: onCommitted,
+      onCategoryChange: onCategoryChange,
+    });
+
+    container.appendChild(tablist);
+    container.appendChild(panelSingle);
+    container.appendChild(panelBatch);
+  }
 
   // Window-or-module-global tail (state-manager.js convention) so Node
   // tests can require this file later.
   global.SingleAddForm = SingleAddForm;
+  global.BatchAddForm = BatchAddForm;
+  global.AddCard = AddCard;
   global.__parentToast = showToast;
 })(typeof window !== 'undefined' ? window : this);

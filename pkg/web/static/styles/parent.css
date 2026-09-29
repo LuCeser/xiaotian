@@ -324,6 +324,195 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/* Add card tabs (Plan 09-06, D-10: 单个添加 | 批量添加)               */
+/* Active tab = accent underline 3px (UI-SPEC Component Inventory).    */
+/* ------------------------------------------------------------------ */
+
+.add-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+
+.add-tab {
+  min-height: 44px;
+  padding: 8px 4px 10px;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -1px; /* overlap the tablist hairline */
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: color 150ms ease-out, border-color 150ms ease-out;
+}
+
+.add-tab:hover {
+  color: var(--ink);
+}
+
+.add-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.add-panel[hidden] {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Batch preview table (Plan 09-06)                                    */
+/* Row rhythm 8px; per-line problems render as Warning rows; the table */
+/* scrolls internally, capped at 320px (UI-SPEC Component Inventory).  */
+/* ------------------------------------------------------------------ */
+
+.preview-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 16px;
+}
+
+.preview-empty {
+  color: var(--muted);
+  padding: 16px;
+  margin: 0;
+}
+
+.preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 16px;
+}
+
+.preview-table th {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--muted);
+  text-align: left;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+}
+
+.preview-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.preview-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.preview-index {
+  width: 2.5em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.preview-word {
+  font-weight: 600;
+}
+
+.preview-meaning {
+  color: var(--muted);
+}
+
+.preview-status {
+  white-space: nowrap;
+  min-width: 7em;
+}
+
+.preview-status-valid {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.preview-row-warning .preview-status {
+  color: var(--warning);
+  font-size: 14px;
+  white-space: normal;
+}
+
+/* ------------------------------------------------------------------ */
+/* Batch result banner (transparency prohibition: skipped > 0 renders  */
+/* Warning, never plain success)                                       */
+/* ------------------------------------------------------------------ */
+
+.result-banner {
+  border-radius: 12px;
+  padding: 8px 16px;
+  min-height: 44px;
+  margin-top: 16px;
+}
+
+.result-banner-success {
+  color: var(--success);
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+}
+
+.result-banner-warning {
+  color: var(--warning);
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+.result-banner p {
+  margin: 0;
+}
+
+.result-summary {
+  font-weight: 600;
+}
+
+.result-detail {
+  font-size: 14px;
+  font-weight: 400;
+  margin-top: 4px !important;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------ */
+/* Button loading state (UI-SPEC: disabled + inline spinner, label     */
+/* kept). Pure-CSS spinner — no glyph dependency.                      */
+/* ------------------------------------------------------------------ */
+
+.btn-spinner {
+  display: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  margin-right: 8px;
+  animation: btn-spin 800ms linear infinite;
+}
+
+.btn.loading .btn-spinner {
+  display: inline-block;
+}
+
+.btn.loading .btn-label {
+  opacity: 0.85;
+}
+
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* >=1024px two-column grid arrives in Plan 09-07 (tracer is single    */
 /* column). Reduced-motion handling for consistency with main.css.     */
 /* ------------------------------------------------------------------ */

@@ -1,19 +1,23 @@
 /**
  * @file Parent Vocabulary Management — application entry point
- *       (Phase 9, Plan 01 tracer).
+ *       (Phase 9, Plans 01 + 06).
  *
- * Loaded with `defer` from parent.html after parent-modes.js and
- * parent-browse.js so both constructors are available (mirrors app.js
- * IIFE + window.X availability-check pattern).
+ * Loaded with `defer` from parent.html after parent-batch-parser.js,
+ * parent-modes.js and parent-browse.js so every constructor is available
+ * (mirrors app.js IIFE + window.X availability-check pattern).
  *
  * Responsibilities:
  *   1. Provide the fetchJSON wrapper: AbortController timeout +
  *      normalization of the {"error":{code,message}} envelope into a
  *      thrown Error carrying the message.
- *   2. Mount WordList into #word-list-container (浏览词库).
- *   3. Mount SingleAddForm into #add-form-container (添加单词).
- *   4. After a successful add, call the browse refresh hook so the new
- *      word appears without a page reload.
+ *   2. Mount AddCard into #add-form-container (添加单词 card: 单个添加 |
+ *      批量添加 tabs, Plan 09-06 D-10).
+ *   3. Mount WordList into #word-list-container (浏览词库).
+ *   4. Populate the SHARED 单元 datalist (#unit-options) from
+ *      GET /api/v1/units — on init (all categories) and whenever an
+ *      add-form category radio changes (scoped to that category).
+ *   5. After a successful add (single OR batch), refresh the browse list
+ *      and the datalist so new words/units appear without a page reload.
  */
 
 (function parentAppEntry() {
@@ -22,15 +26,16 @@
   // ------------------------------------------------------------------
   // Dependency availability checks (graceful degradation, app.js pattern)
   // ------------------------------------------------------------------
-  if (!window.SingleAddForm || !window.WordList) {
-    console.error('[parent-app] SingleAddForm/WordList unavailable — component scripts did not load.');
+  if (!window.AddCard || !window.WordList) {
+    console.error('[parent-app] AddCard/WordList unavailable — component scripts did not load.');
     return;
   }
 
   var addContainer = document.getElementById('add-form-container');
   var browseContainer = document.getElementById('word-list-container');
-  if (!addContainer || !browseContainer) {
-    console.error('[parent-app] mount containers missing from parent.html.');
+  var unitDatalist = document.getElementById('unit-options');
+  if (!addContainer || !browseContainer || !unitDatalist) {
+    console.error('[parent-app] mount containers / shared datalist missing from parent.html.');
     return;
   }
 
@@ -84,9 +89,53 @@
       });
   }
 
+  /** Clear a container via the firstChild-removeChild loop (Pattern 4). */
+  function clearContainer(container) {
+    while (container.firstChild) {
+      container.removeChild(container.firstChild);
+    }
+  }
+
   // ------------------------------------------------------------------
-  // Component wiring: browse list + add form, connected by the refresh
-  // hook so a successful add updates the list without a page reload.
+  // Shared 单元 datalist: GET /api/v1/units?category=<selected> on init
+  // (all categories — both forms start with no selection, D-06) and on
+  // every add-form category radio change. Both add forms share the ONE
+  // datalist element; option values are plain unit names (textContent
+  // only, Pitfall 10). The empty-string unit row (words with no unit)
+  // carries nothing to suggest and is skipped.
+  // ------------------------------------------------------------------
+  var selectedCategory = '';
+
+  function renderUnitOptions(units) {
+    clearContainer(unitDatalist);
+    (units || []).forEach(function (u) {
+      if (!u || !u.unit) {
+        return;
+      }
+      var option = document.createElement('option');
+      option.textContent = u.unit;
+      unitDatalist.appendChild(option);
+    });
+  }
+
+  function refreshUnitOptions(category) {
+    selectedCategory = category || '';
+    var url = '/api/v1/units' +
+      (selectedCategory ? ('?category=' + encodeURIComponent(selectedCategory)) : '');
+    return fetchJSON('GET', url)
+      .then(function (data) {
+        renderUnitOptions(data && data.units);
+      })
+      .catch(function () {
+        // Datalist suggestions are a convenience — a failed refresh
+        // degrades to the previous (or empty) list; the free-text input
+        // keeps working. No toast: nothing the parent must act on.
+      });
+  }
+
+  // ------------------------------------------------------------------
+  // Component wiring: browse list + tabbed add card, connected by the
+  // refresh hook so a successful add updates the list without a reload.
   // ------------------------------------------------------------------
   var wordList = new window.WordList(browseContainer, {
     fetchWords: function () {
@@ -96,22 +145,34 @@
     },
   });
 
-  var addForm = new window.SingleAddForm(addContainer, {
-    onSubmit: function (payload) {
+  var addCard = new window.AddCard(addContainer, {
+    submitWords: function (payload) {
       return fetchJSON('POST', '/api/v1/words', payload);
     },
-    onSuccess: function () {
+    fetchWords: function (category) {
+      return fetchJSON('GET', '/api/v1/words?category=' + encodeURIComponent(category))
+        .then(function (data) {
+          return (data && Array.isArray(data.words)) ? data.words : [];
+        });
+    },
+    onCommitted: function () {
       wordList.refresh();
+      refreshUnitOptions(selectedCategory);
+    },
+    onCategoryChange: function (category) {
+      refreshUnitOptions(category);
     },
   });
 
-  // Initial render of the browse list.
+  // Initial render: browse list + all-category unit suggestions.
   wordList.refresh();
+  refreshUnitOptions('');
 
   // Debug exposure (app.js window.__app convention).
   window.__parentApp = {
-    addForm: addForm,
+    addCard: addCard,
     wordList: wordList,
     fetchJSON: fetchJSON,
+    refreshUnitOptions: refreshUnitOptions,
   };
 })();

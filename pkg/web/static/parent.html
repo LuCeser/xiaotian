@@ -20,7 +20,7 @@
   <meta name="theme-color" content="#f5f7fa">
   <meta name="description" content="单词库管理 — 添加、整理孩子的听写词库">
   <title>单词库管理</title>
-  <link rel="stylesheet" href="styles/parent.css?v=20260927">
+  <link rel="stylesheet" href="styles/parent.css?v=20260928">
 </head>
 <body>
   <!-- Skip to main content link for accessibility (mirrors index.html) -->
@@ -43,7 +43,13 @@
       <section class="card add-section" id="addSection"
                role="region" aria-labelledby="addSectionTitle">
         <h2 class="card-title" id="addSectionTitle">添加单词</h2>
+        <!-- AddCard (parent-modes.js) mounts the 单个添加 | 批量添加 tabs
+             plus both forms here. -->
         <div id="add-form-container"></div>
+        <!-- Shared 单元 datalist: both add forms' 单元 inputs reference
+             list="unit-options"; parent-app.js populates it from
+             GET /api/v1/units for the selected category (Plan 09-06). -->
+        <datalist id="unit-options"></datalist>
       </section>
 
       <section class="card browse-section" id="browseSection"
@@ -64,12 +70,17 @@
   <!--
     Scripts: loaded with `defer` so they execute in order after the DOM is
     parsed. Load order matters (defer preserves it):
-      js/parent-modes.js  → window.SingleAddForm (添加单词 form component)
-      js/parent-browse.js → window.WordList (浏览词库 list component)
-      js/parent-app.js    → wires them together (entry point, fetchJSON)
+      js/parent-batch-parser.js → window.parseBatch (pure paste parser, NO DOM)
+      js/parent-modes.js        → window.SingleAddForm/BatchAddForm/AddCard
+                                  (添加单词 card components; AddCard reads
+                                  window.parseBatch when 解析并预览 is clicked)
+      js/parent-browse.js       → window.WordList (浏览词库 list component)
+      js/parent-app.js          → wires them together (entry, fetchJSON,
+                                  unit datalist population)
   -->
-  <script src="js/parent-modes.js?v=20260927" defer></script>
-  <script src="js/parent-browse.js?v=20260927" defer></script>
-  <script src="js/parent-app.js?v=20260927" defer></script>
+  <script src="js/parent-batch-parser.js?v=20260928" defer></script>
+  <script src="js/parent-modes.js?v=20260928" defer></script>
+  <script src="js/parent-browse.js?v=20260928" defer></script>
+  <script src="js/parent-app.js?v=20260928" defer></script>
 </body>
 </html>
