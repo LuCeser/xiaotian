@@ -1,5 +1,6 @@
 /**
- * @file Parent page — add-card components (Phase 9, Plans 01 + 06).
+ * @file Parent page — add-card components + settings card
+ *       (Phase 9, Plans 01 + 06 + 07).
  *
  * AddCard: the 添加单词 card body — tabs 单个添加 | 批量添加 (D-10)
  * hosting the two entry forms.
@@ -10,6 +11,10 @@
  * (client-side window.parseBatch) → preview table with per-line Warning
  * rows → 确认添加（{n} 个） → result banner 已添加 {a} 个，跳过 {b} 个
  * 重复单词 (one lesson = one unit, D-10).
+ * SettingsCard: the 学习设置 card (D-15) — two FSRS sliders (记忆保持率,
+ * 最长复习间隔) with hints and live 当前/默认 readouts, 保存设置 → PUT
+ * /api/v1/settings/fsrs, 恢复默认 resetting without a request, and the
+ * future-only note (D-13).
  *
  * Contracts (UI-SPEC + plan 09-06 must-haves):
  *   - Category radio pair 英语|中文 — REQUIRED, NO pre-selection (D-06).
@@ -743,10 +748,262 @@
     container.appendChild(panelBatch);
   }
 
+  // ------------------------------------------------------------------
+  // SettingsCard — 学习设置 card (D-15, Plan 09-07 Task 3): two FSRS
+  // sliders with plain-language hints, live 当前 {v} · 默认 {d} readouts,
+  // 保存设置 / 恢复默认, and the future-only note (D-13). Embedded in the
+  // page — NOT a separate page.
+  // ------------------------------------------------------------------
+
+  // Slider windows per plan 09-07 (the server enforces the same
+  // retention window; the interval slider tops at 365 — values above it
+  // were never settable from this UI).
+  var FSRS_RETENTION_MIN = 0.7;
+  var FSRS_RETENTION_MAX = 0.95;
+  var FSRS_RETENTION_DEFAULT = 0.85;
+  var FSRS_INTERVAL_MIN = 1;
+  var FSRS_INTERVAL_MAX = 365;
+  var FSRS_INTERVAL_DEFAULT = 180;
+
+  function formatRetention(value) {
+    return Number(value).toFixed(2);
+  }
+
+  function formatInterval(value) {
+    return String(Math.round(value));
+  }
+
+  /** Accent track fill for input[type=range] (UI-SPEC Slider row). */
+  function updateRangeFill(input) {
+    var min = parseFloat(input.min);
+    var max = parseFloat(input.max);
+    var value = parseFloat(input.value);
+    if (!isFinite(min) || !isFinite(max) || !isFinite(value) || max === min) {
+      return;
+    }
+    var pct = ((value - min) / (max - min)) * 100;
+    input.style.setProperty('--range-fill', pct + '%');
+  }
+
+  /**
+   * Build one slider field: label + input[type=range] + hint + live
+   * readout 当前 {v} · 默认 {d}. Returns {field, input, setValue(value)}.
+   */
+  function buildSliderField(spec) {
+    var field = document.createElement('div');
+    field.className = 'form-field slider-field';
+
+    var label = document.createElement('label');
+    label.className = 'form-label';
+    label.setAttribute('for', spec.id);
+    label.textContent = spec.labelText;
+    field.appendChild(label);
+
+    var input = document.createElement('input');
+    input.type = 'range';
+    input.className = 'range-input';
+    input.id = spec.id;
+    input.name = spec.id;
+    input.min = String(spec.min);
+    input.max = String(spec.max);
+    input.step = String(spec.step);
+    field.appendChild(input);
+
+    var hint = document.createElement('p');
+    hint.className = 'form-hint';
+    hint.textContent = spec.hint;
+    field.appendChild(hint);
+
+    var readout = document.createElement('p');
+    readout.className = 'slider-readout';
+
+    function update() {
+      var value = parseFloat(input.value);
+      if (!isFinite(value)) {
+        value = spec.defaultValue;
+      }
+      readout.textContent = '当前 ' + spec.format(value) +
+        ' · 默认 ' + spec.format(spec.defaultValue);
+      updateRangeFill(input);
+    }
+
+    input.addEventListener('input', update);
+    field.appendChild(readout);
+
+    return {
+      field: field,
+      input: input,
+      readout: readout,
+      setValue: function (value) {
+        input.value = String(value);
+        update();
+      },
+    };
+  }
+
+  /**
+   * options:
+   *   fetchSettings()        → Promise — GET /api/v1/settings/fsrs
+   *   saveSettings(settings) → Promise — PUT /api/v1/settings/fsrs
+   *
+   * Mounting unhides the 学习设置 section (parent.html keeps it hidden
+   * until a real component exists — tracer-era contract).
+   */
+  function SettingsCard(container, options) {
+    options = options || {};
+    this.fetchSettings = options.fetchSettings || function () {
+      return Promise.reject(new Error('SettingsCard: missing fetchSettings handler'));
+    };
+    this.saveSettings = options.saveSettings || function () {
+      return Promise.reject(new Error('SettingsCard: missing saveSettings handler'));
+    };
+    this.container = container;
+
+    if (typeof container.closest === 'function') {
+      var section = container.closest('.settings-section');
+      if (section) {
+        section.hidden = false;
+      }
+    }
+
+    this.build();
+
+    var self = this;
+    this.fetchSettings()
+      .then(function (settings) {
+        self.applySettings(settings || {});
+      })
+      .catch(function () {
+        // A failed initial load falls back to the documented defaults in
+        // the sliders; the parent can still review and save them.
+        self.applySettings({});
+      });
+  }
+
+  SettingsCard.prototype.build = function () {
+    var form = document.createElement('form');
+    form.className = 'settings-form';
+    form.noValidate = true;
+
+    this.retentionField = buildSliderField({
+      labelText: '记忆保持率',
+      id: 'settings-retention',
+      min: FSRS_RETENTION_MIN,
+      max: FSRS_RETENTION_MAX,
+      step: 0.01,
+      hint: '保持率越高，复习越频繁，每天练习量越大。建议 0.85–0.90。',
+      defaultValue: FSRS_RETENTION_DEFAULT,
+      format: formatRetention,
+    });
+    form.appendChild(this.retentionField.field);
+
+    this.intervalField = buildSliderField({
+      labelText: '最长复习间隔',
+      id: 'settings-interval',
+      min: FSRS_INTERVAL_MIN,
+      max: FSRS_INTERVAL_MAX,
+      step: 1,
+      hint: '两次复习之间最多隔多少天。默认 180 天。',
+      defaultValue: FSRS_INTERVAL_DEFAULT,
+      format: formatInterval,
+    });
+    form.appendChild(this.intervalField.field);
+
+    // D-13 future-only note.
+    var note = document.createElement('p');
+    note.className = 'form-hint settings-note';
+    note.textContent = '只影响以后的复习安排，不会改动已学单词的进度。';
+    form.appendChild(note);
+
+    var actions = document.createElement('div');
+    actions.className = 'settings-actions';
+    this.saveBtn = buildLoadingButton('保存设置');
+    this.saveBtn.type = 'submit';
+    this.restoreBtn = document.createElement('button');
+    this.restoreBtn.type = 'button';
+    this.restoreBtn.className = 'btn btn-secondary';
+    this.restoreBtn.textContent = '恢复默认';
+    actions.appendChild(this.saveBtn);
+    actions.appendChild(this.restoreBtn);
+    form.appendChild(actions);
+
+    this.container.appendChild(form);
+
+    var self = this;
+    // 恢复默认 resets BOTH sliders and readouts WITHOUT saving — no
+    // request is issued; values only persist when 保存设置 is clicked.
+    this.restoreBtn.addEventListener('click', function () {
+      self.retentionField.setValue(FSRS_RETENTION_DEFAULT);
+      self.intervalField.setValue(FSRS_INTERVAL_DEFAULT);
+    });
+    this.saveBtn.addEventListener('click', function (event) {
+      event.preventDefault();
+      self.handleSave();
+    });
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      self.handleSave();
+    });
+  };
+
+  /** Clamp loaded/typed values into the slider windows and render. */
+  SettingsCard.prototype.applySettings = function (settings) {
+    var retention = parseFloat(settings.desired_retention);
+    if (!isFinite(retention)) {
+      retention = FSRS_RETENTION_DEFAULT;
+    }
+    retention = Math.min(FSRS_RETENTION_MAX, Math.max(FSRS_RETENTION_MIN, retention));
+
+    var interval = parseInt(settings.maximum_interval, 10);
+    if (!isFinite(interval)) {
+      interval = FSRS_INTERVAL_DEFAULT;
+    }
+    interval = Math.min(FSRS_INTERVAL_MAX, Math.max(FSRS_INTERVAL_MIN, interval));
+
+    this.retentionField.setValue(retention);
+    this.intervalField.setValue(interval);
+  };
+
+  /** 保存设置: clamped values → PUT → toast 已保存，下次听写生效. */
+  SettingsCard.prototype.handleSave = function () {
+    if (this.saveBtn.disabled) {
+      return;
+    }
+    var retention = parseFloat(this.retentionField.input.value);
+    if (!isFinite(retention)) {
+      retention = FSRS_RETENTION_DEFAULT;
+    }
+    retention = Math.min(FSRS_RETENTION_MAX, Math.max(FSRS_RETENTION_MIN, retention));
+    retention = Math.round(retention * 100) / 100;
+
+    var interval = parseInt(this.intervalField.input.value, 10);
+    if (!isFinite(interval) || interval < FSRS_INTERVAL_MIN) {
+      interval = FSRS_INTERVAL_MIN;
+    }
+    if (interval > FSRS_INTERVAL_MAX) {
+      interval = FSRS_INTERVAL_MAX;
+    }
+
+    var self = this;
+    setLoading(this.saveBtn, true);
+    this.saveSettings({
+      desired_retention: retention,
+      maximum_interval: interval,
+    }).then(function () {
+      showToast('已保存，下次听写生效', 'success');
+    }).catch(function (err) {
+      var message = (err && err.message) ? err.message : '未知错误';
+      showToast('保存失败：' + message + '。内容没有保存，请检查后重试。', 'error');
+    }).then(function () {
+      setLoading(self.saveBtn, false);
+    });
+  };
+
   // Window-or-module-global tail (state-manager.js convention) so Node
   // tests can require this file later.
   global.SingleAddForm = SingleAddForm;
   global.BatchAddForm = BatchAddForm;
   global.AddCard = AddCard;
+  global.SettingsCard = SettingsCard;
   global.__parentToast = showToast;
 })(typeof window !== 'undefined' ? window : this);

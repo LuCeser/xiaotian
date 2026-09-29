@@ -820,7 +820,126 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
-/* >=1024px two-column grid (D-03) arrives in Plan 09-07 Task 3.       */
+/* 学习设置 card (Plan 09-07 Task 3, D-15): styled range sliders with   */
+/* accent track fill + 44px thumb hit area + live readouts.            */
+/* ------------------------------------------------------------------ */
+
+.range-input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  min-height: 44px; /* thumb hit area */
+  margin: 0;
+  background: transparent;
+}
+
+.range-input::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) var(--range-fill, 50%),
+    var(--border) var(--range-fill, 50%)
+  );
+}
+
+.range-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 28px;
+  height: 28px;
+  margin-top: -10px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 3px solid #ffffff;
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.range-input::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.range-input::-moz-range-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.range-input::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 3px solid #ffffff;
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.slider-readout {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--muted);
+  margin: 4px 0 0;
+}
+
+.settings-note {
+  margin-top: 16px;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Card padding escalation (UI-SPEC Responsive Behavior): 16px mobile, */
+/* 24px >=768px.                                                       */
+/* ------------------------------------------------------------------ */
+
+@media (min-width: 768px) {
+  .card {
+    padding: 24px;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* >=1024px two-column grid (D-03): 浏览词库 2fr / rail (添加单词 +     */
+/* 学习设置) 1fr, container max-width 1120px centered. Explicit grid   */
+/* placement decouples the visual columns from the mobile DOM order.   */
+/* ------------------------------------------------------------------ */
+
+@media (min-width: 1024px) {
+  .main-content {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    grid-template-rows: auto 1fr;
+    gap: 32px;
+    align-items: start;
+  }
+
+  .main-content .card {
+    margin-bottom: 0;
+  }
+
+  .browse-section {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .add-section {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .settings-section {
+    grid-column: 2;
+    grid-row: 2;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Reduced-motion handling for consistency with main.css.              */
 /* ------------------------------------------------------------------ */
 

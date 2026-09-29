@@ -15,6 +15,8 @@
  *      批量添加 tabs, Plan 09-06 D-10).
  *   3. Mount BrowseView into #word-list-container (浏览词库: toolbar +
  *      unit groups + edit/rename/delete modals, Plan 09-07).
+ *   3b. Mount SettingsCard into #settings-container (学习设置 card,
+ *      D-15) — mounting unhides the section.
  *   4. Populate the SHARED 单元 datalist (#unit-options) from
  *      GET /api/v1/units — on init (all categories), whenever an
  *      add-form category radio changes, and for the edit modal's
@@ -29,15 +31,16 @@
   // ------------------------------------------------------------------
   // Dependency availability checks (graceful degradation, app.js pattern)
   // ------------------------------------------------------------------
-  if (!window.AddCard || !window.BrowseView) {
-    console.error('[parent-app] AddCard/BrowseView unavailable — component scripts did not load.');
+  if (!window.AddCard || !window.BrowseView || !window.SettingsCard) {
+    console.error('[parent-app] AddCard/BrowseView/SettingsCard unavailable — component scripts did not load.');
     return;
   }
 
   var addContainer = document.getElementById('add-form-container');
   var browseContainer = document.getElementById('word-list-container');
+  var settingsContainer = document.getElementById('settings-container');
   var unitDatalist = document.getElementById('unit-options');
-  if (!addContainer || !browseContainer || !unitDatalist) {
+  if (!addContainer || !browseContainer || !settingsContainer || !unitDatalist) {
     console.error('[parent-app] mount containers / shared datalist missing from parent.html.');
     return;
   }
@@ -206,6 +209,16 @@
     },
   });
 
+  // 学习设置 card (D-15): GET on init, 保存设置 → PUT (Plan 09-05 API).
+  var settingsCard = new window.SettingsCard(settingsContainer, {
+    fetchSettings: function () {
+      return fetchJSON('GET', '/api/v1/settings/fsrs');
+    },
+    saveSettings: function (settings) {
+      return fetchJSON('PUT', '/api/v1/settings/fsrs', settings);
+    },
+  });
+
   // Initial render: browse view + all-category unit suggestions.
   browse.refresh();
   refreshUnitOptions('');
@@ -214,6 +227,7 @@
   window.__parentApp = {
     addCard: addCard,
     browse: browse,
+    settingsCard: settingsCard,
     fetchJSON: fetchJSON,
     refreshUnitOptions: refreshUnitOptions,
   };
