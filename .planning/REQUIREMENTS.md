@@ -9,9 +9,9 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 
 ### Vocabulary Management
 
-- [ ] **VOC-01**: Parent can add vocabulary words with Chinese translations, pronunciations, and example sentences
-- [ ] **VOC-02**: Parent can organize words into units and lessons
-- [ ] **VOC-03**: Parent can configure FSRS parameters (difficulty, retention interval)
+- [x] **VOC-01**: Parent can add vocabulary words with Chinese translations, pronunciations, and example sentences
+- [x] **VOC-02**: Parent can organize words into units and lessons
+- [x] **VOC-03**: Parent can configure FSRS parameters (difficulty, retention interval)
 - [x] **VOC-04**: System stores vocabulary data in SQLite database with proper schema
 
 ### FSRS Integration
@@ -85,7 +85,7 @@ Requirements for Phase 1 implementation. Each maps to roadmap phases.
 
 ### Web Interface
 
-- [ ] **WEB-01**: Parent interface for vocabulary management (add/edit/organize)
+- [x] **WEB-01**: Parent interface for vocabulary management (add/edit/organize)
 - [x] **WEB-02**: Student interface for dictation session requests and progress display
   - **Completed Phase 08-06** (2026-08-23): Backend now emits progress_update, word_complete, and session_complete control frames. Frontend already implements play_word/next_word triggers. Real-time progress bar updates and gapless audio playback are now functional.
 - [ ] **WEB-03**: Parent review interface for post-dictation feedback
@@ -132,9 +132,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| VOC-01 | Phase 9 | Pending |
-| VOC-02 | Phase 9 | Pending |
-| VOC-03 | Phase 9 | Pending |
+| VOC-01 | Phase 9 | Complete |
+| VOC-02 | Phase 9 | Complete |
+| VOC-03 | Phase 9 | Complete |
 | VOC-04 | Phase 4 | Complete |
 | FSRS-01 | Phase 5 | Complete |
 | FSRS-02 | Phase 5 | Complete |
@@ -176,7 +176,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PY-02 | Phase 3 | Complete |
 | PY-03 | Phase 3 | Complete |
 | PY-04 | Phase 3 | Complete |
-| WEB-01 | Phase 9 | Pending |
+| WEB-01 | Phase 9 | Complete |
 | WEB-02 | Phase 8 | Complete |
 | WEB-03 | Phase 10 | Pending |
 | WEB-04 | Phase 8 | Complete |
