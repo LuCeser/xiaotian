@@ -446,7 +446,7 @@ Plans:
   3. Parent can configure FSRS parameters (difficulty, retention interval)
   4. Interface persists all changes to SQLite database
 
-**Plans**: 6/8 plans executed
+**Plans**: 7/8 plans executed
 
 Plans:
 **Wave 1**
@@ -466,7 +466,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 09-07-PLAN.md — Browse + organize UI (unit groups, search, edit/rename/delete modals) + 学习设置 card + responsive two-column layout (VOC-02, VOC-03, WEB-01, D-03/D-11/D-12/D-15)
+- [x] 09-07-PLAN.md — Browse + organize UI (unit groups, search, edit/rename/delete modals) + 学习设置 card + responsive two-column layout (VOC-02, VOC-03, WEB-01, D-03/D-11/D-12/D-15)
 
 **Wave 5** *(blocked on Wave 4)*
 
@@ -548,7 +548,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 8.4. Batch Answer Submission Workflow (INSERTED) | 0/0 | Not started | - |
 | 8.5. Automatic Grading and Analysis Reports (INSERTED) | 0/0 | Not started | - |
 | 8.6. Multi-User Session Isolation and Scaling (INSERTED) | 0/0 | Not started | - |
-| 9. Parent Vocabulary Management | 6/8 | In Progress|  |
+| 9. Parent Vocabulary Management | 7/8 | In Progress|  |
 | 10. Parent Feedback System | 0/0 | Not started | - |
 | 11. Error Handling & Resilience | 0/0 | Not started | - |
 | 12. End-to-End Validation | 0/0 | Not started | - |

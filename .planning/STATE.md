@@ -5,10 +5,10 @@ milestone_name: milestone
 current_phase: 09
 current_phase_name: parent-vocabulary-management
 status: executing
-stopped_at: Completed 09-06-PLAN.md
-last_updated: "2026-09-29T14:34:48.379Z"
+stopped_at: Completed 09-07-PLAN.md
+last_updated: "2026-09-29T15:12:20.599Z"
 last_activity: 2026-09-29
-last_activity_desc: Plan 09-06 complete
+last_activity_desc: Plan 09-07 complete
 progress:
   total_phases: 16
   completed_phases: 9
@@ -28,12 +28,12 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 ## Current Position
 
 Phase: 09 (parent-vocabulary-management) — EXECUTING
-Plan: 6 of 8 complete
+Plan: 7 of 8 complete
 Status: Ready to execute
-Last activity: 2026-09-29 — Plan 09-06 complete
-Next: ①执行 09-07（浏览/整理 + 学习设置 UI）②09-08 收尾 E2E；注意 VOC-01/02/03 待 09-07/09-08 SUMMARY 落地后才在 REQUIREMENTS.md 翻 Complete（shared-ID gate）
+Last activity: 2026-09-29 — Plan 09-07 complete
+Next: ①执行 09-08（收尾 E2E，最后一计划）②REQUIREMENTS.md 的 VOC-01/02/03/WEB-01 待 09-08 SUMMARY 落地后翻 Complete（shared-ID gate：ready-ids 本计划返回 0/3）
 
-Progress: [█████████░] 90%
+Progress: [█████████░] 92%
 
 ## Performance Metrics
 
@@ -80,6 +80,7 @@ Progress: [█████████░] 90%
 | Phase 09 P04 | 26min | 2 tasks | 4 files |
 | Phase 09 P05 | 16min | 3 tasks | 6 files |
 | Phase 09 P06 | 25min | 2 tasks | 7 files |
+| Phase 09 P07 | 30min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -116,6 +117,9 @@ Recent decisions affecting current work:
 - [Phase 09]: Plan 09-06 resume: interrupted Task 2 work (781+99+25+189 lines across parent-modes.js/parent-app.js/parent.html/parent.css) adopted after per-file diff review against the plan spec instead of rewritten — every spec item (tabs, D-06 radio validation, D-08 optional fields, shared datalist, preview table, transparency banner, createElement/textContent) was already present and verified green; zero fragments needed rewriting (Plan 09-04 precedent) — Plan 09-06 resume: interrupted Task 2 work (781+99+25+189 lines across parent-modes.js/parent-app.js/parent.html/parent.css) adopted after per-file diff review against the plan spec instead of rewritten — every spec item (tabs, D-06 radio validation, D-08 optional fields, shared datalist, preview table, transparency banner, createElement/textContent) was already present and verified green; zero fragments needed rewriting (Plan 09-04 precedent)
 - [Phase 09]: Batch result banner names the skipped words via a pre-commit GET /words snapshot: the API returns only {added,skipped} counts, but skips are UNIQUE(word,category), so skipped == pasted ∩ existing — the snapshot derives the readable list; on snapshot failure the banner still renders the honest counts (transparency never depends on the extra request) — Batch result banner names the skipped words via a pre-commit GET /words snapshot: the API returns only {added,skipped} counts, but skips are UNIQUE(word,category), so skipped == pasted ∩ existing — the snapshot derives the readable list; on snapshot failure the banner still renders the honest counts (transparency never depends on the extra request)
 - [Phase 09]: The batch commit is refused client-side above 100 entries (MAX_BATCH_ENTRIES mirrors pkg/web/api maxEntries) with a split-paste hint, and at zero valid rows the commit button stays disabled — bounded request bodies enforced before the request is ever sent (threat-model trust boundary, Plan 09-01 caps) — The batch commit is refused client-side above 100 entries (MAX_BATCH_ENTRIES mirrors pkg/web/api maxEntries) with a split-paste hint, and at zero valid rows the commit button stays disabled — bounded request bodies enforced before the request is ever sent (threat-model trust boundary, Plan 09-01 caps)
+- [Phase ?]: [Phase 09]: Plan 09-07 browse unit-level 重命名/删除 act per-category across the categories present in the group's rows, and header actions are WITHHELD in the 全部+search combination — destructive confirm copy must always match the DELETE {category, unit} server scope (T-09-05) — The mutation API requires category; a merged 全部 group can span both categories — iterating the rows' categories is exact without an extra fetch, and in the one ambiguous combination the group shows no unit-level buttons instead of a count the API would not honor
+- [Phase ?]: [Phase 09]: Plan 09-07 unit-group headers build the 48px aria-expanded toggle as a SIBLING of the 重命名/删除 action buttons — buttons are never nested (invalid HTML breaks the accessibility tree); localStorage parent.units.collapsed stores a JSON array of unit names, re-read defensively on every render — UI-SPEC button-headers-with-aria-expanded is preserved per-toggle while keeping valid HTML; the per-render re-read makes collapse state self-healing against manual storage edits
+- [Phase ?]: [Phase 09]: Plan 09-07 SettingsCard interval slider caps at 365 (plan spec) though the API allows 36500, and the edit modal sends ALL four fields (provided-empty clears the column) because the modal renders the word's full current state — Values above 365 were never settable from this UI; a full-state editor matching visible fields makes PUT semantics (empty = clear, D-08 partial-form valid) obvious to the parent
 
 ### Pending Todos
 
@@ -173,6 +177,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-29T14:33:59.999Z
-Stopped at: Completed 09-06-PLAN.md
+Last session: 2026-09-29T15:11:25.646Z
+Stopped at: Completed 09-07-PLAN.md
 Resume file: None
