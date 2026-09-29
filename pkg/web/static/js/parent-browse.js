@@ -597,6 +597,31 @@
     toggle.appendChild(badge);
     header.appendChild(toggle);
 
+    // Inline header actions (UI-SPEC Unit group row): 重命名 + 删除 —
+    // 44px hit areas via padding. Rendered only for named units and only
+    // when the exact-scope dialog copy can be guaranteed (see
+    // unitOpsAllowed); 未分组 has no {category, unit} target.
+    if (unit !== '' && this.unitOpsAllowed()) {
+      var renameBtn = document.createElement('button');
+      renameBtn.type = 'button';
+      renameBtn.className = 'unit-action';
+      renameBtn.textContent = '重命名';
+      renameBtn.addEventListener('click', function () {
+        self.openRenameModal(unit);
+      });
+
+      var deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'unit-action unit-action-danger';
+      deleteBtn.textContent = '删除';
+      deleteBtn.addEventListener('click', function () {
+        self.openDeleteUnitModal(unit, count);
+      });
+
+      header.appendChild(renameBtn);
+      header.appendChild(deleteBtn);
+    }
+
     var body = document.createElement('div');
     body.className = 'unit-body';
     group.rows.forEach(function (word) {
@@ -663,7 +688,17 @@
     editBtn.addEventListener('click', function () {
       self.openEditModal(word);
     });
+
+    var deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'row-action row-action-danger';
+    deleteBtn.textContent = '删除';
+    deleteBtn.addEventListener('click', function () {
+      self.openDeleteWordModal(word);
+    });
+
     actions.appendChild(editBtn);
+    actions.appendChild(deleteBtn);
 
     row.appendChild(text);
     if (word.meaning) {
@@ -772,6 +807,231 @@
           event.preventDefault();
           handleSave();
         });
+      },
+    });
+  };
+
+  // ------------------------------------------------------------------
+  // Rename + destructive-delete flows (Plan 09-07 Task 2). Every
+  // mutation is gated by its modal — the dialog is the ONLY confirmation
+  // layer and the API call issued is always the confirmed one (prohibition
+  // pairing with Plan 09-05: no delete request exists outside this path).
+  // ------------------------------------------------------------------
+
+  /**
+   * Distinct categories present among a unit's rows in the current view.
+   * Mutation endpoints require a category; in the 全部 view a merged
+   * unit may span both, so the flow iterates the categories actually
+   * held by the group (with the browse category scoped, this is always
+   * exactly that one category).
+   */
+  BrowseView.prototype.categoriesForUnit = function (unit) {
+    var seen = [];
+    this.words.forEach(function (word) {
+      if ((word.unit || '') === unit && seen.indexOf(word.category) === -1) {
+        seen.push(word.category);
+      }
+    });
+    return seen;
+  };
+
+  /** Run one mutation per category, sequentially, failing fast. */
+  BrowseView.prototype.runPerCategory = function (categories, perform) {
+    return categories.reduce(function (chain, category) {
+      return chain.then(function () {
+        return perform(category);
+      });
+    }, Promise.resolve());
+  };
+
+  /**
+   * Rename modal (重命名单元): 将「{old}」重命名为 + input + 确认重命名
+   * / 取消 (loading state on confirm) → POST /api/v1/units/rename with
+   * the group's category scope. A not_found response surfaces the
+   * backend message in an Error toast (Pitfall 2); generic failures show
+   * 保存失败：{message}。
+   */
+  BrowseView.prototype.openRenameModal = function (unit) {
+    var self = this;
+    var categories = this.categoriesForUnit(unit);
+
+    openModal({
+      title: '重命名单元',
+      build: function (body, actions, close) {
+        var form = document.createElement('form');
+        form.className = 'modal-form';
+        form.noValidate = true;
+
+        var prompt = document.createElement('p');
+        prompt.className = 'modal-message';
+        prompt.textContent = '将「' + unit + '」重命名为';
+        form.appendChild(prompt);
+
+        var field = buildModalField('新单元名', 'rename-unit-input', false);
+        field.input.value = unit;
+        form.appendChild(field.field);
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = '取消';
+        cancelBtn.addEventListener('click', close);
+
+        var confirmBtn = buildLoadingButton('确认重命名', 'btn btn-primary');
+        confirmBtn.type = 'submit';
+
+        actions.appendChild(cancelBtn);
+        actions.appendChild(confirmBtn);
+        form.appendChild(actions);
+        body.appendChild(form);
+
+        function handleConfirm() {
+          if (confirmBtn.disabled) {
+            return;
+          }
+          field.error.textContent = '';
+          var newName = field.input.value.trim();
+          if (!newName) {
+            field.error.textContent = '请输入新的单元名';
+            return;
+          }
+          if (newName === unit) {
+            close();
+            return;
+          }
+          setLoading(confirmBtn, true);
+          self.runPerCategory(categories, function (category) {
+            return self.renameUnit(unit, newName, category);
+          }).then(function () {
+            close();
+            toast('已重命名', 'success');
+            self.refresh();
+            self.onMutated();
+          }).catch(function (err) {
+            setLoading(confirmBtn, false);
+            if (err && err.code === 'not_found') {
+              // Pitfall 2 surfaced: the backend's stdout diagnostic
+              // rides as the message — show it verbatim.
+              toast(errorMessage(err), 'error');
+            } else {
+              toast('保存失败：' + errorMessage(err) + '。', 'error');
+            }
+            // One category may have renamed before a later one failed —
+            // re-render the true state either way.
+            self.refresh();
+          });
+        }
+
+        confirmBtn.addEventListener('click', function (event) {
+          event.preventDefault();
+          handleConfirm();
+        });
+        form.addEventListener('submit', function (event) {
+          event.preventDefault();
+          handleConfirm();
+        });
+      },
+    });
+  };
+
+  /**
+   * Destructive delete-word confirm (删除单词): exact-word copy +
+   * 确认删除 / 取消 → DELETE /api/v1/words with {category, words:[word]}.
+   */
+  BrowseView.prototype.openDeleteWordModal = function (word) {
+    var self = this;
+    openModal({
+      title: '删除单词',
+      danger: true,
+      build: function (body, actions, close) {
+        var message = document.createElement('p');
+        message.className = 'modal-message';
+        message.textContent = '确认删除「' + word.word + '」？它的学习记录会一起删除，无法恢复。';
+        body.appendChild(message);
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = '取消';
+        cancelBtn.addEventListener('click', close);
+
+        var confirmBtn = buildLoadingButton('确认删除', 'btn btn-destructive');
+        confirmBtn.addEventListener('click', function () {
+          if (confirmBtn.disabled) {
+            return;
+          }
+          setLoading(confirmBtn, true);
+          self.deleteWords({ category: word.category, words: [word.word] })
+            .then(function () {
+              close();
+              toast('已删除', 'success');
+              self.refresh();
+              self.onMutated();
+            })
+            .catch(function (err) {
+              setLoading(confirmBtn, false);
+              toast('删除失败：' + errorMessage(err) + '。', 'error');
+            });
+        });
+
+        actions.appendChild(cancelBtn);
+        actions.appendChild(confirmBtn);
+      },
+    });
+  };
+
+  /**
+   * Destructive delete-unit confirm (删除单元): exact-count copy (n from
+   * the badge) → DELETE /api/v1/words with {category, unit} per category
+   * the group holds. Failure keeps the dialog open with the backend
+   * message and re-renders the true state.
+   */
+  BrowseView.prototype.openDeleteUnitModal = function (unit, count) {
+    var self = this;
+    var categories = this.categoriesForUnit(unit);
+
+    openModal({
+      title: '删除单元',
+      danger: true,
+      build: function (body, actions, close) {
+        var message = document.createElement('p');
+        message.className = 'modal-message';
+        message.textContent = '确认删除「' + unit + '」的全部 ' + count +
+          ' 个单词？学习记录会一起删除，无法恢复。';
+        body.appendChild(message);
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = '取消';
+        cancelBtn.addEventListener('click', close);
+
+        var confirmBtn = buildLoadingButton('确认删除', 'btn btn-destructive');
+        confirmBtn.addEventListener('click', function () {
+          if (confirmBtn.disabled) {
+            return;
+          }
+          setLoading(confirmBtn, true);
+          var deleted = 0;
+          self.runPerCategory(categories, function (category) {
+            return self.deleteWords({ category: category, unit: unit })
+              .then(function (result) {
+                deleted += (result && result.deleted) || 0;
+              });
+          }).then(function () {
+            close();
+            toast('已删除 ' + deleted + ' 个单词', 'success');
+            self.refresh();
+            self.onMutated();
+          }).catch(function (err) {
+            setLoading(confirmBtn, false);
+            toast('删除失败：' + errorMessage(err) + '。', 'error');
+            self.refresh();
+          });
+        });
+
+        actions.appendChild(cancelBtn);
+        actions.appendChild(confirmBtn);
       },
     });
   };

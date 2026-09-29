@@ -232,6 +232,13 @@ body {
   border-color: var(--border);
 }
 
+/* Destructive: used ONLY inside confirm dialogs and row/header 删除
+   actions (UI-SPEC Color roles, Plan 09-07 Task 2). */
+.btn-destructive {
+  background: var(--destructive);
+  color: #ffffff;
+}
+
 /* ------------------------------------------------------------------ */
 /* Word rows / browse list                                             */
 /* ------------------------------------------------------------------ */
@@ -663,6 +670,25 @@ body {
   white-space: nowrap;
 }
 
+/* Inline header actions (重命名 / 删除, Plan 09-07 Task 2) — 44px hit
+   areas via padding; destructive variant uses the destructive role. */
+.unit-action {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 16px;
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 44px;
+  padding: 8px 12px;
+  touch-action: manipulation;
+}
+
+.unit-action-danger {
+  color: var(--destructive);
+}
+
 .unit-body {
   padding: 0 12px 8px;
 }
@@ -688,6 +714,11 @@ body {
   min-height: 44px;
   padding: 8px;
   touch-action: manipulation;
+}
+
+/* Row-level 删除 (Plan 09-07 Task 2) — destructive role. */
+.row-action-danger {
+  color: var(--destructive);
 }
 
 /* ------------------------------------------------------------------ */
@@ -759,6 +790,12 @@ body {
   font-weight: 600;
   line-height: 1.2;
   margin: 0 0 16px;
+}
+
+/* Destructive confirm emphasis (UI-SPEC Color roles): the dialog title
+   takes the destructive color so the register is unmistakable. */
+.modal-danger .modal-title {
+  color: var(--destructive);
 }
 
 .modal-message {
