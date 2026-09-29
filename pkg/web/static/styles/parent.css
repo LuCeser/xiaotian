@@ -268,6 +268,14 @@ body {
   order: 5;
   color: var(--muted);
   overflow-wrap: anywhere;
+  /* UI-SPEC long-text row: meanings wrap to at most 2 lines then
+     ellipsize (Plan 09-08 Rule-2 fix — the clamp is specified by the
+     UI-SPEC long-text backstop row but was absent from the Plan 09-07
+     styles this plan's e2e asserts against). */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 @media (min-width: 768px) {

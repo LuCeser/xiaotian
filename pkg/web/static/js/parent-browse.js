@@ -580,6 +580,12 @@
     var name = document.createElement('span');
     name.className = 'unit-name';
     name.textContent = unit || UNGROUPED_LABEL;
+    // UI-SPEC long-text row: the full name stays available beyond the
+    // single-line ellipsis (hover/tap-hold tooltip; assistive tech reads
+    // the untruncated textContent regardless).
+    if (unit) {
+      name.title = unit;
+    }
 
     // Count badge: {n} 个单词 from GET /api/v1/units (category-scoped;
     // the all-categories view merges by name). The 未分组 group has no

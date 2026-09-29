@@ -284,3 +284,195 @@ test('full flow: batch add → browse → search → edit → rename → delete 
     await deleteUnit(request, UNIT_TRACER);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Plan 09-08 Task 2 — D-03 responsive matrix + UI-SPEC backstop rows.
+//
+// Discriminators are read from the real stylesheet (styles/parent.css) via
+// computed styles / window.matchMedia — the ipad-layout.spec.js approach:
+//   - <1024px: .main-content stacks (display:block), sections in DOM order
+//   - >=1024px: two-column grid (browse 2fr wider than the 1fr rail),
+//     container max-width 1120px
+//   - every viewport: inputs report font-size >=16px (no iOS zoom-on-focus)
+//
+// Backstop fixtures (UI Considerations long-text + overflow rows): an
+// over-length unit name and a long Chinese meaning prove the clamp/ellipsis
+// styles; a 25-line paste proves the 320px preview cap and page scroll with
+// a collapsed group present. Screenshots land under test-results/ as the
+// durable human-review evidence (the automated asserts are best-effort;
+// the plan routes these rows to visual confirmation).
+// ---------------------------------------------------------------------------
+
+const OVER_UNIT = 'e2e-backstop-' + '超长单元名称测试'.repeat(15); // 133 runes
+const LONG_MEANING = '这是一个用来验证长文本换行与省略行为的超长中文释义。'.repeat(8);
+// 25 pasted lines for the preview-overflow fixture — previewed, NEVER committed.
+const OVERFLOW_PASTE = Array.from({ length: 25 }, (_, i) =>
+  `e2e-overflow-${String(i + 1).padStart(2, '0')}\t溢出第${i + 1}行`).join('\n');
+
+test('responsive matrix (phone/tablet/desktop) + backstop visual checks', async ({ page, request }) => {
+  const info = test.info();
+  await deleteUnit(request, OVER_UNIT);
+  try {
+    const seed = await request.post('/api/v1/words', {
+      data: {
+        category: CAT,
+        unit: OVER_UNIT,
+        entries: [
+          { word: 'e2e-longtext', meaning: LONG_MEANING },
+          { word: 'e2e-filler', meaning: '占位' },
+        ],
+      },
+    });
+    expect(seed.ok(), 'backstop seed POST must succeed').toBeTruthy();
+
+    const viewports = [
+      { name: 'phone-375x812', width: 375, height: 812, twoCol: false, cardPadding: '16px', assertToolbarColumn: true },
+      { name: 'tablet-820x1180', width: 820, height: 1180, twoCol: false, cardPadding: '24px', assertToolbarColumn: false },
+      { name: 'desktop-1280x800', width: 1280, height: 800, twoCol: true, cardPadding: '24px', assertToolbarColumn: false },
+    ];
+
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto('/parent.html');
+
+    const longRow = page.locator('.word-row[data-word="e2e-longtext"]');
+    await expect(longRow).toBeVisible();
+
+    for (const vp of viewports) {
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+
+      const layout = await page.evaluate(() => {
+        const cs = (el) => (el ? getComputedStyle(el) : null);
+        const main = document.querySelector('.main-content');
+        const browse = document.querySelector('.browse-section');
+        const add = document.querySelector('.add-section');
+        const toolbar = document.querySelector('.browse-toolbar');
+        const container = document.querySelector('.container');
+        // iOS zooms text-ENTRY inputs whose font is <16px (radios/ranges
+        // are not zoom-on-focus targets); parent.css pins 16px on every
+        // text input class — assert that surface.
+        const textInputs = Array.from(
+          document.querySelectorAll('input[type="text"], input:not([type]), textarea'),
+        ).map((el) => parseFloat(getComputedStyle(el).fontSize));
+        return {
+          mq1024: window.matchMedia('(min-width: 1024px)').matches,
+          mainDisplay: cs(main).display,
+          gridTracks: cs(main).gridTemplateColumns.split(' ').filter(Boolean).length,
+          toolbarDirection: cs(toolbar).flexDirection,
+          containerMaxWidth: cs(container).maxWidth,
+          browseWidth: browse.getBoundingClientRect().width,
+          addWidth: add.getBoundingClientRect().width,
+          browseTop: browse.getBoundingClientRect().top,
+          addBottom: add.getBoundingClientRect().bottom,
+          cardPadding: cs(add).paddingLeft,
+          minInputFont: textInputs.length ? Math.min(...textInputs) : 0,
+        };
+      });
+
+      expect(layout.mq1024, `${vp.name}: (min-width: 1024px) MQ must match the viewport`).toBe(vp.twoCol);
+      if (!vp.twoCol) {
+        // Single column: sections stack in DOM order, no grid, toolbar stacks.
+        expect(layout.mainDisplay, `${vp.name}: sections stack (single column)`).toBe('block');
+        expect(layout.browseTop, `${vp.name}: browse renders below the add card`).toBeGreaterThanOrEqual(layout.addBottom);
+        if (vp.assertToolbarColumn) {
+          expect(layout.toolbarDirection, `${vp.name}: toolbar stacks on phone`).toBe('column');
+        }
+      } else {
+        // Two-column grid active: browse 2fr wider than the 1fr rail.
+        expect(layout.mainDisplay, `${vp.name}: two-column grid active at >=1024px`).toBe('grid');
+        expect(layout.gridTracks, `${vp.name}: grid-template-columns has two tracks`).toBe(2);
+        expect(layout.browseWidth, `${vp.name}: browse column wider than the rail`).toBeGreaterThan(layout.addWidth);
+        expect(layout.containerMaxWidth, `${vp.name}: container capped at 1120px`).toBe('1120px');
+      }
+      expect(layout.cardPadding, `${vp.name}: card padding follows the breakpoint`).toBe(vp.cardPadding);
+      expect(layout.minInputFont, `${vp.name}: every input stays >=16px (no iOS zoom-on-focus)`).toBeGreaterThanOrEqual(16);
+
+      await page.screenshot({
+        path: info.outputPath(`matrix-${vp.name}.png`),
+        fullPage: true,
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // Backstop row 1 — long-text handling (UI-SPEC UI Considerations):
+    // meanings clamp to 2 lines with ellipsis; unit names stay single-line
+    // ellipsized with the full text available (title attribute; AT reads
+    // the untruncated textContent).
+    // ------------------------------------------------------------------
+    // This Chromium computes display:-webkit-box as flow-root while the
+    // clamp still applies — assert the clamp properties plus the rendered
+    // 2-line height (the behavioral proof), not the display alias.
+    const meaningStyles = await longRow.locator('.word-meaning').evaluate((el) => {
+      const s = getComputedStyle(el);
+      const lineHeight = parseFloat(s.lineHeight) || parseFloat(s.fontSize) * 1.5;
+      return {
+        clamp: s.webkitLineClamp || s.getPropertyValue('-webkit-line-clamp'),
+        orient: s.webkitBoxOrient,
+        overflow: s.overflow,
+        height: el.getBoundingClientRect().height,
+        lineHeight,
+      };
+    });
+    expect(meaningStyles.clamp, 'meaning clamps at 2 lines').toBe('2');
+    expect(meaningStyles.orient, 'clamp orientation is vertical').toBe('vertical');
+    expect(meaningStyles.overflow, 'clamped meaning hides the overflow').toBe('hidden');
+    expect(
+      meaningStyles.height,
+      'rendered meaning stays within 2 lines (clamp actually applies to the long fixture)',
+    ).toBeLessThanOrEqual(meaningStyles.lineHeight * 2.5);
+
+    const backstopGroup = page.locator(`.unit-group[data-unit="${OVER_UNIT}"]`);
+    const unitName = backstopGroup.locator('.unit-name');
+    const nameStyles = await unitName.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { whiteSpace: s.whiteSpace, textOverflow: s.textOverflow, overflow: s.overflow };
+    });
+    expect(nameStyles.whiteSpace, 'unit name stays single-line').toBe('nowrap');
+    expect(nameStyles.textOverflow, 'unit name ellipsizes').toBe('ellipsis');
+    expect(nameStyles.overflow).toBe('hidden');
+    expect(
+      await unitName.getAttribute('title'),
+      'full unit name stays available beyond the ellipsis',
+    ).toBe(OVER_UNIT);
+
+    await page.screenshot({
+      path: info.outputPath('backstop-longtext-desktop.png'),
+      fullPage: true,
+    });
+
+    // ------------------------------------------------------------------
+    // Backstop row 2 — overflow: the batch preview table caps at 320px
+    // with an inner scroll; the long page scrolls with a collapsed group
+    // present (uses the e2e unit — no 20-unit seeding, T-09-12).
+    // ------------------------------------------------------------------
+    await page.getByRole('tab', { name: '批量添加' }).click();
+    const batchPanel = page.locator('#add-panel-batch');
+    await batchPanel.locator('#parent-batch-paste').fill(OVERFLOW_PASTE);
+    await batchPanel.getByRole('button', { name: '解析并预览' }).click();
+    await expect(batchPanel.locator('.preview-row')).toHaveCount(25);
+
+    const previewStyles = await batchPanel.locator('.preview-scroll').evaluate((el) => {
+      const s = getComputedStyle(el);
+      return {
+        maxHeight: s.maxHeight,
+        overflowY: s.overflowY,
+        scrollable: el.scrollHeight > el.clientHeight,
+      };
+    });
+    expect(previewStyles.maxHeight, 'preview region capped at 320px').toBe('320px');
+    expect(previewStyles.overflowY, 'preview scrolls internally').toBe('auto');
+    expect(previewStyles.scrollable, '25 rows overflow into the inner scroll').toBe(true);
+
+    await page.screenshot({
+      path: info.outputPath('backstop-preview-overflow.png'),
+      fullPage: true,
+    });
+
+    await backstopGroup.locator('.unit-toggle').click();
+    await expect(backstopGroup.locator('.unit-body')).toBeHidden();
+    const pageScrolls = await page.evaluate(() =>
+      document.documentElement.scrollHeight > window.innerHeight);
+    expect(pageScrolls, 'long page scrolls with a collapsed group present').toBe(true);
+  } finally {
+    await deleteUnit(request, OVER_UNIT);
+  }
+});
