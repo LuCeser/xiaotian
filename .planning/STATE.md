@@ -5,10 +5,10 @@ milestone_name: milestone
 current_phase: 09
 current_phase_name: parent-vocabulary-management
 status: executing
-stopped_at: Completed 09-05-PLAN.md
-last_updated: "2026-09-28T14:54:37.346Z"
-last_activity: 2026-09-28
-last_activity_desc: Plan 09-01 complete
+stopped_at: Completed 09-06-PLAN.md
+last_updated: "2026-09-29T14:34:48.379Z"
+last_activity: 2026-09-29
+last_activity_desc: Phase 09 execution started
 progress:
   total_phases: 16
   completed_phases: 9
@@ -28,9 +28,9 @@ See: .planning/PROJECT.md (updated 2026-08-09)
 ## Current Position
 
 Phase: 09 (parent-vocabulary-management) — EXECUTING
-Plan: 6 of 7 complete
+Plan: 2 of 8
 Status: Ready to execute
-Last activity: 2026-09-28 — Plan 09-05 complete
+Last activity: 2026-09-29 — Phase 09 execution started
 Next: ①执行 09-06（添加单词 UI：批量粘贴解析器 + 添加单词 双模式卡片）②随后 09-07（浏览/整理 + 学习设置 UI）③09-08 收尾 E2E；注意 VOC-01/02/03 待 09-06/07/08 SUMMARY 落地后才在 REQUIREMENTS.md 翻 Complete（shared-ID gate）
 
 Progress: [█████████░] 90%
@@ -79,6 +79,7 @@ Progress: [█████████░] 90%
 | Phase 09 P03 | 26min | 2 tasks | 7 files |
 | Phase 09 P04 | 26min | 2 tasks | 4 files |
 | Phase 09 P05 | 16min | 3 tasks | 6 files |
+| Phase 09 P06 | 25min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,9 @@ Recent decisions affecting current work:
 - [Phase 09]: Plan 09-04 resume: interrupted Task 2 work adopted after diff review instead of rewritten; only its seed INSERT arg-count bug fixed — The partial work already mirrored listWords conventions and the plan test spec; rewriting would discard sound design and add churn (Plan 09-04)
 - [Phase 09]: [Phase 09]: Plan 09-05 mutation handlers share one mapBridgeError — vocab_manager.py stdout diagnostics ("Card N not found"/"No cards found") map to 404 not_found truncated to 300 runes; the four pybridge sentinels map to 502 python_failed — One mapping cannot drift per-handler; Pitfall 2 closes end-to-end at the API layer and T-09-07 keeps subprocess output bounded in the error envelope
 - [Phase 09]: [Phase 09]: Plan 09-05 fsrs_config.json written atomically (same-directory temp + Sync + os.Rename, failure removes temp and preserves original); FSRSSettings struct declaration order fixes on-disk key order — A half-written config would poison every future vocab_manager.py spawn (loader falls back wholesale); atomic replace + fixed key order keeps the Go writer key-for-key with the Python reader (D-14)
+- [Phase 09]: Plan 09-06 resume: interrupted Task 2 work (781+99+25+189 lines across parent-modes.js/parent-app.js/parent.html/parent.css) adopted after per-file diff review against the plan spec instead of rewritten — every spec item (tabs, D-06 radio validation, D-08 optional fields, shared datalist, preview table, transparency banner, createElement/textContent) was already present and verified green; zero fragments needed rewriting (Plan 09-04 precedent) — Plan 09-06 resume: interrupted Task 2 work (781+99+25+189 lines across parent-modes.js/parent-app.js/parent.html/parent.css) adopted after per-file diff review against the plan spec instead of rewritten — every spec item (tabs, D-06 radio validation, D-08 optional fields, shared datalist, preview table, transparency banner, createElement/textContent) was already present and verified green; zero fragments needed rewriting (Plan 09-04 precedent)
+- [Phase 09]: Batch result banner names the skipped words via a pre-commit GET /words snapshot: the API returns only {added,skipped} counts, but skips are UNIQUE(word,category), so skipped == pasted ∩ existing — the snapshot derives the readable list; on snapshot failure the banner still renders the honest counts (transparency never depends on the extra request) — Batch result banner names the skipped words via a pre-commit GET /words snapshot: the API returns only {added,skipped} counts, but skips are UNIQUE(word,category), so skipped == pasted ∩ existing — the snapshot derives the readable list; on snapshot failure the banner still renders the honest counts (transparency never depends on the extra request)
+- [Phase 09]: The batch commit is refused client-side above 100 entries (MAX_BATCH_ENTRIES mirrors pkg/web/api maxEntries) with a split-paste hint, and at zero valid rows the commit button stays disabled — bounded request bodies enforced before the request is ever sent (threat-model trust boundary, Plan 09-01 caps) — The batch commit is refused client-side above 100 entries (MAX_BATCH_ENTRIES mirrors pkg/web/api maxEntries) with a split-paste hint, and at zero valid rows the commit button stays disabled — bounded request bodies enforced before the request is ever sent (threat-model trust boundary, Plan 09-01 caps)
 
 ### Pending Todos
 
@@ -169,6 +173,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-28T14:54:37.331Z
-Stopped at: Completed 09-05-PLAN.md
+Last session: 2026-09-29T14:33:59.999Z
+Stopped at: Completed 09-06-PLAN.md
 Resume file: None
