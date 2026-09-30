@@ -247,8 +247,11 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 
 // validateAddRequest enforces the add-path caps: category enum (D-06),
 // batch size in [1, maxEntries], and per-field rune caps with the
-// offending field named in the message (T-09-04). Returns "" on success
-// or the error message on failure.
+// offending field named in the message (T-09-04). An empty word is
+// rejected here (WR-01) — mirroring validateEditRequest — so it fails as
+// 400 invalid_request instead of leaking to Python's exit-1 and surfacing
+// as a misleading 502 python_failed. Returns "" on success or the error
+// message on failure.
 func validateAddRequest(req *AddRequest) string {
 	if err := ValidateCategory(req.Category); err != nil {
 		return "category must be \"english\" or \"chinese\""
@@ -258,6 +261,9 @@ func validateAddRequest(req *AddRequest) string {
 			maxEntries, len(req.Entries))
 	}
 	for i, e := range req.Entries {
+		if e.Word == "" {
+			return fmt.Sprintf("entries[%d].word must not be empty", i)
+		}
 		// CR-01: the delete path encodes word lists as comma-joined argv
 		// (--words a,b) that Python splits back on ",", so a word
 		// containing a comma could never be deleted as itself — deleting
