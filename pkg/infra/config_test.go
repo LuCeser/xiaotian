@@ -18,15 +18,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// setRequiredPythonEnv installs the two python.* env vars that have no
-// default in DefaultConfig (interpreter, scriptsDir) but are required by
-// Config.Validate. Tests that exercise LoadConfig expecting success call this
+// setRequiredPythonEnv installs the python.* env vars that have no default
+// in DefaultConfig but are required by Config.Validate (interpreter,
+// scriptsDir, and — since WR-05 — dataDir, which anchors the
+// fsrs_config.json writer and the DICTATION_DATA_DIR reader on one
+// directory). Tests that exercise LoadConfig expecting success call this
 // first; tests that exercise a python validation failure do NOT (they want
 // Validate to fail on the python field they're testing).
 func setRequiredPythonEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("HTA_PYTHON_INTERPRETER", "/opt/hta/venv/bin/python")
 	t.Setenv("HTA_PYTHON_SCRIPTSDIR", "third_party/python")
+	t.Setenv("HTA_PYTHON_DATADIR", t.TempDir())
 }
 
 // TestDefaultConfig asserts the phase-1 baseline configuration (D-52 lowest
@@ -517,6 +520,26 @@ func TestLoadConfigInvalidPythonScriptsDir(t *testing.T) {
 	}
 }
 
+// TestLoadConfigInvalidPythonDataDir verifies that python.dataDir is
+// required (WR-05 / Pitfall 8 single-resolution rule): the directory
+// anchors BOTH the web/api fsrs_config.json writer and the
+// DICTATION_DATA_DIR env the Python scripts read. Empty splits the two
+// ends (Python reads SKILL_DIR/data, Go writes CWD/fsrs_config.json) with
+// no error anywhere — so Validate must fail fast at boot.
+func TestLoadConfigInvalidPythonDataDir(t *testing.T) {
+	t.Setenv("HTA_PYTHON_INTERPRETER", "/opt/hta/venv/bin/python")
+	t.Setenv("HTA_PYTHON_SCRIPTSDIR", "third_party/python")
+	// Explicitly empty so an ambient HTA_PYTHON_DATADIR cannot mask the rule.
+	t.Setenv("HTA_PYTHON_DATADIR", "")
+	_, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("LoadConfig returned nil error, want ErrConfigInvalid for python.dataDir empty")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
 // TestLoadConfigInvalidPythonMaxConcurrent verifies the D-02 bound: the
 // semaphore cap MUST be in [1, 4]. Values outside that range (e.g. 8) risk
 // fork-bombing the 1C/1G VPS or starving the Go heap.
@@ -724,13 +747,15 @@ func TestWSConfigValidate(t *testing.T) {
 		// localhost/127.0.0.1 origins satisfy the infra layer; ws.NewServer
 		// re-validates at construction time (double-validation).
 		//
-		// Python.Interpreter/ScriptsDir have NO default (deployment-specific,
-		// supplied via env in the real boot path) so fill them on the struct to
-		// isolate the assertion to the WS layer. This mirrors what
-		// setRequiredPythonEnv does at the viper/env layer for LoadConfig.
+		// Python.Interpreter/ScriptsDir/DataDir have NO default
+		// (deployment-specific, supplied via env in the real boot path) so
+		// fill them on the struct to isolate the assertion to the WS layer.
+		// This mirrors what setRequiredPythonEnv does at the viper/env layer
+		// for LoadConfig.
 		cfg := DefaultConfig()
 		cfg.Python.Interpreter = "/opt/hta/venv/bin/python"
 		cfg.Python.ScriptsDir = "third_party/python"
+		cfg.Python.DataDir = t.TempDir()
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("DefaultConfig().Validate() = %v, want nil (WS defaults must not break Validate)", err)
 		}

@@ -406,12 +406,15 @@ func clearHTAEnv(t *testing.T) {
 	// Phase 3 (D-03/D-04): PythonConfig requires a non-empty interpreter +
 	// scriptsDir, so run() refuses to boot without them. The main boot tests
 	// exercise run() end-to-end and need a minimally-valid python env — the
-	// same contract pkg/infra tests get via setRequiredPythonEnv. Set after
-	// clearing so the baseline is "no HTA env except the required python pair."
-	// (TestMainRejectsInvalidConfig still fails on its audioFrameBytes=512
-	// override, independent of these.)
+	// same contract pkg/infra tests get via setRequiredPythonEnv. Since
+	// WR-05, python.dataDir is required too (it anchors the fsrs_config.json
+	// writer and the DICTATION_DATA_DIR reader on one directory). Set after
+	// clearing so the baseline is "no HTA env except the required python
+	// fields." (TestMainRejectsInvalidConfig still fails on its
+	// audioFrameBytes=512 override, independent of these.)
 	t.Setenv("HTA_PYTHON_INTERPRETER", "python3")
 	t.Setenv("HTA_PYTHON_SCRIPTSDIR", "third_party/python")
+	t.Setenv("HTA_PYTHON_DATADIR", t.TempDir())
 }
 
 // freePortAddr opens a TCP listener on 127.0.0.1:0, reads the bound

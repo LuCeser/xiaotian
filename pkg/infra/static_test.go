@@ -62,6 +62,7 @@ func TestStaticRouteValidationWhenEnabled(t *testing.T) {
 			// test is the static config.
 			cfg.Python.Interpreter = "/opt/hta/venv/bin/python"
 			cfg.Python.ScriptsDir = "third_party/python"
+			cfg.Python.DataDir = t.TempDir()
 			cfg.Server.StaticDir = tc.staticDir
 			cfg.Server.StaticRoute = tc.route
 			err := cfg.Validate()

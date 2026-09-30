@@ -379,7 +379,12 @@ type PythonConfig struct {
 	VocabDBPath string `json:"vocabDBPath" mapstructure:"vocabDBPath"`
 
 	// DataDir is the runtime data directory (env DICTATION_DATA_DIR) used by
-	// the Python scripts for non-cache persistent state.
+	// the Python scripts for non-cache persistent state. It is ALSO the
+	// anchor for the web/api layer's fsrs_config.json writer (Phase 9,
+	// Pitfall 8 single-resolution rule: Go writer and Python reader must
+	// resolve THE SAME directory). Empty is rejected by Validate — an empty
+	// value silently splits the two ends (env not forwarded → Python reads
+	// SKILL_DIR/data; Go writes CWD/fsrs_config.json).
 	DataDir string `json:"dataDir" mapstructure:"dataDir"`
 
 	// CacheDir is the runtime cache directory (env DICTATION_CACHE_DIR) where
@@ -1123,6 +1128,15 @@ func (c Config) Validate() error {
 	}
 	if c.Python.MgmtTimeout <= 0 {
 		return errors.Wrap(ErrConfigInvalid, "python.mgmtTimeout must be > 0")
+	}
+	// WR-05 (Pitfall 8): DataDir anchors BOTH the web/api fsrs_config.json
+	// writer and the DICTATION_DATA_DIR env the Python scripts read. When
+	// empty, Bridge.childEnv silently withholds the env (Python falls back
+	// to SKILL_DIR/data) while Go writes CWD/fsrs_config.json — the parent's
+	// saved settings never reach the scheduler, with no error anywhere.
+	if c.Python.DataDir == "" {
+		return errors.Wrap(ErrConfigInvalid,
+			"python.dataDir must not be empty (anchors fsrs_config.json writer and DICTATION_DATA_DIR reader on one directory)")
 	}
 
 	// WS origin whitelist (D-24). The wildcard "*" is forbidden at this layer
