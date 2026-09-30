@@ -648,4 +648,30 @@ func TestE2E_RunDeleteWords(t *testing.T) {
 	if len(rows) != 0 {
 		t.Fatalf("after unit-mode delete rows = %v, want none", rows)
 	}
+
+	// WR-03: deleting a target that matches NOTHING is an idempotent
+	// no-op — the script prints trailing {"deleted": 0} with exit 0, so
+	// the Bridge must return a nil error and Deleted 0 (never
+	// ErrPythonJSONParse → 502, which a stale second tab's delete would
+	// have surfaced before the fix).
+	delRes, err = b.RunDeleteWords(context.Background(), DeleteWordsOpts{
+		Unit:     "ghost-unit",
+		Category: "english",
+	})
+	if err != nil {
+		t.Fatalf("RunDeleteWords (unit mode, not found): %v", err)
+	}
+	if delRes.Deleted != 0 {
+		t.Fatalf("unit-mode not-found Deleted = %d, want 0", delRes.Deleted)
+	}
+	delRes, err = b.RunDeleteWords(context.Background(), DeleteWordsOpts{
+		Words:    []string{"never-added"},
+		Category: "english",
+	})
+	if err != nil {
+		t.Fatalf("RunDeleteWords (words mode, not found): %v", err)
+	}
+	if delRes.Deleted != 0 {
+		t.Fatalf("words-mode not-found Deleted = %d, want 0", delRes.Deleted)
+	}
 }

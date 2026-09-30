@@ -756,7 +756,11 @@ def cmd_delete_words(db, args):
             (args.category, args.unit),
         ).fetchall()
         if not rows:
-            print(f"No cards found with unit '{args.unit}' in category '{args.category}'")
+            # Not-found is an idempotent no-op: print a trailing JSON result
+            # (not the old plain-text diagnostic) so the Go bridge's
+            # classifyMgmtRun/extractTrailingJSON parses a typed result
+            # instead of erroring ErrPythonJSONParse → 502 (WR-03).
+            print(json.dumps({"deleted": 0}))
             sys.exit(0)
 
         card_ids = [r["id"] for r in rows]
@@ -789,7 +793,9 @@ def cmd_delete_words(db, args):
             [args.category] + word_list,
         ).fetchall()
         if not rows:
-            print("No matching cards found")
+            # Words-mode not-found: same idempotent-JSON contract as unit
+            # mode above (WR-03).
+            print(json.dumps({"deleted": 0}))
             sys.exit(0)
 
         card_ids = [r["id"] for r in rows]
