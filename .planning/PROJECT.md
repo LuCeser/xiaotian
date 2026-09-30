@@ -1,5 +1,7 @@
 # Home Tutor Agent
 
+> **2026-09-30 产品验收重定基：** [ADR-0002](../docs/adr/0002-browser-realtime-tutor.md) 已转正 **Accepted**——自研 RTC 层（先 WebSocket 后 WebRTC/Go pion，传输可替换接口）＋ 小米 MiMo ASR/LLM/TTS 全家桶（每层可替换接口），附三条硬护栏与火山书面 Plan B。当前主线 = **R0–R3**（见 ROADMAP「R0–R3 当前主线」章节）；产品验收 = **RT-01~RT-10**（见 REQUIREMENTS「产品验收（最高优先级）」组）；旧 Phase 1–9 完成记录 = **组件证据**。最新事实见 [项目复盘](../docs/PROJECT-REVIEW-2026-09-30.md)。
+
 ## What This Is
 
 A web-based real-time dictation tutor agent that provides natural, interactive learning experiences for elementary school students. The system uses conversational AI to deliver personalized vocabulary practice through voice dictation sessions, with parent feedback integration that drives FSRS (Free Spaced Repetition Scheduler) algorithm updates.
@@ -23,16 +25,15 @@ Students receive personalized, real-time dictation practice with immediate feedb
 
 ### Active
 
-- [ ] **Word/vocabulary entry management** - Parents can add and organize vocabulary words by unit/lesson
-- [ ] **FSRS-based automatic word selection** - System selects due words based on spaced repetition algorithm
-- [ ] **Real-time voice dictation interaction** - Students request dictation sessions ("I want to dictate 30 words") and receive TTS prompts
-- [ ] **Parent feedback integration** - Post-dictation review interface for parents to rate performance (good/hard/again/easy)
-- [ ] **FSRS algorithm updates** - Parent feedback automatically updates the spaced repetition scheduler
-- [ ] **iPad web browser support** - Responsive interface optimized for iPad tablets
-- [ ] **Resource-constrained deployment** - Efficient operation on 1C 1G VPS infrastructure
-- [ ] **Session state management** - Robust WebSocket session handling (IDLE → LISTENING → DICTATING → WAITING_PARENT → FEEDBACK)
-- [ ] **Audio streaming** - Real-time TTS audio delivery with <1.5s latency target
-- [ ] **Integration with existing Python assets** - Reuse vocab_manager.py and pregenerate_dictation.py from xiaotian-skills
+- [ ] **浏览器自然实时家教（产品验收 RT-01~RT-10）** - R0 真机最小闭环起步：3 固定词、采集→VAD→MiMo ASR/LLM/TTS→流式播放→可打断，含 get_lesson_state 工具调用
+- [ ] **自研 RTC 层** - 先 WebSocket 成环、后 WebRTC（Go pion），传输层可替换接口
+- [ ] **词库管理与 FSRS** - 已交付组件（词库/单元、FSRS 选词与参数更新），R2 与自然家教对话贯通学习闭环
+- [ ] **家长反馈** - R2 交付（吸收旧 Phase 10 的 FEED-01~04：批改确认/覆盖与进度统计）
+- [ ] **iPad Safari 真机 + 业主证书 HTTPS** - 业主现有证书部署 VPS，iPad 走真实网络验收（RT-01）
+- [ ] **资源受限部署** - 1C 1G VPS 上高效运行（150MB 限定口径见 Constraints）
+- [ ] **按钮听写页（RT-10 降级模式）** - 功能冻结，只修阻塞 bug；作为备用按钮路径保留，不再作为产品主交互演进
+- [ ] **音频时延（RT-04 口径）** - 以「首个实际可听响应」衡量：授权完成至首次可听问候 ≤3 秒；句末至首个实际可听响应 P50≤1.5 秒、P95≤2.5 秒
+- [ ] **复用既有 Python 资产** - vocab_manager.py / pregenerate_dictation.py 经 subprocess 桥继续服务词库与 FSRS 业务
 
 ### Out of Scope
 
@@ -68,30 +69,45 @@ Students receive personalized, real-time dictation practice with immediate feedb
 - No foundation for future digital avatar integration
 - Resource constraints require careful memory and connection management
 
+## Technology Stack
+
+- **Go** — 业务服务 + 自研传输层；WebRTC 阶段引入 pion
+- **Python** — 既有 FSRS/词库 CLI，经 subprocess 桥复用
+- **SQLite** — 词库、FSRS 与学习记录存储
+- **小米 MiMo ASR + LLM + TTS** — 现有 key，每层可替换接口
+- **传输** — WebSocket → WebRTC（可替换传输接口）
+- **HTTPS** — 业主现有证书部署 VPS
+- **目标设备** — iPad Safari 真实网络
+
 ## Constraints
 
-- **Infrastructure**: 1C 1G VPS with strict memory limits (150MB for Go service, 50MB audio buffer pool)
+- **Infrastructure**: 1C 1G VPS with strict memory limits (150MB for Go service, 50MB audio buffer pool)——150MB 仅适用于 Go 业务服务；自研 RTC/语音组件按实际组件评估，不沿用旧预算结论
 - **Target Platform**: iPad web browser (Safari compatibility required)
-- **Audio Technology**: Full streaming TTS approach (consistency over caching), Doubao/XiaoMimiMo APIs
+- **Audio Technology**: 小米 MiMo ASR/LLM/TTS 全家桶（每层可替换接口）
 - **Language Stack**: Go for WebSocket service, Python for existing business logic integration
 - **Storage**: SQLite database (sufficient for current needs, avoids PostgreSQL overhead)
-- **Latency Target**: <1.5 seconds acceptable for dictation responses
+- **Latency Target**: RT-04 口径——授权完成至首次可听问候 ≤3 秒；句末至首个实际可听响应 P50≤1.5 秒、P95≤2.5 秒（以真实可听音频衡量）
+- **传输**: 两步走 WebSocket → WebRTC（Go pion），传输层可替换接口
+- **HTTPS/验收环境**: 业主现有证书部署 VPS，iPad 真实网络验收
 - **Architecture**: Must support future digital avatar integration (Phase 3)
-- **Concurrency**: Support 50-100 concurrent sessions within resource constraints
+- **Concurrency**: Support 50-100 concurrent sessions within resource constraints（容量结论待 R3 按实测重估）
 
 ## Key Decisions
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Go WebSocket + Python microservices | Go provides efficient WebSocket handling with lower memory; Python reuse existing FSRS and TTS logic | — Pending implementation |
-| Full streaming TTS vs caching | Consistency and simplicity over complex caching strategies for Phase 1 | — Pending implementation |
-| SQLite vs PostgreSQL | SQLite sufficient for current scale, avoids resource overhead on 1C 1G VPS | — Pending implementation |
-| Binary WebSocket protocol (640B frames) | Optimized for 20ms@16kHz PCM audio with proper sequence management | — Pending implementation |
-| Resource budgeting (150MB Go + 50MB audio) | Prevents memory overflow on 1C 1G VPS while supporting 50-100 concurrent sessions | — Pending implementation |
+| ADR-0002：自研 RTC 层（WS→WebRTC/pion）+ MiMo ASR/LLM/TTS 可替换接口 | 业主为领域工程师（练手目标，复杂度定价改变）+ 绿地自建≠旧协议修补 + 三条硬护栏与火山书面 Plan B | Accepted（2026-09-30），R0 spike 验证中 |
+| Go WebSocket + Python microservices | Go provides efficient WebSocket handling with lower memory; Python reuse existing FSRS and TTS logic | Delivered（Phases 1–9 组件证据，业务层保留） |
+| Full streaming TTS vs caching | Consistency and simplicity over complex caching strategies for Phase 1 | Superseded（实际交付预生成＋缓存；R0 重回真流式，按 RT-04 验收） |
+| SQLite vs PostgreSQL | SQLite sufficient for current scale, avoids resource overhead on 1C 1G VPS | Delivered |
+| Binary WebSocket protocol (640B frames) | Optimized for 20ms@16kHz PCM audio with proper sequence management | Delivered（功能冻结为 RT-10 降级模式） |
+| Resource budgeting (150MB Go + 50MB audio) | Prevents memory overflow on 1C 1G VPS while supporting 50-100 concurrent sessions | Delivered（Phase 1；150MB 限定 Go 业务服务） |
 
 ## Evolution
 
 This document evolves at phase transitions and milestone boundaries.
+
+**2026-09-30 — 产品验收重定基。** 复盘（[PROJECT-REVIEW-2026-09-30](../docs/PROJECT-REVIEW-2026-09-30.md)）+ 拷问讨论拍板：ADR-0002 转正 Accepted（自研 RTC + MiMo 可替换接口 + 三条硬护栏 + 火山书面 Plan B）；Phase 1–9 完成记录降为组件证据；主线 R0–R3；产品验收 = RT-01~RT-10。本文件 Active / Technology Stack / Constraints / Key Decisions 同步改写。
 
 **2026-09-27 — Phase 08 (Student Web Interface) complete.** DICT-01 / WEB-02 / WEB-04 validated (goal-backward verification passed: 28/31 must-have truths verified, 2 device-audition deferrals, VPS rehearsal → Phase 12). New browser-E2E layer: Playwright (`make e2e` / `npm run e2e`, commit 599c2a4). Phases 8.1–8.6 were delivered directly as speech-recognition-redesign tickets 01–07; next actionable phase with pending work: **9 (Parent Vocabulary Management)**. Carried residuals: UAT-CHECKLIST A2/A4-sub/A5 (next iPad session), session-resume-across-reconnect → Phase 11, VPS deployment → Phase 12.
 
@@ -109,4 +125,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-27 after Phase 08 completion*
+*Last updated: 2026-09-30 — 产品验收重定基（R0–R3 主线；ADR-0002 Accepted）*
