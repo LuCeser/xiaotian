@@ -22,7 +22,9 @@
  * Test-data hygiene (T-09-12): all writes are confined to the dedicated
  * `e2e-*` units; every test removes them in a finally-shaped API cleanup,
  * so the suite is idempotent across consecutive runs and a mid-flow
- * failure still leaves the family library as found.
+ * failure still leaves the family library as found. The global
+ * fsrs_config.json is snapshotted before the full flow and restored in
+ * its finally block (WR-04) — settings are not unit-scoped.
  */
 // @ts-check
 const { test, expect } = require('@playwright/test');
@@ -75,6 +77,12 @@ test('tracer: parent adds one word from parent.html and sees it in the browse li
 });
 
 test('full flow: batch add → browse → search → edit → rename → delete → settings → cleanup', async ({ page, request }) => {
+  // WR-04: fsrs_config.json is a GLOBAL file (outside the e2e-* unit
+  // namespace), so snapshot the settings as-found and restore them in the
+  // finally block — never clobber a parent's saved values with doc
+  // defaults when the suite runs against a real service/DataDir.
+  const settingsBefore = await (await request.get('/api/v1/settings/fsrs')).json();
+
   // -- Setup: pre-clean any crashed earlier run's e2e-full leftovers, then
   //    seed the deterministic duplicate target. The batch paste below
   //    re-includes this word, so the server MUST skip it (skips are
@@ -218,8 +226,9 @@ test('full flow: batch add → browse → search → edit → rename → delete 
 
     // ----------------------------------------------------------------
     // 7. Settings: 记忆保持率 → 0.90, save, reload reflects it (slider +
-    //    GET), then restore defaults via the UI and save so the config
-    //    file returns to 0.85/180.
+    //    GET), then exercise 恢复默认 via the UI and save (the button's
+    //    doc-default behavior is asserted below; the parent's REAL
+    //    pre-test settings are restored in the finally block, WR-04).
     // ----------------------------------------------------------------
     const retention = page.locator('#settings-retention');
     await retention.evaluate((el) => {
@@ -282,6 +291,10 @@ test('full flow: batch add → browse → search → edit → rename → delete 
     await deleteUnit(request, UNIT_FULL);
     await deleteUnit(request, UNIT_FULL_RENAMED);
     await deleteUnit(request, UNIT_TRACER);
+    // WR-04: restore the settings snapshotted before the flow — covers
+    // both a mid-flow failure (0.90 left saved) and a real-VPS run where
+    // the parent's custom values must not be reset to doc defaults.
+    await request.put('/api/v1/settings/fsrs', { data: settingsBefore }).catch(() => {});
   }
 });
 
