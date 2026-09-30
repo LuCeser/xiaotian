@@ -17,6 +17,14 @@ Students receive personalized, real-time dictation practice with immediate feedb
 - **Success metric**: Student engagement and vocabulary retention improvement
 - **Strategy notes**: Phase 1 focuses on technical MVP; broader market strategy to be determined
 
+## Current Milestone: v2.0 realtime-tutor
+
+**Goal:** 浏览器自然实时家教，RT-01～RT-10 验收。
+
+**Target features:** 自研交互＋MiMo 可替换接口，Phase 13～16（R0～R3）；先 WebSocket，Phase 16 替换 pion WebRTC，触发时间检查时切火山 Plan B。
+
+**Next:** /gsd-plan-phase 13；日期及切换步骤见 ROADMAP 和 docs/REALTIME-TUTOR-PLAN-B.md。
+
 ## Requirements
 
 ### Validated
@@ -25,7 +33,7 @@ Students receive personalized, real-time dictation practice with immediate feedb
 
 ### Active
 
-- [ ] **浏览器自然实时家教（产品验收 RT-01~RT-10）** - R0 真机最小闭环起步：3 固定词、采集→VAD→MiMo ASR/LLM/TTS→流式播放→可打断，含 get_lesson_state 工具调用
+- [ ] **浏览器自然实时家教（产品验收 RT-01~RT-10）** - R0 真机最小闭环起步：3 固定词、采集→VAD→MiMo ASR/LLM/TTS→流式播放→可打断，含真实读写工具调用及幂等验证
 - [ ] **自研 RTC 层** - 先 WebSocket 成环、后 WebRTC（Go pion），传输层可替换接口
 - [ ] **词库管理与 FSRS** - 已交付组件（词库/单元、FSRS 选词与参数更新），R2 与自然家教对话贯通学习闭环
 - [ ] **家长反馈** - R2 交付（吸收旧 Phase 10 的 FEED-01~04：批改确认/覆盖与进度统计）
@@ -37,16 +45,16 @@ Students receive personalized, real-time dictation practice with immediate feedb
 
 ### Out of Scope
 
-- **Photo OCR** — Deferred to Phase 2 to maintain Phase 1 focus on core dictation flow
+- **Photo OCR** — 已有组件，Phase 15 接入学习闭环；Phase 13 不前置 OCR。
 - **Digital avatar integration** — Planned for Phase 3, requires Phase 1 real-time foundation
 - **Mobile native apps** — iPad web browser approach reduces development complexity
-- **Multi-language support** — English-only for Phase 1, expansion possible later
+- **更多教学语言** — 本里程碑先验证中文交流和英语词汇教学；其他语言另行决定。
 - **Advanced analytics dashboard** — Basic statistics for Phase 1, detailed analytics later
 
 ## Context
 
 **Technical Environment:**
-- Greenfield project located at `D:\workspace\ai\xiaotian`
+- Existing project located at `D:\workspace\ai\xiaotian`
 - Existing reusable assets at `D:\workspace\ai\xiaotian-skills\shared\dictation\scripts\`
 - vocab_manager.py (822 lines): FSRS algorithm + SQLite CLI
 - pregenerate_dictation.py (1348 lines): Sophisticated TTS pipeline
@@ -104,6 +112,8 @@ Students receive personalized, real-time dictation practice with immediate feedb
 | Resource budgeting (150MB Go + 50MB audio) | Prevents memory overflow on 1C 1G VPS while supporting 50-100 concurrent sessions | Delivered（Phase 1；150MB 限定 Go 业务服务） |
 
 ## Evolution
+
+**2026-09-30 — 正式关闭旧方案、启动 v2.0。** v1.0 为 superseded / override_closeout；Phase 10～12 不再等待恢复。Phase 9 两项人工验收未执行，结转 Phase 16。新阶段数字编号 13～16；第一周/第三周/第六周检查分别为 10-07/10-21/11-11，规划时间计入，切换不重置计时。
 
 This document evolves at phase transitions and milestone boundaries.
 

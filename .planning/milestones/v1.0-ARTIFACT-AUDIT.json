@@ -1,0 +1,138 @@
+{
+  "scanned_at": "2026-09-30T14:11:25.772Z",
+  "has_open_items": true,
+  "counts": {
+    "debug_sessions": 2,
+    "quick_tasks": 5,
+    "threads": 0,
+    "todos": 5,
+    "seeds": 0,
+    "uat_gaps": 4,
+    "verification_gaps": 1,
+    "context_questions": 0,
+    "total": 17
+  },
+  "items": {
+    "debug_sessions": [
+      {
+        "slug": "2026-08-22-connection-error-handoff",
+        "status": "unknown",
+        "updated": "",
+        "hypothesis": ""
+      },
+      {
+        "slug": "static-file-404",
+        "status": "fixing",
+        "updated": "2026-08-10T00:19:00Z",
+        "hypothesis": "hypothesis: ROOT CAUSE CONFIRMED - Service running from wrong working directory (temp Go build dir),"
+      }
+    ],
+    "quick_tasks": [
+      {
+        "slug": "58w-minimal-frontend-e2e",
+        "date": "20260801",
+        "status": "missing",
+        "description": ""
+      },
+      {
+        "slug": "category-field-fix",
+        "date": "20260823",
+        "status": "unknown",
+        "description": ""
+      },
+      {
+        "slug": "refactor-xiaomi-asr",
+        "date": "20260823",
+        "status": "missing",
+        "description": ""
+      },
+      {
+        "slug": "260726-u7d-enforce-local-windows-verifiability-fix-",
+        "date": "",
+        "status": "missing",
+        "description": ""
+      },
+      {
+        "slug": "260823-",
+        "date": "",
+        "status": "missing",
+        "description": ""
+      }
+    ],
+    "threads": [],
+    "todos": [
+      {
+        "filename": "2026-07-25-fsrs-sqlite-ownership-adr.md",
+        "priority": "",
+        "area": "planning",
+        "summary": "## Problem\r"
+      },
+      {
+        "filename": "2026-07-25-repo-hygiene-readme-gitignore-cleanup.md",
+        "priority": "",
+        "area": "tooling",
+        "summary": "## Problem"
+      },
+      {
+        "filename": "2026-07-25-resolve-workerpool-unused.md",
+        "priority": "",
+        "area": "infra",
+        "summary": "## Problem"
+      },
+      {
+        "filename": "2026-07-25-unify-connection-registry-adr.md",
+        "priority": "",
+        "area": "architecture",
+        "summary": "## Problem"
+      },
+      {
+        "filename": "2026-08-08-research-and-fix-ios-websocket-audio-playback-issues-for-ipa.md",
+        "priority": "",
+        "area": "infra",
+        "summary": "## Problem"
+      },
+      {
+        "_remainder_count": 4,
+        "filename": "",
+        "priority": "",
+        "area": "",
+        "summary": ""
+      }
+    ],
+    "seeds": [],
+    "uat_gaps": [
+      {
+        "phase": "01",
+        "file": "01-UAT.md",
+        "status": "passed",
+        "open_scenario_count": 0
+      },
+      {
+        "phase": "07.1",
+        "file": "07.1-UAT-SCRIPT.md",
+        "status": "unknown",
+        "open_scenario_count": 0
+      },
+      {
+        "phase": "08",
+        "file": "iPad-UAT-Testing-Guide.md",
+        "status": "unknown",
+        "open_scenario_count": 0
+      },
+      {
+        "phase": "09",
+        "file": "09-UAT.md",
+        "status": "testing",
+        "open_scenario_count": 2
+      }
+    ],
+    "verification_gaps": [
+      {
+        "phase": "09",
+        "file": "09-VERIFICATION.md",
+        "status": "human_needed"
+      }
+    ],
+    "context_questions": []
+  }
+}

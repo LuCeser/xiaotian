@@ -1,95 +1,51 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-current_phase: R0
+milestone: v2.0
+milestone_name: realtime-tutor
+current_phase: 13
 current_phase_name: realtime-minimal-loop
-status: rebaselined
-stopped_at: "Rebaselined 2026-09-30: ADR-0002 Accepted, mainline R0-R3 (self-built RTC + MiMo); R0 not started"
-last_updated: "2026-09-30T13:33:23.000Z"
+status: planning
+stopped_at: "Ready to plan Phase 13 (R0); v1.0 superseded"
+last_updated: "2026-09-30T14:11:26.540Z"
 last_activity: 2026-09-30
-last_activity_desc: Product acceptance rebaseline to R0-R3 mainline (self-built RTC + MiMo)
 progress:
-  total_phases: 16
-  completed_phases: 10
-  total_plans: 51
-  completed_plans: 49
+  total_phases: 4
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Product Acceptance Rebaseline — 2026-09-30
 
-**产品验收未通过。** 2026-09-30 复盘 + 拷问讨论拍板：[ADR-0002](../docs/adr/0002-browser-realtime-tutor.md) 转正 **Accepted**——主线 = 自研 RTC 层（先 WebSocket 后 WebRTC/Go pion，传输可替换接口）＋ MiMo ASR/LLM/TTS 全家桶（每层可替换接口）＋ R0–R3 顺序 ＋ 三条硬护栏（火山混合编排降级为书面 Plan B）。
-
-旧 Phase 1–9 勾选 = 组件证据，不是产品验收；产品验收 = RT-01~RT-10（见 REQUIREMENTS「产品验收（最高优先级）」组与 ROADMAP「R0–R3 当前主线」章节）。下一步 = 规划 R0（/gsd-discuss-phase 起步）。
+产品验收未通过。v1.0 superseded / override_closeout，旧 Phase 10～12 不再执行；新里程碑 v2.0 realtime-tutor。Phase 13～16 对应 R0～R3。MiMo 可替换接口、自研 WebSocket→pion WebRTC、真实读写工具和真机 RT 验收为当前范围。
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-08-09)
+See: .planning/PROJECT.md (updated 2026-09-30)
 
-**Core value:** Students receive personalized, real-time dictation practice with immediate feedback while parents get detailed progress tracking and the ability to influence the learning algorithm through their reviews.
-**Current focus:** R0 — 真机最小闭环（自研 RTC + MiMo）
+**Core value:** 学生在浏览器与家教自然实时交流，理解上下文、允许打断、等待纸笔书写，学习结果进入真实记录。
+**Current focus:** Phase 13（R0）— 真机最小闭环，Ready to plan
 
 ## Current Position
 
-Phase: R0（重定基主线）— NOT STARTED
-Plan: —（待规划）
-Status: Ready to plan R0
-Last activity: 2026-09-30 — Completed quick task 260930-t8z：重定基规划文档（产品验收矫正，R0–R3 主线）
-Next: 以 ROADMAP「R0–R3 当前主线」章节为范围来源规划 R0
+Phase: 13 of 16 (R0 真机最小闭环；v2.0 起点)
+Plan: —（实施计划待生成）
+Status: Planning
+Last activity: 2026-09-30 — v1.0 关闭归档，v2.0 需求与路线图就绪
+Next: /gsd-plan-phase 13
 
-R0 未开始 / R1–R3 未开始，产品验收 RT-01~RT-10 全部待验证，历史 Phase 1–9 计划完成记录 = 组件证据（非产品验收）。
+新实时语音尚未实现；RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
 
 ## Performance Metrics
 
-**Velocity:**
-
-- Total plans completed: 37
-- Average duration: - min
-- Total execution time: 0.0 hours
-
-**By Phase:**
-
-| Phase | Plans | Total | Avg/Plan |
-|-------|-------|-------|----------|
-| 01 | 8 | - | - |
-| 02 | 3 | - | - |
-| 03 | 5 | - | - |
-| 04 | 5 | - | - |
-| 05 | 2 | - | - |
-| 06 | 4 | - | - |
-| 07 | 3 | - | - |
-| 08 | 7 | - | - |
-
-**Recent Trend:**
-
-- Last 5 plans: -
-- Trend: -
-
-*Updated after each plan completion*
-**Per-Plan Metrics:**
-
-| Plan | Duration | Tasks | Files |
-|------|----------|-------|-------|
-| Phase 03 P01 | 20 | 3 tasks | 10 files |
-| Phase 03 P02 | ~10 | 2 tasks | 10 files |
-| Phase 03 P03 | ~25 | 2 tasks | 6 files |
-| Phase 03 P04 | ~12 | 2 tasks | 3 files |
-| Phase 03 P05 | ~25 | 2 tasks | 5 files |
-| Phase 04 P01 | ~15 | 2 tasks | 6 files |
-| Phase 04 P02 | ~15 | 2 tasks | 2 files |
-| Phase 08-student-web-interface P04 | 5.5 minutes | 4 tasks | 6 files |
-| Phase 09 P01 | 39min | 2 tasks | 22 files |
-| Phase 09 P02 | 24min | 2 tasks | 2 files |
-| Phase 09 P03 | 26min | 2 tasks | 7 files |
-| Phase 09 P04 | 26min | 2 tasks | 4 files |
-| Phase 09 P05 | 16min | 3 tasks | 6 files |
-| Phase 09 P06 | 25min | 2 tasks | 7 files |
-| Phase 09 P07 | 30min | 3 tasks | 4 files |
-| Phase 09 P08 | 22min | 2 tasks | 3 files |
+v2.0：4 个活跃阶段，0 个实施计划完成。历史统计保留于 milestones/v1.0-STATE.md，不用于新里程碑进度。
 
 ## Accumulated Context
+
+以下保留旧里程碑的决策和待办登记用于追溯；旧阶段命令、历史缺陷判断及快速任务记录不构成当前任务建议。当前执行只以 Phase 13～16、RT-01～RT-10 和日期检查为准。旧登记的未解决状态见 milestones/v1.0-CLOSEOUT.md，不能自动恢复旧阶段。
 
 ### Decisions
 
@@ -179,14 +135,17 @@ None yet.
 
 ## Deferred Items
 
-Items acknowledged and carried forward from previous milestone close:
+旧里程碑以 superseded / override_closeout 关闭：审计有 17 项开放登记及未验收阶段，详见 [关闭记录](milestones/v1.0-CLOSEOUT.md) 和 [原始审计](milestones/v1.0-ARTIFACT-AUDIT.json)。它们未被判为通过。
 
-| Category | Item | Status | Deferred At |
-|----------|------|--------|-------------|
-| *(none)* | | | |
+| Category | Item | Status | 接收范围 |
+|---|---|---|---|
+| human_uat | Phase 9 长文本/省略号/预览视觉确认 | 未执行 | Phase 16 人工验收 |
+| human_uat | Phase 9 真 iPad 家长页视觉/触控/缩放 | 未执行 | Phase 16 真机验收 |
+| roadmap | 旧 Phase 10～12 | superseded | Phase 13～16 / RT-07～RT-10 及全量复验 |
+| historical_records | 历史调试/快速任务/待办/验证登记 | 原状态保留，不阻塞 R0 | 相关问题仅在影响新体验时处理 |
 
 ## Session Continuity
 
 Last session: 2026-09-30T13:33:23.000Z
-Stopped at: Rebaselined 2026-09-30: ADR-0002 Accepted, mainline R0-R3 (self-built RTC + MiMo); R0 not started
+Stopped at: Ready to plan Phase 13 (R0); v1.0 superseded
 Resume file: None

@@ -52,7 +52,7 @@
 
 已核实能力清单：接入自定义 ASR/TTS、第三方 LLM、Function Calling、打断、判停。
 
-原为首个候选，2026-09-30 重定基后降级为**书面 Plan B**：硬护栏 b 触发（3 周内无真机最小环、或 6 周内 RT-04/RT-05 不达标）时切换到火山 RTC 混合编排。切换前仅保留本表与 Sources 供核对，不预先投入实现。
+原为首个候选，2026-09-30 重定基后降级为**书面 Plan B**：硬护栏 b 触发（3 周内无真机最小环、或 6 周内 RT-04/RT-05 不达标）时切换到火山 RTC 混合编排。切换步骤、保留接口和验收要求见 [书面 Plan B](../REALTIME-TUTOR-PLAN-B.md)；触发前不预先实现备用集成。
 
 ### C：原生实时模型 WebRTC（对照候选记录）
 
@@ -91,7 +91,13 @@
 
 1. **a) 垂直切片纪律：** 第 1 周必须在真 iPad 上跑通 3 词最小闭环（采集→VAD→MiMo ASR→MiMo LLM→MiMo TTS→流式播放→可打断）。
 2. **b) 时间盒与 kill criteria：** 3 周内无真机最小环、或 6 周内 RT-04/RT-05 不达标 → 切换书面 Plan B（火山 RTC 混合编排，见 Options B）。
-3. **c) 工具调用环：** 最小环必须含至少一个真实工具调用（如 get_lesson_state 读 3 个固定词），turn manager 从第一天按「工具＋幂等」设计。
+3. **c) 工具调用环：** 最小环必须含真实 get_lesson_state 读工具，以及 advance_word 或等效写工具；写操作实际修改课堂状态并验证重试不重复推进，turn manager 从第一天按「工具＋幂等」设计。
+
+## 执行日期与阶段编号
+
+R0～R3 对应 GSD Phase 13～16。起算日 2026-09-30（规划计时），第一周检查 2026-10-07，第三周 2026-10-21，第六周 2026-11-11；统一北京时间当日 23:59。阶段迁移、替换传输或提供商不重置计时。第一周未成环只允许聚焦修复，第三周仍未成环必须切 Plan B；第六周 RT-04/RT-05 任一未达标必须切换。切换不允许恢复旧按钮方案作为产品成功。
+
+第一周最小环与最终延迟通过分别记录，原始时序、至少 30 次测量及 P50/P95 证据写入 [Phase 13 检查表](../../.planning/phases/13-realtime-minimal-loop/13-CHECKPOINTS.md)。
 
 ## Trade-off Analysis
 
@@ -116,7 +122,7 @@
 
 1. [ ] R0：MiMo 整段式 ASR 适配——自研管线：浏览器采集→服务端 VAD 切句→整句提交 MiMo ASR→流式收文本。
 2. [ ] R0：HTTPS 证书部署核对——业主现有证书部署到 VPS，iPad 真实网络可信访问（RT-01）。
-3. [ ] R0：工具调用环——get_lesson_state 读 3 个固定词；turn manager 从第一天按「工具＋幂等」设计（硬护栏 c）。
+3. [ ] R0（Phase 13）：工具调用环——真实 get_lesson_state + advance_word 或等效写工具，lesson_id/request_id/expected_version；LLM 工具请求由业务服务执行，重试不重复推进（硬护栏 c）。
 4. [ ] R0：第 1 周真 iPad 3 词最小闭环（采集→VAD→MiMo ASR→MiMo LLM→MiMo TTS→流式播放→可打断），WebSocket 传输成环；按复盘第 10 节「必须记录」清单采集 RT-04/RT-05 时序。
 5. [ ] R1：接入 start/get/repeat/advance/pause/resume/hint/finish 工具和确定性课堂状态；request_id/版本幂等与旧响应取消；首词按需、余下短距预取；正常写字不自动跳词。
 6. [ ] R2：接真实词库、提交批改、家长确认与 FSRS，验证整个学习闭环。
