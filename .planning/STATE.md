@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 09
-current_phase_name: parent-vocabulary-management
-status: executing
-stopped_at: Completed 09-08-PLAN.md
-last_updated: "2026-09-29T15:51:50.755Z"
-last_activity: 2026-09-29
-last_activity_desc: Plan 09-08 complete (phase 09 8/8)
+current_phase: R0
+current_phase_name: realtime-minimal-loop
+status: rebaselined
+stopped_at: "Rebaselined 2026-09-30: ADR-0002 Accepted, mainline R0-R3 (self-built RTC + MiMo); R0 not started"
+last_updated: "2026-09-30T13:33:23.000Z"
+last_activity: 2026-09-30
+last_activity_desc: Product acceptance rebaseline to R0-R3 mainline (self-built RTC + MiMo)
 progress:
   total_phases: 16
   completed_phases: 10
@@ -18,22 +18,28 @@ progress:
 
 # Project State
 
+## Product Acceptance Rebaseline — 2026-09-30
+
+**产品验收未通过。** 2026-09-30 复盘 + 拷问讨论拍板：[ADR-0002](../docs/adr/0002-browser-realtime-tutor.md) 转正 **Accepted**——主线 = 自研 RTC 层（先 WebSocket 后 WebRTC/Go pion，传输可替换接口）＋ MiMo ASR/LLM/TTS 全家桶（每层可替换接口）＋ R0–R3 顺序 ＋ 三条硬护栏（火山混合编排降级为书面 Plan B）。
+
+旧 Phase 1–9 勾选 = 组件证据，不是产品验收；产品验收 = RT-01~RT-10（见 REQUIREMENTS「产品验收（最高优先级）」组与 ROADMAP「R0–R3 当前主线」章节）。下一步 = 规划 R0（/gsd-discuss-phase 起步）。
+
 ## Project Reference
 
 See: .planning/PROJECT.md (updated 2026-08-09)
 
 **Core value:** Students receive personalized, real-time dictation practice with immediate feedback while parents get detailed progress tracking and the ability to influence the learning algorithm through their reviews.
-**Current focus:** Phase 09 — parent-vocabulary-management
+**Current focus:** R0 — 真机最小闭环（自研 RTC + MiMo）
 
 ## Current Position
 
-Phase: 09 (parent-vocabulary-management) — EXECUTING
-Plan: 8 of 8 complete
-Status: Ready to execute
-Last activity: 2026-09-29 — Plan 09-08 complete (phase 09 8/8)
-Next: Phase 09 执行完毕（8/8）→ 运行 /gsd-verify-work 做阶段验证；VOC-01/02/03 + WEB-01 已按 shared-ID gate（ready-ids 4/4）翻 Complete
+Phase: R0（重定基主线）— NOT STARTED
+Plan: —（待规划）
+Status: Ready to plan R0
+Last activity: 2026-09-30 — Completed quick task 260930-t8z：重定基规划文档（产品验收矫正，R0–R3 主线）
+Next: 以 ROADMAP「R0–R3 当前主线」章节为范围来源规划 R0
 
-Progress: [██████████] 96%
+R0 未开始 / R1–R3 未开始，产品验收 RT-01~RT-10 全部待验证，历史 Phase 1–9 计划完成记录 = 组件证据（非产品验收）。
 
 ## Performance Metrics
 
@@ -149,6 +155,7 @@ None yet.
 | 260801-ge1 | 接入 WebSocket 运行时(P0-1) | 2026-08-01 | bfb24d3 | Verified | [260801-ge1-websocket-p0-1](./quick/260801-ge1-websocket-p0-1/) |
 | 260801-kdq | 根治 ws TestHubStopsOnContextCancel flake | 2026-08-01 | b65ad5e | | [260801-kdq-ws-testhubstopsoncontextcancel-flake](./quick/260801-kdq-ws-testhubstopsoncontextcancel-flake/) |
 | 260802-ldq | 创建最小化前端验证界面，用于测试WebSocket连接、FSRS单词选择和TTS音频流播放 | 2026-08-02 | ad599a5 | Verified | [260802-ldq-websocket-fsrs-tts](./quick/260802-ldq-websocket-fsrs-tts/) |
+| 260930-t8z | 重定基规划文档：产品验收矫正（R0-R3主线，ADR-0002转正） | 2026-09-30 | a7fcfb4 | | [260930-t8z-r0-r3](./quick/260930-t8z-r0-r3/) |
 | 260823-cff | Fix category field in session_ready response for correct speech recognition language | 2026-08-23 | e8556fa | complete | [20260823-category-field-fix](./quick/20260823-category-field-fix/) |
 | 260823-fvx | 重构小米ASR实现以符合官方API规范 | 2026-08-23 | 9a8a7b3,3edb20a,cb72cab | complete | [260823-fvx-asr](./quick/260823-fvx-asr/) |
 | 260823-j2n | 收尾 speech-recognition-redesign Ticket 01 状态文档（issue 勾选/总结更新/STATE 补 commit） | 2026-08-23 | 371010c,eb58b7e | complete | [260823-j2n-speech-recognition-redesign-ticket-01-is](./quick/260823-j2n-speech-recognition-redesign-ticket-01-is/) |
@@ -180,6 +187,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-09-29T15:50:16.600Z
-Stopped at: Completed 09-08-PLAN.md
+Last session: 2026-09-30T13:33:23.000Z
+Stopped at: Rebaselined 2026-09-30: ADR-0002 Accepted, mainline R0-R3 (self-built RTC + MiMo); R0 not started
 Resume file: None
