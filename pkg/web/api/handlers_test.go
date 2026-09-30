@@ -204,6 +204,26 @@ func TestAddWords(t *testing.T) {
 		}
 	})
 
+	t.Run("comma-containing word returns 400 invalid_request", func(t *testing.T) {
+		// CR-01: the delete path joins words with "," and Python splits
+		// back on ",", so a comma word must never enter the library.
+		h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodPost, "/words",
+			strings.NewReader(`{"category":"english","entries":[{"word":"a,b"}]}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for comma word (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+			t.Errorf("body = %s, want invalid_request error envelope", rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "must not contain commas") {
+			t.Errorf("body = %s, want the comma rule named", rec.Body.String())
+		}
+	})
+
 	t.Run("unknown JSON field returns 400", func(t *testing.T) {
 		// RESEARCH Pitfall 12: DisallowUnknownFields must reject a typo like
 		// "catagory" rather than silently ignoring it.
@@ -559,6 +579,23 @@ func TestEditWord(t *testing.T) {
 		}
 	})
 
+	t.Run("comma-containing word returns 400 invalid_request", func(t *testing.T) {
+		// CR-01: editing a word into "a,b" would set up a later delete to
+		// splinter it into unintended deletions — rejected at the gate.
+		h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodPut, "/words/1",
+			strings.NewReader(`{"word":"a,b"}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for comma word (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+			t.Errorf("body = %s, want invalid_request error envelope", rec.Body.String())
+		}
+	})
+
 	t.Run("non-numeric id returns 400 invalid_request", func(t *testing.T) {
 		h := newTestHandler(&fakeExecutor{}, &fakeCardRepo{})
 		req := httptest.NewRequest(http.MethodPut, "/words/abc",
@@ -784,6 +821,7 @@ func TestDeleteWordsValidation(t *testing.T) {
 		"missing category":  `{"words":["a"]}`,
 		"unknown category":  `{"category":"francais","words":["a"]}`,
 		"empty words array": `{"category":"english","words":[]}`,
+		"comma in word":     `{"category":"english","words":["a,b"]}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

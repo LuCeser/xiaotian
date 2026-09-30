@@ -13,6 +13,10 @@
  *     lines (no tab) are skipped — neither rows nor errors.
  *   - A line consisting only of separators (e.g. a lone tab) → error
  *     {line, reason:'empty-word'} — never a silent skip.
+ *   - A word containing an ASCII comma → error
+ *     {line, reason:'word-comma'} — the delete API encodes word lists as
+ *     comma-joined argv that the Python engine splits back on ",", so a
+ *     comma word can never be deleted as itself (CR-01).
  *   - A word longer than 200 runes (code points, not UTF-16 units) →
  *     error {line, reason:'word-too-long'} — matches the API's
  *     entries[i].word cap (pkg/web/api/validate.go maxWordRunes).
@@ -93,6 +97,13 @@
 
       if (word === '') {
         errors.push({ line: lineNumber, reason: 'empty-word' });
+        continue;
+      }
+      // Mirrors the API's comma rejection (pkg/web/api/validate.go, CR-01):
+      // the delete path joins word lists with "," and Python splits back
+      // on ",", so a comma word could never round-trip as itself.
+      if (word.indexOf(',') !== -1) {
+        errors.push({ line: lineNumber, reason: 'word-comma' });
         continue;
       }
       if (runeCount(word) > MAX_WORD_RUNES) {

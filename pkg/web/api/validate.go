@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/pkg/errors"
 )
@@ -132,6 +133,14 @@ func validateDeleteRequest(req *DeleteRequest) string {
 		if word == "" {
 			return fmt.Sprintf("words[%d] must not be empty", i)
 		}
+		// CR-01: deleteWordsArgs joins Words with "," and the script splits
+		// it back on "," (vocab_manager.py cmd_delete_words), so a word
+		// containing a comma would splinter into multiple unintended
+		// deletions. Reject it here — mirroring the Python split contract —
+		// so the words list always round-trips exactly as confirmed.
+		if strings.Contains(word, ",") {
+			return fmt.Sprintf("words[%d] must not contain commas", i)
+		}
 		if n := len([]rune(word)); n > maxWordRunes {
 			return fmt.Sprintf("words[%d] exceeds %d characters", i, maxWordRunes)
 		}
@@ -141,11 +150,17 @@ func validateDeleteRequest(req *DeleteRequest) string {
 
 // validateEditRequest enforces the edit-path caps (Plan 09-05): word
 // required and ≤ maxWordRunes; each PROVIDED optional field within its cap
-// (an absent pointer is not checked — it means "keep the column"). Returns
-// "" on success or the error message naming the offending field.
+// (an absent pointer is not checked — it means "keep the column"). A word
+// containing a comma is rejected (CR-01): while edit does not itself use
+// the comma-join encoding, allowing "a,b" into the library would set up a
+// later delete to splinter it (see validateDeleteRequest). Returns "" on
+// success or the error message naming the offending field.
 func validateEditRequest(req *EditRequest) string {
 	if req.Word == "" {
 		return "word is required"
+	}
+	if strings.Contains(req.Word, ",") {
+		return "word must not contain commas"
 	}
 	if n := len([]rune(req.Word)); n > maxWordRunes {
 		return fmt.Sprintf("word exceeds %d characters", maxWordRunes)
@@ -243,6 +258,13 @@ func validateAddRequest(req *AddRequest) string {
 			maxEntries, len(req.Entries))
 	}
 	for i, e := range req.Entries {
+		// CR-01: the delete path encodes word lists as comma-joined argv
+		// (--words a,b) that Python splits back on ",", so a word
+		// containing a comma could never be deleted as itself — deleting
+		// it would remove OTHER words instead. Reject at the entry gate.
+		if strings.Contains(e.Word, ",") {
+			return fmt.Sprintf("entries[%d].word must not contain commas", i)
+		}
 		if n := len([]rune(e.Word)); n > maxWordRunes {
 			return fmt.Sprintf("entries[%d].word exceeds %d characters", i, maxWordRunes)
 		}

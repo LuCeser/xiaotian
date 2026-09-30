@@ -95,7 +95,24 @@ const { parseBatch } = require('../pkg/web/static/js/parent-batch-parser.js');
   });
 }
 
-// 7. Duplicate word within one paste: the SECOND occurrence is flagged
+// 7. A word containing an ASCII comma → word-comma error (CR-01): the
+//    delete API joins word lists with "," and Python splits back on ",",
+//    so a comma word must be rejected at parse time, per line.
+{
+  assert.deepStrictEqual(parseBatch('a,b'), {
+    rows: [],
+    errors: [{ line: 1, reason: 'word-comma' }],
+  });
+  assert.deepStrictEqual(parseBatch('apple\t苹果\na,b\t坏的\nbanana'), {
+    rows: [
+      { word: 'apple', meaning: '苹果' },
+      { word: 'banana', meaning: '' },
+    ],
+    errors: [{ line: 2, reason: 'word-comma' }],
+  });
+}
+
+// 8. Duplicate word within one paste: the SECOND occurrence is flagged
 //    referencing the first line number; the first stays a valid row.
 {
   assert.deepStrictEqual(parseBatch('apple\nbanana\napple'), {
@@ -107,7 +124,7 @@ const { parseBatch } = require('../pkg/web/static/js/parent-batch-parser.js');
   });
 }
 
-// 8. Mixed input: valid rows AND errors come back together — one bad
+// 9. Mixed input: valid rows AND errors come back together — one bad
 //    line never aborts the whole batch.
 {
   assert.deepStrictEqual(
@@ -125,7 +142,7 @@ const { parseBatch } = require('../pkg/web/static/js/parent-batch-parser.js');
   );
 }
 
-// 9. Windows paste: a trailing \r is trimmed before parsing.
+// 10. Windows paste: a trailing \r is trimmed before parsing.
 {
   assert.deepStrictEqual(parseBatch('apple\t苹果\r\nbanana\r\n'), {
     rows: [

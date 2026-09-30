@@ -232,12 +232,15 @@
 
   /**
    * Human-readable status text for one parser error row. Reasons come
-   * from parent-batch-parser.js ('empty-word', 'word-too-long',
-   * 'duplicate:<firstLine>').
+   * from parent-batch-parser.js ('empty-word', 'word-comma',
+   * 'word-too-long', 'duplicate:<firstLine>').
    */
   function describeParseError(err) {
     if (err.reason === 'empty-word') {
       return '这一行没有单词';
+    }
+    if (err.reason === 'word-comma') {
+      return '单词不能包含英文逗号';
     }
     if (err.reason === 'word-too-long') {
       return '单词超过 200 个字符';
