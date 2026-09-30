@@ -1,8 +1,76 @@
 # Roadmap: Home Tutor Agent
 
+> **2026-09-30 产品路线校准（重定基）：** [ADR-0002](../docs/adr/0002-browser-realtime-tutor.md) 已转正 **Accepted**——主线 = 自研 RTC 层（先 WebSocket 后 WebRTC/Go pion，传输可替换接口）＋ 小米 MiMo ASR/LLM/TTS 全家桶（每层可替换接口）＋ Go/Python 业务与工具。当前执行主线 = 本文件「R0–R3 当前主线」章节（见下文）；下方旧 Phase 1–12 章节保留为历史组件证据，不再按原序列推进（Phase 10–12 已暂停并入 R2/R3）。产品验收以 [REQUIREMENTS.md](./REQUIREMENTS.md)「产品验收（最高优先级）：RT-01~RT-10」组为准。详见 [ADR-0002](../docs/adr/0002-browser-realtime-tutor.md) 与 [项目复盘](../docs/PROJECT-REVIEW-2026-09-30.md)。
+
 ## Overview
 
 Journey from greenfield to production real-time dictation tutor system. Start with infrastructure foundation and resource management, build WebSocket communication layer, integrate existing Python assets (vocab_manager.py, pregenerate_dictation.py), implement FSRS algorithm and database layer, create TTS audio streaming with <1.5s latency, deliver complete session management workflow, build responsive web interfaces optimized for iPad, implement parent feedback system, polish user experience with error handling and progress tracking, and finally validate complete end-to-end functionality with performance metrics.
+
+## R0–R3 当前主线（2026-09-30 重定基）
+
+依据 [ADR-0002](../docs/adr/0002-browser-realtime-tutor.md)（Accepted）与 [项目复盘第 9 节](../docs/PROJECT-REVIEW-2026-09-30.md#9-重新安排交付顺序)。产品验收条目 RT-01~RT-10 见 [REQUIREMENTS.md](./REQUIREMENTS.md)「产品验收」组。
+
+### R0: 真机最小闭环（自研实时层 spike）
+
+**Goal**: 在真实 iPad + 用户网络上跑通 3 词最小闭环：采集→VAD→MiMo ASR→MiMo LLM→MiMo TTS→流式播放→可打断，WebSocket 传输成环（WebRTC/pion 为第二阶段）。
+**Depends on**: 无（新主线起点）。
+**Requirements**: RT-01, RT-02, RT-03（3 词场景起步）, RT-04, RT-05, RT-10。
+**Success Criteria** (what must be TRUE):
+
+  1. 硬护栏 a——第 1 周真 iPad 3 词闭环跑通（采集→VAD→MiMo ASR→MiMo LLM→MiMo TTS→流式播放→可打断）
+  2. 硬护栏 c——闭环含 get_lesson_state 读 3 个固定词的真实工具调用，turn manager 按工具＋幂等设计
+  3. 业主现有证书 HTTPS 部署 VPS，iPad 真实网络可信访问（RT-01）
+  4. 一次授权后持续听说（RT-02）；RT-04/RT-05 按复盘第 10 节「必须记录」清单采集时序
+  5. 旧按钮听写页冻结为 RT-10 降级模式（只修阻塞 bug）
+
+**Plans**: 0（待规划，/gsd-discuss-phase 起步）
+
+### R1: 对话接真实课堂
+
+**Goal**: start/get/repeat/advance/pause/resume/hint/finish 最小工具接真实课堂状态；口头发起、选词、重复、等待书写、暂停恢复、求助都改变真实状态；先 3~5 词再扩到 30 词；初始化立即反馈，首词按需、余下预取不阻塞。
+**Depends on**: R0。
+**Requirements**: RT-03（全量 20 场景）, RT-06, RT-07, RT-10（降级完善）。
+**Success Criteria** (what must be TRUE):
+
+  1. 写操作带 request_id 与课堂版本，重复回调不重复推进（RT-07）
+  2. 沉默写字不自动跳词，求助先提示/澄清（RT-06）
+  3. 按钮与语音同经业务服务一条路径（RT-07）
+
+**Plans**: 0（待规划）
+
+### R2: 学习闭环
+
+**Goal**: 接拍照/人工提交、批改、家长确认、FSRS；自然家教对话与真实学习记录贯通；跨连接恢复以课堂 ID 为依据，不绑 Client 内存地址。
+**Depends on**: R1。
+**Requirements**: RT-08, RT-09，吸收旧 Phase 10 的 FEED-01~04 与旧 Phase 11 的 ERR-01 残留。
+**Success Criteria** (what must be TRUE):
+
+  1. 15 分钟真实练习；断网/切后台恢复以课堂 ID 恢复进度，不偷偷新建课程（RT-08）
+  2. 完成批改及家长确认后正确记录并影响后续 FSRS 选词（RT-09）
+  3. 旧 Phase 10 家长反馈（FEED-01~04）与旧 Phase 11 跨连接恢复（ERR-01）内容在此交付
+
+**Plans**: 0（待规划）
+
+### R3: 部署与容量
+
+**Goal**: 按实际单会话资源、网络和费用评估生产部署与并发；100 人连接能力不等于 100 个真实语音会话达标；吸收旧 Phase 12 与旧代码清理决策（旧页删除与否推迟到此）。
+**Depends on**: R2。
+**Requirements**: RT-01~RT-10 全量复验 + 容量/费用。
+**Success Criteria** (what must be TRUE):
+
+  1. 单会话资源、网络与费用实测数据支撑生产部署与并发结论
+  2. RT-01~RT-10 全量复验通过（真机、真实网络）
+  3. 旧代码清理决策（旧按钮听写页删除与否）按实际使用数据落定
+
+**Plans**: 0（待规划）
+
+### 硬护栏（kill criteria）
+
+逐条转录自 [ADR-0002](../docs/adr/0002-browser-realtime-tutor.md)（Accepted）：
+
+1. **a) 垂直切片纪律：** 第 1 周必须在真 iPad 上跑通 3 词最小闭环（采集→VAD→MiMo ASR→MiMo LLM→MiMo TTS→流式播放→可打断）。
+2. **b) 时间盒与 kill criteria：** 3 周内无真机最小环、或 6 周内 RT-04/RT-05 不达标 → 切换书面 Plan B（火山 RTC 混合编排，见 ADR-0002 Options B）。
+3. **c) 工具调用环：** 最小环必须含至少一个真实工具调用（如 get_lesson_state 读 3 个固定词），turn manager 从第一天按「工具＋幂等」设计。
 
 ## Phases
 
@@ -21,10 +89,10 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 6: TTS Audio Streaming** - Real-time audio delivery with <1.5s latency (completed 2026-08-08)
 - [x] **Phase 7: Session State Management** - Complete session lifecycle and state transitions (completed 2026-08-08)
 - [x] **Phase 8: Student Web Interface** - Responsive iPad-optimized student experience (completed 2026-09-27)
-- [ ] **Phase 9: Parent Vocabulary Management** - Add/edit/organize vocabulary with FSRS configuration
-- [ ] **Phase 10: Parent Feedback System** - Post-dictation review and performance ratings
-- [ ] **Phase 11: Error Handling & Resilience** - Graceful disconnections and structured logging
-- [ ] **Phase 12: End-to-End Validation** - Complete user flow verification and performance testing
+- [x] **Phase 9: Parent Vocabulary Management** - Add/edit/organize vocabulary with FSRS configuration（8/8 完成 2026-09-29；组件证据）
+- [ ] **Phase 10: Parent Feedback System** - Post-dictation review and performance ratings（并入 R2/R3，暂停）
+- [ ] **Phase 11: Error Handling & Resilience** - Graceful disconnections and structured logging（并入 R2/R3，暂停）
+- [ ] **Phase 12: End-to-End Validation** - Complete user flow verification and performance testing（并入 R2/R3，暂停）
 
 ## Phase Details
 
@@ -436,6 +504,8 @@ Plans:
 
 ### Phase 9: Parent Vocabulary Management
 
+> 2026-09-29 计划 8/8 完成；2026-09-30 重定基定为组件证据，产品验收另按 RT-01~RT-10。
+
 **Goal**: Parent interface for adding, editing, and organizing vocabulary with FSRS configuration
 **Depends on**: Phase 4, Phase 8
 **Requirements**: VOC-01, VOC-02, VOC-03, WEB-01
@@ -477,6 +547,8 @@ Plans:
 
 ### Phase 10: Parent Feedback System
 
+> **2026-09-30 重定基：并入 R2/R3，暂停。** 重映射：FEED-01~04 → R2（学习闭环的家长确认环节）。不再按原序列执行。
+
 **Goal**: Parent review interface over auto-graded dictation results (Phase 8.5) — view detailed analysis reports, verify or override per-word grades, and track progress statistics. Parent confirmation remains the FSRS authority; auto-grading pre-fills the ratings (removes the parent bottleneck without removing parent control).
 **Depends on**: Phase 7, Phase 8, Phase 8.5
 **Requirements**: FEED-01, FEED-02, FEED-03, FEED-04, GRADE-04, WEB-03
@@ -494,6 +566,8 @@ Plans:
 
 ### Phase 11: Error Handling & Resilience
 
+> **2026-09-30 重定基：并入 R2/R3，暂停。** 重映射：ERR-01/跨连接恢复 → R2（以课堂 ID 为依据的恢复）。不再按原序列执行。
+
 **Goal**: Graceful error handling with meaningful messages and structured logging
 **Depends on**: Phase 10
 **Requirements**: ERR-01, ERR-02, RES-02
@@ -509,6 +583,8 @@ Plans:
 **PROJECT_MODE**: mvp
 
 ### Phase 12: End-to-End Validation
+
+> **2026-09-30 重定基：并入 R2/R3，暂停。** 重映射：端到端验证/容量/清理决策 → R3（部署与容量）。不再按原序列执行。
 
 **Goal**: Complete user flow verification with performance testing and resource validation on target hardware — absorbs speech-recognition-redesign ticket 08 scope (children's voices, real handwriting samples, real iPad Safari workflows).
 **Source of truth (extension):** `.scratch/speech-recognition-redesign/issues/08-end-to-end-integration-testing.md`
@@ -531,6 +607,8 @@ Plans:
 **Execution Order:**
 Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 8.1 → 8.2 → 8.3 → 8.4 → 8.5 → 8.6 → 9 → 10 → 11 → 12
 
+当前执行主线为 R0–R3（见上文章节），旧 Phase 10–12 暂停并入 R2/R3，不再按原序列执行。
+
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Resource-Constrained Infrastructure | 8/8 | Complete    | 2026-07-23 |
@@ -542,16 +620,16 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 →
 | 7. Session State Management | 3/3 | Complete    | 2026-08-08 |
 | 07.1. iOS WebSocket Audio Playback Fix (INSERTED) | 4/4 | Complete    | 2026-08-09 |
 | 8. Student Web Interface | 7/7 | Complete    | 2026-09-27 |
-| 8.1. Core Dictation Flow with Mimo TTS (INSERTED) | 0/0 | Not started (re-planning after re-scope) | - |
-| 8.2. Voice Command Recognition via Mimo ASR (INSERTED) | 0/0 | Not started | - |
-| 8.3. Photo OCR Answer Submission (INSERTED) | 0/0 | Not started | - |
-| 8.4. Batch Answer Submission Workflow (INSERTED) | 0/0 | Not started | - |
-| 8.5. Automatic Grading and Analysis Reports (INSERTED) | 0/0 | Not started | - |
-| 8.6. Multi-User Session Isolation and Scaling (INSERTED) | 0/0 | Not started | - |
-| 9. Parent Vocabulary Management | 8/8 | In Progress|  |
-| 10. Parent Feedback System | 0/0 | Not started | - |
-| 11. Error Handling & Resilience | 0/0 | Not started | - |
-| 12. End-to-End Validation | 0/0 | Not started | - |
+| 8.1. Core Dictation Flow with Mimo TTS (INSERTED) | 0/0 | Delivered via ticket 02 | 2026-08-23 |
+| 8.2. Voice Command Recognition via Mimo ASR (INSERTED) | 0/0 | Delivered via ticket 03 | 2026-08-31 |
+| 8.3. Photo OCR Answer Submission (INSERTED) | 0/0 | Delivered via ticket 04 | 2026-09-08 |
+| 8.4. Batch Answer Submission Workflow (INSERTED) | 0/0 | Delivered via ticket 05 | 2026-09-09 |
+| 8.5. Automatic Grading and Analysis Reports (INSERTED) | 0/0 | Delivered via ticket 06 | 2026-09-10 |
+| 8.6. Multi-User Session Isolation and Scaling (INSERTED) | 0/0 | Delivered via ticket 07 | 2026-09-11 |
+| 9. Parent Vocabulary Management | 8/8 | Complete | 2026-09-29 |
+| 10. Parent Feedback System | 0/0 | Paused（并入 R2/R3） | - |
+| 11. Error Handling & Resilience | 0/0 | Paused（并入 R2/R3） | - |
+| 12. End-to-End Validation | 0/0 | Paused（并入 R2/R3） | - |
 
 ## Backlog
 
