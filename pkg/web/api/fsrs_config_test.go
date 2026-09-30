@@ -7,6 +7,9 @@
 //   - TestGetFSRSFromFile:   file values echoed verbatim.
 //   - TestGetFSRSCorruptFile: garbage file → 200 defaults (read side never
 //     errors to the client; Python's Warning behavior is Plan 09-02's).
+//   - TestGetFSRSOutOfBoundsFile: valid JSON with out-of-range values →
+//     200 defaults (WR-02: mirrors Python load_scheduler's whole-file
+//     fallback so GET never reports values the scheduler will not use).
 //   - TestPutFSRSValidation: out-of-range retention/interval, non-integer
 //     interval, and extra scheduler fields all → 400 invalid_request;
 //     boundary values are accepted.
@@ -118,6 +121,79 @@ func TestGetFSRSCorruptFile(t *testing.T) {
 		t.Errorf("response = {%v, %d}, want defaults {0.85, 180} for a corrupt file",
 			resp.DesiredRetention, resp.MaximumInterval)
 	}
+}
+
+func TestGetFSRSOutOfBoundsFile(t *testing.T) {
+	// WR-02: the Python loader (load_scheduler) falls back to 0.85/180 as a
+	// WHOLE FILE when any value is out of range; the Go read side must
+	// report the same thing or the SettingsCard sliders show values the
+	// scheduler does not use. A boundary-valid file stays verbatim.
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"retention above 1", `{"desired_retention":1.7,"maximum_interval":180}`},
+		{"retention below 0.7", `{"desired_retention":0.5,"maximum_interval":180}`},
+		{"missing maximum_interval decodes to 0", `{"desired_retention":0.85}`},
+		{"interval above cap", `{"desired_retention":0.85,"maximum_interval":99999}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, fsrsTestConfigFile)
+			if err := os.WriteFile(path, []byte(tc.raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			h := newFSRSTestHandler(t, &fakeExecutor{}, dir)
+
+			req := httptest.NewRequest(http.MethodGet, "/settings/fsrs", nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s: status = %d, want 200 (body=%s)", tc.name, rec.Code, rec.Body.String())
+			}
+			var resp struct {
+				DesiredRetention float64 `json:"desired_retention"`
+				MaximumInterval  int     `json:"maximum_interval"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+			}
+			if resp.DesiredRetention != 0.85 || resp.MaximumInterval != 180 {
+				t.Errorf("%s: response = {%v, %d}, want defaults {0.85, 180}",
+					tc.name, resp.DesiredRetention, resp.MaximumInterval)
+			}
+		})
+	}
+
+	t.Run("boundary-valid file still returns verbatim", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, fsrsTestConfigFile)
+		if err := os.WriteFile(path, []byte(`{"desired_retention":0.95,"maximum_interval":36500}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := newFSRSTestHandler(t, &fakeExecutor{}, dir)
+
+		req := httptest.NewRequest(http.MethodGet, "/settings/fsrs", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			DesiredRetention float64 `json:"desired_retention"`
+			MaximumInterval  int     `json:"maximum_interval"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+		}
+		if resp.DesiredRetention != 0.95 || resp.MaximumInterval != 36500 {
+			t.Errorf("response = {%v, %d}, want the in-range file values {0.95, 36500}",
+				resp.DesiredRetention, resp.MaximumInterval)
+		}
+	})
 }
 
 func TestPutFSRSValidation(t *testing.T) {

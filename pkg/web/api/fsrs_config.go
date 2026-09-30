@@ -72,9 +72,12 @@ func fsrsSettingsDefaults() FSRSSettings {
 
 // readFSRSConfig reads and decodes the config file at path. A missing file
 // or ANY json/decode problem yields the defaults — the read side never
-// errors to the client (Python's loader likewise falls back, warning on
-// malformed content per Plan 09-02's contract; that Warning path is the
-// student session's safety net, not this endpoint's problem).
+// errors to the client. WR-02: a file with VALID JSON but OUT-OF-BOUNDS
+// values (e.g. desired_retention 1.7 after a manual edit) also falls back
+// to the defaults, mirroring the Python loader's whole-file fallback in
+// load_scheduler (vocab_manager.py) — otherwise GET would report "current"
+// values the scheduler does not actually use, and the SettingsCard sliders
+// would mislead the parent.
 func readFSRSConfig(path string) FSRSSettings {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -82,6 +85,9 @@ func readFSRSConfig(path string) FSRSSettings {
 	}
 	var s FSRSSettings
 	if err := json.Unmarshal(raw, &s); err != nil {
+		return fsrsSettingsDefaults()
+	}
+	if err := ValidateFSRSSettings(s); err != nil {
 		return fsrsSettingsDefaults()
 	}
 	return s
