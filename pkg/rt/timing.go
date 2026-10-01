@@ -1,0 +1,105 @@
+package rt
+
+import (
+	"time"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+)
+
+// Server-side timing event vocabulary — the server half of the REQUIREMENTS
+// "必须记录" list. Client-side events (page_ready / auth_complete /
+// first_audio_played / interrupt_start / interrupt_stop) are recorded by the
+// frontend (13-05) on the client clock; the two JSONL streams are aligned by
+// turn/epoch event IDs, never by subtracting cross-machine clocks.
+//
+// Values are frozen identifiers (they land in JSONL evidence files), not
+// display strings.
+const (
+	// EventConnected: /rt connection upgraded and session bound.
+	EventConnected = "connected"
+	// EventSpeechStarted: VAD detected speech onset (server).
+	EventSpeechStarted = "speech_started"
+	// EventSpeechEnded: VAD closed an utterance (server).
+	EventSpeechEnded = "speech_ended"
+	// EventToolStart: lesson tool execution began (server).
+	EventToolStart = "tool_start"
+	// EventToolEnd: lesson tool execution finished (server).
+	EventToolEnd = "tool_end"
+	// EventFirstAudioReceived: first TTS chunk of a turn arrived from the
+	// provider (server side of the RT-04 sentence-end→first-audio path).
+	EventFirstAudioReceived = "first_audio_received"
+	// EventInterruptHandled: an interrupt took effect (epoch bumped, TTS
+	// cancelled). Wire value is the REQUIREMENTS vocabulary's "interrupt";
+	// the constant name records that this is the handled-acknowledgement
+	// event, not the client's interrupt_start detection.
+	EventInterruptHandled = "interrupt"
+	// EventLessonVersion: a lesson-state write committed (new version).
+	EventLessonVersion = "lesson_version"
+	// EventSessionEnd: session released (explicit end, idle, or failure).
+	EventSessionEnd = "session_end"
+	// EventError: a visible failure occurred (RT-10 evidence).
+	EventError = "error"
+)
+
+// EventRecorder emits the server-side timing event stream for one session
+// as structured rt_event log entries. All events for a session share one
+// process anchor so their t_mono_ns values are mutually comparable.
+type EventRecorder struct {
+	logger    infra.Logger
+	sessionID string
+	// anchor is the in-process monotonic reference fixed at construction.
+	// time.Since(anchor) is monotonic and immune to wall-clock steps (NTP),
+	// unlike time.Now().UnixNano().
+	anchor time.Time
+}
+
+// NewEventRecorder builds the session's event recorder. A nil logger is
+// replaced with the no-op logger (dependency-injection zero value, D-42), so
+// callers constructing recorders in tests never need a logger to avoid a
+// panic.
+func NewEventRecorder(logger infra.Logger, sessionID string) *EventRecorder {
+	if logger == nil {
+		logger = infra.NewNoOpLogger()
+	}
+	return &EventRecorder{
+		logger:    logger,
+		sessionID: sessionID,
+		anchor:    time.Now(),
+	}
+}
+
+// MonoNs returns nanoseconds elapsed since the recorder's anchor. This is a
+// MONOTONIC, in-process relative timestamp:
+//
+//   - It never goes backwards and is unaffected by NTP steps or manual clock
+//     changes (it is time.Since, not UnixNano).
+//   - It shares its anchor with every rt_event t_mono_ns and with the
+//     PongMsg.t_server_mono_ns stamp, so pong-based clock-offset estimation
+//     aligns with the event stream.
+//   - It is NOT comparable across machines or processes. Cross-machine
+//     alignment uses event IDs plus the client's per-session clock_offset
+//     estimate (RTT/2 against pong); never subtract a client timestamp from
+//     a server one directly.
+func (r *EventRecorder) MonoNs() int64 {
+	return time.Since(r.anchor).Nanoseconds()
+}
+
+// Emit logs one rt_event entry carrying the event name, the session ID, and
+// the monotonic t_mono_ns stamp, followed by the caller's fields.
+//
+// Redaction boundary (T-13-06b): fields may only carry event-name / ID /
+// duration / version / count class values — turn_id, epoch, sentence_id,
+// duration_ms, version, and the like. Never pass transcript text, audio
+// payloads, or credential-bearing values; the rt_event stream is retained as
+// desensitized evidence, and this method is the single choke point it flows
+// through.
+func (r *EventRecorder) Emit(event string, fields ...infra.Field) {
+	all := make([]infra.Field, 0, 3+len(fields))
+	all = append(all,
+		infra.F("event", event),
+		infra.F("session_id", r.sessionID),
+		infra.F("t_mono_ns", r.MonoNs()),
+	)
+	all = append(all, fields...)
+	r.logger.Info("rt_event", all...)
+}
