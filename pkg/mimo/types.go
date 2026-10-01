@@ -24,10 +24,20 @@ type TTSRequest struct {
 	Stream bool `json:"stream,omitempty"`
 }
 
-// Message represents a single message in the TTS conversation
+// Message represents a single message in the TTS conversation. The same type
+// carries chat-completion turns, where Role may also be "system" or "tool":
+// ToolCalls replays an assistant's tool requests and ToolCallID answers one on
+// a role:"tool" turn (Phase 13 RT-03 wire shape). Both are omitted when zero,
+// so the TTS wire (which reuses this type via TTSRequest.Messages) never sees
+// them.
 type Message struct {
-	Role    string `json:"role"`    // "user" or "assistant"
+	Role    string `json:"role"`    // "user" or "assistant" (chat: "system"/"tool")
 	Content string `json:"content"` // Message content
+	// ToolCalls replays the assistant's requested tool calls back to the model
+	// (assistant turn of the tool loop)
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID identifies which tool call this role:"tool" message answers
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // AudioConfig configures TTS audio output parameters
@@ -176,6 +186,61 @@ func (r *ASRResponse) ExtractText() string {
 	return r.Choices[0].Message.Content
 }
 
+// ThinkingConfig controls MiMo's thinking mode on a chat completion request.
+// mimo-v2.5 ships with thinking ENABLED by default (extra reasoning_content
+// output and a server-forced temperature 1.0 — a large slice of first-response
+// latency); realtime callers must send {"type":"disabled"} explicitly to turn
+// it off (13-RESEARCH Pitfall 1 / RT-04).
+type ThinkingConfig struct {
+	// Type is "enabled" or "disabled"
+	Type string `json:"type"`
+}
+
+// ToolDef declares one function tool offered to the model on a chat
+// completion (OpenAI-style wire shape, Phase 13 RT-03).
+type ToolDef struct {
+	// Type is always "function" in the current MiMo API
+	Type string `json:"type"`
+	// Function carries the function declaration
+	Function ToolFunctionDef `json:"function"`
+}
+
+// ToolFunctionDef describes a tool's name, purpose, and JSON Schema parameters.
+type ToolFunctionDef struct {
+	// Name is the function the model should call (e.g. "advance_word")
+	Name string `json:"name"`
+	// Description tells the model when to call the function
+	Description string `json:"description,omitempty"`
+	// Parameters is the JSON Schema for the function arguments, kept as raw
+	// JSON so callers pass the schema through verbatim
+	Parameters json.RawMessage `json:"parameters,omitempty"`
+	// Strict requests schema-conformant arguments (the model may still
+	// hallucinate — validate before executing; 13-RESEARCH Pitfall 2)
+	Strict bool `json:"strict,omitempty"`
+}
+
+// ToolCall is one tool invocation requested by the model. It appears both in
+// assistant responses (the model asking to call a tool) and in assistant
+// messages replayed back on the next request of the tool loop.
+type ToolCall struct {
+	// ID identifies this call; echo it back as the role:"tool" ToolCallID
+	ID string `json:"id"`
+	// Type is always "function" in the current MiMo API
+	Type string `json:"type"`
+	// Function names the call and carries its raw JSON argument string
+	Function ToolCallFunction `json:"function"`
+}
+
+// ToolCallFunction pairs the requested function name with its arguments.
+// Arguments stays a raw string — the official docs warn it may be invalid
+// JSON, so parsing/validation is deferred to the tool executor (T-13-05).
+type ToolCallFunction struct {
+	// Name is the function to execute
+	Name string `json:"name"`
+	// Arguments is the model-produced JSON argument string (unvalidated)
+	Arguments string `json:"arguments"`
+}
+
 // ChatRequest represents an LLM chat completion request to the Xiaomi Mimo
 // API (OpenAI-compatible /chat/completions, Ticket 03 — voice-command intent
 // analysis).
@@ -189,22 +254,38 @@ type ChatRequest struct {
 	// Temperature tunes sampling (0 = omitted; mimo-v2.5 thinking mode
 	// ignores it server-side anyway per the official docs)
 	Temperature float64 `json:"temperature,omitempty"`
+	// Tools offers function tools to the model (Phase 13 RT-03 tool loop).
+	// Omitted when unset so legacy chat request bodies stay unchanged on the
+	// wire.
+	Tools []ToolDef `json:"tools,omitempty"`
+	// ToolChoice influences tool usage. MiMo only honors the string "auto" —
+	// structured values are silently stripped server-side and behave as auto
+	// (13-RESEARCH Pitfall 7), so WithToolChoiceAuto is the only meaningful
+	// setter.
+	ToolChoice any `json:"tool_choice,omitempty"`
+	// Thinking controls the mimo-v2.5 thinking mode. It is ENABLED by default
+	// server-side and must be explicitly disabled for latency-sensitive
+	// realtime turns (Pitfall 1) — see WithThinkingDisabled.
+	Thinking *ThinkingConfig `json:"thinking,omitempty"`
 }
 
 // ChatMessageContent mirrors an assistant message in a chat completion
 // response. Thinking models may populate ReasoningContent with the chain of
-// thought while the final answer lands in Content.
+// thought while the final answer lands in Content; tool-calling turns carry
+// the requested calls in ToolCalls with an empty Content.
 type ChatMessageContent struct {
-	Role             string `json:"role"`
-	Content          string `json:"content"`
-	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ChatResponse represents the response from an LLM chat completion request.
 type ChatResponse struct {
 	Choices []struct {
-		Message ChatMessageContent `json:"message"`
-		Index   int                `json:"index"`
+		Message      ChatMessageContent `json:"message"`
+		Index        int                `json:"index"`
+		FinishReason string             `json:"finish_reason"`
 	} `json:"choices"`
 	Usage Usage `json:"usage,omitempty"`
 }
@@ -220,6 +301,22 @@ func (r *ChatResponse) Text() string {
 		return r.Choices[0].Message.Content
 	}
 	return r.Choices[0].Message.ReasoningContent
+}
+
+// ToolCallsRequested reports whether the model responded by requesting tool
+// calls (finish_reason == "tool_calls" on the first choice). The realtime
+// turn manager uses this to branch between answering and executing tools.
+func (r *ChatResponse) ToolCallsRequested() bool {
+	return len(r.Choices) > 0 && r.Choices[0].FinishReason == "tool_calls"
+}
+
+// FirstToolCalls returns the tool calls requested by the first choice, or nil
+// when there are none (no choices or a plain text answer).
+func (r *ChatResponse) FirstToolCalls() []ToolCall {
+	if len(r.Choices) == 0 {
+		return nil
+	}
+	return r.Choices[0].Message.ToolCalls
 }
 
 // ChatContentPart is one part of a multipart chat message content
@@ -371,6 +468,31 @@ func WithMaxTokens(n int) ChatOption {
 func WithTemperature(t float64) ChatOption {
 	return func(req *ChatRequest) {
 		req.Temperature = t
+	}
+}
+
+// WithTools offers function tools on a chat completion (Phase 13 RT-03 tool
+// loop wire shape).
+func WithTools(tools []ToolDef) ChatOption {
+	return func(req *ChatRequest) {
+		req.Tools = tools
+	}
+}
+
+// WithToolChoiceAuto sets tool_choice to the string "auto" — the only value
+// the MiMo backend honors (structured tool_choice values are silently
+// stripped server-side; 13-RESEARCH Pitfall 7).
+func WithToolChoiceAuto() ChatOption {
+	return func(req *ChatRequest) {
+		req.ToolChoice = "auto"
+	}
+}
+
+// WithThinkingDisabled turns off mimo-v2.5's default-enabled thinking mode
+// (no reasoning_content, lower first-response latency — Pitfall 1 / RT-04).
+func WithThinkingDisabled() ChatOption {
+	return func(req *ChatRequest) {
+		req.Thinking = &ThinkingConfig{Type: "disabled"}
 	}
 }
 

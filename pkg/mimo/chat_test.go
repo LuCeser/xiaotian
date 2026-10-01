@@ -37,10 +37,12 @@ func defaultChatHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := ChatResponse{}
 	response.Choices = append(response.Choices, struct {
-		Message ChatMessageContent `json:"message"`
-		Index   int                `json:"index"`
+		Message      ChatMessageContent `json:"message"`
+		Index        int                `json:"index"`
+		FinishReason string             `json:"finish_reason"`
 	}{
-		Message: ChatMessageContent{Role: "assistant", Content: `{"action":"next_word","confidence":0.9}`},
+		Message:      ChatMessageContent{Role: "assistant", Content: `{"action":"next_word","confidence":0.9}`},
+		FinishReason: "stop",
 	})
 
 	w.Header().Set("Content-Type", "application/json")
@@ -111,10 +113,12 @@ func TestClient_Chat(t *testing.T) {
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				response := ChatResponse{}
 				response.Choices = append(response.Choices, struct {
-					Message ChatMessageContent `json:"message"`
-					Index   int                `json:"index"`
+					Message      ChatMessageContent `json:"message"`
+					Index        int                `json:"index"`
+					FinishReason string             `json:"finish_reason"`
 				}{
-					Message: ChatMessageContent{Role: "assistant", ReasoningContent: "thinking..."},
+					Message:      ChatMessageContent{Role: "assistant", ReasoningContent: "thinking..."},
+					FinishReason: "stop",
 				})
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(response)

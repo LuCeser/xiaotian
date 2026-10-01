@@ -38,10 +38,12 @@ func defaultVisionHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := ChatResponse{}
 	response.Choices = append(response.Choices, struct {
-		Message ChatMessageContent `json:"message"`
-		Index   int                `json:"index"`
+		Message      ChatMessageContent `json:"message"`
+		Index        int                `json:"index"`
+		FinishReason string             `json:"finish_reason"`
 	}{
-		Message: ChatMessageContent{Role: "assistant", Content: `{"text":"apple","confidence":0.9}`},
+		Message:      ChatMessageContent{Role: "assistant", Content: `{"text":"apple","confidence":0.9}`},
+		FinishReason: "stop",
 	})
 
 	w.Header().Set("Content-Type", "application/json")
