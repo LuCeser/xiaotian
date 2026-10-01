@@ -33,12 +33,23 @@
 **Plans**: 7 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 13-01-PLAN.md — pkg/lesson 课堂状态存储与幂等工具执行（request_id + expected_version）
 - [ ] 13-02-PLAN.md — pkg/mimo 工具调用扩展（tools/thinking 关闭/tool_calls wire）
 - [ ] 13-03-PLAN.md — pkg/rt 基础：协议、供应商接口、时序事件、/rt WSS 传输
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 13-04-PLAN.md — pkg/rt 轮次管理：能量 VAD、epoch 取消、MiMo 工具环、逐句流式 TTS
 - [ ] 13-05-PLAN.md — tutor 前端：持续采集、收即播、打断通道、mock e2e
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 13-06-PLAN.md — 服务接线：/rt 与 /tutor/ 挂载、Go 原生 TLS、降级模式
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 13-07-PLAN.md — VPS 部署与真机验证：回声标定、打断、3 词场景、时序采样
 
 ### Phase 14: R1 对话接真实课堂
@@ -56,6 +67,7 @@ Plans:
 **Plans**: 0 plans
 
 Plans:
+
 - [ ] TBD — /gsd-plan-phase 14
 
 ### Phase 15: R2 学习闭环
@@ -72,6 +84,7 @@ Plans:
 **Plans**: 0 plans
 
 Plans:
+
 - [ ] TBD — /gsd-plan-phase 15
 
 ### Phase 16: R3 部署与容量
@@ -89,6 +102,7 @@ Plans:
 **Plans**: 0 plans
 
 Plans:
+
 - [ ] TBD — /gsd-plan-phase 16
 
 ## Progress

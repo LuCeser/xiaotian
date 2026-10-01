@@ -1,13 +1,14 @@
 ---
 gsd_state_version: 1.0
 milestone: v2.0
-milestone_name: realtime-tutor
+milestone_name: realtime-tutor — ACTIVE
 current_phase: 13
 current_phase_name: realtime-minimal-loop
-status: planning
-stopped_at: "Ready to plan Phase 13 (R0); v1.0 superseded"
-last_updated: "2026-09-30T14:11:26.540Z"
+status: executing
+stopped_at: Ready to plan Phase 13 (R0); v1.0 superseded
+last_updated: "2026-10-01T00:52:07.310Z"
 last_activity: 2026-09-30
+last_activity_desc: v1.0 关闭归档，v2.0 需求与路线图就绪
 progress:
   total_phases: 4
   completed_phases: 0
@@ -33,7 +34,7 @@ See: .planning/PROJECT.md (updated 2026-09-30)
 
 Phase: 13 of 16 (R0 真机最小闭环；v2.0 起点)
 Plan: —（实施计划待生成）
-Status: Planning
+Status: Ready to execute
 Last activity: 2026-09-30 — v1.0 关闭归档，v2.0 需求与路线图就绪
 Next: /gsd-plan-phase 13
 
