@@ -50,7 +50,8 @@ created: 2026-10-01
 | 13-03-02 | 03 | 1 | RT-04/RT-10 | T-13-06b | 时序事件词表 + 脱敏字段 | unit | `go test ./pkg/rt/ -run "TestTiming\|TestFakes" -count=1` | ❌ W0（本计划创建） | ⬜ pending |
 | 13-03-03 | 03 | 1 | RT-10 | T-13-01/T-13-02 | Origin/读限/心跳/会话释放 | unit | `go test ./pkg/rt/ -count=1` | ❌ W0（本计划创建） | ⬜ pending |
 | 13-04-01 | 04 | 2 | RT-03 | — | VAD 切句五行为（30s 硬切） | unit | `go test ./pkg/rt/ -run TestVAD -count=1` | ❌ W0（本计划创建） | ⬜ pending |
-| 13-04-02 | 04 | 2 | RT-03/RT-05/RT-07 | T-13-03/T-13-05b/T-13-04b | 工具环先执行后播报/epoch 丢弃/历史裁剪/门控/参数校验 | unit | `go test ./pkg/rt/ -count=1` | ❌ W0（本计划创建） | ⬜ pending |
+| 13-04-02 | 04 | 2 | RT-03/RT-05/RT-07 | T-13-03/T-13-05b/T-13-04b | 工具环先执行后播报/epoch 丢弃/历史裁剪/门控/参数校验/lesson_id 会话绑定 | unit | `go test ./pkg/rt/ -count=1` | ❌ W0（本计划创建） | ⬜ pending |
+| 13-04-03 | 04 | 2 | RT-03/RT-05 | — | 整链拼装：binary→VAD→fake 供应商→SendAudio + 播放中 interrupt（13-04 Task 3，review S8） | unit(integration) | `go test ./pkg/rt/ -run TestTurnOverConn -count=1 -v` | ❌ W0（本计划创建） | ⬜ pending |
 | 13-05-01 | 05 | 2 | RT-01/RT-10 | — | 安全上下文提示 + 降级横幅 + 协议客户端 | unit(node) | `node tests/test-rt-timing.js` | ❌ W0（本计划创建） | ⬜ pending |
 | 13-05-02 | 05 | 2 | RT-02/RT-05 | T-13-06c | 降采样/令牌/RMS/playedUntil 纯逻辑 | unit(node) | `node -e "…parse-ok"` + Task3 | ❌ W0（本计划创建） | ⬜ pending |
 | 13-05-03 | 05 | 2 | RT-02/RT-05 | — | mock WSS 10 轮环 + 打断 + 结束 | e2e(mock) | `npx playwright test -c playwright.rt.config.js` | ❌ W0（本计划创建） | ⬜ pending |
@@ -72,7 +73,7 @@ created: 2026-10-01
 - [ ] `pkg/rt/protocol_test.go`/`timing_test.go`/`conn_test.go`/`providers_fake_test.go` — RT-02/04/10 单测基建（fake providers 是 13-04 前置）
 - [ ] `pkg/rt/vad_test.go`/`turn_test.go` — RT-03/05 行为测试（fake 驱动）
 - [ ] `tests/test-rt-playback.js`/`test-rt-timing.js` — 前端纯逻辑
-- [ ] `tests/e2e/mock-rt-server.js` + `rt-loop.spec.js` + `playwright.rt.config.js` — 10 轮 mock 环
+- [ ] `tests/e2e-rt/mock-rt-server.js` + `rt-loop.spec.js` + `playwright.rt.config.js` — 10 轮 mock 环（独立目录，存量套件零拾取——review H-1）
 - [ ] `cmd/service/rt_wiring_test.go` — RT-01 TLS 接线
 
 *测试文件全部由对应计划自建（绿地方案，无需单独 Wave 0 计划）。*
