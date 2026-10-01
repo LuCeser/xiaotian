@@ -436,28 +436,33 @@ JSONL 双流（client/client-clock 与 server/server-clock）按 turn_id+epoch �
 | A6 | MiMo TTS `sample_rate` 请求参数按 16000 下发时 pcm16 输出即为 16kHz（存量代码如此用且生产验证过） | Standard Stack | 若非→播放变速；客户端按 chunk 声明采样率兜底 |
 | A7 | 用户既有证书与私钥可按文件路径部署到 VPS 且覆盖访问域名（SAN） | Environment | 域不匹配→浏览器告警、RT-01 失败；需用户提供证书细节 |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **证书细节与 VPS 现状**
    - What we know: 用户"现有证书"（ADR Action Item 2）；VPS 走 systemd 部署（docs/DEPLOYMENT.md）。
    - What's unclear: 证书覆盖的域名/SAN、到期日、VPS 是否已有 nginx 占 443、证书文件格式（fullchain?）。
    - Recommendation: 计划里把"证书部署核验"列为独立 checkpoint:human-verify 任务；Go 侧只依赖 cert/key 两个路径字段。
+   - RESOLVED: 落地为 13-07 Task 2 checkpoint:human-verify（证书部署 + HTTPS 入口 + iPad 一次授权 7 步清单）；Go 侧仅依赖 server.tls 的 cert/key 两路径字段（13-06 Task 2 TLS 接线测试锚定）。
 2. **MiMo 工具调用 + thinking 关闭的真 key 烟测**
    - What we know: 官方文档确认接口形状；存量有 live-test skip 模式（Quick Task 260928-tsp）。
    - What's unclear: mimo-v2.5 非 thinking 模式下工具调用成功率/延迟量级。
    - Recommendation: Wave 0 加一个 `go test -tags=live ./pkg/mimo/` 烟测（真 key 才跑），先摸底再定默认。
+   - RESOLVED: 13-02 Task 3 建 chat_tools_live_test.go——MIMO_API_KEY env 门控（无 key 或 -short 即 Skip 不算失败），断言 thinking 关闭后无 reasoning_content，并留默认开启的延迟对比 t.Logf 摸底（A4 证据通道）。
 3. **打断检测阈值与持续窗的真机标定**
    - What we know: 架构上打断只走客户端；AEC 默认开。
    - What's unclear: 目标 iPad 扬声器音量下的回声残留 RMS 量级。
    - Recommendation: 计划含"回声标定"真机任务，产出一组 (RMS 阈值, 持续窗) 写入前端配置；作为 Success Criterion 4 的证据。
+   - RESOLVED: 13-05 rt-playback.js 将 INTERRUPT_RMS_THRESHOLD/INTERRUPT_SUSTAIN_MS 做成可调常量 + URL 参数覆盖；真机标定为 13-07 Task 3 步骤 1（回声自检 + 调参回报，结果记入 13-CHECKPOINTS.md）。
 4. **LLM 请求的 request_id 来源**
    - What we know: 幂等键必须在工具执行端。
    - What's unclear: 用 MiMo tool_call id 作 request_id 是否覆盖所有重试形态（连接断开重发同轮）。
    - Recommendation: R0 用 tool_call id 为主键 + expected_version 兜底并发；断线重连语义 Phase 15（RT-08）再深化。
+   - RESOLVED: 13-04 turn.go 以 toolCall.ID 为 request_id 调 AdvanceWord + expected_version 乐观锁（幂等事务由 13-01 执行端承担）；断线重连语义延至 Phase 15（RT-08）。
 5. **旧按钮页与新入口的路由关系**
    - What we know: 独立入口、旧页标注降级（RT-10）。
    - What's unclear: 新入口放 `/tutor/` 还是替换 `/`（影响家长页与旧书签）。
    - Recommendation: 新页挂 `/tutor/`，`/` 暂保持旧学生页 + 顶部降级说明横幅；Phase 16 再定去留（ROADMAP 已有此意图）。
+   - RESOLVED: 13-05 建 /tutor/ 前端与旧页降级横幅（index-banner.js 指向 /tutor/，不计语音验收）；13-06 publicMux 挂载 /tutor/ 静态入口与 /rt 路由 + TLS；去留 Phase 16 再定。
 
 ## Environment Availability
 
