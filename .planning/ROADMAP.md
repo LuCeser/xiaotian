@@ -30,10 +30,16 @@
 6. 记录 RT-04/RT-05 全部实际播放时序；第一周成环与第六周延迟达标是不同检查。R0 可在闭环通过且测量已齐备后进入 R1，但未达标项仍保持未验收，第六周切换条件继续生效。
 7. 故障原因可见、可结束释放会话；按钮备用明确标为降级，不计语音通过。
 
-**Plans**: 0 plans (ready for planning)
+**Plans**: 7 plans
 
 Plans:
-- [ ] TBD — /gsd-plan-phase 13，依据 [13-CONTEXT.md](phases/13-realtime-minimal-loop/13-CONTEXT.md) 编写实施计划
+- [ ] 13-01-PLAN.md — pkg/lesson 课堂状态存储与幂等工具执行（request_id + expected_version）
+- [ ] 13-02-PLAN.md — pkg/mimo 工具调用扩展（tools/thinking 关闭/tool_calls wire）
+- [ ] 13-03-PLAN.md — pkg/rt 基础：协议、供应商接口、时序事件、/rt WSS 传输
+- [ ] 13-04-PLAN.md — pkg/rt 轮次管理：能量 VAD、epoch 取消、MiMo 工具环、逐句流式 TTS
+- [ ] 13-05-PLAN.md — tutor 前端：持续采集、收即播、打断通道、mock e2e
+- [ ] 13-06-PLAN.md — 服务接线：/rt 与 /tutor/ 挂载、Go 原生 TLS、降级模式
+- [ ] 13-07-PLAN.md — VPS 部署与真机验证：回声标定、打断、3 词场景、时序采样
 
 ### Phase 14: R1 对话接真实课堂
 
@@ -91,7 +97,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |---|---|---|---|
-| 13. R0 真机最小闭环 | 0/0 | Ready to plan | - |
+| 13. R0 真机最小闭环 | 0/7 | Ready to execute | - |
 | 14. R1 对话接真实课堂 | 0/0 | Not started | - |
 | 15. R2 学习闭环 | 0/0 | Not started | - |
 | 16. R3 部署与容量 | 0/0 | Not started | - |
