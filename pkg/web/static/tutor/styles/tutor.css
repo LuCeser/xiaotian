@@ -1,0 +1,250 @@
+/*
+ * tutor.css — Natural Real-Time Tutor page (/tutor/), Phase 13 Plan 05.
+ *
+ * iPad Safari layout (768x1024): one column, touch targets >= 60px
+ * (ipad-layout spec, same rule as the legacy page), generous type for
+ * elementary-school students. No framework, no build step.
+ */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  background: linear-gradient(180deg, #eef4ff 0%, #f7fbff 100%);
+  color: #1f2d3d;
+  -webkit-text-size-adjust: 100%;
+  touch-action: manipulation; /* primary iOS zoom-on-focus defense */
+}
+
+body[data-page="tutor"] {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* ------------------------------------------------------------------ */
+/* Top status bar                                                      */
+/* ------------------------------------------------------------------ */
+
+.rt-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #ffffff;
+  border-bottom: 1px solid #dbe6f5;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.rt-state { display: flex; gap: 8px; }
+
+.rt-state-chip {
+  padding: 6px 12px;
+  border-radius: 18px;
+  font-size: 15px;
+  font-weight: 600;
+  background: #eef2f7;
+  color: #8a97a8;
+  white-space: nowrap;
+}
+
+.rt-state[data-state="listening"] .rt-state-chip[data-chip="listening"],
+.rt-state[data-state="processing"] .rt-state-chip[data-chip="processing"],
+.rt-state[data-state="speaking"] .rt-state-chip[data-chip="speaking"],
+.rt-state[data-state="ended"] .rt-state-chip[data-chip="ended"] {
+  background: #2f6fed;
+  color: #ffffff;
+}
+
+.rt-conn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: #5b6b7f;
+  white-space: nowrap;
+}
+
+.rt-conn-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #b6c2d2;
+}
+
+.rt-conn[data-conn="connected"] .rt-conn-dot { background: #2fb96b; }
+.rt-conn[data-conn="connecting"] .rt-conn-dot { background: #e8a33d; }
+.rt-conn[data-conn="closed"] .rt-conn-dot { background: #d64545; }
+
+/* ------------------------------------------------------------------ */
+/* Main column                                                         */
+/* ------------------------------------------------------------------ */
+
+.rt-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+/* Lesson progress ---------------------------------------------------- */
+
+.rt-progress {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 14px 16px;
+  border: 1px solid #e3ecf7;
+}
+
+.rt-words { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+
+.rt-word-chip {
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: #f0f4fa;
+  color: #5b6b7f;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.rt-word-chip.rt-word-current {
+  background: #2f6fed;
+  color: #ffffff;
+  transform: scale(1.05);
+}
+
+.rt-progress-track {
+  height: 10px;
+  border-radius: 5px;
+  background: #e8eef7;
+  overflow: hidden;
+}
+
+.rt-progress-fill {
+  height: 100%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #4f9bff, #2f6fed);
+  transition: width 0.4s ease;
+}
+
+.rt-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 14px;
+  color: #5b6b7f;
+}
+
+/* Subtitles ----------------------------------------------------------- */
+
+.rt-subtitles {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 220px;
+}
+
+.rt-teacher {
+  flex: 1;
+  background: #ffffff;
+  border: 1px solid #e3ecf7;
+  border-radius: 16px;
+  padding: 14px 16px;
+  overflow-y: auto;
+  max-height: 42vh;
+}
+
+.rt-teacher .t-line {
+  font-size: 20px;
+  line-height: 1.6;
+  margin-bottom: 10px;
+  color: #1f2d3d;
+}
+
+.rt-transcript {
+  min-height: 64px;
+  background: #f4f8ff;
+  border: 1px dashed #b9cef0;
+  border-radius: 16px;
+  padding: 14px 16px;
+  font-size: 19px;
+  line-height: 1.5;
+  color: #2d4a7a;
+}
+
+/* Error panel (RT-10: reasons in plain Chinese) ------------------------ */
+
+.rt-error {
+  background: #fff3f2;
+  border: 1px solid #f2c4c0;
+  border-radius: 14px;
+  padding: 12px 16px;
+}
+
+.rt-error-code {
+  font-size: 13px;
+  color: #b05248;
+  letter-spacing: 0.4px;
+}
+
+.rt-error-text {
+  font-size: 17px;
+  color: #8a2f27;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+/* Notice / degradation area ------------------------------------------- */
+
+.rt-notice {
+  background: #fffbea;
+  border: 1px solid #f0dd9a;
+  border-radius: 14px;
+  padding: 12px 16px;
+  font-size: 16px;
+  color: #7a5c14;
+  line-height: 1.5;
+}
+
+/* Controls -------------------------------------------------------------- */
+
+.rt-controls {
+  display: flex;
+  gap: 12px;
+  padding-bottom: 8px;
+}
+
+.rt-btn {
+  flex: 1;
+  min-height: 64px; /* >=60px touch target (ipad-layout) */
+  border: none;
+  border-radius: 16px;
+  font-size: 20px;
+  font-weight: 700;
+  color: #ffffff;
+  background: #8fa3ba;
+  cursor: pointer;
+  transition: transform 0.08s ease, background 0.2s ease;
+}
+
+.rt-btn:active { transform: scale(0.97); }
+
+.rt-btn-start { background: #2fb96b; flex: 2; }
+.rt-btn-start:disabled { background: #9db8a9; }
+.rt-btn-end { background: #d64545; }
+.rt-btn-end:disabled { background: #d9a5a5; }
+.rt-btn-export { background: #5b6b7f; flex: 1; font-size: 17px; }
+
+@media (max-width: 420px) {
+  .rt-controls { flex-direction: column; }
+  .rt-state { flex-wrap: wrap; }
+}
