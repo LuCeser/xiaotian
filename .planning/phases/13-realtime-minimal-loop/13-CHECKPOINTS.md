@@ -24,6 +24,64 @@
 
 补充证书部署、正式入口、权限与配置核验结果。凭据留部署配置，不写入规划文档。若资源未提供，记录具体阻塞并推进能独立完成的本地闭环工作；不能把本地模拟判为真机通过，也不能自动延后日期。
 
+### 部署准备清单（2026-10-02，13-07 Task 1）
+
+| 项 | 状态 | 记录 |
+|---|---|---|
+| Linux 部署二进制 | 就绪 | `bin/home-tutor-agent-linux`（ELF 64-bit x86-64 静态链接 stripped，14,549,152 字节；sha256 `4eeb0595ff6e79a3e70e921fb0efbb08dcd9ce6e21f7795fa04438d91e05b5d4`）。构建命令 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags '-s -w'`，与 Makefile build 的 CGO_ENABLED=0 契约一致；`bin/` 已被 .gitignore 排除，产物不入库 |
+| 证书 certFile/keyFile 路径 | **待提供**（Task 2） | 用户现有证书资产：VPS 上 fullchain.pem 与 key.pem 的绝对路径、到期日、覆盖域名（SAN） |
+| 访问域名（rt.allowedOrigins 值） | **待提供**（Task 2） | 必须与证书一致；`rt.allowedOrigins` 配置该域名（host，可含端口），禁 `*` |
+| VPS 目标 | **待提供**（Task 2） | 用户 1C1G VPS（systemd 部署，按 docs/DEPLOYMENT.md 流程；下文命令清单假定 /opt/hta 布局，实际布局不同时等价替换） |
+| 本地预检 | 全绿 | `go test ./...` 15 包 ok（本机无 gcc，`-race` 不可用——Makefile test 的 race 档位在 VPS/CI 侧执行）；`npm test` ok；`npx playwright test -c playwright.rt.config.js` 3 passed；`npx playwright test --list` 7 项不含 rt-loop（存量套件隔离复检 H-1） |
+| 时序分析工具 | 就绪 | `scripts/rt-timing-report.js`（`--self-test`/`--json`，第六周判定口径：clock_offset 中位数校准 + ±RTT/2 误差界 + 无 offset 样本单独计数）；package.json 新增 `rt-report` script |
+
+### VPS 部署命令清单（Task 2 执行；`<占位符>` 由用户替换；凭据不进对话与 git）
+
+约定：`<VPS>` = `用户名@主机`；`<DOMAIN>` = 证书覆盖的访问域名；`<CERT_DIR>` = 证书目录（如 `/etc/letsencrypt/live/<DOMAIN>`）。服务布局沿用 docs/DEPLOYMENT.md（/opt/hta + systemd `home-tutor-agent`）。
+
+1. 本机（仓库根）上传二进制与静态资源：
+   ```sh
+   scp bin/home-tutor-agent-linux <VPS>:/tmp/service.new
+   scp -r pkg/web/static <VPS>:/tmp/static.new
+   ```
+2. VPS 上放置证书（已在 VPS 的 Let's Encrypt 等证书可跳过；自带证书先上传到 <CERT_DIR>）：
+   ```sh
+   ls -l <CERT_DIR>/fullchain.pem <CERT_DIR>/privkey.pem   # 两文件必须存在且可读
+   sudo chmod 600 <CERT_DIR>/privkey.pem
+   ```
+3. VPS 上编辑 `/opt/hta/config.yaml`：`server.addr` 改为 `"0.0.0.0:443"`、`server.staticDir` 确认为 `/opt/hta/pkg/web/static`，并加入两个块（其余段落不动；`MIMO_API_KEY` 继续留在 `/opt/hta/secrets.env`，绝不写入 config）：
+   ```yaml
+   server:
+     addr: "0.0.0.0:443"
+     staticDir: /opt/hta/pkg/web/static
+     tls:
+       certFile: <CERT_DIR>/fullchain.pem
+       keyFile: <CERT_DIR>/privkey.pem
+   rt:
+     allowedOrigins:
+       - <DOMAIN>
+   ```
+   （`rt.lessonId`/`rt.lessonWords` 不填即取默认 r0-test 三词「美丽/勇敢/聪明」。）
+4. VPS 上切换文件并重启：
+   ```sh
+   sudo systemctl stop home-tutor-agent
+   sudo install -m 0755 /tmp/service.new /opt/hta/bin/service
+   sudo rm -rf /opt/hta/pkg/web/static && sudo cp -r /tmp/static.new /opt/hta/pkg/web/static
+   sudo systemctl start home-tutor-agent
+   systemctl status home-tutor-agent --no-pager | head -5
+   sudo journalctl -u home-tutor-agent -n 20 --no-pager
+   ```
+   日志应出现 `"tls":true` 与 `static interface directory verified`；若报 `TLS certificate file not accessible`，回查第 2 步路径。
+5. VPS 本机核验：
+   ```sh
+   curl -sI https://<DOMAIN>/tutor/        # 期望 HTTP 200（2xx）
+   curl -s http://127.0.0.1:8081/health    # 期望健康 JSON
+   ```
+   云安全组/防火墙需放行 443 入站。
+6. 真 iPad Safari 打开 `https://<DOMAIN>/tutor/`：地址栏锁标可信（无告警页）、页面显示状态与开始按钮；点「开始」一次完成麦克风授权 → 听到老师首问候；用页面导出功能存一份 `rt-timing-*.jsonl` 备用。
+7. 若页面正常但 wss 连不上：按 docs/DEPLOYMENT.md 排查项先试禁 h2（`cmd/service/main.go` 的 ListenAndServeTLS 处把 `TLSNextProto` 置空 map）再重部署。
+8. 回报内容：访问域名、证书到期日、iPad 型号/iPadOS/Safari 版本、每步结果（或失败第几步+报错原文）、导出的 JSONL 文件名——记入下方检查记录（不含任何密钥/私钥内容）。
+
 ## Plan B 执行状态
 
 未触发、未实现。触发后依 [书面方案](../../../docs/REALTIME-TUTOR-PLAN-B.md) 顺序执行。没有调度自动提醒；每个后续执行会话必须检查当前日期和证据。
