@@ -115,6 +115,86 @@ ExecStart=/opt/hta/bin/service -config /opt/hta/config.yaml
 
 And set `server.staticDir` to an absolute path in `config.yaml`.
 
+## HTTPS / TLS 与 /tutor/ 入口 (Phase 13, RT-01)
+
+The public listener terminates TLS in-process (Go `ListenAndServeTLS` — no
+nginx/caddy sidecar on the 1C1G VPS). The certificate is the owner's
+existing asset; the service only needs the two file paths.
+
+### server.tls configuration
+
+```yaml
+server:
+  addr: 0.0.0.0:443
+  staticDir: /opt/hta/pkg/web/static
+  tls:
+    certFile: /etc/letsencrypt/live/tutor.example.com/fullchain.pem
+    keyFile: /etc/letsencrypt/live/tutor.example.com/privkey.pem
+```
+
+Rules (enforced at boot, no silent downgrade):
+
+- No `tls:` block → plain HTTP (localhost dev; `getUserMedia` works on
+  localhost as a secure-context exception).
+- `tls:` present with BOTH paths → HTTPS. A missing/inaccessible cert file
+  aborts startup with a clear log line (`TLS certificate file not
+  accessible`) and exit code 1 — the trusted entrance NEVER silently falls
+  back to HTTP.
+- An empty `tls: {}` block or a half pair (cert without key) is a config
+  validation error.
+
+### rt.allowedOrigins — production MUST list the certificate domain
+
+```yaml
+rt:
+  allowedOrigins:
+    - tutor.example.com   # the domain on the certificate (host, optionally host:port)
+```
+
+The default `["localhost", "127.0.0.1"]` is dev-only; the /rt WebSocket
+rejects every other Origin. The wildcard `"*"` is forbidden at both the
+config and transport layers.
+
+### Certificate handling (hard rule)
+
+The certificate and private key NEVER enter git, `.planning/`, or any
+documentation — they live only in the VPS deployment config above
+(user convention / threat T-13-06). Tests use throwaway self-signed
+certificates generated in temp directories.
+
+### systemd — no changes needed
+
+Same binary, same unit file as above. Only `config.yaml` changes (add the
+`server.tls` block; point `addr` at 443). Restart picks it up:
+
+```sh
+sudo systemctl restart home-tutor-agent
+```
+
+### Post-deploy verification
+
+```sh
+# On the VPS itself:
+curl -I https://tutor.example.com/tutor/        # expect HTTP 200
+curl -s http://127.0.0.1:8081/health            # expect {"status": ...}
+
+# iPad Safari: open https://tutor.example.com/tutor/
+#   - padlock icon visible (real cert, not a warning page)
+#   - one tap starts the session (mic permission prompt once)
+```
+
+### Troubleshooting
+
+- **Page loads over HTTPS but the wss connection fails immediately:**
+  first suspect is h2 (Pitfall 8). Disable h2 by setting
+  `http.Server.TLSNextProto` to an empty non-nil map (one-line fix in
+  `cmd/service/main.go` at the ListenAndServeTLS site) and retry.
+- **Tutor page loads but shows "语音不可用" (voice unavailable):** that is
+  the DESIGNED degraded state, not a fault — `MIMO_API_KEY` is not set in
+  `/opt/hta/secrets.env`. The `/rt` endpoint stays mounted and
+  `session_init` answers `voice_unavailable` so the page can explain why
+  (RT-10 transparency). Add the key and restart to enable voice.
+
 ## Troubleshooting
 
 ### Static files return 404 (student interface doesn't load)
