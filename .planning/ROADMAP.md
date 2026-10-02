@@ -30,7 +30,7 @@
 6. 记录 RT-04/RT-05 全部实际播放时序；第一周成环与第六周延迟达标是不同检查。R0 可在闭环通过且测量已齐备后进入 R1，但未达标项仍保持未验收，第六周切换条件继续生效。
 7. 故障原因可见、可结束释放会话；按钮备用明确标为降级，不计语音通过。
 
-**Plans**: 3/7 plans executed
+**Plans**: 5/7 plans executed
 
 Plans:
 **Wave 1**
@@ -41,8 +41,8 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 13-04-PLAN.md — pkg/rt 轮次管理：能量 VAD、epoch 取消、MiMo 工具环、逐句流式 TTS
-- [ ] 13-05-PLAN.md — tutor 前端：持续采集、收即播、打断通道、mock e2e
+- [x] 13-04-PLAN.md — pkg/rt 轮次管理：能量 VAD、epoch 取消、MiMo 工具环、逐句流式 TTS
+- [x] 13-05-PLAN.md — tutor 前端：持续采集、收即播、打断通道、mock e2e
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -111,7 +111,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |---|---|---|---|
-| 13. R0 真机最小闭环 | 3/7 | In Progress|  |
+| 13. R0 真机最小闭环 | 5/7 | In Progress|  |
 | 14. R1 对话接真实课堂 | 0/0 | Not started | - |
 | 15. R2 学习闭环 | 0/0 | Not started | - |
 | 16. R3 部署与容量 | 0/0 | Not started | - |
