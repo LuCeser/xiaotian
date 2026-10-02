@@ -169,6 +169,8 @@
   <!--
     Scripts: loaded with `defer` so they execute in order after the DOM is
     parsed. Load order matters (defer preserves it):
+      index-banner.js     → degraded-mode banner (Phase 13: this page is the
+                            labeled RT-10 fallback; links to /tutor/)
       frame-codec.js      → window.FrameCodec + SequenceCounter (wire format)
       timing.js           → window.adaptiveWritingMs (P0-1 pacing helper)
       websocket-client.js → window.WebSocketClient (transport; uses FrameCodec)
@@ -180,6 +182,7 @@
       ui-components.js    → window.SessionButton (uses the state store)
       app.js              → wires them together
   -->
+  <script src="js/index-banner.js?v=20261001" defer></script>
   <script src="js/frame-codec.js?v=20260924" defer></script>
   <script src="js/timing.js?v=20260924" defer></script>
   <script src="js/websocket-client.js?v=20260924" defer></script>
