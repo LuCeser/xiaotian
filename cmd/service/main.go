@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -31,8 +32,10 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
+	"github.com/xiaotian/home-tutor-agent/pkg/rt"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/tts"
 	"github.com/xiaotian/home-tutor-agent/pkg/voice"
@@ -263,6 +266,45 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		return 1
 	}
 
+	// Phase 13: lesson tables (lessons/tool_requests) live in the same
+	// SQLite file; lesson.Migrate is idempotent exactly like database.Migrate
+	// and runs AFTER it so the shared connection pool sees one consistent
+	// schema state at boot. The store/executor pair powers the /rt turn
+	// manager's classroom tools (get_lesson_state / advance_word); the
+	// LessonTools adapter satisfies rt.LessonExecutor (compile-time checked
+	// in pkg/rt/mimo_adapters.go).
+	if err := lesson.Migrate(ctx, db); err != nil {
+		logger.Error("lesson migration failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	lessonStore, err := lesson.NewStore(db, logger)
+	if err != nil {
+		logger.Error("lesson store construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	lessonExec, err := lesson.NewExecutor(lessonStore, logger)
+	if err != nil {
+		logger.Error("lesson executor construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	rtLessonExec, err := rt.NewLessonTools(lessonStore, lessonExec)
+	if err != nil {
+		logger.Error("rt lesson tools construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+
 	// Construct repositories (D-07, D-42 constructor DI).
 	cardRepo, err := database.NewCardRepository(db, logger)
 	if err != nil {
@@ -397,6 +439,13 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// ------------------------------------------------------------------
 		var voiceCmd *voiceService
 		var photoCmd *photoService
+		// Phase 13 /rt providers. nil when MIMO_API_KEY is absent — the
+		// TurnManager tolerates nil providers and answers session_init with
+		// voice_unavailable (RT-10 degraded transparency: the endpoint stays
+		// mounted and explains itself instead of disappearing).
+		var rtASR rt.ASRProvider
+		var rtLLM rt.LLMProvider
+		var rtTTS rt.TTSSynthesizer
 		if apiKey := os.Getenv("MIMO_API_KEY"); apiKey != "" {
 			// The shared client's HTTP timeout must cover the slowest caller:
 			// photo's vision OCR (20s) over voice's ASR+LLM sequence (15s).
@@ -446,6 +495,24 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 				infra.F("component", "infra.main"),
 			)
 
+			// Phase 13 (13-06 review M-7, fixed decision recorded at the
+			// construction site): rt reuses the shared mimoClient, whose
+			// Timeout = max(voice 15s, photo 20s) = 20s and covers the whole
+			// request including streaming body reads. R0 rationale: VAD caps
+			// an utterance at 30s but ASR processes faster than realtime, and
+			// per-sentence TTS chunks are all short sentences. If real-device
+			// runs ever show 20s truncation (long ASR segments or slow TTS
+			// streams), give rt its own client and add a timeout field to
+			// RTConfig (the rt config section already has room for it).
+			rtASR = rt.NewMimoASR(mimoClient)
+			rtLLM = rt.NewMimoLLM(mimoClient, cfg.Voice.ChatModel)
+			rtTTS = rt.NewMimoTTS(mimoClient)
+			logger.Info("rt realtime tutor providers enabled",
+				infra.F("component", "infra.main"),
+				infra.F("chat_model", cfg.Voice.ChatModel),
+				infra.F("lesson_id", cfg.RT.LessonID),
+			)
+
 			voiceCmd = newVoiceService(
 				mimoTranscriber(mimoClient),
 				voice.NewHybridClassifier(voice.NewLLMClassifier(mimoChatter(mimoClient, cfg.Voice.ChatModel))),
@@ -474,6 +541,48 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			logger.Warn("MIMO_API_KEY not set — voice commands and photo OCR disabled; buttons and manual input remain",
 				infra.F("component", "infra.main"),
 			)
+			logger.Warn("MIMO_API_KEY not set — /rt voice tutor degraded: session_init answers voice_unavailable (RT-10)",
+				infra.F("component", "infra.main"),
+			)
+		}
+
+		// ------------------------------------------------------------------
+		// Phase 13: /rt realtime tutor endpoint (transport + turn manager).
+		// The handler is constructed and mounted regardless of MIMO_API_KEY:
+		// with nil providers the TurnManager answers session_init with
+		// voice_unavailable so the tutor page can show WHY voice is off
+		// (RT-10 degraded semantics) instead of the endpoint 404ing.
+		// ------------------------------------------------------------------
+		rtServerCfg := rt.ServerConfig{
+			AllowedOrigins:    cfg.RT.AllowedOrigins,
+			MaxMessageBytes:   cfg.RT.MaxMessageBytes,
+			ReadBufferSize:    cfg.RT.ReadBufferSize,  // 0 → rt.NewHandler fills 4096
+			WriteBufferSize:   cfg.RT.WriteBufferSize, // 0 → rt.NewHandler fills 4096
+			HandshakeTimeout:  cfg.RT.HandshakeTimeout,
+			HeartbeatInterval: cfg.RT.HeartbeatInterval,
+		}
+		rtTurnCfg := rt.TurnManagerConfig{
+			LessonID:        cfg.RT.LessonID,
+			LessonWords:     cfg.RT.LessonWords,
+			MaxToolLoops:    3,
+			HistoryMaxTurns: 20,
+		}
+		rtHandler, err := rt.NewHandler(rtServerCfg, func() rt.SessionManager {
+			// Per-connection factory: one TurnManager + one EventRecorder per
+			// /rt session. The recorder's session id uses the same rt-N
+			// sequence the TurnManager assigns (the counters advance in
+			// lockstep — one factory call per construction), so the rt_event
+			// stream and session_ready carry the same id.
+			sid := fmt.Sprintf("rt-%d", rtSessionCounter.Add(1))
+			return rt.NewTurnManager(rtASR, rtLLM, rtTTS, rtLessonExec, rtTurnCfg,
+				rt.NewEventRecorder(logger, sid), logger)
+		}, logger)
+		if err != nil {
+			logger.Error("rt handler construction failed",
+				infra.F("component", "infra.main"),
+				infra.ErrField(err),
+			)
+			return err
 		}
 
 		router, err := ws.NewRouter(ttsHandlers(manager, fsrsSvc, voiceCmd, photoCmd, logger), routerCfg, wsLogger)
@@ -503,6 +612,15 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// established design).
 		publicMux := http.NewServeMux()
 		publicMux.HandleFunc("/ws", wsServer.HandleWebSocket)
+		// Phase 13: /rt realtime tutor endpoint, sibling to /ws. ServeMux
+		// prefix matching keeps "/rt" distinct from "/" (static root) and
+		// "/tutor/" — all three coexist on the public listener.
+		publicMux.HandleFunc("/rt", rtHandler.HandleWebSocket)
+		logger.Info("rt endpoint mounted",
+			infra.F("component", "infra.main"),
+			infra.F("route", "/rt"),
+			infra.F("lesson_id", cfg.RT.LessonID),
+		)
 
 		// Phase 9 (WEB-01): the /api/v1 REST surface, mounted ONCE here.
 		// All route logic (method patterns, validation, error envelope)
@@ -529,6 +647,17 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 				infra.F("route", cfg.Server.StaticRoute),
 				infra.F("dir", cfg.Server.StaticDir),
 			)
+			// Phase 13 (13-05): the natural-voice tutor interface is served
+			// from <staticDir>/tutor at the /tutor/ prefix — its own entry
+			// point, distinct from the legacy button student page at "/" (the
+			// legacy page stays as the RT-10 labeled degraded fallback).
+			publicMux.Handle("/tutor/", http.StripPrefix("/tutor/",
+				infra.StaticFileServer(filepath.Join(cfg.Server.StaticDir, "tutor"), logger)))
+			logger.Info("tutor static interface mounted",
+				infra.F("component", "infra.main"),
+				infra.F("route", "/tutor/"),
+				infra.F("dir", filepath.Join(cfg.Server.StaticDir, "tutor")),
+			)
 			// Debug interfaces remain reachable at their explicit paths; ServeMux
 			// prefers these longer patterns over the "/" prefix so they do not
 			// collide with the static FileServer.
@@ -545,12 +674,45 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			ReadTimeout:       cfg.Server.ReadTimeout,
 			WriteTimeout:      cfg.Server.WriteTimeout,
 		}
+		// Phase 13 (RT-01): when server.tls is configured, fail fast on an
+		// inaccessible certificate/key pair BEFORE the listener starts — a
+		// missing cert must abort startup with a clear log line, never a
+		// silent HTTP fallback (trusted-entrance prohibition).
+		if cfg.Server.TLS != nil {
+			for _, p := range []string{cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile} {
+				if _, statErr := os.Stat(p); statErr != nil {
+					logger.Error("TLS certificate file not accessible",
+						infra.F("component", "infra.main"),
+						infra.F("path", p),
+						infra.ErrField(statErr),
+					)
+					return statErr
+				}
+			}
+			logger.Info("TLS certificate files verified",
+				infra.F("component", "infra.main"),
+				infra.F("certFile", cfg.Server.TLS.CertFile),
+			)
+		}
+		useTLS := cfg.Server.TLS != nil
 		go func() {
 			logger.Info("public server listening",
 				infra.F("component", "infra.main"),
 				infra.F("addr", cfg.Server.Addr),
+				infra.F("tls", useTLS),
 			)
-			if err := publicSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			var err error
+			if useTLS {
+				// Phase 13 (RT-01): HTTPS termination with the owner's
+				// existing certificate. Pitfall 8 (13-RESEARCH) troubleshooting
+				// first step: if Safari wss misbehaves over h2, disable h2 by
+				// setting http.Server.TLSNextProto to an empty non-nil map
+				// (one-line fix) and retry.
+				err = publicSrv.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
+			} else {
+				err = publicSrv.ListenAndServe()
+			}
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				logger.Error("public server error",
 					infra.F("component", "infra.main"),
 					infra.ErrField(err),
@@ -658,6 +820,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 // ensure fmt is referenced even if future refactors remove the only call
 // site. Cheap to keep, painful to forget.
 var _ = fmt.Sprintf
+
+// rtSessionCounter disambiguates /rt session ids for the per-connection
+// EventRecorder (Phase 13). It advances in lockstep with rt's internal
+// session counter — one factory call per TurnManager construction — so the
+// rt-N id stamped into the event stream matches the session_ready payload.
+var rtSessionCounter atomic.Uint64
 
 // homeDir returns the user's home directory. On error (e.g. HOME not set),
 // it returns "." as a safe fallback. Used by the database bootstrap to

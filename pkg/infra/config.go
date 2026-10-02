@@ -156,6 +156,107 @@ type Config struct {
 	// voice pipeline's mimo client (voice.baseURL and the env-only
 	// MIMO_API_KEY), so PhotoConfig carries no endpoint or secret of its own.
 	Photo PhotoConfig `json:"photo" mapstructure:"photo"`
+
+	// RT tunes the /rt realtime tutor layer (Phase 13, RT-01/RT-10):
+	// the natural-voice WebSocket endpoint's transport governance and the
+	// R0 fixed test lesson. Operational fields only — the MIMO_API_KEY
+	// secret stays environment-only (D-24 no-secret invariant). Defaults
+	// boot the service with NO rt: block in config.yaml; 0-value buffer /
+	// message fields defer to rt.NewHandler's semantic defaults (double
+	// validation, mirroring the WS pattern).
+	RT RTConfig `json:"rt" mapstructure:"rt"`
+}
+
+// TLSConfig configures HTTPS termination on the public listener (Phase 13,
+// RT-01). The two fields are paired: BOTH must be set to enable TLS; an
+// absent server.tls block (nil pointer) leaves the listener on plain HTTP
+// (the localhost dev path). The certificate is the owner's existing asset —
+// paths point at deployment-side files and never enter git.
+type TLSConfig struct {
+	// CertFile is the path to the PEM certificate chain (e.g.
+	// /etc/letsencrypt/live/<domain>/fullchain.pem). Empty when TLS is
+	// disabled; MUST be non-empty iff KeyFile is non-empty.
+	CertFile string `json:"certFile" mapstructure:"certFile"`
+
+	// KeyFile is the path to the PEM private key (e.g.
+	// /etc/letsencrypt/live/<domain>/privkey.pem). MUST be non-empty iff
+	// CertFile is non-empty.
+	KeyFile string `json:"keyFile" mapstructure:"keyFile"`
+}
+
+// RTConfig tunes the /rt realtime tutor layer (Phase 13). Defaults make the
+// service boot with NO rt: block: the localhost origin pair, a 65551-byte
+// message cap, 10s handshake / 30s heartbeat cadence, and the R0 fixed
+// three-word test lesson from 13-CONTEXT ("3 个固定词可作为测试课").
+// Buffer-size and message-cap zeros defer to rt.NewHandler's own semantic
+// defaults when left at 0 (double validation, WS pattern).
+type RTConfig struct {
+	// AllowedOrigins is the /rt Origin whitelist. Defaults to the localhost
+	// pair ["localhost", "127.0.0.1"]; the wildcard "*" is rejected by
+	// Validate. Production deployments MUST list the certificate's domain
+	// (e.g. "tutor.example.com") — rt matches host(+port) like ws does.
+	AllowedOrigins []string `json:"allowedOrigins" mapstructure:"allowedOrigins"`
+
+	// MaxMessageBytes caps a single /rt WebSocket read. Default 65551
+	// (matching the /ws cap). 0 defers to rt.NewHandler's default.
+	MaxMessageBytes int64 `json:"maxMessageBytes" mapstructure:"maxMessageBytes"`
+
+	// ReadBufferSize is the gorilla read buffer size. Default 0 →
+	// rt.NewHandler fills its own default.
+	ReadBufferSize int `json:"readBufferSize" mapstructure:"readBufferSize"`
+
+	// WriteBufferSize is the gorilla write buffer size. Default 0 →
+	// rt.NewHandler fills its own default.
+	WriteBufferSize int `json:"writeBufferSize" mapstructure:"writeBufferSize"`
+
+	// HandshakeTimeout bounds the /rt WebSocket upgrade handshake. Default
+	// 10s. 0 defers to rt.NewHandler's default.
+	HandshakeTimeout time.Duration `json:"handshakeTimeout" mapstructure:"handshakeTimeout"`
+
+	// HeartbeatInterval is the /rt ping cadence. Default 30s (matching
+	// ws.DefaultHeartbeatInterval). 0 defers to rt.NewHandler's default.
+	HeartbeatInterval time.Duration `json:"heartbeatInterval" mapstructure:"heartbeatInterval"`
+
+	// LessonID is the server-side lesson the /rt session binds to. Default
+	// "r0-test" — the R0 fixed test lesson backed by pkg/lesson's EnsureLesson
+	// semantics. MUST be non-empty.
+	LessonID string `json:"lessonId" mapstructure:"lessonId"`
+
+	// LessonWords is the fixed word list of the R0 test lesson. Defaults to
+	// the three fixed test words ["美丽", "勇敢", "聪明"]. MUST contain 1..10
+	// non-empty words.
+	LessonWords []string `json:"lessonWords" mapstructure:"lessonWords"`
+}
+
+// Validate enforces the RTConfig rules (D-04 fail-fast): origins non-empty
+// with no wildcard "*", a non-empty LessonID, and 1..10 non-empty
+// LessonWords. On any failure it returns an error wrapping ErrConfigInvalid
+// so callers branch with errors.Is(err, infra.ErrConfigInvalid).
+func (c RTConfig) Validate() error {
+	if len(c.AllowedOrigins) == 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			"rt.allowedOrigins must not be empty (set the certificate domain for production)")
+	}
+	for _, origin := range c.AllowedOrigins {
+		if origin == "*" {
+			return errors.Wrap(ErrConfigInvalid,
+				"rt.allowedOrigins must not contain wildcard \"*\"")
+		}
+	}
+	if c.LessonID == "" {
+		return errors.Wrap(ErrConfigInvalid, "rt.lessonId is required")
+	}
+	if len(c.LessonWords) < 1 || len(c.LessonWords) > 10 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("rt.lessonWords must contain 1..10 words, got %d", len(c.LessonWords)))
+	}
+	for i, w := range c.LessonWords {
+		if w == "" {
+			return errors.Wrap(ErrConfigInvalid,
+				fmt.Sprintf("rt.lessonWords[%d] must not be empty", i))
+		}
+	}
+	return nil
 }
 
 // VoiceConfig tunes the voice-command pipeline (Phase 8.2, Ticket 03). It
@@ -674,6 +775,14 @@ type ServerConfig struct {
 	// because Go's ServeMux matches the longer, more specific "/ws" pattern
 	// first. Only consulted when StaticDir is non-empty.
 	StaticRoute string `json:"staticRoute" mapstructure:"staticRoute"`
+
+	// TLS opts the public listener into HTTPS termination (Phase 13, RT-01).
+	// nil (the default and the absence of a server.tls block) keeps the
+	// listener on plain HTTP — the localhost dev path. When non-nil BOTH
+	// CertFile and KeyFile must be set (see TLSConfig); a yaml `tls: {}`
+	// empty block is rejected by Validate rather than silently disabling
+	// TLS (L-7: no silent downgrade on the trusted entrance).
+	TLS *TLSConfig `json:"tls" mapstructure:"tls"`
 }
 
 // LogConfig tunes structured logging output (D-25, D-34). The actual logger
@@ -871,6 +980,24 @@ func DefaultConfig() Config {
 			// best guess rather than auto-judging.
 			ConfidenceThreshold: 0.6,
 		},
+		RT: RTConfig{
+			// Dev-safe origins (same pair as ws); production MUST set the
+			// certificate domain. The wildcard "*" is rejected by Validate.
+			AllowedOrigins: []string{"localhost", "127.0.0.1"},
+			// Matches the /ws read cap; 0 would also defer to rt.NewHandler.
+			MaxMessageBytes: 65551,
+			// Buffer sizes stay 0 → rt.NewHandler fills its own defaults
+			// (double validation, WS pattern).
+			ReadBufferSize: 0,
+			WriteBufferSize: 0,
+			// 10s handshake (TLS+upgrade on a slow iPad radio), 30s ping
+			// cadence matching ws.DefaultHeartbeatInterval.
+			HandshakeTimeout:  10 * time.Second,
+			HeartbeatInterval: 30 * time.Second,
+			// R0 fixed test lesson — three fixed words (13-CONTEXT).
+			LessonID:   "r0-test",
+			LessonWords: []string{"美丽", "勇敢", "聪明"},
+		},
 	}
 }
 
@@ -955,6 +1082,17 @@ func LoadConfig(configPath string) (Config, error) {
 			mapstructure.StringToSliceHookFunc(" "),
 		))); err != nil {
 		return Config{}, errors.Wrap(err, "unmarshalling config")
+	}
+
+	// L-7 (Phase 13): viper's AllKeys-based unmarshal drops an empty
+	// `server.tls: {}` yaml block entirely — it has no leaf keys, so the
+	// *TLSConfig pointer stays nil and TLS would be silently disabled.
+	// IsSet still sees the block; fail fast instead of downgrading the
+	// trusted entrance (RT-01). A tls block with any real leaf key
+	// reaches the struct and is checked by Config.Validate's pair rules.
+	if cfg.Server.TLS == nil && v.IsSet("server.tls") {
+		return Config{}, errors.Wrap(ErrConfigInvalid,
+			"server.tls present but certFile/keyFile empty — remove the tls block to disable TLS (no silent HTTP downgrade)")
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -1059,6 +1197,21 @@ func (c Config) Validate() error {
 		if c.Server.StaticRoute == "/ws" || strings.HasPrefix(c.Server.StaticRoute, "/ws/") {
 			return errors.Wrap(ErrConfigInvalid,
 				"server.staticRoute must not collide with the /ws WebSocket upgrade path")
+		}
+	}
+
+	// Phase 13 TLS three-state (L-7, RT-01). nil = disabled (plain HTTP,
+	// the localhost dev path). Non-nil demands BOTH paths set: an empty
+	// pair (`tls: {}` in yaml) or a half pair is a hard error so the
+	// trusted entrance never silently downgrades to HTTP.
+	if c.Server.TLS != nil {
+		if c.Server.TLS.CertFile == "" && c.Server.TLS.KeyFile == "" {
+			return errors.Wrap(ErrConfigInvalid,
+				"server.tls present but certFile/keyFile empty — remove the tls block to disable TLS (no silent HTTP downgrade)")
+		}
+		if c.Server.TLS.CertFile == "" || c.Server.TLS.KeyFile == "" {
+			return errors.Wrap(ErrConfigInvalid,
+				"server.tls.certFile and server.tls.keyFile must be set as a pair")
 		}
 	}
 
@@ -1188,6 +1341,14 @@ func (c Config) Validate() error {
 	// enforces field ranges so a malformed HTA_PHOTO_* value fails boot
 	// rather than producing an unbounded photo buffer (D-04 fail-fast).
 	if err := c.Photo.Validate(); err != nil {
+		return err
+	}
+
+	// /rt realtime tutor layer (Phase 13). RTConfig.Validate enforces the
+	// origin whitelist shape and the fixed test lesson bounds so a malformed
+	// HTA_RT_* value fails boot rather than producing an open or unusable
+	// realtime endpoint (D-04 fail-fast).
+	if err := c.RT.Validate(); err != nil {
 		return err
 	}
 
@@ -1328,6 +1489,19 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"sessionTimeout.feedbackStateTimeout",
 		// Database path (Phase 4).
 		"database.path",
+		// Phase 13 RT realtime layer + TLS (RT-01/RT-10). Pitfall 6: every
+		// leaf MUST be bound explicitly or HTA_SERVER_TLS_*/HTA_RT_* env
+		// vars are silently inert.
+		"server.tls.certFile",
+		"server.tls.keyFile",
+		"rt.allowedOrigins",
+		"rt.maxMessageBytes",
+		"rt.readBufferSize",
+		"rt.writeBufferSize",
+		"rt.handshakeTimeout",
+		"rt.heartbeatInterval",
+		"rt.lessonId",
+		"rt.lessonWords",
 	}
 	for _, key := range keys {
 		_ = v.BindEnv(key)

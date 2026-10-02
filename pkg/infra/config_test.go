@@ -1126,3 +1126,231 @@ func TestPhotoConfigValidate(t *testing.T) {
 		}
 	})
 }
+
+// === Phase 13: server.tls + rt tests (RT-01/RT-10) ===
+
+// validatableDefault returns a DefaultConfig with the deployment-specific
+// python fields filled so Config.Validate isolates the assertion target
+// (same trick TestWSConfigValidate uses at the struct layer).
+func validatableDefault(t *testing.T) Config {
+	t.Helper()
+	cfg := DefaultConfig()
+	cfg.Python.Interpreter = "/opt/hta/venv/bin/python"
+	cfg.Python.ScriptsDir = "third_party/python"
+	cfg.Python.DataDir = t.TempDir()
+	return cfg
+}
+
+// TestTLSThreeStateValidate exercises the L-7 three-state contract:
+// nil = disabled (plain HTTP, valid); non-nil with BOTH paths = valid;
+// non-nil with an empty pair (`tls: {}`) or a half pair = ErrConfigInvalid.
+// A yaml empty block must never silently disable TLS (RT-01 no-silent-
+// downgrade).
+func TestTLSThreeStateValidate(t *testing.T) {
+	cases := []struct {
+		name    string
+		mut     func(c *Config)
+		wantErr bool
+	}{
+		{
+			"nil TLS = disabled, valid (no tls block)",
+			func(c *Config) { c.Server.TLS = nil },
+			false,
+		},
+		{
+			"empty pair (tls:{}) rejected — no silent HTTP downgrade",
+			func(c *Config) { c.Server.TLS = &TLSConfig{} },
+			true,
+		},
+		{
+			"certFile without keyFile rejected",
+			func(c *Config) { c.Server.TLS = &TLSConfig{CertFile: "a.pem"} },
+			true,
+		},
+		{
+			"keyFile without certFile rejected",
+			func(c *Config) { c.Server.TLS = &TLSConfig{KeyFile: "b.pem"} },
+			true,
+		},
+		{
+			"paired paths valid",
+			func(c *Config) { c.Server.TLS = &TLSConfig{CertFile: "a.pem", KeyFile: "b.pem"} },
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validatableDefault(t)
+			tc.mut(&cfg)
+			err := cfg.Validate()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("Config.Validate() = nil, want ErrConfigInvalid")
+				}
+				if !errors.Is(err, ErrConfigInvalid) {
+					t.Errorf("Config.Validate() error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Config.Validate() = %v, want nil", err)
+				}
+			}
+		})
+	}
+}
+
+// TestLoadConfigTLSEmptyBlockRejected anchors the viper layer of the L-7
+// contract: a yaml `server.tls: {}` empty block decodes into a NON-nil
+// *TLSConfig, so Validate rejects it instead of silently leaving the
+// listener on HTTP.
+func TestLoadConfigTLSEmptyBlockRejected(t *testing.T) {
+	setRequiredPythonEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte("server:\n  tls: {}\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error %v", path, err)
+	}
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("LoadConfig(tls:{}) returned nil error, want ErrConfigInvalid")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Errorf("LoadConfig error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+	}
+}
+
+// TestDefaultRTConfig asserts the Phase 13 RT defaults: the localhost
+// origin pair, 65551 message cap, 10s/30s handshake/heartbeat cadence, and
+// the R0 fixed three-word test lesson (13-CONTEXT "3 个固定词可作为测试课").
+func TestDefaultRTConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	want := []string{"localhost", "127.0.0.1"}
+	if len(cfg.RT.AllowedOrigins) != len(want) {
+		t.Fatalf("RT.AllowedOrigins length = %d, want %d (%v)",
+			len(cfg.RT.AllowedOrigins), len(want), want)
+	}
+	for i, w := range want {
+		if cfg.RT.AllowedOrigins[i] != w {
+			t.Errorf("RT.AllowedOrigins[%d] = %q, want %q", i, cfg.RT.AllowedOrigins[i], w)
+		}
+	}
+	if cfg.RT.MaxMessageBytes != 65551 {
+		t.Errorf("RT.MaxMessageBytes = %d, want 65551 (matches /ws cap)", cfg.RT.MaxMessageBytes)
+	}
+	if cfg.RT.HandshakeTimeout != 10*time.Second {
+		t.Errorf("RT.HandshakeTimeout = %v, want 10s", cfg.RT.HandshakeTimeout)
+	}
+	if cfg.RT.HeartbeatInterval != 30*time.Second {
+		t.Errorf("RT.HeartbeatInterval = %v, want 30s", cfg.RT.HeartbeatInterval)
+	}
+	if cfg.RT.LessonID != "r0-test" {
+		t.Errorf("RT.LessonID = %q, want %q (R0 fixed test lesson)", cfg.RT.LessonID, "r0-test")
+	}
+	if len(cfg.RT.LessonWords) != 3 {
+		t.Errorf("RT.LessonWords length = %d, want 3 (three fixed test words)", len(cfg.RT.LessonWords))
+	}
+	if err := cfg.RT.Validate(); err != nil {
+		t.Errorf("default RTConfig fails Validate: %v", err)
+	}
+}
+
+// TestRTConfigValidate covers the RTConfig fail-fast rules (D-04):
+// non-empty origins without wildcard "*", non-empty LessonID, and 1..10
+// non-empty LessonWords. Each case isolates one rule off the valid default.
+func TestRTConfigValidate(t *testing.T) {
+	valid := DefaultConfig().RT
+
+	cases := []struct {
+		name string
+		mut  func(c *RTConfig)
+	}{
+		{"empty origins rejected", func(c *RTConfig) { c.AllowedOrigins = nil }},
+		{"wildcard origin rejected", func(c *RTConfig) { c.AllowedOrigins = []string{"*"} }},
+		{"lessonId empty rejected", func(c *RTConfig) { c.LessonID = "" }},
+		{"lessonWords empty array rejected", func(c *RTConfig) { c.LessonWords = []string{} }},
+		{"lessonWords nil rejected", func(c *RTConfig) { c.LessonWords = nil }},
+		{"lessonWords above ten rejected", func(c *RTConfig) {
+			c.LessonWords = []string{"一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一"}
+		}},
+		{"lessonWords containing empty word rejected", func(c *RTConfig) {
+			c.LessonWords = []string{"美丽", ""}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := valid
+			tc.mut(&c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatal("RTConfig.Validate() = nil, want ErrConfigInvalid")
+			}
+			if !errors.Is(err, ErrConfigInvalid) {
+				t.Errorf("RTConfig.Validate() error = %v, want errors.Is(err, ErrConfigInvalid)=true", err)
+			}
+		})
+	}
+	t.Run("defaults pass", func(t *testing.T) {
+		if err := valid.Validate(); err != nil {
+			t.Fatalf("default RTConfig Validate() = %v, want nil", err)
+		}
+	})
+}
+
+// TestLoadConfigRTEmptySectionTakesDefaults proves a config with NO rt:
+// block boots on the defaults (RTConfig "empty config takes defaults and is
+// valid") — viper leaves the RT section untouched so the R0 test lesson
+// defaults win.
+func TestLoadConfigRTEmptySectionTakesDefaults(t *testing.T) {
+	setRequiredPythonEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte("session:\n  maxConcurrent: 50\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error %v", path, err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig(%s) error %v, want nil (RT defaults must boot)", path, err)
+	}
+	if cfg.RT.LessonID != "r0-test" {
+		t.Errorf("RT.LessonID = %q, want default %q", cfg.RT.LessonID, "r0-test")
+	}
+	if len(cfg.RT.LessonWords) != 3 {
+		t.Errorf("RT.LessonWords length = %d, want default 3", len(cfg.RT.LessonWords))
+	}
+	if cfg.Server.TLS != nil {
+		t.Errorf("Server.TLS = %+v, want nil (no tls block in file)", cfg.Server.TLS)
+	}
+}
+
+// TestRTAndTLSEnvBinding proves bindEnvForAllLeaves registered the Phase 13
+// leaves (Pitfall 6 guard): HTA_RT_LESSONID and the HTA_SERVER_TLS_* pair
+// override the defaults through LoadConfig with no file in play. Key-name
+// case is normalized by SetEnvKeyReplacer (mirrors the HTA_PYTHON_* trick
+// in cmd/service/main_test.go:415-417).
+func TestRTAndTLSEnvBinding(t *testing.T) {
+	setRequiredPythonEnv(t)
+	t.Setenv("HTA_RT_LESSONID", "env-lesson")
+	t.Setenv("HTA_SERVER_TLS_CERTFILE", "a.pem")
+	t.Setenv("HTA_SERVER_TLS_KEYFILE", "b.pem")
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig returned error %v, want nil", err)
+	}
+	if cfg.RT.LessonID != "env-lesson" {
+		t.Errorf("RT.LessonID = %q, want %q (env override via HTA_RT_LESSONID)",
+			cfg.RT.LessonID, "env-lesson")
+	}
+	if cfg.Server.TLS == nil {
+		t.Fatal("Server.TLS = nil, want non-nil (env pair must allocate the TLS block)")
+	}
+	if cfg.Server.TLS.CertFile != "a.pem" {
+		t.Errorf("Server.TLS.CertFile = %q, want %q (env override via HTA_SERVER_TLS_CERTFILE)",
+			cfg.Server.TLS.CertFile, "a.pem")
+	}
+	if cfg.Server.TLS.KeyFile != "b.pem" {
+		t.Errorf("Server.TLS.KeyFile = %q, want %q (env override via HTA_SERVER_TLS_KEYFILE)",
+			cfg.Server.TLS.KeyFile, "b.pem")
+	}
+}
