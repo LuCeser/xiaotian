@@ -6,10 +6,10 @@ current_phase: 13
 current_phase_name: R0 真机最小闭环
 status: executing
 stopped_at: 交互模型决策变更：状态机默写助手（FSRS+确认+60s超时+四类口令）；待 /gsd-plan-phase 13 重规划；本机预验收环境保留（PID 16256/45992）
-last_updated: "2026-10-03T15:24:05.085Z"
+last_updated: "2026-10-03T15:24:38.532Z"
 last_activity: 2026-10-02
 last_activity_desc: Phase 13 execution resumed (wave continue)
-state_head: 7525486892a4c51c674acd2e2f4a5639ce55ce48
+state_head: 7c629c8ce4e306a1598a3394f6e587ddc3536b3b
 progress:
   total_phases: 4
   completed_phases: 0
@@ -87,6 +87,7 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 09]: Plan 09-07 SettingsCard interval slider caps at 365 (plan spec) though the API allows 36500, and the edit modal sends ALL four fields (provided-empty clears the column) because the modal renders the word's full current state — Values above 365 were never settable from this UI; a full-state editor matching visible fields makes PUT semantics (empty = clear, D-08 partial-form valid) obvious to the parent
 - [Phase 09]: E2E net-zero pattern formalized (09-08): dedicated e2e-* units only, finally-shaped API cleanup backstops the UI deletion path, suite idempotent across consecutive runs; the duplicate-skip banner is made deterministic by API-seeding the duplicate target before the paste
 - [Phase 09]: Backstop styles shipped under Rule 2 in the e2e plan (09-08): the 2-line meaning clamp (-webkit-line-clamp on .word-meaning) and unit-name title attribute asserted by the must-haves were absent from the Plan 09-07 styles — fixed in the Task 2 commit and asserted behaviorally (rendered height within 2 line-heights; Chromium computes display:-webkit-box as flow-root while the clamp applies)
+- [Phase 13]: R0 交互模型转向「状态机默写助手」（2026-10-03 用户决策；本机预验收 rt-6 证据：12 轮对话 0 次课堂工具调用）。服务端状态机控制节奏：FSRS 取到期词（上限 10，不足取全部）→ 老师开场报词 → 等「好了/可以了/下一个」确认或 60 秒超时自动推进 → 支持重读/慢读、不会写提示、词义解释、暂停继续口令 → 完结总结写学习记录。大模型仅做意图识别与话术生成，不再拥有课堂节奏裁量权。 — 用户原始能力模型是默写助手；R0 按 13-CONTEXT 以「自由对话+可选工具」验证实时链路，体验与产品定义错位。属规划阶段翻译损耗而非执行偏移——执行与计划一致（证据：13-CONTEXT L16/L17/L20、RT-06 原文、PROJECT.md「FSRS R2 贯通」）。本决策推翻：固定 3 词不选词、沉默不跳词（RT-06 原文）、FSRS 排 R2。伴随缺陷一并修：MiMo invalid API response（实测×4）、VAD 0 秒误触发、首问候缺失（13-03/04/05 实现缝隙）。
 
 ### Pending Todos
 
