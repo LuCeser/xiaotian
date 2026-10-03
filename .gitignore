@@ -17,6 +17,12 @@ coverage.html
 # committed so local edits do not pollute git history.
 /config.yaml
 
+# Local HTTPS pre-acceptance channel (13-07 Task 2) — mkcert LAN cert/key
+# plus the LAN-IP-bearing local config. Never committed (private key + LAN
+# address hygiene, T-13-06d).
+/.local-certs/
+/config.local.yaml
+
 # Python venv created by `make py-bootstrap` (D-04). Never committed — the
 # venv is rebuilt on the deploy host from third_party/python/requirements.txt.
 third_party/python/.venv/

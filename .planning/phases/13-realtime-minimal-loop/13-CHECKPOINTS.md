@@ -29,9 +29,9 @@
 | 项 | 状态 | 记录 |
 |---|---|---|
 | Linux 部署二进制 | 就绪 | `bin/home-tutor-agent-linux`（ELF 64-bit x86-64 静态链接 stripped，14,549,152 字节；sha256 `4eeb0595ff6e79a3e70e921fb0efbb08dcd9ce6e21f7795fa04438d91e05b5d4`）。构建命令 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags '-s -w'`，与 Makefile build 的 CGO_ENABLED=0 契约一致；`bin/` 已被 .gitignore 排除，产物不入库 |
-| 证书 certFile/keyFile 路径 | **待提供**（Task 2） | 用户现有证书资产：VPS 上 fullchain.pem 与 key.pem 的绝对路径、到期日、覆盖域名（SAN） |
-| 访问域名（rt.allowedOrigins 值） | **待提供**（Task 2） | 必须与证书一致；`rt.allowedOrigins` 配置该域名（host，可含端口），禁 `*` |
-| VPS 目标 | **待提供**（Task 2） | 用户 1C1G VPS（systemd 部署，按 docs/DEPLOYMENT.md 流程；下文命令清单假定 /opt/hta 布局，实际布局不同时等价替换） |
+| 证书 certFile/keyFile 路径 | **待提供**（Task 2 VPS 段） | 用户现有证书资产：VPS 上 fullchain.pem 与 key.pem 的绝对路径、到期日、覆盖域名（SAN） |
+| 访问域名（rt.allowedOrigins 值） | **待提供**（Task 2 VPS 段） | 必须与证书一致；`rt.allowedOrigins` 配置该域名（host，可含端口），禁 `*` |
+| VPS 目标 | **待提供**（Task 2 VPS 段） | 用户 1C1G VPS（systemd 部署，按 docs/DEPLOYMENT.md 流程；下文命令清单假定 /opt/hta 布局，实际布局不同时等价替换） |
 | 本地预检 | 全绿 | `go test ./...` 15 包 ok（本机无 gcc，`-race` 不可用——Makefile test 的 race 档位在 VPS/CI 侧执行）；`npm test` ok；`npx playwright test -c playwright.rt.config.js` 3 passed；`npx playwright test --list` 7 项不含 rt-loop（存量套件隔离复检 H-1） |
 | 时序分析工具 | 就绪 | `scripts/rt-timing-report.js`（`--self-test`/`--json`，第六周判定口径：clock_offset 中位数校准 + ±RTT/2 误差界 + 无 offset 样本单独计数）；package.json 新增 `rt-report` script |
 
@@ -81,6 +81,23 @@
 6. 真 iPad Safari 打开 `https://<DOMAIN>/tutor/`：地址栏锁标可信（无告警页）、页面显示状态与开始按钮；点「开始」一次完成麦克风授权 → 听到老师首问候；用页面导出功能存一份 `rt-timing-*.jsonl` 备用。
 7. 若页面正常但 wss 连不上：按 docs/DEPLOYMENT.md 排查项先试禁 h2（`cmd/service/main.go` 的 ListenAndServeTLS 处把 `TLSNextProto` 置空 map）再重部署。
 8. 回报内容：访问域名、证书到期日、iPad 型号/iPadOS/Safari 版本、每步结果（或失败第几步+报错原文）、导出的 JSONL 文件名——记入下方检查记录（不含任何密钥/私钥内容）。
+
+### 本机预验收通道与执行顺序决策（2026-10-03，13-07 Task 2 重定范围）
+
+用户决定（2026-10-03 checkpoint 回复：先在本机执行验收完成后再部署到 VPS 主机）：Task 2 拆为「本机预验收 → VPS 正式部署」两段。VPS 命令清单（上节）不变，推迟到本机预验收通过后执行。
+
+**1. 本机预验收通道（已就绪并核验，2026-10-03）**
+
+- 入口：`https://<本机 WLAN IPv4>:8443/tutor/`（WLAN 物理适配器地址，记录于本机 `config.local.yaml`，按 T-13-06d 内网地址不落档；WSL/Hyper-V 虚拟适配器地址不适用）。
+- 证书：mkcert 本地 CA + 服务器证书（SAN：本机 WLAN IPv4 / 127.0.0.1 / localhost；有效期至 2029-01-03）。证书与私钥在 `.local-certs/`（已加 .gitignore，私钥与 CA 私钥永不入库）；iPad 侧需安装并完全信任 mkcert 根证书（rootCA.pem 为公开证书，经本机 `http://<本机 WLAN IPv4>:8765/` 下发，该目录仅含公开根证书副本）。
+- 配置：`config.local.yaml`（gitignored）——`server.addr 0.0.0.0:8443` + `server.tls`（mkcert 证书两路径）+ `rt.allowedOrigins` 增加本机 LAN 主机条目（bare host；/rt 端自动扩展 scheme 并端口宽容匹配）；MiMo 等密钥仍走 `.env` 活进程环境注入（D-05），未落入任何文件。
+- 启动与防火墙：Windows 构建 `bin/service.exe -config config.local.yaml`（与 8080 明文开发实例可并行）；防火墙无需新增规则——既有 `bin\service.exe` 与系统 python312 的 Public 配置文件放行规则（program 级、任意端口）已分别覆盖 8443 与 8765 入站。
+- 本机核验（2026-10-03，node fetch / ws 客户端）：`/tutor/` HTTPS 200；`/health` 健康 JSON；`/rt` WSS 握手（TLS + 升级 + Origin 白名单校验）通过；服务日志含 `"tls":true` 与 `rt realtime tutor providers enabled`（MIMO 密钥经 .env 生效）。
+
+**2. 证据口径（本机预验收 ≠ 正式验收）**
+
+- 功能预验收（首问候、打断、3 词场景、连续 10 轮、故障可见性）可在本机通道用真 iPad + 真麦克风先行验证，问题先暴露先修；结果如实标注「本机预验收」。
+- 正式 RT-01 可信入口证据、≥30 时序样本与检查记录最终落档仍以 VPS 部署为准（清单见上节）；本机 LAN 时序样本仅用于验证 rt-timing-report 报告管线，不作为第六周判定证据。
 
 ## Plan B 执行状态
 
