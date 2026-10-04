@@ -57,8 +57,8 @@ created: 2026-10-01
 | 13-10-02 | 10 | 5 | RT-10 | T-13-20 | PyFSRS：FetchLockHours=1、实际 Updated 集合、部分/零更新如实返回且不盲重试 | unit | `go test ./pkg/rt/ -count=1 -run "TestPyFSRS" -v && go build ./...` | ❌ 本计划创建 | ⬜ pending |
 | 13-10-03 | 10 | 5 | RT-10 | T-13-21 | main.go PyFSRS/WordTimeout 注线 + wiring 测试 + DEPLOYMENT 词源前提与排障 | unit(build)+docs | `go build ./... && go vet ./cmd/service/ ./pkg/rt/ && go test ./cmd/service/ -short -count=1 && go test ./pkg/rt/ ./pkg/infra/ -short -count=1` | ✅ 改既有 | ⬜ pending |
 | 13-12-01 | 12 | 6 | RT-02/RT-10 | T-13-26 | 全量预检 + 8443 通道新构建重启 + 真实 RunDue 取词冒烟（词数 >0） | unit/e2e/smoke | `go test ./pkg/... ./cmd/... -short -count=1 && npm test && npx playwright test -c playwright.rt.config.js` | n/a（CHECKPOINTS 记录） | ⬜ pending |
-| 13-12-02 | 12 | 6 | RT-01~RT-05/RT-07/RT-10 | T-13-24/T-13-25 | 真 iPad：播放 ACK 后结束、真实回声观察、暂停仍可语音恢复、实际 Updated 与评级优先级追认 | manual(checkpoint) | 13-CHECKPOINTS 本机预验收记录 + resume-signal | n/a | ⬜ pending |
-| 13-12-03 | 12 | 6 | RT-04 | T-13-24 | 时序报告管线自检 + 本机样本报告（不作第六周证据）+ 脱敏落档 | script | `node scripts/rt-timing-report.js --self-test && git diff --cached --stat` | ✅ 既有 | ⬜ pending |
+| 13-12-02 | 12 | 6 | RT-01~RT-05/RT-07/RT-10 | T-13-30/T-13-25 | 真 iPad：播放 ACK 后结束、真实回声观察、暂停仍可语音恢复、实际 Updated 与评级优先级追认 | manual(checkpoint) | 13-CHECKPOINTS 本机预验收记录 + resume-signal | n/a | ⬜ pending |
+| 13-12-03 | 12 | 6 | RT-04 | T-13-30 | 时序报告管线自检 + 本机样本报告（不作第六周证据）+ 脱敏落档 | script | `node scripts/rt-timing-report.js --self-test && git diff --cached --stat` | ✅ 既有 | ⬜ pending |
 | 13-13-01 | 13 | 7 | RT-01 | T-13-27 | 预检 + Linux 包 + 实际词表脚本 sha256/due --help + 显式 FetchLockHours=1 | unit/e2e/build | `go test ./pkg/... ./cmd/... -short -count=1 && npm test && node scripts/rt-timing-report.js --self-test && sha256sum bin/home-tutor-agent-linux` | n/a（产物不入库） | ⬜ pending |
 | 13-13-02 | 13 | 7 | RT-01 | T-13-27/T-13-28 | VPS 部署（用户执行）+ Claude 公网探针核验可信入口 | manual(checkpoint) | 13-CHECKPOINTS 部署记录 + /tutor/ 2xx + /health | n/a | ⬜ pending |
 | 13-13-03 | 13 | 7 | RT-01~RT-05/RT-07/RT-10 | T-13-29 | 真 iPad 正式验收：完整默写课/回声自检/≥30×2 样本（含失败计数） | manual(checkpoint) | 13-CHECKPOINTS 检查记录 + JSONL 清单 | n/a | ⬜ pending |
