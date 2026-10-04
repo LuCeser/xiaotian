@@ -1,174 +1,156 @@
 ---
 phase: 13
-reviewers: [claude, codex]
-reviewed_at: 2026-10-01T03:26:38.914Z
-plans_reviewed: [13-01-PLAN.md, 13-02-PLAN.md, 13-03-PLAN.md, 13-04-PLAN.md, 13-05-PLAN.md, 13-06-PLAN.md, 13-07-PLAN.md]
+reviewers: [claude]
+reviewed_at: 2026-10-04T07:58:55.526Z
+plans_reviewed: [13-01-PLAN.md, 13-02-PLAN.md, 13-03-PLAN.md, 13-04-PLAN.md, 13-05-PLAN.md, 13-06-PLAN.md, 13-07-PLAN.md, 13-08-PLAN.md, 13-09-PLAN.md, 13-10-PLAN.md, 13-11-PLAN.md, 13-12-PLAN.md, 13-13-PLAN.md]
+external_review_count: 1
+source_crosscheck: current_codex_orchestrator
 ---
 
 # Cross-AI Plan Review — Phase 13
 
-> 评审环境备注：本轮只有 Claude 一条通道产出有效评审。Codex 通道在两次尝试（1200s / 2700s）中均于首次工具调用处挂起（`codex_core::tools::router` 错误，与 GSD 无关的本机 codex 运行时故障），按掉线通道处理——其诊断存根见下方 Codex 节，不参与共识计权。gemini/qwen/cursor/antigravity 未安装，opencode 与本地模型通道因缺 jq 不可用（--all 下的信息性说明，非错误）。jq 缺失与 codex 故障修复后可用 `$gsd-review 13 --codex` 等补跑。
+> 2026-10-04（Asia/Shanghai）重新评审全部 13 份计划；13-01～13-06 已执行，13-07～13-13 按 2026-10-03 状态机转向决策评估。本报告替代旧版七计划评审，历史内容仍可从 Git 读取。
+>
+> --all 检测结果：Claude、Codex、OpenCode 已安装；按技能独立性规则跳过当前执行者 Codex；OpenCode 以及三个本地模型评审方式因缺 jq 不可选；Gemini/CodeRabbit/Qwen/Cursor/Antigravity 未检测到。仅 Claude CLI 返回有效外部报告，不能称为多模型共识。
+>
+> 运行说明：GSD 默认 Windows 启动以 ENOENT 失败，经临时可执行文件路径适配后沿用同一 review-lane runner、提示词和 1200 秒上限成功完成；未改 GSD 安装。无提示词裁剪。Claude Code 版本 2.1.289；stderr 报告模型标识 glm-5.2[1m] 的 unrecognized_model 警告，因此这里只确认 Claude CLI 适配器，不能据名称认定使用了 Anthropic Claude 模型。警告没有使进程失败。
+>
+> 下节保留外部意见；结尾原本是否定“无仓库访问”的格式标记，已改为普通文字避免机器误判。后面的 Consensus Summary 明确列出执行者复核、补充发现和不采纳的推断，二者不得合并计为两位独立外部评审者。
 
 ## Claude Review
 
-# Phase 13（R0 真机最小闭环）7 份实施计划评审
+# Phase 13 计划集交叉评审报告（独立只读评审）
 
-**评审方法**：已逐项对照仓库源码验证（非仅读计划文本）——实际读取了 `pkg/database`、`pkg/mimo`、`pkg/ws`、`pkg/infra`、`pkg/tts`、`pkg/voice`、`cmd/service/main.go`、前端两个控制器、`package.json`/`playwright.config.js`/`Makefile`/`go.mod`/`.gitignore` 等，计划中的行号引用与符号声明基本全部核实。以下每条发现均附 `file:line` 证据。
+评审范围：13-01～13-06（已执行，对照现有代码复核）＋ 13-07～13-13（待执行，按计划机制与现有依赖评估）。已读取 `.planning/STATE.md`、13-CONTEXT/RESEARCH/PATTERNS/CHECKPOINTS、全部 PLAN/SUMMARY，并对照 `pkg/rt`、`pkg/lesson`、`pkg/mimo`、`pkg/pybridge`、`pkg/infra`、`cmd/service/main.go` 源码逐项核实。未运行任何实现工作流，未改动任何文件。
 
----
+## 总体判断（Summary）
 
-## 1. Summary（总体评估）
+计划集与 2026-10-03 转向决策（STATE.md 末条）一致，且**代码现状与计划前提吻合**：工具环仍在位待删（`pkg/rt/turn.go:95-99` lessonToolDefs、`:549` executeToolCall、`:798` validateToolArgs）；`main.go:564-577` 的 rtTurnCfg 仍引用 LessonWords/MaxToolLoops；ASR 空 choices 仍与坏 JSON 共用 ErrInvalidResponse（`pkg/mimo/client.go:797-802`）；lesson 表无 cards 列（`pkg/lesson/store.go:41-85`）；协议无 paused/lesson_unavailable（`pkg/rt/protocol.go:67-88`）；pybridge DueCard 已有 word/meaning/example 三字段（`pkg/pybridge/executor.go:122-126`）且 DueOpts 支持 Limit/Peek/FetchLockHours（`pkg/pybridge/vocab_test.go:84-141`）。13-07～13-13 的依赖顺序、并行波次划分、幂等键设计（lessonID-advance-目标index）在机制层面成立。主要风险集中在：第一周截止时间、VAD 回声尾窗口与真实播放结束的错位、legacy 课堂行的边界语义、以及多份上位文档未随转向更新。
 
-这是一组**源码落地精度异常高**的计划：PATTERNS.md 中的行号引用（如 `pkg/ws/server.go:135` 的 `EnableCompression:false`、`session_repo.go` 的哨兵错误范式、`audio-controller.js` 的 `_playbackGeneration` 令牌三段）经逐文件核对**全部属实**；波次依赖（Wave1 三计划独立 → 13-03 契约冻结后 13-04/13-05 并行 → 13-06 接线 → 13-07 真机）排序正确，与 CONTEXT 八条锁定决策一一对应，RT-01/02/03/04/05/07/10 全覆盖且 R0 口径（成环优先、达标不前置）与 ROADMAP 一致。幂等设计（request_id=toolCall.ID + expected_version 在工具执行端单事务）忠实实现了 CONTEXT 的「不以 LLM 记忆实现幂等」。主要问题集中在**三处跨计划/计划内契约矛盾**（TTS base64 解码归属、打断历史裁剪时机、mock e2e 对存量 playwright 套件的污染）和**若干沿用范式时的遗漏**（env 绑定、yaml 模板引用失实）——均可在执行前用小幅计划修订消除，无需动架构。
+## 优点（Strengths）
 
-**逐计划结论**：
+1. **幂等键设计比旧 tool_call id 方案更强**。13-08 用 `lessonID-advance-目标index` 作确定性 request_id，落在 13-01 已验证的单事务幂等层上（`pkg/lesson/executor.go` 的 BeginTx + request_id 主键 + expected_version，SUMMARY 有测试锚定）。「确认与超时对同一目标竞争只推进一次」由此结构性保证，不依赖时序。
+2. **转向后的威胁面显著收窄且论证正确**。LLM 从「可发起写工具」降为「只能产出 intent 标签 + reply 文本」，提示注入的后果上限等于一次推进（等价于超时），13-08 威胁寄存器 T-13-13 的 accept 论证成立；reply 裁剪（T-13-15）与固定人话错误文案（T-13-14）补齐了剩余面。
+3. **契约先行（13-07）与并行波次 ownership 清晰**。13-07 三个子系统互不依赖（mimo 哨兵 / lesson 词卡 / rt 协议词表），13-08（FSM）与 13-11（前端）同波并行、13-09 与 13-10 同波并行，文件集无交集：13-08/13-09/13-11 都动 `pkg/rt` 与 tutor 前端但改不同文件（dictation.go/turn.go vs 前端 JS），唯一共享点 turn.go 在 13-08→13-09 串行，无写冲突。13-08 Task 1 step 6 明确「编译对端同步同 commit」，避免了半编译中间态。
+4. **缺陷修复与转向同源归因正确**。VAD 0 秒误触发、invalid API response ×4 被归因到「误切空段打 ASR」，13-07 哨兵分离（ErrEmptyTranscription ≠ ErrInvalidResponse，互斥断言双向）→ 13-09 静默容忍 + 单次重试，链条闭合。
+5. **验收证据纪律强**。13-12/13-13 坚持「本机预验收 ≠ 正式验收」「mock 不计语音通过」「样本不剔除失败」「以真实可听时刻计量」，prohibition 均为判断级且带 blocking-human 门；脱敏三重纪律（JSONL 不入库、grep 暂存 diff、凭据不入档）落实到位。
+6. **已执行计划的 SUMMARY 与代码对得上**。抽查 13-06 声明的 TLS 三态、IsSet 兜底、LessonTools 适配器等在 config.go/main.go/mimo_adapters.go 均存在（RTConfig 现状 `pkg/infra/config.go:193-253`、默认三词 `:998-999`，与 13-10 将重构的字段一致）。
 
-| 计划 | 判定 | 关键证据 |
+## 问题（Concerns）
+
+**HIGH-1｜VAD 回声尾窗口与客户端真实播放结束错位（13-09 Task 3）**
+`VADEchoTailMs=500` 从「服务端 speakTurn 结束」起算，但 audio_end 是服务端**发完**的时刻，客户端此刻仍在播放排队 chunk（rt-playback 有 60ms 起播偏移 + 队列调度，且 24kHz chunk 在途）。服务端 state 回 listening、500ms 窗口过期后，iPad 扬声器仍在放老师的话，回声进麦克风会被 VAD 切句 → 伪学生轮次 → ASR 空转写（已被 13-07 容忍，无害）或更糟：被分类为 confirm 类意图的杂音。这是 RT-05/回声自检的真机隐患，建议以 sentence_ack（客户端实际播完）驱动回声尾窗口，或把默认窗放大到 ≥1s 并在 13-12 标定项中显式列出此错位。
+
+**MEDIUM-1｜legacy 课堂行 / 空 cards 的重连语义未指定（13-07 + 13-08）**
+13-08 的 handleSessionInit 规则是「GetLessonState 命中即跳过取词直接用已存 Cards」。但：(a) 13-06 期间本地与 VPS 可能已落 `r0-test` 行（words=美丽/勇敢/聪明，迁移后 cards='[]'）——重连会拿到一个**无词卡、无 ground truth、且不知进度的旧测试课**，hint/meaning 全部走「没有释义」兜底；(b) 当天课程完结后（current_index==len）再次连接同一 lessonID 的行为未定义（应走完结/无课提示还是重建）。建议 13-08 明确：`cards 为空` 或 `课程已完结` 时的分支（视为 ErrLessonNotFound 重取词，或发 lesson_complete 幂等回复）。
+
+**MEDIUM-2｜RunDue 取词锁定与课堂夭折的交互（13-10）**
+PyFSRS 用非 peek RunDue（会触发 fetch-lock），词取走后若会话中断、SubmitReview 永不发生，词保持锁定直到锁窗过期。T-13-20 已按 R0 accept，但计划未显式设置或核对 `FetchLockHours` 的脚本默认值——若默认很长（如 24h），孩子当天重连会「没有到期词」直接 no_due_words 结束。建议 13-10 在 DueOpts 中显式决定 FetchLockHours（或核实脚本默认值并写入 DEPLOYMENT 排障段）。
+
+**MEDIUM-3｜第一周时间线（项目风险，非计划缺陷）**
+2026-10-07 23:59 截止，剩 13-07～13-13 七个计划，含两个 blocking-human 检查点、真机多会话采样（≥30×2）与用户资产（证书/VPS/python 词库）依赖。13-13 flagged assumption 已如实登记「不自动延后、不把本机结果记为通过」，处置正确，但按当前剩余工作量，第一周未成环的概率不低；应预先按 13-CHECKPOINTS 规则准备失败记录与聚焦清单。
+
+**MEDIUM-4｜上位文档与转向决策冲突（文档问题，单独报告，非功能阻塞）**
+- `13-CONTEXT.md:16-17` 仍是旧决策原文（固定 3 词、LLM get_lesson_state/advance_word 工具环、「普通沉默不跳词」），与 STATE.md 2026-10-03 决策直接矛盾；13-07+ 的 PLAN 引用它为 context 又声明取代。13-RESEARCH 的 OQ 勘误与 13-CHECKPOINTS 模板勘误已打补丁，但 CONTEXT 本体未改。
+- `.planning/REQUIREMENTS.md` RT-06 仍写「不因普通沉默自动跳词」，而新模型 60 秒超时正是沉默推进；STATE.md 已声明推翻 RT-06 原文，但 RT-06 归属 Phase 14 且需求文本未更新。
+- `PROJECT.md` Active 首条仍写「3 固定词…真实读写工具调用及幂等验证」（旧口径）。
+建议在执行 13-07 前做一次小规模文档对齐（或至少在 CONTEXT 头部加转向注记，如 CHECKPOINTS 已做的那样），避免后续执行者读 CONTEXT 走回旧路。
+
+**LOW-1｜StatePaused 命名撞车**：冻结栈 `pkg/database/schema.go:36` 已有 `StatePaused = "PAUSED"`（旧按钮 FSM），新 `rt.StatePaused = "paused"`。值与包均不同、无功能冲突，仅排查/grep 时需注意。
+
+**LOW-2｜13-11 mock 以定时器推进课堂**，不经学生音频验证确认路径的前端表现（已自我登记为 T-13-23，13-12 真机对账兜底）。可接受。
+
+**LOW-3｜13-13 要求 ≥30 次打断样本**，即孩子需成功插话 30 次（可多会话累计）。对儿童用户是不轻的负担，样本采集安排上建议允许多天累计并在 CHECKPOINTS 记录进行中状态。
+
+**LOW-4｜13-09 意图重置计时的细则**：「任何被处理的学生话语（confirm 以外）重置计时」含 chat；而 ErrEmptyTranscription 轮（无 turn 发起）不重置——语义正确但建议在 13-09 测试里加一条空转写不重置计时的用例，防实现把「收到音频」当「学生互动」。
+
+## 具体建议（Suggestions）
+
+1. 13-09：回声尾窗口改为 sentence_ack 驱动或默认 ≥1000ms，并在 13-12 Task 2 第 5 步（打断项）旁增加「老师播报结束 0.5–1.5s 后保持安静」的回声观察步骤。
+2. 13-08：handleSessionInit 补两个显式分支——`已存课堂 cards 为空`（含 legacy r0-test 行）与`current_index==len`（已完结），并各配一条测试。
+3. 13-10：DueOpts 显式设定/核实 FetchLockHours，写入 DEPLOYMENT「FSRS 词源前提」排障顺序。
+4. 13-07 执行前：给 13-CONTEXT.md 加转向注记（一段即可），REQUIREMENTS RT-06 加「2026-10-03 口径修订」脚注，PROJECT Active 首条改写为状态机默写口径。
+5. 13-12：评级映射追认（confirmed→good / timeout→hard / hint→again）建议同时确认 hint 后又超时的覆盖顺序（现计划为「最后状态为准」，即 hard 覆盖 again——确认这是产品意图）。
+
+## 风险评估（Risk Assessment）
+
+**总体：中。** 架构一致性高（转向决策 → 13-07 契约 → 13-08 主环 → 13-09 交互全集 → 13-10 生产接线 → 13-11 前端 → 13-12/13-13 验收，链路无断点、无循环依赖、并行波次文件所有权干净），幂等与威胁模型在转向后反而更稳。真正的不确定性集中在**真机物理层**（回声/静默期/打断阈值，HIGH-1 与既有 A1/A5 假设）与**时间线**（MEDIUM-3）；两者都有已安排的真机检查点兜底，不会静默产假绿。文档滞后（MEDIUM-4）是当前最应先修的低成本项。
+
+## 分计划简评
+
+| 计划 | 评估 | 要点 |
 |---|---|---|
-| 13-01 lesson | ✅ 优 | 范式引用全部核实（`session_repo.go:14-22,76-84,170-178`、`migrate.go:18-33`、`db.go:71-73`） |
-| 13-02 mimo tools | ✅ 优 | 「client.go 零改动」主张**成立**（`client.go:297-309` options 直通 + `:312-313` 整体 marshal） |
-| 13-03 rt 基础 | ✅ 良 | 传输参数照抄属实（`ws/server.go:135,136-160,200-215`）；TTS 24kHz 常量有双重代码依据（`client.go:143`、`mimo_synth.go:43`） |
-| 13-04 轮次管理 | ⚠️ 良（有一处内部矛盾） | 打断历史「完成后 append」与验收测试「interrupt 后最后 assistant 消息含已播句」互相矛盾（详见 C-1） |
-| 13-05 tutor 前端 | ⚠️ 良（有一处会破坏存量套件） | 存量模式引用属实（`audio-controller.js:47-52,391-398,468`、`voice-command-controller.js:142-153,260-309`）；但 spec 文件位置会污染存量 e2e（详见 H-1） |
-| 13-06 服务接线 | ⚠️ 良 | 挂载点/分支位置属实（`main.go:505,525-540,541-559,111-133`）；漏 `bindEnvForAllLeaves`、yaml 模板引用失实（M-2/M-3） |
-| 13-07 部署验证 | ✅ 优 | human-verify 门禁、脱敏、≥30 样本含失败、不以后端时序替代可听时刻，均与 REQUIREMENTS/13-CHECKPOINTS 对齐 |
+| 13-07 | ✅ 良好 | 三个契约独立、存量零回归有锚；Word 标签与 DueCard 逐字对齐已核实（executor.go:122-126）；迁移幂等含 legacy 补列。建议补：rt.StatePaused 与旧栈撞车的 godoc 注记 |
+| 13-08 | ✅ 良好（tracer 恰当） | 幂等键设计强；编译对端同 commit 处理干净；需补 MEDIUM-1 的空 cards/已完结分支 |
+| 13-09 | ⚠️ 良好但有一处真机隐患 | 计时器四重校验 + 幂等竞争测试完备；HIGH-1 回声尾窗口与客户端播放结束错位需在实现/标定时修正 |
+| 13-10 | ✅ 良好 | 配置四件套与 env 纪律延续；MEDIUM-2 FetchLockHours 未显式决策 |
+| 13-11 | ✅ 良好 | innerHTML 负门 + 隔离复检维持；mock 定时推进的局限已登记并由 13-12 对账 |
+| 13-12 | ✅ 良好 | 本机预验收通道有据（CHECKPOINTS 2026-10-03 段）；「本机 ≠ 正式」纪律严；依赖 user 到期词，前置条件已列 |
+| 13-13 | ✅ 良好 | 部署/验收/报告/检查表四件齐；第一周行如实更新承诺明确；时间线风险如实登记 |
+| 13-01～06（已执行） | ✅ 与代码吻合 | 抽查关键声明（TLS 三态、LessonTools、工具环在位待删、约束码 1555 扩展）均在源码可证；13-04 的工具环运行时路径按约将被 13-08 取代，wire 支持保留符合决策 |
 
----
-
-## 2. Strengths（优点）
-
-- **源码引用核查全部命中**。抽查的每一处行号/符号均真实存在且语义相符：`pkg/ws/server.go:135`（Safari TEXT→BINARY 压缩缺陷注释原文）、`server.go:136-160,178-188`（两段式 Origin + stripOriginPort）、`server.go:200,207-215`（SetReadLimit + pong 滚动 deadline）、`pkg/mimo/types.go:182-192`（ChatRequest 确无 tools/thinking 字段）、`pkg/infra/config.go:310-350`（WSConfig 范式）、`Makefile:17-19`（CGO_ENABLED=0 锁定）、`go.mod:7,11`（gorilla v1.5.3 / modernc v1.55.0，零新增依赖主张成立）。计划不是凭印象写的。
-- **13-02 的「接口零改动」论断经机制验证成立**：`Chat` 的 `buildChatRequest` 对 `ChatRequest` 逐 option 赋值（`client.go:297-309`），`executeChatRequest` 直接 `json.Marshal(req)`（`client.go:312-313`）——新字段加 omitempty 后确实直通，且 `TestChatWithoutToolsUnchanged` 专门锚定存量请求体无漂移，防回归意识到位。
-- **TTS 24kHz 事实有双重代码依据且跨计划自洽**：`pkg/tts/mimo_synth.go:42-44`（"Mimo pins pcm16 output at 24kHz regardless of the requested sample rate"）与 `client.go:143`（`2*24000` 注释）互证；13-03 的 `TTSOutputSampleRate=24000`、13-05 的 24kHz AudioBuffer、session_ready 声明采样率，三方一致，规避了「请求 16k 实得 24k」的变速陷阱（连 `PresetDictationTeacher` 请求 16k 的存量矛盾都被正确绕开）。
-- **幂等与乐观并发设计精确实现 CONTEXT 锁定**：request_id 用 toolCall.ID、expected_version 用 `UPDATE...WHERE version=?` 0 行判冲突、两者都在 SQLite 单事务（13-01 Task 2 的事务顺序 INSERT→UPDATE→UPDATE result，冲突时回滚保证「tool_requests 无该行」的行为测试与 RESEARCH Pattern 5 逐字对应）。`db.go:71-73` 的 `SetMaxOpenConns(1)` 让单事务语义在 Go 侧天然串行，设计前提成立。
-- **可替换接口与编译期契约贯穿**：13-03 定义 `SessionManager`/`Sender`/三供应商接口（签名与 `types.go:314-339` Client 接口逐字对齐，已核对 `Chat/SynthesizeStream/Transcribe` 签名），13-04 用 `var _ SessionManager` 检查，13-06 用三个 `var _` 对接——跨计划握手靠编译器不靠文档。
-- **安全姿态扎实且有存量范式背书**：Origin 禁 `"*"`/拒空 Origin/去端口回退（照抄 `server.go:136-160`）、SetReadLimit+心跳（`server.go:200-215`）、工具参数执行前校验、威胁模型每计划一份；TLS 只收 cert/key 两路径、密钥不入 git/config（维持 `config.go:66-73` 的 no-secret 不变量与 D-05 约定）。
-- **前端复用的 iOS 模式全部真实**：手势解锁三条件（`audio-controller.js:121-169`）、`_playbackGeneration` 捕获-比对-自增三段（`audio-controller.js:47-52, 391-398, 468`）、getUserMedia 约束三元组与 NotAllowedError 分流（`voice-command-controller.js:142-153`）、线性插值降采样+`_tail` 残余（`voice-command-controller.js:281-309`）——「打断后旧音频不复活」的客户端半边确实有已验证原型。
-- **测试三轨分工诚实**：unit（fake providers 在 13-03 一次建设、13-04 复用）、mock e2e 明示「组件证据；真机验收归 13-07」、live 烟测 env 门控照抄 `integration_test.go:64-74`（无 key skip 不算失败）；13-07 坚持失败样本保留、不以 HTTP 成功/收帧替代可听时刻，与 REQUIREMENTS「必须记录」段完全对齐。
-- **冻结边界被尊重**：`pkg/rt`、`pkg/lesson` 均不存在（绿地确认），全部计划零触碰 `pkg/ws`/`pkg/session`/`pkg/voice`；13-01 显式禁止 pkg/lesson import 冻结栈。
-
----
-
-## 3. Concerns（问题）
-
-### HIGH
-
-- **H-1（13-05）：mock e2e 的 spec 位置会污染存量 playwright 套件，且验收标准断言了错误的事实。**
-  计划把新 spec 放在 `tests/e2e/rt-loop.spec.js`，但存量 `playwright.config.js:16` 是 `testDir: 'tests/e2e'` 且**无 testMatch 过滤**——playwright 默认 testMatch 会匹配 `rt-loop.spec.js`。后果：`npm run e2e` / `make e2e`（Makefile:48-49）会把这个面向 mock 服务（:8099）的 spec 拿去跑**真实 Go 后端**（webServer 为 run.ps1 启动的 :8080 真服务，`playwright.config.js:33-41`），必然失败。计划验收项「存量 npx playwright test（Go 后端套件）不受新 config 影响（testMatch 隔离）」方向反了——**新 config 隔离了新运行，但旧 config 没有被隔离于新文件**；且 13-07 Task 1 预检只跑 `make test + npm test + playwright.rt.config`，`make e2e` 不在门内，该回归会**静默入库**。修复很小（见建议 1），但按「破坏既有功能 + 验收断言失实」定为 HIGH。
-
-### MEDIUM
-
-- **M-1（13-03↔13-04↔13-06）：TTS chunk 的 base64 解码归属在两个计划里互相矛盾。**
-  13-03 的接口 `TTSSynthesizer.SynthesizeStream(..., callback mimo.StreamCallback, ...)` 中 callback 载荷是 `mimo.StreamChunk`，其 `AudioData` 是 **base64 字符串**（`types.go:276-283`）；13-04 明确「chunk.AudioData base64 解码为 s16le 字节 → SendAudio(字节)」＝**turn.go 解码**；而 13-06 的 MimoTTS 又要求「chunk.AudioData base64 解码为字节经包装 StreamCallback 上交（**调用方拿裸 s16le**）」＝**适配器解码**。`mimo.StreamCallback` 类型无法干净地承载裸字节——若适配器把原始字节塞进 string 字段，13-04 的二次 base64 解码会产出噪音（大概率报错、小概率静默 garbage）。两个计划只能有一个是对的。会在 13-06 集成时暴露（可被编译/测试抓住），但这是跨计划音频主路径的契约矛盾，应在执行前裁定。
-- **M-2（13-04 计划内部）：打断后的历史裁剪与「全部句完成才 append」自相矛盾。**
-  Task 2 action 第 8 条规定「**全部句完成**：history append assistant 纯文本消息」，第 5 条 interrupt 又要求「把**最后一条 assistant 消息**内容替换为实际已播放句拼接」。逐帧推演：interrupt 发生在 speakTurn 中途时最终文本**尚未入 history**，此时「最后一条 assistant 消息」是 tool_calls 消息（Content 为空串）——裁剪要么扑空、要么把播放文本错写进 tool_calls 消息（该消息会在下一轮 Chat 原样重放，wire 形状未定义）。而验收标准「两句 teacher_sentence 只 ack 第一句后 interrupt → 下一次 llm.Chat 收到的**最后 assistant 消息内容只含第一句文本**」又预设了「先 append 全文、interrupt 时裁剪」的另一种设计。这是 RT-05「下一轮理解实际已播放内容」的核心机制，两套语义混在一处；执行者的 TDD 门禁会逼出正确行为，但计划文本应先自洽（另需补：工具环进行中被 interrupt 时无口语文本可裁剪的情形）。
-- **M-3（13-06）：新增配置叶子未接入 `bindEnvForAllLeaves`，违反仓库自身成文的 Pitfall 6。**
-  `pkg/infra/config.go:1239-1335` 为每个叶子字段显式 `BindEnv`，且注释明言「every leaf MUST be bound explicitly or HTA_* env vars are **silently inert**」（`config.go:1255-1256,1293` 等）。13-06 Task 1 加 `server.tls.certFile/keyFile` 与 `rt.*` 七字段却只字未提更新此列表——文件配置仍可用（viper 按 key 覆盖），但 `HTA_SERVER_TLS_*`/`HTA_RT_*` 将静默失效，与全仓约定及既有测试手法（`main_test.go:415-417` 正是用 `HTA_PYTHON_*` env 驱动 run()）不一致。
-- **M-4（13-06）：read_first 引用的「main_test.go 既有 yaml 模板」不存在。**
-  `cmd/service/main_test.go` 的全部 boot 测试都以**不存在的 config 路径**+env 覆盖运行（`main_test.go:42,72,116...` + `:415-417`），仓库里没有「临时 config yaml」先例。13-06 Task 3 的 TLS 测试需要自撰完整 yaml，且必须包含 Validate 硬性要求的 `python.interpreter/scriptsDir/dataDir`（`config.go:1103-1108,1137-1140`）——计划把它说成照抄既有模板，执行者会找不到模板（易走弯路，且漏 python 段时 run 返回 1 会与「缺证书返回 1」的断言混淆）。
-- **M-5（13-04）：`lesson_id` 未做会话绑定校验，弱于 RESEARCH 自身声明的控制项。**
-  Research 安全域 V4 写明「lesson_id 由服务端会话绑定，不信客户端自报」，但 13-04 的 `validateToolArgs` 只校验「lesson_id 非空字符串 + 工具名白名单」。幻觉/注入的 lesson_id 会直达 `lesson.Executor`（R0 库中只有一课，误写他课会得 `ErrLessonNotFound`，危害有限，但这是已声明却未落地的缓解措施）。应在 turn.go 入口加 `lessonID == cfg.LessonID` 判定。
-- **M-6（13-07 / RT-04）：跨机时钟的「句末→首实际可听」测量方法论被显式悬置。**
-  `speech_ended` 只能产生于服务端 VAD、`first_audio_played` 只能产生于客户端——RT-04 的核心指标天然跨时钟，而 CHECKPOINTS 明令禁止跨机相减。13-07 Task 1 的处理是「分列，成环基线用第一周口径说明」，等于把「第六周如何算 P50/P95」推迟到未定义。R0 范围内（只齐测量）成立，但第六周切换判定依赖这个数字，越晚定义方法论，第六周风险越大。
-- **M-7（13-06）：复用共享 mimoClient 的 20s HTTP 超时是未声明的假设。**
-  `main.go:404-407` 将共享 client 的 Timeout 定为 `max(voice 15s, photo 20s)=20s`，且该 timeout 覆盖**整个请求含流式 body 读取**。rt 复用该 client：VAD max-segment 30s 音频的整段 ASR、长句 TTS 流都挤在 20s 内——按快于实时的处理速度大概率够，但计划未记录该预算，也没有为 rt 另立 client/超时的决策记录。
-
-### LOW
-
-- **L-1（13-03）**：timing.go 称时间戳为「服务器**单调**时钟纳秒」，但 `time.Now().UnixNano()` 并不保证单调（受 NTP 步进影响）。服务端内部求时长应锚 `time.Since` 起点；跨机对齐本来就按事件 ID，无实害，但 godoc 措辞应准确。
-- **L-2（13-01）**：事务里「sqlite 报 UNIQUE 约束失败」的判定方式未指明（modernc 驱动的约束错误需按 `sqlite.Error`/code 匹配，不是字符串包含）；建议在 action 里点名 `errors.Is(err, sqlite.ErrConstraint)` 类判法，防执行者写成字符串匹配（与「禁止字符串匹配」的既有约定冲突）。
-- **L-3（13-01/存量交互）**：`db.go:71-73` 单连接池下，`AdvanceWord` 事务持有唯一连接期间，冻结栈 `/ws` 会话表的写会被短暂阻塞。R0 事务只有三条短语句，可接受；建议在 13-01 注释里写明该前提。
-- **L-4（13-04）**：逐句 TTS 是**串行**的（句 2 的合成等句 1 流完）——首包延迟达标不受影响，但多句回复的句间接续存在串行合成空隙；R0 可接受，Phase 16 前可考虑「播放中预合成下一句」。
-- **L-5（13-04，产品设计确认项）**：半双工门控意味着 SPEAKING 期间学生打断话语本身不被采集，interrupt 后学生需（继续）重说——与 RESEARCH Pattern 3 的设计一致，但对「插话即成轮」的体验预期要有认识（真机验证时观察）。
-- **L-6（13-02）**：`Message` 同时用于 TTS `TTSRequest.Messages`（`types.go:20`），新增 `ToolCalls/ToolCallID` 靠 omitempty 保证 TTS 请求体不漂移——`TestChatWithoutToolsUnchanged` 只断言顶层无 `tools/thinking` 键，未覆盖 message 级；建议补一条 message 级断言。
-- **L-7（13-06）**：`TLS *TLSConfig` 指针 + yaml 中出现空 `tls: {}` 块时，viper 会给出非 nil 但两字段全空的结构——Validate 只管「一空一非空」，main.go 的 `cfg.Server.TLS != nil` 分支会把空路径传给 `ListenAndServeTLS`。建议 Validate 直接判「两字段都空 = 视为禁用或报错」二选一写死。
-- **L-8（研究文档小误）**：RESEARCH 称 `ws` npm 包为「存量 devDep」，实际在 `package.json:6-8` 的 **dependencies**；无实害，备案。
-
----
-
-## 4. Suggestions（建议）
-
-1. **（对 H-1，必改）** 13-05 将 mock e2e 迁至独立目录 `tests/e2e-rt/`（`playwright.rt.config.js` 的 testDir 指向它），或给存量 `playwright.config.js` 加 `testIgnore: '**/rt-loop.spec.js'`；同时把验收项改为可真正验证的断言（如 `npx playwright test --list` 输出**不含** rt-loop）。
-2. **（对 M-1，必改）** 裁定 base64 解码唯一归属。推荐：13-03 的 `TTSSynthesizer` 回调改为 rt 自有类型（如 `func(pcm []byte, isFinal bool) error`），解码归 MimoTTS 适配器——「供应商 wire 细节止步于适配层」与本阶段可替换接口的定位最一致；同步修订 13-04 的 speakTurn 描述（删去其自行解码语句）。
-3. **（对 M-2，必改）** 13-04 统一为「speakTurn 开始时 append 全文 assistant 消息 → interrupt 时按 sentence_ack/played_until 裁剪为实际已播内容」，并补「工具环进行中 interrupt（尚无口语文本，不裁剪，仅取消）」的分支；使 action 与验收测试同构。
-4. **（对 M-3/M-4）** 13-06 Task 1 补 `bindEnvForAllLeaves` 增项（server.tls.certFile/keyFile + rt.* 七键）与对应 config_test 用例；Task 3 的 read_first 改为「main_test.go 的 env 驱动模式（`main_test.go:415-417`）+ 自撰含 python 必填段的临时 yaml」，并在测试里先跑一次「无 TLS 配置正常 200」对照，避免缺段返回 1 与缺证书返回 1 混淆断言。
-5. **（对 M-5）** 13-04 `validateToolArgs` 增加 `args.lesson_id == cfg.LessonID` 判定（不符即 invalid_arguments 回喂），落实 Research V4 已声明的控制。
-6. **（对 M-6）** 在 13-07 Task 1 里现在就定义 RT-04 口径，例如：a) 每会话一次时钟偏移估计（客户端发起 `ping`，服务端回 `t_recv`，客户端以 RTT/2 估计偏移并记录进 JSONL）；或 b) 明确双代理指标组——服务端 `speech_ended→first_audio_chunk_sent`（同钟）+ 客户端 `transcript_received→first_audio_played`（同钟），并声明第六周以哪组为准。任选其一写死，避免第六周临期争论。
-7. **（对 M-7）** 13-06 在接线处加一行决策注释：rt 复用共享 mimoClient、20s 单请求预算的依据（ASR 快于实时、逐句 TTS 短句），或为 rt 构造独立 client（`rt` 配置段已有位置可放 timeout）。
-8. **（增强，可选）** 13-04 收尾可加一个 `TurnManager + conn.go` 的进程内集成测试（httptest + gorilla Dialer + 13-03 fakes），把「binary 帧→VAD→fake ASR/LLM/TTS→SendAudio」整链走一遍——现有计划只有分件测试，整链拼装问题（如 sender 并发使用）目前靠 `var _` 与人工推演。
-
----
-
-## 5. Risk Assessment（风险评级）
-
-**总体：MEDIUM（执行前应用上述 1–3 修订后可降为 LOW-MEDIUM）**
-
-- **计划质量风险：低**。源码引用核实率极高、依赖排序正确、CONTEXT 锁定决策逐条落地、R0「成环优先/达标不前置」的口径贯穿始终；无范围蔓延（词库/OCR/并发容量均被显式挡在界外）。
-- **集成返工风险：中**。H-1 会静默破坏存量 `make e2e`；M-1/M-2 是两处契约级矛盾，会在 13-05/13-06 执行中暴露并触发偏差处理——都可被编译/测试/TDD 门禁拦下，不会带病进入真机，但会造成返工与计划文本失真。
-- **真机风险：中且已被正确管理**。回声/AEC、h2 回退、采样率协商等最大的不确定项全部显式登记为假设（A1–A7）并配有真机 checkpoint 与降级路径（rnnoise-go、禁 h2 一行修复、URL 参数标定），13-07 不允许以 mock 证据替代真机验收——这是该批计划最成熟的部分。
-- **日程风险提示**：第一周截止 2026-10-07。H-1/M-1/M-2 均为计划级小修，建议在 `/gsd-execute-phase 13` 前完成修订（半小时量级），避免把可前置的矛盾留到 Wave 2/3 的执行偏差里消化。
-
----
-
-## Codex Review
-
-codex review failed or returned empty output.
-
-## Diagnostic
-
-**Attempt 1** — killed at the lane's 1200s floor timeout; stderr transcript ends:
-
-```
-codex
-我会逐一核对计划引用的源码和测试，重点检查工具事务、音频取消、时序测量与运行时接入是否能支撑真机闭环，再给出按计划分组的审查意见。
-
-hook: PreToolUse
-hook: PreToolUse
-
-[spawn error: ETIMEDOUT]
-```
-
-**Attempt 2** — timeout raised to 2700s via `review.timeouts.codex`; killed at 2701s with the identical signature (session begins, first tool call attempted, hangs at PreToolUse).
-
-**Minimal reproduction outside GSD** (2 attempts, incl. one with project `.codex/hooks.json` temporarily disabled):
-
-```
-codex
-I'll read the first three lines of go.mod.
-hook: PreToolUse
-2026-10-01T03:25:12.536737Z ERROR codex_core::tools::router: error=code-mode host closed its stdout
-```
-
-Even a trivial "read go.mod and reply PROBE-OK" prompt hangs forever at the first tool call. Variant errors across runs (`[spawn error: ETIMEDOUT]` and `codex_core::tools::router: error=code-mode host closed its stdout`), both in codex's tool-invocation layer.
-
-**Environment:** codex-cli 0.159.2 on Windows, model gpt-6.1-sol (reasoning=high), `--ephemeral`, sandbox workspace-write. Hooks were trusted and SessionStart/UserPromptSubmit hooks completed; the hang is in the tool router, reproducible with project hooks disabled.
-
-**Conclusion:** not a budget/time problem — `codex exec` on this host cannot execute any tool call right now. Lane dropped; verdict carries no consensus weight. Fix the local codex installation (or upgrade codex-cli) and re-run `$gsd-review 13 --codex`.
+*本次评审声明已读取仓库；下文汇总另列复核与修正。*
 
 ---
 
 ## Consensus Summary
 
-仅一名有效评审人（Claude），下述条目为单源结论，未经第二模型交叉确认；Codex 修复后补跑可作交叉验证。
+### 评审范围与结论
+
+本次仅一个外部评审实例成功返回，因此**没有多模型共识**。Claude CLI 原始判断为 MEDIUM；结合当前执行者的源码复核，建议先修订下列计划缺口，再执行 13-08/13-09/13-11。补充发现均指向待执行计划与现有代码之间的具体关系，不表示这些 FSM 缺陷已经存在于尚未实现的代码中。
 
 ### Agreed Strengths
 
-（单评审人，无跨模型共识；以下为 Claude 评审中证据最扎实的强项，置信度较高）
-
-- 源码落地精度高：抽查的 `file:line` 引用（`pkg/ws/server.go:135-215`、`pkg/mimo/types.go:182-192`、`pkg/infra/config.go:310-350`、`pkg/tts/mimo_synth.go:42-44` 等）全部核实命中；波次依赖与 CONTEXT 八条锁定决策一一对应。
-- 幂等与乐观并发设计忠实实现「不以 LLM 记忆实现幂等」：request_id=toolCall.ID + expected_version 在 SQLite 单事务，且 `db.go:71-73` 的 `SetMaxOpenConns(1)` 使事务天然串行。
-- 测试三轨分工诚实：unit / mock e2e（明示组件证据）/ env 门控 live 烟测，13-07 坚持失败样本保留、不以收帧替代可听时刻。
+无两位独立外部评审者可供交叉计数。已复核的优点是：13-07 冻结数据/协议契约，再由 13-08 和 13-11 消费；现有课堂推进在单事务中维护 request_id 和 expected_version（pkg/lesson/executor.go:111、:131、:157）；13-12/13-13 分开本机预验收与正式真机验收。数据库幂等成立不等于调用方所有副作用都已幂等，见 S-03。
 
 ### Agreed Concerns
 
-（单评审人；按优先级列出 Claude 的发现，待第二评审人确认）
+无多外部评审共识。外部 HIGH-1 经复核成立；其余按下列修正使用，不能把原报告中的全部肯定表述当成已验证事实。
 
-1. **H-1（13-05）**：mock e2e spec 放 `tests/e2e/rt-loop.spec.js` 会污染存量 playwright 套件——存量 config 无 testMatch 过滤，`make e2e` 会拿面向 mock 服务的 spec 跑真实 Go 后端，必然失败且静默入库（13-07 预检不含 `make e2e`）。
-2. **M-1（13-03↔13-04↔13-06）**：TTS chunk 的 base64 解码归属在三个计划间互相矛盾（turn.go 解码 vs 适配器解码），跨计划音频主路径契约需在执行前裁定。
-3. **M-2（13-04 内部）**：打断后历史裁剪时机自相矛盾（全部句完成才 append vs interrupt 时替换最后一条 assistant 消息），这是 RT-05「下一轮理解实际已播放内容」的核心机制。
-4. **M-3/M-4（13-06）**：新增配置叶子未接入 `bindEnvForAllLeaves`（违反仓库成文 Pitfall 6，`HTA_RT_*` env 将静默失效）；引用的「既有 yaml 模板」不存在。
-5. **日程风险**：H-1/M-1/M-2 均为计划级小修（半小时量级），应在执行前完成，避免 Wave 2/3 返工——第一周截止 2026-10-07。
+### 执行者源码复核：优先修订项
 
-### Divergent Views
+#### S-01 — HIGH：完结消息会截断仍在播放的总结（13-08、13-11）
 
-无——第二名评审人（Codex）未产出评审，不存在分歧记录。
+- 证据：13-08-PLAN.md:152 在 speakTurn 返回后发送 session_ended 并 internalClose；同计划 :116 的无到期词分支也在 speakTurn 后结束。现有 pkg/rt/turn.go:654、:675、:686 只等待 TTS 流发送完，不等待浏览器播完。pkg/web/static/tutor/js/rt-playback.js:215 把音频安排到未来时间，:237 才在播放结束回调释放播放任务。pkg/web/static/tutor/index.html:223 的 session_ended 处理调用 :161 的 stopEverything，其中 :165 立即 playback.stopNow。
+- 机制：提供商生成快于实时播放时，总结仍在播放或排队，session_ended 随即触发停止，学生听不到完整总结或“记录未保存”的告知。13-11-PLAN.md:149 只断言字幕/横幅存在，无法证明总结被听完。
+- 修订：定义自然完结的播放完成条件，与用户主动停止、故障、打断分开处理；麦克风释放与音频播放结束分别管理。复用客户端实际播放完成确认时明确最后一句、epoch、超时及断线行为。增加“音频已发完但浏览器尚未播完”的验收用例，同时覆盖 lesson_complete 和 no_due_words。
+
+#### S-02 — HIGH：重置后的旧计时回调无法靠 epoch/index 识别（13-09）
+
+- 证据：13-09-PLAN.md:112 只保存 (epoch, wordIndex)，resetWordTimer 停止后以相同参数重建；:113 只核验关闭、epoch、游标、paused 和 listening；:115 却要求手动触发旧回调不推进。现有 pkg/rt/turn.go:465 只读取 epoch，普通新语音轮次在 :466 递增 turnID，不递增 epoch。
+- 机制：repeat/chat 重置计时但不推进词游标或打断，旧回调若已启动、等待锁，在互动结束后获取锁，其所有校验仍成立。停止计时器不能撤回已经开始的回调，旧回调可能提前推进当前词。
+- 修订：每次武装/重置/停止更新独立计时器代数或身份，在锁内比较并使旧回调失效；确定性测试模拟旧回调已排队、重置完成后才执行。另将 :113 的 processing 分支放在通用 state 拒绝之前，消除“非 listening 丢弃”和“processing 重置”的矛盾。
+
+#### S-03 — MEDIUM：幂等命中后的副作用规则自相矛盾（13-08、13-09）
+
+- 证据：13-08-PLAN.md:120 对“成功或 Idempotent=true”都要求写 outcome、发 LessonUpdateMsg/EventWordAdvanced、播下一词；:125 的测试却要求 Idempotent=true 不重复发消息或报词。13-09-PLAN.md:114 又要求竞争时 outcome 取先到者。pkg/lesson/executor.go:245 的幂等读取仅返回首次数据库结果，不阻止调用者重复播报和改内存记录。
+- 修订：把首次提交、幂等命中、版本冲突写成互斥分支；明确重复结果只做必要的状态对齐，不覆盖首次 outcome、不重复播报或触发完结写记录。分类启动时捕获目标词/版本，避免迟到确认按照已经变化的 currentIndex 重新计算另一目标。分别验证确认先到与超时先到；计划当前的单向用例不能证明全部竞争安全。
+
+#### S-04 — MEDIUM：暂停播报后会恢复 listening，暂停状态显示不稳定（13-09、13-11）
+
+- 证据：13-09-PLAN.md:86 依次发 paused、调用 speakTurn(pauseAckText)、停止计时；13-08-PLAN.md:114 明确保留 speakTurn 的机制。pkg/rt/turn.go:627 播报时设 speaking，:686/:690 无条件恢复并广播 listening。13-11-PLAN.md:90 要求 paused chip 随 state 显示。
+- 机制：按计划直接实现时，暂停确认语音结束后页面显示 listening，内部 paused 位却仍阻止推进。若直接把内部 state 改成 paused，pkg/rt/turn.go:437 和 :461 又会拒绝上行语音和新轮次，导致听不到“继续”。
+- 修订：明确内部语音处理状态与课堂暂停位的关系，播报结束后根据暂停位发出正确 UI 状态，并保留暂停期的口令识别。用真实后端验证“暂停确认播完→仍显示暂停→说继续可恢复”，不能仅靠 mock 广播 paused。
+
+#### S-05 — MEDIUM：学习记录写入应核对 Updated，不能只看 error（13-10）
+
+- 证据：13-10-PLAN.md:113 仅规定调用 RunReview；13-08-PLAN.md:152 随 SubmitReview 成功就发 EventReviewWritten(count=N)。pkg/pybridge/vocab.go:311 明确子进程会以 exit 0 返回部分/零 updated 并带 Warning，:363 直接返回解析结果和 nil；pkg/pybridge/executor.go:191 定义了 Updated 结果。
+- 机制：词在取出后被删除，或其他跳过条件出现时，RunReview 返回 nil error 但未写全。适配器若丢弃 Updated，将把未保存报告为成功；“词库唯一词”假设不能覆盖词被删除的情况。
+- 修订：核对请求集合与实际更新集合，部分成功要明确报告实际数量并走诚实反馈。增加空 updated/部分 updated 且 error=nil 的测试；不要整批盲目重试已经更新的 FSRS 项。
+
+#### S-06 — LOW：两个验证过滤器漏掉计划指定用例
+
+13-09-PLAN.md:88 的 TestConfirmWhilePausedIsGentleRejected 不被 :91 的 -run TestIntent 匹配；13-10-PLAN.md:115 将用例拼为 TestPyFRSSubmitReviewPassesResultsAndSkipsEmpty，不被 :118 的 -run TestPyFSRS 匹配。全包测试可能兜底，但局部“用例名必须出现”的验收条件无法按原命令通过。统一名称或修正过滤器。
+
+### Divergent Views / 对外部意见的修正
+
+1. **幂等与计时器并未完整证明。** 外部称“结构性保证”“竞争测试完备”，但 S-02/S-03 给出了计划机制和测试契约之间的缺口，不能照单采纳。
+2. **回声尾计时问题成立，单纯把窗口扩大到 1 秒不是确定性修复。** 13-09-PLAN.md:139 从服务端 speakTurn 结束起算，pkg/web/static/tutor/js/rt-playback.js:215/:237 证明实际播放更晚结束。应基于有效的播放完成证据，并处理客户端缺失确认、断线、打断；同一差异也影响书写计时开始点。真机标定不能替代控制逻辑的正确性。
+3. **取词锁风险需要收窄触发条件。** 外部 MEDIUM-2 所称普通同日重连再次取词，不符合 13-08-PLAN.md:116 的复用已存 Cards 分支。风险主要是 RunDue 已锁词但课堂创建未成功、跨日/更换 lessonID、并发创建产生未使用的词批。当前相邻资产仓库脚本 D:/workspace/ai/xiaotian-skills/shared/dictation/scripts/vocab_manager.py:98 的默认锁定值确为 24 小时；:278 附近负责写锁。部署仍须核对实际配置的脚本版本，不把邻仓文件当 VPS 事实。
+4. **旧 cards 为空和已完结重连仍是有效缺口。** 13-07-PLAN.md:116 的迁移测试明确保留空 Cards；13-08-PLAN.md:116 直接消费持久化 Cards，缺少边界分支。不要按外部建议简单“视为不存在再 EnsureLessonCards”：pkg/lesson/store.go:140 的 INSERT OR IGNORE 会保留同 ID 旧行，不能完成替换。应明确可兼容读取、拒绝提示或受控迁移；已完结课堂不得索引越界或重复提交学习记录。
+5. **不重新扩大已接受范围。** 13-08-PLAN.md:242 已明确接受 R0 掉线丢失内存 outcome、完整恢复归 Phase 15。本评审不把该取舍重新列为阻塞项；只要求对计划已承诺的行为如实报告。
+6. **文档过期成立，转向决策保持优先。** STATE.md:90 已明确取代固定三词、LLM 控制节奏及沉默不跳词的旧要求。修订 CONTEXT/REQUIREMENTS/PROJECT 时应同步该决策，不能借文档冲突恢复旧设计。第一周/第六周时间检查也保持各自口径，不能把第一周成环误写成第一周完成所有延迟达标测量。
+
+### 后续规划输入
+
+优先修订 13-08/13-09/13-11 的播放结束协议、计时器失效规则与幂等分支，再补暂停状态和 FSRS 写入核对。保留 13-12/13-13 真机验收安排，自动化与 mock 只作组件证据。调用 /gsd-plan-phase 13 --reviews 吸收本报告；本次只更新评审报告，没有修改计划或业务代码，也没有运行测试、部署或真机验收。
