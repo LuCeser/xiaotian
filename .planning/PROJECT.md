@@ -23,7 +23,7 @@ Students receive personalized, real-time dictation practice with immediate feedb
 
 **Target features:** 自研交互＋MiMo 可替换接口，Phase 13～16（R0～R3）；先 WebSocket，Phase 16 替换 pion WebRTC，触发时间检查时切火山 Plan B。
 
-**Next:** /gsd-plan-phase 13；日期及切换步骤见 ROADMAP 和 docs/REALTIME-TUTOR-PLAN-B.md。
+**Next:** /gsd-execute-phase 13；日期及切换步骤见 ROADMAP 和 docs/REALTIME-TUTOR-PLAN-B.md。
 
 ## Requirements
 
@@ -33,9 +33,9 @@ Students receive personalized, real-time dictation practice with immediate feedb
 
 ### Active
 
-- [ ] **浏览器自然实时家教（产品验收 RT-01~RT-10）** - R0 真机最小闭环起步：3 固定词、采集→VAD→MiMo ASR/LLM/TTS→流式播放→可打断，含真实读写工具调用及幂等验证
+- [ ] **浏览器自然实时家教（产品验收 RT-01~RT-10）** - R0 真机最小闭环：FSRS 到期词（上限 10）→服务端状态机报词/确认或 60 秒推进→四类口令→完结学习记录；采集→VAD→MiMo ASR/LLM 意图识别/TTS→流式播放→可打断，含幂等推进与真实写入
 - [ ] **自研 RTC 层** - 先 WebSocket 成环、后 WebRTC（Go pion），传输层可替换接口
-- [ ] **词库管理与 FSRS** - 已交付组件（词库/单元、FSRS 选词与参数更新），R2 与自然家教对话贯通学习闭环
+- [ ] **词库管理与 FSRS** - 已交付组件（词库/单元、FSRS 选词与参数更新）；R0 接入到期取词与课末 review，R2 再接批改、家长确认和 durable 恢复闭环
 - [ ] **家长反馈** - R2 交付（吸收旧 Phase 10 的 FEED-01~04：批改确认/覆盖与进度统计）
 - [ ] **iPad Safari 真机 + 业主证书 HTTPS** - 业主现有证书部署 VPS，iPad 走真实网络验收（RT-01）
 - [ ] **资源受限部署** - 1C 1G VPS 上高效运行（150MB 限定口径见 Constraints）
@@ -135,4 +135,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-30 — 产品验收重定基（R0–R3 主线；ADR-0002 Accepted）*
+*Last updated: 2026-10-04 — 同步 2026-10-03 状态机默写助手转向（FSRS 到期词、60 秒推进、LLM 仅意图/话术）*

@@ -1,32 +1,32 @@
 ---
-gsd_state_version: "1.0"
+gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: realtime-tutor — ACTIVE
 current_phase: 13
 current_phase_name: R0 真机最小闭环
 status: executing
-stopped_at: 交互模型决策变更：状态机默写助手（FSRS+确认+60s超时+四类口令）；待 /gsd-plan-phase 13 重规划；本机预验收环境保留（PID 16256/45992）
-last_updated: "2026-10-04T01:44:35.127Z"
-last_activity: 2026-10-02
-last_activity_desc: Phase 13 execution resumed (wave continue)
-state_head: cf6e496c8d507d37600f595524a55a6bbecba423
+stopped_at: Phase 13 --reviews 重规划完成；13-07～13-13 独立检查通过；下一步 /gsd-execute-phase 13，从 13-07 开始
+last_updated: "2026-10-04T23:12:54.136Z"
+last_activity: 2026-10-05
+last_activity_desc: Phase 13 review replan complete; 7 pending plans independently verified
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 13
   completed_plans: 6
-  percent: 0
+  percent: 46
+state_head: cf6e496c8d507d37600f595524a55a6bbecba423
 ---
 
 # Project State
 
 ## Product Acceptance Rebaseline — 2026-09-30
 
-产品验收未通过。v1.0 superseded / override_closeout，旧 Phase 10～12 不再执行；新里程碑 v2.0 realtime-tutor。Phase 13～16 对应 R0～R3。MiMo 可替换接口、自研 WebSocket→pion WebRTC、真实读写工具和真机 RT 验收为当前范围。
+产品验收未通过。v1.0 superseded / override_closeout，旧 Phase 10～12 不再执行；新里程碑 v2.0 realtime-tutor。Phase 13～16 对应 R0～R3。MiMo 可替换接口、自研 WebSocket→pion WebRTC、服务端状态机幂等推进、真实 FSRS 读写和真机 RT 验收为当前范围。
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-09-30)
+See: .planning/PROJECT.md (updated 2026-10-04)
 
 **Core value:** 学生在浏览器与家教自然实时交流，理解上下文、允许打断、等待纸笔书写，学习结果进入真实记录。
 **Current focus:** Phase 13 — R0 真机最小闭环
@@ -34,16 +34,18 @@ See: .planning/PROJECT.md (updated 2026-09-30)
 ## Current Position
 
 Phase: 13 (R0 真机最小闭环) — READY TO EXECUTE
-Plan: 1 of 7
+Plan: 7 of 13 — next 13-07; 13-01～13-06 executed, 7 plans remaining
 Status: Ready to execute
-Last activity: 2026-10-02 — Phase 13 execution resumed (wave continue)
-Next: /gsd-plan-phase 13
+Last activity: 2026-10-05 — /gsd-plan-phase 13 --reviews 完成；独立检查无剩余 BLOCKER/WARNING
+Next: /gsd-execute-phase 13
 
-新实时语音尚未实现；RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
+13-01～13-06 的实时语音基础已实现；状态机默写转向尚待执行 13-07～13-13，RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
+
+本轮规划检查：7/7 待执行计划结构有效，7/7 阶段需求覆盖；CONTEXT 决策覆盖工具因无可跟踪 ID 跳过，独立检查已核对现行能力与计划的一致性。S-01～S-06、HIGH-1 及评审修正意见已落实。13-07 历史波次的无待执行依赖仅为 INFO；7 条未分类边界探测保留 unresolved，评级优先级及真机证据仍待人工检查。本轮仅修改规划文档，未运行实现测试、部署或真机验收。
 
 ## Performance Metrics
 
-v2.0：4 个活跃阶段，0 个实施计划完成。历史统计保留于 milestones/v1.0-STATE.md，不用于新里程碑进度。
+v2.0：4 个活跃阶段，Phase 13 已完成 6/13 个实施计划，剩余 7 个计划、5 个执行波次（3～7）；产品验收尚未通过。历史统计保留于 milestones/v1.0-STATE.md，不用于新里程碑进度。
 
 ## Accumulated Context
 
@@ -149,6 +151,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-03T15:24:05.061Z
-Stopped at: 交互模型决策变更：状态机默写助手（FSRS+确认+60s超时+四类口令）；待 /gsd-plan-phase 13 重规划；本机预验收环境保留（PID 16256/45992）
+Last session: 2026-10-05
+Stopped at: Phase 13 --reviews 重规划完成；13-07～13-13 独立检查通过；下一步 /gsd-execute-phase 13，从 13-07 开始
 Resume file: None

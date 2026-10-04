@@ -15,11 +15,12 @@
 > 2026-10-04 勘误：本模板交互语义与事件行已按 2026-10-03 转向决策（状态机默写助手，STATE.md Phase 13）改写——旧「语音发起 3 词」「LLM 工具请求 get_lesson_state/advance_word」口径作废；下方其余行与已执行的历史记录不受影响。
 
 - 检查日期、执行者、Git 版本、iPad 型号/iPadOS/Safari、访问地址（不含密钥）、网络及 VPS 环境。
-- 一次授权、一次点击开始后全程持续听说（≥10 轮交互，不按住录音）；完整默写课：开场报词、逐词等「好了/可以了/下一个」确认或 60 秒超时自动推进、四类口令（重读/慢读、不会写提示、词义解释、暂停继续）、学生打断、完结总结。
+- 一次授权、一次点击开始后全程持续听说（≥10 轮交互，不按住录音）；完整默写课：开场报词、逐词等「好了/可以了/下一个」确认或 60 秒超时自动推进、四类口令（重读/慢读、不会写提示、词义解释、暂停继续）、学生打断、完结总结。暂停确认话术播完后页面仍显示 paused，麦克风/识别继续工作并能用语音「继续」恢复。
 - 服务端状态机事件链：word_announced/word_advanced/lesson_complete/review_written 各事件、lessonID（省略 = 每日派生 r0-YYYYMMDD）与 lesson_version；重复确认或超时不重复推进（版本与词序只变一次）；完结后对应词的 FSRS due 状态前后对照。日志脱敏。
-- 真实扬声器播放、回声误触发、学生插话；停播后旧音频不复活；下一轮承认学生实际听到的位置。
-- 每轮记录页面就绪、授权完成、连接就绪、speech_started/ended、报词/推进/完结事件（word_announced/word_advanced/lesson_complete/review_written）、首个收到音频、首个实际播放、打断开始/停播、lesson_version。浏览器播放时刻与服务端耗时分开，不直接相减未校准的跨机器时钟。
-- RT-04 至少 30 次响应样本，报告首次问候耗时、轮次 P50/P95；RT-05 至少 30 次打断样本，报告 P95，并提供迟到音频和上下文检查结果。保留失败与超时，不只计算成功轮次。
+- 真实扬声器播放、回声误触发、学生插话；停播后旧音频不复活；下一轮承认学生实际听到的位置。每次真实播放结束后分别观察 0.5～1.5 秒与更长静默段，无回声转写、误确认或推进；不能用延长固定回声窗口替代观察。
+- 每轮记录页面就绪、授权完成、连接就绪、speech_started/ended、报词/推进/完结事件（word_announced/word_advanced/lesson_complete/review_written）、首个收到音频、首个实际播放、sentence_ack、打断开始/停播、lesson_version。summary/no_due 正常路径必须记录「实际听完 → matching ACK → session_ended」顺序；若出现 playback_ack_timeout，则另记「ErrorMsg(timeout) → 原 lesson_complete/no_due_words reason → normal close → 客户端排空/有界清理」，并明确该超时不能充当实际播放完成证据。浏览器播放时刻与服务端耗时分开，不直接相减未校准的跨机器时钟。
+- 学习记录记录 requested/updated/missing 计数并与词库实际变化核对；部分或零 Updated 不得记为全部成功，也不自动重试。评级优先级（尤其 hint→confirm、hint→timeout）在用户确认前保持 Pending。
+- RT-04 至少 30 次响应样本，报告首次问候耗时、轮次 P50/P95；RT-05 至少 30 次打断样本，报告 P95，并提供迟到音频和上下文检查结果。样本允许跨多日多会话累计，每次记录日期/版本/增量；未满时标记 In progress。保留失败与超时，不只计算成功轮次。
 - 用户可见结果、失败原因、证据路径、通过/未通过；若触发切换，列出 Plan B 每步的结果和阻塞。
 
 ## 首次启动实施时
@@ -36,6 +37,7 @@
 | VPS 目标 | **待提供**（Task 2 VPS 段） | 用户 1C1G VPS（systemd 部署，按 docs/DEPLOYMENT.md 流程；下文命令清单假定 /opt/hta 布局，实际布局不同时等价替换） |
 | 本地预检 | 全绿 | `go test ./...` 15 包 ok（本机无 gcc，`-race` 不可用——Makefile test 的 race 档位在 VPS/CI 侧执行）；`npm test` ok；`npx playwright test -c playwright.rt.config.js` 3 passed；`npx playwright test --list` 7 项不含 rt-loop（存量套件隔离复检 H-1） |
 | 时序分析工具 | 就绪 | `scripts/rt-timing-report.js`（`--self-test`/`--json`，第六周判定口径：clock_offset 中位数校准 + ±RTT/2 误差界 + 无 offset 样本单独计数）；package.json 新增 `rt-report` script |
+| VPS 实际词表脚本 | Pending | 部署前记录脚本 sha256，执行 `due --help` 确认含 `--fetch-lock-hours`，并核对生产服务显式传 1 小时；默认 24 小时不作为运行策略。 |
 
 ### VPS 部署命令清单（Task 2 执行；`<占位符>` 由用户替换；凭据不进对话与 git）
 
@@ -98,7 +100,7 @@
 
 **2. 证据口径（本机预验收 ≠ 正式验收）**
 
-- 功能预验收（首问候、打断、3 词场景、连续 10 轮、故障可见性）可在本机通道用真 iPad + 真麦克风先行验证，问题先暴露先修；结果如实标注「本机预验收」。
+- 功能预验收（首问候、打断、完整默写、播放完成后结束、真实回声观察、暂停语音恢复、实际 Updated 与故障可见性）可在本机通道用真 iPad + 真麦克风先行验证，问题先暴露先修；结果如实标注「本机预验收」。
 - 正式 RT-01 可信入口证据、≥30 时序样本与检查记录最终落档仍以 VPS 部署为准（清单见上节）；本机 LAN 时序样本仅用于验证 rt-timing-report 报告管线，不作为第六周判定证据。
 
 ## Plan B 执行状态
