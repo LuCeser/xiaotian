@@ -101,7 +101,7 @@ PyFSRS 用非 peek RunDue（会触发 fetch-lock），词取走后若会话中�
 
 ### Agreed Strengths
 
-无两位独立外部评审者可供交叉计数。已复核的优点是：13-07 冻结数据/协议契约，再由 13-08 和 13-11 消费；现有课堂推进在单事务中维护 request_id 和 expected_version（pkg/lesson/executor.go:111、:131、:157）；13-12/13-13 分开本机预验收与正式真机验收。数据库幂等成立不等于调用方所有副作用都已幂等，见 S-03。
+无两位独立外部评审者可供交叉计数。已复核的优点是：13-07 冻结数据/协议契约，再由 13-08 和 13-11 消费；现有课堂推进在单事务中维护 request_id 和 expected_version（pkg/lesson/executor.go:101、:122、:146）；13-12/13-13 分开本机预验收与正式真机验收。数据库幂等成立不等于调用方所有副作用都已幂等，见 S-03。
 
 ### Agreed Concerns
 
@@ -123,7 +123,7 @@ PyFSRS 用非 peek RunDue（会触发 fetch-lock），词取走后若会话中�
 
 #### S-03 — MEDIUM：幂等命中后的副作用规则自相矛盾（13-08、13-09）
 
-- 证据：13-08-PLAN.md:120 对“成功或 Idempotent=true”都要求写 outcome、发 LessonUpdateMsg/EventWordAdvanced、播下一词；:125 的测试却要求 Idempotent=true 不重复发消息或报词。13-09-PLAN.md:114 又要求竞争时 outcome 取先到者。pkg/lesson/executor.go:245 的幂等读取仅返回首次数据库结果，不阻止调用者重复播报和改内存记录。
+- 证据：13-08-PLAN.md:120 对“成功或 Idempotent=true”都要求写 outcome、发 LessonUpdateMsg/EventWordAdvanced、播下一词；:125 的测试却要求 Idempotent=true 不重复发消息或报词。13-09-PLAN.md:114 又要求竞争时 outcome 取先到者。pkg/lesson/executor.go:246 的幂等读取仅返回首次数据库结果，不阻止调用者重复播报和改内存记录。
 - 修订：把首次提交、幂等命中、版本冲突写成互斥分支；明确重复结果只做必要的状态对齐，不覆盖首次 outcome、不重复播报或触发完结写记录。分类启动时捕获目标词/版本，避免迟到确认按照已经变化的 currentIndex 重新计算另一目标。分别验证确认先到与超时先到；计划当前的单向用例不能证明全部竞争安全。
 
 #### S-04 — MEDIUM：暂停播报后会恢复 listening，暂停状态显示不稳定（13-09、13-11）
@@ -134,7 +134,7 @@ PyFSRS 用非 peek RunDue（会触发 fetch-lock），词取走后若会话中�
 
 #### S-05 — MEDIUM：学习记录写入应核对 Updated，不能只看 error（13-10）
 
-- 证据：13-10-PLAN.md:113 仅规定调用 RunReview；13-08-PLAN.md:152 随 SubmitReview 成功就发 EventReviewWritten(count=N)。pkg/pybridge/vocab.go:311 明确子进程会以 exit 0 返回部分/零 updated 并带 Warning，:363 直接返回解析结果和 nil；pkg/pybridge/executor.go:191 定义了 Updated 结果。
+- 证据：13-10-PLAN.md:113 仅规定调用 RunReview；13-08-PLAN.md:152 随 SubmitReview 成功就发 EventReviewWritten(count=N)。pkg/pybridge/vocab.go:311 明确子进程会以 exit 0 返回部分/零 updated 并带 Warning，:363 直接返回解析结果和 nil；pkg/pybridge/executor.go:183 定义了 Updated 结果。
 - 机制：词在取出后被删除，或其他跳过条件出现时，RunReview 返回 nil error 但未写全。适配器若丢弃 Updated，将把未保存报告为成功；“词库唯一词”假设不能覆盖词被删除的情况。
 - 修订：核对请求集合与实际更新集合，部分成功要明确报告实际数量并走诚实反馈。增加空 updated/部分 updated 且 error=nil 的测试；不要整批盲目重试已经更新的 FSRS 项。
 
@@ -147,7 +147,7 @@ PyFSRS 用非 peek RunDue（会触发 fetch-lock），词取走后若会话中�
 1. **幂等与计时器并未完整证明。** 外部称“结构性保证”“竞争测试完备”，但 S-02/S-03 给出了计划机制和测试契约之间的缺口，不能照单采纳。
 2. **回声尾计时问题成立，单纯把窗口扩大到 1 秒不是确定性修复。** 13-09-PLAN.md:139 从服务端 speakTurn 结束起算，pkg/web/static/tutor/js/rt-playback.js:215/:237 证明实际播放更晚结束。应基于有效的播放完成证据，并处理客户端缺失确认、断线、打断；同一差异也影响书写计时开始点。真机标定不能替代控制逻辑的正确性。
 3. **取词锁风险需要收窄触发条件。** 外部 MEDIUM-2 所称普通同日重连再次取词，不符合 13-08-PLAN.md:116 的复用已存 Cards 分支。风险主要是 RunDue 已锁词但课堂创建未成功、跨日/更换 lessonID、并发创建产生未使用的词批。当前相邻资产仓库脚本 D:/workspace/ai/xiaotian-skills/shared/dictation/scripts/vocab_manager.py:98 的默认锁定值确为 24 小时；:278 附近负责写锁。部署仍须核对实际配置的脚本版本，不把邻仓文件当 VPS 事实。
-4. **旧 cards 为空和已完结重连仍是有效缺口。** 13-07-PLAN.md:116 的迁移测试明确保留空 Cards；13-08-PLAN.md:116 直接消费持久化 Cards，缺少边界分支。不要按外部建议简单“视为不存在再 EnsureLessonCards”：pkg/lesson/store.go:140 的 INSERT OR IGNORE 会保留同 ID 旧行，不能完成替换。应明确可兼容读取、拒绝提示或受控迁移；已完结课堂不得索引越界或重复提交学习记录。
+4. **旧 cards 为空和已完结重连仍是有效缺口。** 13-07-PLAN.md:118 的迁移测试明确保留空 Cards；13-08-PLAN.md:116 直接消费持久化 Cards，缺少边界分支。不要按外部建议简单“视为不存在再 EnsureLessonCards”：pkg/lesson/store.go:128 的 INSERT OR IGNORE 会保留同 ID 旧行，不能完成替换。应明确可兼容读取、拒绝提示或受控迁移；已完结课堂不得索引越界或重复提交学习记录。
 5. **不重新扩大已接受范围。** 13-08-PLAN.md:242 已明确接受 R0 掉线丢失内存 outcome、完整恢复归 Phase 15。本评审不把该取舍重新列为阻塞项；只要求对计划已承诺的行为如实报告。
 6. **文档过期成立，转向决策保持优先。** STATE.md:90 已明确取代固定三词、LLM 控制节奏及沉默不跳词的旧要求。修订 CONTEXT/REQUIREMENTS/PROJECT 时应同步该决策，不能借文档冲突恢复旧设计。第一周/第六周时间检查也保持各自口径，不能把第一周成环误写成第一周完成所有延迟达标测量。
 
