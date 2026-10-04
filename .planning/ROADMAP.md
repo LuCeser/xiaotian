@@ -8,7 +8,7 @@
 
 ## Phases
 
-- [ ] **Phase 13: R0 真机最小闭环** — 3 词自然对话、读写工具、真实打断与时序证据
+- [ ] **Phase 13: R0 真机最小闭环** — FSRS 到期词状态机默写、幂等写与学习记录、真实打断与时序证据（2026-10-03 交互模型转向：状态机默写助手）
 - [ ] **Phase 14: R1 对话接真实课堂** — 完整课堂工具、上下文、书写等待及幂等
 - [ ] **Phase 15: R2 学习闭环** — 词库、提交批改、家长确认、FSRS 和恢复
 - [ ] **Phase 16: R3 部署与容量** — pion WebRTC、全量真机验收、资源与费用
@@ -17,40 +17,55 @@
 
 ### Phase 13: R0 真机最小闭环
 
-**Goal**: 学生在真实 iPad 的 HTTPS 网页一次授权后，通过自然对话发起 3 词练习、追问、推进一词并打断老师；进度与工具结果一致。
+**Goal**: 学生在真实 iPad 的 HTTPS 网页一次授权后，与「状态机默写助手」完成一节 FSRS 到期词听写课：老师开场报词、确认或 60 秒超时推进、四类口令（重读/慢读、不会写提示、词义解释、暂停/继续）正确响应、可打断老师、完结总结写入真实学习记录；进度与记录一致。（2026-10-03 交互模型转向：课堂节奏由服务端状态机拥有，LLM 仅做意图识别与话术生成）
 **Depends on**: None
 **Requirements**: RT-01, RT-02, RT-03, RT-04, RT-05, RT-07, RT-10
 **Success Criteria** (what must be TRUE):
 
-1. 独立自然家教入口经用户现有证书部署 VPS；真 iPad、真实网络访问。一次必要点击授权后至少 10 轮无需按住录音。
-2. 新 WebSocket 交互传输与 MiMo ASR、LLM、TTS 各有独立替换接口；采集→VAD 切句→整句 ASR→LLM→流式 TTS→收到即播放，不等待整课或整句合成完成。先接 3 个固定词，不前置完整词库、OCR 或容量工程。
-3. MiMo LLM 发起真实 get_lesson_state 读取，以及 advance_word 或等效写工具；服务端实际修改该课堂的状态。写入携带 lesson_id、request_id、expected_version，同一请求重试只推进一次，重复请求返回原执行结果，旧版本冲突可见。不能用提示词内置 JSON 或模型口头回应替代工具执行。
+1. 独立自然家教入口经用户现有证书部署 VPS；真 iPad、真实网络访问。一次必要点击授权后持续听说，完整课堂无需反复按住录音。
+2. 新 WebSocket 交互传输与 MiMo ASR、LLM、TTS 各有独立替换接口；采集→VAD 切句→整句 ASR→LLM 意图识别→流式 TTS→收到即播放，不等待整课或整句合成完成。课堂词来自 FSRS 到期获取（上限 10，不足取全部；0 词优雅结束），不前置完整词库、OCR 或容量工程。
+3. 课堂推进由服务端状态机经 pkg/lesson 幂等执行（lesson_id、request_id、expected_version）：确认与超时对同一目标竞争只推进一次，重试/重放不双跳；完结总结先写学习记录（pybridge review，按结果映射评分）后播报，失败如实可见。
 4. 学生开口能停止当前播放、清空旧排队音频、取消或丢弃旧轮次输出；下一轮以实际播放到的位置为上下文。要实测扬声器回声不会触发老师自我打断。
-5. “刚才那个是什么意思”“慢一点”“还没写完”“不会写”有上下文响应；沉默写字不自动推进，求助不默认跳词。
+5. 「好了/可以了/下一个」确认推进；重读、慢读、不会写（先部分提示不泄题）、词义解释（据词库 ground truth）、暂停/继续各有正确响应；普通沉默仅在 60 秒计时到点推进（转向决策口径）。
 6. 记录 RT-04/RT-05 全部实际播放时序；第一周成环与第六周延迟达标是不同检查。R0 可在闭环通过且测量已齐备后进入 R1，但未达标项仍保持未验收，第六周切换条件继续生效。
-7. 故障原因可见、可结束释放会话；按钮备用明确标为降级，不计语音通过。
+7. 故障原因可见（含 lesson_unavailable 取词失败）、可结束释放会话；按钮备用明确标为降级，不计语音通过。首问候缺失、VAD 0 秒误触发、MiMo invalid API response ×4 三个伴随缺陷修复并真机复核为零。
 
-**Plans**: 6/7 plans executed
+**Plans**: 6/13 plans executed（13-01～13-06 已执行；2026-10-03 交互模型转向后 13-07 起为重规划新约：13-04 的 LLM 工具环运行时路径被 13-08 状态机取代，wire 支持保留）
 
 Plans:
-**Wave 1**
+**Wave 1**（已执行）
 
 - [x] 13-01-PLAN.md — pkg/lesson 课堂状态存储与幂等工具执行（request_id + expected_version）
-- [x] 13-02-PLAN.md — pkg/mimo 工具调用扩展（tools/thinking 关闭/tool_calls wire）
+- [x] 13-02-PLAN.md — pkg/mimo 工具调用扩展（tools/thinking 关闭/tool_calls wire；转向后运行时不再使用，wire 支持保留）
 - [x] 13-03-PLAN.md — pkg/rt 基础：协议、供应商接口、时序事件、/rt WSS 传输
 
-**Wave 2** *(blocked on Wave 1 completion)*
+**Wave 2**（已执行）
 
-- [x] 13-04-PLAN.md — pkg/rt 轮次管理：能量 VAD、epoch 取消、MiMo 工具环、逐句流式 TTS
+- [x] 13-04-PLAN.md — pkg/rt 轮次管理：能量 VAD、epoch 取消、逐句流式 TTS（MiMo 工具环部分被 13-08 取代）
 - [x] 13-05-PLAN.md — tutor 前端：持续采集、收即播、打断通道、mock e2e
-
-**Wave 3** *(blocked on Wave 2 completion)*
-
 - [x] 13-06-PLAN.md — 服务接线：/rt 与 /tutor/ 挂载、Go 原生 TLS、降级模式
 
-**Wave 4** *(blocked on Wave 3 completion)*
+**Wave 3**（2026-10-03 转向后重规划；以下为现行合同）
 
-- [ ] 13-07-PLAN.md — VPS 部署与真机验证：回声标定、打断、3 词场景、时序采样
+- [ ] 13-07-PLAN.md — 转向地基：ASR 空转写哨兵 + lesson 词卡列 + 协议词表（paused/lesson_unavailable/结束原因）
+
+**Wave 4**
+
+- [ ] 13-08-PLAN.md — 状态机默写主环（tracer）：FSRS 取词、开场报词、确认幂等推进、意图分类、完结写学习记录
+- [ ] 13-11-PLAN.md — tutor 前端适配 + mock e2e 默写流重写（与 13-08 同波并行）
+
+**Wave 5**
+
+- [ ] 13-09-PLAN.md — 四类口令 + 60 秒超时 + 暂停继续 + 缺陷修复（VAD 静默期/空转写容忍/坏响应重试）
+- [ ] 13-10-PLAN.md — RTConfig 重构 + PyFSRS 适配器 + main.go 注线 + DEPLOYMENT（与 13-09 同波并行）
+
+**Wave 6**
+
+- [ ] 13-12-PLAN.md — 本机预验收：新构建重启 8443 通道、真 iPad 完整默写课、评级映射追认、缺陷复核
+
+**Wave 7**
+
+- [ ] 13-13-PLAN.md — VPS 正式部署 + 真机正式验收（回声、打断、≥30×2 时序样本）+ 第六周口径报告
 
 ### Phase 14: R1 对话接真实课堂
 
