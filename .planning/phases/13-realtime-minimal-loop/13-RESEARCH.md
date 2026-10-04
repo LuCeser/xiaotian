@@ -438,6 +438,8 @@ JSONL 双流（client/client-clock 与 server/server-clock）按 turn_id+epoch �
 
 ## Open Questions (RESOLVED)
 
+> **勘误（2026-10-04，转向后重规划）：** 下述 RESOLVED 指向中的 13-01～13-06 任务号属已执行/被取代的 legacy 计划（STATE.md 2026-10-03 转向决策）。现行承载：OQ1 → 13-13 Task 2（VPS 部署 + 正式入口核验 checkpoint）；OQ3 → 13-13 Task 3（回声自检与阈值标定；URL 覆盖参数为 rt-playback.js 的 interrupt_rms/interrupt_sustain_ms）；OQ4 → 转向后无 LLM 工具调用，推进/幂等语义由 13-08 状态机（lessonID-advance-index 派生）承载、真机核验归 13-13 Task 2/3。
+
 1. **证书细节与 VPS 现状**
    - What we know: 用户"现有证书"（ADR Action Item 2）；VPS 走 systemd 部署（docs/DEPLOYMENT.md）。
    - What's unclear: 证书覆盖的域名/SAN、到期日、VPS 是否已有 nginx 占 443、证书文件格式（fullchain?）。

@@ -12,11 +12,13 @@
 
 ## 每次检查记录模板
 
+> 2026-10-04 勘误：本模板交互语义与事件行已按 2026-10-03 转向决策（状态机默写助手，STATE.md Phase 13）改写——旧「语音发起 3 词」「LLM 工具请求 get_lesson_state/advance_word」口径作废；下方其余行与已执行的历史记录不受影响。
+
 - 检查日期、执行者、Git 版本、iPad 型号/iPadOS/Safari、访问地址（不含密钥）、网络及 VPS 环境。
-- 一次授权后至少 10 轮连续对话；语音发起 3 词、追问上一词、慢读、等候书写、求助、打断。
-- LLM 工具请求、get_lesson_state 结果、advance_word 的前后状态、lesson_id/request_id/expected_version；重复回调后版本和词序只变一次。日志脱敏。
+- 一次授权、一次点击开始后全程持续听说（≥10 轮交互，不按住录音）；完整默写课：开场报词、逐词等「好了/可以了/下一个」确认或 60 秒超时自动推进、四类口令（重读/慢读、不会写提示、词义解释、暂停继续）、学生打断、完结总结。
+- 服务端状态机事件链：word_announced/word_advanced/lesson_complete/review_written 各事件、lessonID（省略 = 每日派生 r0-YYYYMMDD）与 lesson_version；重复确认或超时不重复推进（版本与词序只变一次）；完结后对应词的 FSRS due 状态前后对照。日志脱敏。
 - 真实扬声器播放、回声误触发、学生插话；停播后旧音频不复活；下一轮承认学生实际听到的位置。
-- 每轮记录页面就绪、授权完成、连接就绪、speech_started/ended、工具开始/结束、首个收到音频、首个实际播放、打断开始/停播、课堂版本。浏览器播放时刻与服务端耗时分开，不直接相减未校准的跨机器时钟。
+- 每轮记录页面就绪、授权完成、连接就绪、speech_started/ended、报词/推进/完结事件（word_announced/word_advanced/lesson_complete/review_written）、首个收到音频、首个实际播放、打断开始/停播、lesson_version。浏览器播放时刻与服务端耗时分开，不直接相减未校准的跨机器时钟。
 - RT-04 至少 30 次响应样本，报告首次问候耗时、轮次 P50/P95；RT-05 至少 30 次打断样本，报告 P95，并提供迟到音频和上下文检查结果。保留失败与超时，不只计算成功轮次。
 - 用户可见结果、失败原因、证据路径、通过/未通过；若触发切换，列出 Plan B 每步的结果和阻塞。
 
@@ -61,7 +63,7 @@
      allowedOrigins:
        - <DOMAIN>
    ```
-   （`rt.lessonId`/`rt.lessonWords` 不填即取默认 r0-test 三词「美丽/勇敢/聪明」。）
+   （转向后语义〔2026-10-04 修订；原「不填即取默认 r0-test 三词美丽/勇敢/聪明」口径已作废〕：`rt.lessonWords` 键已移除——老配置残留该键应删除（被忽略不报错）；`rt.lessonId` 省略 = 服务端按北京时间每日派生 `r0-YYYYMMDD`，非空原样使用；词恒来自 FSRS 到期获取（上限 10 词，不足取全部），无固定默认词表；`rt.wordTimeoutMs` 默认 60000，可按 13-12 标定值设置。FSRS 词源前提：python 三必填键 → scriptsDir 词表脚本 → `python.vocabDBPath` 家庭词库有到期词 → secrets.env 的 `MIMO_API_KEY`（docs/DEPLOYMENT.md「FSRS 词源前提」小节）；前提缺失时开课取词报 `lesson_unavailable`。）
 4. VPS 上切换文件并重启：
    ```sh
    sudo systemctl stop home-tutor-agent
