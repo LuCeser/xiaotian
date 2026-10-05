@@ -1,17 +1,20 @@
-// turn_integration_test.go — in-process whole-chain integration harness: a
-// real httptest /rt server + gorilla dialer + fakes, driving the
-// binary→VAD→ASR→classify→FSM dispatch→TTS→binary round trip over the
-// actual websocket transport. The dictation-flow integration cases
-// (TestDictationOverConn*) land in 13-08 Task 3; the helpers here are the
-// shared 13-04 harness (review Suggestion 8).
+// turn_integration_test.go — in-process whole-chain integration (13-08
+// Task 3): a real httptest /rt server + gorilla dialer + fakes, driving the
+// dictation flow — session_init → greeting → scripted-ASR confirm →
+// lesson_update → next-word announcement → completion → session_ended —
+// over the actual websocket transport (13-04 harness, review Suggestion 8).
+// Assembly-class defects (sender concurrency, ack gating, natural-end
+// sequencing) regress here instead of relying on unit fixtures.
 package rt
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,9 +110,9 @@ func itRead(t *testing.T, conn *websocket.Conn, timeout time.Duration, match fun
 }
 
 // itDrainUntilTimeout collects every message arriving inside the window and
-// then returns. Reads are only retried after SUCCESSFUL reads (gorilla's
-// sticky readErr panics on a post-error read); the closing timeout error is
-// the expected exit.
+// then returns. NOTE: the connection is poisoned after the closing timeout
+// read (gorilla sticky read error) — use only as the LAST read phase of a
+// test.
 func itDrainUntilTimeout(t *testing.T, conn *websocket.Conn, window time.Duration) []itMsg {
 	t.Helper()
 	var seen []itMsg
@@ -158,5 +161,316 @@ func itSendUtterance(t *testing.T, conn *websocket.Conn) {
 		if err := conn.WriteMessage(websocket.BinaryMessage, quiet); err != nil {
 			t.Fatalf("write silence frame: %v", err)
 		}
+	}
+}
+
+// itInit sends session_init and returns the session_ready message.
+func itInit(t *testing.T, conn *websocket.Conn) SessionReadyMsg {
+	t.Helper()
+	itSendText(t, conn, SessionInitMsg{
+		Type:  TypeSessionInit,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	})
+	ready := itRead(t, conn, 5*time.Second, func(m itMsg) bool { return m.typ == TypeSessionReady })
+	var readyMsg SessionReadyMsg
+	if err := json.Unmarshal(ready.raw, &readyMsg); err != nil {
+		t.Fatalf("session_ready decode: %v", err)
+	}
+	return readyMsg
+}
+
+// itAnnounceAck reads messages through one announcement: acks every
+// audio_end (completion-ack semantics) and returns the announcement's
+// teacher sentence texts once the FSM hands control back (listening).
+func itAnnounceAck(t *testing.T, conn *websocket.Conn) []string {
+	texts, _ := itAnnounceAckCounted(t, conn)
+	return texts
+}
+
+// itAnnounceAckCounted is itAnnounceAck, also returning the number of
+// binary PCM frames delivered for the announcement (报词音频字节 evidence).
+func itAnnounceAckCounted(t *testing.T, conn *websocket.Conn) ([]string, int) {
+	t.Helper()
+	var texts []string
+	binaryFrames := 0
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatal("announcement never settled to listening")
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(remaining))
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("itAnnounceAck read: %v", err)
+		}
+		if mt == websocket.BinaryMessage {
+			binaryFrames++
+			continue
+		}
+		m := itProbe(mt, data)
+		switch m.typ {
+		case TypeTeacherSentence:
+			var ts TeacherSentenceMsg
+			_ = json.Unmarshal(data, &ts)
+			texts = append(texts, ts.Text)
+		case TypeAudioEnd:
+			var ae AudioEndMsg
+			_ = json.Unmarshal(data, &ae)
+			itSendText(t, conn, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: ae.SentenceID, Epoch: ae.Epoch})
+		case TypeState:
+			var sm StateMsg
+			_ = json.Unmarshal(data, &sm)
+			if sm.Value == StateListening {
+				return texts, binaryFrames
+			}
+		}
+	}
+}
+
+// itHoldThenAck schedules the sentence ack after holdDelay while the caller
+// keeps reading: if the server ends the session BEFORE the ack was sent,
+// the test fails (the natural-end ack gate, observed over the real wire).
+func itHoldThenAck(t *testing.T, conn *websocket.Conn, holdDelay time.Duration, sentenceID string, epoch uint64) *atomic.Bool {
+	t.Helper()
+	var ackSent atomic.Bool
+	go func() {
+		time.Sleep(holdDelay)
+		itSendText(t, conn, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: sentenceID, Epoch: epoch})
+		ackSent.Store(true)
+	}()
+	return &ackSent
+}
+
+// itReadUntilSessionEnded reads until session_ended, failing if it arrives
+// before ackSent flipped true (any earlier arrival = the FSM ended without
+// the matching playback ack).
+func itReadUntilSessionEnded(t *testing.T, conn *websocket.Conn, ackSent *atomic.Bool) SessionEndedMsg {
+	t.Helper()
+	m := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeSessionEnded })
+	if !ackSent.Load() {
+		t.Fatal("session_ended arrived before the matching sentence_ack was sent")
+	}
+	var ended SessionEndedMsg
+	if err := json.Unmarshal(m.raw, &ended); err != nil {
+		t.Fatalf("session_ended decode: %v", err)
+	}
+	return ended
+}
+
+// ---------------------------------------------------------------------------
+// TestDictationOverConnHappyPath: the whole dictation loop over the real
+// transport — 3 words advanced through scripted confirms, completion
+// summary held for its ack, lesson_complete only after it, one full-batch
+// SubmitReview.
+// ---------------------------------------------------------------------------
+
+func TestDictationOverConnHappyPath(t *testing.T) {
+	cards := ttCards("苹果", "香蕉", "橘子")
+	words := newFakeWords(cards)
+	exec := newFakeExecutorNoRow("it-lesson")
+	asr := newFakeASR(asrScript{text: "好了"}, asrScript{text: "好了"}, asrScript{text: "好了"})
+	llm := newFakeLLM(
+		intentScript(intentConfirm, ""),
+		intentScript(intentConfirm, ""),
+		intentScript(intentConfirm, ""),
+	)
+	tts := newFakeTTS(2, 320)
+	tts.delay = 20 * time.Millisecond
+	srv := itServer(t, asr, llm, tts, exec, words)
+	conn := itDial(t, srv)
+
+	ready := itInit(t, conn)
+	if len(ready.Lesson.Words) != 3 || ready.Lesson.Words[0] != "苹果" {
+		t.Fatalf("session_ready.lesson.words = %v, want the 3 due words", ready.Lesson.Words)
+	}
+
+	// Opening greeting (teacher speaks immediately after session_ready);
+	// the announcement's PCM bytes must reach the client side.
+	greeting, greetingFrames := itAnnounceAckCounted(t, conn)
+	if len(greeting) < 2 || !strings.Contains(greeting[len(greeting)-1], "苹果") {
+		t.Fatalf("greeting = %v, want the opening plus the first word 苹果", greeting)
+	}
+	if greetingFrames < 2 {
+		t.Errorf("greeting binary frames = %d, want >0 (word-announcement audio bytes must reach the client)", greetingFrames)
+	}
+
+	// Three confirms: word 1 → 2 → 3; the first two announce the next word.
+	var versions, indexes []int
+	for i := 0; i < 3; i++ {
+		itSendUtterance(t, conn)
+		upd := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeLessonUpdate })
+		var lu LessonUpdateMsg
+		if err := json.Unmarshal(upd.raw, &lu); err != nil {
+			t.Fatalf("lesson_update decode: %v", err)
+		}
+		versions = append(versions, lu.Version)
+		indexes = append(indexes, lu.CurrentIndex)
+		if lu.RequestID != lessonRequestID("it-lesson", i) {
+			t.Errorf("lesson_update %d request_id = %q, want %q (FSM-derived target key)", i, lu.RequestID, lessonRequestID("it-lesson", i))
+		}
+		if i < 2 {
+			itAnnounceAck(t, conn) // next-word announcement
+		}
+	}
+	if len(versions) != 3 || versions[0] != 2 || versions[1] != 3 || versions[2] != 4 {
+		t.Errorf("lesson_update versions = %v, want [2 3 4] (strictly increasing)", versions)
+	}
+	if len(indexes) != 3 || indexes[0] != 1 || indexes[1] != 2 || indexes[2] != 3 {
+		t.Errorf("lesson_update indexes = %v, want [1 2 3]", indexes)
+	}
+
+	// Completion summary: hold the final ack — no session_ended may arrive
+	// before it.
+	var (
+		summaryTexts   []string
+		lastAckID      string
+		lastAckEpoch   uint64
+		summaryAudioEnd int
+	)
+	deadline := time.Now().Add(15 * time.Second)
+	for summaryAudioEnd < 2 { // summary = 2 sentences for a full 3/3 batch
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatal("completion summary never fully streamed")
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(remaining))
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("summary read: %v", err)
+		}
+		m := itProbe(mt, data)
+		switch m.typ {
+		case TypeTeacherSentence:
+			var ts TeacherSentenceMsg
+			_ = json.Unmarshal(data, &ts)
+			summaryTexts = append(summaryTexts, ts.Text)
+		case TypeAudioEnd:
+			var ae AudioEndMsg
+			_ = json.Unmarshal(data, &ae)
+			lastAckID, lastAckEpoch = ae.SentenceID, ae.Epoch
+			summaryAudioEnd++
+		case TypeSessionEnded:
+			t.Fatal("session_ended arrived before the summary ack (ack gate broken)")
+		}
+	}
+	if len(summaryTexts) < 1 || !strings.Contains(strings.Join(summaryTexts, ""), "3 个词") {
+		t.Errorf("summary = %v, want the 3-word wrap-up", summaryTexts)
+	}
+
+	ackSent := itHoldThenAck(t, conn, 600*time.Millisecond, lastAckID, lastAckEpoch)
+	ended := itReadUntilSessionEnded(t, conn, ackSent)
+	if ended.Reason != ReasonLessonComplete {
+		t.Errorf("reason = %q, want %s", ended.Reason, ReasonLessonComplete)
+	}
+
+	// One full-batch review write, executed before the summary aired.
+	subs := words.submissions()
+	if len(subs) != 1 {
+		t.Fatalf("SubmitReview calls = %d, want exactly 1", len(subs))
+	}
+	for _, w := range []string{"苹果", "香蕉", "橘子"} {
+		if subs[0][w] != "good" {
+			t.Errorf("submitted rating for %s = %q, want good", w, subs[0][w])
+		}
+	}
+}
+
+// lessonRequestID mirrors the FSM's advance request key (dictation.go).
+func lessonRequestID(lessonID string, wordIndex int) string {
+	return fmt.Sprintf("%s-advance-%d", lessonID, wordIndex)
+}
+
+// TestDictationOverConnInterruptMidAnnouncement: interrupting mid-announcement
+// invalidates the old epoch's pending acks and NO late binary frame arrives;
+// the classroom still advances on the next confirmed turn.
+func TestDictationOverConnInterruptMidAnnouncement(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	exec := newFakeExecutorNoRow("it-lesson")
+	asr := newFakeASR(asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tts := newFakeTTS(8, 320) // 8 chunks × 40 ms: a stream to interrupt
+	tts.delay = 40 * time.Millisecond
+	srv := itServer(t, asr, llm, tts, exec, words)
+	conn := itDial(t, srv)
+
+	itInit(t, conn)
+
+	// Wait for the first greeting chunk, then interrupt immediately.
+	itRead(t, conn, 10*time.Second, func(m itMsg) bool { return m.mt == websocket.BinaryMessage }) // BinaryMessage
+	itSendText(t, conn, InterruptMsg{Type: TypeInterrupt, Epoch: 0, LastSentenceID: "t1-s0", PlayedUntilMs: 250})
+
+	ack := itRead(t, conn, 5*time.Second, func(m itMsg) bool { return m.typ == TypeInterruptAck })
+	var ackMsg InterruptAckMsg
+	if err := json.Unmarshal(ack.raw, &ackMsg); err != nil {
+		t.Fatalf("interrupt_ack decode: %v", err)
+	}
+	if ackMsg.NewEpoch <= ackMsg.OldEpoch {
+		t.Errorf("epoch = old %d -> new %d, want new > old", ackMsg.OldEpoch, ackMsg.NewEpoch)
+	}
+
+	// From the ack to the FSM's listening state: NO binary frame may arrive
+	// (no late audio after the interrupt).
+	for {
+		m := itRead(t, conn, 5*time.Second, func(m itMsg) bool {
+			return m.mt == websocket.BinaryMessage || m.typ == TypeState
+		})
+		if m.mt == websocket.BinaryMessage {
+			t.Fatal("binary frame arrived after the interrupt ack (late audio resurrected)")
+		}
+		var sm StateMsg
+		if err := json.Unmarshal(m.raw, &sm); err == nil && sm.Value == StateListening {
+			break
+		}
+	}
+
+	// The classroom still advances: confirm word 1 over the same session.
+	itSendUtterance(t, conn)
+	upd := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeLessonUpdate })
+	var lu LessonUpdateMsg
+	if err := json.Unmarshal(upd.raw, &lu); err != nil {
+		t.Fatalf("lesson_update decode: %v", err)
+	}
+	if lu.Version != 2 || lu.CurrentIndex != 1 {
+		t.Errorf("lesson_update = %+v, want version 2 index 1 (lesson advanced after the interrupt)", lu)
+	}
+	itAnnounceAck(t, conn) // settle the next-word announcement
+}
+
+// TestDictationOverConnNoDueWaitsForAck: with zero due words the teacher's
+// explanation is fully delivered and session_ended(no_due_words) arrives
+// only after the explanation's actual-playback ack — the ending never
+// truncates the explanation.
+func TestDictationOverConnNoDueWaitsForAck(t *testing.T) {
+	words := newFakeWords() // zero due
+	exec := newFakeExecutorNoRow("it-lesson")
+	tts := newFakeTTS(2, 320)
+	tts.delay = 20 * time.Millisecond
+	srv := itServer(t, newFakeASR(), newFakeLLM(), tts, exec, words)
+	conn := itDial(t, srv)
+
+	ready := itInit(t, conn)
+	if len(ready.Lesson.Words) != 0 {
+		t.Fatalf("session_ready.lesson.words = %v, want empty", ready.Lesson.Words)
+	}
+
+	// Read the explanation through its audio_end without acking.
+	var lastAckID string
+	var lastAckEpoch uint64
+	m := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeAudioEnd })
+	var ae AudioEndMsg
+	if err := json.Unmarshal(m.raw, &ae); err != nil {
+		t.Fatalf("audio_end decode: %v", err)
+	}
+	lastAckID, lastAckEpoch = ae.SentenceID, ae.Epoch
+
+	ackSent := itHoldThenAck(t, conn, 600*time.Millisecond, lastAckID, lastAckEpoch)
+	ended := itReadUntilSessionEnded(t, conn, ackSent)
+	if ended.Reason != ReasonNoDueWords {
+		t.Errorf("reason = %q, want %s", ended.Reason, ReasonNoDueWords)
+	}
+	if got := len(words.submissions()); got != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0 (no due words, no review)", got)
 	}
 }

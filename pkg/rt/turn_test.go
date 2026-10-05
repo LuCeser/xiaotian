@@ -1381,6 +1381,73 @@ func TestTurnHalfDuplexGatesUplinkWhileSpeaking(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Interrupt trim on the FSM short-history deque (Pitfall 9, 13-08 semantics)
+// ---------------------------------------------------------------------------
+
+// ttTrimFixture drives one chat turn whose reply is two sentences on slow
+// TTS and returns once both sentences went out (announcement pending).
+func ttTrimFixture(t *testing.T, ttsDelay time.Duration) (*TurnManager, *captureSender) {
+	t.Helper()
+	asr := newFakeASR(asrScript{text: "开始吧"})
+	llm := newFakeLLM(intentScript(intentChat, "这是第一句话。这是第二句话。"))
+	tts := newFakeTTS(1, 320)
+	tts.delay = ttsDelay
+	tm := NewTurnManager(asr, llm, tts, newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(ttCards("苹果"))), nil, nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3) // greeting
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	go tm.processTurn(s, []byte("pcm"))
+	ttAwaitSpoken(t, s, 5) // greeting 3 + reply 2
+	return tm, s
+}
+
+// TestTurnInterruptTrimsShortHistoryToPlayedSentences: the interrupt trims
+// the FSM short-history deque's newest teacher reply to the sentences the
+// student actually heard; zero-played removes the reply while the student's
+// own utterance stays.
+func TestTurnInterruptTrimsShortHistoryToPlayedSentences(t *testing.T) {
+	t.Run("played sentence survives in the deque", func(t *testing.T) {
+		tm, s := ttTrimFixture(t, 250*time.Millisecond)
+		// The reply announcement's sentences are t3-s0/t3-s1 (turn 1 =
+		// greeting, turn 2 = the utterance, turn 3 = the announcement).
+		tm.HandleControl(s, mustJSON(t, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: "t3-s0", Epoch: 0}))
+		tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt, Epoch: 0}))
+
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		n := len(tm.tutor.shortHistory)
+		if n < 2 {
+			t.Fatalf("short history = %d rounds, want >= 2", n)
+		}
+		last := tm.tutor.shortHistory[n-1]
+		if last.userText != "开始吧" {
+			t.Errorf("user text = %q, want 开始吧 (the student's own utterance stays)", last.userText)
+		}
+		if last.teacherText != "这是第一句话。" {
+			t.Errorf("trimmed teacher text = %q, want only the played first sentence", last.teacherText)
+		}
+	})
+
+	t.Run("zero played removes the reply", func(t *testing.T) {
+		tm, s := ttTrimFixture(t, 250*time.Millisecond)
+		tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt, Epoch: 0}))
+
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		last := tm.tutor.shortHistory[len(tm.tutor.shortHistory)-1]
+		if last.teacherText != "" {
+			t.Errorf("teacher text = %q, want empty (zero-played reply removed)", last.teacherText)
+		}
+		if last.userText != "开始吧" {
+			t.Errorf("user text = %q, want 开始吧 (the round survives)", last.userText)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // splitSentences
 // ---------------------------------------------------------------------------
 
