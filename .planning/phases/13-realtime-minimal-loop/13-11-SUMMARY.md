@@ -23,10 +23,10 @@ affects: [13-12 (本机真服务预验收——同一顺序的真实后端复核
 actuals:
   tokens: 22177       # chars/4 over the realized diff (88707 chars across 8 files, +1194/-189)
   tasks: 3
-  commits: 5          # MEASURED: git rev-list --count db9a9d3..344ab9a
-commits: 5
+  commits: 6          # MEASURED: git rev-list --count db9a9d3..61f4e5e
+commits: 6
 plan_head_before: db9a9d3
-plan_head_after: 344ab9a
+plan_head_after: 61f4e5e
 
 # Tech tracking
 tech-stack:
@@ -160,7 +160,8 @@ Each task was committed atomically:
 1. **Task 1: tutor 页 — paused/完结/无到期词/错误映射/动态进度** - `303a3e9` (feat)
 2. **Task 2: mock 服务重写 — 默写流脚本（报词/推进/暂停/完结）** - `a2912b9` (feat)
 3. **Task 3: 播放排空控制 + e2e 四用例重写 + 隔离复检** - `d51b1ad` (feat)
-   - 稳定化跟进 `d11bccd` (test)、负门字面量修正 `344ab9a` (fix)
+   - 稳定化跟进 `d11bccd` (test)、负门字面量修正 `344ab9a` (fix)、
+     mock 终态观测名补暂存 `61f4e5e` (fix)
 
 **Plan metadata:** 本 SUMMARY 提交（docs(13-11)）
 
@@ -227,9 +228,17 @@ Each task was committed atomically:
 - **Verification:** 负门 clean；内联脚本语法复查通过
 - **Committed in:** 344ab9a
 
+**5. [Rule 3 - Blocking] mock 终态观测名单行修改遗漏暂存（提交树与 spec 断言不一致）**
+- **Found during:** SUMMARY 提交后的 git status 复查（tests/e2e-rt/mock-rt-server.js 意外显示 modified）
+- **Issue:** summary_ack→terminal_ack 改名发生在 Task 2 提交之后、Task 3 暂存清单之外；此后全部 e2e 在携带工作区补丁的状态下运行——提交历史中 mock 与 spec 断言不一致，新检出的树会红
+- **Fix:** 补提交该单行（61f4e5e）；SUMMARY 提交计数与 plan_head_after 勘误
+- **Files modified:** tests/e2e-rt/mock-rt-server.js
+- **Verification:** git status 干净（计划文件零残留改动）；e2e 在无工作区补丁状态下复跑 4 passed
+- **Committed in:** 61f4e5e
+
 ---
 
-**Total deviations:** 4 auto-fixed（3 blocking，1 minor；全部为计划意图的机械落地或其直接必然后果）
+**Total deviations:** 5 auto-fixed（4 blocking，1 minor；全部为计划意图的机械落地或其直接必然后果）
 **Impact on plan:** 零范围蔓延——修正均发生在计划声明文件内，验证命令全部按计划原样命中（npm test / playwright rt / --list / 负门逐字执行），无过滤漂移。
 
 ## Issues Encountered
@@ -261,10 +270,10 @@ None - no external service configuration required.
 ## Self-Check: PASSED
 
 - [x] 8 个修改文件全部存在于磁盘且全部在计划 files_modified 清单内（Test-Path/清单比对）
-- [x] 提交 303a3e9 / a2912b9 / d51b1ad / d11bccd / 344ab9a 均在 git log（git log 303a3e9^..HEAD 验证）
-- [x] commits: 5 为实测值（git rev-list --count db9a9d3..344ab9a），与 narrated 一致
+- [x] 提交 303a3e9 / a2912b9 / d51b1ad / d11bccd / 344ab9a / 61f4e5e 均在 git log（git log 303a3e9^..HEAD 验证）
+- [x] commits: 6 为实测值（git rev-list --count db9a9d3..61f4e5e），与 narrated 一致
 - [x] 计划级验证命令全部通过且按原文执行：npm test 全绿（9 套件）；npx playwright test -c playwright.rt.config.js → 4 passed；npx playwright test --list → 7 tests in 4 files 零 rt-loop；innerHTML 负门 clean；node --check mock 通过
-- [x] e2e 稳定性：修复后 5 次单用例 + 3 次全套件复跑 8/8 通过
+- [x] e2e 稳定性：修复后 5 次单用例 + 3 次全套件复跑 8/8 通过；提交树无工作区补丁依赖（61f4e5e 补齐后 git status 计划文件零残留）
 - [x] 无 stub 模式（无 TODO/placeholder/空数据源）；无计划外威胁面新增（零新增依赖、零新端点、零新协议类型——__test_resume 为 mock 测试通道并在代码注释与本表登记）
 
 ---
