@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
+	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 )
 
 // ---------------------------------------------------------------------------
@@ -230,8 +231,19 @@ func mustJSON(t *testing.T, v any) []byte {
 	return b
 }
 
+// ttConfig builds the standard test config.
 func ttConfig(words WordSource) TurnManagerConfig {
 	return TurnManagerConfig{LessonID: ttLessonID, Words: words}
+}
+
+// ttConfigWith builds the standard config and lets a test override timing
+// fields (the 13-09 timer / VAD gating tests).
+func ttConfigWith(words WordSource, mutate func(*TurnManagerConfig)) TurnManagerConfig {
+	cfg := ttConfig(words)
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	return cfg
 }
 
 func ttInit(t *testing.T, tm *TurnManager, s *captureSender) {
@@ -1509,10 +1521,16 @@ func (c *captureSender) stateCount(value string) int {
 // greeting's valid ack into listening, with the caller's scripted ASR/LLM
 // queued for the intent turn(s) under test.
 func ttIntentFixture(t *testing.T, cards []lesson.Word, asr *fakeASR, llm *fakeLLM) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
+	return ttIntentFixtureCfg(t, cards, asr, llm, ttConfig(newFakeWords(cards)))
+}
+
+// ttIntentFixtureCfg is ttIntentFixture with an explicit config (timing
+// fields for the 13-09 tests).
+func ttIntentFixtureCfg(t *testing.T, cards []lesson.Word, asr *fakeASR, llm *fakeLLM, cfg TurnManagerConfig) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
 	t.Helper()
 	log := &captureLogger{}
 	exec := newFakeExecutorNoRow(ttLessonID)
-	tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), exec, ttConfig(newFakeWords(cards)), NewEventRecorder(log, "t"), nil)
+	tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), exec, cfg, NewEventRecorder(log, "t"), nil)
 	s := &captureSender{}
 	ttInit(t, tm, s)
 	ttAwaitSpoken(t, s, 3) // greeting (hello + count + first word)
@@ -1816,5 +1834,375 @@ func TestIntentConfirmWhilePausedIsGentleRejected(t *testing.T) {
 	}
 	if got := s.listeningCount(); got != listeningBefore {
 		t.Errorf("listening broadcasts = %d, want %d (still paused after the rejection)", got, listeningBefore)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 13-09 Task 2: the 60s per-word confirm countdown (TestWordTimer*,
+// TestStaleTimer*, TestTimeoutConfirmRace*)
+// ---------------------------------------------------------------------------
+
+// ttTimerState reads the timer generation and live handle (white-box).
+func ttTimerState(tm *TurnManager) (uint64, *time.Timer) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.timerGen, tm.wordTimer
+}
+
+// TestWordTimerArmsOnlyAfterPlaybackAck: the countdown arms ONLY on the
+// announcement's valid final sentence_ack — TTS completion and audio_end
+// never arm it.
+func TestWordTimerArmsOnlyAfterPlaybackAck(t *testing.T) {
+	cards := ttCards("苹果")
+	log := &captureLogger{}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID),
+		ttConfigWith(newFakeWords(cards), nil), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+
+	// Fully spoken (TTS done, audio_end out) but NOT acked: nothing armed.
+	ttAwaitSpoken(t, s, 3)
+	gen, handle := ttTimerState(tm)
+	if handle != nil || gen != 0 {
+		t.Fatalf("timer armed before the playback ack: gen=%d handle=%v", gen, handle)
+	}
+
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { _, h := ttTimerState(tm); return h != nil }) {
+		t.Fatal("timer never armed after the greeting's valid ack")
+	}
+	if gen, _ := ttTimerState(tm); gen != 1 {
+		t.Errorf("timerGen = %d, want 1 after the first arm", gen)
+	}
+}
+
+// TestWordTimerResetInvalidatesQueuedCallbackSameEpochAndIndex: the armed
+// callback is QUEUED (captured by the injected factory), then a re-arm
+// happens with the same epoch and the same word index — when the old
+// callback finally runs it must be dead on arrival (T-13-16), with zero
+// side effects and the new handle untouched.
+func TestWordTimerResetInvalidatesQueuedCallbackSameEpochAndIndex(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	log := &captureLogger{}
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) { c.WordTimeout = time.Hour }),
+		NewEventRecorder(log, "t"), nil)
+
+	// Capture the armed callback instead of scheduling it: the deterministic
+	// "already queued" callback.
+	tm.mu.Lock()
+	var queued func()
+	tm.timerFactory = func(_ time.Duration, cb func()) *time.Timer {
+		queued = cb // invoked under tm.mu by armWordTimerLocked
+		return time.NewTimer(time.Hour) // the injected handle never fires
+	}
+	tm.mu.Unlock()
+
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	tm.mu.Lock()
+	stale := queued
+	gen1 := tm.timerGen
+	tm.mu.Unlock()
+	if stale == nil {
+		t.Fatal("arm never captured the queued callback")
+	}
+
+	// Reset: same epoch, same word index, nothing changed but the
+	// generation.
+	tm.armWordTimer()
+	gen2, handle := ttTimerState(tm)
+	if gen2 != gen1+1 {
+		t.Fatalf("re-arm generation = %d, want %d", gen2, gen1+1)
+	}
+	if handle == nil {
+		t.Fatal("re-arm left no live handle")
+	}
+
+	// The OLD queued callback finally acquires the lock: dropped, zero side
+	// effects.
+	stale()
+	if exec.advanceCount() != 0 {
+		t.Errorf("stale queued callback advanced the lesson (%d calls)", exec.advanceCount())
+	}
+	if ttEventCount(t, log, EventTimeoutFired) != 0 {
+		t.Error("timeout_fired emitted by a stale queued callback")
+	}
+	if s.countOf(TypeLessonUpdate) != 0 {
+		t.Error("lesson_update sent by a stale queued callback")
+	}
+	if gen, h := ttTimerState(tm); gen != gen2 || h == nil {
+		t.Error("the stale callback disturbed the new handle")
+	}
+}
+
+// TestWordTimerEmptyTranscriptionDoesNotReset: an ASR empty transcription
+// is tolerated silently — no classification, no user-visible error, and the
+// countdown (generation AND handle) is untouched: hearing silence is not an
+// interaction.
+func TestWordTimerEmptyTranscriptionDoesNotReset(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{err: mimo.ErrEmptyTranscription})
+	llm := newFakeLLM(intentScript(intentConfirm, "")) // must NOT be consumed
+	tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+
+	gen0, h0 := ttTimerState(tm)
+	tm.processTurn(s, []byte("pcm")) // settles synchronously (no announcement)
+
+	gen1, h1 := ttTimerState(tm)
+	if gen1 != gen0 || h1 != h0 {
+		t.Errorf("timer disturbed by an empty transcription: gen %d→%d", gen0, gen1)
+	}
+	if llm.callCount() != 0 {
+		t.Errorf("classification ran for an empty transcription (%d calls)", llm.callCount())
+	}
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0", exec.advanceCount())
+	}
+	if got := s.controlsOf(t, TypeError); len(got) != 0 {
+		t.Errorf("user-visible errors = %v, want none (silence is not a fault)", got)
+	}
+	marked := false
+	for _, v := range ttEventField(t, log, EventSpeechEnded, "empty") {
+		if v == true {
+			marked = true
+		}
+	}
+	if !marked {
+		t.Error("no speech_ended empty=true marker recorded")
+	}
+	ttWaitListening(t, s)
+}
+
+// TestWordTimerProcessingBranchRearms: the firing during an in-flight
+// classification is handled BEFORE the generic state rejection — the firing
+// is discarded and a fresh countdown re-armed (no advance); once listening
+// resumes, the re-armed countdown drives the real timeout advance.
+func TestWordTimerProcessingBranchRearms(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	cfg := ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) { c.WordTimeout = 40 * time.Millisecond })
+	tm, s, log, exec := ttIntentFixtureCfg(t, cards, newFakeASR(), newFakeLLM(), cfg)
+	gen0, _ := ttTimerState(tm)
+
+	tm.mu.Lock()
+	tm.state = StateProcessing
+	tm.mu.Unlock()
+
+	if !waitFor(t, 5*time.Second, func() bool {
+		g, h := ttTimerState(tm)
+		return g > gen0 && h != nil
+	}) {
+		t.Fatal("the firing during processing never re-armed a fresh countdown")
+	}
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls during processing = %d, want 0", exec.advanceCount())
+	}
+	if ttEventCount(t, log, EventTimeoutFired) != 0 {
+		t.Error("timeout_fired emitted for a discarded firing")
+	}
+	if s.countOf(TypeLessonUpdate) != 0 {
+		t.Error("lesson_update sent for a discarded firing")
+	}
+	tm.mu.Lock()
+	st := tm.state
+	tm.mu.Unlock()
+	if st != StateProcessing {
+		t.Errorf("state = %q, want processing (the discard must not disturb the turn)", st)
+	}
+
+	// Listening resumes; the re-armed countdown then drives the advance.
+	tm.mu.Lock()
+	tm.state = StateListening
+	tm.mu.Unlock()
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeLessonUpdate) == 1 }) {
+		t.Fatal("the re-armed countdown never advanced after listening resumed")
+	}
+	if ttEventCount(t, log, EventTimeoutFired) != 1 {
+		t.Errorf("timeout_fired events = %d, want 1", ttEventCount(t, log, EventTimeoutFired))
+	}
+	tm.mu.Lock()
+	outcome := tm.tutor.perWordOutcome[0]
+	tm.mu.Unlock()
+	if outcome != outcomeTimeout {
+		t.Errorf("outcome = %q, want timeout", outcome)
+	}
+	// The advance's next-word announcement stays pending its ack — the test
+	// intentionally never acks it, and no further countdown can fire (the
+	// announce-ack re-arm point never ran).
+}
+
+// TestWordTimerSuspendedWhilePaused: the pause command stops the countdown
+// (generation bump, handle dropped); even a hand-crafted firing under the
+// current generation is dropped by the paused check, and arming while
+// paused does not resurrect it.
+func TestWordTimerSuspendedWhilePaused(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{text: "休息一下"})
+	llm := newFakeLLM(intentScript(intentPause, ""))
+	cfg := ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) { c.WordTimeout = 30 * time.Millisecond })
+	tm, s, log, exec := ttIntentFixtureCfg(t, cards, asr, llm, cfg)
+
+	ttRunIntentTurn(t, tm, s, 3) // pause
+	if !ttPaused(t, tm) {
+		t.Fatal("classroom not paused")
+	}
+	gen, handle := ttTimerState(tm)
+	if handle != nil {
+		t.Error("countdown still armed while paused")
+	}
+	if gen < 2 {
+		t.Errorf("timerGen = %d, want the stop bump (>=2)", gen)
+	}
+
+	tm.mu.Lock()
+	target := tm.tutor.turnTarget()
+	cur := tm.timerGen
+	tm.mu.Unlock()
+	tm.onWordTimeout(cur, 0, target) // fully "valid" except the pause bit
+	if exec.advanceCount() != 0 {
+		t.Error("timeout advanced while paused")
+	}
+	if ttEventCount(t, log, EventTimeoutFired) != 0 {
+		t.Error("timeout_fired emitted while paused")
+	}
+
+	tm.armWordTimer() // must not resurrect the countdown while paused
+	if _, handle := ttTimerState(tm); handle != nil {
+		t.Error("arming while paused resurrected the countdown")
+	}
+}
+
+// TestStaleTimerIgnored: a firing with a stale generation, a stale epoch, a
+// wrong word index, or a stale expected version is dropped with zero side
+// effects — the full TurnTarget is re-verified inside the lock.
+func TestStaleTimerIgnored(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	tm, s, log, exec := ttIntentFixtureCfg(t, cards, newFakeASR(), newFakeLLM(),
+		ttConfigWith(newFakeWords(cards), nil)) // 60s default: never fires live
+	gen, _ := ttTimerState(tm)
+	tm.mu.Lock()
+	target := tm.tutor.turnTarget()
+	tm.mu.Unlock()
+
+	tm.onWordTimeout(gen-1, 0, target)                                                // stale generation
+	tm.onWordTimeout(gen, 7, target)                                                  // stale epoch
+	tm.onWordTimeout(gen, 0, TurnTarget{WordIndex: 1, ExpectedVersion: 1, Word: "香蕉"}) // wrong word
+	tm.onWordTimeout(gen, 0, TurnTarget{WordIndex: 0, ExpectedVersion: 9, Word: "苹果"}) // stale version
+
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0 (every stale firing ignored)", exec.advanceCount())
+	}
+	if ttEventCount(t, log, EventTimeoutFired) != 0 {
+		t.Error("timeout_fired emitted by a stale firing")
+	}
+	if s.countOf(TypeLessonUpdate) != 0 {
+		t.Error("lesson_update sent by a stale firing")
+	}
+}
+
+// TestTimeoutConfirmRaceConfirmWins: confirm commits first; the late
+// timeout carrying the SAME captured target replays Idempotent=true — align
+// only, and the confirmed outcome is never overwritten.
+func TestTimeoutConfirmRaceConfirmWins(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR(asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+
+	// Confirm first: the real processTurn path commits word0 (the turn
+	// settles after the next-word announcement's ack).
+	ttRunIntentTurn(t, tm, s, 3)
+	if s.countOf(TypeLessonUpdate) != 1 {
+		t.Fatalf("lesson_update = %d, want 1 (confirm committed)", s.countOf(TypeLessonUpdate))
+	}
+
+	// The timeout arrives late with the SAME target: idempotent replay.
+	tm.timeoutAdvance(s, 0, TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+
+	if s.countOf(TypeLessonUpdate) != 1 {
+		t.Errorf("lesson_update = %d, want 1 (the losing timeout added none)", s.countOf(TypeLessonUpdate))
+	}
+	if ttEventCount(t, log, EventTimeoutFired) != 0 {
+		t.Error("the losing timeout claimed it advanced (timeout_fired emitted)")
+	}
+	if ttEventCount(t, log, EventWordAdvanced) != 1 {
+		t.Errorf("word_advanced events = %d, want 1", ttEventCount(t, log, EventWordAdvanced))
+	}
+	tm.mu.Lock()
+	outcome := tm.tutor.perWordOutcome[0]
+	rating := tm.tutor.ratings()["苹果"]
+	tm.mu.Unlock()
+	if outcome != outcomeConfirmed {
+		t.Errorf("outcome = %q, want confirmed (never overwritten by the timeout)", outcome)
+	}
+	if rating != "good" {
+		t.Errorf("rating = %q, want good", rating)
+	}
+	if exec.advanceCount() != 2 {
+		t.Errorf("advance calls = %d, want 2 (the replay still hits the executor)", exec.advanceCount())
+	}
+}
+
+// TestTimeoutConfirmRaceTimeoutWins: the timeout commits first (outcome
+// hard, timeout_fired emitted); the late confirm with the SAME captured
+// target replays idempotently and never overwrites the outcome.
+func TestTimeoutConfirmRaceTimeoutWins(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	tm, s, log, exec := ttIntentFixtureCfg(t, cards, newFakeASR(), newFakeLLM(),
+		ttConfigWith(newFakeWords(cards), nil)) // 60s default: no live firing
+	tm.mu.Lock()
+	gen, target := tm.timerGen, tm.tutor.turnTarget()
+	tm.mu.Unlock()
+
+	// Timeout first: fires on its own goroutine, commits, announces the
+	// next word; the test acks that announcement.
+	fired := make(chan struct{})
+	go func() {
+		tm.onWordTimeout(gen, 0, target)
+		close(fired)
+	}()
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeLessonUpdate) == 1 }) {
+		t.Fatal("the timeout never committed")
+	}
+	ttAwaitSpoken(t, s, 4)
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the timeout goroutine never returned")
+	}
+
+	// The late confirm carries the ORIGINAL captured target: idempotent
+	// replay, align only.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tm.confirmTarget(s, ctx, cancel, 0, 0, "", target)
+
+	if s.countOf(TypeLessonUpdate) != 1 {
+		t.Errorf("lesson_update = %d, want 1 (the losing confirm added none)", s.countOf(TypeLessonUpdate))
+	}
+	if ttEventCount(t, log, EventTimeoutFired) != 1 {
+		t.Errorf("timeout_fired events = %d, want 1 (first commit only)", ttEventCount(t, log, EventTimeoutFired))
+	}
+	if ttEventCount(t, log, EventWordAdvanced) != 1 {
+		t.Errorf("word_advanced events = %d, want 1", ttEventCount(t, log, EventWordAdvanced))
+	}
+	tm.mu.Lock()
+	outcome := tm.tutor.perWordOutcome[0]
+	rating := tm.tutor.ratings()["苹果"]
+	tm.mu.Unlock()
+	if outcome != outcomeTimeout {
+		t.Errorf("outcome = %q, want timeout (never overwritten by the late confirm)", outcome)
+	}
+	if rating != "hard" {
+		t.Errorf("rating = %q, want hard", rating)
+	}
+	if exec.advanceCount() != 2 {
+		t.Errorf("advance calls = %d, want 2 (the replay still hits the executor)", exec.advanceCount())
 	}
 }

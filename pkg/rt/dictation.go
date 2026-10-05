@@ -293,6 +293,132 @@ func (tm *TurnManager) effectiveClientStateLocked() string {
 }
 
 // ---------------------------------------------------------------------------
+// Per-word confirm countdown (13-09 Task 2): the 60s auto-advance of the
+// turning decision. Arming happens ONLY from an ack-driven path — the final
+// valid sentence_ack of a word announcement (announceAcked) or of a
+// student-reply announcement (the repeat/slow/hint/meaning/chat/resume
+// re-arm rule). TTS send completion and audio_end never arm; a playback
+// ack timeout never fabricates a countdown start.
+// ---------------------------------------------------------------------------
+
+// armWordTimer (re)arms the per-word countdown for the CURRENT word.
+// Arming first bumps timerGeneration, so any callback already queued under
+// an older generation is dead on arrival — same epoch and word index
+// included (T-13-16).
+func (tm *TurnManager) armWordTimer() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.armWordTimerLocked()
+}
+
+// armWordTimerLocked is the locked arm body. Caller holds tm.mu.
+func (tm *TurnManager) armWordTimerLocked() {
+	tm.timerGen++
+	tm.stopTimerHandleLocked()
+	if tm.tutor == nil || tm.tutor.completed || tm.tutor.paused {
+		// No classroom, lesson finished, or paused: no countdown. The
+		// generation bump above still invalidates any queued callback.
+		return
+	}
+	gen := tm.timerGen
+	epoch := tm.epoch
+	target := tm.tutor.turnTarget()
+	factory := tm.timerFactory
+	if factory == nil {
+		factory = time.AfterFunc
+	}
+	tm.wordTimer = factory(tm.cfg.WordTimeout, func() {
+		tm.onWordTimeout(gen, epoch, target)
+	})
+}
+
+// stopWordTimer suspends the countdown (the pause command, session close).
+// The generation bump kills every callback queued under the old handle.
+func (tm *TurnManager) stopWordTimer() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.stopWordTimerLocked()
+}
+
+// stopWordTimerLocked is the locked stop body. Caller holds tm.mu.
+func (tm *TurnManager) stopWordTimerLocked() {
+	tm.timerGen++
+	tm.stopTimerHandleLocked()
+}
+
+// stopTimerHandleLocked drops the live handle without touching the
+// generation. Caller holds tm.mu.
+func (tm *TurnManager) stopTimerHandleLocked() {
+	if tm.wordTimer != nil {
+		tm.wordTimer.Stop()
+		tm.wordTimer = nil
+	}
+}
+
+// onWordTimeout is the countdown firing (its own goroutine). It re-acquires
+// the lock and validates in order: generation, session close, epoch, tutor
+// liveness, the pause bit, and the FULL TurnTarget (word/index/version — a
+// late confirm that already advanced bumps the version, so a stale target
+// mismatches). The processing branch is handled BEFORE the generic
+// state-rejection drop: a student reply being classified must not swallow
+// the timeout — that firing is discarded and a fresh countdown re-armed.
+// speaking is ack-driven and never advances early; anything else is
+// dropped.
+func (tm *TurnManager) onWordTimeout(gen uint64, epoch uint64, target TurnTarget) {
+	tm.mu.Lock()
+	if gen != tm.timerGen || tm.closed || tm.epoch != epoch ||
+		tm.tutor == nil || tm.tutor.completed || tm.tutor.paused {
+		tm.mu.Unlock()
+		return
+	}
+	if tm.tutor.turnTarget() != target {
+		tm.mu.Unlock()
+		return
+	}
+	switch tm.state {
+	case StateProcessing:
+		// Mid-classification: discard this firing and re-arm a fresh
+		// countdown — this round's reply ack re-arms again anyway.
+		tm.armWordTimerLocked()
+		tm.mu.Unlock()
+	case StateListening:
+		s := tm.sender
+		tm.mu.Unlock()
+		tm.timeoutAdvance(s, epoch, target)
+	default:
+		// speaking (or the transient ""): the announcement's ack path
+		// re-arms; no early advance.
+		tm.mu.Unlock()
+	}
+}
+
+// timeoutAdvance executes the timeout's auto-advance: the SAME idempotency
+// key and optimistic lock as confirm (`lessonID-advance-<index>`), so the
+// confirm/timeout race resolves through the executor — the loser replays
+// Idempotent=true and aligns with zero side effects (only the first driver
+// writes the outcome, messages, narration and review).
+func (tm *TurnManager) timeoutAdvance(s Sender, epoch uint64, target TurnTarget) {
+	if s == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	tm.turnCancel = cancel
+	tm.mu.Unlock()
+	defer cancel()
+
+	tm.advanceTarget(s, ctx, cancel, epoch, target, outcomeTimeout, "", func() {
+		// EventTimeoutFired is emitted by the FIRST COMMIT ONLY: a timeout
+		// that lost the race to confirm is an idempotent replay and never
+		// claims it advanced anything.
+		tm.recorder.Emit(EventTimeoutFired,
+			infra.F("word_index", target.WordIndex),
+			infra.F("epoch", epoch),
+		)
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Template wording (pure functions — the opening/announcement/summary path
 // makes ZERO LLM calls, so first-audible latency is FSRS fetch + TTS first
 // packet only; RT-04 structure)

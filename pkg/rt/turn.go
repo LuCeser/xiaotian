@@ -46,6 +46,7 @@ import (
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
+	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 )
 
 // ErrStaleEpoch is returned by TTS chunk callbacks when the epoch they were
@@ -255,6 +256,23 @@ type TurnManager struct {
 	// droppedUplink counts audio chunks dropped by half-duplex gating.
 	droppedUplink int
 
+	// --- 13-09 per-word confirm countdown (logic lives in dictation.go) ---
+
+	// sender is the connection's write half, retained at session_init for
+	// announcements that have no request context behind them — the 13-09
+	// timeout auto-advance. It lives exactly as long as the session.
+	sender Sender
+	// timerFactory builds the countdown timers (test seam); nil means
+	// time.AfterFunc.
+	timerFactory func(time.Duration, func()) *time.Timer
+	// timerGen is the monotonic per-word timer generation. EVERY
+	// arm/reset/stop increments it, so a callback already queued before the
+	// reset is dead on arrival even with the same epoch and word index
+	// (T-13-16).
+	timerGen uint64
+	// wordTimer is the live countdown handle; nil when disarmed.
+	wordTimer *time.Timer
+
 	// vad is fed from the read loop only (see concurrency note).
 	vad *VAD
 }
@@ -348,6 +366,13 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	}
 
 	lessonID := resolveLessonID(tm.cfg.LessonID, time.Now())
+
+	// Retain the write half for server-initiated announcements that have no
+	// request context behind them (the 13-09 timeout auto-advance).
+	tm.mu.Lock()
+	tm.sender = s
+	tm.mu.Unlock()
+
 	unlock := lockLessonInit(lessonID)
 	defer unlock()
 
@@ -499,22 +524,10 @@ func (tm *TurnManager) announceAcked(s Sender) {
 	tm.armWordTimer()
 }
 
-// armWordTimer arms the per-word confirm timer after a word announcement's
-// valid playback ack (WordTimeout countdown → auto-advance with the
-// timeout outcome). 13-08 ships the armed-slot placeholder only: the FSM
-// callback point is exercised by tests; the timer behavior itself is 13-09
-// work (plan-locked split).
-func (tm *TurnManager) armWordTimer() {
-	// placeholder — implemented in 13-09
-}
-
-// stopWordTimer suspends the per-word countdown (the pause command). The
-// body — generation bump plus handle drop, so any queued callback is dead
-// on arrival — is 13-09 Task 2 work, mirroring the armWordTimer placeholder
-// split.
-func (tm *TurnManager) stopWordTimer() {
-	// placeholder — implemented in 13-09 Task 2
-}
+// armWordTimer arms the per-word confirm countdown; the implementation
+// (generation bump + full TurnTarget capture + epoch-stamped callback)
+// lives in dictation.go next to the rest of the 13-09 timer logic.
+// stopWordTimer suspends it (the pause command).
 
 // runAnnouncement speaks one FSM announcement and settles the FSM only
 // after its valid final playback ack — TTS send completion and audio_end
@@ -685,9 +698,10 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 	tm.internalClose()
 }
 
-// internalClose cancels in-flight work, invalidates playback waits, and
-// resets the FSM without emitting the session_end event again. It also
-// cancels any playback-ack wait (异常断线取消等待).
+// internalClose cancels in-flight work, invalidates playback waits,
+// suspends the per-word timer, and resets the FSM without emitting the
+// session_end event again. It also cancels any playback-ack wait (异常断线
+// 取消等待).
 func (tm *TurnManager) internalClose() {
 	tm.mu.Lock()
 	if tm.turnCancel != nil {
@@ -698,6 +712,7 @@ func (tm *TurnManager) internalClose() {
 	}
 	tm.pendingPlayback = map[string]*pendingPlayback{}
 	tm.playbackPending = false
+	tm.stopWordTimerLocked()
 	tm.state = ""
 	tm.closed = true
 	tm.mu.Unlock()
@@ -785,6 +800,15 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	_ = s.SendControl(TurnStartMsg{Type: TypeTurnStart, TurnID: turnID, Epoch: epoch})
 
 	transcript, err := tm.asr.Transcribe(ctx, segment)
+	if errors.Is(err, mimo.ErrEmptyTranscription) {
+		// The provider's legitimate "nothing spoken" answer (13-07 sentinel):
+		// silence is not a fault — no user-visible error, no classification,
+		// and the per-word countdown is NOT reset (hearing nothing is not an
+		// interaction). A server-side marker event only.
+		tm.recorder.Emit(EventSpeechEnded, infra.F("turn_id", turnID), infra.F("empty", true))
+		tm.settleListening(s)
+		return
+	}
 	if err != nil {
 		tm.failTurn(s, epoch, ErrCodeProviderFailed, "语音识别失败，请再对我说一遍")
 		return
@@ -883,26 +907,40 @@ func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, ca
 }
 
 // confirmTarget advances the classroom through the target captured at
-// classification start. The three AdvanceWord outcomes are mutually
-// exclusive; NONE of them re-interprets a late confirm against the
-// post-return currentIndex (T-13-15c):
+// classification start (outcome=confirmed). All advance outcomes funnel
+// through advanceTarget, shared with the 13-09 timeout path — the three
+// AdvanceWord branches stay mutually exclusive whatever drove them.
+func (tm *TurnManager) confirmTarget(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, reply string, target TurnTarget) {
+	tm.advanceTarget(s, ctx, cancel, epoch, target, outcomeConfirmed, reply, nil)
+}
+
+// advanceTarget drives one word advance through the captured target. NONE
+// of the branches re-interprets a late driver against the post-return
+// currentIndex (T-13-15c):
 //
-//   - first commit (Idempotent=false, nil): record outcome, lesson_update,
+//   - first commit (Idempotent=false, nil): record outcome (optionally fire
+//     onFirstCommit — the timeout's EventTimeoutFired), lesson_update,
 //     word_advanced event, next-word announcement or completion;
 //   - idempotent hit (Idempotent=true, nil): align the local cursor to the
 //     FIRST stored result — no outcome write, no message, no narration, no
 //     completion;
 //   - version conflict: read-back alignment ONLY — no retry write, no
 //     side effects.
-func (tm *TurnManager) confirmTarget(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, reply string, target TurnTarget) {
+//
+// An invalid target (completed lesson, out of range) degrades to the plain
+// chat reply when one exists (confirm) and silently returns otherwise
+// (timeout).
+func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, target TurnTarget, outcome, reply string, onFirstCommit func()) {
 	tm.mu.Lock()
 	lessonID := tm.tutor.lessonID
 	valid := !tm.tutor.completed && target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words)
 	tm.mu.Unlock()
 	if !valid {
-		// Completed or out-of-range target: pacing owns the cursor — this
-		// confirm degrades to a plain chat reply.
-		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, nil)
+		// Completed or out-of-range target: pacing owns the cursor — a
+		// confirm degrades to a plain chat reply; a timeout just stops.
+		if reply != "" {
+			tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, nil)
+		}
 		return
 	}
 
@@ -925,7 +963,9 @@ func (tm *TurnManager) confirmTarget(s Sender, ctx context.Context, cancel conte
 		return
 	}
 	if res.Idempotent {
-		// Duplicate confirm: align to the first result and do NOTHING else.
+		// A duplicate driver (late confirm after a timeout, or the
+		// reverse): align to the first result and do NOTHING else — the
+		// first outcome is never overwritten.
 		tm.mu.Lock()
 		tm.tutor.align(res.NewIndex, res.NewVersion)
 		tm.mu.Unlock()
@@ -936,9 +976,12 @@ func (tm *TurnManager) confirmTarget(s Sender, ctx context.Context, cancel conte
 	// First commit: outcome + wire update + narration (or completion).
 	tm.mu.Lock()
 	tm.tutor.align(res.NewIndex, res.NewVersion)
-	tm.tutor.commitOutcome(target.WordIndex, outcomeConfirmed)
+	tm.tutor.commitOutcome(target.WordIndex, outcome)
 	finished := res.NewIndex >= len(tm.tutor.words)
 	tm.mu.Unlock()
+	if onFirstCommit != nil {
+		onFirstCommit()
+	}
 
 	_ = s.SendControl(LessonUpdateMsg{
 		Type:         TypeLessonUpdate,

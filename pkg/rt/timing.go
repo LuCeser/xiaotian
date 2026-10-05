@@ -35,6 +35,10 @@ const (
 	// EventWordAdvanced: the FIRST commit of one advance_word landed
 	// (13-08); idempotent replays and version conflicts never emit it.
 	EventWordAdvanced = "word_advanced"
+	// EventTimeoutFired: the 60s per-word countdown DROVE an advance (13-09)
+	// — emitted by the first commit only; a timeout that lost the race to a
+	// confirm replays idempotently and never claims it advanced anything.
+	EventTimeoutFired = "timeout_fired"
 	// EventIntentClassified: the classification Chat produced a whitelisted
 	// intent (13-08). Fields carry the intent label only — never the
 	// transcript text (T-13-06b boundary).
