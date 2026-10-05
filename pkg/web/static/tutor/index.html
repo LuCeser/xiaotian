@@ -128,7 +128,7 @@
       // The ONLY element-removal helper on this page: server-sourced text
       // (subtitles, transcripts, errors, teacher lines) never touches an HTML
       // parser — createElement/textContent discipline is the XSS boundary
-      // (T-13-22, innerHTML negative gate).
+      // (T-13-22, enforced by the negative grep gate).
       function clearChildren(el) {
         while (el.firstChild) el.removeChild(el.firstChild);
       }
