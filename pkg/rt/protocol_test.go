@@ -132,11 +132,21 @@ func TestProtocolInterruptRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProtocolSentenceAckRoundTrip(t *testing.T) {
+// TestProtocolSentenceAckCompletionRoundTrip asserts the sentence_ack wire
+// contract keeps its frozen two-field identity (sentence_id + epoch) — the
+// message is the ACTUAL PLAYBACK COMPLETION acknowledgement (sent only after
+// the matching audio_end and the last scheduled source's onended), never a
+// playback-start signal. Field shape must not change; runtime identity
+// gating belongs to 13-08, per-sentence browser scheduling to 13-11.
+func TestProtocolSentenceAckCompletionRoundTrip(t *testing.T) {
 	msg := SentenceAckMsg{Type: TypeSentenceAck, SentenceID: "s-1", Epoch: 4}
 	got := roundTrip(t, msg, SentenceAckMsg{}).(SentenceAckMsg)
 	if got != msg {
 		t.Errorf("round trip = %+v, want %+v", got, msg)
+	}
+	if got.Epoch != msg.Epoch || got.SentenceID != msg.SentenceID {
+		t.Errorf("completion ack identity = epoch %d/sentence %q, want epoch %d/sentence %q",
+			got.Epoch, got.SentenceID, msg.Epoch, msg.SentenceID)
 	}
 	w := wireKeys(t, msg)
 	for _, key := range []string{"sentence_id", "epoch"} {
@@ -310,7 +320,7 @@ func TestProtocolInterruptAckRoundTrip(t *testing.T) {
 }
 
 func TestProtocolStateRoundTrip(t *testing.T) {
-	for _, value := range []string{StateListening, StateProcessing, StateSpeaking} {
+	for _, value := range []string{StateListening, StateProcessing, StateSpeaking, StatePaused} {
 		msg := StateMsg{Type: TypeState, Value: value}
 		got := roundTrip(t, msg, StateMsg{}).(StateMsg)
 		if got != msg {
@@ -363,6 +373,68 @@ func TestProtocolMissingTypeRejected(t *testing.T) {
 func TestProtocolMalformedJSONRejected(t *testing.T) {
 	if _, err := ParseControl([]byte(`{"type":`)); err == nil {
 		t.Fatal("ParseControl accepted malformed JSON, want error")
+	}
+}
+
+// TestProtocolPausedAndReasonLiterals pins the exact wire literals of the
+// 13-07 contract vocabulary: the paused state value, the two new error
+// codes, and the two natural-end SessionEndedMsg reasons. playback_ack_timeout
+// must exist ONLY as an error code — it is deliberately absent from the
+// reason vocabulary.
+func TestProtocolPausedAndReasonLiterals(t *testing.T) {
+	if got := StatePaused; got != "paused" {
+		t.Errorf("StatePaused = %q, want %q", got, "paused")
+	}
+	if got := ErrCodeLessonUnavailable; got != "lesson_unavailable" {
+		t.Errorf("ErrCodeLessonUnavailable = %q, want %q", got, "lesson_unavailable")
+	}
+	if got := ErrCodePlaybackAckTimeout; got != "playback_ack_timeout" {
+		t.Errorf("ErrCodePlaybackAckTimeout = %q, want %q", got, "playback_ack_timeout")
+	}
+	if got := ReasonLessonComplete; got != "lesson_complete" {
+		t.Errorf("ReasonLessonComplete = %q, want %q", got, "lesson_complete")
+	}
+	if got := ReasonNoDueWords; got != "no_due_words" {
+		t.Errorf("ReasonNoDueWords = %q, want %q", got, "no_due_words")
+	}
+	if ReasonPlaybackAckTimeoutExists() {
+		t.Error("playback_ack_timeout leaked into the SessionEndedMsg.Reason vocabulary")
+	}
+}
+
+// ReasonPlaybackAckTimeoutExists is a compile-time guard documenting the
+// freeze: playback_ack_timeout is an ErrorMsg.Code, never a
+// SessionEndedMsg.Reason constant. It always returns false; if someone later
+// adds a Reason constant with the playback_ack_timeout value, update this
+// function to return true and the test above fails.
+func ReasonPlaybackAckTimeoutExists() bool {
+	return ReasonLessonComplete == ErrCodePlaybackAckTimeout ||
+		ReasonNoDueWords == ErrCodePlaybackAckTimeout
+}
+
+// TestErrorCode maps the protocol sentinels (bare and wrapped) to their
+// stable ErrorMsg.Code values, including the two 13-07 codes and the
+// provider_failed fallback.
+func TestErrorCode(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"unsupported format", ErrUnsupportedAudioFormat, ErrCodeUnsupportedFormat},
+		{"invalid control message", ErrInvalidControlMessage, ErrCodeInvalidMessage},
+		{"lesson unavailable", ErrLessonUnavailable, ErrCodeLessonUnavailable},
+		{"lesson unavailable wrapped", errors.Wrap(ErrLessonUnavailable, "session_init: due fetch failed"), ErrCodeLessonUnavailable},
+		{"playback ack timeout", ErrPlaybackAckTimeout, ErrCodePlaybackAckTimeout},
+		{"playback ack timeout wrapped", errors.Wrap(ErrPlaybackAckTimeout, "bounded wait expired"), ErrCodePlaybackAckTimeout},
+		{"unknown falls back", errors.New("some other failure"), ErrCodeProviderFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ErrorCode(tc.err); got != tc.want {
+				t.Errorf("ErrorCode(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

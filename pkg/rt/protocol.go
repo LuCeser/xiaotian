@@ -67,6 +67,11 @@ const (
 	StateListening  = "listening"
 	StateProcessing = "processing"
 	StateSpeaking   = "speaking"
+	// StatePaused: the pause command has suspended the per-word timer and
+	// playback, but VAD keeps listening for the resume command. Carried by
+	// StateMsg.Value. (Qualified as rt.StatePaused — the frozen database
+	// StatePaused = "PAUSED" constant belongs to another package and flow.)
+	StatePaused = "paused"
 )
 
 // Error codes carried by ErrorMsg.Code.
@@ -86,6 +91,20 @@ const (
 	ErrCodeInvalidMessage = "invalid_message"
 	// ErrCodeSessionClosed: operation referenced an already-closed session.
 	ErrCodeSessionClosed = "session_closed"
+	// ErrCodeLessonUnavailable: session_init could not initialize the FSRS
+	// due-word fetch / classroom row (e.g. legacy lessons row with empty
+	// cards, no due words with the lesson unusable). The classroom cannot
+	// start; the frontend must surface an honest failure.
+	ErrCodeLessonUnavailable = "lesson_unavailable"
+	// ErrCodePlaybackAckTimeout: the server finished SENDING one scheduled
+	// announcement but did not receive a matching actual-playback-completion
+	// ack (sentence_ack) within the bounded wait derived from the total
+	// duration of the outstanding scheduled PCM. This code is carried ONLY
+	// by ErrorMsg.Code — it is never a SessionEndedMsg.Reason and is never
+	// evidence that audio was actually played. The frontend must present an
+	// honest notice and keep the scheduled audio until it drains naturally
+	// or a bounded cleanup stops it.
+	ErrCodePlaybackAckTimeout = "playback_ack_timeout"
 )
 
 // Sentinel errors carrying the protocol error codes above. Callers map them
@@ -99,6 +118,17 @@ var (
 	// ErrInvalidControlMessage is returned by ParseControl for malformed
 	// JSON or an unknown message type (code: invalid_message).
 	ErrInvalidControlMessage = errors.New("rt: invalid control message")
+
+	// ErrLessonUnavailable is returned when classroom initialization fails
+	// during session_init — FSRS due-word fetch or the lessons row cannot
+	// support a lesson (code: lesson_unavailable).
+	ErrLessonUnavailable = errors.New("rt: lesson unavailable")
+
+	// ErrPlaybackAckTimeout is returned when the bounded wait for a
+	// matching playback-completion ack expires after the server sent out a
+	// scheduled announcement (code: playback_ack_timeout). It reports the
+	// server STOPPED WAITING — never that playback completed.
+	ErrPlaybackAckTimeout = errors.New("rt: playback completion ack timed out")
 )
 
 // requiredInput pins the only uplink audio configuration R0 accepts. The
@@ -170,9 +200,17 @@ type InterruptMsg struct {
 	PlayedUntilMs  int64  `json:"played_until_ms"`
 }
 
-// SentenceAckMsg confirms the client actually started/finished playing one
-// teacher sentence. Acks are the ground truth for "actually played" history
-// trimming and RT-04 first-audible measurement.
+// SentenceAckMsg confirms the ACTUAL PLAYBACK COMPLETION of one teacher
+// sentence. It is a completion acknowledgement, never a playback-start
+// signal: the client sends it only after (a) the audio_end matching this
+// epoch+sentence_id has been seen AND (b) the onended callback of the last
+// AudioBufferSourceNode scheduled for that sentence has fired. The
+// epoch+sentence_id pair is the identity key and its wire shape is frozen;
+// runtime identity validation (only accept acks for the currently
+// outstanding sentence set) belongs to the 13-08 FSM, and per-sentence
+// independent scheduling in the browser belongs to 13-11. Acks are the
+// ground truth for "actually played" history trimming, natural-completion
+// sequencing (SessionEndedMsg reasons), and RT-04 measurement.
 type SentenceAckMsg struct {
 	Type       string `json:"type"`
 	SentenceID string `json:"sentence_id"`
@@ -285,7 +323,7 @@ type PongMsg struct {
 }
 
 // StateMsg announces the student-facing connection state (listening /
-// processing / speaking).
+// processing / speaking / paused).
 type StateMsg struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`
@@ -301,8 +339,32 @@ type ErrorMsg struct {
 	Recoverable bool   `json:"recoverable"`
 }
 
+// SessionEndedMsg.Reason vocabulary for NATURAL classroom endings (the
+// state-machine dictation-tutor loop, 2026-10-03 pivot). These are the only
+// two natural-end reasons; explicit end_session, idle timeout, or fatal
+// error keep using their existing reason strings.
+const (
+	// ReasonLessonComplete: the wrap-up summary has been produced and the
+	// learning record written after the last word completed.
+	ReasonLessonComplete = "lesson_complete"
+	// ReasonNoDueWords: zero FSRS due words; the teacher explained that and
+	// ended the session.
+	ReasonNoDueWords = "no_due_words"
+)
+
 // SessionEndedMsg is the server's final message before closing the
-// connection (explicit end_session, idle timeout, or fatal error).
+// connection (explicit end_session, idle timeout, fatal error, or a natural
+// classroom end carrying ReasonLessonComplete / ReasonNoDueWords).
+//
+// Sequencing contract for natural endings: the SessionEndedMsg must be sent
+// only after the matching playback-completion sentence_ack has been received
+// for the final announcement. If that bounded wait times out, the server
+// first sends ErrorMsg(code=playback_ack_timeout) and THEN sends the
+// SessionEndedMsg still carrying the original lesson_complete/no_due_words
+// reason. That degraded order means only "the server stopped waiting" — it
+// is never evidence that the announcement was actually played, and
+// playback_ack_timeout itself is an ErrorMsg.Code, never a
+// SessionEndedMsg.Reason.
 type SessionEndedMsg struct {
 	Type   string `json:"type"`
 	Reason string `json:"reason"`
@@ -457,6 +519,10 @@ func ErrorCode(err error) string {
 		return ErrCodeUnsupportedFormat
 	case errors.Is(err, ErrInvalidControlMessage):
 		return ErrCodeInvalidMessage
+	case errors.Is(err, ErrLessonUnavailable):
+		return ErrCodeLessonUnavailable
+	case errors.Is(err, ErrPlaybackAckTimeout):
+		return ErrCodePlaybackAckTimeout
 	default:
 		return ErrCodeProviderFailed
 	}
