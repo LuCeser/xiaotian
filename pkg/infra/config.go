@@ -186,8 +186,11 @@ type TLSConfig struct {
 
 // RTConfig tunes the /rt realtime tutor layer (Phase 13). Defaults make the
 // service boot with NO rt: block: the localhost origin pair, a 65551-byte
-// message cap, 10s handshake / 30s heartbeat cadence, and the R0 fixed
-// three-word test lesson from 13-CONTEXT ("3 个固定词可作为测试课").
+// message cap, 10s handshake / 30s heartbeat cadence, an EMPTY LessonID
+// (the FSM derives the daily "r0-YYYYMMDD" lesson), and the 60s per-word
+// timeout. Words are never configured here — they always come from the FSRS
+// due fetch through the PyFSRS adapter (13-10 pivot; the retired
+// rt.lessonWords key is ignored when old configs still carry it).
 // Buffer-size and message-cap zeros defer to rt.NewHandler's own semantic
 // defaults when left at 0 (double validation, WS pattern).
 type RTConfig struct {
@@ -217,21 +220,28 @@ type RTConfig struct {
 	// ws.DefaultHeartbeatInterval). 0 defers to rt.NewHandler's default.
 	HeartbeatInterval time.Duration `json:"heartbeatInterval" mapstructure:"heartbeatInterval"`
 
-	// LessonID is the server-side lesson the /rt session binds to. Default
-	// "r0-test" — the R0 fixed test lesson backed by pkg/lesson's EnsureLesson
-	// semantics. MUST be non-empty.
+	// LessonID is the server-side lesson the /rt session binds to. When
+	// non-empty it is used as-is (a dedicated classroom / test lesson);
+	// when empty the server derives the daily lesson id "r0-YYYYMMDD" on
+	// the Beijing calendar, so same-day sessions resume the same lesson.
+	// Default: empty (daily derivation).
 	LessonID string `json:"lessonId" mapstructure:"lessonId"`
 
-	// LessonWords is the fixed word list of the R0 test lesson. Defaults to
-	// the three fixed test words ["美丽", "勇敢", "聪明"]. MUST contain 1..10
-	// non-empty words.
-	LessonWords []string `json:"lessonWords" mapstructure:"lessonWords"`
+	// WordTimeoutMs is the per-word writing timer in milliseconds: when it
+	// elapses the FSM auto-advances to the next word. Default 60000 (60s);
+	// the knob exists so real-device runs (13-12) can shorten it for
+	// quicker verification. 0 means "use the default"; a negative value or
+	// anything above 3600000 (1h) is rejected by Validate.
+	WordTimeoutMs int `json:"wordTimeoutMs" mapstructure:"wordTimeoutMs"`
 }
 
 // Validate enforces the RTConfig rules (D-04 fail-fast): origins non-empty
-// with no wildcard "*", a non-empty LessonID, and 1..10 non-empty
-// LessonWords. On any failure it returns an error wrapping ErrConfigInvalid
-// so callers branch with errors.Is(err, infra.ErrConfigInvalid).
+// with no wildcard "*", WordTimeoutMs in range (0 → default 60000; negative
+// or above 3600000 rejected), and — when LessonID is set — a lightweight
+// sanity check (≤64 runes, no whitespace, no path separators). An empty
+// LessonID is legal and means the daily "r0-YYYYMMDD" derivation. On any
+// failure it returns an error wrapping ErrConfigInvalid so callers branch
+// with errors.Is(err, infra.ErrConfigInvalid).
 func (c RTConfig) Validate() error {
 	if len(c.AllowedOrigins) == 0 {
 		return errors.Wrap(ErrConfigInvalid,
@@ -243,17 +253,28 @@ func (c RTConfig) Validate() error {
 				"rt.allowedOrigins must not contain wildcard \"*\"")
 		}
 	}
-	if c.LessonID == "" {
-		return errors.Wrap(ErrConfigInvalid, "rt.lessonId is required")
-	}
-	if len(c.LessonWords) < 1 || len(c.LessonWords) > 10 {
+	if c.WordTimeoutMs < 0 {
 		return errors.Wrap(ErrConfigInvalid,
-			fmt.Sprintf("rt.lessonWords must contain 1..10 words, got %d", len(c.LessonWords)))
+			fmt.Sprintf("rt.wordTimeoutMs must not be negative, got %d", c.WordTimeoutMs))
 	}
-	for i, w := range c.LessonWords {
-		if w == "" {
+	if c.WordTimeoutMs > 3600000 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("rt.wordTimeoutMs must not exceed 3600000 (1h), got %d", c.WordTimeoutMs))
+	}
+	if c.LessonID != "" {
+		if len(c.LessonID) > 64 {
 			return errors.Wrap(ErrConfigInvalid,
-				fmt.Sprintf("rt.lessonWords[%d] must not be empty", i))
+				fmt.Sprintf("rt.lessonId must not exceed 64 characters, got %d", len(c.LessonID)))
+		}
+		if strings.IndexFunc(c.LessonID, func(r rune) bool {
+			return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
+		}) >= 0 {
+			return errors.Wrap(ErrConfigInvalid,
+				"rt.lessonId must not contain whitespace")
+		}
+		if strings.ContainsAny(c.LessonID, `/\`) {
+			return errors.Wrap(ErrConfigInvalid,
+				"rt.lessonId must not contain path separators")
 		}
 	}
 	return nil
@@ -994,9 +1015,13 @@ func DefaultConfig() Config {
 			// cadence matching ws.DefaultHeartbeatInterval.
 			HandshakeTimeout:  10 * time.Second,
 			HeartbeatInterval: 30 * time.Second,
-			// R0 fixed test lesson — three fixed words (13-CONTEXT).
-			LessonID:   "r0-test",
-			LessonWords: []string{"美丽", "勇敢", "聪明"},
+			// LessonID empty → the FSM derives the daily "r0-YYYYMMDD"
+			// lesson on the Beijing calendar (13-10 pivot: words come from
+			// the FSRS due fetch, the fixed three-word lesson is retired).
+			LessonID: "",
+			// 60s per-word confirm wait; the knob exists for real-device
+			// calibration runs to shorten.
+			WordTimeoutMs: 60000,
 		},
 	}
 }
@@ -1501,7 +1526,7 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"rt.handshakeTimeout",
 		"rt.heartbeatInterval",
 		"rt.lessonId",
-		"rt.lessonWords",
+		"rt.wordTimeoutMs",
 	}
 	for _, key := range keys {
 		_ = v.BindEnv(key)

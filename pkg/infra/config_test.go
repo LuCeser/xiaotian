@@ -1221,8 +1221,10 @@ func TestLoadConfigTLSEmptyBlockRejected(t *testing.T) {
 }
 
 // TestDefaultRTConfig asserts the Phase 13 RT defaults: the localhost
-// origin pair, 65551 message cap, 10s/30s handshake/heartbeat cadence, and
-// the R0 fixed three-word test lesson (13-CONTEXT "3 个固定词可作为测试课").
+// origin pair, 65551 message cap, 10s/30s handshake/heartbeat cadence, the
+// EMPTY LessonID (daily "r0-YYYYMMDD" derivation), and the 60000ms per-word
+// timeout (13-10 pivot: the fixed three-word lesson is retired; words come
+// from the FSRS due fetch).
 func TestDefaultRTConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	want := []string{"localhost", "127.0.0.1"}
@@ -1244,11 +1246,11 @@ func TestDefaultRTConfig(t *testing.T) {
 	if cfg.RT.HeartbeatInterval != 30*time.Second {
 		t.Errorf("RT.HeartbeatInterval = %v, want 30s", cfg.RT.HeartbeatInterval)
 	}
-	if cfg.RT.LessonID != "r0-test" {
-		t.Errorf("RT.LessonID = %q, want %q (R0 fixed test lesson)", cfg.RT.LessonID, "r0-test")
+	if cfg.RT.LessonID != "" {
+		t.Errorf("RT.LessonID = %q, want empty (daily r0-YYYYMMDD derivation)", cfg.RT.LessonID)
 	}
-	if len(cfg.RT.LessonWords) != 3 {
-		t.Errorf("RT.LessonWords length = %d, want 3 (three fixed test words)", len(cfg.RT.LessonWords))
+	if cfg.RT.WordTimeoutMs != 60000 {
+		t.Errorf("RT.WordTimeoutMs = %d, want 60000 (60s per-word default)", cfg.RT.WordTimeoutMs)
 	}
 	if err := cfg.RT.Validate(); err != nil {
 		t.Errorf("default RTConfig fails Validate: %v", err)
@@ -1256,8 +1258,11 @@ func TestDefaultRTConfig(t *testing.T) {
 }
 
 // TestRTConfigValidate covers the RTConfig fail-fast rules (D-04):
-// non-empty origins without wildcard "*", non-empty LessonID, and 1..10
-// non-empty LessonWords. Each case isolates one rule off the valid default.
+// non-empty origins without wildcard "*", WordTimeoutMs range (negative /
+// above 1h rejected; 0 passes as the default sentinel), and the lightweight
+// LessonID sanity checks when it IS set (whitespace / over-length /
+// path separators rejected; empty = daily derivation is legal). Each case
+// isolates one rule off the valid default.
 func TestRTConfigValidate(t *testing.T) {
 	valid := DefaultConfig().RT
 
@@ -1267,15 +1272,15 @@ func TestRTConfigValidate(t *testing.T) {
 	}{
 		{"empty origins rejected", func(c *RTConfig) { c.AllowedOrigins = nil }},
 		{"wildcard origin rejected", func(c *RTConfig) { c.AllowedOrigins = []string{"*"} }},
-		{"lessonId empty rejected", func(c *RTConfig) { c.LessonID = "" }},
-		{"lessonWords empty array rejected", func(c *RTConfig) { c.LessonWords = []string{} }},
-		{"lessonWords nil rejected", func(c *RTConfig) { c.LessonWords = nil }},
-		{"lessonWords above ten rejected", func(c *RTConfig) {
-			c.LessonWords = []string{"一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一"}
+		{"wordTimeoutMs negative rejected", func(c *RTConfig) { c.WordTimeoutMs = -1 }},
+		{"wordTimeoutMs above one hour rejected", func(c *RTConfig) { c.WordTimeoutMs = 3600001 }},
+		{"lessonId with whitespace rejected", func(c *RTConfig) { c.LessonID = "r0 test" }},
+		{"lessonId with tab rejected", func(c *RTConfig) { c.LessonID = "r0\ttest" }},
+		{"lessonId over 64 chars rejected", func(c *RTConfig) {
+			c.LessonID = strings.Repeat("a", 65)
 		}},
-		{"lessonWords containing empty word rejected", func(c *RTConfig) {
-			c.LessonWords = []string{"美丽", ""}
-		}},
+		{"lessonId with path separator rejected", func(c *RTConfig) { c.LessonID = "r0/test" }},
+		{"lessonId with backslash rejected", func(c *RTConfig) { c.LessonID = `r0\test` }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1295,12 +1300,33 @@ func TestRTConfigValidate(t *testing.T) {
 			t.Fatalf("default RTConfig Validate() = %v, want nil", err)
 		}
 	})
+	t.Run("wordTimeoutMs zero passes as default sentinel", func(t *testing.T) {
+		c := valid
+		c.WordTimeoutMs = 0
+		if err := c.Validate(); err != nil {
+			t.Fatalf("WordTimeoutMs=0 Validate() = %v, want nil (0 means default)", err)
+		}
+	})
+	t.Run("empty lessonId passes as daily derivation", func(t *testing.T) {
+		c := valid
+		c.LessonID = ""
+		if err := c.Validate(); err != nil {
+			t.Fatalf("LessonID=\"\" Validate() = %v, want nil (daily r0-YYYYMMDD)", err)
+		}
+	})
+	t.Run("wordTimeoutMs at one hour boundary passes", func(t *testing.T) {
+		c := valid
+		c.WordTimeoutMs = 3600000
+		if err := c.Validate(); err != nil {
+			t.Fatalf("WordTimeoutMs=3600000 Validate() = %v, want nil (inclusive bound)", err)
+		}
+	})
 }
 
 // TestLoadConfigRTEmptySectionTakesDefaults proves a config with NO rt:
 // block boots on the defaults (RTConfig "empty config takes defaults and is
-// valid") — viper leaves the RT section untouched so the R0 test lesson
-// defaults win.
+// valid") — viper leaves the RT section untouched so the empty-LessonID /
+// 60s-word-timeout defaults win.
 func TestLoadConfigRTEmptySectionTakesDefaults(t *testing.T) {
 	setRequiredPythonEnv(t)
 	dir := t.TempDir()
@@ -1313,11 +1339,11 @@ func TestLoadConfigRTEmptySectionTakesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig(%s) error %v, want nil (RT defaults must boot)", path, err)
 	}
-	if cfg.RT.LessonID != "r0-test" {
-		t.Errorf("RT.LessonID = %q, want default %q", cfg.RT.LessonID, "r0-test")
+	if cfg.RT.LessonID != "" {
+		t.Errorf("RT.LessonID = %q, want default empty (daily r0-YYYYMMDD derivation)", cfg.RT.LessonID)
 	}
-	if len(cfg.RT.LessonWords) != 3 {
-		t.Errorf("RT.LessonWords length = %d, want default 3", len(cfg.RT.LessonWords))
+	if cfg.RT.WordTimeoutMs != 60000 {
+		t.Errorf("RT.WordTimeoutMs = %d, want default 60000", cfg.RT.WordTimeoutMs)
 	}
 	if cfg.Server.TLS != nil {
 		t.Errorf("Server.TLS = %+v, want nil (no tls block in file)", cfg.Server.TLS)
@@ -1325,13 +1351,14 @@ func TestLoadConfigRTEmptySectionTakesDefaults(t *testing.T) {
 }
 
 // TestRTAndTLSEnvBinding proves bindEnvForAllLeaves registered the Phase 13
-// leaves (Pitfall 6 guard): HTA_RT_LESSONID and the HTA_SERVER_TLS_* pair
-// override the defaults through LoadConfig with no file in play. Key-name
-// case is normalized by SetEnvKeyReplacer (mirrors the HTA_PYTHON_* trick
-// in cmd/service/main_test.go:415-417).
+// leaves (Pitfall 6 guard): HTA_RT_LESSONID, HTA_RT_WORDTIMEOUTMS and the
+// HTA_SERVER_TLS_* pair override the defaults through LoadConfig with no
+// file in play. Key-name case is normalized by SetEnvKeyReplacer (mirrors
+// the HTA_PYTHON_* trick in cmd/service/main_test.go:415-417).
 func TestRTAndTLSEnvBinding(t *testing.T) {
 	setRequiredPythonEnv(t)
 	t.Setenv("HTA_RT_LESSONID", "env-lesson")
+	t.Setenv("HTA_RT_WORDTIMEOUTMS", "30000")
 	t.Setenv("HTA_SERVER_TLS_CERTFILE", "a.pem")
 	t.Setenv("HTA_SERVER_TLS_KEYFILE", "b.pem")
 	cfg, err := LoadConfig("")
@@ -1341,6 +1368,10 @@ func TestRTAndTLSEnvBinding(t *testing.T) {
 	if cfg.RT.LessonID != "env-lesson" {
 		t.Errorf("RT.LessonID = %q, want %q (env override via HTA_RT_LESSONID)",
 			cfg.RT.LessonID, "env-lesson")
+	}
+	if cfg.RT.WordTimeoutMs != 30000 {
+		t.Errorf("RT.WordTimeoutMs = %d, want 30000 (env override via HTA_RT_WORDTIMEOUTMS)",
+			cfg.RT.WordTimeoutMs)
 	}
 	if cfg.Server.TLS == nil {
 		t.Fatal("Server.TLS = nil, want non-nil (env pair must allocate the TLS block)")
