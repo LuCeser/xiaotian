@@ -395,7 +395,7 @@
         // matches /rt by path and ignores the query); the mock e2e reads
         // them to pick its session script (?mock_pause / ?mock_empty /
         // ?mock_ack_timeout / ?mock_step_ms).
-        client.connect(deriveRtUrl(global.location) + (global.location.search || ''));
+        client.connect(deriveRtUrl(window.location) + (window.location.search || ''));
       });
 
       endBtn.addEventListener('click', function () {

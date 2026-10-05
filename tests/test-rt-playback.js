@@ -90,6 +90,8 @@ function makePlayback(opts) {
     client,
     timing,
     now: () => t,
+    setTimeoutFn: opts.setTimeoutFn,
+    clearTimeoutFn: opts.clearTimeoutFn,
     tuning: Object.assign({ interruptRms: 0.08, interruptSustainMs: 200, maxQueuedChunks: MAX_QUEUED_CHUNKS }, opts.tuning || {})
   });
   pb.setAudioContext(new FakeAudioContext());
@@ -98,6 +100,28 @@ function makePlayback(opts) {
   pb.testTiming = timing;
   return pb;
 }
+
+/** Manual timer queue — drives the drain watchdog without real waits. */
+function FakeTimers() {
+  this.pending = new Map();
+  this._next = 0;
+}
+FakeTimers.prototype.setTimeoutFn = function (fn, ms) {
+  const id = ++this._next;
+  this.pending.set(id, { fn, ms });
+  return id;
+};
+FakeTimers.prototype.clearTimeoutFn = function (id) {
+  this.pending.delete(id);
+};
+FakeTimers.prototype.fireAll = function () {
+  const items = Array.from(this.pending.values());
+  this.pending.clear();
+  for (const it of items) it.fn();
+};
+FakeTimers.prototype.pendingMs = function () {
+  return Array.from(this.pending.values()).map((it) => it.ms);
+};
 
 // ---------------------------------------------------------------------------
 // 1. resampleTo16k — 48 kHz sine → 16 kHz
@@ -335,4 +359,167 @@ function makePlayback(opts) {
   assert.strictEqual(pb.droppedChunks, 6, 'excess chunks dropped and counted');
 }
 
-console.log('test-rt-playback.js: all assertions passed');
+// ---------------------------------------------------------------------------
+// 6. Per-sentence ledger (13-11): overlapping sentences ack independently
+// ---------------------------------------------------------------------------
+{
+  const pb = makePlayback();
+  pb.onTurnStart(1, 1);
+  pb.onAudioStart(1, 's1');
+  pb.onAudioChunk(chunkBuffer(2400)); // s1 src0
+  pb.onAudioChunk(chunkBuffer(2400)); // s1 src1
+  // Adjacent-sentence overlap: s2 announces BEFORE s1's last onended.
+  pb.onAudioStart(1, 's2');
+  pb.onAudioChunk(chunkBuffer(2400)); // s2 src2
+  pb.onAudioEnd(1, 's1');
+  pb.audioCtx.sources[0].onended();
+  pb.audioCtx.sources[1].onended();
+  let acks = pb.testClient.sends.filter((m) => m.type === 'sentence_ack');
+  assert.strictEqual(acks.length, 1, 's1 acks while s2 is still scheduled');
+  assert.strictEqual(acks[0].sentence_id, 's1');
+  assert.strictEqual(acks[0].epoch, 1);
+  assert.strictEqual(pb._acceptingAudio, true, 's1 completion does not close s2 chunk gate');
+
+  pb.onAudioEnd(1, 's2');
+  pb.audioCtx.sources[2].onended();
+  acks = pb.testClient.sends.filter((m) => m.type === 'sentence_ack');
+  assert.strictEqual(acks.length, 2, 's2 acks after its own sources end');
+  assert.strictEqual(acks[1].sentence_id, 's2');
+
+  // Duplicate audio_end + extra onended for the same key: still one ack.
+  pb.onAudioEnd(1, 's2');
+  pb.audioCtx.sources[2].onended();
+  acks = pb.testClient.sends.filter((m) => m.type === 'sentence_ack');
+  assert.strictEqual(acks.length, 2, 'duplicate events never double-ack');
+
+  // Ack ordering is observable: each sentence's first onended precedes its
+  // ack entry (a duplicate onended may append after — irrelevant).
+  const trace = pb.trace;
+  assert.ok(trace.indexOf('onended:1:s1') >= 0 &&
+    trace.indexOf('onended:1:s1') < trace.indexOf('ack:1:s1'),
+    's1 onended precedes its ack in the trace');
+  assert.ok(trace.indexOf('onended:1:s2') >= 0 &&
+    trace.indexOf('onended:1:s2') < trace.indexOf('ack:1:s2'),
+    's2 onended precedes its ack in the trace');
+}
+
+// ---------------------------------------------------------------------------
+// 7. Old-epoch late onended must never ack the new sentence (13-11)
+// ---------------------------------------------------------------------------
+{
+  const pb = makePlayback();
+  pb.onTurnStart(1, 1);
+  pb.onAudioStart(1, 's1');
+  pb.onAudioChunk(chunkBuffer(2400));
+  const oldSource = pb.audioCtx.sources[0];
+  // Server-driven epoch change without a stop: the old entry stays behind.
+  pb.onTurnStart(2, 2);
+  pb.onAudioStart(2, 's2');
+  pb.onAudioChunk(chunkBuffer(2400));
+  pb.onAudioEnd(2, 's2');
+  pb.audioCtx.sources[1].onended();
+  let acks = pb.testClient.sends.filter((m) => m.type === 'sentence_ack');
+  assert.strictEqual(acks.length, 1);
+  assert.deepStrictEqual([acks[0].epoch, acks[0].sentence_id], [2, 's2'],
+    'only the new-epoch sentence acks');
+
+  oldSource.onended(); // old epoch's source ends late
+  acks = pb.testClient.sends.filter((m) => m.type === 'sentence_ack');
+  assert.strictEqual(acks.length, 1, 'old-epoch onended acks nothing');
+
+  // audio_end for the OLD epoch is ignored outright (epoch gate).
+  pb.onAudioEnd(1, 's1');
+  assert.strictEqual(pb.testClient.sends.filter((m) => m.type === 'sentence_ack').length, 1,
+    'old-epoch audio_end records no ack');
+}
+
+// ---------------------------------------------------------------------------
+// 8-10. drainNaturally + watchdog (13-11, T-13-24b) — async contract
+// ---------------------------------------------------------------------------
+(async function testDrainContracts() {
+  // 8a. Normal drain: nothing is stopped, resolves after the real last
+  // onended, repeat calls share one promise, post-completion call is instant.
+  {
+    const pb = makePlayback();
+    pb.onTurnStart(1, 1);
+    pb.onAudioStart(1, 's1');
+    pb.onAudioChunk(chunkBuffer(2400));
+    pb.onAudioChunk(chunkBuffer(2400));
+    const p1 = pb.drainNaturally();
+    const p2 = pb.drainNaturally();
+    assert.strictEqual(p1, p2, 'repeat drain calls return the same promise');
+    assert.strictEqual(pb.audioCtx.sources[0].stopped, false, 'drain stops no source');
+    assert.strictEqual(pb.stopNowCalls, 0, 'drain never calls stopNow');
+    pb.audioCtx.sources[0].onended();
+    assert.strictEqual(pb.testClient.sends.filter((m) => m.type === 'sentence_ack').length, 0,
+      'no audio_end seen yet — no ack even after every source ended');
+    pb.onAudioEnd(1, 's1');
+    pb.audioCtx.sources[1].onended();
+    assert.strictEqual(await p1, 'drained', 'drain resolves after the real last onended');
+    assert.ok(pb.trace.indexOf('drain:drained') > pb.trace.lastIndexOf('onended:1:s1'),
+      'drain completion follows the real last onended in the trace');
+    assert.strictEqual(await pb.drainNaturally(), 'drained', 'post-drain call resolves instantly');
+  }
+
+  // 8b. Explicit stopNow mid-drain resolves 'stopped' and stops sources.
+  {
+    const pb = makePlayback();
+    pb.onTurnStart(1, 1);
+    pb.onAudioStart(1, 's1');
+    pb.onAudioChunk(chunkBuffer(2400));
+    const p = pb.drainNaturally();
+    pb.interruptNow();
+    assert.strictEqual(await p, 'stopped', 'explicit cancel resolves stopped');
+    assert.ok(pb.audioCtx.sources[0].stopped, 'mid-drain stopNow stops the source');
+    assert.strictEqual(pb.stopNowCalls, 1);
+  }
+
+  // 9. Watchdog — remaining-schedule derivation with both clamp bounds,
+  // and the timed-out path never records a sentence_ack.
+  {
+    // 9a. Floor clamp (3 s): cursor already behind the audio clock.
+    const timers = new FakeTimers();
+    const pb = makePlayback({ setTimeoutFn: (fn, ms) => timers.setTimeoutFn(fn, ms), clearTimeoutFn: (id) => timers.clearTimeoutFn(id) });
+    pb.onTurnStart(1, 1);
+    pb.onAudioStart(1, 's1');
+    pb.onAudioChunk(chunkBuffer(2400));
+    pb.audioCtx.currentTime = 200; // audio clock ran past the cursor
+    const p = pb.drainNaturally();
+    assert.deepStrictEqual(timers.pendingMs(), [3000],
+      'watchdog = remaining + 3 s, floored at 3 s');
+    timers.fireAll();
+    assert.strictEqual(await p, 'timed_out', 'watchdog resolves timed_out');
+    assert.ok(pb.audioCtx.sources[0].stopped, 'watchdog cleanup stops sources');
+    assert.strictEqual(pb.stopNowCalls, 1, 'watchdog stopNow is counted');
+    assert.strictEqual(pb.testClient.sends.filter((m) => m.type === 'sentence_ack').length, 0,
+      'watchdog path never fakes a sentence_ack');
+    assert.ok(pb.trace.includes('drain:timed_out'));
+
+    // 9b. Ceiling clamp (45 s): 500 chunks = 50 s scheduled ahead.
+    const timers2 = new FakeTimers();
+    const pb2 = makePlayback({
+      setTimeoutFn: (fn, ms) => timers2.setTimeoutFn(fn, ms),
+      clearTimeoutFn: (id) => timers2.clearTimeoutFn(id),
+      tuning: { maxQueuedChunks: 1000 }
+    });
+    pb2.onTurnStart(1, 1);
+    pb2.onAudioStart(1, 's1');
+    for (let i = 0; i < 500; i++) pb2.onAudioChunk(chunkBuffer(2400));
+    pb2.onAudioEnd(1, 's1');
+    const p2 = pb2.drainNaturally();
+    assert.deepStrictEqual(timers2.pendingMs(), [45000],
+      'watchdog derived from 50 s remaining, capped at 45 s');
+    // Before the watchdog: sources are untouched (no stopNow).
+    assert.strictEqual(pb2.stopNowCalls, 0);
+    assert.strictEqual(pb2.audioCtx.sources[0].stopped, false);
+    timers2.fireAll();
+    assert.strictEqual(await p2, 'timed_out');
+    assert.strictEqual(pb2.testClient.sends.filter((m) => m.type === 'sentence_ack').length, 0,
+      'capped watchdog path also never fakes a sentence_ack');
+  }
+
+  console.log('test-rt-playback.js: all assertions passed');
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
