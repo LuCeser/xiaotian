@@ -57,6 +57,22 @@ async function getSession(page) {
   return s;
 }
 
+/**
+ * Session state polled until the mock recorded its terminal close — the
+ * mock pushes 'close' ~50 ms after session_ended, which can race a plain
+ * read issued right after the client hits the ended state.
+ */
+async function getFinalSession(page) {
+  let s = null;
+  await expect
+    .poll(async () => {
+      s = await getSession(page);
+      return s.terminalOrder.length >= 3 ? 'closed' : 'closing';
+    }, { timeout: 15_000 })
+    .toBe('closed');
+  return s;
+}
+
 /** Read-only drain observables from the page (13-11). */
 async function getObserve(page) {
   return page.evaluate(() => window.__rtTutor.observe());
@@ -147,7 +163,7 @@ test('complete classroom runs on a single getUserMedia authorization', async ({ 
     .toBeGreaterThanOrEqual(1);
 
   // Mock-side: exactly 3 lesson_updates, terminal order ack-gated.
-  const s = await getSession(page);
+  const s = await getFinalSession(page);
   expect(s.lessonUpdates).toBe(3);
   expect(s.currentIndex).toBe(3);
   expect(s.lessonCompleteSent).toBe(true);
@@ -165,13 +181,17 @@ test('interrupt during the second announcement bumps the epoch and the lesson st
       { timeout: 20_000 })
     .toBeTruthy();
 
-  // Atomic wait: at least 2 teacher lines are up AND the teacher is
-  // speaking (the second word's announcement is in flight).
+  // Atomic wait: at least 2 teacher lines are up, the teacher is speaking,
+  // AND the client still has sources queued for the current sentence —
+  // with pendingSources > 0 the sentence provably cannot have acked yet,
+  // so the interrupt genuinely cancels in-flight audio (no race with the
+  // DOM's speaking display lagging the audio clock).
   await expect
     .poll(async () => {
       const st = await page.getAttribute('#rt-status', 'data-state');
       const n = await page.locator('#rt-teacher .t-line').count();
-      return n >= 2 && st === 'speaking' ? 'ready' : 'waiting';
+      const obs = await page.evaluate(() => window.__rtTutor.observe());
+      return n >= 2 && st === 'speaking' && obs.pendingSources > 0 ? 'ready' : 'waiting';
     }, { timeout: 30_000 })
     .toBe('ready');
   await page.evaluate(() => window.__rtTutor.interruptNow());
@@ -195,7 +215,7 @@ test('interrupt during the second announcement bumps the epoch and the lesson st
   await expect
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
     .toBe('ended');
-  const s2 = await getSession(page);
+  const s2 = await getFinalSession(page);
   expect(s2.lessonCompleteSent).toBe(true);
   expect(s2.currentIndex).toBe(3);
   expect(s2.lessonUpdates).toBe(3); // an interrupt never skips or advances a word
@@ -282,7 +302,7 @@ test('pause stays paused after the confirmation speech; no-due path ends honestl
   expect(obs.stopNowCalls).toBe(0);
   expect(obs.playbackResourceReleased).toBe(true);
 
-  const s2 = await getSession(page);
+  const s2 = await getFinalSession(page);
   expect(s2.noDueSent).toBe(true);
   expect(s2.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
 });
@@ -356,7 +376,7 @@ test('playback-ack timeout drains with sources queued and releases only after th
 
   // Mock-side: the terminal order carried the timeout error, the ORIGINAL
   // natural reason, and the close — and the summary ack never landed.
-  const s = await getSession(page);
+  const s = await getFinalSession(page);
   expect(s.terminalOrder).toEqual(['timeout_error', 'session_ended', 'close']);
   expect(s.summaryAcked).toBe(false);
   expect(s.lessonCompleteSent).toBe(true);
