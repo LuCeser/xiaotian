@@ -1764,6 +1764,9 @@ func TestIntentPauseAckLeavesClientPaused(t *testing.T) {
 	if !ttPaused(t, tm) {
 		t.Error("classroom pause bit not set")
 	}
+	if _, handle := ttTimerState(tm); handle != nil {
+		t.Error("countdown not suspended by the pause")
+	}
 	if got := s.listeningCount(); got != listeningBefore {
 		t.Errorf("listening broadcasts = %d, want %d (no silent resume after the ack)",
 			got, listeningBefore)
@@ -1793,10 +1796,16 @@ func TestIntentResumeRecognizedWhilePausedAndRearmsAfterAck(t *testing.T) {
 	if !ttPaused(t, tm) {
 		t.Fatal("pause bit not set before the resume turn")
 	}
+	if _, handle := ttTimerState(tm); handle != nil {
+		t.Fatal("countdown not suspended by the pause")
+	}
 	ttRunIntentTurn(t, tm, s, 4) // resume
 
 	if ttPaused(t, tm) {
 		t.Error("pause bit still set after the resume")
+	}
+	if _, handle := ttTimerState(tm); handle == nil {
+		t.Error("countdown not re-armed after the resume ack")
 	}
 	got := ttSentencesSince(t, s, 4)
 	if !contains(got, "还是第 1 个词") || !contains(got, "苹果") {
