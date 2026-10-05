@@ -89,11 +89,28 @@ type TurnManagerConfig struct {
 	// before auto-advancing (0 → 60s default). 13-08 defines the field;
 	// the timer behavior itself lands in 13-09.
 	WordTimeout time.Duration
+	// VADStartGraceMs is the uplink start-grace window in milliseconds
+	// after session_ready (0 → 1000ms default): mic-open transients must
+	// not cut a phantom turn. A real-device calibration value (13-12).
+	VADStartGraceMs int
+	// VADEchoTailMs is the post-ack echo tail in milliseconds (0 → 500ms
+	// default): ordinary uplink stays gated this long after the VALID
+	// playback-completion ack of a teacher announcement. A real-device
+	// calibration value (13-12).
+	VADEchoTailMs int
 }
 
 // defaultWordTimeout is the per-word confirm wait used when
 // TurnManagerConfig.WordTimeout is unset (13-09 arms the timer).
 const defaultWordTimeout = 60 * time.Second
+
+// VAD gating window defaults (milliseconds): the session_ready start grace
+// and the post-ack echo tail. Both are starting values awaiting real-device
+// calibration (13-12) — the WINDOW CONTROL is already ack-driven here.
+const (
+	defaultVADStartGraceMs = 1000
+	defaultVADEchoTailMs   = 500
+)
 
 // Announcement purposes — the playback-completion await behaves differently
 // for ordinary announcements (timeout → orderly close) versus natural
@@ -273,6 +290,19 @@ type TurnManager struct {
 	// wordTimer is the live countdown handle; nil when disarmed.
 	wordTimer *time.Timer
 
+	// --- 13-09 uplink gating windows ---
+
+	// sessionReadyAt stamps when session_ready went out; ordinary uplink is
+	// dropped until the start grace elapses (mic-open transients).
+	sessionReadyAt time.Time
+	// lastPlaybackCompletedAt is the moment the last VALID playback ack
+	// landed. Written ONLY by the ack-driven settle path — never from a
+	// speakTurn return or an audio_end send.
+	lastPlaybackCompletedAt time.Time
+	// echoTailUntil gates ordinary uplink through the echo tail that starts
+	// at the valid playback ack.
+	echoTailUntil time.Time
+
 	// vad is fed from the read loop only (see concurrency note).
 	vad *VAD
 }
@@ -290,6 +320,12 @@ var _ SessionManager = (*TurnManager)(nil)
 func NewTurnManager(asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, exec LessonExecutor, cfg TurnManagerConfig, recorder *EventRecorder, logger infra.Logger) *TurnManager {
 	if cfg.WordTimeout <= 0 {
 		cfg.WordTimeout = defaultWordTimeout
+	}
+	if cfg.VADStartGraceMs <= 0 {
+		cfg.VADStartGraceMs = defaultVADStartGraceMs
+	}
+	if cfg.VADEchoTailMs <= 0 {
+		cfg.VADEchoTailMs = defaultVADEchoTailMs
 	}
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
@@ -432,6 +468,7 @@ func (tm *TurnManager) failLessonInit(s Sender) {
 func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 	tm.mu.Lock()
 	tm.state = StateListening
+	tm.sessionReadyAt = time.Now()
 	tm.mu.Unlock()
 
 	_ = s.SendControl(SessionReadyMsg{
@@ -456,6 +493,7 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
 	tm.mu.Lock()
 	tm.state = StateListening
+	tm.sessionReadyAt = time.Now()
 	tm.mu.Unlock()
 
 	_ = s.SendControl(SessionReadyMsg{
@@ -478,6 +516,7 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson) {
 	tm.mu.Lock()
 	tm.tutor = newDictationTutor(l)
 	tm.state = StateListening
+	tm.sessionReadyAt = time.Now()
 	first := tm.tutor.words[tm.tutor.currentIndex]
 	total := len(tm.tutor.words)
 	tm.mu.Unlock()
@@ -745,24 +784,39 @@ func (tm *TurnManager) Close(Sender) {
 // SessionManager: audio path
 // ---------------------------------------------------------------------------
 
-// IngestAudio is the half-duplex gate (Pattern 3): while the teacher speaks
-// — INCLUDING the playback-pending window from the first audio_start until
-// the valid final ack (TTS completion and audio_end never lift the gate) —
-// uplink audio is dropped and counted. In listening state the VAD segments
-// the stream; each closed utterance starts one turn goroutine. Interrupt
-// control messages always bypass this gate (they travel HandleControl).
+// IngestAudio is the half-duplex gate (Pattern 3) with the 13-09 silence
+// windows. Ordinary uplink is dropped (and counted) while
+//
+//   - the teacher's announcement awaits its valid final playback ack —
+//     from the first audio_start through the ack; TTS send completion and
+//     audio_end NEVER lift this gate;
+//   - the echo tail runs — VADEchoTailMs after the valid ack
+//     (lastPlaybackCompletedAt is set by that ack and ONLY by it);
+//   - the start grace runs — VADStartGraceMs after session_ready
+//     (mic-open transients must not cut a phantom turn);
+//   - the session is not in listening (voice state; the classroom pause bit
+//     is an overlay on the client-effective state and does not gate uplink —
+//     the resume command must be recognizable while paused).
+//
+// Interrupt control messages always bypass this gate (they travel
+// HandleControl and are honored immediately).
 func (tm *TurnManager) IngestAudio(s Sender, data []byte) {
 	tm.mu.Lock()
+	now := time.Now()
+	ordinaryGated := tm.playbackPending || now.Before(tm.echoTailUntil) ||
+		(!tm.sessionReadyAt.IsZero() &&
+			now.Sub(tm.sessionReadyAt) < time.Duration(tm.cfg.VADStartGraceMs)*time.Millisecond)
 	state := tm.state
-	tm.mu.Unlock()
-	if state != StateListening {
-		tm.mu.Lock()
+	closed := tm.closed
+	if ordinaryGated || state != StateListening || closed {
 		tm.droppedUplink++
-		tm.mu.Unlock()
+	}
+	tm.mu.Unlock()
+	if ordinaryGated || state != StateListening || closed {
 		return
 	}
-	segment, closed := tm.vad.Feed(data)
-	if !closed {
+	segment, segClosed := tm.vad.Feed(data)
+	if !segClosed {
 		return
 	}
 	// Utterances shorter than two frames (60 ms) are nose breaths, not
@@ -799,6 +853,7 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateProcessing})
 	_ = s.SendControl(TurnStartMsg{Type: TypeTurnStart, TurnID: turnID, Epoch: epoch})
 
+	attempts := 1
 	transcript, err := tm.asr.Transcribe(ctx, segment)
 	if errors.Is(err, mimo.ErrEmptyTranscription) {
 		// The provider's legitimate "nothing spoken" answer (13-07 sentinel):
@@ -809,8 +864,15 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		tm.settleListening(s)
 		return
 	}
+	if err != nil && errors.Is(err, mimo.ErrInvalidResponse) {
+		// The ASR half of the invalid-response discipline (13-08 built the
+		// LLM half): same ctx, at most ONE retry; the failure count lands
+		// in the event fields when it still fails.
+		attempts = 2
+		transcript, err = tm.asr.Transcribe(ctx, segment)
+	}
 	if err != nil {
-		tm.failTurn(s, epoch, ErrCodeProviderFailed, "语音识别失败，请再对我说一遍")
+		tm.failTurn(s, epoch, ErrCodeProviderFailed, "语音识别失败，请再对我说一遍", infra.F("attempts", attempts))
 		return
 	}
 	if transcript == "" {
@@ -1195,9 +1257,11 @@ func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpos
 }
 
 // settleListening returns the FSM to listening after a valid final ack —
-// the ONLY place an announcement hands control back. The broadcast carries
-// the EFFECTIVE client state: while the classroom pause bit holds, the
-// student sees paused, never a silent resume to listening (13-09).
+// the ONLY place an announcement hands control back, and the ONLY place the
+// echo tail starts: lastPlaybackCompletedAt is stamped here and ordinary
+// uplink stays gated through VADEchoTailMs. The broadcast carries the
+// EFFECTIVE client state: while the classroom pause bit holds, the student
+// sees paused, never a silent resume to listening (13-09).
 func (tm *TurnManager) settleListening(s Sender) {
 	tm.mu.Lock()
 	if tm.state == "" || tm.closed {
@@ -1206,6 +1270,9 @@ func (tm *TurnManager) settleListening(s Sender) {
 	}
 	tm.state = StateListening
 	tm.playbackPending = false
+	now := time.Now()
+	tm.lastPlaybackCompletedAt = now
+	tm.echoTailUntil = now.Add(time.Duration(tm.cfg.VADEchoTailMs) * time.Millisecond)
 	value := tm.effectiveClientStateLocked()
 	tm.mu.Unlock()
 	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
@@ -1214,12 +1281,13 @@ func (tm *TurnManager) settleListening(s Sender) {
 // failTurn reports a turn-level failure and returns the FSM to listening —
 // but only if the turn is still current: an interrupted turn must not emit a
 // spurious error on top of the interrupt ack. Any playback waits the failed
-// announcement left behind are invalidated.
-func (tm *TurnManager) failTurn(s Sender, epoch uint64, code, message string) {
+// announcement left behind are invalidated. Optional fields ride the error
+// event (e.g. the retry-attempts count of the invalid-response discipline).
+func (tm *TurnManager) failTurn(s Sender, epoch uint64, code, message string, fields ...infra.Field) {
 	if !tm.epochCurrent(epoch) {
 		return
 	}
-	tm.sendError(s, code, message, true)
+	tm.sendError(s, code, message, true, fields...)
 	tm.mu.Lock()
 	for _, p := range tm.pendingPlayback {
 		p.cancelWait()
@@ -1232,10 +1300,15 @@ func (tm *TurnManager) failTurn(s Sender, epoch uint64, code, message string) {
 	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
 }
 
-// sendError is the single error egress: coded ErrorMsg + error event.
-func (tm *TurnManager) sendError(s Sender, code, message string, recoverable bool) {
+// sendError is the single error egress: coded ErrorMsg + error event. The
+// optional fields are desensitized event annotations only (attempts, codes)
+// — never transcript text (T-13-06b).
+func (tm *TurnManager) sendError(s Sender, code, message string, recoverable bool, fields ...infra.Field) {
 	_ = s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: recoverable})
-	tm.recorder.Emit(EventError, infra.F("code", code))
+	all := make([]infra.Field, 0, 1+len(fields))
+	all = append(all, infra.F("code", code))
+	all = append(all, fields...)
+	tm.recorder.Emit(EventError, all...)
 }
 
 // ---------------------------------------------------------------------------

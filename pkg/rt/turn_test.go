@@ -2206,3 +2206,353 @@ func TestTimeoutConfirmRaceTimeoutWins(t *testing.T) {
 		t.Errorf("advance calls = %d, want 2 (the replay still hits the executor)", exec.advanceCount())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 13-09 Task 3: uplink silence windows + ASR tolerance/retry
+// (TestVAD*, TestASR*, TestPlaybackPending*, TestPausedStillRecognizes*)
+// ---------------------------------------------------------------------------
+
+// ttUtterance is one VAD-closable utterance burst: 300ms speech + 900ms
+// silence (hangover 700ms closes it).
+func ttUtterance() []byte {
+	return append(vadSine(12000, 300), vadSilence(900)...)
+}
+
+// TestVADStartGraceSuppressesEarlyAudio: uplink inside the session_ready
+// start grace is dropped before the VAD — a mic-open transient can never
+// cut a phantom turn; the same utterance goes through once it lapses.
+func TestVADStartGraceSuppressesEarlyAudio(t *testing.T) {
+	cards := ttCards("苹果")
+	log := &captureLogger{}
+	asr := newFakeASR(asrScript{text: "好了"})
+	tm := NewTurnManager(asr, newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID),
+		ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) {
+			c.VADStartGraceMs = 10 * 1000 // 10s: stays active for the whole test
+			c.VADEchoTailMs = 1
+		}), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s) // the 1ms tail lapses; the 10s grace holds
+
+	tm.IngestAudio(s, ttUtterance())
+	tm.IngestAudio(s, ttUtterance())
+	time.Sleep(100 * time.Millisecond)
+	if got := len(asr.fedBytes); got != 0 {
+		t.Fatalf("asr calls during the start grace = %d, want 0", got)
+	}
+
+	// Once the grace lapses (faked clock), the same utterance goes through.
+	tm.mu.Lock()
+	tm.sessionReadyAt = time.Now().Add(-11 * time.Second)
+	tm.mu.Unlock()
+	tm.IngestAudio(s, ttUtterance())
+	if !waitFor(t, 5*time.Second, func() bool { return len(asr.fedBytes) == 1 }) {
+		t.Fatalf("asr calls after the grace = %d, want 1", len(asr.fedBytes))
+	}
+}
+
+// TestVADEchoTailStartsAtPlaybackAck: a delayed ack keeps gating ordinary
+// VAD; the valid ack starts the echo tail which keeps gating for its
+// window; only after the tail lapses does ordinary uplink reach the ASR.
+// lastPlaybackCompletedAt is stamped by the ack path and ONLY by it.
+func TestVADEchoTailStartsAtPlaybackAck(t *testing.T) {
+	cards := ttCards("苹果")
+	log := &captureLogger{}
+	asr := newFakeASR(asrScript{text: "好了"})
+	tm := NewTurnManager(asr, newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID),
+		ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) {
+			c.VADStartGraceMs = 1
+			c.VADEchoTailMs = 400
+		}), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+
+	// Fully spoken (audio_end out), NOT acked: still gated.
+	ttAwaitSpoken(t, s, 3)
+	tm.IngestAudio(s, ttUtterance())
+	time.Sleep(50 * time.Millisecond)
+	if got := len(asr.fedBytes); got != 0 {
+		t.Fatalf("asr calls during playback-pending = %d, want 0", got)
+	}
+
+	// The valid ack lands: listening, but the echo tail keeps gating.
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+	tm.IngestAudio(s, ttUtterance())
+	time.Sleep(50 * time.Millisecond)
+	if got := len(asr.fedBytes); got != 0 {
+		t.Fatalf("asr calls during the echo tail = %d, want 0", got)
+	}
+
+	// Tail lapsed (faked clock): the same utterance goes through.
+	tm.mu.Lock()
+	tm.echoTailUntil = time.Now().Add(-time.Millisecond)
+	tm.mu.Unlock()
+	tm.IngestAudio(s, ttUtterance())
+	if !waitFor(t, 5*time.Second, func() bool { return len(asr.fedBytes) == 1 }) {
+		t.Fatalf("asr calls after the tail = %d, want 1", len(asr.fedBytes))
+	}
+	tm.mu.Lock()
+	stamped := !tm.lastPlaybackCompletedAt.IsZero()
+	tm.mu.Unlock()
+	if !stamped {
+		t.Error("lastPlaybackCompletedAt never stamped by the ack path")
+	}
+}
+
+// TestVADEchoTailRejectsStaleAck: a stale-epoch ack is rejected with zero
+// side effects — the playback gate holds, no tail starts, no listening
+// broadcast, and ordinary uplink stays dropped.
+func TestVADEchoTailRejectsStaleAck(t *testing.T) {
+	cards := ttCards("苹果")
+	log := &captureLogger{}
+	asr := newFakeASR(asrScript{text: "好了"})
+	tm := NewTurnManager(asr, newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID),
+		ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) {
+			c.VADStartGraceMs = 1
+			c.VADEchoTailMs = 400
+		}), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+
+	tm.HandleControl(s, mustJSON(t, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: "t1-s0", Epoch: 9}))
+	time.Sleep(50 * time.Millisecond)
+
+	tm.mu.Lock()
+	pending := tm.playbackPending
+	tailZero := tm.echoTailUntil.IsZero()
+	tm.mu.Unlock()
+	if !pending {
+		t.Error("stale ack cleared the playback gate")
+	}
+	if !tailZero {
+		t.Error("stale ack started the echo tail")
+	}
+	if s.listeningCount() != 0 {
+		t.Error("stale ack restored listening")
+	}
+	tm.IngestAudio(s, ttUtterance())
+	time.Sleep(50 * time.Millisecond)
+	if got := len(asr.fedBytes); got != 0 {
+		t.Errorf("asr calls after a stale ack = %d, want 0", got)
+	}
+}
+
+// TestPlaybackPendingInterruptStillImmediate: while ordinary uplink is
+// gated by the playback window, an interrupt control message is honored
+// immediately — it cancels the announcement and lifts the gate for real
+// utterances.
+func TestPlaybackPendingInterruptStillImmediate(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR(asrScript{text: "你好"})
+	llm := newFakeLLM(intentScript(intentChat, "好的，听我说。"))
+	tts := newFakeTTS(1, 320)
+	tm := NewTurnManager(asr, llm, tts, newFakeExecutorNoRow(ttLessonID),
+		ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) {
+			c.VADStartGraceMs = 1
+			c.VADEchoTailMs = 1
+		}), nil, nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	tts.streamUntilCancel = true // only the CHAT reply streams forever
+	tts.delay = 50 * time.Millisecond
+
+	base := s.audioCount()
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	if !waitFor(t, 5*time.Second, func() bool { return s.audioCount() >= base+1 }) {
+		t.Fatal("teacher never started speaking")
+	}
+
+	// Ordinary uplink during the playback window: dropped.
+	tm.IngestAudio(s, ttUtterance())
+	time.Sleep(50 * time.Millisecond)
+
+	// The interrupt is immediate despite the gate.
+	tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the interrupt did not take effect promptly")
+	}
+	if s.countOf(TypeInterruptAck) != 1 {
+		t.Errorf("interrupt_ack = %d, want 1", s.countOf(TypeInterruptAck))
+	}
+
+	// With the gate lifted, a real utterance reaches the ASR (the gated
+	// burst above was never transcribed).
+	tm.IngestAudio(s, ttUtterance())
+	if !waitFor(t, 5*time.Second, func() bool { return len(asr.fedBytes) == 1 }) {
+		t.Fatalf("asr calls after the interrupt = %d, want 1", len(asr.fedBytes))
+	}
+}
+
+// TestPlaybackPendingTimeoutIsVisibleNoTimerAdvance: an ordinary
+// announcement whose ack never arrives degrades VISIBLY inside the bounded
+// wait (ErrorMsg(playback_ack_timeout)) and orderly-closes — it never
+// stamps a playback completion, never starts the echo tail, never arms or
+// re-arms the countdown, and never advances a word.
+func TestPlaybackPendingTimeoutIsVisibleNoTimerAdvance(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{text: "你好"})
+	llm := newFakeLLM(intentScript(intentChat, "这是一句普通的回复。"))
+	tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+	gen0, _ := ttTimerState(tm) // armed by the greeting ack, 60s: silent
+	tm.mu.Lock()
+	last0, tail0 := tm.lastPlaybackCompletedAt, tm.echoTailUntil
+	tm.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > 3 }) {
+		t.Fatal("the reply announcement never spoke")
+	}
+	// No ack is ever sent: the bounded wait (min 3s) must expire in budget.
+	if !waitFor(t, 10*time.Second, func() bool {
+		for _, e := range s.controlsOf(t, TypeError) {
+			if e["code"] == ErrCodePlaybackAckTimeout {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("playback_ack_timeout never went out for the ordinary announcement")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn goroutine never returned after the ack timeout")
+	}
+
+	tm.mu.Lock()
+	closed := tm.closed
+	gen1, h1 := tm.timerGen, tm.wordTimer
+	last1, tail1 := tm.lastPlaybackCompletedAt, tm.echoTailUntil
+	tm.mu.Unlock()
+	if !closed {
+		t.Error("session not orderly closed after the ack timeout")
+	}
+	if h1 != nil || gen1 != gen0+1 {
+		// The orderly close STOPS the countdown (one generation bump, handle
+		// dropped); nothing may have re-armed it.
+		t.Errorf("countdown after the timeout: gen %d→%d handle-nil=%v, want exactly the close's stop bump",
+			gen0, gen1, h1 == nil)
+	}
+	if !last1.Equal(last0) || !tail1.Equal(tail0) {
+		t.Error("a fabricated playback completion (tail/lastPlaybackCompletedAt moved) after the timeout")
+	}
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0", exec.advanceCount())
+	}
+	if ttEventCount(t, log, EventWordAdvanced) != 0 || ttEventCount(t, log, EventTimeoutFired) != 0 {
+		t.Error("word_advanced/timeout_fired emitted for a timed-out announcement")
+	}
+}
+
+// TestASREmptyTranscriptionSilentlyIgnoredAndTimerUnchanged: an ASR empty
+// transcription is zero-user-visible-fault silence — no error message, no
+// classification, no teacher response, no advance, listening restored, and
+// the countdown untouched.
+func TestASREmptyTranscriptionSilentlyIgnoredAndTimerUnchanged(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{err: mimo.ErrEmptyTranscription})
+	llm := newFakeLLM(intentScript(intentChat, "不应该被调用"))
+	tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+	gen0, h0 := ttTimerState(tm)
+	listeningBefore := s.listeningCount()
+
+	tm.processTurn(s, []byte("pcm"))
+
+	if llm.callCount() != 0 {
+		t.Errorf("classification calls = %d, want 0 (nothing was said)", llm.callCount())
+	}
+	if got := s.countOf(TypeTeacherSentence); got != 3 {
+		t.Errorf("teacher sentences = %d, want 3 (greeting only; no response turn)", got)
+	}
+	if got := s.listeningCount(); got <= listeningBefore {
+		t.Error("listening not restored after the empty transcription")
+	}
+	if got := s.controlsOf(t, TypeError); len(got) != 0 {
+		t.Errorf("user-visible errors = %v, want none", got)
+	}
+	if ttEventCount(t, log, EventError) != 0 {
+		t.Error("error event emitted for a legal empty transcription")
+	}
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0", exec.advanceCount())
+	}
+	gen1, h1 := ttTimerState(tm)
+	if gen1 != gen0 || h1 != h0 {
+		t.Error("the countdown was disturbed by an empty transcription")
+	}
+}
+
+// TestASRInvalidResponseRetriedOnce: a corrupted ASR response is retried
+// EXACTLY once on the same ctx; the recovered transcription proceeds
+// through classification normally — no visible failure on the success path.
+func TestASRInvalidResponseRetriedOnce(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR(asrScript{err: mimo.ErrInvalidResponse}, asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+
+	ttRunIntentTurn(t, tm, s, 3)
+
+	if len(asr.fedBytes) != 2 {
+		t.Errorf("asr calls = %d, want 2 (exactly one retry)", len(asr.fedBytes))
+	}
+	if llm.callCount() != 1 {
+		t.Errorf("classification calls = %d, want 1", llm.callCount())
+	}
+	if s.countOf(TypeLessonUpdate) != 1 {
+		t.Errorf("lesson_update = %d, want 1 (the retry recovered the confirm)", s.countOf(TypeLessonUpdate))
+	}
+	if exec.advanceCount() != 1 {
+		t.Errorf("advance calls = %d, want 1", exec.advanceCount())
+	}
+	if ttEventCount(t, log, EventError) != 0 {
+		t.Error("error event emitted on the recovered path")
+	}
+}
+
+// TestPausedStillRecognizesResumeThroughRealProcessTurn: while the
+// classroom pause bit holds, a student utterance still enters through the
+// REAL processTurn (uplink is not gated by the pause overlay), the resume
+// intent is recognized, and the classroom un-pauses with the same word
+// position.
+func TestPausedStillRecognizesResumeThroughRealProcessTurn(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{text: "休息一下"}, asrScript{text: "老师我们继续吧"})
+	llm := newFakeLLM(intentScript(intentPause, ""), intentScript(intentResume, ""))
+	tm, s, _, _ := ttIntentFixture(t, cards, asr, llm)
+
+	ttRunIntentTurn(t, tm, s, 3) // pause
+	if !ttPaused(t, tm) {
+		t.Fatal("pause bit not set before the resume utterance")
+	}
+
+	ttRunIntentTurn(t, tm, s, 4) // resume through the real processTurn
+
+	if ttPaused(t, tm) {
+		t.Error("classroom still paused after the recognized resume")
+	}
+	if got := ttSentencesSince(t, s, 4); !contains(got, "还是第 1 个词") || !contains(got, "苹果") {
+		t.Errorf("resume ack = %q, want the same word position", got)
+	}
+	if s.listeningCount() == 0 {
+		t.Error("listening not restored after the resume ack")
+	}
+}

@@ -32,8 +32,11 @@ func itServer(t *testing.T, asr ASRProvider, llm LLMProvider, tts TTSSynthesizer
 	t.Helper()
 	h, err := NewHandler(
 		ServerConfig{
-			AllowedOrigins:    []string{itOrigin},
-			HeartbeatInterval: 50 * time.Millisecond,
+			AllowedOrigins: []string{itOrigin},
+			// Default 30s cadence: the harness sleeps through the 13-09
+			// gating lead-ins without reading, and an aggressive test
+			// heartbeat would kill the connection for missing pongs.
+			HeartbeatInterval: 30 * time.Second,
 		},
 		func() SessionManager {
 			return NewTurnManager(asr, llm, tts, exec,
@@ -146,10 +149,20 @@ func itSendText(t *testing.T, conn *websocket.Conn, v any) {
 	}
 }
 
+// itUtteranceLeadIn is the pause before an utterance burst: a real child
+// starts speaking only after the teacher finished (the echo tail has run)
+// and outside the mic-open start grace. The harness bursts all frames at
+// wire speed, so the lead-in must cover the 13-09 gating windows (start
+// grace 1000ms after session_ready + greeting, echo tail 500ms after the
+// last ack) — otherwise the WHOLE utterance lands inside a window and is
+// dropped by the very gate under test.
+const itUtteranceLeadIn = 1400 * time.Millisecond
+
 // itSendUtterance writes one loud-speech + silence sequence that closes a
 // VAD segment (one turn).
 func itSendUtterance(t *testing.T, conn *websocket.Conn) {
 	t.Helper()
+	time.Sleep(itUtteranceLeadIn)
 	loud := vadSine(12000, 30)
 	quiet := vadSilence(30)
 	for i := 0; i < 50; i++ { // 1.5 s of speech
@@ -434,6 +447,85 @@ func TestDictationOverConnInterruptMidAnnouncement(t *testing.T) {
 	}
 	if lu.Version != 2 || lu.CurrentIndex != 1 {
 		t.Errorf("lesson_update = %+v, want version 2 index 1 (lesson advanced after the interrupt)", lu)
+	}
+	itAnnounceAck(t, conn) // settle the next-word announcement
+}
+
+// TestDictationOverConnEarlyNoiseDoesNotStartTurn: a burst of high-energy
+// PCM fired immediately after session_ready lands inside the 13-09 start
+// grace (and the greeting's playback gate) — the server cuts NO phantom
+// turn (no turn_start, no extra teacher sentence), and the normal confirm
+// flow still works afterwards.
+func TestDictationOverConnEarlyNoiseDoesNotStartTurn(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	exec := newFakeExecutorNoRow("it-lesson")
+	asr := newFakeASR(asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tts := newFakeTTS(2, 320)
+	tts.delay = 20 * time.Millisecond
+	srv := itServer(t, asr, llm, tts, exec, words)
+	conn := itDial(t, srv)
+
+	itInit(t, conn)
+
+	// ~500ms of loud synthetic PCM, sent at burst speed right after ready.
+	noise := vadSine(12000, 30)
+	for i := 0; i < 17; i++ {
+		if err := conn.WriteMessage(websocket.BinaryMessage, noise); err != nil {
+			t.Fatalf("write noise: %v", err)
+		}
+	}
+
+	// Read through the greeting while tallying: only the greeting's three
+	// sentences may appear, and no turn_start may exist.
+	sentences, turnStarts := 0, 0
+	settled := false
+	deadline := time.Now().Add(15 * time.Second)
+	for !settled {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatal("greeting never settled to listening")
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(remaining))
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("greeting read: %v", err)
+		}
+		m := itProbe(mt, data)
+		switch m.typ {
+		case TypeTeacherSentence:
+			sentences++
+		case TypeTurnStart:
+			turnStarts++
+		case TypeAudioEnd:
+			var ae AudioEndMsg
+			_ = json.Unmarshal(data, &ae)
+			itSendText(t, conn, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: ae.SentenceID, Epoch: ae.Epoch})
+		case TypeState:
+			var sm StateMsg
+			_ = json.Unmarshal(data, &sm)
+			if sm.Value == StateListening {
+				settled = true
+			}
+		}
+	}
+	if turnStarts != 0 {
+		t.Errorf("turn_start during the noise window = %d, want 0 (the grace suppressed the phantom turn)", turnStarts)
+	}
+	if sentences != 3 {
+		t.Errorf("teacher sentences = %d, want exactly the greeting's 3", sentences)
+	}
+
+	// The classroom still works: a normal utterance confirms word 1.
+	itSendUtterance(t, conn)
+	upd := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeLessonUpdate })
+	var lu LessonUpdateMsg
+	if err := json.Unmarshal(upd.raw, &lu); err != nil {
+		t.Fatalf("lesson_update decode: %v", err)
+	}
+	if lu.Version != 2 || lu.CurrentIndex != 1 {
+		t.Errorf("lesson_update = %+v, want version 2 index 1 (normal flow after the noise)", lu)
 	}
 	itAnnounceAck(t, conn) // settle the next-word announcement
 }

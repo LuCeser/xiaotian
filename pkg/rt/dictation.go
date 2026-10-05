@@ -667,7 +667,10 @@ func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, targ
 	}
 	if !ok {
 		intent, reply = intentChat, classifyFallbackReply
-		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+		// The LLM half of the invalid-response discipline: exactly one
+		// correction retry, then the deterministic spoken fallback — the
+		// failure count rides the event fields like the ASR half's does.
+		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("attempts", 2))
 	}
 	// Desensitization boundary (T-13-06b): the intent label only — never
 	// the transcript text — reaches the event stream.
