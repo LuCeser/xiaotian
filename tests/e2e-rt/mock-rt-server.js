@@ -539,7 +539,7 @@ wss.on('connection', (ws, req, query) => {
         if (pending && pending.epoch === msg.epoch && pending.sentence_id === msg.sentence_id) {
           state.pendingTerminal = null;
           state.summaryAcked = true;
-          state.terminalOrder.push('summary_ack');
+          state.terminalOrder.push('terminal_ack');
           fireNaturalEnd(pending.reason);
         }
         break;
