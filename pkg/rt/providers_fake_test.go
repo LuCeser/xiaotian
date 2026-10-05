@@ -8,11 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 )
 
@@ -478,4 +480,85 @@ func TestFakesTTSStreamUntilCancel(t *testing.T) {
 	if res.ChunkCount != gotN {
 		t.Errorf("result chunk count = %d, want %d", res.ChunkCount, gotN)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// fakeWordSource (13-08 dictation FSM)
+// ---------------------------------------------------------------------------
+
+// fakeWordSource is the scripted WordSource: each FetchDueWords call pops
+// the next due batch (empty batch = the no-due ending); SubmitReview
+// records every submission and answers with the scripted result/error.
+type fakeWordSource struct {
+	mu           sync.Mutex
+	due          [][]lesson.Word
+	fetchErr     error
+	fetchCalls   int
+	reviewErr    error
+	reviewResult ReviewWriteResult
+	submitCalls  []map[string]string
+}
+
+func newFakeWords(due ...[]lesson.Word) *fakeWordSource {
+	return &fakeWordSource{due: append([][]lesson.Word(nil), due...)}
+}
+
+// FetchDueWords implements WordSource.
+func (f *fakeWordSource) FetchDueWords(_ context.Context, limit int) ([]lesson.Word, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fetchCalls++
+	if f.fetchErr != nil {
+		return nil, f.fetchErr
+	}
+	if len(f.due) == 0 {
+		return nil, nil
+	}
+	head := f.due[0]
+	f.due = f.due[1:]
+	if limit > 0 && len(head) > limit {
+		head = head[:limit]
+	}
+	return append([]lesson.Word(nil), head...), nil
+}
+
+// SubmitReview implements WordSource.
+func (f *fakeWordSource) SubmitReview(_ context.Context, results map[string]string) (ReviewWriteResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.submitCalls = append(f.submitCalls, results)
+	if f.reviewErr != nil {
+		return ReviewWriteResult{}, f.reviewErr
+	}
+	return f.reviewResult, nil
+}
+
+func (f *fakeWordSource) fetchCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fetchCalls
+}
+
+func (f *fakeWordSource) submissions() []map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]string(nil), f.submitCalls...)
+}
+
+// intentScript builds one classification ChatResponse carrying the strict
+// {"intent":...,"reply":...} JSON as its content.
+func intentScript(intent, reply string) llmScript {
+	payload, _ := json.Marshal(map[string]string{"intent": intent, "reply": reply})
+	wire := `{"choices":[{"index":0,"message":{"role":"assistant","content":` + strconv.Quote(string(payload)) + `}}]}`
+	return llmScript{wire: wire}
+}
+
+// ttCards builds the standard test cards (meaning/example filled so the
+// ground-truth injection path is exercised).
+func ttCards(words ...string) []lesson.Word {
+	cards := make([]lesson.Word, 0, len(words))
+	for _, w := range words {
+		cards = append(cards, lesson.Word{Word: w, Meaning: "释义-" + w, Example: "例句-" + w})
+	}
+	return cards
 }

@@ -132,6 +132,13 @@ func (t *LessonTools) EnsureLesson(ctx context.Context, lessonID string, words [
 	return t.store.EnsureLesson(ctx, lessonID, words)
 }
 
+// EnsureLessonCards creates the lesson row carrying word cards if absent
+// (first content wins). A legacy row with empty cards is NOT backfilled —
+// the 13-08 FSM detects that state and answers lesson_unavailable.
+func (t *LessonTools) EnsureLessonCards(ctx context.Context, lessonID string, cards []lesson.Word) (lesson.Lesson, error) {
+	return t.store.EnsureLessonCards(ctx, lessonID, cards)
+}
+
 // GetLessonState returns the current lesson row (get_lesson_state tool).
 func (t *LessonTools) GetLessonState(ctx context.Context, lessonID string) (lesson.Lesson, error) {
 	return t.exec.GetLessonState(ctx, lessonID)
@@ -152,6 +159,7 @@ var _ LessonExecutor = (*LessonTools)(nil)
 // stops compiling instead of failing at wiring time.
 var (
 	_ func(*lesson.Store, context.Context, string, []string) (lesson.Lesson, error) = (*lesson.Store).EnsureLesson
+	_ func(*lesson.Store, context.Context, string, []lesson.Word) (lesson.Lesson, error) = (*lesson.Store).EnsureLessonCards
 	_ func(*lesson.Executor, context.Context, string) (lesson.Lesson, error)        = (*lesson.Executor).GetLessonState
 	_ func(*lesson.Executor, context.Context, string, int, string) (lesson.AdvanceResult, error) = (*lesson.Executor).AdvanceWord
 )

@@ -562,10 +562,10 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			HeartbeatInterval: cfg.RT.HeartbeatInterval,
 		}
 		rtTurnCfg := rt.TurnManagerConfig{
-			LessonID:        cfg.RT.LessonID,
-			LessonWords:     cfg.RT.LessonWords,
-			MaxToolLoops:    3,
-			HistoryMaxTurns: 20,
+			LessonID: cfg.RT.LessonID,
+			// Words (the PyFSRS due-word adapter) is injected by 13-10;
+			// until then session_init honestly answers lesson_unavailable.
+			// The infra RTConfig.LessonWords key is untouched by 13-08.
 		}
 		rtHandler, err := rt.NewHandler(rtServerCfg, func() rt.SessionManager {
 			// Per-connection factory: one TurnManager + one EventRecorder per

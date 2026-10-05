@@ -21,10 +21,6 @@ const (
 	EventSpeechStarted = "speech_started"
 	// EventSpeechEnded: VAD closed an utterance (server).
 	EventSpeechEnded = "speech_ended"
-	// EventToolStart: lesson tool execution began (server).
-	EventToolStart = "tool_start"
-	// EventToolEnd: lesson tool execution finished (server).
-	EventToolEnd = "tool_end"
 	// EventFirstAudioReceived: first TTS chunk of a turn arrived from the
 	// provider (server side of the RT-04 sentence-end→first-audio path).
 	EventFirstAudioReceived = "first_audio_received"
@@ -33,8 +29,29 @@ const (
 	// the constant name records that this is the handled-acknowledgement
 	// event, not the client's interrupt_start detection.
 	EventInterruptHandled = "interrupt"
-	// EventLessonVersion: a lesson-state write committed (new version).
-	EventLessonVersion = "lesson_version"
+	// EventWordAnnounced: the teacher announced a word and the client
+	// confirmed actual playback of that announcement (13-08 FSM).
+	EventWordAnnounced = "word_announced"
+	// EventWordAdvanced: the FIRST commit of one advance_word landed
+	// (13-08); idempotent replays and version conflicts never emit it.
+	EventWordAdvanced = "word_advanced"
+	// EventIntentClassified: the classification Chat produced a whitelisted
+	// intent (13-08). Fields carry the intent label only — never the
+	// transcript text (T-13-06b boundary).
+	EventIntentClassified = "intent_classified"
+	// EventLessonComplete: the lesson's natural completion sequence ran
+	// (summary played/acknowledged or degraded, session ended).
+	EventLessonComplete = "lesson_complete"
+	// EventReviewWritten: the review write returned; fields carry the real
+	// requested/updated/missing counts (13-08 honest completion).
+	EventReviewWritten = "review_written"
+	// EventPlaybackAckTimeout: the bounded wait for a playback-completion
+	// ack expired (13-08); fields carry the purpose and the waited ms.
+	EventPlaybackAckTimeout = "playback_ack_timeout"
+	// EventSentenceAckRejected: a sentence_ack was rejected (empty id,
+	// unknown/stale, or duplicate) — sanitized diagnostic only, zero state
+	// side effects (T-13-15b).
+	EventSentenceAckRejected = "sentence_ack_rejected"
 	// EventSessionEnd: session released (explicit end, idle, or failure).
 	EventSessionEnd = "session_end"
 	// EventError: a visible failure occurred (RT-10 evidence).

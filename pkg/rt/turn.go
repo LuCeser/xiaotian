@@ -1,20 +1,34 @@
-// turn.go — the per-connection turn manager (13-04 Task 2): the single
-// owner of session state on top of the /rt transport.
+// turn.go — the per-connection turn manager (13-04 Task 2; pipeline
+// re-arranged by the 13-08 dictation pivot): the single owner of session
+// state on top of the /rt transport.
 //
 // Responsibilities (CONTEXT locked decisions, all landed here):
-//   - Turn FSM: listening → processing → speaking → listening.
+//   - Dictation FSM: the server owns classroom pacing. session_init fetches
+//     due words, establishes the lesson row, answers session_ready and the
+//     teacher speaks the opening (word announcement included) immediately —
+//     zero LLM calls on that path (first-greeting defect fix, RT-04).
+//   - Per-turn pipeline: VAD → ASR → intent classification (one Chat call,
+//     strict JSON) → FSM dispatch → speakTurn announcement.
+//   - Advance path: the immutable TurnTarget captured at classification
+//     start feeds AdvanceWord's idempotency key + optimistic lock; first
+//     commit / idempotent replay / version conflict are mutually exclusive
+//     branches (T-13-15c) — only the first commit records the outcome,
+//     sends lesson_update, and narrates the next word or the completion.
 //   - Epoch cancellation: a monotonic counter; interrupt bumps it, cancels
-//     the in-flight provider context, and every late TTS chunk / tool-loop
-//     hop that observes a stale epoch is discarded (Pitfall 4). Cancelling
-//     speech NEVER rolls back an already-committed advance_word.
-//   - MiMo tool loop: execute tools FIRST, feed results back as role:"tool",
-//     and only then speak the final confirmation (先执行后播报).
+//     the in-flight provider context, invalidates every old-epoch playback
+//     wait, and trims the FSM short-history deque to what was actually
+//     heard (Pitfall 9). Cancelling speech NEVER rolls back an
+//     already-committed advance_word.
 //   - Sentence-streamed TTS: subtitles first, audio chunks forwarded the
-//     moment they arrive (收即播). Audio bytes crossing this layer are
-//     already bare s16le PCM (AudioChunkFunc); the MiMo wire's encoded-chunk
-//     decoding belongs to the 13-06 MimoTTS adapter alone (review M-1).
-//   - History trimmed to what the student actually heard (Pitfall 9),
-//     never touching the turn's tool_calls/role:"tool" records (review M-2).
+//     moment they arrive (收即播). Bare s16le PCM crosses this layer
+//     (AudioChunkFunc); the MiMo wire's encoded-chunk decoding belongs to
+//     the 13-06 MimoTTS adapter alone (review M-1).
+//   - Playback-completion gating: every sentence registers a pending entry
+//     BEFORE its audio_start is queued; the FSM stays speaking (ordinary
+//     uplink gated) until the sentence_ack matching the final sentence
+//     arrives (T-13-15b). A bounded wait (3..45s from the outstanding
+//     scheduled PCM) degrades via ErrorMsg(playback_ack_timeout) — never a
+//     fabricated completion (protocol.go sequencing contract).
 //   - Half-duplex gating: uplink audio is dropped while the teacher speaks
 //     (Pattern 3 — echo countermeasure); interrupts travel the client
 //     control channel only.
@@ -22,134 +36,185 @@ package rt
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pkg/errors"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
-	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 )
 
-// ErrStaleEpoch is returned by TTS chunk callbacks (and checked at every
-// tool-loop hop) when the epoch they were launched under no longer matches
-// the session's current epoch — the caller discards the late output instead
-// of playing it (Pitfall 4: old audio must not resurrect).
+// ErrStaleEpoch is returned by TTS chunk callbacks when the epoch they were
+// launched under no longer matches the session's current epoch — the caller
+// discards the late output instead of playing it (Pitfall 4: old audio must
+// not resurrect).
 var ErrStaleEpoch = errors.New("rt: stale epoch")
 
 // LessonExecutor is the classroom-state seam the turn manager depends on
 // (13-01). Signatures align verbatim with pkg/lesson's methods so 13-06 can
-// bind them with a compile-time check; EnsureLesson lives on *lesson.Store
-// and the read/write pair on *lesson.Executor, so the production
-// implementation is a small adapter over both.
+// bind them with a compile-time check; EnsureLessonCards lives on
+// *lesson.Store and the read/write pair on *lesson.Executor, so the
+// production implementation is a small adapter over both.
 type LessonExecutor interface {
 	// EnsureLesson creates the lesson row if absent and returns it (first
 	// stored content wins).
 	EnsureLesson(ctx context.Context, lessonID string, words []string) (lesson.Lesson, error)
-	// GetLessonState returns the current lesson row (get_lesson_state tool).
+	// GetLessonState returns the current lesson row.
 	GetLessonState(ctx context.Context, lessonID string) (lesson.Lesson, error)
+	// EnsureLessonCards creates the lesson row carrying word cards if
+	// absent and returns it (first stored content wins; a legacy row with
+	// empty cards is NOT backfilled — the caller detects it).
+	EnsureLessonCards(ctx context.Context, lessonID string, cards []lesson.Word) (lesson.Lesson, error)
 	// AdvanceWord moves the cursor forward one word, idempotently by
-	// requestID (the MiMo tool_call id), guarded by expectedVersion.
+	// requestID, guarded by expectedVersion.
 	AdvanceWord(ctx context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error)
 }
 
 // TurnManagerConfig configures one TurnManager.
 type TurnManagerConfig struct {
-	// LessonID is the server-owned lesson this session is bound to. Tool
-	// arguments carrying any other lesson_id are rejected (M-5 / RESEARCH
-	// V4: neither client nor model may self-report a foreign lesson id).
+	// LessonID pins the server-owned lesson this session binds to. Empty
+	// means derive "r0-YYYYMMDD" on the Beijing calendar (same-day
+	// reconnects resume the same lesson).
 	LessonID string
-	// LessonWords is the R0 fixed word list (3 words) for EnsureLesson.
-	LessonWords []string
-	// MaxToolLoops bounds Chat hops per turn (default 3) so tool-loop churn
-	// cannot stall the latency budget.
-	MaxToolLoops int
-	// HistoryMaxTurns bounds the LLM context (default 20 turns); the system
-	// message is always kept.
-	HistoryMaxTurns int
+	// Words is the due-word source (WordSource). Nil answers session_init
+	// with lesson_unavailable — the classroom cannot start without it.
+	// The 13-10 PyFSRS adapter injects the production implementation.
+	Words WordSource
+	// WordTimeout bounds how long the FSM waits for a per-word confirm
+	// before auto-advancing (0 → 60s default). 13-08 defines the field;
+	// the timer behavior itself lands in 13-09.
+	WordTimeout time.Duration
 }
 
-// teacherSystemPrompt is the tutor persona plus the classroom rules CONTEXT
-// locked:
-//   - progress is ONLY readable/writable through the tools — never narrated
-//     from imagination (口头编造进度禁止);
-//   - ordinary silence is writing time — no auto-advancing on quiet;
-//   - “不会写” gets a hint or a clarifying question first; advance_word only
-//     after the student explicitly confirms;
-//   - encouraging wording only — humiliation, threats, or punitive phrasing
-//     toward elementary-school children are forbidden (prohibition).
-const teacherSystemPrompt = `你是一位亲切、耐心的小学听写家教老师，正在通过语音陪学生完成听写练习。
+// defaultWordTimeout is the per-word confirm wait used when
+// TurnManagerConfig.WordTimeout is unset (13-09 arms the timer).
+const defaultWordTimeout = 60 * time.Second
 
-课堂规则：
-1. 课堂的真实进度（单词列表、当前写到第几个词、版本号）只能通过 get_lesson_state 工具读取、通过 advance_word 工具修改。严禁凭记忆或想象口头编造课堂进度。
-2. 学生安静沉默是在书写，属于正常情况：耐心等待，不要催促，更不要因为沉默就调用 advance_word 跳词。
-3. 学生说“不会写”或求助时，先给一点提示（字形、部首、读音或例句），或者温和地询问是否想跳过这个词；只有学生明确表示“写完了”“跳过吧”“下一个”之后，才调用 advance_word。
-4. 调用 advance_word 时，expected_version 必须使用最近一次 get_lesson_state 返回的 version 值。
-5. 回应要简短、自然、温暖，适合小学生：写对了就真诚表扬，写错了就耐心鼓励再试一次。严禁任何羞辱、恐吓、惩罚性或让孩子难过的表述。
-请始终用简短的中文口语回答。`
+// Announcement purposes — the playback-completion await behaves differently
+// for ordinary announcements (timeout → orderly close) versus natural
+// endings (timeout → the original lesson_complete/no_due_words reason still
+// ships; protocol.go sequencing contract).
+const (
+	purposeGreeting = "greeting"      // opening + first word
+	purposeAnnounce = "announce"      // next-word announcement
+	purposeChat     = "chat"          // classification reply
+	purposeSummary  = "summary"       // completion wrap-up
+	purposeNoDue    = "no_due_words"  // zero-due explanation
+)
 
-// lessonToolDefs declares the two classroom tools. request_id is deliberately
-// NOT a tool parameter: the server takes it from the MiMo tool_call id
-// (request_id=tool_call id 约定, 13-CONTEXT) — the model cannot invent or
-// reuse idempotency keys.
-var lessonToolDefs = []mimo.ToolDef{
-	{
-		Type: "function",
-		Function: mimo.ToolFunctionDef{
-			Name:        "get_lesson_state",
-			Description: "读取当前课堂状态：单词列表、当前进度（current_index）和版本号（version）。谈论或确认进度前必须先调用。",
-			Parameters: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"lesson_id": {"type": "string", "description": "课堂 ID"}
-				},
-				"required": ["lesson_id"]
-			}`),
-		},
-	},
-	{
-		Type: "function",
-		Function: mimo.ToolFunctionDef{
-			Name:        "advance_word",
-			Description: "推进到下一个单词。仅当学生明确表示写完或确认跳过时才调用；expected_version 必须等于最近一次 get_lesson_state 返回的 version。",
-			Parameters: json.RawMessage(`{
-				"type": "object",
-				"properties": {
-					"lesson_id": {"type": "string", "description": "课堂 ID"},
-					"expected_version": {"type": "integer", "description": "当前课堂版本号"}
-				},
-				"required": ["lesson_id", "expected_version"]
-			}`),
-			Strict: true,
-		},
-	},
+// maxReplyRunes bounds an LLM reply before it enters TTS and subtitles
+// (T-13-15: untrusted model output is length-capped at one choke point).
+const maxReplyRunes = 500
+
+// lessonInitLocks serializes session-init classroom initialization per
+// lesson id across this process's concurrent connections: with the lock
+// held, a second connection's GetLessonState sees the row the first creator
+// wrote, so only ONE creator runs the due fetch — two simultaneous
+// connections must not each walk off a batch of unused words.
+var lessonInitLocks sync.Map // lesson id → *sync.Mutex
+
+func lockLessonInit(lessonID string) func() {
+	v, _ := lessonInitLocks.LoadOrStore(lessonID, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // sessionCounter disambiguates session ids within one process.
 var sessionCounter atomic.Uint64
 
-// sentenceInfo is one spoken sentence of the current turn, kept so an
-// interrupt can trim history to the sentences actually played (Pitfall 9).
+// sentenceInfo is one spoken sentence of the current announcement, kept so
+// an interrupt can trim the FSM short history to the sentences actually
+// played (Pitfall 9).
 type sentenceInfo struct {
 	id   string
 	text string
 }
 
+// pendingPlayback tracks one scheduled sentence awaiting its
+// actual-playback-completion ack (T-13-15b). The entry is registered BEFORE
+// the sentence's audio_start is queued, so an ack can never outrun its
+// pending entry; done is closed exactly once — with completed set on a real
+// ack, left false on interrupt/disconnect cancellation (waiters wake and
+// re-check either way; the sticky completed bit means a final ack that
+// arrives before the await call is never lost).
+type pendingPlayback struct {
+	purpose    string
+	pcmSamples int // scheduled PCM sample count (s16le mono: bytes/2)
+	done       chan struct{}
+	completed  bool
+}
+
+// finish marks the pending completed (a valid ack consumed it).
+// Caller holds tm.mu.
+func (p *pendingPlayback) finish() {
+	if !p.completed {
+		p.completed = true
+		close(p.done)
+	}
+}
+
+// cancelWait wakes the awaiter without completion (interrupt / disconnect).
+// Caller holds tm.mu.
+func (p *pendingPlayback) cancelWait() {
+	if !p.completed {
+		close(p.done)
+	}
+}
+
+func pendingKey(epoch uint64, sentenceID string) string {
+	return fmt.Sprintf("%d/%s", epoch, sentenceID)
+}
+
+// PlaybackRef identifies one multi-sentence announcement for the
+// playback-completion wait: the final sentence's identity plus every
+// sentence scheduled in the announcement (their still-unacked PCM samples
+// drive the bounded wait — never the last short sentence alone).
+type PlaybackRef struct {
+	Epoch           uint64
+	FinalSentenceID string
+	SentenceIDs     []string
+}
+
+// Playback ack wait bounds: derived from all outstanding scheduled PCM plus
+// margin, clamped to a bounded band (plan: 3..45s).
+const (
+	playbackAckMargin  = 3 * time.Second
+	playbackAckMinWait = 3 * time.Second
+	playbackAckMaxWait = 45 * time.Second
+)
+
+// playbackAckTimeout derives the bounded wait for one announcement.
+func playbackAckTimeout(pcmSamples int) time.Duration {
+	d := playbackAckMargin
+	if pcmSamples > 0 {
+		d += time.Duration(pcmSamples) * time.Second / TTSOutputSampleRate
+	}
+	if d < playbackAckMinWait {
+		d = playbackAckMinWait
+	}
+	if d > playbackAckMaxWait {
+		d = playbackAckMaxWait
+	}
+	return d
+}
+
 // TurnManager implements SessionManager for one /rt connection.
 //
 // Concurrency: HandleControl/IngestAudio run on the transport read loop;
-// processTurn (and its TTS callbacks) run on separate goroutines. mu guards
-// every field below. The VAD is only touched from the read loop (IngestAudio
-// feeds it, interrupt Resets it) and needs no lock. Provider calls
+// processTurn, greeting/completion goroutines (and their TTS callbacks) run
+// on separate goroutines. mu guards every field below — including all
+// DictationTutor state (single-lock discipline, see dictation.go). The VAD
+// is only touched from the read loop and needs no lock. Provider calls
 // (ASR/LLM/TTS) always happen OUTSIDE mu; their results re-acquire it.
 // SendControl/SendAudio are non-blocking queue enqueues, so calling them
 // under mu is safe and makes "epoch check + send" atomic with respect to
 // interrupt handling — after HandleControl(interrupt) returns, no further
-// chunk or subtitle of the interrupted turn can be emitted.
+// chunk or subtitle of the interrupted announcement can be emitted.
 type TurnManager struct {
 	asr      ASRProvider
 	llm      LLMProvider
@@ -170,25 +235,23 @@ type TurnManager struct {
 	// epoch is the monotonic cancellation token. In-flight provider work
 	// remembers the epoch it launched under; on mismatch it aborts.
 	epoch uint64
-	// turnCancel cancels the current turn's provider context.
+	// turnCancel cancels the current turn's/announcement's provider context.
 	turnCancel context.CancelFunc
-	// turnID counts turns (TurnStartMsg/TranscriptMsg carry it).
+	// turnID counts turns and announcements (sentence-id namespace).
 	turnID uint64
-	// history is the LLM conversation; history[0] is the system prompt.
-	history []mimo.Message
-	// spokenMsgIdx is the history index of the CURRENT turn's spoken-text
-	// assistant message (the interrupt trim target), or -1. It is only
-	// non-negative while the turn is speaking; nothing appends history
-	// between the append and the interrupt, so trimming can never shift it.
-	spokenMsgIdx int
-	// turnSentences are the sentences sent for the current turn, in order.
+	// tutor is the dictation FSM state; nil until a lesson session starts.
+	tutor *DictationTutor
+	// turnSentences are the sentences sent for the current announcement, in
+	// order (the interrupt-trim source).
 	turnSentences []sentenceInfo
-	// acked marks sentence ids the client confirmed playing.
+	// acked marks sentence ids the client confirmed playing, for the trim.
 	acked map[string]bool
-	// turnWrote/turnWroteVersion record whether this turn committed a
-	// lesson write (for the lesson_version event at natural completion).
-	turnWrote        bool
-	turnWroteVersion int
+	// pendingPlayback maps epoch/sentence_id → the outstanding completion
+	// wait (T-13-15b).
+	pendingPlayback map[string]*pendingPlayback
+	// playbackPending marks an announcement awaiting its final ack; uplink
+	// stays gated while it holds.
+	playbackPending bool
 	// droppedUplink counts audio chunks dropped by half-duplex gating.
 	droppedUplink int
 
@@ -203,14 +266,12 @@ var _ SessionManager = (*TurnManager)(nil)
 // NewTurnManager builds a turn manager. A nil asr/llm/tts still constructs —
 // the session then answers session_init with ErrCodeVoiceUnavailable (RT-10
 // degraded semantics: no MIMO_API_KEY configured server-side; 13-06 uses
-// this). A nil logger becomes the no-op logger and a nil recorder a
-// no-session recorder (D-42).
+// this). A nil Words answers lesson_unavailable (T-13-14: honest failure
+// until the 13-10 adapter is wired). A nil logger becomes the no-op logger
+// and a nil recorder a no-session recorder (D-42).
 func NewTurnManager(asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, exec LessonExecutor, cfg TurnManagerConfig, recorder *EventRecorder, logger infra.Logger) *TurnManager {
-	if cfg.MaxToolLoops <= 0 {
-		cfg.MaxToolLoops = 3
-	}
-	if cfg.HistoryMaxTurns <= 0 {
-		cfg.HistoryMaxTurns = 20
+	if cfg.WordTimeout <= 0 {
+		cfg.WordTimeout = defaultWordTimeout
 	}
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
@@ -219,18 +280,17 @@ func NewTurnManager(asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, exec L
 		recorder = NewEventRecorder(logger, "")
 	}
 	return &TurnManager{
-		asr:          asr,
-		llm:          llm,
-		tts:          tts,
-		exec:         exec,
-		cfg:          cfg,
-		recorder:     recorder,
-		logger:       logger,
-		session:      fmt.Sprintf("rt-%d", sessionCounter.Add(1)),
-		spokenMsgIdx: -1,
-		acked:        map[string]bool{},
-		vad:          NewVAD(DefaultVADConfig()),
-		history:      []mimo.Message{{Role: "system", Content: teacherSystemPrompt}},
+		asr:             asr,
+		llm:             llm,
+		tts:             tts,
+		exec:            exec,
+		cfg:             cfg,
+		recorder:        recorder,
+		logger:          logger,
+		session:         fmt.Sprintf("rt-%d", sessionCounter.Add(1)),
+		acked:           map[string]bool{},
+		pendingPlayback: map[string]*pendingPlayback{},
+		vad:             NewVAD(DefaultVADConfig()),
 	}
 }
 
@@ -264,8 +324,9 @@ func (tm *TurnManager) HandleControl(s Sender, data []byte) {
 	}
 }
 
-// handleSessionInit validates the negotiated audio format, binds the lesson,
-// and answers session_ready plus the initial listening state.
+// handleSessionInit validates the negotiated audio format, then establishes
+// the classroom under the per-lesson init lock: one creator runs the due
+// fetch; legacy-empty and already-completed rows take their explicit paths.
 func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	if err := ValidateAudioInit(m.Audio); err != nil {
 		tm.sendError(s, ErrCodeUnsupportedFormat, "仅支持 16000Hz、s16le、单声道的上行音频", true)
@@ -280,13 +341,70 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 		tm.sendError(s, ErrCodeProviderFailed, "服务器课堂模块未就绪", false)
 		return
 	}
-
-	l, err := tm.exec.EnsureLesson(context.Background(), tm.cfg.LessonID, tm.cfg.LessonWords)
-	if err != nil {
-		tm.sendError(s, ErrCodeProviderFailed, "课堂初始化失败，请稍后重试", true)
+	if tm.cfg.Words == nil {
+		// T-13-14: fixed human wording; the adapter is wired by 13-10.
+		tm.sendError(s, ErrCodeLessonUnavailable, lessonUnavailableNotice, false)
 		return
 	}
 
+	lessonID := resolveLessonID(tm.cfg.LessonID, time.Now())
+	unlock := lockLessonInit(lessonID)
+	defer unlock()
+
+	ctx := context.Background()
+	l, err := tm.exec.GetLessonState(ctx, lessonID)
+	if err != nil && !errors.Is(err, lesson.ErrLessonNotFound) {
+		tm.failLessonInit(s)
+		return
+	}
+
+	if errors.Is(err, lesson.ErrLessonNotFound) {
+		// Fresh lesson: this process instance is the single creator (init
+		// lock held) — fetch due words now.
+		cards, ferr := tm.cfg.Words.FetchDueWords(ctx, dueWordsLimit)
+		if ferr != nil {
+			tm.failLessonInit(s)
+			return
+		}
+		if len(cards) == 0 {
+			tm.startNoDueSession(s, lessonID)
+			return
+		}
+		l, err = tm.exec.EnsureLessonCards(ctx, lessonID, cards)
+		if err != nil {
+			// RunDue succeeded but the lesson row did not materialize; the
+			// 13-10 fetch lock (1h) may linger — recorded honestly below.
+			// R0 does NOT pretend this is recoverable in-process.
+			tm.failLessonInit(s)
+			return
+		}
+	}
+
+	switch {
+	case len(l.Cards) == 0:
+		// Legacy empty cards (e.g. r0-test rows created before cards
+		// existed): INSERT OR IGNORE is not a replacement mechanism (13-07
+		// frozen boundary). Visible failure — never a re-RunDue, never a
+		// fake backfill.
+		tm.failLessonInit(s)
+	case l.CurrentIndex >= len(l.Cards):
+		tm.startCompletedSession(s, l)
+	default:
+		tm.startDictationSession(s, l)
+	}
+}
+
+// failLessonInit is the single classroom-init failure egress: a coded,
+// fixed-wording ErrorMsg plus the server-side error event (T-13-14).
+func (tm *TurnManager) failLessonInit(s Sender) {
+	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable))
+	tm.sendError(s, ErrCodeLessonUnavailable, lessonUnavailableNotice, false)
+}
+
+// startNoDueSession answers session_ready with an empty word table, lets
+// the teacher explain (zero due words), and ends the session only after the
+// explanation's actual playback ack (or its bounded timeout).
+func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 	tm.mu.Lock()
 	tm.state = StateListening
 	tm.mu.Unlock()
@@ -296,17 +414,157 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 		SessionID: tm.session,
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
 		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    LessonView{LessonID: l.LessonID, Version: l.Version, CurrentIndex: l.CurrentIndex, Words: l.Words},
+		Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
 	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateListening})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	tm.turnCancel = cancel
+	tm.mu.Unlock()
+	go tm.runNaturalEnding(s, ctx, cancel, noDueWordsText(), purposeNoDue, ReasonNoDueWords)
 }
 
-// handleInterrupt is the epoch bump + provider cancellation + history trim
-// (M-2 unified semantics). The trim targets ONLY the current turn's
-// spoken-text message — the turn's assistant(tool_calls)/role:"tool" records
-// are executed facts and are never touched; when the tool loop is still in
-// flight (processing) there is no spoken text yet and nothing is trimmed.
+// startCompletedSession restores the completion state for an
+// already-finished lesson: session_ready then session_ended(lesson_complete)
+// — no summary replay, no second SubmitReview.
+func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
+	tm.mu.Lock()
+	tm.state = StateListening
+	tm.mu.Unlock()
+
+	_ = s.SendControl(SessionReadyMsg{
+		Type:      TypeSessionReady,
+		SessionID: tm.session,
+		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
+		Lesson:    lessonViewOf(l),
+	})
+	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
+	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
+	tm.internalClose()
+}
+
+// startDictationSession binds the FSM to the lesson row and immediately
+// speaks the opening greeting (first greeting + first word) — the RT-04
+// structure where first-audible latency contains only the FSRS fetch and
+// the TTS first packet, no LLM call.
+func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson) {
+	tm.mu.Lock()
+	tm.tutor = newDictationTutor(l)
+	tm.state = StateListening
+	first := tm.tutor.words[tm.tutor.currentIndex]
+	total := len(tm.tutor.words)
+	tm.mu.Unlock()
+
+	_ = s.SendControl(SessionReadyMsg{
+		Type:      TypeSessionReady,
+		SessionID: tm.session,
+		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
+		Lesson:    lessonViewOf(l),
+	})
+	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	tm.turnCancel = cancel
+	tm.mu.Unlock()
+	go tm.runAnnouncement(s, ctx, cancel, greetingText(total, first.Word), purposeGreeting, func() {
+		tm.announceAcked(s)
+	})
+}
+
+// lessonViewOf projects a lesson row into the wire LessonView.
+func lessonViewOf(l lesson.Lesson) LessonView {
+	words := make([]string, 0, len(l.Cards))
+	for _, c := range l.Cards {
+		words = append(words, c.Word)
+	}
+	return LessonView{LessonID: l.LessonID, Version: l.Version, CurrentIndex: l.CurrentIndex, Words: words}
+}
+
+// announceAcked is the ack-armed callback of word announcements: mark the
+// announced word event and arm the (13-09) per-word timer slot.
+func (tm *TurnManager) announceAcked(s Sender) {
+	tm.mu.Lock()
+	idx := -1
+	if tm.tutor != nil && tm.tutor.currentIndex < len(tm.tutor.words) {
+		idx = tm.tutor.currentIndex
+	}
+	tm.mu.Unlock()
+	if idx >= 0 {
+		tm.recorder.Emit(EventWordAnnounced, infra.F("word_index", idx))
+	}
+	tm.armWordTimer()
+}
+
+// armWordTimer arms the per-word confirm timer after a word announcement's
+// valid playback ack (WordTimeout countdown → auto-advance with the
+// timeout outcome). 13-08 ships the armed-slot placeholder only: the FSM
+// callback point is exercised by tests; the timer behavior itself is 13-09
+// work (plan-locked split).
+func (tm *TurnManager) armWordTimer() {
+	// placeholder — implemented in 13-09
+}
+
+// runAnnouncement speaks one FSM announcement and settles the FSM only
+// after its valid final playback ack — TTS send completion and audio_end
+// NEVER restore listening (uplink stays gated through the ack; 13-09 adds
+// the 500ms echo tail afterwards). Timeout degrades per purpose: ordinary
+// announcements orderly-close; natural endings still ship their original
+// reason first.
+func (tm *TurnManager) runAnnouncement(s Sender, ctx context.Context, cancel context.CancelFunc, text, purpose string, onAck func()) {
+	defer cancel()
+
+	tm.mu.Lock()
+	epoch := tm.epoch
+	turnID := tm.nextTurnIDLocked()
+	tm.mu.Unlock()
+
+	ref := tm.speakTurn(s, turnID, epoch, text, purpose, ctx, cancel)
+	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
+	if !completed {
+		if timedOut {
+			tm.orderlyClose()
+		}
+		return
+	}
+	tm.settleListening(s)
+	if onAck != nil {
+		onAck()
+	}
+}
+
+// runNaturalEnding speaks a natural-ending announcement (no-due words, or
+// the completion summary) and finishes with session_ended carrying the
+// ORIGINAL reason — after the valid ack, or after the bounded ack timeout
+// (ErrorMsg first, reason second — the protocol.go degraded order; never a
+// fabricated completion and never a timeout reason).
+func (tm *TurnManager) runNaturalEnding(s Sender, ctx context.Context, cancel context.CancelFunc, text, purpose, reason string) {
+	defer cancel()
+
+	tm.mu.Lock()
+	epoch := tm.epoch
+	turnID := tm.nextTurnIDLocked()
+	tm.mu.Unlock()
+
+	ref := tm.speakTurn(s, turnID, epoch, text, purpose, ctx, cancel)
+	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
+	if !completed && !timedOut {
+		// Interrupted or disconnected: cancel the wait, never message.
+		tm.internalClose()
+		return
+	}
+	if purpose == purposeSummary {
+		tm.recorder.Emit(EventLessonComplete, infra.F("reason", reason))
+	}
+	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
+	tm.internalClose()
+}
+
+// handleInterrupt is the epoch bump + provider cancellation + short-history
+// trim (Pitfall 9 on the FSM deque) + old-epoch playback-wait invalidation.
 func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 	tm.mu.Lock()
 	oldEpoch := tm.epoch
@@ -316,35 +574,35 @@ func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 		tm.turnCancel()
 	}
 
-	if tm.state == StateSpeaking && tm.spokenMsgIdx >= 0 {
-		// Played = this turn's acked sentences ∪ the interrupt's
-		// last_sentence_id (Pitfall 9: the next turn must only know what
-		// the student actually heard).
-		played := make(map[string]bool, len(tm.acked)+1)
-		for id := range tm.acked {
-			played[id] = true
-		}
-		if m.LastSentenceID != "" {
-			played[m.LastSentenceID] = true
-		}
-		var kept []string
-		for _, si := range tm.turnSentences {
-			if played[si.id] {
-				kept = append(kept, si.text)
-			}
-		}
-		if len(kept) == 0 {
-			// Nothing was actually heard: the spoken-text message leaves
-			// history entirely (the teacher "never said it").
-			tm.history = append(tm.history[:tm.spokenMsgIdx], tm.history[tm.spokenMsgIdx+1:]...)
-		} else {
-			tm.history[tm.spokenMsgIdx].Content = strings.Join(kept, "")
+	// Played = this announcement's acked sentences ∪ the interrupt's
+	// last_sentence_id (Pitfall 9: the next turn must only know what the
+	// student actually heard).
+	played := make(map[string]bool, len(tm.acked)+1)
+	for id := range tm.acked {
+		played[id] = true
+	}
+	if m.LastSentenceID != "" {
+		played[m.LastSentenceID] = true
+	}
+	var kept []string
+	for _, si := range tm.turnSentences {
+		if played[si.id] {
+			kept = append(kept, si.text)
 		}
 	}
-	// Per-turn bookkeeping ends here either way.
-	tm.spokenMsgIdx = -1
+	if tm.tutor != nil {
+		tm.tutor.trimTeacherReply(kept)
+	}
 	tm.turnSentences = nil
 	tm.acked = map[string]bool{}
+
+	// Invalidate every old-epoch playback wait: close the wait channels so
+	// awaiters wake and observe the stale epoch (interrupt beats ack).
+	for _, p := range tm.pendingPlayback {
+		p.cancelWait()
+	}
+	tm.pendingPlayback = map[string]*pendingPlayback{}
+	tm.playbackPending = false
 
 	if tm.state != "" && !tm.closed {
 		tm.state = StateListening
@@ -370,10 +628,34 @@ func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 }
 
 // handleSentenceAck records one sentence the client actually played — the
-// ground truth for history trimming and RT-04 measurement.
+// only valid completion evidence (T-13-15b): the ack must carry a non-empty
+// sentence id, match the pending entry registered before that sentence's
+// audio_start, and belong to the announcement's pending set. Unknown, stale
+// and duplicate acks emit a sanitized diagnostic and have ZERO state side
+// effects.
 func (tm *TurnManager) handleSentenceAck(m SentenceAckMsg) {
+	if m.SentenceID == "" {
+		tm.recorder.Emit(EventSentenceAckRejected, infra.F("reason", "empty_sentence_id"))
+		return
+	}
 	tm.mu.Lock()
+	p, ok := tm.pendingPlayback[pendingKey(m.Epoch, m.SentenceID)]
+	if !ok {
+		tm.mu.Unlock()
+		tm.recorder.Emit(EventSentenceAckRejected,
+			infra.F("reason", "unknown_or_stale"),
+			infra.F("epoch", m.Epoch))
+		return
+	}
 	tm.acked[m.SentenceID] = true
+	if p.completed {
+		tm.mu.Unlock()
+		tm.recorder.Emit(EventSentenceAckRejected,
+			infra.F("reason", "duplicate"),
+			infra.F("epoch", m.Epoch))
+		return
+	}
+	p.finish()
 	tm.mu.Unlock()
 }
 
@@ -394,17 +676,31 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 	tm.internalClose()
 }
 
-// internalClose cancels in-flight work and resets the FSM without emitting
-// the session_end event again.
+// internalClose cancels in-flight work, invalidates playback waits, and
+// resets the FSM without emitting the session_end event again. It also
+// cancels any playback-ack wait (异常断线取消等待).
 func (tm *TurnManager) internalClose() {
 	tm.mu.Lock()
 	if tm.turnCancel != nil {
 		tm.turnCancel()
 	}
+	for _, p := range tm.pendingPlayback {
+		p.cancelWait()
+	}
+	tm.pendingPlayback = map[string]*pendingPlayback{}
+	tm.playbackPending = false
 	tm.state = ""
 	tm.closed = true
 	tm.mu.Unlock()
 	tm.vad.Reset()
+}
+
+// orderlyClose is the bounded-timeout degraded ending of an ordinary
+// announcement: the ErrorMsg(playback_ack_timeout) already went out in the
+// await; this closes the session in order — no fabricated completion, no
+// timer arm, no word advance, and no new timeout end reason.
+func (tm *TurnManager) orderlyClose() {
+	tm.internalClose()
 }
 
 // Close implements SessionManager: the transport read loop exited for any
@@ -426,10 +722,11 @@ func (tm *TurnManager) Close(Sender) {
 // ---------------------------------------------------------------------------
 
 // IngestAudio is the half-duplex gate (Pattern 3): while the teacher speaks
-// (or a turn is processing), uplink audio is dropped and counted — the
-// server VAD must not segment the speaker's own echo. In listening state
-// the VAD segments the stream; each closed utterance starts one turn
-// goroutine.
+// — INCLUDING the playback-pending window from the first audio_start until
+// the valid final ack (TTS completion and audio_end never lift the gate) —
+// uplink audio is dropped and counted. In listening state the VAD segments
+// the stream; each closed utterance starts one turn goroutine. Interrupt
+// control messages always bypass this gate (they travel HandleControl).
 func (tm *TurnManager) IngestAudio(s Sender, data []byte) {
 	tm.mu.Lock()
 	state := tm.state
@@ -452,28 +749,24 @@ func (tm *TurnManager) IngestAudio(s Sender, data []byte) {
 	go tm.processTurn(s, segment)
 }
 
-// processTurn runs one utterance → ASR → tool loop → speech cycle on its
-// own goroutine (IngestAudio launches it). The epoch captured at entry
-// governs every provider call and the final speech; any mismatch aborts the
-// whole turn without issuing further Chat/TTS calls.
+// processTurn runs one utterance → ASR → intent classification → FSM
+// dispatch cycle on its own goroutine (IngestAudio launches it). The epoch
+// captured at entry governs every provider call and the announcement; any
+// mismatch aborts the whole turn without issuing further calls.
 func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	tm.mu.Lock()
-	if tm.state != StateListening {
+	if tm.state != StateListening || tm.closed || tm.tutor == nil {
 		tm.mu.Unlock()
 		return
 	}
 	epoch := tm.epoch
-	tm.turnID++
-	turnID := tm.turnID
+	turnID := tm.nextTurnIDLocked()
 	tm.state = StateProcessing
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.turnCancel = cancel
-	// Fresh per-turn bookkeeping.
-	tm.acked = map[string]bool{}
-	tm.turnSentences = nil
-	tm.spokenMsgIdx = -1
-	tm.turnWrote = false
-	tm.turnWroteVersion = 0
+	// Immutable advance target captured BEFORE classification (T-13-15c):
+	// a late confirm may only ever act on this word/version pair.
+	target := tm.tutor.turnTarget()
 	tm.mu.Unlock()
 	defer cancel()
 
@@ -487,159 +780,203 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		tm.failTurn(s, epoch, ErrCodeProviderFailed, "语音识别失败，请再对我说一遍")
 		return
 	}
-	if transcript != "" {
-		_ = s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: transcript})
-		tm.appendHistory(mimo.Message{Role: "user", Content: transcript})
+	if transcript == "" {
+		// Nothing usable recognized: back to listening. (13-09 refines the
+		// silent tolerance of legal-empty ASR results.)
+		tm.settleListening(s)
+		return
+	}
+	_ = s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: transcript})
+	tm.mu.Lock()
+	tm.tutor.appendUserRound(transcript)
+	tm.mu.Unlock()
+
+	intent, reply := tm.classifyTurn(ctx, transcript, target)
+	if !tm.epochCurrent(epoch) {
+		return // interrupted mid-classification: abort the whole turn silently
+	}
+	tm.dispatchTurn(s, ctx, cancel, turnID, epoch, intent, reply, target)
+}
+
+// dispatchTurn routes a whitelisted intent into the FSM. Only confirm drives
+// pacing; chat (and repeat/slow/hint/meaning/pause/resume, whose dedicated
+// behaviors 13-09/13-10 fill) speaks the classification reply.
+func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, intent, reply string, target TurnTarget) {
+	switch intent {
+	case intentConfirm:
+		tm.confirmTarget(s, ctx, cancel, turnID, epoch, reply, target)
+	default:
+		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, nil)
+	}
+}
+
+// confirmTarget advances the classroom through the target captured at
+// classification start. The three AdvanceWord outcomes are mutually
+// exclusive; NONE of them re-interprets a late confirm against the
+// post-return currentIndex (T-13-15c):
+//
+//   - first commit (Idempotent=false, nil): record outcome, lesson_update,
+//     word_advanced event, next-word announcement or completion;
+//   - idempotent hit (Idempotent=true, nil): align the local cursor to the
+//     FIRST stored result — no outcome write, no message, no narration, no
+//     completion;
+//   - version conflict: read-back alignment ONLY — no retry write, no
+//     side effects.
+func (tm *TurnManager) confirmTarget(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, reply string, target TurnTarget) {
+	tm.mu.Lock()
+	lessonID := tm.tutor.lessonID
+	valid := !tm.tutor.completed && target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words)
+	tm.mu.Unlock()
+	if !valid {
+		// Completed or out-of-range target: pacing owns the cursor — this
+		// confirm degrades to a plain chat reply.
+		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, nil)
+		return
 	}
 
-	// Tool loop: execute first, speak the confirmation after (先执行后播报).
-	finalText := ""
-	for hop := 0; hop < tm.cfg.MaxToolLoops; hop++ {
-		if !tm.epochCurrent(epoch) {
-			return // interrupted: abort the whole turn silently
-		}
-		resp, err := tm.llm.Chat(ctx, tm.historySnapshot(),
-			mimo.WithTools(lessonToolDefs), mimo.WithThinkingDisabled())
-		if err != nil {
-			tm.failTurn(s, epoch, ErrCodeProviderFailed, "老师思考时出了点问题，请再说一遍")
+	requestID := fmt.Sprintf("%s-advance-%d", lessonID, target.WordIndex)
+	res, err := tm.exec.AdvanceWord(ctx, lessonID, target.ExpectedVersion, requestID)
+	if err != nil {
+		var conflict *lesson.ConflictError
+		if errors.As(err, &conflict) {
+			// Conflict: read-back sync only. No retry write, no narration,
+			// no completion — the store already holds the truth.
+			if l, gerr := tm.exec.GetLessonState(ctx, lessonID); gerr == nil {
+				tm.mu.Lock()
+				tm.tutor.align(l.CurrentIndex, l.Version)
+				tm.mu.Unlock()
+			}
+			tm.settleListening(s)
 			return
 		}
-		if !resp.ToolCallsRequested() {
-			finalText = resp.Text()
-			break
-		}
-		toolCalls := resp.FirstToolCalls()
-
-		// Replay the assistant's tool request verbatim, then answer each
-		// call with a role:"tool" result (Pattern 4 wire shape).
-		var content string
-		if len(resp.Choices) > 0 {
-			content = resp.Choices[0].Message.Content
-		}
-		tm.appendHistory(mimo.Message{Role: "assistant", Content: content, ToolCalls: toolCalls})
-		for _, tc := range toolCalls {
-			tm.recorder.Emit(EventToolStart,
-				infra.F("turn_id", turnID),
-				infra.F("tool", tc.Function.Name),
-				infra.F("request_id", tc.ID),
-			)
-			result := tm.executeToolCall(s, ctx, tc, turnID)
-			tm.recorder.Emit(EventToolEnd,
-				infra.F("turn_id", turnID),
-				infra.F("tool", tc.Function.Name),
-				infra.F("request_id", tc.ID),
-			)
-			tm.appendHistory(mimo.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
-		}
-		// Loop continues: the next Chat hop sees the tool results.
+		tm.failTurn(s, epoch, ErrCodeProviderFailed, "课堂进度更新失败，请再试一次")
+		return
 	}
-	if finalText == "" {
-		// Tool budget exhausted without a final answer.
-		tm.failTurn(s, epoch, ErrCodeProviderFailed, "老师想得太久了，我们再试一次好吗")
+	if res.Idempotent {
+		// Duplicate confirm: align to the first result and do NOTHING else.
+		tm.mu.Lock()
+		tm.tutor.align(res.NewIndex, res.NewVersion)
+		tm.mu.Unlock()
+		tm.settleListening(s)
 		return
 	}
 
-	tm.speakTurn(s, finalText, turnID, epoch, ctx, cancel)
-}
+	// First commit: outcome + wire update + narration (or completion).
+	tm.mu.Lock()
+	tm.tutor.align(res.NewIndex, res.NewVersion)
+	tm.tutor.commitOutcome(target.WordIndex, outcomeConfirmed)
+	finished := res.NewIndex >= len(tm.tutor.words)
+	tm.mu.Unlock()
 
-// executeToolCall validates and runs ONE tool call, returning the JSON tool
-// result that is fed back to the model. Validation failures and version
-// conflicts are tool RESULTS (the model gets a chance to react); invalid
-// input never reaches the executor (T-13-03 / T-13-05b).
-func (tm *TurnManager) executeToolCall(s Sender, ctx context.Context, tc mimo.ToolCall, turnID uint64) string {
-	args, err := validateToolArgs(tm.cfg.LessonID, tc.Function.Name, tc.Function.Arguments)
-	if err != nil {
-		return toolErrorResult("invalid_arguments", err.Error())
+	_ = s.SendControl(LessonUpdateMsg{
+		Type:         TypeLessonUpdate,
+		LessonID:     lessonID,
+		Version:      res.NewVersion,
+		CurrentIndex: res.NewIndex,
+		RequestID:    requestID,
+	})
+	tm.recorder.Emit(EventWordAdvanced,
+		infra.F("word_index", target.WordIndex),
+		infra.F("new_index", res.NewIndex),
+		infra.F("version", res.NewVersion),
+	)
+
+	if finished {
+		tm.enterCompletion(s, ctx, cancel, epoch)
+		return
 	}
 
-	switch tc.Function.Name {
-	case "get_lesson_state":
-		l, err := tm.exec.GetLessonState(ctx, args.LessonID)
-		if err != nil {
-			tm.sendError(s, ErrCodeProviderFailed, "读取课堂进度失败", true)
-			return toolErrorResult("tool_failed", "get_lesson_state failed")
-		}
-		payload, _ := json.Marshal(map[string]any{
-			"lesson_id":     l.LessonID,
-			"words":         l.Words,
-			"current_index": l.CurrentIndex,
-			"version":       l.Version,
-		})
-		return string(payload)
-
-	case "advance_word":
-		// request_id = the MiMo tool_call id: idempotency is keyed on the
-		// provider's own call identity, never on model-invented input.
-		res, err := tm.exec.AdvanceWord(ctx, args.LessonID, *args.ExpectedVersion, tc.ID)
-		if err != nil {
-			var conflict *lesson.ConflictError
-			if errors.As(err, &conflict) {
-				// Fed back for a verbal resolution — never a retried write.
-				payload, _ := json.Marshal(map[string]any{
-					"ok":              false,
-					"error":           "version_conflict",
-					"current_version": conflict.CurrentVersion,
-				})
-				return string(payload)
-			}
-			tm.sendError(s, ErrCodeProviderFailed, "课堂进度更新失败", true)
-			return toolErrorResult("tool_failed", "advance_word failed")
-		}
-		tm.mu.Lock()
-		tm.turnWrote = true
-		tm.turnWroteVersion = res.NewVersion
-		tm.mu.Unlock()
-		_ = s.SendControl(LessonUpdateMsg{
-			Type:         TypeLessonUpdate,
-			LessonID:     args.LessonID,
-			Version:      res.NewVersion,
-			CurrentIndex: res.NewIndex,
-			RequestID:    tc.ID,
-		})
-		payload, _ := json.Marshal(map[string]any{
-			"ok":        true,
-			"new_index": res.NewIndex,
-			"version":   res.NewVersion,
-		})
-		return string(payload)
-	}
-
-	// validateToolArgs whitelists the name; unreachable.
-	return toolErrorResult("invalid_arguments", "unknown tool "+tc.Function.Name)
+	tm.mu.Lock()
+	word := tm.tutor.words[res.NewIndex]
+	text := announceText(res.NewIndex+1, len(tm.tutor.words), word.Word)
+	tm.mu.Unlock()
+	tm.runAnnouncement(s, ctx, cancel, text, purposeAnnounce, func() {
+		tm.announceAcked(s)
+	})
 }
 
-// speakTurn streams the final text sentence by sentence: subtitle first,
-// audio chunks forwarded the instant they arrive. The spoken-text message is
-// appended to history UP FRONT and its index recorded — interrupt-time
-// trimming is the ONLY mutation of it (M-2: this function never rolls back
-// its own append; the interrupt branch owns the final state).
-func (tm *TurnManager) speakTurn(s Sender, text string, turnID, epoch uint64, ctx context.Context, cancel context.CancelFunc) {
+// enterCompletion runs the wrap-up: reachable only from the first-commit
+// branch (the completed flag is set under mu below, and a duplicate confirm
+// of the same word replays idempotently — it can never re-enter).
+// Order is 先执行后播报: the review write actually executes first; the
+// spoken summary then reports the REAL result sets; session_ended
+// (lesson_complete) waits for the summary's valid playback ack.
+func (tm *TurnManager) enterCompletion(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64) {
+	if !tm.epochCurrent(epoch) {
+		return
+	}
+	tm.mu.Lock()
+	tm.tutor.markCompleted()
+	total := len(tm.tutor.words)
+	confirmed, timedOutN, hinted := tm.tutor.outcomeCounts()
+	results := tm.tutor.ratings()
+	tm.mu.Unlock()
+
+	summary := completionSummaryText(total, confirmed, timedOutN, hinted)
+	if len(results) > 0 {
+		wres, err := tm.cfg.Words.SubmitReview(ctx, results)
+		switch {
+		case err != nil:
+			// Honest failure: the record was NOT saved; the student hears
+			// that — never a narrated success (transparency prohibition).
+			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+			summary += reviewFailedSuffix()
+		default:
+			// Real counts only: partial/zero updates are visible (Task 2
+			// adds their explicit honest wording; the counts never lie).
+			tm.recorder.Emit(EventReviewWritten,
+				infra.F("requested", len(wres.Requested)),
+				infra.F("updated", len(wres.Updated)),
+				infra.F("missing", len(wres.Missing)),
+			)
+		}
+	}
+
+	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
+}
+
+// speakTurn streams the text sentence by sentence: subtitle first, audio
+// chunks forwarded the instant they arrive. Each sentence's pendingPlayback
+// entry is registered in the SAME locked section that queues its
+// audio_start — an ack can never outrun its pending entry (T-13-15b). The
+// FSM stays speaking/playback-pending on return; the caller awaits the
+// final ack via awaitPlaybackCompletion.
+func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, text, purpose string, ctx context.Context, cancel context.CancelFunc) PlaybackRef {
+	text = truncateRunes(text, maxReplyRunes)
+	sentences := splitSentences(text)
+
 	tm.mu.Lock()
 	if tm.epoch != epoch {
-		// Stale before the first sound: nothing appended, nothing spoken.
+		// Stale before the first sound: nothing registered, nothing spoken.
 		tm.mu.Unlock()
-		return
+		return PlaybackRef{}
 	}
-	tm.history = append(tm.history, mimo.Message{Role: "assistant", Content: text})
-	tm.spokenMsgIdx = len(tm.history) - 1
-	sentences := splitSentences(text)
+	if tm.tutor != nil {
+		tm.tutor.recordTeacherReply(text)
+	}
+	tm.turnSentences = nil
+	tm.acked = map[string]bool{}
 	tm.state = StateSpeaking
+	tm.playbackPending = true
 	tm.mu.Unlock()
 
 	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateSpeaking})
 
-	var firstChunk atomic.Bool
+	var ref PlaybackRef
+	ref.Epoch = epoch
 	for i, sentence := range sentences {
 		sentID := fmt.Sprintf("t%d-s%d", turnID, i)
 
-		// Subtitle first (字幕先行), atomically against interrupt handling —
-		// after an interrupt is acknowledged, no further subtitle of the
-		// interrupted turn can go out.
+		// Subtitle first (字幕先行) + pending registration BEFORE
+		// audio_start is queued — atomic against interrupt handling: after
+		// an interrupt is acknowledged, no further subtitle/chunk of the
+		// interrupted announcement can go out.
 		tm.mu.Lock()
 		if tm.epoch != epoch {
 			tm.mu.Unlock()
-			return
+			return ref
 		}
+		tm.pendingPlayback[pendingKey(epoch, sentID)] = &pendingPlayback{purpose: purpose, done: make(chan struct{})}
 		tm.turnSentences = append(tm.turnSentences, sentenceInfo{id: sentID, text: sentence})
 		_ = s.SendControl(TeacherSentenceMsg{
 			Type: TypeTeacherSentence, TurnID: turnID, Epoch: epoch, SentenceID: sentID, Text: sentence,
@@ -649,6 +986,7 @@ func (tm *TurnManager) speakTurn(s Sender, text string, turnID, epoch uint64, ct
 
 		// pcm arrives as bare s16le bytes (AudioChunkFunc); the wire
 		// encoding is digested by the 13-06 adapter, never here (M-1).
+		var sentSamples int
 		_, err := tm.tts.SynthesizeStream(ctx, sentence, func(pcm []byte, isFinal bool) error {
 			tm.mu.Lock()
 			if tm.epoch != epoch {
@@ -656,55 +994,113 @@ func (tm *TurnManager) speakTurn(s Sender, text string, turnID, epoch uint64, ct
 				cancel() // late chunk: abort the provider stream too
 				return ErrStaleEpoch
 			}
-			if firstChunk.CompareAndSwap(false, true) {
-				tm.recorder.Emit(EventFirstAudioReceived, infra.F("turn_id", turnID))
-			}
+			sentSamples += len(pcm) / 2 // s16le mono: 2 bytes per sample
 			err := s.SendAudio(pcm)
 			tm.mu.Unlock()
 			return err
 		})
 		if err != nil && !errors.Is(err, ErrStaleEpoch) && tm.epochCurrent(epoch) {
-			// A genuine provider failure on a still-live turn.
+			// A genuine provider failure on a still-live announcement.
 			tm.failTurn(s, epoch, ErrCodeProviderFailed, "老师的声音出了点问题，请再说一遍")
-			return
+			return ref
 		}
 
 		tm.mu.Lock()
+		if p, ok := tm.pendingPlayback[pendingKey(epoch, sentID)]; ok {
+			p.pcmSamples = sentSamples
+		}
 		stale := tm.epoch != epoch
 		if !stale {
 			_ = s.SendControl(AudioEndMsg{Type: TypeAudioEnd, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
 		}
 		tm.mu.Unlock()
 		if stale {
-			return // interrupted mid-sentence: the interrupt branch trims
+			return ref // interrupted mid-announcement: the interrupt branch trims
+		}
+		ref.SentenceIDs = append(ref.SentenceIDs, sentID)
+		ref.FinalSentenceID = sentID
+	}
+	return ref
+}
+
+// awaitPlaybackCompletion waits, bounded, for the announcement's FINAL
+// sentence's actual-playback ack. The wait derives from ALL still-unacked
+// scheduled PCM of the announcement plus margin (clamped 3..45s) — never
+// from the last short sentence alone. On timeout ONLY the timeout is
+// reported (ErrorMsg code=playback_ack_timeout, recoverable) plus the
+// desensitized event: no fabricated ack, no lastPlaybackCompletedAt, no
+// timer arm, no word advance.
+func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpose string) (completed, timedOut bool) {
+	if ref.FinalSentenceID == "" {
+		return false, false // nothing scheduled (stale before the first sound)
+	}
+	tm.mu.Lock()
+	fin, ok := tm.pendingPlayback[pendingKey(ref.Epoch, ref.FinalSentenceID)]
+	remaining := 0
+	for _, sid := range ref.SentenceIDs {
+		if p, ok := tm.pendingPlayback[pendingKey(ref.Epoch, sid)]; ok && !p.completed {
+			remaining += p.pcmSamples
 		}
 	}
+	tm.mu.Unlock()
+	if !ok {
+		return false, false // pending gone (interrupt cleared it) — stale
+	}
 
-	// All sentences played naturally: the spoken-text message keeps the full
-	// text, the turn ends, and a lesson write (if any) gets its event.
+	wait := playbackAckTimeout(remaining)
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-fin.done:
+		tm.mu.Lock()
+		done := fin.completed
+		tm.mu.Unlock()
+		return done, false
+	case <-timer.C:
+		tm.recorder.Emit(EventPlaybackAckTimeout,
+			infra.F("purpose", purpose),
+			infra.F("wait_ms", wait.Milliseconds()),
+		)
+		_ = s.SendControl(ErrorMsg{
+			Type:        TypeError,
+			Code:        ErrCodePlaybackAckTimeout,
+			Message:     playbackAckTimeoutNotice,
+			Recoverable: true,
+		})
+		return false, true
+	}
+}
+
+// settleListening returns the FSM to listening after a valid final ack —
+// the ONLY place an announcement hands control back (13-09 then adds the
+// echo tail).
+func (tm *TurnManager) settleListening(s Sender) {
 	tm.mu.Lock()
+	if tm.state == "" || tm.closed {
+		tm.mu.Unlock()
+		return
+	}
 	tm.state = StateListening
-	wrote, wroteVersion := tm.turnWrote, tm.turnWroteVersion
-	tm.spokenMsgIdx = -1
+	tm.playbackPending = false
 	tm.mu.Unlock()
 	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateListening})
-	if wrote {
-		tm.recorder.Emit(EventLessonVersion,
-			infra.F("turn_id", turnID),
-			infra.F("version", wroteVersion),
-		)
-	}
 }
 
 // failTurn reports a turn-level failure and returns the FSM to listening —
 // but only if the turn is still current: an interrupted turn must not emit a
-// spurious error on top of the interrupt ack.
+// spurious error on top of the interrupt ack. Any playback waits the failed
+// announcement left behind are invalidated.
 func (tm *TurnManager) failTurn(s Sender, epoch uint64, code, message string) {
 	if !tm.epochCurrent(epoch) {
 		return
 	}
 	tm.sendError(s, code, message, true)
 	tm.mu.Lock()
+	for _, p := range tm.pendingPlayback {
+		p.cancelWait()
+	}
+	tm.pendingPlayback = map[string]*pendingPlayback{}
+	tm.playbackPending = false
 	tm.state = StateListening
 	tm.mu.Unlock()
 	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateListening})
@@ -726,111 +1122,21 @@ func (tm *TurnManager) epochCurrent(launch uint64) bool {
 	return tm.epoch == launch
 }
 
-func (tm *TurnManager) appendHistory(m mimo.Message) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	tm.history = append(tm.history, m)
-	tm.trimHistoryLocked()
+// nextTurnIDLocked allocates the next turn/announcement identity (sentence
+// ids derive from it). Caller holds tm.mu.
+func (tm *TurnManager) nextTurnIDLocked() uint64 {
+	tm.turnID++
+	return tm.turnID
 }
 
-// historySnapshot returns a copy for provider calls (providers must not
-// alias the live slice).
-func (tm *TurnManager) historySnapshot() []mimo.Message {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	return append([]mimo.Message(nil), tm.history...)
-}
-
-// trimHistoryLocked bounds the context to HistoryMaxTurns turns, keeping
-// the system message. A "turn" is a user message plus everything after it up
-// to the next user message; only whole oldest turns are dropped, so the
-// current (newest) turn is never trimmed mid-flight.
-func (tm *TurnManager) trimHistoryLocked() {
-	max := tm.cfg.HistoryMaxTurns
-	if max <= 0 {
-		return
+// truncateRunes caps text to n runes (T-13-15: reply length bound before
+// TTS and subtitles).
+func truncateRunes(text string, n int) string {
+	r := []rune(text)
+	if len(r) <= n {
+		return text
 	}
-	for {
-		groups := 0
-		for i := 1; i < len(tm.history); i++ {
-			if tm.history[i].Role == "user" {
-				groups++
-			}
-		}
-		if groups <= max {
-			return
-		}
-		// Drop the first group: from after the system message up to (not
-		// including) the second user message.
-		end := len(tm.history)
-		seenUser := false
-		for i := 1; i < len(tm.history); i++ {
-			if tm.history[i].Role == "user" {
-				if !seenUser {
-					seenUser = true
-					continue
-				}
-				end = i
-				break
-			}
-		}
-		tm.history = append(tm.history[:1], tm.history[end:]...)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Tool argument validation (T-13-03 / T-13-05b / M-5)
-// ---------------------------------------------------------------------------
-
-// lessonToolArgs is the strict parse of a lesson tool's arguments.
-// ExpectedVersion is a pointer so "absent" is distinguishable from 0, and
-// non-integer JSON (1.5, "1") fails the unmarshal instead of the executor.
-type lessonToolArgs struct {
-	LessonID        string `json:"lesson_id"`
-	ExpectedVersion *int   `json:"expected_version"`
-}
-
-// validateToolArgs enforces the whitelist and per-field checks BEFORE any
-// executor call: known tool name, valid JSON, non-empty lesson_id that MUST
-// equal the session's lesson (session binding — a hallucinated or injected
-// foreign lesson id never reaches the executor, M-5 / RESEARCH V4), and for
-// advance_word an integer expected_version >= 1.
-func validateToolArgs(sessionLessonID, toolName, argsJSON string) (*lessonToolArgs, error) {
-	switch toolName {
-	case "get_lesson_state", "advance_word":
-	default:
-		return nil, fmt.Errorf("unknown tool %q", toolName)
-	}
-	var args lessonToolArgs
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return nil, fmt.Errorf("arguments are not valid JSON: %v", err)
-	}
-	if args.LessonID == "" {
-		return nil, fmt.Errorf("lesson_id must be a non-empty string")
-	}
-	if args.LessonID != sessionLessonID {
-		return nil, fmt.Errorf("lesson_id %q does not match this session's lesson", args.LessonID)
-	}
-	if toolName == "advance_word" {
-		if args.ExpectedVersion == nil {
-			return nil, fmt.Errorf("expected_version is required and must be an integer >= 1")
-		}
-		if *args.ExpectedVersion < 1 {
-			return nil, fmt.Errorf("expected_version must be >= 1")
-		}
-	}
-	return &args, nil
-}
-
-// toolErrorResult shapes the tool result fed back to the model when the call
-// was invalid or failed — the model gets its chance to react (回喂), and
-// nothing is written for invalid input.
-func toolErrorResult(code, detail string) string {
-	payload, _ := json.Marshal(map[string]any{
-		"error":  code,
-		"detail": detail,
-	})
-	return string(payload)
+	return string(r[:n])
 }
 
 // splitSentences breaks teacher text into speakable sentences. Chinese

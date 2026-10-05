@@ -1,7 +1,9 @@
-// turn_test.go — fake-driven behavior tests for the turn manager (13-04
-// Task 2): tool loop, epoch cancellation, history trimming, half-duplex
-// gating, and argument validation. The full binary→VAD→provider→binary
-// chain over a real websocket is covered by turn_integration_test.go.
+// turn_test.go — fake-driven behavior tests for the dictation FSM turn
+// manager (13-08): opening greeting, confirm/idempotent/conflict advance
+// branches, legacy/completed lesson paths, sentence-ack identity, and the
+// pending-before-audio-start registration. The full binary→VAD→classify→
+// dispatch chain over a real websocket is covered by
+// turn_integration_test.go (13-08 Task 3).
 package rt
 
 import (
@@ -9,16 +11,14 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
-	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 )
 
 // ---------------------------------------------------------------------------
-// Test doubles: capture sender, fake executor, blocking LLM wrapper
+// Test doubles: capture sender, fake executor
 // ---------------------------------------------------------------------------
 
 // captureSender records every control message (as marshaled JSON) and audio
@@ -92,16 +92,34 @@ func (c *captureSender) countOf(typ string) int {
 	return n
 }
 
+// listeningCount counts StateMsg values equal to listening.
+func (c *captureSender) listeningCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, b := range c.controls {
+		var m StateMsg
+		if json.Unmarshal(b, &m) == nil && m.Value == StateListening {
+			n++
+		}
+	}
+	return n
+}
+
 // fakeExecutor is the in-memory LessonExecutor: scripted lesson state plus
 // call recording. conflictVersion > 0 makes every AdvanceWord return a
-// ConflictError instead of advancing.
+// ConflictError; requestResults replays the first stored result for a
+// duplicate requestID (Idempotent=true), mirroring the tool_requests table.
 type fakeExecutor struct {
 	mu              sync.Mutex
 	lesson          lesson.Lesson
+	exists          bool
 	ensureCalls     int
+	ensureCardsCalls int
 	stateCalls      int
 	advanceCalls    []fakeAdvanceCall
 	conflictVersion int
+	requestResults  map[string]lesson.AdvanceResult
 }
 
 type fakeAdvanceCall struct {
@@ -110,10 +128,30 @@ type fakeAdvanceCall struct {
 	requestID       string
 }
 
-func newFakeExecutor(lessonID string, words []string) *fakeExecutor {
-	return &fakeExecutor{
-		lesson: lesson.Lesson{LessonID: lessonID, Words: words, CurrentIndex: 0, Version: 1},
+func cardWords(cards []lesson.Word) []string {
+	words := make([]string, 0, len(cards))
+	for _, c := range cards {
+		words = append(words, c.Word)
 	}
+	return words
+}
+
+// newFakeExecutor builds an executor whose lesson row EXISTS with the given
+// cards (empty cards = the legacy-row case).
+func newFakeExecutor(lessonID string, cards []lesson.Word) *fakeExecutor {
+	return &fakeExecutor{
+		lesson:         lesson.Lesson{LessonID: lessonID, Words: cardWords(cards), Cards: cards, CurrentIndex: 0, Version: 1},
+		exists:         true,
+		requestResults: map[string]lesson.AdvanceResult{},
+	}
+}
+
+// newFakeExecutorNoRow builds an executor with NO lesson row
+// (GetLessonState → ErrLessonNotFound, so session_init takes the fetch path).
+func newFakeExecutorNoRow(lessonID string) *fakeExecutor {
+	e := newFakeExecutor(lessonID, nil)
+	e.exists = false
+	return e
 }
 
 func (f *fakeExecutor) EnsureLesson(_ context.Context, _ string, _ []string) (lesson.Lesson, error) {
@@ -123,10 +161,23 @@ func (f *fakeExecutor) EnsureLesson(_ context.Context, _ string, _ []string) (le
 	return f.lesson, nil
 }
 
+func (f *fakeExecutor) EnsureLessonCards(_ context.Context, _ string, cards []lesson.Word) (lesson.Lesson, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensureCardsCalls++
+	f.lesson.Cards = cards
+	f.lesson.Words = cardWords(cards)
+	f.exists = true
+	return f.lesson, nil
+}
+
 func (f *fakeExecutor) GetLessonState(_ context.Context, _ string) (lesson.Lesson, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stateCalls++
+	if !f.exists {
+		return lesson.Lesson{}, lesson.ErrLessonNotFound
+	}
 	return f.lesson, nil
 }
 
@@ -134,12 +185,18 @@ func (f *fakeExecutor) AdvanceWord(_ context.Context, lessonID string, expectedV
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.advanceCalls = append(f.advanceCalls, fakeAdvanceCall{lessonID, expectedVersion, requestID})
+	if stored, ok := f.requestResults[requestID]; ok {
+		stored.Idempotent = true
+		return stored, nil
+	}
 	if f.conflictVersion > 0 {
 		return lesson.AdvanceResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
 	}
 	f.lesson.CurrentIndex++
 	f.lesson.Version++
-	return lesson.AdvanceResult{NewIndex: f.lesson.CurrentIndex, NewVersion: f.lesson.Version}, nil
+	res := lesson.AdvanceResult{NewIndex: f.lesson.CurrentIndex, NewVersion: f.lesson.Version}
+	f.requestResults[requestID] = res
+	return res, nil
 }
 
 func (f *fakeExecutor) advanceCount() int {
@@ -148,56 +205,18 @@ func (f *fakeExecutor) advanceCount() int {
 	return len(f.advanceCalls)
 }
 
-// gatingLLM wraps a fakeLLM and parks the Nth Chat call on a gate (or ctx
-// cancellation) — the shape the tool-loop interrupt test needs.
-type gatingLLM struct {
-	inner     *fakeLLM
-	blockOn   int // 1-based call index that blocks
-	entered   chan struct{}
-	enterOnce sync.Once
-	gate      chan struct{}
-	calls     atomic.Int32
-}
-
-func newGatingLLM(inner *fakeLLM, blockOn int) *gatingLLM {
-	return &gatingLLM{
-		inner:   inner,
-		blockOn: blockOn,
-		entered: make(chan struct{}),
-		gate:    make(chan struct{}),
-	}
-}
-
-func (g *gatingLLM) Chat(ctx context.Context, messages []mimo.Message, opts ...mimo.ChatOption) (mimo.ChatResponse, error) {
-	if int(g.calls.Add(1)) == g.blockOn {
-		g.enterOnce.Do(func() { close(g.entered) })
-		select {
-		case <-g.gate:
-		case <-ctx.Done():
-			return mimo.ChatResponse{}, ctx.Err()
-		}
-	}
-	return g.inner.Chat(ctx, messages, opts...)
+func (f *fakeExecutor) setRow(index, version int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lesson.CurrentIndex = index
+	f.lesson.Version = version
 }
 
 // ---------------------------------------------------------------------------
 // Fixtures and helpers
 // ---------------------------------------------------------------------------
 
-const (
-	ttLessonID   = "L1"
-	ttFinalText  = "好，我们继续写下一个词。"
-	ttFinalWire  = `{"choices":[{"index":0,"message":{"role":"assistant","content":"` + ttFinalText + `"},"finish_reason":"stop"}]}`
-	ttTwoSent    = "这是第一句话。这是第二句话。"
-	ttTwoSentWre = `{"choices":[{"index":0,"message":{"role":"assistant","content":"` + ttTwoSent + `"},"finish_reason":"stop"}]}`
-)
-
-// ttToolCallWire builds a tool_calls response wire for advance_word.
-func ttToolCallWire(args string) string {
-	return `{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_abc","type":"function","function":{"name":"advance_word","arguments":"` + args + `"}}]},"finish_reason":"tool_calls"}]}`
-}
-
-const ttGoodArgs = `{\"lesson_id\":\"L1\",\"expected_version\":1}`
+const ttLessonID = "L1"
 
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
@@ -208,13 +227,8 @@ func mustJSON(t *testing.T, v any) []byte {
 	return b
 }
 
-func ttConfig() TurnManagerConfig {
-	return TurnManagerConfig{
-		LessonID:        ttLessonID,
-		LessonWords:     []string{"苹果", "香蕉", "橘子"},
-		MaxToolLoops:    3,
-		HistoryMaxTurns: 20,
-	}
+func ttConfig(words WordSource) TurnManagerConfig {
+	return TurnManagerConfig{LessonID: ttLessonID, Words: words}
 }
 
 func ttInit(t *testing.T, tm *TurnManager, s *captureSender) {
@@ -225,25 +239,49 @@ func ttInit(t *testing.T, tm *TurnManager, s *captureSender) {
 	}))
 }
 
-// lastAssistantContent returns the newest plain assistant message content
-// (no tool_calls, not a tool answer).
-func lastAssistantContent(msgs []mimo.Message) (string, bool) {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		m := msgs[i]
-		if m.Role == "assistant" && len(m.ToolCalls) == 0 && m.ToolCallID == "" {
-			return m.Content, true
-		}
+// ttAwaitSpoken waits until at least n teacher sentences went out.
+func ttAwaitSpoken(t *testing.T, s *captureSender, n int) {
+	t.Helper()
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) >= n }) {
+		t.Fatalf("teacher sentences = %d, want >= %d", s.countOf(TypeTeacherSentence), n)
 	}
-	return "", false
 }
 
-// chanClosed polls a closed-channel signal inside waitFor.
-func chanClosed(ch chan struct{}) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-		return false
+// ttAckLast sends the sentence_ack for the most recently announced sentence
+// (the announcement's final sentence) and returns its id.
+func ttAckLast(t *testing.T, tm *TurnManager, s *captureSender, epoch uint64) string {
+	t.Helper()
+	sents := s.controlsOf(t, TypeTeacherSentence)
+	if len(sents) == 0 {
+		t.Fatal("no teacher sentence to ack")
+	}
+	sid, _ := sents[len(sents)-1]["sentence_id"].(string)
+	tm.HandleControl(s, mustJSON(t, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: sid, Epoch: epoch}))
+	return sid
+}
+
+// ttEventCount counts recorded rt_event entries of the given event name.
+func ttEventCount(t *testing.T, log *captureLogger, event string) int {
+	t.Helper()
+	n := 0
+	for _, e := range log.snapshot() {
+		if e.msg != "rt_event" {
+			continue
+		}
+		for _, f := range e.fields {
+			if f.Key == "event" && f.Value == event {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// ttWaitListening waits for the FSM to hand control back after an ack.
+func ttWaitListening(t *testing.T, s *captureSender) {
+	t.Helper()
+	if !waitFor(t, 5*time.Second, func() bool { return s.listeningCount() > 0 }) {
+		t.Fatal("FSM never returned to listening after the valid ack")
 	}
 }
 
@@ -252,9 +290,9 @@ func chanClosed(ch chan struct{}) bool {
 // ---------------------------------------------------------------------------
 
 func TestTurnSessionInitHappyPath(t *testing.T) {
-	asr := newFakeASR(asrScript{text: "你好"})
-	exec := newFakeExecutor(ttLessonID, []string{"苹果"})
-	tm := NewTurnManager(asr, newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(), nil, nil)
+	words := newFakeWords(ttCards("苹果", "香蕉", "橘子"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(words), nil, nil)
 	s := &captureSender{}
 	ttInit(t, tm, s)
 
@@ -274,13 +312,20 @@ func TestTurnSessionInitHappyPath(t *testing.T) {
 	if l["id"] != ttLessonID || l["version"] != float64(1) {
 		t.Errorf("session_ready.lesson = %v, want L1 v1", l)
 	}
-	if s.countOf(TypeState) == 0 {
-		t.Error("no state message after session_init")
+	gotWords := l["words"].([]any)
+	if len(gotWords) != 3 || gotWords[0] != "苹果" {
+		t.Errorf("session_ready.lesson.words = %v, want [苹果 香蕉 橘子]", gotWords)
+	}
+	if exec.ensureCardsCalls != 1 {
+		t.Errorf("EnsureLessonCards calls = %d, want 1", exec.ensureCardsCalls)
+	}
+	if words.fetchCount() != 1 {
+		t.Errorf("FetchDueWords calls = %d, want 1", words.fetchCount())
 	}
 }
 
 func TestTurnSessionInitDegraded(t *testing.T) {
-	tm := NewTurnManager(nil, nil, nil, newFakeExecutor(ttLessonID, nil), ttConfig(), nil, nil)
+	tm := NewTurnManager(nil, nil, nil, newFakeExecutor(ttLessonID, ttCards("苹果")), ttConfig(newFakeWords(ttCards("苹果"))), nil, nil)
 	s := &captureSender{}
 	ttInit(t, tm, s)
 
@@ -299,9 +344,22 @@ func TestTurnSessionInitDegraded(t *testing.T) {
 	}
 }
 
+func TestTurnSessionInitNoWordSource(t *testing.T) {
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutor(ttLessonID, ttCards("苹果")), TurnManagerConfig{LessonID: ttLessonID}, nil, nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+
+	errs := s.controlsOf(t, TypeError)
+	if len(errs) != 1 || errs[0]["code"] != ErrCodeLessonUnavailable {
+		t.Fatalf("errors = %v, want one lesson_unavailable", errs)
+	}
+	if s.countOf(TypeSessionReady) != 0 {
+		t.Error("session_ready sent without a WordSource")
+	}
+}
+
 func TestTurnSessionInitRejectsBadFormat(t *testing.T) {
-	asr := newFakeASR()
-	tm := NewTurnManager(asr, newFakeLLM(), newFakeTTS(1, 320), newFakeExecutor(ttLessonID, nil), ttConfig(), nil, nil)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(ttCards("苹果"))), nil, nil)
 	s := &captureSender{}
 	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
 		Type:  TypeSessionInit,
@@ -315,7 +373,7 @@ func TestTurnSessionInitRejectsBadFormat(t *testing.T) {
 }
 
 func TestTurnPingPong(t *testing.T) {
-	tm := NewTurnManager(nil, nil, nil, nil, ttConfig(), nil, nil)
+	tm := NewTurnManager(nil, nil, nil, nil, ttConfig(nil), nil, nil)
 	s := &captureSender{}
 	tm.HandleControl(s, []byte(`{"type":"ping","t_client_ms":4242}`))
 
@@ -332,7 +390,7 @@ func TestTurnPingPong(t *testing.T) {
 }
 
 func TestTurnUnknownControlRejected(t *testing.T) {
-	tm := NewTurnManager(nil, nil, nil, nil, ttConfig(), nil, nil)
+	tm := NewTurnManager(nil, nil, nil, nil, ttConfig(nil), nil, nil)
 	s := &captureSender{}
 	tm.HandleControl(s, []byte(`{"type":"teacher_sentence"}`))
 	errs := s.controlsOf(t, TypeError)
@@ -342,238 +400,391 @@ func TestTurnUnknownControlRejected(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool loop (先执行后播报)
+// Dictation FSM behavior (13-08 Task 1)
 // ---------------------------------------------------------------------------
 
-// TestTurnToolLoopExecutesBeforeSpeaking: fakeLLM scripts
-// [tool_calls(advance_word) → final text]. The executor runs exactly once
-// under the tool_call id; the second Chat sees the role:"tool" answer; the
-// lesson update and only THEN the spoken sentence go out.
-func TestTurnToolLoopExecutesBeforeSpeaking(t *testing.T) {
-	asr := newFakeASR(asrScript{text: "写完了"})
-	llm := newFakeLLM(
-		llmScript{wire: ttToolCallWire(ttGoodArgs)},
-		llmScript{wire: ttFinalWire},
-	)
-	tts := newFakeTTS(2, 320)
-	exec := newFakeExecutor(ttLessonID, []string{"苹果", "香蕉"})
-	tm := NewTurnManager(asr, llm, tts, exec, ttConfig(), nil, nil)
+// TestDictationOpeningGreetsAndAnnounces: session_ready carries the due
+// word table, the teacher speaks the opening + FIRST word with ZERO LLM
+// calls, and the FSM returns to listening (plus word_announced) only after
+// the greeting's valid final ack.
+func TestDictationOpeningGreetsAndAnnounces(t *testing.T) {
+	log := &captureLogger{}
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tts := newFakeTTS(1, 320)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), tts, exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
 	s := &captureSender{}
 	ttInit(t, tm, s)
 
-	tm.processTurn(s, []byte("pcm"))
+	ready := s.controlsOf(t, TypeSessionReady)
+	if len(ready) != 1 {
+		t.Fatalf("session_ready count = %d, want 1", len(ready))
+	}
+	l := ready[0]["lesson"].(map[string]any)
+	if got := l["words"].([]any); len(got) != 2 {
+		t.Errorf("lesson.words = %v, want 2 due words", got)
+	}
 
-	if got := exec.advanceCount(); got != 1 {
-		t.Fatalf("executor advance calls = %d, want exactly 1", got)
+	// Greeting (3 sentences: hello + word count + first word) goes out with
+	// no LLM call.
+	ttAwaitSpoken(t, s, 3)
+	if llm := tm.llm.(*fakeLLM); llm.callCount() != 0 {
+		t.Errorf("llm calls during greeting = %d, want 0 (opening is template-only)", llm.callCount())
+	}
+	sents := s.controlsOf(t, TypeTeacherSentence)
+	hello, _ := sents[0]["text"].(string)
+	count, _ := sents[1]["text"].(string)
+	firstWord, _ := sents[len(sents)-1]["text"].(string)
+	if !contains(hello, "你好") {
+		t.Errorf("greeting hello = %q, want the teacher hello", hello)
+	}
+	if !contains(count, "2 个词") {
+		t.Errorf("greeting word count = %q, want the word count", count)
+	}
+	if !contains(firstWord, "苹果") || !contains(firstWord, "第 1 个词") {
+		t.Errorf("greeting first word = %q, want 第 1 个词 苹果", firstWord)
+	}
+
+	// No listening before the ack: TTS completion and audio_end never lift
+	// the playback gate.
+	if s.listeningCount() != 0 {
+		t.Errorf("listening before ack = %d, want 0", s.listeningCount())
+	}
+
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+	if ttEventCount(t, log, EventWordAnnounced) != 1 {
+		t.Errorf("word_announced events = %d, want 1", ttEventCount(t, log, EventWordAnnounced))
+	}
+}
+
+// TestDictationConfirmAdvancesAndAnnouncesNext: one classification Chat
+// returns confirm; the FIRST AdvanceWord commit records the outcome, sends
+// lesson_update with the FSM-derived requestID, and announces the NEXT word.
+func TestDictationConfirmAdvancesAndAnnouncesNext(t *testing.T) {
+	log := &captureLogger{}
+	words := newFakeWords(ttCards("苹果", "香蕉", "橘子"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	asr := newFakeASR(asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	// processTurn blocks inside the next-word announcement's ack wait —
+	// drive it on a goroutine and ack the announcement when it appears.
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	ttAwaitSpoken(t, s, 4)
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirm turn did not settle after the announce ack")
+	}
+
+	if exec.advanceCount() != 1 {
+		t.Fatalf("advance calls = %d, want 1", exec.advanceCount())
 	}
 	call := exec.advanceCalls[0]
-	if call.lessonID != ttLessonID || call.expectedVersion != 1 || call.requestID != "call_abc" {
-		t.Errorf("advance call = %+v, want L1/1/call_abc (request_id must be the tool_call id)", call)
+	if call.requestID != "L1-advance-0" || call.expectedVersion != 1 || call.lessonID != ttLessonID {
+		t.Errorf("advance call = %+v, want L1-advance-0 @ v1", call)
 	}
-
-	if llm.callCount() != 2 {
-		t.Fatalf("llm calls = %d, want 2", llm.callCount())
-	}
-	second := llm.calls[1].messages
-	var toolMsg *mimo.Message
-	var replayMsg *mimo.Message
-	for i := range second {
-		if second[i].Role == "tool" && second[i].ToolCallID == "call_abc" {
-			m := second[i]
-			toolMsg = &m
-		}
-		if second[i].Role == "assistant" && len(second[i].ToolCalls) == 1 {
-			m := second[i]
-			replayMsg = &m
-		}
-	}
-	if toolMsg == nil {
-		t.Fatalf("second Chat history has no role:tool answer for call_abc: %+v", second)
-	}
-	if !strings.Contains(toolMsg.Content, `"ok":true`) || !strings.Contains(toolMsg.Content, `"new_index":1`) {
-		t.Errorf("tool result = %s, want ok:true new_index:1", toolMsg.Content)
-	}
-	if replayMsg == nil || replayMsg.ToolCalls[0].ID != "call_abc" {
-		t.Errorf("assistant tool_calls replay missing: %+v", second)
-	}
-
 	updates := s.controlsOf(t, TypeLessonUpdate)
 	if len(updates) != 1 {
 		t.Fatalf("lesson_update count = %d, want 1", len(updates))
 	}
-	if updates[0]["version"] != float64(2) || updates[0]["request_id"] != "call_abc" {
-		t.Errorf("lesson_update = %v, want version 2 / call_abc", updates[0])
+	if updates[0]["version"] != float64(2) || updates[0]["current_index"] != float64(1) || updates[0]["request_id"] != "L1-advance-0" {
+		t.Errorf("lesson_update = %v, want v2 idx1 L1-advance-0", updates[0])
+	}
+	if ttEventCount(t, log, EventWordAdvanced) != 1 {
+		t.Errorf("word_advanced events = %d, want 1", ttEventCount(t, log, EventWordAdvanced))
+	}
+	if llm.callCount() != 1 {
+		t.Errorf("llm calls = %d, want 1 (single classification call)", llm.callCount())
 	}
 
-	sentences := s.controlsOf(t, TypeTeacherSentence)
-	if len(sentences) != 1 || sentences[0]["text"] != ttFinalText {
-		t.Fatalf("teacher_sentence = %v, want the final text after tools", sentences)
+	// Next word announced (already acked above); the ack armed
+	// word_announced for the NEW index.
+	sents := s.controlsOf(t, TypeTeacherSentence)
+	last, _ := sents[len(sents)-1]["text"].(string)
+	if !contains(last, "香蕉") || !contains(last, "第 2 个词") {
+		t.Errorf("next announcement = %q, want 第 2 个词 香蕉", last)
 	}
-	if s.audioCount() == 0 {
-		t.Error("no audio sent for the final sentence")
-	}
-	if s.countOf(TypeAudioStart) < 1 {
-		t.Error("no audio_start message")
-	}
-	if s.countOf(TypeState) < 1 {
-		t.Error("no final listening state message")
+	if !waitFor(t, 5*time.Second, func() bool { return ttEventCount(t, log, EventWordAnnounced) == 2 }) {
+		t.Fatalf("word_announced events = %d, want 2 (greeting + next word)", ttEventCount(t, log, EventWordAnnounced))
 	}
 }
 
-// TestTurnToolLoopConflictFedBack: a ConflictError becomes a
-// version_conflict tool result — verbal resolution, no retry write, no
-// panic, and the turn still speaks a final text.
-func TestTurnToolLoopConflictFedBack(t *testing.T) {
-	asr := newFakeASR(asrScript{text: "下一个"})
-	llm := newFakeLLM(
-		llmScript{wire: ttToolCallWire(ttGoodArgs)},
-		llmScript{wire: ttFinalWire},
-	)
-	exec := newFakeExecutor(ttLessonID, []string{"苹果"})
-	exec.conflictVersion = 7
-	tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), exec, ttConfig(), nil, nil)
+// TestDictationDoubleConfirmIdempotent: a late confirm re-using the SAME
+// captured target replays Idempotent=true — the local cursor aligns to the
+// FIRST result and nothing else happens: no outcome write, no message, no
+// narration, no event.
+func TestDictationDoubleConfirmIdempotent(t *testing.T) {
+	log := &captureLogger{}
+	words := newFakeWords(ttCards("苹果", "香蕉", "橘子"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	asr := newFakeASR(asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
 	s := &captureSender{}
 	ttInit(t, tm, s)
-
-	tm.processTurn(s, []byte("pcm"))
-
-	if got := exec.advanceCount(); got != 1 {
-		t.Fatalf("advance calls = %d, want 1", got)
-	}
-	if llm.callCount() < 2 {
-		t.Fatalf("llm calls = %d, want 2", llm.callCount())
-	}
-	second := llm.calls[1].messages
-	found := false
-	for _, m := range second {
-		if m.Role == "tool" && strings.Contains(m.Content, `"error":"version_conflict"`) && strings.Contains(m.Content, `"current_version":7`) {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("no version_conflict tool result fed back: %+v", second)
-	}
-	if s.countOf(TypeLessonUpdate) != 0 {
-		t.Error("lesson_update sent for a failed write")
-	}
-	if s.countOf(TypeTeacherSentence) != 1 {
-		t.Error("turn did not speak a final text after the conflict")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Argument validation (T-13-03 / T-13-05b / M-5)
-// ---------------------------------------------------------------------------
-
-func TestTurnValidateToolArgs(t *testing.T) {
-	ver := 3
-	if a, err := validateToolArgs(ttLessonID, "advance_word", `{"lesson_id":"L1","expected_version":3}`); err != nil || a == nil || *a.ExpectedVersion != ver {
-		t.Fatalf("parsed args = %+v err=%v, want expected_version 3", a, err)
-	}
-	if _, err := validateToolArgs(ttLessonID, "advance_word", `{"lesson_id":"L1","expected_version":3}`); err != nil {
-		t.Fatalf("valid advance_word rejected: %v", err)
-	}
-	if _, err := validateToolArgs(ttLessonID, "get_lesson_state", `{"lesson_id":"L1"}`); err != nil {
-		t.Fatalf("valid get_lesson_state rejected: %v", err)
-	}
-
-	bad := []struct {
-		name, args string
-	}{
-		{"broken json", `{"lesson_id":"L1",`},
-		{"unknown tool args-shape", `{"lesson_id":"L1","expected_version":1}`}, // used with unknown name below
-		{"empty lesson_id", `{"lesson_id":"","expected_version":1}`},
-		{"foreign lesson_id", `{"lesson_id":"OTHER","expected_version":1}`},
-		{"missing expected_version", `{"lesson_id":"L1"}`},
-		{"string version", `{"lesson_id":"L1","expected_version":"1"}`},
-		{"float version", `{"lesson_id":"L1","expected_version":1.5}`},
-		{"zero version", `{"lesson_id":"L1","expected_version":0}`},
-	}
-	for _, c := range bad {
-		name := c.name
-		args := c.args
-		tool := "advance_word"
-		if name == "unknown tool args-shape" {
-			tool = "delete_everything"
-		}
-		if _, err := validateToolArgs(ttLessonID, tool, args); err == nil {
-			t.Errorf("%s: accepted, want rejection", name)
-		}
-	}
-}
-
-// TestTurnToolLoopInvalidArgsNotExecuted: broken-JSON arguments and a
-// foreign lesson_id both feed invalid_arguments back to the model WITHOUT
-// any executor call (M-5).
-func TestTurnToolLoopInvalidArgsNotExecuted(t *testing.T) {
-	cases := []struct {
-		name string
-		args string
-	}{
-		{"broken json", `{\"lesson_id\":\"L1\",\"expected_version\":1`},
-		{"foreign lesson id", `{\"lesson_id\":\"OTHER\",\"expected_version\":1}`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			asr := newFakeASR(asrScript{text: "下一个"})
-			llm := newFakeLLM(
-				llmScript{wire: ttToolCallWire(tc.args)},
-				llmScript{wire: ttFinalWire},
-			)
-			exec := newFakeExecutor(ttLessonID, []string{"苹果"})
-			tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), exec, ttConfig(), nil, nil)
-			s := &captureSender{}
-			ttInit(t, tm, s)
-
-			tm.processTurn(s, []byte("pcm"))
-
-			if exec.advanceCount()+exec.stateCalls != 0 {
-				t.Fatalf("executor touched: advance=%d state=%d, want 0/0", exec.advanceCount(), exec.stateCalls)
-			}
-			if llm.callCount() < 2 {
-				t.Fatalf("llm calls = %d, want 2 (invalid arguments must be fed back for a retry)", llm.callCount())
-			}
-			var toolContent string
-			for _, m := range llm.calls[1].messages {
-				if m.Role == "tool" && m.ToolCallID == "call_abc" {
-					toolContent = m.Content
-				}
-			}
-			if !strings.Contains(toolContent, "invalid_arguments") {
-				t.Fatalf("tool result = %q, want invalid_arguments feedback", toolContent)
-			}
-			// The model gets its one retry and the turn completes.
-			if s.countOf(TypeTeacherSentence) != 1 {
-				t.Error("turn did not complete after invalid-arguments feedback")
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Epoch cancellation
-// ---------------------------------------------------------------------------
-
-// TestTurnInterruptStopsAudioAndBumpsEpoch: with the TTS streaming
-// continuously, an interrupt must (a) bump the epoch, (b) stop ALL further
-// audio bytes to the sender, (c) ack with new_epoch > old_epoch.
-func TestTurnInterruptStopsAudioAndBumpsEpoch(t *testing.T) {
-	asr := newFakeASR(asrScript{text: "你好"})
-	llm := newFakeLLM(llmScript{wire: ttFinalWire})
-	tts := newFakeTTS(0, 320)
-	tts.streamUntilCancel = true
-	tts.delay = 20 * time.Millisecond
-	tm := NewTurnManager(asr, llm, tts, newFakeExecutor(ttLessonID, nil), ttConfig(), nil, nil)
-	s := &captureSender{}
-	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
 
 	done := make(chan struct{})
 	go func() {
 		tm.processTurn(s, []byte("pcm"))
 		close(done)
 	}()
+	ttAwaitSpoken(t, s, 4)
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first confirm never settled after the announce ack")
+	}
+	before := map[string]int{
+		"lesson_update":   s.countOf(TypeLessonUpdate),
+		"teacher_sentence": s.countOf(TypeTeacherSentence),
+		"word_advanced":   ttEventCount(t, log, EventWordAdvanced),
+		"review":          ttEventCount(t, log, EventReviewWritten),
+	}
 
-	if !waitFor(t, 5*time.Second, func() bool { return s.audioCount() >= 3 }) {
+	// The late duplicate confirm carries the ORIGINAL captured target.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tm.confirmTarget(s, ctx, cancel, 0, 0, "", TurnTarget{WordIndex: 0, ExpectedVersion: 1})
+
+	if exec.advanceCount() != 2 {
+		t.Fatalf("advance calls = %d, want 2 (the duplicate still hits the executor)", exec.advanceCount())
+	}
+	if exec.advanceCalls[1].requestID != "L1-advance-0" {
+		t.Errorf("duplicate requestID = %q, want L1-advance-0", exec.advanceCalls[1].requestID)
+	}
+	if got := s.countOf(TypeLessonUpdate); got != before["lesson_update"] {
+		t.Errorf("lesson_update after duplicate = %d, want %d (no new message)", got, before["lesson_update"])
+	}
+	if got := s.countOf(TypeTeacherSentence); got != before["teacher_sentence"] {
+		t.Errorf("teacher_sentence after duplicate = %d, want %d (no re-announcement)", got, before["teacher_sentence"])
+	}
+	if got := ttEventCount(t, log, EventWordAdvanced); got != before["word_advanced"] {
+		t.Errorf("word_advanced after duplicate = %d, want %d", got, before["word_advanced"])
+	}
+	if got := ttEventCount(t, log, EventReviewWritten); got != before["review"] {
+		t.Errorf("review_written after duplicate = %d, want %d (no completion)", got, before["review"])
+	}
+	if s.listeningCount() == 0 {
+		t.Error("duplicate confirm did not settle back to listening")
+	}
+}
+
+// TestDictationVersionConflictAlignsWithoutSideEffects: a version conflict
+// read-backs and aligns the local cursor — no retry write, no message, no
+// narration, no completion.
+func TestDictationVersionConflictAlignsWithoutSideEffects(t *testing.T) {
+	log := &captureLogger{}
+	words := newFakeWords(ttCards("苹果"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	exec.conflictVersion = 7
+	asr := newFakeASR(asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 2)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+	greetingSents := s.countOf(TypeTeacherSentence)
+
+	tm.processTurn(s, []byte("pcm"))
+
+	if exec.advanceCount() != 1 {
+		t.Fatalf("advance calls = %d, want 1 (no retry write)", exec.advanceCount())
+	}
+	exec.mu.Lock()
+	states := exec.stateCalls
+	exec.mu.Unlock()
+	if states == 0 {
+		t.Error("conflict branch never read the lesson state back for alignment")
+	}
+	if s.countOf(TypeLessonUpdate) != 0 {
+		t.Error("lesson_update sent for a conflicted write")
+	}
+	if got := s.countOf(TypeTeacherSentence); got != greetingSents {
+		t.Errorf("teacher_sentence after conflict = %d, want %d (no narration)", got, greetingSents)
+	}
+	if ttEventCount(t, log, EventWordAdvanced) != 0 {
+		t.Error("word_advanced emitted for a conflicted write")
+	}
+	ttWaitListening(t, s)
+}
+
+// TestLegacyEmptyCardsIsLessonUnavailable: a pre-existing lessons row with
+// EMPTY cards (legacy r0-test) fails visibly — never a re-RunDue, never a
+// fake backfill.
+func TestLegacyEmptyCardsIsLessonUnavailable(t *testing.T) {
+	log := &captureLogger{}
+	words := newFakeWords(ttCards("苹果"))
+	exec := newFakeExecutor(ttLessonID, nil) // row exists, cards empty
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+
+	errs := s.controlsOf(t, TypeError)
+	if len(errs) != 1 || errs[0]["code"] != ErrCodeLessonUnavailable {
+		t.Fatalf("errors = %v, want one lesson_unavailable", errs)
+	}
+	if s.countOf(TypeSessionReady) != 0 {
+		t.Error("session_ready sent for a legacy empty-cards row")
+	}
+	if words.fetchCount() != 0 {
+		t.Errorf("FetchDueWords calls = %d, want 0 (no re-RunDue for an existing row)", words.fetchCount())
+	}
+	if exec.ensureCardsCalls != 0 {
+		t.Errorf("EnsureLessonCards calls = %d, want 0 (no fake backfill)", exec.ensureCardsCalls)
+	}
+}
+
+// TestCompletedReconnectDoesNotReviewOrNarrate: reconnecting to a finished
+// lesson restores the completion state only — session_ready + session_ended
+// (lesson_complete), no summary replay, no second SubmitReview.
+func TestCompletedReconnectDoesNotReviewOrNarrate(t *testing.T) {
+	log := &captureLogger{}
+	words := newFakeWords(ttCards("苹果", "香蕉", "橘子"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉", "橘子"))
+	exec.setRow(3, 4)
+	tts := newFakeTTS(1, 320)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), tts, exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+
+	ready := s.controlsOf(t, TypeSessionReady)
+	if len(ready) != 1 {
+		t.Fatalf("session_ready count = %d, want 1", len(ready))
+	}
+	if ready[0]["lesson"].(map[string]any)["current_index"] != float64(3) {
+		t.Errorf("session_ready.lesson = %v, want current_index 3", ready[0]["lesson"])
+	}
+	ended := s.controlsOf(t, TypeSessionEnded)
+	if len(ended) != 1 || ended[0]["reason"] != ReasonLessonComplete {
+		t.Fatalf("session_ended = %v, want one lesson_complete", ended)
+	}
+	if s.countOf(TypeTeacherSentence) != 0 {
+		t.Errorf("teacher_sentence = %d, want 0 (no summary replay)", s.countOf(TypeTeacherSentence))
+	}
+	if got := len(tts.recordedTexts()); got != 0 {
+		t.Errorf("tts calls = %d, want 0", got)
+	}
+	if got := len(words.submissions()); got != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0 (no second review)", got)
+	}
+	if ttEventCount(t, log, EventReviewWritten) != 0 {
+		t.Error("review_written emitted on a completed reconnect")
+	}
+}
+
+// TestSentenceAckRejectsStaleUnknownAndDuplicate: only the current-epoch,
+// registered, first ack consumes the pending entry; stale, unknown, and
+// duplicate acks emit sanitized diagnostics with zero state side effects.
+func TestSentenceAckRejectsStaleUnknownAndDuplicate(t *testing.T) {
+	log := &captureLogger{}
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 2)
+
+	ack := func(sid string, epoch uint64) {
+		tm.HandleControl(s, mustJSON(t, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: sid, Epoch: epoch}))
+	}
+	ack("t1-s0", 5) // stale epoch
+	ack("t1-s99", 0) // unknown sentence
+	if s.listeningCount() != 0 {
+		t.Fatal("rejected acks lifted the playback gate")
+	}
+	sid := ttAckLast(t, tm, s, 0) // valid final ack
+	ttWaitListening(t, s)
+	ack(sid, 0) // duplicate
+
+	if got := ttEventCount(t, log, EventWordAnnounced); got != 1 {
+		t.Errorf("word_announced events = %d, want exactly 1", got)
+	}
+	if got := ttEventCount(t, log, EventSentenceAckRejected); got != 3 {
+		t.Errorf("sentence_ack_rejected events = %d, want 3 (stale + unknown + duplicate)", got)
+	}
+}
+
+// TestDictationRegistersPendingBeforeAudioStartAndObservesEarlyFinalAck:
+// the pending entry is registered BEFORE the sentence's audio_start is
+// queued (an ack sent while the final sentence is still streaming is
+// accepted), and the sticky completion bit means the early final ack is
+// never lost by the later await call.
+func TestDictationRegistersPendingBeforeAudioStartAndObservesEarlyFinalAck(t *testing.T) {
+	log := &captureLogger{}
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	tts := newFakeTTS(3, 320)
+	tts.delay = 100 * time.Millisecond
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), tts, newFakeExecutorNoRow(ttLessonID), ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+
+	// Greeting is 3 sentences; wait until the FINAL sentence's audio_start
+	// went out, then ack BEFORE its audio_end / before any await call.
+	ttAwaitSpoken(t, s, 3)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioStart) >= 3 }) {
+		t.Fatal("final sentence audio_start never went out")
+	}
+	tm.HandleControl(s, mustJSON(t, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: "t1-s2", Epoch: 0}))
+
+	ttWaitListening(t, s)
+	if got := ttEventCount(t, log, EventWordAnnounced); got != 1 {
+		t.Errorf("word_announced events = %d, want 1 (early final ack observed)", got)
+	}
+	if got := ttEventCount(t, log, EventPlaybackAckTimeout); got != 0 {
+		t.Errorf("playback_ack_timeout events = %d, want 0", got)
+	}
+	if got := ttEventCount(t, log, EventError); got != 0 {
+		t.Errorf("error events = %d, want 0 (the early ack must not be rejected)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Epoch cancellation + half-duplex gating (13-04 semantics, FSM form)
+// ---------------------------------------------------------------------------
+
+// TestTurnInterruptStopsAudioAndBumpsEpoch: with the TTS streaming
+// continuously, an interrupt must (a) bump the epoch, (b) stop ALL further
+// audio bytes to the sender, (c) ack with new_epoch > old_epoch, and (d)
+// wake the playback-ack waiter without further messages.
+func TestTurnInterruptStopsAudioAndBumpsEpoch(t *testing.T) {
+	asr := newFakeASR(asrScript{text: "你好"})
+	llm := newFakeLLM(intentScript(intentChat, "这是一句比较长的回答，慢慢说给你听。"))
+	tts := newFakeTTS(1, 320) // greeting completes instantly
+	tm := NewTurnManager(asr, llm, tts, newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(ttCards("苹果"))), nil, nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 2)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	tts.streamUntilCancel = true // the chat reply streams forever
+	tts.delay = 20 * time.Millisecond
+	base := s.audioCount() // greeting chunks already delivered — anchor on them
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+
+	if !waitFor(t, 5*time.Second, func() bool { return s.audioCount() >= base+3 }) {
 		t.Fatal("TTS stream never produced chunks")
 	}
 
@@ -598,183 +809,34 @@ func TestTurnInterruptStopsAudioAndBumpsEpoch(t *testing.T) {
 	}
 }
 
-// TestTurnInterruptDuringToolLoopKeepsToolRecords: interrupt while the
-// second Chat hop is blocked → no further Chat/TTS issues for that turn,
-// the assistant(tool_calls) + role:"tool" records stay in history verbatim,
-// and the next turn's Chat sees them followed directly by its user message
-// (no spoken-text message in between).
-func TestTurnInterruptDuringToolLoopKeepsToolRecords(t *testing.T) {
-	asr := newFakeASR(asrScript{text: "下一个"}, asrScript{text: "还在吗"})
-	inner := newFakeLLM(
-		llmScript{wire: ttToolCallWire(ttGoodArgs)},
-		llmScript{wire: ttFinalWire},
-	)
-	llm := newGatingLLM(inner, 2)
-	tts := newFakeTTS(1, 320)
-	exec := newFakeExecutor(ttLessonID, []string{"苹果"})
-	tm := NewTurnManager(asr, llm, tts, exec, ttConfig(), nil, nil)
-	s := &captureSender{}
-	ttInit(t, tm, s)
-
-	done := make(chan struct{})
-	go func() {
-		tm.processTurn(s, []byte("pcm"))
-		close(done)
-	}()
-
-	if !waitFor(t, 5*time.Second, func() bool { return exec.advanceCount() == 1 && chanClosed(llm.entered) }) {
-		t.Fatal("tool never executed or second Chat never started")
-	}
-	// Second hop is now parked. Interrupt: ctx cancellation unblocks it.
-	tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("processTurn did not return after interrupt")
-	}
-
-	if got := len(tts.recordedTexts()); got != 0 {
-		t.Fatalf("tts calls after interrupted tool loop = %d, want 0", got)
-	}
-	if exec.advanceCount() != 1 {
-		t.Errorf("advance calls = %d, want 1 (exactly-once semantics)", exec.advanceCount())
-	}
-
-	// The next turn proceeds on a history that preserves the tool facts.
-	tm.processTurn(s, []byte("pcm"))
-	if inner.callCount() < 2 {
-		t.Fatalf("llm calls = %d, want 2", inner.callCount())
-	}
-	msgs := inner.calls[1].messages
-	if len(msgs) < 5 {
-		t.Fatalf("next Chat history = %+v, want [system user assistant(tool_calls) tool user]", msgs)
-	}
-	if msgs[4].Role != "user" {
-		t.Fatalf("message 4 = %+v, want the new user turn", msgs[4])
-	}
-	var sawToolReplay, sawToolAnswer bool
-	for _, m := range msgs[:4] {
-		if m.Role == "assistant" && len(m.ToolCalls) == 1 && m.ToolCalls[0].ID == "call_abc" {
-			sawToolReplay = true
-		}
-		if m.Role == "tool" && m.ToolCallID == "call_abc" {
-			sawToolAnswer = true
-		}
-		if m.Role == "assistant" && len(m.ToolCalls) == 0 && m.ToolCallID == "" && m.Content != "" {
-			t.Fatalf("spoken-text message survived a tool-loop interrupt: %+v", m)
-		}
-	}
-	if !sawToolReplay || !sawToolAnswer {
-		t.Fatalf("tool records missing after interrupt: replay=%v answer=%v", sawToolReplay, sawToolAnswer)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// History trimming to actually-played sentences (M-2 / Pitfall 9)
-// ---------------------------------------------------------------------------
-
-// trimFixture runs one speaking turn (two sentences, slow TTS) until the
-// given ack set is applied and an interrupt lands mid-speech, then runs a
-// follow-up turn and returns the follow-up Chat's message slice.
-func trimFixture(t *testing.T, ackFirst bool, lastSentenceID string) []mimo.Message {
-	t.Helper()
-	asr := newFakeASR(asrScript{text: "开始吧"}, asrScript{text: "继续"})
-	llm := newFakeLLM(
-		llmScript{wire: ttTwoSentWre},
-		llmScript{wire: ttFinalWire},
-	)
-	tts := newFakeTTS(1, 320)
-	tts.delay = 250 * time.Millisecond
-	tm := NewTurnManager(asr, llm, tts, newFakeExecutor(ttLessonID, nil), ttConfig(), nil, nil)
-	s := &captureSender{}
-	ttInit(t, tm, s)
-
-	done := make(chan struct{})
-	go func() {
-		tm.processTurn(s, []byte("pcm"))
-		close(done)
-	}()
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) >= 2 }) {
-		t.Fatal("both teacher sentences never went out")
-	}
-	if ackFirst {
-		tm.HandleControl(s, mustJSON(t, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: "t1-s0", Epoch: 0}))
-	}
-	tm.HandleControl(s, mustJSON(t, InterruptMsg{
-		Type:           TypeInterrupt,
-		Epoch:          0,
-		LastSentenceID: lastSentenceID,
-		PlayedUntilMs:  1234,
-	}))
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("speaking turn did not return after interrupt")
-	}
-
-	// Follow-up turn: its Chat reveals the trimmed history.
-	tm.processTurn(s, []byte("pcm"))
-	if llm.callCount() < 2 {
-		t.Fatalf("llm calls = %d, want 2", llm.callCount())
-	}
-	return llm.calls[1].messages
-}
-
-func TestTurnInterruptTrimsHistoryToPlayedSentences(t *testing.T) {
-	t.Run("only first sentence acked", func(t *testing.T) {
-		msgs := trimFixture(t, true, "")
-		content, ok := lastAssistantContent(msgs)
-		if !ok {
-			t.Fatalf("no assistant message in trimmed history: %+v", msgs)
-		}
-		if content != "这是第一句话。" {
-			t.Errorf("trimmed content = %q, want only the first sentence", content)
-		}
-	})
-	t.Run("zero sentences acked removes message", func(t *testing.T) {
-		msgs := trimFixture(t, false, "")
-		if _, ok := lastAssistantContent(msgs); ok {
-			t.Fatalf("spoken-text message survived zero-played interrupt: %+v", msgs)
-		}
-	})
-	t.Run("ack union interrupt last_sentence_id", func(t *testing.T) {
-		msgs := trimFixture(t, true, "t1-s1")
-		content, ok := lastAssistantContent(msgs)
-		if !ok {
-			t.Fatalf("no assistant message in union-trimmed history: %+v", msgs)
-		}
-		if content != ttTwoSent {
-			t.Errorf("union content = %q, want both sentences", content)
-		}
-	})
-}
-
-// ---------------------------------------------------------------------------
-// Half-duplex gating (Pattern 3)
-// ---------------------------------------------------------------------------
-
-// TestTurnHalfDuplexGatesUplinkWhileSpeaking: while the teacher speaks,
-// uplink audio is dropped — the ASR must not be called for it.
+// TestTurnHalfDuplexGatesUplinkWhileSpeaking: while the teacher speaks —
+// including the playback-pending window — uplink audio is dropped; the ASR
+// must not be called for it.
 func TestTurnHalfDuplexGatesUplinkWhileSpeaking(t *testing.T) {
 	asr := newFakeASR(asrScript{text: "你好"})
-	llm := newFakeLLM(llmScript{wire: ttFinalWire})
-	tts := newFakeTTS(0, 320)
-	tts.streamUntilCancel = true
-	tts.delay = 50 * time.Millisecond
-	tm := NewTurnManager(asr, llm, tts, newFakeExecutor(ttLessonID, nil), ttConfig(), nil, nil)
+	llm := newFakeLLM(intentScript(intentChat, "好的，听我说。"))
+	tts := newFakeTTS(1, 320)
+	tm := NewTurnManager(asr, llm, tts, newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(ttCards("苹果"))), nil, nil)
 	s := &captureSender{}
 	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 2)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
 
+	tts.streamUntilCancel = true
+	tts.delay = 50 * time.Millisecond
+	base := s.audioCount() // greeting chunks already delivered — anchor on them
 	done := make(chan struct{})
 	go func() {
 		tm.processTurn(s, []byte("pcm"))
 		close(done)
 	}()
-	if !waitFor(t, 5*time.Second, func() bool { return s.audioCount() >= 1 }) {
+	if !waitFor(t, 5*time.Second, func() bool { return s.audioCount() >= base+1 }) {
 		t.Fatal("teacher never started speaking")
 	}
 
-	// Loud uplink during speaking: dropped by the gate, never transcribed.
+	// Loud uplink during speaking/pending: dropped by the gate, never
+	// transcribed.
 	loud := vadSine(12000, 200)
 	tm.IngestAudio(s, loud)
 	tm.IngestAudio(s, loud)
@@ -829,24 +891,7 @@ func TestTurnSplitSentences(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// System prompt values (CONTEXT prohibitions)
-// ---------------------------------------------------------------------------
-
-// TestTurnSystemPromptCarriesLockedRules: the persona must forbid invented
-// progress, forbid advancing on silence, require confirmation before
-// advance_word, and forbid punitive wording (13-CONTEXT prohibitions).
-func TestTurnSystemPromptCarriesLockedRules(t *testing.T) {
-	p := teacherSystemPrompt
-	for _, want := range []string{"get_lesson_state", "advance_word", "沉默", "不会写", "明确"} {
-		if !strings.Contains(p, want) {
-			t.Errorf("system prompt missing %q — CONTEXT locked rule absent", want)
-		}
-	}
-	if !strings.Contains(p, "严禁") {
-		t.Error("system prompt lacks explicit prohibitions (严禁)")
-	}
-	if len(lessonToolDefs) != 2 {
-		t.Errorf("lessonToolDefs = %d tools, want 2", len(lessonToolDefs))
-	}
+// contains is a tiny strings.Contains wrapper keeping assertions terse.
+func contains(haystack, needle string) bool {
+	return strings.Contains(haystack, needle)
 }
