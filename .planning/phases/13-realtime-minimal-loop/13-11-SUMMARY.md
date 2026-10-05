@@ -23,10 +23,10 @@ affects: [13-12 (本机真服务预验收——同一顺序的真实后端复核
 actuals:
   tokens: 22177       # chars/4 over the realized diff (88707 chars across 8 files, +1194/-189)
   tasks: 3
-  commits: 6          # MEASURED: git rev-list --count db9a9d3..61f4e5e
-commits: 6
+  commits: 7          # MEASURED: git rev-list --count db9a9d3..a7ee50f -- pkg tests（7 个生产提交；另有 3 个 docs SUMMARY/勘误提交不计入）
+commits: 7
 plan_head_before: db9a9d3
-plan_head_after: 61f4e5e
+plan_head_after: a7ee50f
 
 # Tech tracking
 tech-stack:
@@ -236,9 +236,17 @@ Each task was committed atomically:
 - **Verification:** git status 干净（计划文件零残留改动）；e2e 在无工作区补丁状态下复跑 4 passed
 - **Committed in:** 61f4e5e
 
+**6. [Rule 3 - Blocking] 用例一 close 顺序断言的客户端侧同类竞态**
+- **Found during:** 计划级终验（对提交树全量复跑，用例一 trace.indexOf('close') === -1）
+- **Issue:** 服务端在 session_ended 后 ~50ms 才 close，客户端 onClose 的 close note 滞后于紧随其后的 trace 直读——与偏差 3 同族、客户端侧
+- **Fix:** 沿用轮询模式：poll 到 trace 含 close 再读全序断言（a7ee50f）
+- **Files modified:** tests/e2e-rt/rt-loop.spec.js
+- **Verification:** 4 次单用例 + 4 次全套件复跑 8/8 稳定；随后计划级终验全绿
+- **Committed in:** a7ee50f
+
 ---
 
-**Total deviations:** 5 auto-fixed（4 blocking，1 minor；全部为计划意图的机械落地或其直接必然后果）
+**Total deviations:** 6 auto-fixed（5 blocking，1 minor；全部为计划意图的机械落地或其直接必然后果）
 **Impact on plan:** 零范围蔓延——修正均发生在计划声明文件内，验证命令全部按计划原样命中（npm test / playwright rt / --list / 负门逐字执行），无过滤漂移。
 
 ## Issues Encountered
@@ -270,10 +278,10 @@ None - no external service configuration required.
 ## Self-Check: PASSED
 
 - [x] 8 个修改文件全部存在于磁盘且全部在计划 files_modified 清单内（Test-Path/清单比对）
-- [x] 提交 303a3e9 / a2912b9 / d51b1ad / d11bccd / 344ab9a / 61f4e5e 均在 git log（git log 303a3e9^..HEAD 验证）
-- [x] commits: 6 为实测值（git rev-list --count db9a9d3..61f4e5e），与 narrated 一致
+- [x] 提交 303a3e9 / a2912b9 / d51b1ad / d11bccd / 344ab9a / 61f4e5e / a7ee50f 均在 git log（git log 303a3e9^..HEAD 验证）
+- [x] commits: 7 为生产提交实测值（git rev-list --count db9a9d3..a7ee50f -- pkg tests；另有 3 个 docs 提交不计入），与 narrated 一致
 - [x] 计划级验证命令全部通过且按原文执行：npm test 全绿（9 套件）；npx playwright test -c playwright.rt.config.js → 4 passed；npx playwright test --list → 7 tests in 4 files 零 rt-loop；innerHTML 负门 clean；node --check mock 通过
-- [x] e2e 稳定性：修复后 5 次单用例 + 3 次全套件复跑 8/8 通过；提交树无工作区补丁依赖（61f4e5e 补齐后 git status 计划文件零残留）
+- [x] e2e 稳定性：修复后多轮复跑稳定（含 4+4 次 8/8 全绿与两次计划级终验）；提交树无工作区补丁依赖（61f4e5e 补齐后 git status 计划文件零残留）
 - [x] 无 stub 模式（无 TODO/placeholder/空数据源）；无计划外威胁面新增（零新增依赖、零新端点、零新协议类型——__test_resume 为 mock 测试通道并在代码注释与本表登记）
 
 ---
