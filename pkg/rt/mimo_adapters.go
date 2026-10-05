@@ -9,11 +9,14 @@ package rt
 import (
 	"context"
 	"encoding/base64"
+	"sort"
 
 	"github.com/pkg/errors"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
+	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/voice"
 )
 
@@ -163,3 +166,125 @@ var (
 	_ func(*lesson.Executor, context.Context, string) (lesson.Lesson, error)        = (*lesson.Executor).GetLessonState
 	_ func(*lesson.Executor, context.Context, string, int, string) (lesson.AdvanceResult, error) = (*lesson.Executor).AdvanceWord
 )
+
+// pyfsrsFetchLockHours is the fetch-lock window PyFSRS explicitly passes on
+// every RunDue (13-10, T-13-20): 1 hour covers an R0 classroom while
+// bounding the impact of a "RunDue succeeded but lesson creation failed"
+// leftover lock, and it must NOT be left to the vendored script's 24h
+// default. Process-crash residual locks re-enter the queue after this
+// window; scoped unlock / durable recovery is deferred to Phase 15.
+const pyfsrsFetchLockHours = 1
+
+// PyFSRS adapts pybridge.Executor onto the WordSource seam (13-10): the
+// dictation FSM fetches due words via the vocab_manager.py `due`
+// subcommand and writes learning records via `review`. This is the ONLY
+// place where the pybridge result shapes (DueCard / ReviewResult.Updated)
+// are digested — everything above sees lesson.Word and ReviewWriteResult.
+type PyFSRS struct {
+	exec   pybridge.Executor
+	logger infra.Logger
+}
+
+// NewPyFSRS composes the FSRS word-source adapter. Returns an error when
+// exec is nil (D-47 nil-guard convention, same as NewLessonTools); a nil
+// logger is substituted with the silent NoOp logger.
+func NewPyFSRS(exec pybridge.Executor, logger infra.Logger) (*PyFSRS, error) {
+	if exec == nil {
+		return nil, errors.New("rt: pyfsrs requires a non-nil pybridge executor")
+	}
+	if logger == nil {
+		logger = infra.NewNoOpLogger()
+	}
+	return &PyFSRS{exec: exec, logger: logger}, nil
+}
+
+// FetchDueWords returns up to limit due vocabulary cards from the FSRS
+// store. A limit <= 0 falls back to the FSM's own cap (dueWordsLimit = 10).
+// RunDue is ALWAYS called with an explicit FetchLockHours=1 (never the
+// script's 24h default, never a peek): the lock serializes one fetch per
+// card for the classroom window while bounding leftover locks to one hour.
+// Cards map into lesson.Word field-for-field (word/meaning/example — the
+// json tags were aligned losslessly in 13-07) and keep the script's order.
+// Zero cards is a legal result (no due words today), not an error.
+func (p *PyFSRS) FetchDueWords(ctx context.Context, limit int) ([]lesson.Word, error) {
+	if limit <= 0 {
+		limit = dueWordsLimit
+	}
+	res, err := p.exec.RunDue(ctx, pybridge.DueOpts{
+		Limit:          limit,
+		FetchLockHours: pyfsrsFetchLockHours,
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "rt: pyfsrs fetch due words")
+	}
+	words := make([]lesson.Word, 0, len(res.Cards))
+	for _, card := range res.Cards {
+		words = append(words, lesson.Word{
+			Word:    card.Word,
+			Meaning: card.Meaning,
+			Example: card.Example,
+		})
+	}
+	return words, nil
+}
+
+// SubmitReview writes one review batch (word → good/hard/again/easy rating)
+// and reports what ACTUALLY happened. An empty results map is a no-op:
+// it returns the zero result WITHOUT spawning a python subprocess.
+//
+// A nil error NEVER means "everything saved": the returned sets are the
+// truth — Requested is the submitted keys, Updated the words the backend
+// really refreshed (in the script's reported order), Missing the requested
+// words it did not (already reviewed today, absent from the store, ...).
+// Partial and zero Updated with a nil error are legal outcomes the 13-08
+// completion path narrates honestly ("本次保存 M/N 个" / 记录未保存后缀).
+// Exactly one RunReview is issued — no blind batch retry.
+//
+// Updated words that were never requested, or that repeat, violate the
+// provider contract and surface as a provider-contract error (not retried)
+// rather than being silently folded into the sets.
+func (p *PyFSRS) SubmitReview(ctx context.Context, results map[string]string) (ReviewWriteResult, error) {
+	if len(results) == 0 {
+		return ReviewWriteResult{}, nil
+	}
+	res, err := p.exec.RunReview(ctx, pybridge.ReviewOpts{Results: results})
+	if err != nil {
+		return ReviewWriteResult{}, errors.Wrap(err, "rt: pyfsrs submit review")
+	}
+	requested := make([]string, 0, len(results))
+	for word := range results {
+		requested = append(requested, word)
+	}
+	sort.Strings(requested) // deterministic reporting; membership is what matters
+	updatedSet := make(map[string]bool, len(res.Updated))
+	updated := make([]string, 0, len(res.Updated))
+	for _, card := range res.Updated {
+		if _, ok := results[card.Word]; !ok {
+			return ReviewWriteResult{}, errors.Errorf(
+				"rt: pyfsrs review reported an unrequested word %q (provider contract violation)", card.Word)
+		}
+		if updatedSet[card.Word] {
+			return ReviewWriteResult{}, errors.Errorf(
+				"rt: pyfsrs review reported word %q twice (provider contract violation)", card.Word)
+		}
+		updatedSet[card.Word] = true
+		updated = append(updated, card.Word)
+	}
+	missing := make([]string, 0, len(requested)-len(updated))
+	for _, word := range requested {
+		if !updatedSet[word] {
+			missing = append(missing, word)
+		}
+	}
+	p.logger.Info("pyfsrs review write reported",
+		infra.F("component", "rt"),
+		infra.F("requested", len(requested)),
+		infra.F("updated", len(updated)),
+		infra.F("missing", len(missing)),
+	)
+	return ReviewWriteResult{Requested: requested, Updated: updated, Missing: missing}, nil
+}
+
+// Compile-time interface check: the PyFSRS adapter satisfies the dictation
+// FSM's word seam (13-10 key_link).
+var _ WordSource = (*PyFSRS)(nil)
