@@ -797,9 +797,12 @@ func (c *mimoClient) executeASRRequest(ctx context.Context, req ASRRequest) (ASR
 		return ASRResponse{}, errors.Wrap(ErrInvalidResponse, "failed to decode ASR response")
 	}
 
-	// Validate response
+	// Validate response. An empty choices array is a well-formed
+	// "no speech" answer from the provider (distinct from a corrupted
+	// response above): surface it as ErrEmptyTranscription so callers can
+	// tolerate it as an empty transcription instead of a fault.
 	if len(asrResp.Choices) == 0 {
-		return ASRResponse{}, errors.Wrap(ErrInvalidResponse, "no transcription in ASR response")
+		return ASRResponse{}, errors.Wrap(ErrEmptyTranscription, "no transcription in ASR response")
 	}
 
 	return asrResp, nil

@@ -53,6 +53,15 @@ var (
 	// ErrInvalidResponse is returned when API response is invalid
 	ErrInvalidResponse = errors.New("invalid API response")
 
+	// ErrEmptyTranscription is returned when an ASR response is well-formed
+	// (HTTP 200, JSON decodes successfully) but carries an empty choices
+	// array. This is the provider's legitimate answer for a silent or
+	// pure-noise audio segment: callers should treat it as an empty
+	// transcription, not a fault. It is strictly disjoint from
+	// ErrInvalidResponse (corrupted/unparsable response) — the two are
+	// never wrapped for the same condition.
+	ErrEmptyTranscription = errors.New("asr returned no transcription")
+
 	// ErrContextCancelled is returned when context is cancelled
 	ErrContextCancelled = errors.New("context cancelled")
 

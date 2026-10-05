@@ -488,6 +488,99 @@ func TestClient_Transcribe(t *testing.T) {
 	}
 }
 
+// TestClient_TranscribeEmptyChoices verifies the sentinel split for
+// well-formed-but-empty ASR answers: an HTTP 200 response whose JSON decodes
+// successfully but carries an empty choices array is the provider's
+// legitimate "no speech" answer and must surface as ErrEmptyTranscription —
+// NOT as ErrInvalidResponse (which is reserved for corrupted/unparsable
+// responses).
+func TestClient_TranscribeEmptyChoices(t *testing.T) {
+	emptyChoicesHandler := func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-api-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		response := ASRResponse{Choices: []ASRChoice{}}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+	}
+
+	server, cleanup := mockTTSServer(emptyChoicesHandler)
+	defer cleanup()
+
+	config := ClientConfig{
+		APIKey:     "test-api-key",
+		BaseURL:    server.URL,
+		Timeout:    5 * time.Second,
+		MaxRetries: 2,
+		RetryDelay: 100 * time.Millisecond,
+	}
+
+	logger := newTestLogger()
+	client, err := NewClient(config, logger)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	_, err = client.Transcribe(context.Background(), []byte("mock_audio"), "pcm16")
+	if err == nil {
+		t.Fatal("Transcribe() expected error for empty choices, got nil")
+	}
+	if !errors.Is(err, ErrEmptyTranscription) {
+		t.Errorf("Transcribe() error = %v, want errors.Is(err, ErrEmptyTranscription)", err)
+	}
+	if errors.Is(err, ErrInvalidResponse) {
+		t.Errorf("Transcribe() error = %v, empty choices must NOT match ErrInvalidResponse", err)
+	}
+}
+
+// TestClient_TranscribeInvalidJSON verifies the complementary branch of the
+// sentinel split: an HTTP 200 response whose body fails to decode is a
+// corrupted response and must surface as ErrInvalidResponse — NOT as
+// ErrEmptyTranscription.
+func TestClient_TranscribeInvalidJSON(t *testing.T) {
+	invalidJSONHandler := func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-api-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices": [not valid json`))
+	}
+
+	server, cleanup := mockTTSServer(invalidJSONHandler)
+	defer cleanup()
+
+	config := ClientConfig{
+		APIKey:     "test-api-key",
+		BaseURL:    server.URL,
+		Timeout:    5 * time.Second,
+		MaxRetries: 2,
+		RetryDelay: 100 * time.Millisecond,
+	}
+
+	logger := newTestLogger()
+	client, err := NewClient(config, logger)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	_, err = client.Transcribe(context.Background(), []byte("mock_audio"), "pcm16")
+	if err == nil {
+		t.Fatal("Transcribe() expected error for invalid JSON, got nil")
+	}
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Errorf("Transcribe() error = %v, want errors.Is(err, ErrInvalidResponse)", err)
+	}
+	if errors.Is(err, ErrEmptyTranscription) {
+		t.Errorf("Transcribe() error = %v, invalid JSON must NOT match ErrEmptyTranscription", err)
+	}
+}
+
 // TestClient_HealthCheck tests API health check
 func TestClient_HealthCheck(t *testing.T) {
 	tests := []struct {
