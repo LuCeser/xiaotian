@@ -340,15 +340,46 @@ func resolveLessonID(configured string, now time.Time) string {
 // #2's reply field). One Chat call per turn — never a tool loop.
 // ---------------------------------------------------------------------------
 
-// classifySystemPrompt is the classification system prompt: the tutor
-// persona with the child-safety wording prohibition carried over VERBATIM
-// from the 13-04 teacherSystemPrompt, plus the strict JSON output contract.
-// (Task 2 extends this into buildClassifyMessages with the full per-intent
-// definitions and word ground-truth injection.)
-const classifySystemPrompt = `你是一位亲切、耐心的小学听写家教老师，正在通过语音陪学生完成听写练习。回应要简短、自然、温暖，适合小学生：写对了就真诚表扬，写错了就耐心鼓励再试一次。严禁任何羞辱、恐吓、惩罚性或让孩子难过的表述。
+// buildClassifySystemPrompt assembles the classification system prompt:
+//   - the tutor persona with the child-safety wording prohibition carried
+//     over VERBATIM from the 13-04 teacherSystemPrompt;
+//   - the eight-value intent vocabulary with one-line definitions;
+//   - the word ground truth (current word, meaning, example — either may be
+//     absent, and the prompt says so honestly);
+//   - the strict output contract, including the hint (never leak the full
+//     word) and meaning (never invent; fall back to the honest fixed reply
+//     when no ground truth exists) reply rules.
+func buildClassifySystemPrompt(word lesson.Word, index, total int) string {
+	var b strings.Builder
+	b.WriteString(`你是一位亲切、耐心的小学听写家教老师，正在通过语音陪学生完成听写练习。回应要简短、自然、温暖，适合小学生：写对了就真诚表扬，写错了就耐心鼓励再试一次。严禁任何羞辱、恐吓、惩罚性或让孩子难过的表述。
 课堂节奏由服务端负责，你不能推进课程，只判断学生这句话的意图并给出回应。
-只输出一个 JSON 对象，不要输出任何其它内容：{"intent":"<意图>","reply":"<给学生听的回复>"}
-intent 只能是以下八个值之一：confirm（学生表示写完了/可以了/下一个）、repeat（再读一遍）、slow（慢一点读）、hint（不会写求提示）、meaning（问词义）、pause（要休息/暂停）、resume（要继续）、chat（其它对话）。`
+`)
+	fmt.Fprintf(&b, "当前是第 %d 个词（共 %d 个）：“%s”。\n", index+1, total, word.Word)
+	if word.Meaning != "" {
+		fmt.Fprintf(&b, "这个词的释义：%s。\n", word.Meaning)
+	} else {
+		b.WriteString("老师这边暂无这个词的释义。\n")
+	}
+	if word.Example != "" {
+		fmt.Fprintf(&b, "这个词的例句：%s。\n", word.Example)
+	} else {
+		b.WriteString("老师这边暂无这个词的例句。\n")
+	}
+	b.WriteString(`意图词表（intent 只能是以下八个值之一）：
+confirm：学生表示写完了/可以了/下一个
+repeat：再读一遍
+slow：慢一点读
+hint：不会写，求提示
+meaning：问词义
+pause：要休息/暂停
+resume：要继续
+chat：其它对话
+输出契约：只输出一个 JSON 对象，不要输出任何其它内容：{"intent":"<意图>","reply":"<给学生听的回复>"}
+reply 只有 intent 为 hint/meaning/chat 时才需要，其它意图 reply 给空字符串。
+hint 的 reply 只能给部分提示（字形、部首、读音或例句线索），严禁给出整词的写法或完整拼音，不能泄题。
+meaning 的 reply 只能依据上面给出的释义与例句组织；两者都没有时，reply 固定原样输出：老师这边没有这个词的释义，你凭印象写吧。`)
+	return b.String()
+}
 
 // intentPayload is the strict classification JSON shape.
 type intentPayload struct {
@@ -396,48 +427,79 @@ func parseIntentJSON(text string) (intentPayload, bool) {
 	return p, true
 }
 
-// buildClassifyMessages assembles the classification request: system prompt
-// plus one user message carrying the transcript and the FSM short-history
-// deque (last 4 rounds), so chat/hint/meaning stay coherent.
+// buildClassifyMessages assembles the classification request: the system
+// prompt (persona + intent vocabulary + word ground truth + output
+// contract) plus one user message carrying the transcript and the FSM
+// short-history deque (last 4 rounds), so chat/hint/meaning stay coherent.
 func (tm *TurnManager) buildClassifyMessages(transcript string, target TurnTarget) []mimo.Message {
 	var user strings.Builder
 	user.WriteString("学生说：")
 	user.WriteString(transcript)
 	tm.mu.Lock()
-	if tm.tutor != nil && len(tm.tutor.shortHistory) > 0 {
-		user.WriteString("\n最近对话：")
-		for _, r := range tm.tutor.shortHistory {
-			if r.userText != "" {
-				fmt.Fprintf(&user, "\n学生：%s", r.userText)
-			}
-			if r.teacherText != "" {
-				fmt.Fprintf(&user, "\n老师：%s", r.teacherText)
+	total := 0
+	var card lesson.Word
+	if tm.tutor != nil {
+		total = len(tm.tutor.words)
+		fmt.Fprintf(&user, "\n（当前进度：第 %d 个词，共 %d 个）", tm.tutor.currentIndex+1, total)
+		if target.WordIndex >= 0 && target.WordIndex < total {
+			card = tm.tutor.words[target.WordIndex]
+		}
+		if len(tm.tutor.shortHistory) > 0 {
+			user.WriteString("\n最近对话：")
+			for _, r := range tm.tutor.shortHistory {
+				if r.userText != "" {
+					fmt.Fprintf(&user, "\n学生：%s", r.userText)
+				}
+				if r.teacherText != "" {
+					fmt.Fprintf(&user, "\n老师：%s", r.teacherText)
+				}
 			}
 		}
 	}
 	tm.mu.Unlock()
+	system := buildClassifySystemPrompt(card, target.WordIndex, total)
 	return []mimo.Message{
-		{Role: "system", Content: classifySystemPrompt},
+		{Role: "system", Content: system},
 		{Role: "user", Content: user.String()},
 	}
 }
 
-// classifyTurn runs the ONE per-turn classification Chat call (thinking
-// disabled, tight token cap) and returns a whitelisted intent plus the
-// reply wording. Any provider/parse failure collapses to chat with the
-// deterministic fallback reply — the FSM never stalls on the model.
-// (Task 2 adds the one-shot JSON-correction retry before the fallback.)
+// classifyTurn runs the per-turn intent classification: ONE Chat call, and
+// on an unusable output (unparseable JSON, missing/non-whitelisted intent)
+// exactly ONE correction retry — the same conversation plus a user-level
+// "JSON only" nudge. A second failure collapses deterministically to chat
+// with the fixed fallback wording: the teacher asks again out loud (no
+// user-visible ErrorMsg), while the server records the provider failure.
 func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, target TurnTarget) (string, string) {
-	intent, reply := intentChat, classifyFallbackReply
-	resp, err := tm.llm.Chat(ctx, tm.buildClassifyMessages(transcript, target),
-		mimo.WithThinkingDisabled(), mimo.WithMaxTokens(classifyMaxTokens))
-	if err == nil {
-		if p, ok := parseIntentJSON(resp.Text()); ok {
-			intent, reply = p.Intent, p.Reply
-		}
+	msgs := tm.buildClassifyMessages(transcript, target)
+	intent, reply, ok := tm.classifyOnce(ctx, msgs)
+	if !ok {
+		msgs = append(msgs, mimo.Message{
+			Role:    "user",
+			Content: "你刚才的输出不符合要求。请只输出一个 JSON 对象，键为 intent 与 reply，不要输出任何其它内容。",
+		})
+		intent, reply, ok = tm.classifyOnce(ctx, msgs)
+	}
+	if !ok {
+		intent, reply = intentChat, classifyFallbackReply
+		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
 	}
 	// Desensitization boundary (T-13-06b): the intent label only — never
 	// the transcript text — reaches the event stream.
 	tm.recorder.Emit(EventIntentClassified, infra.F("intent", intent))
 	return intent, reply
+}
+
+// classifyOnce runs one Chat hop and parses its strict JSON output.
+func (tm *TurnManager) classifyOnce(ctx context.Context, msgs []mimo.Message) (intent, reply string, ok bool) {
+	resp, err := tm.llm.Chat(ctx, msgs,
+		mimo.WithThinkingDisabled(), mimo.WithMaxTokens(classifyMaxTokens))
+	if err != nil {
+		return "", "", false
+	}
+	p, ok := parseIntentJSON(resp.Text())
+	if !ok {
+		return "", "", false
+	}
+	return p.Intent, p.Reply, true
 }

@@ -922,13 +922,21 @@ func (tm *TurnManager) enterCompletion(s Sender, ctx context.Context, cancel con
 			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
 			summary += reviewFailedSuffix()
 		default:
-			// Real counts only: partial/zero updates are visible (Task 2
-			// adds their explicit honest wording; the counts never lie).
+			// Real result sets decide the reported success: requested vs
+			// updated vs missing, never "nil error = full success". A
+			// partial or zero update ships the same event with the real
+			// counts plus a server-side error marker and an honest
+			// "saved M/N" spoken note — and the batch is NEVER retried
+			// blindly (S-05).
 			tm.recorder.Emit(EventReviewWritten,
 				infra.F("requested", len(wres.Requested)),
 				infra.F("updated", len(wres.Updated)),
 				infra.F("missing", len(wres.Missing)),
 			)
+			if updated := len(wres.Updated); updated < len(results) {
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+				summary += fmt.Sprintf("本次保存 %d/%d 个。", updated, len(results))
+			}
 		}
 	}
 

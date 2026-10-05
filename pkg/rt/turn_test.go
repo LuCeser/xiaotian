@@ -9,6 +9,7 @@ package rt
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -277,12 +278,533 @@ func ttEventCount(t *testing.T, log *captureLogger, event string) int {
 	return n
 }
 
+// ---------------------------------------------------------------------------
+// Intent classification contract (13-08 Task 2)
+// ---------------------------------------------------------------------------
+
+// TestClassifyMessagesCarryVocabGroundTruthAndSafety: source assertion that
+// the classification request carries the eight-value intent vocabulary, the
+// word ground truth (meaning/example), the position, the strict JSON output
+// contract, the child-safety wording prohibition, the hint no-leak rule and
+// the meaning honesty rule.
+func TestClassifyMessagesCarryVocabGroundTruthAndSafety(t *testing.T) {
+	cards := ttCards("苹果")
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
+	ttBindTutor(tm, cards)
+	tm.mu.Lock()
+	tm.tutor.appendUserRound("你好老师")
+	tm.mu.Unlock()
+
+	msgs := tm.buildClassifyMessages("这个字不会写", TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+	if len(msgs) != 2 {
+		t.Fatalf("classify messages = %d, want [system user]", len(msgs))
+	}
+	system, user := msgs[0].Content, msgs[1].Content
+	for _, want := range []string{
+		"confirm", "repeat", "slow", "hint", "meaning", "pause", "resume", "chat",
+		"JSON", "严禁任何羞辱", "苹果", "释义-苹果", "例句-苹果", "第 1 个词",
+		"部分提示", "凭印象写",
+	} {
+		if !contains(system, want) {
+			t.Errorf("classify system prompt missing %q", want)
+		}
+	}
+	if !contains(user, "这个字不会写") {
+		t.Errorf("classify user message missing the transcript: %q", user)
+	}
+	if !contains(user, "学生：你好老师") {
+		t.Errorf("classify user message missing the short-history deque: %q", user)
+	}
+}
+
+// TestClassifyRetriesOnceOnInvalidJSON: a first unusable output (no JSON)
+// triggers exactly one corrected retry — the second call's conversation
+// carries the appended user-level "JSON only" nudge — and the valid answer
+// wins.
+func TestClassifyRetriesOnceOnInvalidJSON(t *testing.T) {
+	cards := ttCards("苹果")
+	llm := newFakeLLM(
+		llmScript{resp: wireChatResponse(t, `{"choices":[{"message":{"content":"我觉得你是想说写完了"}}]}`)},
+		intentScript(intentHint, "上面是草字头哦"),
+	)
+	tm := NewTurnManager(newFakeASR(), llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
+	ttBindTutor(tm, cards)
+
+	intent, reply := tm.classifyTurn(context.Background(), "不会写", TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+	if intent != intentHint {
+		t.Errorf("intent = %q, want hint", intent)
+	}
+	if reply != "上面是草字头哦" {
+		t.Errorf("reply = %q, want the scripted hint", reply)
+	}
+	if llm.callCount() != 2 {
+		t.Fatalf("llm calls = %d, want 2 (one retry)", llm.callCount())
+	}
+	retry := llm.calls[1].messages
+	if len(retry) != 3 {
+		t.Fatalf("retry conversation = %d messages, want 3", len(retry))
+	}
+	if retry[2].Role != "user" || !contains(retry[2].Content, "JSON") {
+		t.Errorf("retry nudge = %+v, want a user-level JSON correction", retry[2])
+	}
+}
+
+// TestClassifyFallsBackToChatAfterSecondFailure: two unusable outputs
+// collapse deterministically to chat + the fixed spoken fallback — no
+// user-visible ErrorMsg, one server-side provider_failed event.
+func TestClassifyFallsBackToChatAfterSecondFailure(t *testing.T) {
+	log := &captureLogger{}
+	cards := ttCards("苹果")
+	garbage := llmScript{resp: wireChatResponse(t, `{"choices":[{"message":{"content":"哈哈"}}]}`)}
+	llm := newFakeLLM(garbage, garbage)
+	tm := NewTurnManager(newFakeASR(), llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), NewEventRecorder(log, "t"), nil)
+	ttBindTutor(tm, cards)
+
+	intent, reply := tm.classifyTurn(context.Background(), "嗯嗯", TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+	if intent != intentChat {
+		t.Errorf("intent = %q, want chat", intent)
+	}
+	if reply != classifyFallbackReply {
+		t.Errorf("reply = %q, want the fixed fallback", reply)
+	}
+	if llm.callCount() != 2 {
+		t.Errorf("llm calls = %d, want 2 (exactly one retry)", llm.callCount())
+	}
+	if got := ttEventCount(t, log, EventError); got != 1 {
+		t.Errorf("error events = %d, want 1 (server-side only)", got)
+	}
+	if got := ttEventCount(t, log, EventIntentClassified); got != 1 {
+		t.Errorf("intent_classified events = %d, want 1", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Completion path: honest review write + ack-gated natural ending (Task 2)
+// ---------------------------------------------------------------------------
+
+// TestCompletionWritesReviewAndWaitsForPlaybackAck: the review write
+// actually executes BEFORE the summary is spoken; after the summary's
+// audio_end but before its ack the session must NOT end; the ack releases
+// session_ended(lesson_complete).
+func TestCompletionWritesReviewAndWaitsForPlaybackAck(t *testing.T) {
+	words := newFakeWords(ttCards("苹果"))
+	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
+	tm, s, log, exec, done := ttConfirmToCompletion(t, words, 5)
+
+	// 先执行后播报: the write already ran while the summary plays.
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want 1 (and before the summary)", got)
+	}
+	ratings := words.submissions()[0]
+	if ratings["苹果"] != "good" {
+		t.Errorf("submitted rating = %v, want 苹果:good", ratings)
+	}
+
+	// audio_end seen, no ack: no session end yet.
+	time.Sleep(250 * time.Millisecond)
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended before the summary ack = %d, want 0", got)
+	}
+
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended never arrived after the summary ack")
+	}
+	ended := s.controlsOf(t, TypeSessionEnded)[0]
+	if ended["reason"] != ReasonLessonComplete {
+		t.Errorf("reason = %v, want %s", ended["reason"], ReasonLessonComplete)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion goroutine did not finish")
+	}
+	if exec.advanceCount() != 1 {
+		t.Errorf("advance calls = %d, want 1", exec.advanceCount())
+	}
+	updated := ttEventField(t, log, EventReviewWritten, "updated")
+	if len(updated) != 1 || updated[0] != 1 {
+		t.Errorf("review_written updated = %v, want [1]", updated)
+	}
+}
+
+// TestCompletionPartialReviewReportsActualCount: nil error with a PARTIAL
+// update set is not success — the summary carries the honest "saved M/N"
+// note, the event carries the real counts, the server records an error
+// marker, and SubmitReview runs exactly once (no blind batch retry).
+func TestCompletionPartialReviewReportsActualCount(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉"},
+		Updated:   []string{"苹果"},
+		Missing:   []string{"香蕉"},
+	}
+	tm, s, log, _, done := ttDriveTwoConfirmCompletion(t, words)
+
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want exactly 1 (no batch retry)", got)
+	}
+	sents := s.controlsOf(t, TypeTeacherSentence)
+	last, _ := sents[len(sents)-1]["text"].(string)
+	if !contains(last, "保存 1/2") {
+		t.Errorf("summary = %q, want the honest 保存 1/2 note", last)
+	}
+	updated := ttEventField(t, log, EventReviewWritten, "updated")
+	if len(updated) != 1 || updated[0] != 1 {
+		t.Errorf("review_written updated = %v, want [1] (real count)", updated)
+	}
+	requested := ttEventField(t, log, EventReviewWritten, "requested")
+	if len(requested) != 1 || requested[0] != 2 {
+		t.Errorf("review_written requested = %v, want [2]", requested)
+	}
+	if got := ttEventCount(t, log, EventError); got == 0 {
+		t.Error("no server-side error marker for the partial update")
+	}
+
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended never arrived after the summary ack")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion goroutine did not finish")
+	}
+}
+
+// TestCompletionZeroUpdatedWithNilErrorIsNotSuccess: nil error + zero
+// updates must still surface as a failure — the spoken summary reports 0/1
+// and the server records the error marker.
+func TestCompletionZeroUpdatedWithNilErrorIsNotSuccess(t *testing.T) {
+	words := newFakeWords(ttCards("苹果"))
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果"},
+		Updated:   nil,
+		Missing:   []string{"苹果"},
+	}
+	tm, s, log, _, done := ttConfirmToCompletion(t, words, 6)
+
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want exactly 1", got)
+	}
+	sents := s.controlsOf(t, TypeTeacherSentence)
+	last, _ := sents[len(sents)-1]["text"].(string)
+	if !contains(last, "保存 0/1") {
+		t.Errorf("summary = %q, want the honest 保存 0/1 note", last)
+	}
+	updated := ttEventField(t, log, EventReviewWritten, "updated")
+	if len(updated) != 1 || updated[0] != 0 {
+		t.Errorf("review_written updated = %v, want [0]", updated)
+	}
+	if got := ttEventCount(t, log, EventError); got == 0 {
+		t.Error("no server-side error marker for the zero update")
+	}
+
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended never arrived after the summary ack")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion goroutine did not finish")
+	}
+}
+
+// TestCompletionReviewFailureSpeaksHonestSuffix: a real SubmitReview error
+// appends the record-not-saved wording — the student never hears a false
+// "saved" (transparency prohibition).
+func TestCompletionReviewFailureSpeaksHonestSuffix(t *testing.T) {
+	words := newFakeWords(ttCards("苹果"))
+	words.reviewErr = fmt.Errorf("pybridge run review failed")
+	tm, s, log, _, done := ttConfirmToCompletion(t, words, 6)
+
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want exactly 1", got)
+	}
+	sents := s.controlsOf(t, TypeTeacherSentence)
+	last, _ := sents[len(sents)-1]["text"].(string)
+	if !contains(last, "没有保存成功") {
+		t.Errorf("summary = %q, want the honest record-not-saved suffix", last)
+	}
+	if got := ttEventCount(t, log, EventReviewWritten); got != 0 {
+		t.Errorf("review_written events = %d, want 0 (the write failed)", got)
+	}
+	if got := ttEventCount(t, log, EventError); got == 0 {
+		t.Error("no server-side error marker for the failed write")
+	}
+
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended never arrived after the summary ack")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion goroutine did not finish")
+	}
+}
+
+// TestNoDueWordsWaitsForPlaybackAck: the zero-due explanation is fully
+// spoken and the session ends ONLY on its actual-playback ack — the ending
+// never truncates the explanation.
+func TestNoDueWordsWaitsForPlaybackAck(t *testing.T) {
+	log := &captureLogger{}
+	words := newFakeWords() // zero due words
+	tts := newFakeTTS(2, 320)
+	tts.delay = 20 * time.Millisecond
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), tts, newFakeExecutorNoRow(ttLessonID), ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+
+	ready := s.controlsOf(t, TypeSessionReady)
+	if len(ready) != 1 {
+		t.Fatalf("session_ready count = %d, want 1", len(ready))
+	}
+	if got := ready[0]["lesson"].(map[string]any)["words"].([]any); len(got) != 0 {
+		t.Errorf("lesson.words = %v, want empty", got)
+	}
+
+	ttAwaitSpoken(t, s, 1)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioEnd) >= 1 }) {
+		t.Fatal("explanation audio_end never went out")
+	}
+	time.Sleep(250 * time.Millisecond)
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended before the explanation ack = %d, want 0", got)
+	}
+
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended never arrived after the explanation ack")
+	}
+	ended := s.controlsOf(t, TypeSessionEnded)[0]
+	if ended["reason"] != ReasonNoDueWords {
+		t.Errorf("reason = %v, want %s", ended["reason"], ReasonNoDueWords)
+	}
+}
+
+// TestPlaybackAckTimeoutIsVisibleAndBounded: without any summary ack the
+// bounded wait expires — ErrorMsg(playback_ack_timeout) goes out FIRST,
+// then session_ended still carries the original lesson_complete reason (the
+// degraded order; the timeout itself is never an end reason). No fabricated
+// completion evidence appears.
+func TestPlaybackAckTimeoutIsVisibleAndBounded(t *testing.T) {
+	words := newFakeWords(ttCards("苹果"))
+	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
+	_, s, log, _, done := ttConfirmToCompletion(t, words, 5) // no ack is ever sent
+
+	// The wait is bounded (min 3s): the timeout ErrorMsg must appear well
+	// inside the test budget, then the natural end follows.
+	timeoutErr := waitFor(t, 10*time.Second, func() bool {
+		for _, e := range s.controlsOf(t, TypeError) {
+			if e["code"] == ErrCodePlaybackAckTimeout {
+				return true
+			}
+		}
+		return false
+	})
+	if !timeoutErr {
+		t.Fatal("playback_ack_timeout ErrorMsg never went out")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended never followed the ack timeout")
+	}
+
+	// Order: the timeout ErrorMsg precedes the session end.
+	types := s.typeOrder()
+	lastErr, firstEnd := -1, -1
+	for i, tp := range types {
+		if tp == TypeError {
+			lastErr = i
+		}
+		if tp == TypeSessionEnded && firstEnd < 0 {
+			firstEnd = i
+		}
+	}
+	if lastErr < 0 || firstEnd < 0 || lastErr > firstEnd {
+		t.Fatalf("degraded order violated: last error at %d, first session_ended at %d", lastErr, firstEnd)
+	}
+	ended := s.controlsOf(t, TypeSessionEnded)[0]
+	if ended["reason"] != ReasonLessonComplete {
+		t.Errorf("reason = %v, want the original %s (never a timeout reason)", ended["reason"], ReasonLessonComplete)
+	}
+
+	// No fabricated completion evidence: the review ran once, no extra
+	// word_announced (the timeout must not arm the word timer or pretend a
+	// word was announced).
+	if got := len(words.submissions()); got != 1 {
+		t.Errorf("SubmitReview calls = %d, want 1", got)
+	}
+	if got := ttEventCount(t, log, EventWordAnnounced); got != 1 {
+		t.Errorf("word_announced events = %d, want 1 (greeting only; no fabricated completion)", got)
+	}
+	if got := ttEventCount(t, log, EventPlaybackAckTimeout); got != 1 {
+		t.Errorf("playback_ack_timeout events = %d, want 1", got)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion goroutine did not finish after the timeout")
+	}
+}
+
+// TestCompletionDisconnectCancelsAckWait: a disconnect during the summary's
+// ack wait cancels the wait — the session closes without any further
+// messages (no session_ended, no timeout notice).
+func TestCompletionDisconnectCancelsAckWait(t *testing.T) {
+	words := newFakeWords(ttCards("苹果"))
+	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
+	tm, s, log, _, done := ttConfirmToCompletion(t, words, 5)
+
+	tm.Close(s) // transport read loop exited: cancels the ack wait
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion goroutine did not return after the disconnect")
+	}
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Errorf("session_ended after disconnect = %d, want 0", got)
+	}
+	if got := ttEventCount(t, log, EventPlaybackAckTimeout); got != 0 {
+		t.Errorf("playback_ack_timeout events after disconnect = %d, want 0", got)
+	}
+}
+
+// ttDriveTwoConfirmCompletion runs a TWO-word lesson through both confirms
+// into the summary's audio_end window, returning before the summary ack.
+func ttDriveTwoConfirmCompletion(t *testing.T, words *fakeWordSource) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor, chan struct{}) {
+	t.Helper()
+	log := &captureLogger{}
+	exec := newFakeExecutorNoRow(ttLessonID)
+	asr := newFakeASR(asrScript{text: "好了"}, asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""), intentScript(intentConfirm, ""))
+	tts := newFakeTTS(2, 320)
+	tts.delay = 20 * time.Millisecond
+	tm := NewTurnManager(asr, llm, tts, exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	// Turn 1: confirm word 1; the next-word announcement blocks the turn
+	// goroutine until its ack.
+	done1 := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done1)
+	}()
+	ttAwaitSpoken(t, s, 4)
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-done1:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first confirm never settled")
+	}
+
+	// Turn 2: confirm word 2 → completion summary (3 sentences).
+	done2 := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done2)
+	}()
+	ttAwaitSpoken(t, s, 7) // 3 greeting + 1 announce + 3 summary
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioEnd) >= 7 }) {
+		t.Fatal("summary audio_end never went out")
+	}
+	return tm, s, log, exec, done2
+}
+
+// typeOrder returns the decoded wire type of every captured control, in
+// arrival order (for message-ordering assertions).
+func (c *captureSender) typeOrder() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, 0, len(c.controls))
+	for _, b := range c.controls {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(b, &probe) == nil {
+			out = append(out, probe.Type)
+		}
+	}
+	return out
+}
+
+// ttEventField returns the values of one field across all recorded entries
+// of the given event name.
+func ttEventField(t *testing.T, log *captureLogger, event, key string) []any {
+	t.Helper()
+	var vals []any
+	for _, e := range log.snapshot() {
+		if e.msg != "rt_event" {
+			continue
+		}
+		matched, val := false, any(nil)
+		for _, f := range e.fields {
+			if f.Key == "event" && f.Value == event {
+				matched = true
+			}
+			if f.Key == key {
+				val = f.Value
+			}
+		}
+		if matched {
+			vals = append(vals, val)
+		}
+	}
+	return vals
+}
+
+// ttBindTutor attaches a fresh tutor to the manager (white-box classify
+// tests that bypass session_init).
+func ttBindTutor(tm *TurnManager, cards []lesson.Word) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.tutor = newDictationTutor(lesson.Lesson{
+		LessonID: ttLessonID, Words: cardWords(cards), Cards: cards, Version: 1,
+	})
+}
+
 // ttWaitListening waits for the FSM to hand control back after an ack.
 func ttWaitListening(t *testing.T, s *captureSender) {
 	t.Helper()
 	if !waitFor(t, 5*time.Second, func() bool { return s.listeningCount() > 0 }) {
 		t.Fatal("FSM never returned to listening after the valid ack")
 	}
+}
+
+// ttConfirmToCompletion drives a ONE-word lesson from session_init through
+// the completion summary's final audio_end (summary pending its ack), with
+// wantSpoken the expected total teacher-sentence count (3 greeting + N
+// summary sentences). The caller owns the summary ack.
+func ttConfirmToCompletion(t *testing.T, words *fakeWordSource, wantSpoken int) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor, chan struct{}) {
+	t.Helper()
+	log := &captureLogger{}
+	exec := newFakeExecutorNoRow(ttLessonID)
+	asr := newFakeASR(asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tts := newFakeTTS(2, 320)
+	tts.delay = 20 * time.Millisecond
+	tm := NewTurnManager(asr, llm, tts, exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	ttAwaitSpoken(t, s, wantSpoken)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioEnd) >= wantSpoken }) {
+		t.Fatalf("summary audio_end never went out (spoken=%d)", s.countOf(TypeTeacherSentence))
+	}
+	return tm, s, log, exec, done
 }
 
 // ---------------------------------------------------------------------------
