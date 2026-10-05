@@ -68,7 +68,15 @@
     'provider_failed': '语音服务暂时出错，请稍等片刻再试',
     'unsupported_format': '浏览器上报的音频格式不被支持（需要 16kHz 单声道 PCM）',
     'invalid_message': '通信内容异常，请刷新页面重试',
-    'session_closed': '课程会话已结束，请重新开始'
+    'session_closed': '课程会话已结束，请重新开始',
+    // 13-07 protocol additions (pkg/rt/protocol.go ErrCode*): the classroom
+    // could not start — honest failure, the page offers the start button as
+    // the retry entry. Same wording as the 13-08 fixed human constant.
+    'lesson_unavailable': '取词失败了，请稍后再试',
+    // 13-11 (T-13-24): the server STOPPED WAITING for a playback-completion
+    // ack — never evidence that audio was heard. The wording promises the
+    // already-scheduled audio keeps playing and must NOT claim completion.
+    'playback_ack_timeout': '播放确认超时，老师会先把已收到的语音播完；若卡住将自动结束'
   };
 
   /**

@@ -55,9 +55,15 @@ body[data-page="tutor"] {
 .rt-state[data-state="listening"] .rt-state-chip[data-chip="listening"],
 .rt-state[data-state="processing"] .rt-state-chip[data-chip="processing"],
 .rt-state[data-state="speaking"] .rt-state-chip[data-chip="speaking"],
+.rt-state[data-state="paused"] .rt-state-chip[data-chip="paused"],
 .rt-state[data-state="ended"] .rt-state-chip[data-chip="ended"] {
   background: #2f6fed;
   color: #ffffff;
+}
+
+/* Paused (StatePaused, 13-07/13-11): warm amber — resting, not ended. */
+.rt-state[data-state="paused"] .rt-state-chip[data-chip="paused"] {
+  background: #e8a33d;
 }
 
 .rt-conn {
@@ -181,6 +187,19 @@ body[data-page="tutor"] {
   color: #2d4a7a;
 }
 
+/* Completion banner (session_ended reason=lesson_complete, 13-11) ------- */
+
+.rt-banner {
+  background: #e9f9ef;
+  border: 1px solid #b7e4c7;
+  border-radius: 14px;
+  padding: 14px 16px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #1f7a40;
+  line-height: 1.5;
+}
+
 /* Error panel (RT-10: reasons in plain Chinese) ------------------------ */
 
 .rt-error {
@@ -201,6 +220,14 @@ body[data-page="tutor"] {
   color: #8a2f27;
   margin-top: 4px;
   line-height: 1.5;
+}
+
+/* Retry hint appended by the page for lesson_unavailable (13-11). */
+.rt-error .rt-error-retry {
+  font-size: 16px;
+  color: #b05248;
+  margin-top: 8px;
+  font-weight: 600;
 }
 
 /* Notice / degradation area ------------------------------------------- */

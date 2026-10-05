@@ -141,7 +141,8 @@ const {
   // humanizeError: every vocabulary code resolves to non-empty Chinese text,
   // client-local hyphenated mic types included; unknown codes fall back.
   ['mic-denied', 'mic-unavailable', 'voice_unavailable', 'provider_failed',
-    'unsupported_format', 'invalid_message', 'session_closed'].forEach((code) => {
+    'unsupported_format', 'invalid_message', 'session_closed',
+    'lesson_unavailable', 'playback_ack_timeout'].forEach((code) => {
     const msg = humanizeError(code);
     assert.strictEqual(typeof msg, 'string');
     assert.ok(msg.length > 4, code + ' has a human message');
@@ -150,6 +151,18 @@ const {
   assert.strictEqual(humanizeError('made-up-code', '备用说明'), '备用说明');
   assert.ok(humanizeError('made-up-code').includes('made-up-code'));
   assert.strictEqual(Object.keys(ERROR_MESSAGES).length >= 5, true);
+
+  // 13-11 (T-13-24): the two new 13-07 wire codes have human mappings.
+  // The timeout wording must NEVER claim the audio was already heard —
+  // playback_ack_timeout is "the server stopped waiting", not a completion
+  // proof (protocol.go godoc + 13-07 key-decision).
+  const timeoutMsg = humanizeError('playback_ack_timeout');
+  assert.ok(!/已听完|已经听完|播放完成/.test(timeoutMsg),
+    'timeout text never claims playback completed');
+  assert.ok(/超时/.test(timeoutMsg), 'timeout text names the timeout itself');
+  assert.ok(/播完|继续/.test(timeoutMsg), 'timeout text promises the scheduled audio keeps playing');
+  const lessonMsg = humanizeError('lesson_unavailable');
+  assert.ok(/再试|重试/.test(lessonMsg), 'lesson_unavailable invites a retry');
 
   // isVoiceCaptureAvailable: the RT-01 safe-context probe.
   assert.strictEqual(isVoiceCaptureAvailable({ mediaDevices: { getUserMedia: function () {} } }), true);
