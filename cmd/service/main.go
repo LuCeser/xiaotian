@@ -561,11 +561,27 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			HandshakeTimeout:  cfg.RT.HandshakeTimeout,
 			HeartbeatInterval: cfg.RT.HeartbeatInterval,
 		}
+		// Phase 13 (13-10): the dictation FSM's due-word source — pyBridge
+		// (pure constructor, built at boot above) adapted onto rt.WordSource.
+		// session_init fetches due words via RunDue(FetchLockHours=1) and the
+		// completion path writes learning records via RunReview. Construction
+		// failure aborts boot like every other component constructor (fail-fast).
+		rtFSRS, err := rt.NewPyFSRS(pyBridge, logger)
+		if err != nil {
+			logger.Error("rt pyfsrs word source construction failed",
+				infra.F("component", "infra.main"),
+				infra.ErrField(err),
+			)
+			return err
+		}
 		rtTurnCfg := rt.TurnManagerConfig{
+			// Empty lessonId = the FSM derives the daily r0-YYYYMMDD lesson
+			// on the Beijing calendar; non-empty is used as-is (13-10 pivot).
 			LessonID: cfg.RT.LessonID,
-			// Words (the PyFSRS due-word adapter) is injected by 13-10;
-			// until then session_init honestly answers lesson_unavailable.
-			// The infra RTConfig.LessonWords key is untouched by 13-08.
+			Words:    rtFSRS,
+			// Per-word writing timer in milliseconds (config default 60000;
+			// a 0 config value would defer to the FSM's own 60s default).
+			WordTimeout: time.Duration(cfg.RT.WordTimeoutMs) * time.Millisecond,
 		}
 		rtHandler, err := rt.NewHandler(rtServerCfg, func() rt.SessionManager {
 			// Per-connection factory: one TurnManager + one EventRecorder per

@@ -155,6 +155,61 @@ The default `["localhost", "127.0.0.1"]` is dev-only; the /rt WebSocket
 rejects every other Origin. The wildcard `"*"` is forbidden at both the
 config and transport layers.
 
+### FSRS 词源前提 (Phase 13, 13-10)
+
+The /rt dictation tutor's words are NOT configured in the service — every
+session fetches due words from the FSRS vocabulary store through the python
+bridge, and learning records are written back the same way. The VPS
+therefore needs THREE prerequisites beyond the Go binary:
+
+1. **Python 词库环境** — the venv interpreter + `third_party/python/`
+   scripts, configured via the `python:` block (`interpreter`,
+   `scriptsDir`, `dataDir`, and `vocabDBPath` pointing at the vocab SQLite
+   database).
+2. **vocab DB with due words** — an empty/due-less store is legal: the
+   session ends with the honest `no_due_words` announcement, not an error.
+3. **MIMO_API_KEY** (via `/opt/hta/secrets.env`) — without it the tutor
+   degrades to `voice_unavailable` (see Troubleshooting below).
+
+#### rt 配置键（13-10 转向后）
+
+- `rt.lessonWords` **已移除** — 词永远来自 FSRS 到期获取。旧 config.yaml
+  若仍携带该键会被静默忽略（viper 对未知键不报错），无需手工清理。
+- `rt.lessonId` 默认**留空** = 服务端按北京时间每日派生 `r0-YYYYMMDD`，
+  同日重连自动续同一课次；非空则原样使用（专用课堂/测试）。设置时禁止
+  空白字符与路径分隔符，长度 ≤64。
+- `rt.wordTimeoutMs` 每词书写计时（毫秒），到点自动推进下一词。默认
+  60000（60 秒）；真机标定可缩短验证。负数或超过 3600000 拒绝启动。
+
+#### 脚本核验（部署时执行一次并记录）
+
+```sh
+# 1) 实际部署脚本必须支持显式取词锁窗口：
+/opt/hta/venv/bin/python /opt/hta/third_party/python/vocab_manager.py due --help | grep -- --fetch-lock-hours
+#    期待输出包含 --fetch-lock-hours；缺失 = 部署脚本过旧，必须先升级脚本再上线。
+
+# 2) 记录实际脚本指纹（与 vendored 副本核对）：
+sha256sum /opt/hta/third_party/python/vocab_manager.py
+```
+
+仓库内 vendored 脚本的 24h 默认锁窗口只是**源码事实**——R0 生产调用由
+服务端显式传 `--fetch-lock-hours 1`（Go 侧 `DueOpts.FetchLockHours=1`），
+不依赖脚本默认值。
+
+**取词锁风险边界**（为何是 1h）：锁的残余影响集中在两处——RunDue 成功但
+建课前失败留下的已锁批次，以及跨进程并发创建产生的未使用批次。普通场景
+（同 lessonID 重连）复用已存的 Cards，不会再次 RunDue。进程崩溃的残余锁
+在 1h 后自动回队；按卡精确解锁/持久恢复留待 Phase 15。
+
+#### 排障：session_init 返回 lesson_unavailable
+
+- **先查 python 词库环境**：`vocabDBPath` 指向的数据库是否存在且可读、
+  venv 解释器是否可用（服务日志中 pybridge 调用错误会带结构化字段）。
+- **legacy 空 Cards**：13-06 期间创建的旧课堂行没有词卡且**不会**被
+  伪填充——使用每日派生 `r0-YYYYMMDD` 或换一个 `rt.lessonId` 即可。
+- python 侧失败（超时/非零退出/JSON 解析失败）不会崩溃服务：会话如实
+  收到 `lesson_unavailable`，细节只在服务端结构化日志。
+
 ### Certificate handling (hard rule)
 
 The certificate and private key NEVER enter git, `.planning/`, or any
