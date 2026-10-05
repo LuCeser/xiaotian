@@ -131,7 +131,12 @@ test('complete classroom runs on a single getUserMedia authorization', async ({ 
   expect(await page.evaluate(() => navigator.mediaDevices.__gumCallCount())).toBe(1);
 
   // Client-side ordering: the summary's real last onended → its
-  // sentence_ack → session_ended(lesson_complete) → close.
+  // sentence_ack → session_ended(lesson_complete) → close. The server
+  // closes ~50 ms after session_ended, so poll until the client's close
+  // note has landed before reading the full ordering.
+  await expect
+    .poll(async () => ((await getTrace(page)).includes('close') ? 'y' : 'n'), { timeout: 15_000 })
+    .toBe('y');
   const trace = await getTrace(page);
   const onendedIdx = trace.lastIndexOf('onended:1:sum');
   const ackIdx = trace.indexOf('ack:1:sum');
