@@ -152,6 +152,16 @@ type DictationTutor struct {
 	completed     bool
 	perWordOutcome map[int]string
 	shortHistory  []historyRound // capped deque, oldest dropped (last 4 rounds)
+	// paused is the independent CLASSROOM pause bit (13-09): set by a
+	// recognized pause command, cleared by a recognized resume. It is
+	// deliberately NOT the voice state — the internal state may be
+	// processing/speaking (the pause acknowledgement itself, or a student
+	// utterance being classified), while the client-effective state stays
+	// paused once playback settles (effectiveClientStateLocked). While
+	// paused the per-word timer stays stopped and ordinary uplink keeps
+	// flowing so the resume command is recognized through the real ASR /
+	// classification path.
+	paused bool
 }
 
 // newDictationTutor binds the FSM to a lesson row read back from the
@@ -270,6 +280,18 @@ func (t *DictationTutor) trimTeacherReply(played []string) {
 	last.teacherText = strings.Join(played, "")
 }
 
+// effectiveClientStateLocked returns the student-facing connection state:
+// the classroom pause bit overrides the voice state. The internal state may
+// be processing/speaking during the pause acknowledgement (the ack speech
+// itself plays), but once playback settles the student still sees paused —
+// never a silent resume to listening. Caller holds tm.mu.
+func (tm *TurnManager) effectiveClientStateLocked() string {
+	if tm.tutor != nil && tm.tutor.paused {
+		return StatePaused
+	}
+	return tm.state
+}
+
 // ---------------------------------------------------------------------------
 // Template wording (pure functions — the opening/announcement/summary path
 // makes ZERO LLM calls, so first-audible latency is FSRS fetch + TTS first
@@ -321,6 +343,43 @@ func noDueWordsText() string {
 // never a false "saved" (transparency prohibition).
 func reviewFailedSuffix() string {
 	return "不过今天的学习记录没有保存成功，记得下次告诉老师哦。"
+}
+
+// ---------------------------------------------------------------------------
+// Intent reply templates (13-09 Task 1 — the four command templates). Pure
+// functions like the opening/summary wording above: deterministic spoken
+// behavior with zero LLM calls on the template path.
+// ---------------------------------------------------------------------------
+
+// repeatText re-reads the current word once, warmly.
+func repeatText(word string) string {
+	return fmt.Sprintf("好，我再读一遍。%s。", word)
+}
+
+// slowReadText repeats the word twice with full-stop pauses so the student
+// can keep up. PROHIBITION (plan #1, the dictation leak ban): it NEVER
+// spells the word out character by character — no pinyin, no per-character
+// assembly of the full answer; a pause between whole-word readings is the
+// entire "slowness".
+func slowReadText(word string) string {
+	return fmt.Sprintf("%s。%s。慢慢写，不着急。", word, word)
+}
+
+// pauseAckText confirms the pause command.
+func pauseAckText() string {
+	return "好，我们先休息一会儿，想继续的时候告诉老师哦。"
+}
+
+// resumeAckText confirms the resume at the SAME word position (idx is the
+// 1-based position, matching announceText's convention).
+func resumeAckText(idx int, word string) string {
+	return fmt.Sprintf("好，我们继续。还是第 %d 个词，%s，慢慢写。", idx, word)
+}
+
+// confirmPausedRejectText gently declines a confirm while the classroom is
+// paused: pacing stays suspended — no advance, no lesson_update.
+func confirmPausedRejectText() string {
+	return "我们还在休息呢，想继续的时候说继续，老师再陪你写这个词。"
 }
 
 // resolveLessonID derives the R0 lesson id: the configured id when present,

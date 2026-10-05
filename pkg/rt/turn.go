@@ -508,6 +508,14 @@ func (tm *TurnManager) armWordTimer() {
 	// placeholder — implemented in 13-09
 }
 
+// stopWordTimer suspends the per-word countdown (the pause command). The
+// body — generation bump plus handle drop, so any queued callback is dead
+// on arrival — is 13-09 Task 2 work, mirroring the armWordTimer placeholder
+// split.
+func (tm *TurnManager) stopWordTimer() {
+	// placeholder — implemented in 13-09 Task 2
+}
+
 // runAnnouncement speaks one FSM announcement and settles the FSM only
 // after its valid final playback ack — TTS send completion and audio_end
 // NEVER restore listening (uplink stays gated through the ack; 13-09 adds
@@ -607,6 +615,7 @@ func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 	if tm.state != "" && !tm.closed {
 		tm.state = StateListening
 	}
+	effective := tm.effectiveClientStateLocked()
 	tm.mu.Unlock()
 
 	tm.vad.Reset()
@@ -624,7 +633,7 @@ func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 		LastSentenceID: m.LastSentenceID,
 		PlayedUntilMs:  m.PlayedUntilMs,
 	})
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateListening})
+	_ = s.SendControl(StateMsg{Type: TypeState, Value: effective})
 }
 
 // handleSentenceAck records one sentence the client actually played — the
@@ -798,16 +807,79 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	tm.dispatchTurn(s, ctx, cancel, turnID, epoch, intent, reply, target)
 }
 
-// dispatchTurn routes a whitelisted intent into the FSM. Only confirm drives
-// pacing; chat (and repeat/slow/hint/meaning/pause/resume, whose dedicated
-// behaviors 13-09/13-10 fill) speaks the classification reply.
+// dispatchTurn routes a whitelisted intent into the FSM. The switch covers
+// the eight-value intent vocabulary EXHAUSTIVELY — there is no
+// fall-through-to-chat branch left (13-09 Task 1 source contract): confirm
+// drives pacing, pause/resume own the classroom pause bit, repeat/slow
+// re-read the current word from templates, hint/meaning/chat speak the
+// classification reply. Every non-confirm/non-pause reply re-arms the
+// per-word countdown after ITS valid final ack (the 13-09 timer's
+// arm-after-reply-ack rule); pause stops it instead.
 func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, intent, reply string, target TurnTarget) {
 	switch intent {
 	case intentConfirm:
+		tm.mu.Lock()
+		paused := tm.tutor != nil && tm.tutor.paused
+		tm.mu.Unlock()
+		if paused {
+			// Gentle rejection while paused: pacing stays suspended — no
+			// advance, no lesson_update, no outcome write; the classroom
+			// keeps showing paused after the reply settles.
+			tm.runAnnouncement(s, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
+			return
+		}
 		tm.confirmTarget(s, ctx, cancel, turnID, epoch, reply, target)
-	default:
-		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, nil)
+	case intentRepeat:
+		tm.speakCurrentWordReading(s, ctx, cancel, repeatText)
+	case intentSlow:
+		tm.speakCurrentWordReading(s, ctx, cancel, slowReadText)
+	case intentHint:
+		// The hint records "again" AHEAD of the final rating. The override
+		// order between this pre-record and a later confirm/timeout stays
+		// the outcomeRating default proposal pending 13-12 user
+		// ratification — NOT a product decision smuggled in here.
+		tm.mu.Lock()
+		if tm.tutor != nil && target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words) {
+			tm.tutor.commitOutcome(target.WordIndex, outcomeHint)
+		}
+		tm.mu.Unlock()
+		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, tm.armWordTimer)
+	case intentMeaning:
+		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, tm.armWordTimer)
+	case intentPause:
+		tm.mu.Lock()
+		if tm.tutor != nil {
+			tm.tutor.paused = true
+		}
+		tm.mu.Unlock()
+		tm.stopWordTimer() // suspend the countdown; only resume re-arms it
+		tm.runAnnouncement(s, ctx, cancel, pauseAckText(), purposeChat, nil)
+	case intentResume:
+		tm.mu.Lock()
+		idx, word := 0, ""
+		if tm.tutor != nil {
+			tm.tutor.paused = false
+			idx = tm.tutor.currentIndex + 1
+			word = tm.tutor.words[tm.tutor.currentIndex].Word
+		}
+		tm.mu.Unlock()
+		tm.runAnnouncement(s, ctx, cancel, resumeAckText(idx, word), purposeChat, tm.armWordTimer)
+	case intentChat:
+		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, tm.armWordTimer)
 	}
+}
+
+// speakCurrentWordReading announces a template re-reading (repeat/slow) of
+// the CURRENT word — the cursor never moves — and re-arms the per-word
+// countdown after the reading's valid final ack.
+func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, cancel context.CancelFunc, template func(string) string) {
+	tm.mu.Lock()
+	word := ""
+	if tm.tutor != nil && tm.tutor.currentIndex < len(tm.tutor.words) {
+		word = tm.tutor.words[tm.tutor.currentIndex].Word
+	}
+	tm.mu.Unlock()
+	tm.runAnnouncement(s, ctx, cancel, template(word), purposeChat, tm.armWordTimer)
 }
 
 // confirmTarget advances the classroom through the target captured at
@@ -1080,8 +1152,9 @@ func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpos
 }
 
 // settleListening returns the FSM to listening after a valid final ack —
-// the ONLY place an announcement hands control back (13-09 then adds the
-// echo tail).
+// the ONLY place an announcement hands control back. The broadcast carries
+// the EFFECTIVE client state: while the classroom pause bit holds, the
+// student sees paused, never a silent resume to listening (13-09).
 func (tm *TurnManager) settleListening(s Sender) {
 	tm.mu.Lock()
 	if tm.state == "" || tm.closed {
@@ -1090,8 +1163,9 @@ func (tm *TurnManager) settleListening(s Sender) {
 	}
 	tm.state = StateListening
 	tm.playbackPending = false
+	value := tm.effectiveClientStateLocked()
 	tm.mu.Unlock()
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateListening})
+	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
 }
 
 // failTurn reports a turn-level failure and returns the FSM to listening —
@@ -1110,8 +1184,9 @@ func (tm *TurnManager) failTurn(s Sender, epoch uint64, code, message string) {
 	tm.pendingPlayback = map[string]*pendingPlayback{}
 	tm.playbackPending = false
 	tm.state = StateListening
+	value := tm.effectiveClientStateLocked()
 	tm.mu.Unlock()
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateListening})
+	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
 }
 
 // sendError is the single error egress: coded ErrorMsg + error event.

@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -1483,4 +1485,336 @@ func TestTurnSplitSentences(t *testing.T) {
 // contains is a tiny strings.Contains wrapper keeping assertions terse.
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
+}
+
+// ---------------------------------------------------------------------------
+// 13-09 Task 1: the four command intents + pause/resume (TestIntent*)
+// ---------------------------------------------------------------------------
+
+// stateCount counts StateMsg values equal to the given state value.
+func (c *captureSender) stateCount(value string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, b := range c.controls {
+		var m StateMsg
+		if json.Unmarshal(b, &m) == nil && m.Value == value {
+			n++
+		}
+	}
+	return n
+}
+
+// ttIntentFixture drives a dictation session from session_init through the
+// greeting's valid ack into listening, with the caller's scripted ASR/LLM
+// queued for the intent turn(s) under test.
+func ttIntentFixture(t *testing.T, cards []lesson.Word, asr *fakeASR, llm *fakeLLM) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
+	t.Helper()
+	log := &captureLogger{}
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), exec, ttConfig(newFakeWords(cards)), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3) // greeting (hello + count + first word)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+	return tm, s, log, exec
+}
+
+// ttRunIntentTurn drives one scripted utterance through the REAL
+// processTurn, acks the reply announcement once it appears, and waits for
+// the turn to settle. prevSent is the teacher-sentence count before the
+// turn (every intent replies with at least one announcement).
+func ttRunIntentTurn(t *testing.T, tm *TurnManager, s *captureSender, prevSent int) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > prevSent }) {
+		t.Fatal("intent reply announcement never spoke")
+	}
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("intent turn never settled after the reply ack")
+	}
+}
+
+// ttPaused reads the classroom pause bit (white-box).
+func ttPaused(t *testing.T, tm *TurnManager) bool {
+	t.Helper()
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.tutor != nil && tm.tutor.paused
+}
+
+// ttLastSentence returns the most recent teacher sentence text.
+func ttLastSentence(t *testing.T, s *captureSender) string {
+	t.Helper()
+	sents := s.controlsOf(t, TypeTeacherSentence)
+	if len(sents) == 0 {
+		t.Fatal("no teacher sentence captured")
+	}
+	text, _ := sents[len(sents)-1]["text"].(string)
+	return text
+}
+
+// ttSentencesSince returns every teacher sentence text from the given index
+// onward, JOINED — announcements are sentence-streamed, so one template
+// reply arrives as several teacher_sentence messages (字幕先行, per-sentence
+// TTS) and the spoken whole is their concatenation.
+func ttSentencesSince(t *testing.T, s *captureSender, from int) string {
+	t.Helper()
+	sents := s.controlsOf(t, TypeTeacherSentence)
+	if len(sents) < from {
+		t.Fatalf("teacher sentences = %d, want >= %d", len(sents), from)
+	}
+	var b strings.Builder
+	for _, m := range sents[from:] {
+		text, _ := m["text"].(string)
+		b.WriteString(text)
+	}
+	return b.String()
+}
+
+// TestIntentDispatchSwitchCoversVocabulary: source assertion — the
+// dispatchTurn switch covers the eight-value intent vocabulary exhaustively
+// with NO default/fall-through-to-chat branch left (Task 1 acceptance).
+func TestIntentDispatchSwitchCoversVocabulary(t *testing.T) {
+	src, err := os.ReadFile("turn.go")
+	if err != nil {
+		t.Fatalf("read turn.go: %v", err)
+	}
+	text := string(src)
+	start := strings.Index(text, "func (tm *TurnManager) dispatchTurn")
+	if start < 0 {
+		t.Fatal("dispatchTurn not found in turn.go")
+	}
+	end := strings.Index(text[start:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("cannot delimit dispatchTurn body")
+	}
+	body := text[start : start+end]
+	for _, ident := range []string{
+		"intentConfirm", "intentRepeat", "intentSlow", "intentHint",
+		"intentMeaning", "intentPause", "intentResume", "intentChat",
+	} {
+		if !strings.Contains(body, "case "+ident+":") {
+			t.Errorf("dispatchTurn switch missing case %s", ident)
+		}
+	}
+	if strings.Contains(body, "default:") {
+		t.Error("dispatchTurn switch carries a default branch — the fall-back-to-chat leftover must be gone")
+	}
+}
+
+// TestIntentRepeatReAnnouncesCurrentWord: repeat re-reads the CURRENT word
+// from the template; the cursor never moves, nothing advances, and the FSM
+// hands control back after the reading's ack.
+func TestIntentRepeatReAnnouncesCurrentWord(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR(asrScript{text: "再读一遍"})
+	llm := newFakeLLM(intentScript(intentRepeat, ""))
+	tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+
+	ttRunIntentTurn(t, tm, s, 3)
+
+	if got := ttSentencesSince(t, s, 3); got != repeatText("苹果") {
+		t.Errorf("repeat announcement = %q, want %q", got, repeatText("苹果"))
+	}
+	tm.mu.Lock()
+	idx := tm.tutor.currentIndex
+	tm.mu.Unlock()
+	if idx != 0 {
+		t.Errorf("cursor moved to %d, want 0 (repeat never advances)", idx)
+	}
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0", exec.advanceCount())
+	}
+	if s.countOf(TypeLessonUpdate) != 0 {
+		t.Error("lesson_update sent for a repeat")
+	}
+	if ttEventCount(t, log, EventWordAdvanced) != 0 {
+		t.Error("word_advanced emitted for a repeat")
+	}
+	ttWaitListening(t, s)
+}
+
+// TestIntentSlowReadsWordWithPausesNotSpelling: slow reads the word twice
+// with full-stop pauses — and NEVER spells it out character by character
+// (plan prohibition #1: the dictation leak ban; source-level assertion).
+func TestIntentSlowReadsWordWithPausesNotSpelling(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{text: "慢一点读"})
+	llm := newFakeLLM(intentScript(intentSlow, ""))
+	tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+
+	ttRunIntentTurn(t, tm, s, 3)
+
+	got := ttSentencesSince(t, s, 3)
+	if got != slowReadText("苹果") {
+		t.Errorf("slow announcement = %q, want %q", got, slowReadText("苹果"))
+	}
+	if !contains(got, "苹果。苹果。") {
+		t.Errorf("slow announcement = %q, want the word repeated twice with full-stop pauses", got)
+	}
+	if regexp.MustCompile(`[a-zA-Z]`).MatchString(got) {
+		t.Errorf("slow announcement = %q, want NO pinyin/letters (no spelling out)", got)
+	}
+	if contains(got, "苹。果") {
+		t.Errorf("slow announcement = %q, spelled the word character by character", got)
+	}
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0", exec.advanceCount())
+	}
+	ttWaitListening(t, s)
+}
+
+// TestIntentHintRecordsAgainAndSpeaksReply: hint records the "again"
+// outcome for the current word and speaks the classification reply (the
+// no-leak constraint lives in the system prompt; dispatch consumes reply).
+func TestIntentHintRecordsAgainAndSpeaksReply(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{text: "这个字不会写"})
+	llm := newFakeLLM(intentScript(intentHint, "上面是草字头哦"))
+	tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+
+	ttRunIntentTurn(t, tm, s, 3)
+
+	if got := ttSentencesSince(t, s, 3); got != "上面是草字头哦" {
+		t.Errorf("hint reply = %q, want the scripted hint", got)
+	}
+	tm.mu.Lock()
+	outcome, ok := tm.tutor.perWordOutcome[0]
+	tm.mu.Unlock()
+	if !ok || outcome != outcomeHint {
+		t.Errorf("perWordOutcome[0] = (%q, %v), want hint recorded", outcome, ok)
+	}
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0", exec.advanceCount())
+	}
+	if s.countOf(TypeLessonUpdate) != 0 {
+		t.Error("lesson_update sent for a hint")
+	}
+	ttWaitListening(t, s)
+}
+
+// TestIntentMeaningSpeaksGroundedReply: meaning speaks the classification
+// reply (grounded via the system prompt's word ground truth); no outcome is
+// recorded — asking for the meaning is not an attempt.
+func TestIntentMeaningSpeaksGroundedReply(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{text: "这个词什么意思"})
+	llm := newFakeLLM(intentScript(intentMeaning, "苹果是一种水果。"))
+	tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+
+	ttRunIntentTurn(t, tm, s, 3)
+
+	if got := ttSentencesSince(t, s, 3); got != "苹果是一种水果。" {
+		t.Errorf("meaning reply = %q, want the scripted grounded reply", got)
+	}
+	tm.mu.Lock()
+	n := len(tm.tutor.perWordOutcome)
+	tm.mu.Unlock()
+	if n != 0 {
+		t.Errorf("outcomes recorded = %d, want 0 (meaning is not an attempt)", n)
+	}
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0", exec.advanceCount())
+	}
+	ttWaitListening(t, s)
+}
+
+// TestIntentPauseAckLeavesClientPaused: the pause command sets the
+// independent classroom bit, the acknowledgement plays, and after it
+// settles the student STILL sees paused — no silent resume to listening.
+func TestIntentPauseAckLeavesClientPaused(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{text: "我要休息一下"})
+	llm := newFakeLLM(intentScript(intentPause, ""))
+	tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+	listeningBefore := s.listeningCount()
+
+	ttRunIntentTurn(t, tm, s, 3)
+
+	if got := ttSentencesSince(t, s, 3); got != pauseAckText() {
+		t.Errorf("pause ack = %q, want %q", got, pauseAckText())
+	}
+	if !ttPaused(t, tm) {
+		t.Error("classroom pause bit not set")
+	}
+	if got := s.listeningCount(); got != listeningBefore {
+		t.Errorf("listening broadcasts = %d, want %d (no silent resume after the ack)",
+			got, listeningBefore)
+	}
+	if got := s.stateCount(StatePaused); got == 0 {
+		t.Error("no paused state broadcast")
+	}
+	if s.countOf(TypeLessonUpdate) != 0 {
+		t.Error("lesson_update sent for a pause")
+	}
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0", exec.advanceCount())
+	}
+}
+
+// TestIntentResumeRecognizedWhilePausedAndRearmsAfterAck: the resume
+// command is recognized through the real processTurn while the classroom is
+// paused, clears the pause bit, confirms the SAME word position, and hands
+// control back to listening after the confirmation's ack.
+func TestIntentResumeRecognizedWhilePausedAndRearmsAfterAck(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{text: "休息一下"}, asrScript{text: "继续"})
+	llm := newFakeLLM(intentScript(intentPause, ""), intentScript(intentResume, ""))
+	tm, s, _, _ := ttIntentFixture(t, cards, asr, llm)
+
+	ttRunIntentTurn(t, tm, s, 3) // pause
+	if !ttPaused(t, tm) {
+		t.Fatal("pause bit not set before the resume turn")
+	}
+	ttRunIntentTurn(t, tm, s, 4) // resume
+
+	if ttPaused(t, tm) {
+		t.Error("pause bit still set after the resume")
+	}
+	got := ttSentencesSince(t, s, 4)
+	if !contains(got, "还是第 1 个词") || !contains(got, "苹果") {
+		t.Errorf("resume ack = %q, want the same word position (第 1 个词 苹果)", got)
+	}
+	if s.listeningCount() == 0 {
+		t.Error("no listening broadcast after the resume ack settled")
+	}
+}
+
+// TestIntentConfirmWhilePausedIsGentleRejected: a confirm while paused
+// never advances — the gentle rejection speaks, the pause bit holds, and no
+// lesson_update / executor write happens.
+func TestIntentConfirmWhilePausedIsGentleRejected(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{text: "休息一下"}, asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentPause, ""), intentScript(intentConfirm, ""))
+	tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+	listeningBefore := s.listeningCount()
+
+	ttRunIntentTurn(t, tm, s, 3) // pause
+	ttRunIntentTurn(t, tm, s, 4) // confirm while paused
+
+	if got := ttSentencesSince(t, s, 4); got != confirmPausedRejectText() {
+		t.Errorf("paused confirm reply = %q, want the gentle rejection %q", got, confirmPausedRejectText())
+	}
+	if !ttPaused(t, tm) {
+		t.Error("pause bit cleared by a paused confirm")
+	}
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0 (confirm must not advance while paused)", exec.advanceCount())
+	}
+	if s.countOf(TypeLessonUpdate) != 0 {
+		t.Error("lesson_update sent for a paused confirm")
+	}
+	if got := s.listeningCount(); got != listeningBefore {
+		t.Errorf("listening broadcasts = %d, want %d (still paused after the rejection)", got, listeningBefore)
+	}
 }
