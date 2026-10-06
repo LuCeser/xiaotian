@@ -5,11 +5,11 @@ milestone_name: realtime-tutor — ACTIVE
 current_phase: 13
 current_phase_name: R0 真机最小闭环
 status: executing
-stopped_at: Phase 13 13-12 完结（2026-10-06 用户改判：Task 2 由真 iPad 改为本机 E2E 代理执行，三任务收口；待用户三项——本机能力认证/iPad 真机认证/评级映射追认——不阻塞 13-13）。下一步 /gsd-execute-phase 13 推进 13-13（VPS 部署+正式验收）
-last_updated: "2026-10-06T10:33:15.554Z"
+stopped_at: 2026-10-06 晚 本机能力验收会话收口——完整 7 词课通过、回声两档静默通过、时序样本已采（首问候 153ms/句末→首音 P50 2.8s）；问题台账 13-UAT-ISSUES-20261006.md U-1～U-10；评级映射用户已裁定待实现（U-9）；剩余 5 验收项待下节活跃课。用户决策：当日讨论内容由用户新会话梳理规划
+last_updated: "2026-10-06T20:30:39.000Z"
 last_activity: 2026-10-06
-last_activity_desc: 13-12 本机 E2E 收口（node WSS 全流程 + Playwright 真实通道 + 时序报告管线）
-state_head: 4b39357007da0059126766bed3daabe646cb60d5
+last_activity_desc: 13-12 本机能力验收：完整课 + 回声通过 + 时序样本 + 问题台账 U-1～U-10
+state_head: a545cac16a19f24f818f23fe938fcfbb5b3a4c5d
 progress:
   total_phases: 4
   completed_phases: 0
