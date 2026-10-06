@@ -138,7 +138,7 @@ def main() -> int:
 
         print("\n--- reset-vocab.py stdout tail ---")
         lines = (proc.stdout or "").strip().splitlines()
-        for line in lines[-12:]:
+        for line in lines[-30:]:
             print(f"  {line}")
         if proc.returncode != 0 and proc.stderr:
             print("--- stderr ---")
