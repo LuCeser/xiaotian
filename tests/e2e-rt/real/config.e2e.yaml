@@ -1,0 +1,86 @@
+# config.e2e.yaml — L3 isolated-instance configuration template (U-1 防复发).
+#
+# Boots a SECOND service instance fully isolated from the developer's
+# production instance. The three isolation primitives, all pure config
+# (zero code changes):
+#   1. Independent ports  — server.addr 127.0.0.1:8790 (service) and
+#      server.healthAddr 127.0.0.1:8791 (health). BOTH must be independent:
+#      leaving healthAddr at its default would collide with the production
+#      health listener. All well-known local ports (the production TLS pair,
+#      run.ps1's plain pair, the playwright mock's port) are avoided.
+#   2. Independent DB     — python.vocabDBPath and every python.*Dir below
+#      resolve under .scratch/e2e-rt-data/ (gitignored). Go falls back to
+#      python.vocabDBPath when database.path is empty (D-12), so the Go
+#      lesson tables and the Python FSRS side share THIS file only. The
+#      production vocabulary DB is never touched.
+#   3. Pinned lesson key  — rt.lessonId: e2e-rt-lesson (matches e2e-*).
+#      Non-empty lessonId is used as-is, bypassing the daily r0-YYYYMMDD
+#      derivation — the collision that caused U-1 is cut at the config
+#      layer. Validate (pkg/infra RTConfig): ≤64 runes, no whitespace,
+#      no path separators — e2e-rt-lesson is legal.
+#
+# Relative paths resolve against the process CWD: run-real.ps1 starts the
+# service from the repo root, so every relative path below resolves from
+# the repo root.
+#
+# The python interpreter is NOT listed here: run-real.ps1 injects the local
+# venv path via HTA_PYTHON_INTERPRETER (viper env override), so machine
+# paths never enter this committed template.
+#
+# wordTimeoutMs 20000 (default 60000): shortens the per-word writing timer so
+# the h_timeout_auto_advance assertion does not have to wait a full minute.
+# Knob semantics: pkg/infra/config.go RTConfig.WordTimeoutMs.
+#
+# Layer documentation: docs/E2E-ISOLATION-SPEC.md. Launcher: run-real.ps1.
+
+server:
+  # Isolated public listener (service + WebSocket /rt + REST /api/v1).
+  addr: "127.0.0.1:8790"
+  readTimeout: 10s
+  writeTimeout: 10s
+  # Isolated health listener — must stay independent alongside addr.
+  healthAddr: "127.0.0.1:8791"
+  # Static student interface, resolved from the repo root CWD.
+  staticDir: ./pkg/web/static
+  staticRoute: /
+
+log:
+  # The launcher redirects stderr into .scratch/e2e-rt-data/server-e2e.err.log;
+  # the driver tails this file for rt_event evidence.
+  level: info
+  format: json
+  output: stderr
+
+python:
+  # interpreter: injected at boot via the HTA_PYTHON_INTERPRETER environment
+  # override (run-real.ps1); the machine path stays out of this template.
+  # Directory holding the vendored Python scripts (D-03 vendor).
+  scriptsDir: third_party/python
+  # Full relative paths — argv[0] is used verbatim (no ScriptsDir join).
+  vocabScript: third_party/python/vocab_manager.py
+  pregenScript: third_party/python/pregenerate_dictation.py
+  # --- isolated runtime data: everything under .scratch/e2e-rt-data/ ------
+  vocabDBPath: .scratch/e2e-rt-data/vocab.db
+  dataDir: .scratch/e2e-rt-data
+  cacheDir: .scratch/e2e-rt-data/cache/audio
+  manifestDir: .scratch/e2e-rt-data/cache
+  # Subprocess wall-clock caps (defaults, listed for template completeness).
+  dueTimeout: 10s
+  reviewTimeout: 10s
+  pregenTimeout: 120s
+  mgmtTimeout: 10s
+  maxConcurrent: 2
+
+rt:
+  # Pinned e2e-* lesson key — the core U-1防复发 primitive. Every L3 session
+  # binds to THIS id; the daily production lesson key derivation is bypassed
+  # entirely.
+  lessonId: e2e-rt-lesson
+  # Origin whitelist for the isolated port. Bare-host entries expand to
+  # http/https scheme variants; the port-qualified entries make the exact
+  # browser/driver Origin (http://127.0.0.1:8790 and http://localhost:8790)
+  # match exactly (pkg/rt conn.go CheckOrigin: exact match first, then the
+  # port-stripped fallback).
+  allowedOrigins: [localhost, "127.0.0.1", "localhost:8790", "127.0.0.1:8790"]
+  # 20s per-word writing timer (see header note).
+  wordTimeoutMs: 20000

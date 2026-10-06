@@ -49,6 +49,10 @@ third_party/python/__pycache__/
 nul
 *.exe~
 
+# Scratch evidence (T-13-30): raw E2E artifacts — transcripts, JSONL timelines,
+# result matrices, isolated-instance DBs/logs — never enter git history.
+.scratch/
+
 
 ## ADE
 

@@ -1,0 +1,16 @@
+{
+  "category": "english",
+  "unit": "e2e-rt",
+  "entries": [
+    { "word": "apple", "meaning": "苹果" },
+    { "word": "banana", "meaning": "香蕉" },
+    { "word": "orange", "meaning": "橙子" },
+    { "word": "grape", "meaning": "葡萄" },
+    { "word": "tiger", "meaning": "老虎" },
+    { "word": "river", "meaning": "河流" },
+    { "word": "house", "meaning": "房子" },
+    { "word": "happy", "meaning": "快乐的" },
+    { "word": "light", "meaning": "光；灯" },
+    { "word": "music", "meaning": "音乐" }
+  ]
+}
