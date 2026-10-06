@@ -159,3 +159,29 @@
 **三缺陷零复发观察点**：① 无 0 秒 VAD 误触发的空转轮（未说话时进度不自行推进）；② 无用户可见 invalid API response 报错；③ 首问候存在（授权后即听到开场白+第 1 词）。
 
 **完成信号**：回复 "approved"（附导出的 JSONL 文件名与任何异常现象描述），或指出未过项。执行者届时核对服务端事件链（word_announced/word_advanced/lesson_complete/review_written、lesson_version）、缺陷复核、评级追认落档，并跑时序报告（Task 3）。
+
+### Task 2 执行改判：本机 E2E 由代理执行（2026-10-06 用户决策，标注「本机预验收」，不记为正式验收）
+
+**决策记录**：原 Task 2 为真 iPad blocking-human 检查点。用户 2026-10-06 指令改为三级顺序：先代理做本机端到端整体功能认证 → 用户再做本机能力认证 → 最后 iPad 真机认证。本段即第一级结果；上方十步 iPad 清单保留给用户后两级使用。执行环境：既有 8443 实例（PID 50472，未重启未改动），语音素材为 Volcengine TTS 生成的学生口令 WAV（好了/可以了/下一个/再读一遍/读慢一点/不会写/休息一下/继续/词义问句/无关语句/打断语句 + 本地生成静音/噪声探针），经 node WSS 客户端按浏览器同款上行时序（常开麦克风 20ms 分帧）直发真实通道——服务端无法区分来源。原始证据（JSONL/时间线/结果矩阵）留本机 `.scratch/e2e-1312/`，不入库（T-13-30）。
+
+**Track 1（主）— node WSS 完整默写课（会话 rt-7，265.9s，断言 17/18）**：
+
+- 续学课 r0-20261006（10 词，本会话可动 3 词）走完整流程至 lesson_complete：首问候（3 句音频流+audio_end 齐备，6.0s 完成 ack-settle 回 listening）→ 确认推进（hao_le → transcript → 意图 confirm → word_advanced）→ 四类口令（repeat/slow/hint/meaning 全部正确分类且均不推进；hint 只提示不漏词语义由意图白名单佐证）→ 暂停继续（pause 后 state=paused，暂停期间无关语音被分类 chat 且 0 推进、状态保持；resume 恢复 listening）→ 打断（播放中发 interrupt 得 interrupt_ack，旧 epoch 音频帧复活=0、迟到字幕=0）→ 超时推进（静默 59.1s 后 advanced，期间 0 轮次，服务端 timeout_fired=1）→ 完结总结播完 ack 后才 session_ended(lesson_complete)。
+- **学习记录落库**：lessons 行 r0-20261006 推进至 10/10（version 11）；review requested=3 / updated=3 / missing=0，review_logs 增量=3 与 updated 一致——按 pybridge 实际 Updated 集合如实报告（S-05）。
+- **三伴随缺陷零复现**：① invalid API response：服务端 error 事件=0、playback_ack_timeout=0、客户端 provider/invalid=0；② VAD 0 秒误触发：静音探针（3s 纯静音）turn_start=0，客户端 11 轮 = 服务端 speech_started 11 严格一致，无空转轮；③ 首问候存在：问候立即开播且 word_announced 为会话首个 rt_event 之一。
+- 唯一未过项 **b2 噪声探针**（标定类，非功能缺陷）：2s 粉噪（持续 RMS≈0.058）打开 1 个语音段进 ASR（返回空、无任何用户可见副作用、无状态影响）。与旧「0 秒误触发」不同类，属 StartRMS=0.02 能量阈值与探针幅度的标定问题——**未解决，留用户/13-13 决策**（调探针幅度或调 VAD 阈值二选一）。
+
+**Track 2（辅）— Playwright 真实通道 /tutor/（2 用例 + 17 断言全过）**：
+
+- 完结课 resume 全链 UI：进度「已完成」+100%（绝不出「第 11/10 个词」）、10 词片 0 越界高亮、data-state=ended、完结横幅与结束通知文案、零错误课堂、儿童上行自然释放（isCapturing=false、stopNowCalls=0——T-13-24/24b 真实通道成立）、重开入口恢复。
+- **错误映射人话验证**：lesson_unavailable→「取词失败了，请稍后再试」与 playback_ack_timeout→「播放确认超时…」两条文案在真实通道 served JS/HTML 中静态断言 + 接线代码级核验（触发条件与代码位置已记录）；两态今日不可达（完结课短路），如实标注「代码级验证」。no_due_words 文案同法核验。
+- **环境发现（设计行为，非缺陷）**：课行 r0-20261006 已 10/10 后，同日再连走 completed-resume 路径（resolveLessonID 按日取键，短路在任何问候/轮次前直接 ready+ended）；该路径服务端只发 connected 不发 session_end（幂等关闭跳过），且不消耗到期词、不写学习记录。
+
+**Task 3 — 时序报告（管线验证口径，本机样本不作第六周判定证据——prohibition 纪律）**：
+
+- `node scripts/rt-timing-report.js --self-test`：exit 0 全断言通过（含 clock_offset/无 offset/失败样本分支）。
+- 对 rt-7 会话 JSONL 报告：exit 0 可读报告产出（首问候/轮次/打断/工具段摘要），**配对数=0 如实记录**——根因：当日课行已被 rt-7 完结，同日无活跃课可再采（completed-resume 短路在 due fetch 之前）；driver 侧 JSONL 发射机制已修正（per-turn first_audio_played），配对>0 样本留待下一活跃课（如次日新课）或 13-13 VPS 段补采。
+
+**遗留观察（非缺陷登记）**：① 服务端每句音频流前 1 帧 0 字节二进制帧（rt-7 计 20 帧，客户端忽略无影响，疑似 codec 分块边界）；② completed-resume 会话服务端 zap 行 session_id 字段重复两次（infra.F 覆盖写入，仅日志冗余）。
+
+**待用户后续执行项（不阻塞本计划收口，2026-10-06 用户三级顺序）**：1) 用户本机能力认证（真实扬声器/麦克风回声两档静默观察——不可自动化部分）；2) iPad 真机认证（上方十步清单）；3) 评级映射追认（**Pending 未定案**：hint→confirm 是否计 good、hint→timeout 是否计 hard；现行口径 confirm/timeout 终态覆盖先前 hint）；4) 下一活跃课补配对时序样本。
