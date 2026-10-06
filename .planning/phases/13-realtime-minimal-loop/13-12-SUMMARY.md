@@ -2,40 +2,43 @@
 phase: 13-realtime-minimal-loop
 plan: 12
 subsystem: qa
-tags: [pre-acceptance, local-https, ipad-uat, fsrs-word-source, ws-smoke, rt-timing, checkpoint-human, evidence-hygiene]
+tags: [pre-acceptance, local-https, local-e2e, ws-smoke, playwright-real-channel, rt-timing, evidence-hygiene, user-deferred-uat]
 
 # Dependency graph
 requires:
   - phase: 13-realtime-minimal-loop/13-10
-    provides: FSRS 词源生产链路（PyFSRS 适配器 + main.go 注线 + rt.wordTimeoutMs 标定入口）——冒烟验证对象
+    provides: FSRS 词源生产链路（PyFSRS 适配器 + main.go 注线 + rt.wordTimeoutMs 标定入口）——冒烟/E2E 词源前提
   - phase: 13-realtime-minimal-loop/13-11
-    provides: tutor 页默写课堂呈现 + mock e2e——真机会话的功能面
+    provides: tutor 页默写课堂呈现 + mock e2e——E2E 的功能面与 UI 断言基础
   - phase: 13-realtime-minimal-loop/13-08
     provides: 默写状态机 + 完结路径 + 三伴随缺陷（VAD 0s/ASR 空转写/invalid response）修复——零复发复核对象
   - phase: 13-realtime-minimal-loop/13-07
     provides: 本机 8443 预验收通道（mkcert 证书 + config.local.yaml）+ rt 协议扩展
 provides:
-  - "13-CHECKPOINTS 本机预验收段：全量预检记录（build/vet/go test 16 包/npm test/playwright rt 4 用例/存量隔离复检全绿）、8443 通道三探针（页面 200 + 健康 + WSS session_ready words=10）、真实 RunDue 取词证据（lessons 表 r0-20261006 行 10 词卡与 vocab.db WAL 写入时刻吻合）、三伴随缺陷自动化侧初判"
-  - "Task 2 blocking-human 检查点请求：真 iPad 默写课十步操作、评级映射追认项（Pending，未定案）、三缺陷零复发观察点"
-  - "rt-timing-report 报告管线自检通过（真实会话 JSONL 报告待用户会话后补）"
-affects: [13-realtime-minimal-loop/13-13 (VPS 正式验收——前置门为本计划 blocking-human 收口), 13-CHECKPOINTS 首周检查行 (2026-10-07)]
+  - "13-CHECKPOINTS 本机预验收段：全量预检记录、8443 通道三探针（words=10）、真实 RunDue 取词证据（Task 1）"
+  - "13-CHECKPOINTS 本机 E2E 段（Task 2 改判代理执行）：Track 1 node WSS 完整默写课（rt-7，17/18 断言，三伴随缺陷零复发，review requested/updated/missing=3/3/0 落库）+ Track 2 Playwright 真实通道 UI/错误映射验证（2 用例+17 断言）+ completed-resume 路径设计行为记录"
+  - "rt-timing-report 报告管线验证：--self-test 全断言 + rt-7 样本报告（配对数=0 根因与补采路径已记录）"
+  - "待用户后续执行项清单（本机能力认证 / iPad 真机认证 / 评级映射追认 Pending / 配对样本补采）"
+affects: [13-realtime-minimal-loop/13-13 (VPS 正式验收——本机防火墙职能完成，先暴露先修目标达成), 13-CHECKPOINTS 首周检查行 (2026-10-07)]
 
 # Actuals (#2632)
 actuals:
-  tokens: 5200        # chars/4 over realized diff (两段 CHECKPOINTS + SUMMARY)
-  tasks: 1            # Task 1 完成；Task 2 停在 blocking-human 门（designed stop）；Task 3 仅自检半
-  commits: 3          # MEASURED: git rev-list --count 525dc4c..HEAD（含本 SUMMARY 提交）
-commits: 3
+  tokens: 11000       # chars/4 over realized diff（Task 1 两段 + 本轮 E2E 段 + SUMMARY 两次 + STATE）
+  tasks: 3            # Task 1 预检冒烟；Task 2 按用户 2026-10-06 改判为本机 E2E（代理执行）；Task 3 报告+落档
+  commits: 5          # git rev-list --count 525dc4c..HEAD（622aba3/b6a5541/66c1c7d + 本轮 2 提交）
+commits: 5
 plan_head_before: 525dc4c
-plan_head_after: b6a5541
+plan_head_after: 66c1c7d   # 收口前；本轮证据/完结提交在其后（见 Task Commits）
 
 # Tech tracking
 tech-stack:
-  added: []           # 零新增依赖（T-13-SC：探针仅用既有 node ws 依赖）
+  added: []           # 零新增依赖（E2E 用既有 node ws / playwright / ffmpeg 本机件；T-13-SC）
   patterns:
-    - "Pattern: 重试继承——服务实例由前次会话启动且构建与树一致时，预检复验（go build + 探针）通过即复用，不盲目重启；跳过计划重启步须在检查记录写明理由"
-    - "Pattern: Debug 级成功路径的替代证据链——pybridge 成功调用不入 info 日志时，用 DB 行时间戳 + WAL 写入时刻 + 会话事件链三点吻合作 RunDue 真实性证据"
+    - "Pattern: 重试继承——服务实例由前次会话启动且构建与树一致时，预检复验通过即复用，不盲目重启"
     - "Pattern: localhost 探针必须 --noproxy（本机 Privoxy 会劫持并伪造失败响应）"
+    - "Pattern: node WSS 驱动必须常开麦克风泵（含纯静音帧，20ms 分帧）模拟浏览器实时上行——句间停发帧会让 VAD hangover 无法扣减、段锁死（本 E2E 实证）"
+    - "Pattern: TTS 生成测试语音走 Volcengine fragments 契约（seed-tts-1.0 资源配 beijingxiaoye 音色；seed-tts-2.0 资源只配 contextual 音色——资源/音色错配报 55000000）"
+    - "Pattern: 课行按日取键且完结后同日短路（completed-resume）——E2E 场景设计须先查当日课状态再排场景"
 
 key-files:
   created:
@@ -44,15 +47,17 @@ key-files:
     - .planning/phases/13-realtime-minimal-loop/13-CHECKPOINTS.md
 
 key-decisions:
-  - "未重启 8443 实例：重试继承的实例（PID 50472，01:46:05 启动）即 post-13-10 新构建（01:45:31 构建，HEAD 后无代码提交，go build 复验通过），符合 Orchestrator『预检不要求重建则不重启』的重试指令；计划 Task 1 第 2 步的重启语义在该条件下为空操作"
-  - "RunDue 证据落档口径：服务日志无 pybridge 成功行属预期（成功路径仅 Debug 级），以 lessons 表 r0-20261006 行（10 词卡）+ vocab.db WAL 写入时刻 + session_ready words=10 作替代证据链"
-  - "冒烟脚本以 session_ended 即收口（服务端保持 ws 开启属 idle 超时语义，非缺陷）；词表正文不入检查记录，仅记词数"
-  - "评级映射在用户答复前保持 Pending 并入档十步操作与两个待确认次序（hint→confirm、hint→timeout），不预写任何『已确认』"
+  - "Task 2 改判：原真 iPad blocking-human 检查点按用户 2026-10-06 指令改为三级顺序（代理本机 E2E → 用户本机能力认证 → iPad 真机认证）；本计划完成第一级，后两级与评级追认、配对样本补采登记为待用户项，不阻塞本计划收口"
+  - "E2E 语音素材走真实 TTS（Volcengine，与服务同契约）生成学生口令 WAV 直发 WSS——服务端无法区分来源，替代不可自动化的儿童语音；真实扬声器/麦克风回声观察明确留用户"
+  - "b2 噪声探针未过判定为标定类观察项非功能缺陷（StartRMS=0.02 与探针幅度问题，无用户可见副作用），未解决留用户/13-13 决策——不静默改 VAD 阈值"
+  - "配对时序样本=0 如实落档：当日课行被 rt-7 完结后同日无活跃课可采；报告管线验证口径（self-test+可读报告）满足计划 backstop truth，配对>0 样本留下一活跃课/VPS 段"
+  - "评级映射在用户答复前保持 Pending（hint→confirm 与 hint→timeout 次序），证据中标注，不预写已确认"
 
 patterns-established:
   - "Pattern: 本机预验收记录强制标注『本机预验收，不记为正式验收』（T-13-25），正式证据仍归 13-13 VPS 段"
+  - "Pattern: E2E 原始证据（JSONL/时间线/结果矩阵/驱动脚本）留 .scratch/ 不入库，入库内容为脱敏摘要（T-13-30）"
 
-requirements-completed: []  # 计划声明的 RT-01/02/03/04/05/07/10 全部待真机会话与 13-13 收口（flagged assumptions：probe 边缘谓词 unresolved，本计划是本机半场）
+requirements-completed: []  # RT-01/02/03/04/05/07/10 正式判定仍归 13-13 与第六周检查（本计划为本机半场：先暴露先修）
 
 # Coverage metadata (#1602)
 coverage:
@@ -68,101 +73,110 @@ coverage:
         status: pass
     human_judgment: false
   - id: D2
-    description: "真 iPad 本机默写课实测（开场/确认/超时/四类口令/暂停继续/打断/完结记录）+ 评级映射用户追认 + 三伴随缺陷零复发复核"
-    verification: []
+    description: "默写课实测 + 评级映射追认 + 三伴随缺陷零复发复核（按用户 2026-10-06 改判：自动化部分由代理本机 E2E 执行）"
+    verification:
+      - kind: integration
+        ref: "Track 1（node WSS 完整课，会话 rt-7）：断言 17/18——首问候/确认推进/四口令不推进/暂停恢复/打断即停/超时推进/完结顺序/review requested-updated-missing=3-3-0 与 review_logs 一致；三缺陷零复现（error 事件=0、静音探针 0 段、问候为首事件）。唯一未过 b2 噪声探针=标定类观察项（无用户可见副作用），留用户/13-13"
+        status: pass
+      - kind: integration
+        ref: "Track 2（Playwright 真实通道）：完结课 resume UI 全链 2 用例+17 断言；lesson_unavailable/playback_ack_timeout 人话映射 served JS/HTML 静态断言+接线代码级核验（两态今日不可达如实标注）"
+        status: pass
+      - kind: human
+        ref: "待用户：本机能力认证（真实扬声器/麦克风/回声两档静默）、iPad 真机认证（十步清单在档）、评级映射追认（Pending）"
+        status: pending
     human_judgment: true
-    rationale: "麦克风/扬声器/儿童语音不可自动化；需用户持真 iPad 完成一节完整默写课并对评级映射追认（检查点请求已落档 13-CHECKPOINTS Task 2 段）"
+    rationale: "麦克风/扬声器/儿童语音/回声不可自动化——代理 E2E 覆盖协议与状态机全流程，物理声道与主观确认留用户三级顺序后两级"
   - id: D3
     description: "rt-timing-report 报告管线可用（--self-test 全断言通过，含 clock_offset/无 offset/失败样本分支）"
     verification:
       - kind: command
-        ref: "node scripts/rt-timing-report.js --self-test（exit 0，全部断言通过）"
+        ref: "node scripts/rt-timing-report.js --self-test（exit 0，全部断言通过——收口会话复跑确认）"
         status: pass
     human_judgment: false
   - id: D4
-    description: "对本机会话导出的 rt-timing JSONL 跑报告并把首问候耗时/逐词推进时序摘要落档（标注：本机 LAN 样本仅验证报告管线，不作第六周判定证据）"
-    verification: []
-    human_judgment: true
-    rationale: "依赖 Task 2 用户会话导出的真实 JSONL；会话未发生，报告样本不存在"
+    description: "对会话 rt-timing JSONL 跑报告并摘要落档（标注：本机样本仅验证报告管线，不作第六周判定证据）"
+    verification:
+      - kind: command
+        ref: "node scripts/rt-timing-report.js .scratch/e2e-1312/rt-timing-e2e-1312.jsonl --server-log server-8443.err.log（exit 0 可读报告）+ track2 同（exit 0）"
+        status: pass
+      - kind: caveat
+        ref: "配对数=0 如实落档：当日课行已被 rt-7 完结、同日 completed-resume 短路无活跃课；driver JSONL 发射机制已修正，配对>0 留下一活跃课（如次日新课）或 13-13 VPS 段补采"
+        status: documented-limitation
+    human_judgment: false
 
 # Metrics
-duration: 12min
+duration: 12min+95min
 completed: 2026-10-06
-status: halted   # designed stop：Task 2 为 blocking-human 检查点（真 iPad 会话须用户亲自执行）；恢复后按 Task 2 完成信号续跑
+status: completed   # Task 2 按用户 2026-10-06 改判为本机 E2E（代理执行）后三任务收口；用户能力认证/iPad/评级追认登记为待用户项
 ---
 
 # Phase 13 Plan 12: 本机预验收（转向后交互模型真机半场）Summary
 
-**全量预检绿 + 8443 通道三探针绿 + 真实 RunDue 取词冒烟 words=10（lesson r0-20261006，词源链路实测工作）落档本机预验收段；Task 2 真 iPad 默写课为 blocking-human 检查点已请求（评级映射追认 Pending），计划按设计停在该门**
+**全量预检绿 + 8443 通道三探针绿 + 真实 RunDue 取词冒烟（Task 1）→ 本机 E2E 代理执行（Task 2 改判）：node WSS 完整默写课 rt-7 17/18 断言、三伴随缺陷零复发、学习记录落库核对；Playwright 真实通道 UI/错误映射全过（Track 2）→ 时序报告管线验证 + 证据脱敏落档（Task 3）。用户三级顺序后两级（本机能力认证、iPad 真机认证）与评级追认、配对样本补采登记为待用户项。**
 
 ## Performance
 
-- **Duration:** 12 min（2026-10-06T09:22+08:00 → 2026-10-06T09:34+08:00）
-- **Started:** 2026-10-06T09:22:37+08:00
-- **Completed:** 2026-10-06T09:34+08:00（designed stop 落档时刻）
-- **Tasks:** 1 / 3 完成（Task 3 自检半完成；Task 2 blocking-human 待用户）
-- **Files modified:** 2（13-CHECKPOINTS.md 两段追加 + 本 SUMMARY）
+- **Duration:** 12 min（Task 1，2026-10-06 上午）+ 95 min（Task 2/3 本机 E2E 与收口，2026-10-06 下午）
+- **Tasks:** 3 / 3 完成（Task 2 按用户改判口径）
+- **Files modified:** 2（13-CHECKPOINTS.md 三段追加 + 本 SUMMARY 两版）
 
 ## Accomplishments
 
-- **全量预检全绿**：go build / go vet / go test 16 包（-short -count=1）/ npm test 9 套件 / playwright rt 4 用例全过；存量隔离复检 `--list` 7 用例不含 rt-loop
-- **8443 通道确认（未重启）**：复用重试继承实例（PID 50472，01:46:05 启动，01:45:31 post-13-10 构建，树一致）；启动日志 `"tls":true` + `rt endpoint mounted lesson_id=""`（每日派生语义生效）；三探针——`/tutor/` 200（18461B 含 data-page="tutor"）、`/health` status ok、WSS 握手 5–7ms。探针纪律：全部 `--noproxy "*"`（本机代理劫持 localhost 会伪造失败）
-- **真实 RunDue 取词冒烟**：session_init → session_ready（lesson_id=r0-20261006 每日派生、version=1、words=10、tts 24000Hz、audio 16000/s16le/1）；首问候链完整（word_announced 为首实质事件）；3×audio_end 全 ack → listening → end_session → session_ended(client_end)；两会话零 error 事件。词源真实性证据：lessons 表 r0-20261006 行（10 词卡）+ vocab.db WAL 写入时刻 + 会话时刻三点吻合（pybridge 成功路径仅 Debug 级，info 日志无行属预期）
-- **三伴随缺陷自动化侧初判为零**：无 0s VAD 空转轮、无 ASR 空转写事件、无 invalid API response 报错（最终结论待 Task 2 真机会话复核）
-- **Task 2 blocking-human 检查点请求落档**：十步用户操作、评级映射追认项（Pending + 两个待确认次序）、三缺陷零复发观察点、完成信号（"approved" + JSONL 文件名）
-- **Task 3 自检半**：`node scripts/rt-timing-report.js --self-test` exit 0 全断言通过；真实会话报告待用户 JSONL
+- **Task 1（前会话完成）**：全量预检全绿；8443 通道复用重试继承实例（PID 50472）；三探针 + WSS 冒烟 session_ready words=10（lesson r0-20261006）；RunDue 真实性以 DB/WAL/事件链三点吻合落档。
+- **Task 2 Track 1（本机 E2E 主通道）**：node WSS 客户端按浏览器同款上行时序（常开麦克风 20ms 分帧）驱动运行中真实服务完成整节默写课（会话 rt-7，265.9s）：首问候→确认推进→四类口令（repeat/slow/hint/meaning 均不推进）→暂停/继续（paused 期间语音 0 推进）→打断即停（旧 epoch 零复活）→59.1s 静默超时推进→完结总结播完 ack 后 lesson_complete。**三伴随缺陷零复现**（invalid API response=0 / 静音 VAD 0 段、轮次严格一致 / 首问候为首事件）；学习记录：lessons 行 10/10（v11）、review requested=3/updated=3/missing=0、review_logs 增量=3。唯一未过 b2 噪声探针（标定类观察项，无用户可见副作用，留用户/13-13）。
+- **Task 2 Track 2（辅通道）**：Playwright 独立 config（真实通道、ignoreHTTPSErrors、fake-ui）2 用例 + 17 断言全过——完结课 resume UI 全链（进度「已完成」100%、词片 0 越界、ended 态、完结横幅、上行自然释放 T-13-24b）+ lesson_unavailable/playback_ack_timeout/no_due_words 人话映射验证（可达态 DOM 断言 + 不可达态 served JS/HTML 静态断言与代码级核验）。设计行为记录：同日完结课后 completed-resume 短路（无问候无轮次、不耗词、幂等关闭不发 session_end）。
+- **Task 3**：`rt-timing-report --self-test` exit 0（收口会话复跑确认）；rt-7/track2 JSONL 报告 exit 0；配对数=0 根因（当日无活跃课）与补采路径落档；证据脱敏落档 13-CHECKPOINTS「本机 E2E」段。
+- **语音素材方案 a 成功**：Volcengine TTS（与服务同契约，seed-tts-1.0/beijingxiaoye）生成 11 条学生口令 WAV + 本地静音/噪声探针——素材与全部 E2E 脚本留 `.scratch/`（T-13-30）。
 
 ## Task Commits
 
 Each task was committed atomically:
 
 1. **Task 1: 全量预检 + 通道确认 + 取词冒烟证据落档** - `622aba3` (docs)
-2. **Task 2: blocking-human 检查点请求落档** - `b6a5541` (docs)
-
-**Plan metadata:** 本 SUMMARY 提交（docs(13-12)）
+2. **Task 2 blocking-human 检查点请求落档（后被改判）** - `b6a5541` (docs)
+3. **Task 1 收口 SUMMARY（designed stop 版）** - `66c1c7d` (docs)
+4. **Task 2/3: 本机 E2E 证据落档** - 见 git log（docs(13-12)）
+5. **Task 2/3: SUMMARY 完结 + STATE 更新** - 见 git log（docs(13-12)）
 
 ## Files Created/Modified
 
-- `.planning/phases/13-realtime-minimal-loop/13-CHECKPOINTS.md` - 新增「本机预验收（2026-10-06，13-12）」段：Task 1 证据（预检表/通道确认/三探针/RunDue 证据链/缺陷初判）+ Task 2 检查点请求（用户步骤/评级追认 Pending/观察点）
-- `.planning/phases/13-realtime-minimal-loop/13-12-SUMMARY.md` - 本文件（status: halted，designed stop）
+- `.planning/phases/13-realtime-minimal-loop/13-CHECKPOINTS.md` - 「本机预验收（Task 1）」+「Task 2 执行改判：本机 E2E（代理执行）」段：Track 1/2 证据、Task 3 报告口径、遗留观察、待用户项（脱敏）
+- `.planning/phases/13-realtime-minimal-loop/13-12-SUMMARY.md` - 本文件（status: completed）
 
-（探针与校验脚本留在 `.scratch/`（smoke-rt-8443-1312.mjs / check-lesson-row-1312.py），不入库——T-13-30 纪律，原始证据本地留存。）
+（E2E 驱动/探针/素材/原始证据留 `.scratch/`（e2e-rt-1312.mjs、e2e-rt-1312-short.mjs、pw-real-1312.config.js、fixtures-1312/、e2e-1312/），不入库——T-13-30 纪律。）
 
 ## Decisions Made
 
-见 frontmatter key-decisions（复用实例不重启、RunDue 替代证据链、session_ended 即收口、评级映射保持 Pending）。
+见 frontmatter key-decisions（Task 2 改判三级顺序、TTS 素材同契约、b2 判标定类不静默改码、配对=0 如实落档、评级保持 Pending）。
 
 ## Deviations from Plan
 
-None - plan executed exactly as written.（计划 Task 1 第 2 步「停旧实例重启」的重启语义在重试继承条件下为空操作：旧 PID 已死、当前实例即新构建且与树一致——按 Orchestrator 重试指令跳过，理由已落档 CHECKPOINTS。）
+- **Task 2 由「真 iPad blocking-human」改判为「本机 E2E 代理执行」**（2026-10-06 用户指令，三级顺序：代理本机 E2E → 用户本机能力认证 → iPad 真机认证）。原十步 iPad 清单保留在 CHECKPOINTS 供用户后两级使用；本计划按改判口径收口，用户项登记为待办不阻塞。
+- Task 1 重启语义在重试继承条件下为空操作（前会话已落档理由）。
+- 其余按计划执行；发现项均只取证未改码（b2 标定类、0 字节帧、zap 冗余字段、completed-resume 设计行为）。
 
 ## Issues Encountered
 
-- 本机 Privoxy 代理劫持 localhost：所有探针必须 `--noproxy "*"`，已在 CHECKPOINTS 探针纪律行固化
-- pybridge 成功路径仅 Debug 级日志（bridge.go:346），info 级服务日志无 RunDue 成功行——以 DB/WAL/事件链替代证据（已落档）
-- 冒烟脚本首跑因等待服务端 close 触发自身 watchdog（服务端 session_ended 后保持 ws 开启属 idle 超时语义）；改为 session_ended 即收口后 exit 0，属探针脚本修正非服务缺陷
+- 本机 Privoxy 劫持 localhost：探针一律 `--noproxy "*"`（已固化）。
+- node 驱动首跑轮次锁死：句间停发帧致 VAD hangover 无法扣减——改常开麦克风泵（含静音帧）后通过；已固化为 pattern。
+- TTS 资源/音色错配报 55000000：seed-tts-2.0 资源只配 contextual 音色，改用 seed-tts-1.0+beijingxiaoye（生产 fragments 同契约）后通过。
+- 裸 `py` 跑 vocab_manager 静默退出（WindowsApps 存根）：须用服务同款 venv 解释器。
+- 服务 zap 写入滞后于 wire：驱动改 10s 轮询日志尾。
+- 当日课完结后同日无法再采活跃课样本（completed-resume 短路）——配对样本留待下一活跃课。
 
-## User Setup Required
+## User Setup Required（待用户项，不阻塞本计划）
 
-Task 2 需用户执行（完整十步见 13-CHECKPOINTS「Task 2：真 iPad 本机默写课实测」段）：
-
-- iPad 与本机同 WLAN，Safari 打开本机 8443 通道入口（mkcert 根证书已装并信任为前提；根证书分发页在本机 8765 端口，进程在位已核验）
-- 完成一节完整默写课（开场/确认/超时/四类口令/暂停继续/打断/完结/回声观察），导出 rt-timing JSONL
-- 追认评级映射（confirm→good、timeout→hard、hint→again 仅无终态时；特别确认 hint→confirm 与 hint→timeout 次序）
-- 回复 "approved"（附 JSONL 文件名与异常现象）或指出未过项
-
-## Pending Items（恢复续跑清单）
-
-1. **Task 2 收口**：用户会话期间执行者同步看日志（`Get-Content server-8443.err.log -Tail`，禁 tail -f）；结束后核对 word_announced/word_advanced/lesson_complete/review_written 事件链与 lesson_version、三缺陷零复发、summary/no_due 的「实际听完→sentence_ack→session_ended」顺序、review requested/updated/missing 与词库实际变化核对、评级追认落档（或改 pkg/rt/dictation.go 常量表重测）
-2. **Task 3 收口**：对导出 JSONL 跑 `node scripts/rt-timing-report.js`，首问候耗时/逐词推进摘要落档（标注本机 LAN 样本仅验证报告管线）；汇总三任务结论入检查记录模板口径；脱敏复查（grep 暂存 diff 无密钥/私钥/192.168 与 10. 局段/转写正文）后提交
-3. **收尾核验**：13-CHECKPOINTS 首周检查行（2026-10-07）按结果更新由 Orchestrator 决定；本机结果不顶替 13-13 VPS 正式验收口径（T-13-25）
-4. 环境备忘：8443 实例（PID 50472）与 8765 根证书分发（PID 45992）在位运行中；如需重启用 `.scratch/run-local-8443.ps1`（含输出重定向的 detached 模式），禁前台/裸 `&` 启动
+1. **本机能力认证**（三级顺序第二级）：真实扬声器/麦克风下复测关键体验 + 回声两档静默观察（0.5～1.5s 与更长，S-01/S-06 口径——不可自动化部分）。
+2. **iPad 真机认证**（第三级）：CHECKPOINTS 十步清单；导出 rt-timing JSONL。
+3. **评级映射追认**（Pending）：confirm→good、timeout→hard、hint→again 仅无终态时；特别确认 hint→confirm 与 hint→timeout 次序；若修正则改 pkg/rt/dictation.go 常量表重跑单测复测。
+4. **配对时序样本补采**：下一活跃课（如次日新课）用修正后 driver 复跑短会话，或 13-13 VPS 段补。
 
 ## Next Phase Readiness
 
-- 13-13（VPS 正式验收）前置门：本计划 blocking-human 收口后才推进；FSRS 词源前提、时序报告管线、评级口径追认三者在本机半场就绪度分别为：已冒烟实证 / 自检通过 / 待用户追认
-- 首周检查行（2026-10-07）证据仍归 VPS 正式通道；本机段只承担「先暴露先修」防火墙职能
+- 13-13（VPS 部署 + 正式验收）前置门就绪：本机防火墙职能完成（先暴露先修——三伴随缺陷零复发、协议/状态机/落库/中文文案全链实证）；遗留仅 b2 标定决策与用户三项，均不阻塞 VPS 部署准备。
+- 首周检查行（2026-10-07）证据仍归 VPS 正式通道；本机段只承担预验收职能（T-13-25）。
+- 环境备忘：8443 实例（PID 50472）与 8765 根证书分发在位；重启用 `.scratch/run-local-8443.ps1`（detached 模式），禁前台启动。
 
 ---
 *Phase: 13-realtime-minimal-loop*
-*Completed: 2026-10-06（designed stop at blocking-human gate）*
+*Completed: 2026-10-06（Task 2 改判本机 E2E 后三任务收口；待用户项另列）*
