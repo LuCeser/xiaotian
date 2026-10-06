@@ -59,3 +59,14 @@ nul
 .codex
 .hta-data
 .opencode
+.pi
+
+# GSD/tool runtime state (2026-10-06 root cleanup)
+.gsd/
+/skills-lock.json
+.planning/state.json
+.planning/milestone.lock
+.planning/research/.cache/
+.planning/tmp-*
+/rt-timing-*.jsonl
+.scratch/debug/
