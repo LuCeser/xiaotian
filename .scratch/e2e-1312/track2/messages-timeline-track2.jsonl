@@ -1,0 +1,3 @@
+{"session_id":"rt-10","t_ms":12,"dir":"out","msg":{"type":"session_init","audio":{"sampleRate":16000,"format":"s16le","channels":1}}}
+{"session_id":"rt-10","t_ms":13,"dir":"in","msg":{"type":"session_ready","session_id":"rt-10","audio":{"sampleRate":16000,"format":"s16le","channels":1},"tts":{"sampleRate":24000},"lesson":{"id":"r0-20261006","version":11,"current_index":10,"words":["apple","hello","world","water","book","banana","cherry","e2e-0907-apple-1790694195008","e2e-0907-banana-1790694195008","e2e-0907-kiwi-1790694469304"]}}}
+{"session_id":"rt-10","t_ms":13,"dir":"in","msg":{"type":"session_ended","reason":"lesson_complete"}}

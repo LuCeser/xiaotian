@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<!--
+  Natural Real-Time Tutor page — /tutor/ (Phase 13, Plan 05, RT-01).
+
+  The PRIMARY student entry for the R0 minimal loop: one-gesture audio
+  authorization, then continuous listen/speak with the /rt WebSocket
+  (pkg/rt/protocol.go wire contract). The legacy button-driven dictation
+  page (/) stays as the explicitly-labeled degraded fallback (RT-10).
+
+  Vanilla JS + CSS only — no build step (1C/1G VPS constraint, same as the
+  legacy page). Designed for iPad Safari 768x1024; touch targets ≥60px.
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#4f8ef7">
+  <meta name="description" content="自然实时家教 — 听说小老师">
+  <title>听说小老师 · 自然实时家教</title>
+  <link rel="stylesheet" href="styles/tutor.css?v=20261005">
+</head>
+<body data-page="tutor">
+
+  <!-- Top status bar: student-facing turn state + connection state -->
+  <header class="rt-topbar">
+    <div class="rt-state" id="rt-status" data-state="idle" role="status" aria-live="polite">
+      <span class="rt-state-chip" data-chip="listening">🎧 听取中</span>
+      <span class="rt-state-chip" data-chip="processing">💭 思考中</span>
+      <span class="rt-state-chip" data-chip="speaking">🗣 讲授中</span>
+      <span class="rt-state-chip" data-chip="paused">⏸ 休息中</span>
+      <span class="rt-state-chip" data-chip="ended">🎓 课程结束</span>
+    </div>
+    <div class="rt-conn" id="rt-conn" data-conn="idle" role="status">
+      <span class="rt-conn-dot" aria-hidden="true"></span>
+      <span class="rt-conn-text" id="rt-conn-text">未连接</span>
+    </div>
+  </header>
+
+  <main class="rt-main">
+
+    <!-- Lesson progress: words + current_index from session_ready / lesson_update -->
+    <section class="rt-progress" aria-label="课堂进度">
+      <div class="rt-words" id="rt-words"></div>
+      <div class="rt-progress-track" aria-hidden="true">
+        <div class="rt-progress-fill" id="rt-progress-fill" style="width:0%"></div>
+      </div>
+      <div class="rt-progress-meta">
+        <span id="rt-progress-text">第 - / - 个词</span>
+        <span id="rt-round">第 0 轮</span>
+      </div>
+    </section>
+
+    <!-- Completion banner (session_ended reason=lesson_complete, 13-11) -->
+    <section class="rt-banner" id="rt-banner" hidden role="status"></section>
+
+    <!-- Subtitles: teacher sentences (append) above student transcript (replace) -->
+    <section class="rt-subtitles" aria-label="对话字幕">
+      <div class="rt-teacher" id="rt-teacher" aria-live="polite"></div>
+      <div class="rt-transcript" id="rt-transcript" aria-live="polite"></div>
+    </section>
+
+    <!-- Error panel: code → human-readable Chinese reason (RT-10) -->
+    <section class="rt-error" id="rt-error" hidden role="alert">
+      <p class="rt-error-code" id="rt-error-code"></p>
+      <p class="rt-error-text" id="rt-error-text"></p>
+    </section>
+
+    <!-- Degradation / notice area (unsafe context, fallback hints) -->
+    <section class="rt-notice" id="rt-notice" hidden role="note"></section>
+
+    <!-- Controls: touch targets ≥60px (ipad-layout spec) -->
+    <section class="rt-controls" aria-label="会话控制">
+      <button id="rt-start" class="rt-btn rt-btn-start" type="button">开始上课</button>
+      <button id="rt-end" class="rt-btn rt-btn-end" type="button" disabled>结束</button>
+      <button id="rt-export" class="rt-btn rt-btn-export" type="button">导出时序</button>
+    </section>
+  </main>
+
+  <!--
+    Script load order (end-of-body, parse order = execution order):
+      js/rt-client.js    → RTCClient / TimingLog / estimateClockOffset / …
+      js/rt-capture.js   → RTCapture / resampleTo16k / floatToInt16
+      js/rt-playback.js  → RTCPlayback / playedUntilMs / interrupt tuning
+    The AudioWorklet module js/rt-pcm-worklet.js is NOT a <script> — it is
+    loaded from rt-capture.js via audioContext.audioWorklet.addModule()
+    (registerProcessor scope has no AudioWorkletProcessor under a plain
+    script tag; loading it here would throw and break the page).
+  -->
+  <script src="js/rt-client.js?v=20261005"></script>
+  <script src="js/rt-capture.js?v=20261005"></script>
+  <script src="js/rt-playback.js?v=20261005"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      function $(id) { return document.getElementById(id); }
+      var startBtn = $('rt-start');
+      var endBtn = $('rt-end');
+      var exportBtn = $('rt-export');
+      var statusEl = $('rt-status');
+      var connEl = $('rt-conn');
+      var connText = $('rt-conn-text');
+      var wordsEl = $('rt-words');
+      var progressFill = $('rt-progress-fill');
+      var progressText = $('rt-progress-text');
+      var roundText = $('rt-round');
+      var teacherEl = $('rt-teacher');
+      var transcriptEl = $('rt-transcript');
+      var errorEl = $('rt-error');
+      var errorCodeEl = $('rt-error-code');
+      var errorTextEl = $('rt-error-text');
+      var noticeEl = $('rt-notice');
+      var bannerEl = $('rt-banner');
+
+      // ----- shared objects -------------------------------------------------
+      var timing = new TimingLog();
+      timing.push(RT_EVENTS.PAGE_READY);
+
+      var client = new RTCClient({ timing: timing });
+      var capture = new RTCapture({ timing: timing });
+      var playback = new RTCPlayback({ timing: timing, client: client });
+
+      var lesson = { words: [], currentIndex: 0, version: 0 };
+      var started = false;
+
+      // ----- DOM helpers ----------------------------------------------------
+      // The ONLY element-removal helper on this page: server-sourced text
+      // (subtitles, transcripts, errors, teacher lines) never touches an HTML
+      // parser — createElement/textContent discipline is the XSS boundary
+      // (T-13-22, enforced by the negative grep gate).
+      function clearChildren(el) {
+        while (el.firstChild) el.removeChild(el.firstChild);
+      }
+
+      function setStatus(state) {
+        statusEl.setAttribute('data-state', state);
+      }
+
+      function setConn(state, text) {
+        connEl.setAttribute('data-conn', state);
+        connText.textContent = text;
+      }
+
+      function showError(code, message) {
+        errorCodeEl.textContent = code || 'unknown';
+        errorTextEl.textContent = humanizeError(code) + (message ? '（' + message + '）' : '');
+        errorEl.hidden = false;
+      }
+
+      function showNotice(text) {
+        clearChildren(noticeEl);
+        var p = document.createElement('p');
+        p.textContent = text;
+        noticeEl.appendChild(p);
+        noticeEl.hidden = false;
+      }
+
+      function showCompletionBanner() {
+        clearChildren(bannerEl);
+        var p = document.createElement('p');
+        p.textContent = '今天的默写课堂完成啦，真棒！';
+        bannerEl.appendChild(p);
+        bannerEl.hidden = false;
+      }
+
+      function renderProgress() {
+        clearChildren(wordsEl);
+        for (var i = 0; i < lesson.words.length; i++) {
+          var chip = document.createElement('span');
+          chip.className = 'rt-word-chip' + (i === lesson.currentIndex ? ' rt-word-current' : '');
+          chip.textContent = lesson.words[i];
+          wordsEl.appendChild(chip);
+        }
+        var total = lesson.words.length; // word count is dynamic — never assumed
+        if (total > 0 && lesson.currentIndex >= total) {
+          progressFill.style.width = '100%';
+          progressText.textContent = '已完成';
+          return;
+        }
+        progressFill.style.width = (total > 0 ? Math.round((lesson.currentIndex / total) * 100) : 0) + '%';
+        progressText.textContent = '第 ' + (lesson.currentIndex + 1) + ' / ' + (total > 0 ? total : '-') + ' 个词';
+      }
+
+      function addTeacherLine(msg) {
+        var line = document.createElement('div');
+        line.className = 't-line';
+        line.setAttribute('data-sentence-id', msg.sentence_id);
+        line.setAttribute('data-turn-id', String(msg.turn_id));
+        line.textContent = '👩‍🏫 ' + msg.text;
+        teacherEl.appendChild(line);
+        teacherEl.scrollTop = teacherEl.scrollHeight;
+      }
+
+      function stopEverything() {
+        // Child-audio privacy boundary: a stopped session never keeps the
+        // mic stream alive — MediaStreamTrack.stop happens inside.
+        capture.stop();
+        playback.stopNow();
+        startBtn.disabled = false;
+        started = false;
+      }
+
+      // ----- terminal draining (13-11, T-13-24 / T-13-24b) -------------------
+      // playback_ack_timeout and NATURAL endings share one draining path:
+      // uplink stops immediately, but already-scheduled downlink audio keeps
+      // playing until its real last onended (or the bounded playback-side
+      // watchdog) — stopNow is forbidden here. Explicit user end, interrupt,
+      // other errors and abnormal closes keep the immediate stopEverything.
+      var terminalDraining = false;
+      var playbackResourceReleased = false;
+
+      function releasePlaybackResources() {
+        if (playbackResourceReleased) return;
+        playbackResourceReleased = true;
+        playback.releaseSharedResources();
+        playback.note('release');
+        startBtn.disabled = false; // restart re-authorizes via the same button
+        started = false;
+      }
+
+      function beginTerminalDrain() {
+        if (terminalDraining) return;
+        terminalDraining = true;
+        capture.stop();      // stop uplink capture / MediaStreamTrack now
+        endBtn.disabled = true;
+        playback.drainNaturally().then(function () {
+          releasePlaybackResources();
+        });
+      }
+
+      // ----- client wiring (wire names mirror pkg/rt/protocol.go) -----------
+      client.on('session_ready', function (m) {
+        lesson.words = (m.lesson && m.lesson.words) || [];
+        lesson.currentIndex = (m.lesson && m.lesson.current_index) || 0;
+        lesson.version = (m.lesson && m.lesson.version) || 0;
+        renderProgress();
+        setConn('connected', '已连接');
+        endBtn.disabled = false;
+      });
+
+      client.on('turn_start', function (m) {
+        roundText.textContent = '第 ' + m.turn_id + ' 轮';
+        playback.onTurnStart(m.turn_id, m.epoch);
+      });
+
+      client.on('transcript', function (m) {
+        transcriptEl.textContent = m.text ? '🧒 ' + m.text : '';
+      });
+
+      client.on('teacher_sentence', function (m) {
+        addTeacherLine(m);
+      });
+
+      client.on('audio_start', function (m) {
+        playback.onAudioStart(m.epoch, m.sentence_id);
+      });
+
+      client.on('audio_end', function (m) {
+        playback.onAudioEnd(m.epoch, m.sentence_id);
+      });
+
+      client.onBinary(function (arrayBuffer) {
+        playback.onAudioChunk(arrayBuffer);
+      });
+
+      client.on('state', function (m) {
+        // Five-state dispatch: listening / processing / speaking / paused /
+        // ended (paused chip added 13-11 — StatePaused, pkg/rt/protocol.go).
+        setStatus(m.value);
+      });
+
+      client.on('lesson_update', function (m) {
+        lesson.currentIndex = m.current_index;
+        lesson.version = m.version;
+        renderProgress();
+      });
+
+      client.on('interrupt_ack', function () {
+        setStatus('listening');
+      });
+
+      client.on('error', function (m) {
+        var code = m && m.code ? m.code : '';
+        playback.note('error:' + (code || 'unknown'));
+        showError(code, m && m.message);
+        if (code === 'playback_ack_timeout') {
+          // Honest degraded order: the timeout code itself is NOT a
+          // completion proof — drain the scheduled audio, wait for the
+          // natural session_ended + normal close. Never stopNow here.
+          beginTerminalDrain();
+        } else if (code === 'lesson_unavailable') {
+          var retry = document.createElement('p');
+          retry.className = 'rt-error-retry';
+          retry.textContent = '点「开始上课」可以重新试一次。';
+          errorEl.appendChild(retry);
+          startBtn.disabled = false;
+          started = false;
+        }
+      });
+
+      client.on('session_ended', function (m) {
+        var reason = m && m.reason ? m.reason : '';
+        playback.note('session_ended:' + reason);
+        setStatus('ended');
+        setConn('closed', '课程已结束');
+        endBtn.disabled = true;
+        // Only the two natural reasons branch here — playback_ack_timeout is
+        // an ErrorMsg.Code, never a SessionEndedMsg.Reason (13-07 contract).
+        if (reason === 'lesson_complete') {
+          // Subtitles keep the wrap-up summary; banner marks completion.
+          showCompletionBanner();
+          showNotice('本次课程已结束。需要再练一次就点「开始上课」。');
+        } else if (reason === 'no_due_words') {
+          showNotice('今天没有到期单词，休息一天吧。');
+        }
+        if (terminalDraining) {
+          // Timeout path: presentation only — the drain armed at error time
+          // releases shared playback resources after the real last onended.
+          return;
+        }
+        if (reason === 'lesson_complete' || reason === 'no_due_words') {
+          // Natural ending without a prior ErrorMsg takes the SAME drain
+          // flow — no stopNow truncation of the scheduled audio.
+          beginTerminalDrain();
+          return;
+        }
+        // Explicit user end / other reasons: immediate teardown.
+        stopEverything();
+        showNotice('本次课程已结束' + (reason ? '（' + reason + '）' : '') + '。需要再练一次就点「开始上课」。');
+      });
+
+      client.onClose(function () {
+        playback.note('close');
+        setConn('closed', '已断开');
+        if (terminalDraining) return; // drain owns teardown; audio survives close
+        stopEverything();
+      });
+
+      // ----- capture / playback wiring ---------------------------------------
+      capture.onUplink(function (int16) {
+        client.sendBinary(int16);
+      });
+      capture.onFrame(function (float32) {
+        playback.onFrame(float32);
+      });
+      capture.onError(function (type) {
+        showError(type, '');
+        startBtn.disabled = false;
+        started = false;
+      });
+
+      // D-06: returning to the page only resumes the AudioContext — the mic
+      // stream and graph are never rebuilt mid-session.
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible' && capture.audioCtx &&
+            capture.audioCtx.state === 'suspended' && capture.audioCtx.resume) {
+          capture.audioCtx.resume();
+        }
+      });
+
+      // ----- RT-01: safe-context detection at load ---------------------------
+      var voiceReady = typeof isVoiceCaptureAvailable === 'function' &&
+        isVoiceCaptureAvailable(navigator);
+      if (!voiceReady) {
+        var warn = document.createElement('p');
+        warn.textContent = '语音不可用：需要 HTTPS 安全上下文。请通过 HTTPS（或本机 localhost）打开本页后再开始。';
+        clearChildren(noticeEl);
+        noticeEl.appendChild(warn);
+        noticeEl.hidden = false;
+        startBtn.disabled = true; // no clickable button that can only fail
+        showError('voice_unavailable', '');
+      }
+
+      // ----- controls ---------------------------------------------------------
+      startBtn.addEventListener('click', function () {
+        if (started) return;
+        if (!voiceReady) return;
+        started = true;
+        startBtn.disabled = true;
+        errorEl.hidden = true;
+        setConn('connecting', '连接中…');
+
+        // ONE user gesture (RT-02): RTCapture.start synchronously runs the
+        // iOS 3-condition unlock inside this handler, then awaits
+        // getUserMedia; the stream and AudioContext are held for the whole
+        // session — no per-utterance hold-to-talk, no re-authorization.
+        capture.start().then(function () {
+          timing.push(RT_EVENTS.AUTH_COMPLETE);
+          playback.setAudioContext(capture.audioCtx);
+        })['catch'](function (errType) {
+          showError(errType, '');
+        });
+        // Page query params ride along on the upgrade request (Go's mux
+        // matches /rt by path and ignores the query); the mock e2e reads
+        // them to pick its session script (?mock_pause / ?mock_empty /
+        // ?mock_ack_timeout / ?mock_step_ms).
+        client.connect(deriveRtUrl(window.location) + (window.location.search || ''));
+      });
+
+      endBtn.addEventListener('click', function () {
+        client.sendJSON({ type: 'end_session' });
+      });
+
+      exportBtn.addEventListener('click', function () {
+        timing.exportFile();
+      });
+
+      // ----- e2e hook (tests/e2e-rt/rt-loop.spec.js) ---------------------------
+      window.__rtTutor = {
+        client: client,
+        capture: capture,
+        playback: playback,
+        timing: timing,
+        sessionState: lesson,
+        interruptNow: function () { playback.interruptNow(); },
+        // Read-only test observables for the draining contract (13-11):
+        // stopNowCalls counts every playback cancellation, pendingSources is
+        // the scheduled-ahead source count, and the two flags prove the
+        // drain path never releases shared playback resources before the
+        // real last onended. Defensive defaults keep this honest before
+        // rt-playback.js grows the counters.
+        observe: function () {
+          return {
+            terminalDraining: terminalDraining,
+            playbackResourceReleased: playbackResourceReleased,
+            stopNowCalls: playback.stopNowCalls || 0,
+            pendingSources: playback._sources ? playback._sources.length : 0
+          };
+        }
+      };
+    })();
+  </script>
+</body>
+</html>
