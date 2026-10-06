@@ -47,8 +47,14 @@ const (
 	// (summary played/acknowledged or degraded, session ended).
 	EventLessonComplete = "lesson_complete"
 	// EventReviewWritten: the review write returned; fields carry the real
-	// requested/updated/missing counts (13-08 honest completion).
+	// requested/updated/missing counts (13-08 honest completion) plus the
+	// U-9 hint accounting aggregates hint_words/hint_total (2026-10-06).
 	EventReviewWritten = "review_written"
+	// EventHintGiven: the teacher granted one hint request for a word
+	// (U-9, 2026-10-06). Fields carry word_index and hint_count (the Nth
+	// hint for that word) — count-class values only, never word text or
+	// transcript content (T-13-06b boundary). Frozen JSONL identifier.
+	EventHintGiven = "hint_given"
 	// EventPlaybackAckTimeout: the bounded wait for a playback-completion
 	// ack expired (13-08); fields carry the purpose and the waited ms.
 	EventPlaybackAckTimeout = "playback_ack_timeout"

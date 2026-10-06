@@ -920,15 +920,26 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 	case intentSlow:
 		tm.speakCurrentWordReading(s, ctx, cancel, slowReadText)
 	case intentHint:
-		// The hint records "again" AHEAD of the final rating. The override
-		// order between this pre-record and a later confirm/timeout stays
-		// the outcomeRating default proposal pending 13-12 user
-		// ratification — NOT a product decision smuggled in here.
+		// U-9 ruling (2026-10-06): every hint request increments the word's
+		// hint count and pre-records the hint outcome. The pre-record is
+		// DESIGNED to be overwritten by the word's first confirm/timeout
+		// commit; the COUNT lives in perWordHints and survives that
+		// overwrite — the final rating is wordRating(outcome, hints) at
+		// completion. The event carries count-class fields only
+		// (word_index + hint_count; T-13-06b boundary) and is emitted
+		// outside the lock.
 		tm.mu.Lock()
+		n := 0
 		if tm.tutor != nil && target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words) {
-			tm.tutor.commitOutcome(target.WordIndex, outcomeHint)
+			n = tm.tutor.recordHint(target.WordIndex)
 		}
 		tm.mu.Unlock()
+		if n > 0 {
+			tm.recorder.Emit(EventHintGiven,
+				infra.F("word_index", target.WordIndex),
+				infra.F("hint_count", n),
+			)
+		}
 		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, tm.armWordTimer)
 	case intentMeaning:
 		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, tm.armWordTimer)
@@ -1087,6 +1098,7 @@ func (tm *TurnManager) enterCompletion(s Sender, ctx context.Context, cancel con
 	total := len(tm.tutor.words)
 	confirmed, timedOutN, hinted := tm.tutor.outcomeCounts()
 	results := tm.tutor.ratings()
+	hintWords, hintTotal := tm.tutor.hintAccounting()
 	tm.mu.Unlock()
 
 	summary := completionSummaryText(total, confirmed, timedOutN, hinted)
@@ -1109,6 +1121,8 @@ func (tm *TurnManager) enterCompletion(s Sender, ctx context.Context, cancel con
 				infra.F("requested", len(wres.Requested)),
 				infra.F("updated", len(wres.Updated)),
 				infra.F("missing", len(wres.Missing)),
+				infra.F("hint_words", hintWords),
+				infra.F("hint_total", hintTotal),
 			)
 			if updated := len(wres.Updated); updated < len(results) {
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))

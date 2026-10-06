@@ -1720,6 +1720,188 @@ func TestIntentHintRecordsAgainAndSpeaksReply(t *testing.T) {
 	ttWaitListening(t, s)
 }
 
+// ---------------------------------------------------------------------------
+// U-9 裁定（2026-10-06）：hint 感知评级——以「提示后是否写对」为准：
+// hint 后 confirm=hard；hint 后 timeout/仍错=again；无提示路径不变
+// （confirm=good、timeout=hard，由既有 Race 测试继续守护）。
+// ---------------------------------------------------------------------------
+
+// TestHintThenConfirmRatesHard: after a hint request the student confirms
+// the word — per the U-9 裁定（2026-10-06） the rating must be hard (helped
+// but finished), never the old terminal-overwrite good.
+func TestHintThenConfirmRatesHard(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR(asrScript{text: "这个字不会写"}, asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentHint, "上面是草字头哦"), intentScript(intentConfirm, ""))
+	tm, s, _, _ := ttIntentFixture(t, cards, asr, llm)
+
+	// Turn 1: the hint (no advance; the reply re-arms the countdown).
+	ttRunIntentTurn(t, tm, s, 3)
+	// Turn 2: the confirm commits word 0 and announces word 1.
+	ttRunIntentTurn(t, tm, s, s.countOf(TypeTeacherSentence))
+
+	tm.mu.Lock()
+	rating := tm.tutor.ratings()["苹果"]
+	tm.mu.Unlock()
+	if rating != "hard" {
+		t.Errorf("rating after hint+confirm = %q, want hard (U-9 裁定 2026-10-06)", rating)
+	}
+}
+
+// TestHintThenTimeoutRatesAgain: after a hint request the word timer's
+// auto-advance commits the word — per the U-9 裁定（2026-10-06） the rating
+// must be again (still unfinished even with help), never the old
+// terminal-overwrite hard.
+func TestHintThenTimeoutRatesAgain(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR(asrScript{text: "这个字不会写"})
+	llm := newFakeLLM(intentScript(intentHint, "上面是草字头哦"))
+	tm, s, _, _ := ttIntentFixture(t, cards, asr, llm)
+
+	// Turn 1: the hint (no advance).
+	ttRunIntentTurn(t, tm, s, 3)
+
+	// The timeout drives the advance with the captured target (the
+	// TestTimeoutConfirmRaceConfirmWins manual-drive pattern); it blocks in
+	// the next-word announcement until the test acks it.
+	fired := make(chan struct{})
+	go func() {
+		tm.timeoutAdvance(s, 0, TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+		close(fired)
+	}()
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeLessonUpdate) == 1 }) {
+		t.Fatal("the timeout never committed")
+	}
+	ttAwaitSpoken(t, s, 5) // 3 greeting + 1 hint reply + 1 next-word announce
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the timeout goroutine never returned")
+	}
+
+	tm.mu.Lock()
+	rating := tm.tutor.ratings()["苹果"]
+	tm.mu.Unlock()
+	if rating != "again" {
+		t.Errorf("rating after hint+timeout = %q, want again (U-9 裁定 2026-10-06)", rating)
+	}
+}
+
+// TestWordRatingMatrix: the pure rating matrix is pinned table-driven — the
+// matrix is the U-9 裁定（2026-10-06） verbatim, and wordRating is its single
+// reference point (Phase 13.1 unverified-fallback must reuse it, never fork).
+func TestWordRatingMatrix(t *testing.T) {
+	cases := []struct {
+		name    string
+		outcome string
+		hints   int
+		want    string
+	}{
+		{"confirmed no hint", outcomeConfirmed, 0, "good"},
+		{"confirmed after hints", outcomeConfirmed, 2, "hard"},
+		{"timeout no hint", outcomeTimeout, 0, "hard"},
+		{"timeout after one hint", outcomeTimeout, 1, "again"},
+		{"hint pre-record one hint", outcomeHint, 1, "again"},
+		{"hint pre-record three hints", outcomeHint, 3, "again"},
+		{"unknown outcome skipped", "bogus", 0, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wordRating(tc.outcome, tc.hints); got != tc.want {
+				t.Errorf("wordRating(%q, %d) = %q, want %q", tc.outcome, tc.hints, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHintCountIncrementsAndEvents: every hint dispatch increments the
+// word's hint count and emits hint_given with count-class fields only
+// (word_index + hint_count, the U-9 裁定 2026-10-06 per-word accounting) —
+// two consecutive hints on one word count 2 and emit the running count [1,2].
+func TestHintCountIncrementsAndEvents(t *testing.T) {
+	cards := ttCards("苹果")
+	asr := newFakeASR(asrScript{text: "这个字不会写"}, asrScript{text: "还是不会写"})
+	llm := newFakeLLM(intentScript(intentHint, "上面是草字头哦"), intentScript(intentHint, "下面是木字底哦"))
+	tm, s, log, _ := ttIntentFixture(t, cards, asr, llm)
+
+	ttRunIntentTurn(t, tm, s, 3)
+	ttRunIntentTurn(t, tm, s, s.countOf(TypeTeacherSentence))
+
+	tm.mu.Lock()
+	n := tm.tutor.perWordHints[0]
+	tm.mu.Unlock()
+	if n != 2 {
+		t.Errorf("perWordHints[0] = %d, want 2 (same word hinted twice counts twice)", n)
+	}
+	if got := ttEventCount(t, log, EventHintGiven); got != 2 {
+		t.Errorf("hint_given events = %d, want 2", got)
+	}
+	counts := ttEventField(t, log, EventHintGiven, "hint_count")
+	if len(counts) != 2 || counts[0] != 1 || counts[1] != 2 {
+		t.Errorf("hint_given hint_count = %v, want [1 2] (running per-word count)", counts)
+	}
+	indexes := ttEventField(t, log, EventHintGiven, "word_index")
+	if len(indexes) != 2 || indexes[0] != 0 || indexes[1] != 0 {
+		t.Errorf("hint_given word_index = %v, want [0 0]", indexes)
+	}
+}
+
+// TestCompletionReviewCarriesHintAccounting: a hinted-then-confirmed word
+// submits hard (U-9 裁定 2026-10-06) and review_written carries the hint
+// aggregates hint_words=1 / hint_total=1 — the rating evidence stays
+// replayable from the JSONL stream.
+func TestCompletionReviewCarriesHintAccounting(t *testing.T) {
+	cards := ttCards("苹果")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
+	asr := newFakeASR(asrScript{text: "这个字不会写"}, asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentHint, "上面是草字头哦"), intentScript(intentConfirm, ""))
+	tm, s, log, _ := ttIntentFixtureCfg(t, cards, asr, llm, ttConfig(words))
+
+	// Turn 1: the hint (no advance; the reply re-arms the countdown).
+	ttRunIntentTurn(t, tm, s, 3)
+
+	// Turn 2: the confirm commits the word, drives completion; the summary
+	// plays and blocks the turn goroutine until the test acks it.
+	prev := s.countOf(TypeTeacherSentence)
+	audioEndBefore := s.countOf(TypeAudioEnd)
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	ttAwaitSpoken(t, s, prev+2) // the wrap-up summary (2 sentences: the hint line counts only words whose FINAL outcome is hint)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioEnd) > audioEndBefore }) {
+		t.Fatal("summary audio_end never went out")
+	}
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended never arrived after the summary ack")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion goroutine did not finish")
+	}
+
+	subs := words.submissions()
+	if len(subs) != 1 {
+		t.Fatalf("SubmitReview calls = %d, want 1", len(subs))
+	}
+	if got := subs[0]["苹果"]; got != "hard" {
+		t.Errorf("submitted rating = %q, want hard (U-9 裁定 2026-10-06)", got)
+	}
+	hintWords := ttEventField(t, log, EventReviewWritten, "hint_words")
+	if len(hintWords) != 1 || hintWords[0] != 1 {
+		t.Errorf("review_written hint_words = %v, want [1]", hintWords)
+	}
+	hintTotal := ttEventField(t, log, EventReviewWritten, "hint_total")
+	if len(hintTotal) != 1 || hintTotal[0] != 1 {
+		t.Errorf("review_written hint_total = %v, want [1]", hintTotal)
+	}
+}
+
 // TestIntentMeaningSpeaksGroundedReply: meaning speaks the classification
 // reply (grounded via the system prompt's word ground truth); no outcome is
 // recorded — asking for the meaning is not an attempt.

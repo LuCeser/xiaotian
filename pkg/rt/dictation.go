@@ -86,16 +86,52 @@ const (
 	outcomeHint      = "hint"      // student asked for a hint and moved on
 )
 
-// outcomeRating maps internal outcomes to the pybridge ReviewOpts.Results
-// rating vocabulary (good/hard/again/easy; R0 never emits easy).
+// Review rating vocabulary submitted in the pybridge ReviewOpts.Results
+// map (good/hard/again/easy; R0 never emits easy).
+const (
+	ratingGood  = "good"
+	ratingHard  = "hard"
+	ratingAgain = "again"
+)
+
+// wordRating derives one word's FSRS rating from its recorded outcome and
+// its hint count — the SINGLE reference point of the rating matrix.
 //
-// EXPLICIT ASSUMPTION (13-08 plan, 13-12 checkpoint): this mapping is an
-// implementation choice pending user ratification at the 13-12 checkpoint —
-// it must be confirmed before VPS formal acceptance.
-var outcomeRating = map[string]string{
-	outcomeConfirmed: "good",
-	outcomeTimeout:   "hard",
-	outcomeHint:      "again",
+// The matrix is the user's 2026-10-06 ruling (U-9; 13-CHECKPOINTS 评级映射
+// 追认段): what matters is whether the word was written correctly AFTER a
+// hint —
+//
+//   - confirmed,  no hint        → good  (wrote it unaided)
+//   - confirmed,  after hint(s)  → hard  (needed help but finished)
+//   - timeout,    no hint        → hard  (ran out of time, no help asked)
+//   - timeout,    after hint(s)  → again (unfinished even with help)
+//   - hint pre-record never advanced (lesson ended on this word) → again
+//   - anything else → "" (ratings() skips the word)
+//
+// Phase 13.1 single reference point: the UNVERIFIED fallback path (photo
+// check absent) MUST rate through this function — 13.1 must not fork a
+// second matrix. The "没听清提示/多音字" human-synthesis wording stays a
+// 13.1 concern; this (outcome, hints) signature is the entire reserved seam
+// for it. No 13.1 functionality lives here.
+func wordRating(outcome string, hints int) string {
+	switch outcome {
+	case outcomeConfirmed:
+		if hints > 0 {
+			return ratingHard
+		}
+		return ratingGood
+	case outcomeTimeout:
+		if hints > 0 {
+			return ratingAgain
+		}
+		return ratingHard
+	case outcomeHint:
+		// Pre-recorded but never advanced: the lesson ended on this word
+		// with only a hint request on record.
+		return ratingAgain
+	default:
+		return ""
+	}
 }
 
 // Classification bounds: one Chat call per turn, thinking disabled, a tight
@@ -145,13 +181,14 @@ type historyRound struct {
 // TurnManager's mu — the tutor never locks on its own, and every method
 // below assumes the caller already holds that lock.
 type DictationTutor struct {
-	lessonID      string
-	words         []lesson.Word
-	version       int
-	currentIndex  int
-	completed     bool
+	lessonID       string
+	words          []lesson.Word
+	version        int
+	currentIndex   int
+	completed      bool
 	perWordOutcome map[int]string
-	shortHistory  []historyRound // capped deque, oldest dropped (last 4 rounds)
+	perWordHints   map[int]int   // per-word hint request count (U-9, 2026-10-06)
+	shortHistory   []historyRound // capped deque, oldest dropped (last 4 rounds)
 	// paused is the independent CLASSROOM pause bit (13-09): set by a
 	// recognized pause command, cleared by a recognized resume. It is
 	// deliberately NOT the voice state — the internal state may be
@@ -173,6 +210,7 @@ func newDictationTutor(l lesson.Lesson) *DictationTutor {
 		version:        l.Version,
 		currentIndex:   l.CurrentIndex,
 		perWordOutcome: map[int]string{},
+		perWordHints:   map[int]int{},
 	}
 }
 
@@ -203,20 +241,36 @@ func (t *DictationTutor) commitOutcome(index int, outcome string) {
 	t.perWordOutcome[index] = outcome
 }
 
+// recordHint records one hint request for a word index: the per-word count
+// increments and the outcome is PRE-RECORDED as hint (preserving the
+// existing semantics — a word that never advances by session end still
+// counts as hinted/again). The word's first confirm/timeout commit
+// OVERWRITES the pre-recorded outcome BY DESIGN; the hint count lives in
+// perWordHints and survives that overwrite — the final rating is
+// wordRating(outcome, hints) at completion, so a hint is never lost from
+// the rating (U-9, 2026-10-06). Returns the incremented count.
+func (t *DictationTutor) recordHint(index int) int {
+	t.perWordHints[index]++
+	t.commitOutcome(index, outcomeHint)
+	return t.perWordHints[index]
+}
+
 // markCompleted marks the lesson finished; the completion path runs once.
 func (t *DictationTutor) markCompleted() {
 	t.completed = true
 }
 
-// ratings maps the recorded outcomes to review ratings, keyed by word.
+// ratings maps the recorded outcomes to review ratings, keyed by word. The
+// rating derives from wordRating(outcome, hints) — the U-9 matrix — and a
+// word whose outcome the matrix does not recognize is skipped.
 func (t *DictationTutor) ratings() map[string]string {
 	out := make(map[string]string, len(t.perWordOutcome))
 	for idx, outcome := range t.perWordOutcome {
 		if idx < 0 || idx >= len(t.words) {
 			continue
 		}
-		rating, ok := outcomeRating[outcome]
-		if !ok {
+		rating := wordRating(outcome, t.perWordHints[idx])
+		if rating == "" {
 			continue
 		}
 		out[t.words[idx].Word] = rating
@@ -237,6 +291,25 @@ func (t *DictationTutor) outcomeCounts() (confirmed, timedOut, hinted int) {
 		}
 	}
 	return confirmed, timedOut, hinted
+}
+
+// hintAccounting aggregates the per-word hint counts for the completion
+// event (U-9, 2026-10-06): how many valid words received at least one hint,
+// and the total number of hint requests across the lesson. Caller holds
+// tm.mu (single-lock discipline).
+func (t *DictationTutor) hintAccounting() (hintWords, hintTotal int) {
+	for idx := range t.perWordOutcome {
+		if idx < 0 || idx >= len(t.words) {
+			continue
+		}
+		if t.perWordHints[idx] > 0 {
+			hintWords++
+		}
+	}
+	for _, n := range t.perWordHints {
+		hintTotal += n
+	}
+	return hintWords, hintTotal
 }
 
 // appendUserRound appends the student's transcription as a new round,
