@@ -1,21 +1,21 @@
 ---
-gsd_state_version: 1.0
+gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: realtime-tutor — ACTIVE
 current_phase: 13
 current_phase_name: R0 真机最小闭环
 status: executing
-stopped_at: Phase 13 --reviews 重规划完成；13-07～13-13 独立检查通过；下一步 /gsd-execute-phase 13，从 13-07 开始
-last_updated: "2026-10-04T23:12:54.136Z"
-last_activity: 2026-10-05
-last_activity_desc: Phase 13 review replan complete; 7 pending plans independently verified
+stopped_at: Phase 13 13-12 完结（2026-10-06 用户改判：Task 2 由真 iPad 改为本机 E2E 代理执行，三任务收口；待用户三项——本机能力认证/iPad 真机认证/评级映射追认——不阻塞 13-13）。下一步 /gsd-execute-phase 13 推进 13-13（VPS 部署+正式验收）
+last_updated: "2026-10-06T06:40:00.000Z"
+last_activity: 2026-10-06
+last_activity_desc: 13-12 本机 E2E 收口（node WSS 全流程 + Playwright 真实通道 + 时序报告管线）
+state_head: 086b3a4d1ef11b9cb0b5b706a5ecb7d109f8390b
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 13
-  completed_plans: 6
-  percent: 46
-state_head: cf6e496c8d507d37600f595524a55a6bbecba423
+  completed_plans: 13
+  percent: 100
 ---
 
 # Project State
@@ -33,11 +33,11 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 ## Current Position
 
-Phase: 13 (R0 真机最小闭环) — READY TO EXECUTE
-Plan: 7 of 13 — next 13-07; 13-01～13-06 executed, 7 plans remaining
-Status: Ready to execute
-Last activity: 2026-10-05 — /gsd-plan-phase 13 --reviews 完成；独立检查无剩余 BLOCKER/WARNING
-Next: /gsd-execute-phase 13
+Phase: 13 (R0 真机最小闭环) — EXECUTING
+Plan: 13 of 13 (13-12 完结——Task 2 按用户 2026-10-06 改判为本机 E2E 代理执行；待用户三项不阻塞 13-13)
+Status: 13-13 ready
+Last activity: 2026-10-06 — 13-12 本机 E2E 收口（node WSS 全流程 rt-7 + Playwright 真实通道 + 时序报告管线）
+Next: /gsd-execute-phase 13 → 13-13（VPS 部署+正式验收）
 
 13-01～13-06 的实时语音基础已实现；状态机默写转向尚待执行 13-07～13-13，RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
 
@@ -45,7 +45,7 @@ Next: /gsd-execute-phase 13
 
 ## Performance Metrics
 
-v2.0：4 个活跃阶段，Phase 13 已完成 6/13 个实施计划，剩余 7 个计划、5 个执行波次（3～7）；产品验收尚未通过。历史统计保留于 milestones/v1.0-STATE.md，不用于新里程碑进度。
+v2.0：4 个活跃阶段，Phase 13 已完成 13/13 个实施计划（13-12 按用户改判本机 E2E 口径收口），下一计划 13-13（Wave 7：VPS 部署+正式验收）；产品验收尚未通过，待用户三项（本机能力认证/iPad 真机认证/评级映射追认）与 13-13。历史统计保留于 milestones/v1.0-STATE.md，不用于新里程碑进度。
 
 ## Accumulated Context
 
@@ -151,6 +151,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-05
-Stopped at: Phase 13 --reviews 重规划完成；13-07～13-13 独立检查通过；下一步 /gsd-execute-phase 13，从 13-07 开始
+Last session: 2026-10-06T06:40:00.000Z
+Stopped at: Phase 13 13-12 完结（本机 E2E 口径）——待用户三项（本机能力认证 / iPad 真机认证 / 评级映射追认 Pending）不阻塞 13-13；下一步 13-13 VPS 部署+正式验收
 Resume file: None
