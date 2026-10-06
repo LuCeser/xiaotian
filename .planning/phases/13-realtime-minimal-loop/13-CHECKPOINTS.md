@@ -106,3 +106,35 @@
 ## Plan B 执行状态
 
 未触发、未实现。触发后依 [书面方案](../../../docs/REALTIME-TUTOR-PLAN-B.md) 顺序执行。没有调度自动提醒；每个后续执行会话必须检查当前日期和证据。
+
+## 本机预验收（2026-10-06，13-12；标注「本机预验收」，不记为正式验收）
+
+### Task 1：全量预检 + 8443 通道确认 + 真实 RunDue 取词冒烟（已完成）
+
+**Git 版本**：525dc4c（13-10 SUMMARY；13-07/08/09/10/11 均在 main，13-11 于 13-09 尾提交前并入）。执行方式：重试继承——前一会话在启动预验收服务后中断，本次复用其经核验的状态。
+
+**全量预检（全部 exit 0）**：
+
+| 项 | 结果 |
+|---|---|
+| `go build ./...` | 通过 |
+| `go vet ./pkg/... ./cmd/...` | 通过 |
+| `go test ./pkg/... ./cmd/... -short -count=1` | 16 包全 ok（pkg/rt 26.3s 最慢） |
+| `npm test` | 9 套件全过 |
+| `npx playwright test -c playwright.rt.config.js` | 4 passed（38.8s） |
+| `npx playwright test --list` | 7 用例/4 文件，不含 rt-loop（存量套件隔离绿） |
+
+**8443 通道（未重启，复用 Orchestrator 2026-10-06 01:46:05 启动的实例）**：跳过计划「停旧实例重启」步的理由——该实例即新构建（bin/service.exe 构建于 01:45:31，post-13-10 树；HEAD 525dc4c 之后无代码提交且 `go build` 复验通过，二进制与当前树一致）；旧 PID 16256 已不存在，45992 为 python 根证书分发服务（8765 端口，不占 8443，iPad 信任链需要，保留）。启动日志核验：`"tls":true`、`rt endpoint mounted route=/rt lesson_id=""`（每日派生语义）、`rt realtime tutor providers enabled`。
+
+**探针纪律**：本机代理会劫持 localhost 流量，所有探针必须 `curl.exe --noproxy "*" -k --max-time 10`（否则得到代理伪造的失败响应）。
+
+三探针结果：
+1. `https://127.0.0.1:8443/tutor/` → 200，18461 字节，含 `data-page="tutor"`；
+2. `/health`（127.0.0.1:8081）→ `status ok`，load_shedding false；
+3. WSS 冒烟（node ws 客户端 ×2，Origin 白名单内回环来源）：握手 5–7ms → session_init → **session_ready：lesson_id=r0-20261006（空 lessonId 每日派生生效）、version=1、words=10、tts 24000Hz、audio 16000/s16le/1**；首问候链完整（connected → word_announced(word_index=0) 为首个实质事件）；3×audio_end 全部 sentence_ack → listening → end_session → session_ended(reason=client_end)；两会话零 error 事件。
+
+**RunDue 真实性证据**（服务日志无 pybridge 成功行是预期——成功路径仅 Debug 级、服务为 info 级）：Go 侧 DB 复用 python.vocabDBPath 指向的家庭词库文件，lessons 表新增 `r0-20261006` 行（10 词卡，created 2026-10-06 01:23:55 UTC = 本机 09:23:55），与会话 rt-1 期间该 DB 的 WAL 写入时刻一致——真实 python RunDue + EnsureLessonCards 链路工作，FSRS 词源在转向接线下真实取词。
+
+**三伴随缺陷自动化侧初判**（最终结论以 Task 2 真机会话日志复核为准）：冒烟两会话日志无 0 秒 VAD 误触发空转轮、无 ASR 空转写事件、无 invalid API response 报错；word_announced 为会话首事件之一（首问候存在）。
+
+**就绪结论**：新构建在本机通道就绪且 FSRS 词源真实工作（词数 10>0），具备真 iPad 会话条件。
