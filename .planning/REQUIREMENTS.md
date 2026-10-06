@@ -39,7 +39,7 @@ R0 必须含真实 FSRS 到期读取、状态机幂等推进及学习记录写�
 | RT-06 | Phase 14（Phase 13 先验证 60 秒计时、提示与暂停继续） | Pending |
 | RT-07 | Phase 14（Phase 13 先验证读写工具） | Pending |
 | RT-08 | Phase 15 | Pending |
-| RT-09 | Phase 15 | Pending |
+| RT-09 | Phase 13.1（检查+统一提交提前实现）/ Phase 15（家长确认与恢复） | Pending |
 | RT-10 | Phase 13（Phase 14 完善，Phase 16 复验） | Pending |
 
 **Coverage:** 10 个需求，10 个主责阶段映射，全部 Pending；Phase 16 全量复验。既有组件证据及未完成的 v1 项见 [归档需求](milestones/v1.0-REQUIREMENTS.md)。

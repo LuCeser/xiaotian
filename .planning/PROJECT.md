@@ -45,7 +45,7 @@ Students receive personalized, real-time dictation practice with immediate feedb
 
 ### Out of Scope
 
-- **Photo OCR** — 已有组件，Phase 15 接入学习闭环；Phase 13 不前置 OCR。
+- **Photo OCR（家长确认/批改闭环）** — 2026-10-06 决策修订：课堂必经的检查阶段（拍照 OCR＋人工校正，三段式课堂）提前至 Phase 13.1；家长确认/覆盖评分与恢复仍留 Phase 15。
 - **Digital avatar integration** — Planned for Phase 3, requires Phase 1 real-time foundation
 - **Mobile native apps** — iPad web browser approach reduces development complexity
 - **更多教学语言** — 本里程碑先验证中文交流和英语词汇教学；其他语言另行决定。

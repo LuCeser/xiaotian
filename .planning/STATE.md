@@ -1,21 +1,21 @@
 ---
-gsd_state_version: "1.0"
+gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: realtime-tutor — ACTIVE
 current_phase: 13
 current_phase_name: R0 真机最小闭环
-status: executing
-stopped_at: 2026-10-06 晚 本机能力验收会话收口——完整 7 词课通过、回声两档静默通过、时序样本已采（首问候 153ms/句末→首音 P50 2.8s）；问题台账 13-UAT-ISSUES-20261006.md U-1～U-10；评级映射用户已裁定待实现（U-9）；剩余 5 验收项待下节活跃课。用户决策：当日讨论内容由用户新会话梳理规划
-last_updated: "2026-10-06T20:30:39.000Z"
+status: 13-13 暂缓（三段式先行）；下一步=第一层缺陷修复（U-9 实现/U-2/E2E 隔离）→ 13.1 规划
+stopped_at: Phase 13.1 context gathered（三段式课堂讨论收敛；顺序：第一层缺陷修复→13.1→13-13）
+last_updated: "2026-10-06T13:35:04.765Z"
 last_activity: 2026-10-06
 last_activity_desc: 13-12 本机能力验收：完整课 + 回声通过 + 时序样本 + 问题台账 U-1～U-10
-state_head: a545cac16a19f24f818f23fe938fcfbb5b3a4c5d
+state_head: 9dc996b232c6053b44d783d26c3508e245252197
 progress:
-  total_phases: 4
+  total_phases: 5
   completed_phases: 0
   total_plans: 13
-  completed_plans: 13
-  percent: 100
+  completed_plans: 12
+  percent: 0
 ---
 
 # Project State
@@ -35,9 +35,9 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 Phase: 13 (R0 真机最小闭环) — EXECUTING
 Plan: 13 of 13 (13-12 完结——Task 2 按用户 2026-10-06 改判为本机 E2E 代理执行；待用户三项不阻塞 13-13)
-Status: 13-13 ready
+Status: 13-13 暂缓（三段式先行）；下一步=第一层缺陷修复（U-9 实现/U-2/E2E 隔离）→ 13.1 规划
 Last activity: 2026-10-06 — 13-12 本机 E2E 收口（node WSS 全流程 rt-7 + Playwright 真实通道 + 时序报告管线）
-Next: /gsd-execute-phase 13 → 13-13（VPS 部署+正式验收）
+Next: 第一层 quick/小计划 → /gsd-plan-phase 13.1 → 13-13 VPS 部署+正式验收
 
 13-01～13-06 的实时语音基础已实现；状态机默写转向尚待执行 13-07～13-13，RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
 
@@ -138,6 +138,7 @@ None yet.
 - Phase 07.1 inserted after Phase 7: Research and fix iOS WebSocket audio playback issues for iPad Safari browsers (URGENT)
 - Phase 8.1 edited: Re-scoped to ticket 02 (student-paced Mimo TTS dictation); auto-advance plans superseded by user decision 2026-08-23
 - Phase 8.6 inserted after Phase 8: Phases 8.2-8.6 inserted from speech-recognition-redesign tickets 03-07 (voice commands, photo OCR, batch submission, auto grading, multi-user); ticket 08 absorbed into Phase 12; FEED re-sourced in Phase 10. Ticket set = single source of truth (user decision 2026-08-23)
+- Phase 13.1 inserted after Phase 13: 三段式默写课堂（默写→检查→统一反馈）：R0 验收问题 U-5/U-6/U-7/U-10 讨论收敛；三段式先行于 13-13 部署（用户 2026-10-06）
 
 ## Deferred Items
 
@@ -152,6 +153,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-06T06:40:00.000Z
-Stopped at: Phase 13 13-12 完结（本机 E2E 口径）——待用户三项（本机能力认证 / iPad 真机认证 / 评级映射追认 Pending）不阻塞 13-13；下一步 13-13 VPS 部署+正式验收
-Resume file: None
+Last session: 2026-10-06T13:34:27.855Z
+Stopped at: Phase 13.1 context gathered（三段式课堂讨论收敛；顺序：第一层缺陷修复→13.1→13-13）
+Resume file: .planning/phases/13.1-three-stage-dictation-lesson/13.1-CONTEXT.md
