@@ -32,6 +32,24 @@ func (e *ConflictError) Error() string { return "version conflict" }
 // Unwrap returns the ErrVersionConflict sentinel so errors.Is matches.
 func (e *ConflictError) Unwrap() error { return ErrVersionConflict }
 
+// staleRecordError reports a duplicate request_id whose stored result was
+// produced by a previous generation of the lessons row (U-2): the stored
+// NewVersion is greater than the row's CURRENT version. Within one
+// generation version only ever increases (UPDATE ... version = version + 1)
+// and a committed record always satisfies stored == the lessons version at
+// its commit time, so stored > current is only reachable when the row was
+// deleted and recreated — the record is stale and must never be replayed as
+// an idempotent hit. Detected via errors.As; AdvanceWord responds by
+// purging the stale record and re-executing the advance inside one atomic
+// retry transaction.
+type staleRecordError struct {
+	StoredNewVersion int
+	CurrentVersion   int
+}
+
+// Error implements the error interface.
+func (e *staleRecordError) Error() string { return "stale dedupe record" }
+
 // AdvanceResult is the outcome of one advance_word execution. Idempotent is
 // false on the first execution and true when a duplicate request_id was
 // served from the first stored result (tool_requests.result).
@@ -71,7 +89,7 @@ func (e *Executor) GetLessonState(ctx context.Context, lessonID string) (Lesson,
 
 // AdvanceWord moves the lesson cursor forward by one word, idempotently.
 //
-// Both guards run in ONE SQLite transaction (RESEARCH Pattern 5):
+// All guards run in ONE SQLite transaction (RESEARCH Pattern 5):
 //
 //  1. INSERT INTO tool_requests — request_id PRIMARY KEY; a duplicate
 //     request_id rolls back and returns the FIRST stored result with
@@ -79,12 +97,21 @@ func (e *Executor) GetLessonState(ctx context.Context, lessonID string) (Lesson,
 //  2. UPDATE lessons ... WHERE lesson_id=? AND version=? — 0 affected rows
 //     is a version conflict; *ConflictError carries the current version and
 //     nothing is written.
+//  3. U-2 stale-record guard — a duplicate whose stored NewVersion is
+//     greater than the current lessons version comes from a dead generation
+//     of the row (lesson reset/rollback; version only ever increases within
+//     one generation, so stored > current can never be a legitimate
+//     duplicate). It is never replayed: the stale record is DELETEd by
+//     primary key and the advance re-executes, atomically in one retry
+//     transaction (single retry — see advanceTx).
 //
 // L-3 (13-01 review): database.Open's SetMaxOpenConns(1) single-connection
 // pool means this transaction holds the ONLY connection for its duration,
 // briefly blocking /ws frozen-stack session-table writes. The R0
-// transaction is three short statements — acceptable. Any change that
-// lengthens this transaction MUST re-review this premise first.
+// transaction is three short statements — acceptable, and the U-2 purge
+// adds exactly one more primary-key DELETE on the retry path, so the
+// short-statement transaction-duration premise is unchanged. Any change
+// that lengthens this transaction MUST re-review this premise first.
 func (e *Executor) AdvanceWord(ctx context.Context, lessonID string, expectedVersion int, requestID string) (AdvanceResult, error) {
 	// T-13-01b: LLM-produced arguments are untrusted; empty identifiers or
 	// an impossible version are rejected before any database work.
@@ -98,6 +125,32 @@ func (e *Executor) AdvanceWord(ctx context.Context, lessonID string, expectedVer
 		return AdvanceResult{}, errors.Wrap(ErrInvalidLesson, "advance word: lesson_id/request_id must be non-empty and expected_version >= 1")
 	}
 
+	res, err := e.advanceTx(ctx, lessonID, expectedVersion, requestID, false)
+	var stale *staleRecordError
+	if !errors.As(err, &stale) {
+		return res, err
+	}
+
+	// U-2 self-heal: idempotentHit detected a stale dedupe record (its
+	// stored result predates a lesson reset). Retry ONCE with the purge
+	// switch. A single retry cannot loop: the single-connection pool
+	// serializes write transactions, so nothing can re-create a stale
+	// record between detection and retry. A still-stale retry is surfaced
+	// to the caller (turn.go's generic advance-failure branch, user-visible
+	// as 「课堂进度更新失败，请再试一次」) instead of spinning forever.
+	return e.advanceTx(ctx, lessonID, expectedVersion, requestID, true)
+}
+
+// advanceTx is one advance_word attempt: the entire original transaction
+// body of AdvanceWord (BeginTx through Commit), plus the U-2 purge switch.
+// With purgeStale set, the stale tool_requests record is DELETEd by primary
+// key BEFORE the INSERT re-claims the request_id, so the purge, the
+// re-claim, the advance and the stored result all commit atomically — any
+// failure rolls the whole transaction back, including the DELETE (the
+// 0-rows UPDATE conflict path unwinds everything, so a failed purge never
+// destroys a record for a legitimate replay). Every other statement and log
+// line is identical between the first attempt and the purge retry.
+func (e *Executor) advanceTx(ctx context.Context, lessonID string, expectedVersion int, requestID string, purgeStale bool) (AdvanceResult, error) {
 	tx, err := e.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		e.logger.Error("advance word: begin tx failed",
@@ -109,6 +162,24 @@ func (e *Executor) AdvanceWord(ctx context.Context, lessonID string, expectedVer
 		return AdvanceResult{}, errors.Wrap(err, "advance word: begin tx")
 	}
 	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	// U-2 retry: the first attempt hit a stale dedupe record (idempotentHit
+	// returned *staleRecordError). Delete it by primary key inside THIS
+	// transaction, before the INSERT below re-claims the request_id.
+	if purgeStale {
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM tool_requests WHERE request_id = ?",
+			requestID,
+		); err != nil {
+			e.logger.Error("advance word: purge stale dedupe record failed",
+				infra.F("component", "lesson/executor"),
+				infra.F("lesson_id", lessonID),
+				infra.F("request_id", requestID),
+				infra.ErrField(err),
+			)
+			return AdvanceResult{}, errors.Wrap(err, "advance word: purge stale dedupe record")
+		}
+	}
 
 	// (a) Claim the request_id first. A PRIMARY KEY violation means this
 	// request already executed: serve the stored result, never re-advance.
@@ -243,6 +314,16 @@ func (e *Executor) AdvanceWord(ctx context.Context, lessonID string, expectedVer
 // back, so this reads the previously committed tool_requests row. An empty
 // stored result (residue of a first write that crashed before storing its
 // result) is treated as ErrInvalidLesson — never as success.
+//
+// Before replaying, the current lessons version is read and checked against
+// the stored result (U-2 guard): version only ever increases within one
+// generation of a lessons row, so a stored NewVersion GREATER than the
+// current version means the row was deleted and recreated — the record is
+// stale, a loud Error is logged (never silent), and *staleRecordError is
+// returned for AdvanceWord to purge and re-execute. A stored version ≤ the
+// current version is a legitimate duplicate and replays unchanged. When the
+// lessons row is gone entirely, ErrLessonNotFound is returned — same
+// contract as a first execution against a missing row.
 func (e *Executor) idempotentHit(ctx context.Context, lessonID, requestID string) (AdvanceResult, error) {
 	var resultJSON string
 	err := e.store.db.QueryRowContext(ctx,
@@ -268,6 +349,38 @@ func (e *Executor) idempotentHit(ctx context.Context, lessonID, requestID string
 	if err := json.Unmarshal([]byte(resultJSON), &stored); err != nil {
 		return AdvanceResult{}, errors.Wrap(err, "advance word: unmarshal stored result")
 	}
+
+	// U-2 stale-record guard: replay only if the record belongs to the
+	// current generation of this lessons row. See the function doc for the
+	// monotonicity argument — stored > current is unreachably stale, never
+	// a legitimate duplicate.
+	var currentVersion int
+	if err := e.store.db.QueryRowContext(ctx,
+		"SELECT version FROM lessons WHERE lesson_id = ?",
+		lessonID,
+	).Scan(&currentVersion); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			e.logger.Error("advance word: idempotent hit with no lessons row",
+				infra.F("component", "lesson/executor"),
+				infra.F("lesson_id", lessonID),
+				infra.F("request_id", requestID),
+				infra.F("stored_new_version", stored.NewVersion),
+			)
+			return AdvanceResult{}, errors.Wrap(ErrLessonNotFound, fmt.Sprintf("advance word for lesson %q", lessonID))
+		}
+		return AdvanceResult{}, errors.Wrap(err, "advance word: read current lesson version")
+	}
+	if stored.NewVersion > currentVersion {
+		e.logger.Error("advance word: stale dedupe record (lesson reset/rolled back), purging and re-executing",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", lessonID),
+			infra.F("request_id", requestID),
+			infra.F("stored_new_version", stored.NewVersion),
+			infra.F("current_lesson_version", currentVersion),
+		)
+		return AdvanceResult{}, &staleRecordError{StoredNewVersion: stored.NewVersion, CurrentVersion: currentVersion}
+	}
+
 	stored.Idempotent = true
 
 	e.logger.Info("advance word idempotent hit",
