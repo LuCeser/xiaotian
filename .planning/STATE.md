@@ -36,7 +36,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 Phase: 13 (R0 真机最小闭环) — EXECUTING
 Plan: 13 of 13 (13-12 完结——Task 2 按用户 2026-10-06 改判为本机 E2E 代理执行；待用户三项不阻塞 13-13)
 Status: 13-13 暂缓（三段式先行）；下一步=第一层缺陷修复（U-9 实现/U-2/E2E 隔离）→ 13.1 规划
-Last activity: 2026-10-06 — Completed quick task 261006-u2o: U-9 评级映射实现＋逐词提示计数（wordRating 矩阵＋perWordHints 计数，commit f948b17）
+Last activity: 2026-10-07 — Completed quick task 261007-0ct: U-2 去重版本倒退防护（过期去重记录判定失效＋同事务清除重执行推进，commit 7fdfac7）；第一层缺陷修复进度 U-9 ✅/U-2 ✅/E2E 隔离待办
 Next: 第一层 quick/小计划 → /gsd-plan-phase 13.1 → 13-13 VPS 部署+正式验收
 
 13-01～13-06 的实时语音基础已实现；状态机默写转向尚待执行 13-07～13-13，RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
@@ -133,6 +133,7 @@ None yet.
 | 260928-tsp | 测试提速：live 测试加 -short 跳过 + mimo 重试延迟压缩 + run.ps1 增量编译 + mimo RealAPI skip & run.ps1 hint restore | 2026-09-28 | 33f8c52,87534a4 | complete |  |
 | 20 | 新建 13-UAT-ISSUES-20261006 本机验收问题台账（U-1 E2E 残留三处已清/防复发待办、U-2 去重版本倒退缺陷立账未修、U-3 确认误判观察） | 2026-10-06 | 4b39357 | — | — |
 | 261006-u2o | U-9：评级映射实现＋逐词提示计数（裁定口径在 CHECKPOINTS；将来降级为 13.1 的未核对兜底路径） | 2026-10-06 | f948b17 | complete | [261006-u2o-u-9-checkpoints-13-1](./quick/261006-u2o-u-9-checkpoints-13-1/) |
+| 261007-0ct | U-2：去重版本倒退防护——重置课行的过期去重记录判定失效＋同事务清除重执行推进（pkg/lesson/executor.go） | 2026-10-07 | 7fdfac7 | complete | [261007-0ct-u-2-pkg-lesson-executor-go](./quick/261007-0ct-u-2-pkg-lesson-executor-go/) |
 
 ### Roadmap Evolution
 
