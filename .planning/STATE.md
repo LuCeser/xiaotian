@@ -6,10 +6,10 @@ current_phase: 13
 current_phase_name: R0 真机最小闭环
 status: executing
 stopped_at: Phase 13 13-12 完结（2026-10-06 用户改判：Task 2 由真 iPad 改为本机 E2E 代理执行，三任务收口；待用户三项——本机能力认证/iPad 真机认证/评级映射追认——不阻塞 13-13）。下一步 /gsd-execute-phase 13 推进 13-13（VPS 部署+正式验收）
-last_updated: "2026-10-06T06:40:00.000Z"
+last_updated: "2026-10-06T10:33:15.554Z"
 last_activity: 2026-10-06
 last_activity_desc: 13-12 本机 E2E 收口（node WSS 全流程 + Playwright 真实通道 + 时序报告管线）
-state_head: 086b3a4d1ef11b9cb0b5b706a5ecb7d109f8390b
+state_head: 4b39357007da0059126766bed3daabe646cb60d5
 progress:
   total_phases: 4
   completed_phases: 0
@@ -131,6 +131,7 @@ None yet.
 | 260909-rih | 验证并提交工作区清理改动：Rating 字段下线、DictationFinished 收敛、测试辅助重构 | 2026-09-09 | 2fa555f | complete | [260909-rih-rating-dictationfinished](./quick/260909-rih-rating-dictationfinished/) |
 | 260912-eam | 归账清理：9 文件工作区改动落库（gofmt/e2e helper/gitignore）；ROADMAP 8.2–8.6 标记 tickets 03–07 直达交付；08-VERIFICATION 过时 FAIL 注记 | 2026-09-12 | 9e3057c,8411fa8,82e8aa8 | complete | [260912-eam-gofmt-roadmap-8-2-8-6-ticket-state-md-08](./quick/260912-eam-gofmt-roadmap-8-2-8-6-ticket-state-md-08/) |
 | 260928-tsp | 测试提速：live 测试加 -short 跳过 + mimo 重试延迟压缩 + run.ps1 增量编译 + mimo RealAPI skip & run.ps1 hint restore | 2026-09-28 | 33f8c52,87534a4 | complete |  |
+| 20 | 新建 13-UAT-ISSUES-20261006 本机验收问题台账（U-1 E2E 残留三处已清/防复发待办、U-2 去重版本倒退缺陷立账未修、U-3 确认误判观察） | 2026-10-06 | 4b39357 | — | — |
 
 ### Roadmap Evolution
 
