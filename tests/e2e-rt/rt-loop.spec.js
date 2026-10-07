@@ -1218,3 +1218,249 @@ test('an index-less voice line asks again and changes no verdict', async ({ page
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
+
+// ---------------------------------------------------------------------------
+// 13.1-07: check-stage photo cases (the 13.1-03 deferred mock e2e,
+// FA-PHOTO-E2E) over ?mock_ocr — OCR prefills render 待确认 and never
+// satisfy the submit gate (D-05 strict), a wrong reading is overridden by
+// the human tap (D-06①), cancel clears the buffer so the retake OCRs only
+// the second photo (Pitfall 5), and the disabled-OCR degradation keeps the
+// check manual-only (RT-10).
+// ---------------------------------------------------------------------------
+
+/** URL params for the photo tests: the OCR script plus a fast tick. */
+const photoParams = (spec) => QUIET_PARAMS + '&mock_step_ms=400&mock_ocr=' + spec;
+
+/** A small notebook-page JPEG, canvas-generated inside THIS page (the
+    plan's "canvas-generated in-test" option — real decodable bytes, no
+    committed binary fixture). */
+async function notebookJPEG(page) {
+  const dataUrl = await page.evaluate(() => {
+    const c = document.createElement('canvas');
+    c.width = 480;
+    c.height = 360;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.fillStyle = '#1a1a1a';
+    ctx.font = '32px cursive';
+    ctx.fillText('apple banana cat', 24, 180);
+    return c.toDataURL('image/jpeg', 0.8);
+  });
+  return Buffer.from(dataUrl.split(',')[1], 'base64');
+}
+
+/** Ship one photo through the page's REAL upload path: click 拍照检查 and
+    answer the dynamically created file picker with the JPEG buffer. The
+    page downscales via its own ladder and chunks into photo_chunk JSON. */
+async function uploadPhoto(page, jpeg) {
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.locator('#rt-check .rt-check-photo').click(),
+  ]);
+  await chooser.setFiles({ name: 'notebook.jpg', mimeType: 'image/jpeg', buffer: jpeg });
+}
+
+test('photo happy path: OCR prefills stay 待确认 and the submit gate demands the manual pass (D-05)', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + photoParams('wrong2'));
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await awaitCheckPanelSettled(page);
+
+  // Upload through the page's real path — the canvas JPEG rides photo_chunk
+  // JSON frames and the scripted OCR pass answers.
+  await uploadPhoto(page, await notebookJPEG(page));
+  await expect
+    .poll(async () => (await getSession(page)).photoUploads, { timeout: 15_000 })
+    .toBe(1);
+
+  // Every prefilled row renders 待确认 — an OCR prefill is never a
+  // confirmation (D-05). Word 2's plausible misread (banana→bnana) shows
+  // with the near-miss hint; the clean words show their readings too.
+  await expect(page.locator('#rt-check .rt-check-pending')).toHaveCount(3);
+  const wrongRow = await page.locator('#rt-check .rt-check-row').nth(1).textContent();
+  expect(wrongRow).toContain('识别：bnana');
+  expect(wrongRow).toContain('好像差一点点');
+  const cleanRow = await page.locator('#rt-check .rt-check-row').nth(0).textContent();
+  expect(cleanRow).toContain('识别：apple');
+
+  // The strict gate BOTH ways: the page's submit button stays blocked AND
+  // the server refuses a forced zero-human submit with no second write.
+  await expect(page.locator('#rt-check .rt-check-submit')).toBeDisabled();
+  await page.evaluate(() =>
+    window.__rtTutor.client.sendJSON({ type: 'check_submit', request_id: 'photo-early' }));
+  await expect
+    .poll(async () => (await getSession(page)).checkSubmits.length, { timeout: 10_000 })
+    .toBe(1);
+  expect((await getSession(page)).reviewResults).toBe(0);
+
+  // The per-word human pass completes the check: prefills flip to manual as
+  // each 对 lands, the submit unlocks, and the honest full save reports 3/3
+  // (the OCR-then-human-final ratings).
+  await finishCheckWithButtons(page, 0);
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+  const s = await getFinalSession(page);
+  expect(s.reviewResults).toBe(1);
+  expect(s.checkSubmits).toHaveLength(2); // the refused early one + the real one
+  const rr = parseFrames(s.frames).filter((m) => m.type === 'review_result');
+  expect(rr).toEqual([{ type: 'review_result', requested: 3, updated: 3, missing: 0, unchecked: false }]);
+  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('OCR misread is overridden by the human tap and the override rides the one submission (D-06①)', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + photoParams('wrong1'));
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await awaitCheckPanelSettled(page);
+
+  await uploadPhoto(page, await notebookJPEG(page));
+  await expect
+    .poll(async () => (await getSession(page)).photoUploads, { timeout: 15_000 })
+    .toBe(1);
+
+  // Word 1 was misread (apple→aple): the wrong reading displays beside the
+  // row and the prefill marked it WRONG (the echo is the render source,
+  // RT-07).
+  await expect(page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(1))
+    .toHaveClass(/rt-check-no-on/, { timeout: 10_000 });
+  const rowText = await page.locator('#rt-check .rt-check-row').nth(0).textContent();
+  expect(rowText).toContain('识别：aple');
+
+  // The human override: 对 on the misread row — the manual call lands over
+  // the prefill through the same verdict upsert (D-06①: the human wins;
+  // the still-pending prefills stay manual=false).
+  await page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(0).click();
+  await expect(page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(0))
+    .toHaveClass(/rt-check-yes-on/, { timeout: 10_000 });
+  const s1 = await getSession(page);
+  expect(s1.checkVerdicts).toEqual([
+    { word_index: 0, correct: true, manual: true },
+    { word_index: 1, correct: true, manual: false },
+    { word_index: 2, correct: true, manual: false }
+  ]);
+
+  // Finish the manual pass and submit once: the overridden word is rated
+  // CORRECT in the unified write — the summary counts 3 对 of 3 and the
+  // honest result saves all three.
+  await finishCheckWithButtons(page, 1);
+  await teacherSaid(page, ['个词对了3个']);
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+  const s = await getFinalSession(page);
+  expect(s.reviewResults).toBe(1);
+  const rr = parseFrames(s.frames).find((m) => m.type === 'review_result');
+  expect(rr).toEqual({ type: 'review_result', requested: 3, updated: 3, missing: 0, unchecked: false });
+  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('photo_cancel mid-upload clears the buffer; the retake OCRs only the second photo', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + photoParams('wrong1;clean'));
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await awaitCheckPanelSettled(page);
+
+  // Abandoned upload: chunk seq 1 lands, then photo_cancel arrives BEFORE
+  // any final — the buffer must clear with chunks pending (the Pitfall 5
+  // discipline: without the clear, the retake's restart-at-1 sequences
+  // would absorb stale bytes).
+  await page.evaluate(() => window.__rtTutor.client.sendJSON({
+    type: 'photo_chunk', seq: 1, data: 'YWJhbmRvbmVk', final: false
+  }));
+  await expect
+    .poll(async () => (await getSession(page)).photoChunks, { timeout: 10_000 })
+    .toBe(1);
+  await page.evaluate(() => window.__rtTutor.client.sendJSON({ type: 'photo_cancel' }));
+  await expect
+    .poll(async () => (await getSession(page)).photoCanceledMid, { timeout: 10_000 })
+    .toBe(true);
+
+  // The retake: a complete single-chunk upload — its readings are the
+  // SECOND spec (clean): exactly one ocr_result, and no merged first-photo
+  // entries anywhere in it.
+  const jpeg = await notebookJPEG(page);
+  await page.evaluate((d) => window.__rtTutor.client.sendJSON({
+    type: 'photo_chunk', seq: 1, data: d, final: true
+  }), jpeg.toString('base64'));
+  await expect
+    .poll(async () => (await getSession(page)).ocrResults, { timeout: 15_000 })
+    .toHaveLength(1);
+  const retake = (await getSession(page)).ocrResults[0];
+  expect(retake).toHaveLength(3);
+  expect(retake.map((e) => e.ocr_text)).toEqual(MOCK_WORDS);
+  for (const e of retake) {
+    expect(e.correct, 'the retake carries no first-photo misread').toBe(true);
+    expect(e.near_miss).toBe(false);
+  }
+
+  // The page renders the clean prefills as 待确认 and the strict gate still
+  // blocks; the manual pass completes the lesson normally.
+  await expect(page.locator('#rt-check .rt-check-pending')).toHaveCount(3);
+  await expect(page.locator('#rt-check .rt-check-submit')).toBeDisabled();
+  await finishCheckWithButtons(page, 0);
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+  const s = await getFinalSession(page);
+  expect(s.photoCancels).toBe(1);
+  expect(s.photoUploads).toBe(1); // only the retake ever completed
+  expect(s.reviewResults).toBe(1);
+  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('photo unavailable degrades to manual-only and the check still completes (RT-10/13.1-01 regression)', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + photoParams('off'));
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await awaitCheckPanelSettled(page);
+
+  // A photo attempt through the page's real path is refused with the coded
+  // honest degradation error — no ocr_result, no prefill, no crash.
+  await uploadPhoto(page, await notebookJPEG(page));
+  await expect
+    .poll(async () => (await getSession(page)).photoUnavailable, { timeout: 15_000 })
+    .toBeGreaterThanOrEqual(1);
+  const errText = await page.textContent('#rt-error');
+  expect(errText).toContain('拍照检查现在用不了');
+
+  // The controller unlocked on the error: the button is usable again and
+  // nothing is stuck processing (the 13.1-03 error-path unlock contract).
+  const obs = await page.evaluate(() => window.__rtTutor.observe().check);
+  expect(obs.photoProcessing).toBe(false);
+  expect(obs.ocrRows).toBe(0);
+  await expect(page.locator('#rt-check .rt-check-pending')).toHaveCount(0);
+  await expect(page.locator('#rt-check .rt-check-submit')).toBeDisabled();
+
+  // The manual-only flow still completes the whole lesson (the 13.1-01
+  // path regression — degradation never blocks the classroom).
+  await driveCheckStage(page);
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+  const s = await getFinalSession(page);
+  expect(s.ocrResults).toHaveLength(0);
+  expect(s.reviewResults).toBe(1);
+  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});

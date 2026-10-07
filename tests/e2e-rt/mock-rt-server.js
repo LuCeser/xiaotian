@@ -49,6 +49,23 @@
  *                       missing=1 so the page's honest-copy branch renders
  *                       「保存了 N-1 / N」 instead of full success
  *
+ * 13.1-07 photo-check script (?mock_ocr=, the 13.1-03 wire contract mirror):
+ *   ?mock_ocr=off        no OCR reader server-side — photo_chunk frames are
+ *                       answered with the coded photo_unavailable error and
+ *                       the check stage keeps working manual-only
+ *   ?mock_ocr=<specs>    ';' list of per-upload specs ('wrong2,4' = words 2
+ *                       and 4 mis-recognized with plausible near-miss
+ *                       readings, 'clean'/'empty' = all correct). Upload N's
+ *                       completed photo uses spec N (a canceled upload
+ *                       consumes no spec — the retake OCRs only the second
+ *                       photo). A completed upload prefills verdicts through
+ *                       the same upsert (manual=false), echoes the
+ *                       authoritative check_verdicts, then sends ocr_result
+ *                       — the applyOcrPrefills frame order, field-for-field.
+ *   photo_chunk/photo_cancel frames are handled with the assembler's real
+ *   discipline (seq 1 resets, contiguous otherwise, cancel clears
+ *   unconditionally and answers nothing).
+ *
  * 13.1-04 reconnect pairs (?mock_unchecked=1 / ?mock_resume=1, both with
  * ?mock_pair=<id> — the persistent per-pair lesson state lives in THIS
  * process so two page loads reconnect into the SAME lesson):
@@ -220,6 +237,13 @@ function handleTestState(res) {
       checkSubmits: s.checkSubmits,
       voiceLines: s.voiceLines,
       voiceVerdicts: s.voiceVerdicts,
+      photoChunks: s.photoChunks,
+      photoUploads: s.photoUploads,
+      photoCancels: s.photoCancels,
+      photoCanceledMid: s.photoCanceledMid,
+      photoUnavailable: s.photoUnavailable,
+      photoOutOfStage: s.photoOutOfStage,
+      ocrResults: s.ocrResults,
       reviewResults: s.reviewResults,
       checkStartedReason: s.checkStartedReason,
       correctionDiff: s.correctionDiff,
@@ -259,6 +283,12 @@ const VOICE_LINES = {
   '第一个词写的是 aple': { intent: 'check_spelling', index: 1, text: 'aple' },
   '嗯那个词怎么样': { intent: 'check_right' }
 };
+
+// 13.1-07 (FA-PHOTO-E2E landing): plausible mis-recognitions for the
+// scripted OCR pass — every misread is edit distance 1 from its word, so
+// mockGrade reports the near-miss boolean exactly like the real pipeline's
+// GradeWord booleans (correct=false, near_miss=true).
+const MOCK_MISREADS = { apple: 'aple', banana: 'bnana', cat: 'cut' };
 
 const SAMPLES_PER_CHUNK = TTS_RATE / 10; // 2400 samples = 100 ms
 
@@ -379,13 +409,31 @@ wss.on('connection', (ws, req, query) => {
     empty: query.get('mock_empty') === '1',
     ackTimeout: query.get('mock_ack_timeout') === '1',
     partialSave: query.get('mock_partial_save') === '1',
-    voiceVerdict: query.get('mock_voice_verdict') === '1'
+    voiceVerdict: query.get('mock_voice_verdict') === '1',
+    // 13.1-07 scripted OCR pass (?mock_ocr=): 'off' = no OCR reader
+    // server-side (photo_unavailable degradation, manual-only check);
+    // otherwise a ';' list of PER-UPLOAD specs — upload N's readings use
+    // spec N (a canceled upload consumes no spec). Each spec is a ',' list
+    // of 1-based wrong positions ('wrong2,4' / 'wrong1') or empty/'clean'
+    // for all-correct readings.
+    ocr: query.get('mock_ocr') || ''
   };
-  mockMode.name = mockMode.voiceVerdict ? 'voice_verdict'
-    : mockMode.partialSave ? 'partial_save'
-      : mockMode.ackTimeout ? 'ack_timeout'
-        : mockMode.empty ? 'empty'
-          : mockMode.pause ? 'pause' : 'default';
+  const ocrSpecs = mockMode.ocr && mockMode.ocr !== 'off'
+    ? mockMode.ocr.split(';').map((spec) => ({
+        wrong: new Set(
+          spec.replace(/^wrong/i, '')
+            .split(',')
+            .map((n) => parseInt(n, 10))
+            .filter((n) => Number.isFinite(n) && n > 0))
+      }))
+    : null;
+  mockMode.name = mockMode.ocr === 'off' ? 'ocr_off'
+    : ocrSpecs ? 'photo_ocr'
+      : mockMode.voiceVerdict ? 'voice_verdict'
+        : mockMode.partialSave ? 'partial_save'
+          : mockMode.ackTimeout ? 'ack_timeout'
+            : mockMode.empty ? 'empty'
+              : mockMode.pause ? 'pause' : 'default';
 
   // 13.1-04 reconnect pair binding (persistent lesson state across page
   // loads; the pair id comes from the spec test).
@@ -418,6 +466,16 @@ wss.on('connection', (ws, req, query) => {
     voiceLines: [],
     voiceVerdicts: 0,
     voiceTurns: 0,
+    /** 13.1-07 photo mirror: assembler + scripted OCR bookkeeping. */
+    photoChunks: 0,
+    photoUploads: 0,
+    photoUploadOrdinal: 0,
+    photoCancels: 0,
+    photoCanceledMid: false,
+    photoUnavailable: 0,
+    photoOutOfStage: 0,
+    photoBuf: [],
+    ocrResults: [],
     reviewResults: 0,
     checkStartedReason: null,
     correctionDiff: null,
@@ -654,6 +712,37 @@ wss.on('connection', (ws, req, query) => {
     }
     announce('v' + (++state.voiceTurns), line, PLAN_NOTICE, 1600 + idx * 10,
       () => { send({ type: 'state', value: 'listening' }); });
+  }
+
+  // 13.1-07 (FA-PHOTO-E2E landing): the scripted OCR pass for one COMPLETED
+  // upload. The readings come from THIS upload attempt's spec (the ordinal
+  // counts seq-1 starts, so an abandoned upload consumes its spec and the
+  // retake OCRs only the second photo). The frame order mirrors
+  // applyOcrPrefills field-for-field: prefill verdicts (manual=false — never
+  // satisfies the submit gate, D-05) through the SAME upsert the button taps
+  // use, the authoritative check_verdicts echo, THEN the ocr_result display
+  // entries.
+  function runMockOcr() {
+    if (state.ended || !state.checkActive) return;
+    const spec = ocrSpecs
+      ? ocrSpecs[Math.min(Math.max(state.photoUploadOrdinal, 1) - 1, ocrSpecs.length - 1)]
+      : { wrong: new Set() };
+    state.photoUploads += 1;
+    const entries = state.words.map((w, i) => {
+      const wrong = spec.wrong.has(i + 1);
+      const text = wrong ? (MOCK_MISREADS[w] || w + 'x') : w;
+      const g = mockGrade(w, text);
+      return { word_index: i, ocr_text: text, correct: g.correct, near_miss: g.nearMiss };
+    });
+    state.ocrResults.push(entries.map((e) => ({ ...e })));
+    for (const e of entries) {
+      const prefill = { word_index: e.word_index, correct: e.correct, manual: false };
+      const found = state.checkVerdicts.find((v) => v.word_index === e.word_index);
+      if (found) Object.assign(found, prefill);
+      else state.checkVerdicts.push(prefill);
+    }
+    send({ type: 'check_verdicts', verdicts: state.checkVerdicts.map((v) => ({ ...v })) });
+    send({ type: 'ocr_result', entries });
   }
 
   // The unified-submit battle summary (D-04 mirror): battle counts plus the
@@ -1035,6 +1124,61 @@ wss.on('connection', (ws, req, query) => {
         state.voiceLines.push(String(msg.line || ''));
         const said = VOICE_LINES[String(msg.line || '')];
         if (said) applyVoiceVerdict(said);
+        break;
+      }
+
+      case 'photo_chunk': {
+        // 13.1-03/13.1-07 mirror: the assembler discipline (seq 1 RESETS the
+        // buffer — the retake contract; any other seq must be exactly
+        // contiguous) + the scripted OCR pass on final. Outside a live check
+        // stage every chunk is refused (photoStageClosedNotice parity), and
+        // with the OCR reader disabled a coded honest degradation error
+        // answers instead (photoUnavailableNotice parity — the check keeps
+        // working manual-only).
+        if (!state.checkActive || state.ended) {
+          state.photoOutOfStage += 1;
+          send({ type: 'error', code: 'invalid_message', message: '现在不是拍照检查的时间哦', recoverable: true });
+          break;
+        }
+        if (mockMode.ocr === 'off') {
+          state.photoUnavailable += 1;
+          send({ type: 'error', code: 'photo_unavailable', message: '拍照检查现在用不了，我们看着屏幕逐个确认吧', recoverable: true });
+          break;
+        }
+        const seq = msg.seq;
+        if (typeof seq !== 'number' || seq < 1) {
+          send({ type: 'error', code: 'invalid_message', message: '这张照片没有传完整，再拍一次吧', recoverable: true });
+          break;
+        }
+        if (seq === 1) {
+          state.photoBuf = [];
+          state.photoUploadOrdinal += 1; // a new upload attempt — consumes the next spec
+        }
+        if (seq !== state.photoBuf.length + 1) {
+          // Out-of-order/duplicate frame: rejected, buffer untouched (the
+          // real add() refuses without absorbing; the 1-based mirror keeps
+          // the same observable).
+          send({ type: 'error', code: 'invalid_message', message: '这张照片没有传完整，再拍一次吧', recoverable: true });
+          break;
+        }
+        state.photoBuf.push(seq);
+        state.photoChunks += 1;
+        if (msg.final) {
+          state.photoBuf = []; // consumed: one upload never bleeds into the next
+          runMockOcr();
+        }
+        break;
+      }
+
+      case 'photo_cancel': {
+        // 13.1-03 retake discipline: discard the in-flight buffer
+        // unconditionally and answer NOTHING (the real handler only records
+        // the event — without the clear, the next upload's restart-at-1
+        // sequences would absorb stale bytes).
+        const hadBuf = state.photoBuf.length > 0;
+        state.photoBuf = [];
+        state.photoCancels += 1;
+        if (hadBuf) state.photoCanceledMid = true;
         break;
       }
 
