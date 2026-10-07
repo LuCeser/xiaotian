@@ -46,6 +46,8 @@ const (
 	TypeEndSession   = "end_session"
 	TypeCheckVerdict = "check_verdict" // 13.1-01: one screen 对/错 verdict
 	TypeCheckSubmit  = "check_submit"  // 13.1-01: the unified-submit request
+	TypePhotoChunk   = "photo_chunk"   // 13.1-03: one base64 image chunk (check stage)
+	TypePhotoCancel  = "photo_cancel"  // 13.1-03: discard the in-flight upload
 )
 
 // Server → client control message type constants.
@@ -66,6 +68,7 @@ const (
 	TypeCheckVerdicts   = "check_verdicts" // 13.1-01: authoritative verdict echo (RT-07)
 	TypeReviewResult    = "review_result"  // 13.1-01: honest unified-submit result (S-05)
 	TypeWordRevealed    = "word_revealed"  // 13.1-01: one word's plaintext reveal
+	TypeOcrResult       = "ocr_result"     // 13.1-03: per-word OCR recognition entries
 )
 
 // StateMsg.Value vocabulary for the student-facing connection state.
@@ -111,6 +114,10 @@ const (
 	// honest notice and keep the scheduled audio until it drains naturally
 	// or a bounded cleanup stops it.
 	ErrCodePlaybackAckTimeout = "playback_ack_timeout"
+	// ErrCodePhotoUnavailable: no OCR reader configured server-side, the
+	// photo-check path is disabled (13.1-03; RT-10 degraded semantics — the
+	// check stage keeps working manual-only).
+	ErrCodePhotoUnavailable = "photo_unavailable"
 )
 
 // Sentinel errors carrying the protocol error codes above. Callers map them
@@ -474,6 +481,53 @@ type WordRevealedMsg struct {
 	Word      string `json:"word"`
 }
 
+// ---------------------------------------------------------------------------
+// Photo-check messages (13.1-03): the D-05 photo upload channel. The image
+// rides the CONTROL channel as base64 JSON chunks (32KiB raw per chunk —
+// under the 65551-byte read limit) so the audio BINARY channel stays
+// untouched (Pitfall 5). The tutor page and the mock e2e suite mirror these
+// field-for-field.
+// ---------------------------------------------------------------------------
+
+// PhotoChunkMsg is one base64 image chunk (client → server). Seq is 1-based
+// and contiguous per upload; a first chunk with seq 1 RESETS any buffered
+// upload (the retake contract). Final marks the last chunk — the server runs
+// the OCR check pass immediately, there is no separate submit message.
+type PhotoChunkMsg struct {
+	Type  string `json:"type"`
+	Seq   int    `json:"seq"`
+	Data  string `json:"data"`  // base64 of the raw chunk bytes
+	Final bool   `json:"final"` // last chunk of this upload
+}
+
+// PhotoCancelMsg discards the in-flight upload (client → server): the
+// student is retaking or abandoning the photo. The assembler buffer clears
+// unconditionally — without this, the NEXT upload's sequence numbers (which
+// restart at 1) would be absorbed as duplicates and the wrong photo OCR'd
+// (the cmd/service photo_cancel incident, Pitfall 5).
+type PhotoCancelMsg struct {
+	Type string `json:"type"`
+}
+
+// OcrResultEntry is one word's OCR recognition shown next to its check row.
+// Correct/NearMiss mirror the GradeWord booleans the prefill used — the
+// verdicts themselves still ride check_verdicts (the single render source).
+type OcrResultEntry struct {
+	WordIndex int    `json:"word_index"`
+	OcrText   string `json:"ocr_text"`
+	Correct   bool   `json:"correct"`
+	NearMiss  bool   `json:"near_miss"`
+}
+
+// OcrResultMsg reports what the vision model recognized per word (server →
+// client), right after the prefill it produced. Entries cover only the
+// positions a non-empty reading exists for; the rest stay for manual
+// confirmation.
+type OcrResultMsg struct {
+	Type    string           `json:"type"`
+	Entries []OcrResultEntry `json:"entries"`
+}
+
 // ParseControl decodes one control message (the payload of a WebSocket
 // TextMessage frame) into its concrete message struct. It recognizes the
 // full type vocabulary so both directions round-trip in tests and conformance
@@ -528,6 +582,24 @@ func ParseControl(data []byte) (any, error) {
 		return m, nil
 	case TypeCheckSubmit:
 		var m CheckSubmitMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		return m, nil
+	case TypePhotoChunk:
+		var m PhotoChunkMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		return m, nil
+	case TypePhotoCancel:
+		var m PhotoCancelMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		return m, nil
+	case TypeOcrResult:
+		var m OcrResultMsg
 		if err := json.Unmarshal(data, &m); err != nil {
 			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
 		}

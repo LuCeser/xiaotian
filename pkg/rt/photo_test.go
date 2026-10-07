@@ -80,11 +80,10 @@ func ttBindPhoto(tm *TurnManager, reader *fakeOCRReader, maxBytes int) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.cfg.OCR = reader.read
-	tm.ocrPipeline = ocr.NewPipeline(tm.cfg.OCR, tm.cfg.PhotoConfidence)
 	if maxBytes > 0 {
 		tm.cfg.PhotoMaxBytes = maxBytes
-		tm.ocrPipeline = ocr.NewPipeline(tm.cfg.OCR, tm.cfg.PhotoConfidence)
 	}
+	tm.ocrPipeline = ocr.NewPipeline(ocr.Reader(tm.cfg.OCR), tm.cfg.PhotoConfidence)
 }
 
 // ttPhotoChunk ships one photo_chunk control frame.

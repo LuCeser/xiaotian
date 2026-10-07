@@ -8,6 +8,12 @@
 // summary speaks (D-04) and session_ended waits for its ack (Pitfall 9 —
 // the new stage never bypasses the sentence_ack gate).
 //
+// 13.1-03 adds the OCR pass (runCheckPhoto): a completed notebook-photo
+// upload is recognized per word, graded with grading.GradeWord, and the
+// results PREFILL verdicts through the same ApplyVerdict path with
+// manual=false (RT-07 — OCR never bypasses the executor, and the submit
+// gate still demands a manual=true verdict for every word, D-05).
+//
 // The event constants below live HERE (timing.go is not touched by 13.1-01)
 // beside their only users, following timing.go's naming style. All fields
 // stay count/index-class (T-13-06b desensitization boundary).
@@ -19,11 +25,14 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/pkg/errors"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/grading"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
+	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
 )
 
 // Check-stage timing-event vocabulary (13.1-01). Frozen JSONL identifiers.
@@ -434,4 +443,205 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 
 	summary := checkedSummaryText(total, correct, result.Updated, requested, saveFailed)
 	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
+}
+
+// ---------------------------------------------------------------------------
+// OCR check pass (13.1-03, D-05/D-06①): photo → per-word recognition →
+// GradeWord judgement → verdict PREFILL (manual=false) → echo + ocr_result.
+// OCR never bypasses the executor, and the submit gate still demands a
+// manual verdict for every word — a zero-human-action submit is impossible
+// server-side (TestOcrSubmitRequiresManualConfirmation pins it).
+// ---------------------------------------------------------------------------
+
+// wordLang picks the grading normalization regime for one word: Han
+// characters select the zh regime, everything else en (the same per-word
+// script detection maskTranscript uses).
+func wordLang(word string) string {
+	for _, r := range word {
+		if unicode.Is(unicode.Han, r) {
+			return "zh"
+		}
+	}
+	return "en"
+}
+
+// ocrJudgements matches OCR readings to the expected words IN ORDER (the
+// readings are positional per the prompt) and grades each with
+// grading.GradeWord — the single judgement engine (Anti-Pattern: never
+// re-implement normalization here). Only the boolean Correct/NearMiss
+// outcomes are consumed; grading's j.Rating is the stale single-word
+// semantics and is never read (13.1 rates through checkRating after the
+// human verdict). The OCR text is untrusted model output: it is rune-capped
+// here before it can enter any message or the verdicts JSON, and it never
+// enters the timing-event stream. Empty readings produce no entry — the
+// word stays for manual confirmation instead of prefilling a guess.
+func ocrJudgements(expected []string, readings []ocr.WordReading) []OcrResultEntry {
+	n := len(expected)
+	if len(readings) < n {
+		n = len(readings)
+	}
+	entries := make([]OcrResultEntry, 0, n)
+	for i := 0; i < n; i++ {
+		text := truncateRunes(strings.TrimSpace(readings[i].Text), maxReplyRunes)
+		if text == "" {
+			continue
+		}
+		j := grading.GradeWord(expected[i], text, wordLang(expected[i]))
+		entries = append(entries, OcrResultEntry{
+			WordIndex: i,
+			OcrText:   text,
+			Correct:   j.Correct,
+			NearMiss:  j.NearMiss,
+		})
+	}
+	return entries
+}
+
+// manualVerdictFor reports whether the stored verdict list already carries a
+// MANUAL verdict for the index (D-06①: a human verdict that landed before a
+// prefill attempt wins — the prefill for that index is dropped).
+func manualVerdictFor(verdicts []lesson.CheckVerdict, index int) bool {
+	for _, v := range verdicts {
+		if v.WordIndex == index {
+			return v.Manual
+		}
+	}
+	return false
+}
+
+// runCheckPhoto runs the OCR check pass over one assembled photo (13.1-03)
+// on its own goroutine: vision OCR → per-word judgement → prefill → the
+// authoritative check_verdicts echo + ocr_result. Low-confidence or failed
+// recognition never blocks the manual path — the student just confirms
+// every word by hand (D-05: the human pass is mandatory anyway).
+func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), photoRequestTimeout)
+	defer cancel()
+
+	tm.mu.Lock()
+	pipeline := tm.ocrPipeline
+	var expected []string
+	if tm.tutor != nil && !tm.closed && tm.tutor.checking {
+		expected = make([]string, len(tm.tutor.words))
+		for i, c := range tm.tutor.words {
+			expected[i] = c.Word
+		}
+	}
+	tm.mu.Unlock()
+	// The session closed (or left the check stage) while the upload was in
+	// flight: the photo is gone, nothing to do.
+	if pipeline == nil || len(expected) == 0 {
+		return
+	}
+
+	readings, err := pipeline.ProcessWords(ctx, jpeg, expected)
+	if err != nil && !errors.Is(err, ocr.ErrLowConfidence) {
+		// OCR genuinely failed: visible honest notice; the manual check
+		// path continues untouched.
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeProviderFailed),
+			infra.F("photo", "ocr_failed"),
+		)
+		tm.sendError(s, ErrCodeProviderFailed, photoOcrFailedNotice, true)
+		return
+	}
+	lowConf := errors.Is(err, ocr.ErrLowConfidence)
+
+	entries := ocrJudgements(expected, readings)
+	recognized := 0
+	for _, r := range readings {
+		if strings.TrimSpace(r.Text) != "" {
+			recognized++
+		}
+	}
+	tm.recorder.Emit(EventOcrCompleted,
+		infra.F("recognized", recognized),
+		infra.F("total", len(expected)),
+	)
+
+	if lowConf {
+		// The gate fired (the pipeline owns the floor): recognition is too
+		// shaky to prefill ANY verdict — the student confirms every word
+		// manually. The recognized text still displays next to each row.
+		tm.broadcastOcrEntries(s, entries)
+		return
+	}
+	tm.applyOcrPrefills(s, entries)
+}
+
+// applyOcrPrefills writes each OCR judgement as a verdict prefill through
+// the executor's idempotent ApplyVerdict path (RT-07: OCR, screen taps, and
+// the 13.1-06 voice corrections all converge on this one write path), then
+// broadcasts the authoritative verdict echo plus ocr_result. Per word:
+//   - optimistic-lock conflict → align from the stored truth; a manual
+//     verdict that landed first wins (D-06①) and the prefill is dropped;
+//     otherwise retry once on the fresh version;
+//   - store failure → stop prefilling (what landed stays); the student
+//     confirms the rest manually.
+//
+// A non-conflict success can never clobber a manual verdict: the optimistic
+// lock guarantees no other writer moved the row since our snapshot.
+func (tm *TurnManager) applyOcrPrefills(s Sender, entries []OcrResultEntry) {
+	tm.mu.Lock()
+	tm.ocrRuns++
+	lessonID := tm.tutor.lessonID
+	version := tm.tutor.version
+	run := tm.ocrRuns
+	tm.mu.Unlock()
+
+	ctx := context.Background()
+	for _, e := range entries {
+		verdict := lesson.CheckVerdict{
+			WordIndex: e.WordIndex,
+			Correct:   e.Correct,
+			Manual:    false, // OCR prefill — never satisfies the submit gate
+			OcrText:   e.OcrText,
+		}
+		// Unique per OCR run: a deterministic per-word key would be replayed
+		// idempotently on a retake, silently pinning the FIRST reading.
+		requestID := lessonID + "-ocr-" + strconv.FormatUint(run, 10) + "-" + strconv.Itoa(e.WordIndex)
+
+		res, err := tm.exec.ApplyVerdict(ctx, lessonID, version, requestID, verdict)
+		if err != nil {
+			var conflict *lesson.ConflictError
+			if !errors.As(err, &conflict) {
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+				break
+			}
+			l, gerr := tm.exec.GetLessonState(ctx, lessonID)
+			if gerr != nil {
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+				break
+			}
+			tm.mu.Lock()
+			tm.tutor.align(l.CurrentIndex, l.Version)
+			tm.tutor.resyncCheck(l)
+			tm.mu.Unlock()
+			if manualVerdictFor(l.Verdicts, e.WordIndex) {
+				continue // the human verdict landed first — it stands
+			}
+			version = l.Version
+			res, err = tm.exec.ApplyVerdict(ctx, lessonID, version, requestID, verdict)
+			if err != nil {
+				continue // give up on this word; manual confirmation covers it
+			}
+		}
+		version = res.NewVersion
+		tm.mu.Lock()
+		tm.tutor.version = version
+		tm.tutor.checkVerdicts = res.Verdicts
+		tm.mu.Unlock()
+	}
+
+	tm.mu.Lock()
+	verdicts := append([]lesson.CheckVerdict(nil), tm.tutor.checkVerdicts...)
+	tm.mu.Unlock()
+	tm.broadcastCheckVerdicts(s, verdicts)
+	tm.broadcastOcrEntries(s, entries)
+}
+
+// broadcastOcrEntries sends the per-word recognition entries (server →
+// client) so the UI can show what was recognized next to each row.
+func (tm *TurnManager) broadcastOcrEntries(s Sender, entries []OcrResultEntry) {
+	_ = s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: entries})
 }

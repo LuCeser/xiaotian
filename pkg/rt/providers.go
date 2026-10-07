@@ -50,3 +50,11 @@ type TTSSynthesizer interface {
 	// for the whole sentence). ctx cancels generation (interrupt path).
 	SynthesizeStream(ctx context.Context, text string, onAudio AudioChunkFunc, opts ...mimo.TTSOption) (*mimo.StreamResult, error)
 }
+
+// OCRReader is the photo-check vision seam (13.1-03): it receives the fixed
+// system + user prompts and the raw JPEG bytes, and returns the raw model
+// reply — the exact shape of ocr.Reader (the production adapter is
+// cmd/service's mimoReader, shared with the legacy photo pipeline; tests
+// inject a plain closure). A nil OCRReader disables the photo-check path:
+// the check stage keeps working manual-only (RT-10 degraded semantics).
+type OCRReader func(ctx context.Context, systemPrompt, userPrompt string, imageJPEG []byte) (string, error)

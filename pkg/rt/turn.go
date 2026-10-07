@@ -47,6 +47,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
+	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
 )
 
 // ErrStaleEpoch is returned by TTS chunk callbacks when the epoch they were
@@ -108,6 +109,18 @@ type TurnManagerConfig struct {
 	// playback-completion ack of a teacher announcement. A real-device
 	// calibration value (13-12).
 	VADEchoTailMs int
+	// OCR is the photo-check vision seam (13.1-03): the raw-model-reply
+	// func the manager wraps in an ocr.Pipeline. Nil disables the photo
+	// check path — the check stage keeps working manual-only (RT-10
+	// degraded semantics; main.go injects cmd/service's mimoReader).
+	OCR OCRReader
+	// PhotoMaxBytes caps one assembled photo's decoded size (0 → 1MiB,
+	// PhotoConfig.MaxImageBytes semantics; T-13.1-06). Over-cap uploads are
+	// rejected AND cleared.
+	PhotoMaxBytes int
+	// PhotoConfidence is the OCR prefill confidence floor (0 → 0.6,
+	// PhotoConfig.ConfidenceThreshold semantics).
+	PhotoConfidence float64
 }
 
 // defaultWordTimeout is the per-word confirm wait used when
@@ -318,6 +331,19 @@ type TurnManager struct {
 
 	// vad is fed from the read loop only (see concurrency note).
 	vad *VAD
+
+	// --- 13.1-03 photo-check channel ---
+
+	// photo is the in-flight upload's assembler buffer; nil when idle.
+	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
+	// consumes them; close/cancel/over-cap/new-upload all discard.
+	photo *photoBuffer
+	// ocrPipeline wraps cfg.OCR for the check pass; nil when photo check is
+	// disabled (no MIMO_API_KEY).
+	ocrPipeline *ocr.Pipeline
+	// ocrRuns disambiguates prefill idempotency keys across retakes (a
+	// replayed key would pin the FIRST reading and drop the retake's).
+	ocrRuns uint64
 }
 
 // Compile-time check: TurnManager satisfies the transport's SessionManager
@@ -340,11 +366,23 @@ func NewTurnManager(asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, exec L
 	if cfg.VADEchoTailMs <= 0 {
 		cfg.VADEchoTailMs = defaultVADEchoTailMs
 	}
+	if cfg.PhotoMaxBytes <= 0 {
+		cfg.PhotoMaxBytes = defaultPhotoMaxBytes
+	}
+	if cfg.PhotoConfidence <= 0 {
+		cfg.PhotoConfidence = defaultPhotoConfidence
+	}
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}
 	if recorder == nil {
 		recorder = NewEventRecorder(logger, "")
+	}
+	// The photo-check pipeline wraps the raw reader seam (13.1-03); the
+	// identical underlying func type converts explicitly.
+	var ocrPipeline *ocr.Pipeline
+	if cfg.OCR != nil {
+		ocrPipeline = ocr.NewPipeline(ocr.Reader(cfg.OCR), cfg.PhotoConfidence)
 	}
 	return &TurnManager{
 		asr:             asr,
@@ -358,6 +396,7 @@ func NewTurnManager(asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, exec L
 		acked:           map[string]bool{},
 		pendingPlayback: map[string]*pendingPlayback{},
 		vad:             NewVAD(DefaultVADConfig()),
+		ocrPipeline:     ocrPipeline,
 	}
 }
 
@@ -388,6 +427,10 @@ func (tm *TurnManager) HandleControl(s Sender, data []byte) {
 		tm.handleCheckVerdict(s, m) // 13.1-01 check stage (check.go)
 	case CheckSubmitMsg:
 		tm.handleCheckSubmit(s, m) // 13.1-01 unified submit (check.go)
+	case PhotoChunkMsg:
+		tm.handlePhotoChunk(s, m) // 13.1-03 photo check (photo.go)
+	case PhotoCancelMsg:
+		tm.handlePhotoCancel(s, m) // 13.1-03 retake discipline (photo.go)
 	default:
 		// Server→client types parse but are not accepted from a client;
 		// the transport only moves bytes — this is the enforcement point.
@@ -837,7 +880,8 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 // internalClose cancels in-flight work, invalidates playback waits,
 // suspends the per-word timer, and resets the FSM without emitting the
 // session_end event again. It also cancels any playback-ack wait (异常断线
-// 取消等待).
+// 取消等待) and sweeps the photo assembler (13.1-03 privacy P2: the child's
+// photo never outlives its session).
 func (tm *TurnManager) internalClose() {
 	tm.mu.Lock()
 	if tm.turnCancel != nil {
@@ -851,6 +895,7 @@ func (tm *TurnManager) internalClose() {
 	tm.stopWordTimerLocked()
 	tm.state = ""
 	tm.closed = true
+	tm.photo = nil
 	tm.mu.Unlock()
 	tm.vad.Reset()
 }
