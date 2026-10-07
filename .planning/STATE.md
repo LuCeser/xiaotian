@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: realtime-tutor — ACTIVE
-current_phase: 13
-current_phase_name: R0 真机最小闭环
+current_phase: 13.1
+current_phase_name: 三段式默写课堂（默写→检查→统一反馈）
 status: 13-13 暂缓（三段式先行）；下一步=第一层缺陷修复（U-9 实现/U-2/E2E 隔离）→ 13.1 规划
 stopped_at: Phase 13.1 context gathered（三段式课堂讨论收敛；顺序：第一层缺陷修复→13.1→13-13）
-last_updated: "2026-10-06T13:35:04.765Z"
-last_activity: 2026-10-06
+last_updated: "2026-10-07T02:16:20.023Z"
+last_activity: 2026-10-07
 last_activity_desc: 13-12 本机能力验收：完整课 + 回声通过 + 时序样本 + 问题台账 U-1～U-10
-state_head: 9dc996b232c6053b44d783d26c3508e245252197
+state_head: 70fd839fdd6c65689411973915511dd02a64ed3a
 progress:
   total_phases: 5
   completed_phases: 0
-  total_plans: 13
+  total_plans: 20
   completed_plans: 12
   percent: 0
 ---
@@ -33,7 +33,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 ## Current Position
 
-Phase: 13 (R0 真机最小闭环) — EXECUTING
+Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈）) — READY TO EXECUTE
 Plan: 13 of 13 (13-12 完结——Task 2 按用户 2026-10-06 改判为本机 E2E 代理执行；待用户三项不阻塞 13-13)
 Status: 13-13 暂缓（三段式先行）；第一层缺陷修复三项齐（U-9 ✅/U-2 ✅/E2E 隔离 ✅ 261007-22t）→ 下一步=13.1 规划
 Last activity: 2026-10-07 — Completed quick task 261007-22t: U-1 E2E 隔离规范资产化（四层 L3 落地，commits 9b11c8f/09dc38d/c1d3c94）；第一层缺陷修复三项齐：U-9 ✅/U-2 ✅/E2E 隔离 ✅

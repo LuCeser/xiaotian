@@ -84,13 +84,32 @@ Plans:
 **Plans:** 7 plans（2026-10-07 规划；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
 
 Plans:
+**Wave 1**
 
 - [ ] 13.1-01-PLAN.md — tracer：三段式主环端到端（D-01/D-02/D-04/D-07）——契约（check_* 协议＋评级纯函数＋lessons 阶段态迁移/幂等 stage 写）＋手动改判最小闭环＋战果总结
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 13.1-02-PLAN.md — 学生模式（D-08/D-09/D-10）：服务端发送侧打码、三态词表、双列 trace、检查阶段全量揭示
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 13.1-03-PLAN.md — 拍照 OCR 检查环（D-05/D-06①）：photo 分块通道（base64 JSON）、多词识别、GradeWord 比对预填、人工改判覆盖＋逐词人工确认提交闸（拍照 mock e2e 延期至 13.1-07）
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 13.1-04-PLAN.md — 未核对兜底＋跨会话恢复＋事后修正（D-03）：关闭即降档落库、resume/correction 路径、差异重写
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 13.1-05-PLAN.md — 再练一组＋收尾状态区分（D-11/D-12/D-13）：随机避开当日、practice_logs 独立存储零 FSRS 污染、两种收尾文案
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [ ] 13.1-06-PLAN.md — 检查阶段语音改判口令（D-06②）：11 值意图白名单、index/text 载荷、语音与点按同路径
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
 - [ ] 13.1-07-PLAN.md — 阶段收口：落地 13.1-03 延期拍照 mock 用例＋全量回归＋真通道隔离冒烟（e2e:rt-real）＋13-13 交接清单
 
 ### Phase 14: R1 对话接真实课堂
