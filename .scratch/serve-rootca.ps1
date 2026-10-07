@@ -21,9 +21,11 @@ foreach ($procId in ($listeners.OwningProcess | Sort-Object -Unique)) {
 
 $py = "$env:LOCALAPPDATA\programs\python\python312\python.exe"
 if (-not (Test-Path $py)) { throw "base python312 not found at $py" }
+$logs = Join-Path $root 'logs'
+New-Item -ItemType Directory -Force -Path $logs | Out-Null
 $p = Start-Process -FilePath $py `
     -ArgumentList '-m', 'http.server', '8765', '--bind', '0.0.0.0', '--directory', "$root\.local-certs\ipad" `
     -WorkingDirectory $root -WindowStyle Hidden `
-    -RedirectStandardError (Join-Path $root 'rootca-server.err.log') `
-    -RedirectStandardOutput (Join-Path $root 'rootca-server.out.log') -PassThru
+    -RedirectStandardError (Join-Path $logs 'rootca-server.err.log') `
+    -RedirectStandardOutput (Join-Path $logs 'rootca-server.out.log') -PassThru
 Write-Host "rootCA http server started, PID $($p.Id) — http://<LAN-IP>:8765/rootCA.pem"

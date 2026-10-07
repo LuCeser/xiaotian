@@ -106,7 +106,7 @@
       "task": "Task 2: rt-capture.js + rt-pcm-worklet.js + rt-playback.js — 采集、播放与打断"
     },
     {
-      "command": "npm test && npx playwright test -c playwright.rt.config.js",
+      "command": "npm test && npx playwright test -c tests/playwright.rt.config.js",
       "statement": "任一 stage non-zero exit；或 npm test 输出缺新测试文件执行痕迹；或 playwright 汇总行非 \"3 passed\"",
       "status": "ok",
       "severity": "none",
@@ -266,7 +266,7 @@
       "task": "Task 2: mock 服务重写 — 默写流脚本（报词/推进/暂停/完结）"
     },
     {
-      "command": "npx playwright test -c playwright.rt.config.js",
+      "command": "npx playwright test -c tests/playwright.rt.config.js",
       "statement": "non-zero exit，或汇总行显示任何 failed（预期 3 passed）",
       "status": "ok",
       "severity": "none",
@@ -282,7 +282,7 @@
       "task": "Task 3: e2e 三用例重写 + 隔离复检"
     },
     {
-      "command": "go test ./pkg/... ./cmd/... -short -count=1 && npm test && npx playwright test -c playwright.rt.config.js",
+      "command": "go test ./pkg/... ./cmd/... -short -count=1 && npm test && npx playwright test -c tests/playwright.rt.config.js",
       "statement": "任一 stage non-zero exit，或 playwright 汇总行含 failed",
       "status": "ok",
       "severity": "none",
