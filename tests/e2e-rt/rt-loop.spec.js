@@ -161,9 +161,9 @@ test('complete classroom runs on a single getUserMedia authorization', async ({ 
   await expect(page.locator('#rt-banner')).toBeVisible();
   // Subtitles RETAIN the wrap-up summary (opening + w2 + w3 + summary).
   await expect
-    .poll(() => page.locator('#rt-teacher .t-line').count(), { timeout: 10_000 })
+    .poll(() => page.locator('#rt-trace .t-line').count(), { timeout: 10_000 })
     .toBeGreaterThanOrEqual(4);
-  const lastLine = await page.locator('#rt-teacher .t-line').last().textContent();
+  const lastLine = await page.locator('#rt-trace .t-line').last().textContent();
   expect(lastLine).toContain('结束啦');
 
   // The single authorization held for the whole classroom (RT-02 backstop).
@@ -244,7 +244,7 @@ test('interrupt during the second announcement bumps the epoch and the lesson st
   await expect
     .poll(async () => {
       const st = await page.getAttribute('#rt-status', 'data-state');
-      const n = await page.locator('#rt-teacher .t-line').count();
+      const n = await page.locator('#rt-trace .t-line').count();
       const obs = await page.evaluate(() => window.__rtTutor.observe());
       return n >= 2 && st === 'speaking' && obs.pendingSources > 0 ? 'ready' : 'waiting';
     }, { timeout: 30_000 })

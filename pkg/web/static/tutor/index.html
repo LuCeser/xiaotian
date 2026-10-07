@@ -18,7 +18,7 @@
   <meta name="theme-color" content="#4f8ef7">
   <meta name="description" content="自然实时家教 — 听说小老师">
   <title>听说小老师 · 自然实时家教</title>
-  <link rel="stylesheet" href="styles/tutor.css?v=20261005">
+  <link rel="stylesheet" href="styles/tutor.css?v=20261007">
 </head>
 <body data-page="tutor">
 
@@ -54,10 +54,15 @@
     <!-- Completion banner (session_ended reason=lesson_complete, 13-11) -->
     <section class="rt-banner" id="rt-banner" hidden role="status"></section>
 
-    <!-- Subtitles: teacher sentences (append) above student transcript (replace) -->
+    <!--
+      Conversation trace (13.1-02, D-10/U-7): a two-column chat in BOTH
+      modes — teacher lines append left (👩‍🏫), student transcript lines
+      append right (🧒) as persistent per-turn rows (never replace-in-place).
+      The aria-live region stays on the container. Line count is capped
+      (MAX_TRACE_LINES) by dropping the oldest.
+    -->
     <section class="rt-subtitles" aria-label="对话字幕">
-      <div class="rt-teacher" id="rt-teacher" aria-live="polite"></div>
-      <div class="rt-transcript" id="rt-transcript" aria-live="polite"></div>
+      <div class="rt-trace" id="rt-trace" aria-live="polite"></div>
     </section>
 
     <!--
@@ -96,9 +101,9 @@
     (registerProcessor scope has no AudioWorkletProcessor under a plain
     script tag; loading it here would throw and break the page).
   -->
-  <script src="js/rt-client.js?v=20261005"></script>
-  <script src="js/rt-capture.js?v=20261005"></script>
-  <script src="js/rt-playback.js?v=20261005"></script>
+  <script src="js/rt-client.js?v=20261007"></script>
+  <script src="js/rt-capture.js?v=20261007"></script>
+  <script src="js/rt-playback.js?v=20261007"></script>
   <script>
     (function () {
       'use strict';
@@ -114,8 +119,7 @@
       var progressFill = $('rt-progress-fill');
       var progressText = $('rt-progress-text');
       var roundText = $('rt-round');
-      var teacherEl = $('rt-teacher');
-      var transcriptEl = $('rt-transcript');
+      var traceEl = $('rt-trace');
       var errorEl = $('rt-error');
       var errorCodeEl = $('rt-error-code');
       var errorTextEl = $('rt-error-text');
@@ -134,11 +138,12 @@
       var started = false;
 
       // ----- UI mode (13.1 D-08) ---------------------------------------------
-      // Only the exact value "test" keeps today's full-reveal behavior;
-      // anything else — including absent — is student mode (the iPad
-      // bookmark must never land the child on a full word table). The mode
-      // rides session_init via client.initMode; this plan's only visible
-      // mode-dependent surface is the check panel (masking lands in 13.1-02).
+      // Only the exact value "test" keeps the full-reveal behavior; anything
+      // else — including absent — is student mode (the iPad bookmark must
+      // never land the child on a full word table). The mode rides
+      // session_init via client.initMode; the SERVER is the masking
+      // authority (13.1-02): this page renders only what it was sent and
+      // never fills in a word it did not receive.
       var mode = new URLSearchParams(window.location.search).get('mode') === 'test' ? 'test' : 'student';
       client.initMode = mode;
 
@@ -278,8 +283,22 @@
         clearChildren(wordsEl);
         for (var i = 0; i < lesson.words.length; i++) {
           var chip = document.createElement('span');
-          chip.className = 'rt-word-chip' + (i === lesson.currentIndex ? ' rt-word-current' : '');
-          chip.textContent = lesson.words[i];
+          if (mode === 'test') {
+            // Test mode keeps the pre-13.1 full-reveal rendering.
+            chip.className = 'rt-word-chip' + (i === lesson.currentIndex ? ' rt-word-current' : '');
+            chip.textContent = lesson.words[i];
+          } else if (lesson.words[i] === '') {
+            // Student mode, unrevealed (the server sent ""): index
+            // placeholder; the CURRENT index is the highlighted number with
+            // no word text — the announcement is voice-only (D-09).
+            chip.className = 'rt-word-chip rt-word-hidden' + (i === lesson.currentIndex ? ' rt-word-current' : '');
+            chip.textContent = String(i + 1);
+          } else {
+            // Student mode, revealed (the server sent the word): word text
+            // plus the green check (the ✓ rides the CSS pseudo-element).
+            chip.className = 'rt-word-chip rt-word-done';
+            chip.textContent = lesson.words[i];
+          }
           wordsEl.appendChild(chip);
         }
         var total = lesson.words.length; // word count is dynamic — never assumed
@@ -292,14 +311,35 @@
         progressText.textContent = '第 ' + (lesson.currentIndex + 1) + ' / ' + (total > 0 ? total : '-') + ' 个词';
       }
 
+      // Trace lines (13.1-02 D-10/U-7): teacher left, student right, both
+      // modes. Bounded retention drops the OLDEST line via the same
+      // removeChild discipline as clearChildren (bounded memory on iPad).
+      var MAX_TRACE_LINES = 200;
+
+      function trimTrace() {
+        while (traceEl.children.length > MAX_TRACE_LINES) {
+          traceEl.removeChild(traceEl.firstChild);
+        }
+      }
+
       function addTeacherLine(msg) {
         var line = document.createElement('div');
-        line.className = 't-line';
+        line.className = 't-line rt-trace-teacher';
         line.setAttribute('data-sentence-id', msg.sentence_id);
         line.setAttribute('data-turn-id', String(msg.turn_id));
         line.textContent = '👩‍🏫 ' + msg.text;
-        teacherEl.appendChild(line);
-        teacherEl.scrollTop = teacherEl.scrollHeight;
+        traceEl.appendChild(line);
+        trimTrace();
+        traceEl.scrollTop = traceEl.scrollHeight;
+      }
+
+      function addStudentLine(text) {
+        var line = document.createElement('div');
+        line.className = 't-line rt-trace-student';
+        line.textContent = '🧒 ' + text;
+        traceEl.appendChild(line);
+        trimTrace();
+        traceEl.scrollTop = traceEl.scrollHeight;
       }
 
       function stopEverything() {
@@ -355,7 +395,11 @@
       });
 
       client.on('transcript', function (m) {
-        transcriptEl.textContent = m.text ? '🧒 ' + m.text : '';
+        // Persistent per-turn right column (D-10/U-7): every transcript is a
+        // new line, never a replace-in-place. Text renders only what the
+        // server sent (already masked in student mode — the server is the
+        // masking authority; the client never desensitizes on its own).
+        if (m && m.text) addStudentLine(m.text);
       });
 
       client.on('teacher_sentence', function (m) {
@@ -386,14 +430,26 @@
         renderProgress();
       });
 
+      client.on('word_revealed', function (m) {
+        // Per-word reveal (13.1-02, D-09): the chip state derives ONLY from
+        // server data — the client never fills in a word it was not sent.
+        if (!m || typeof m.word_index !== 'number') return;
+        if (m.word_index < 0 || m.word_index >= lesson.words.length) return;
+        lesson.words[m.word_index] = m.word || '';
+        renderProgress();
+      });
+
       client.on('check_started', function (m) {
         // The D-10 unmask point: check_started.words is the full plaintext
-        // list — the panel's single data source for rows.
+        // list — the panel's single data source for rows, AND the wholesale
+        // chip-list replacement (every chip flips to revealed, 解除打码).
         check.active = true;
         check.words = (m && m.words) || [];
         check.verdicts = {};
         check.submitPending = false;
         check.resultText = '';
+        lesson.words = check.words.slice();
+        renderProgress();
         renderCheckPanel();
       });
 

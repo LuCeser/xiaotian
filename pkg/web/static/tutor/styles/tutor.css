@@ -121,6 +121,26 @@ body[data-page="tutor"] {
   font-weight: 600;
 }
 
+/* Student-mode three states (13.1-02, D-09). Order matters: the current
+   highlight below must win the cascade over the state tints. */
+.rt-word-chip.rt-word-hidden {
+  background: #f0f4fa;
+  color: #8a97a8;
+}
+
+.rt-word-chip.rt-word-done {
+  background: #e9f9ef;
+  color: #1f7a40;
+}
+
+/* 已默 = word text + green check (D-09); the ✓ rides the pseudo-element so
+   the DOM text stays exactly the server-sent word. */
+.rt-word-chip.rt-word-done::after {
+  content: ' ✓';
+  color: #2fb96b;
+  font-weight: 700;
+}
+
 .rt-word-chip.rt-word-current {
   background: #2f6fed;
   color: #ffffff;
@@ -149,7 +169,9 @@ body[data-page="tutor"] {
   color: #5b6b7f;
 }
 
-/* Subtitles ----------------------------------------------------------- */
+/* Conversation trace (13.1-02, D-10/U-7): one scroll container, teacher
+   lines left, student lines right, BOTH modes; the aria-live region is the
+   container itself. */
 
 .rt-subtitles {
   flex: 1;
@@ -159,7 +181,7 @@ body[data-page="tutor"] {
   min-height: 220px;
 }
 
-.rt-teacher {
+.rt-trace {
   flex: 1;
   background: #ffffff;
   border: 1px solid #e3ecf7;
@@ -167,24 +189,30 @@ body[data-page="tutor"] {
   padding: 14px 16px;
   overflow-y: auto;
   max-height: 42vh;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.rt-teacher .t-line {
-  font-size: 20px;
-  line-height: 1.6;
-  margin-bottom: 10px;
+.rt-trace .t-line {
+  font-size: 19px;
+  line-height: 1.55;
+  max-width: 78%;
+  overflow-wrap: anywhere;
+}
+
+.rt-trace-teacher {
+  align-self: flex-start;
   color: #1f2d3d;
 }
 
-.rt-transcript {
-  min-height: 64px;
-  background: #f4f8ff;
-  border: 1px dashed #b9cef0;
-  border-radius: 16px;
-  padding: 14px 16px;
-  font-size: 19px;
-  line-height: 1.5;
+.rt-trace-student {
+  align-self: flex-end;
   color: #2d4a7a;
+  background: #f4f8ff;
+  border: 1px solid #d6e4fa;
+  border-radius: 14px;
+  padding: 6px 12px;
 }
 
 /* Completion banner (session_ended reason=lesson_complete, 13-11) ------- */
