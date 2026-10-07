@@ -21,6 +21,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 )
@@ -32,6 +33,13 @@ const itOrigin = "http://origin.test"
 // word source.
 func itServer(t *testing.T, asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, exec LessonExecutor, words WordSource) *httptest.Server {
 	t.Helper()
+	return itServerCfg(t, asr, llm, tts, exec, words, nil)
+}
+
+// itServerCfg is itServer with a config mutation hook (13.1-05: the Practice
+// seam + practice store ride in through TurnManagerConfig).
+func itServerCfg(t *testing.T, asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, exec LessonExecutor, words WordSource, mutate func(*TurnManagerConfig)) *httptest.Server {
+	t.Helper()
 	h, err := NewHandler(
 		ServerConfig{
 			AllowedOrigins: []string{itOrigin},
@@ -41,11 +49,14 @@ func itServer(t *testing.T, asr ASRProvider, llm LLMProvider, tts TTSSynthesizer
 			HeartbeatInterval: 30 * time.Second,
 		},
 		func() SessionManager {
-			return NewTurnManager(asr, llm, tts, exec,
-				TurnManagerConfig{
-					LessonID: "it-lesson",
-					Words:    words,
-				},
+			cfg := TurnManagerConfig{
+				LessonID: "it-lesson",
+				Words:    words,
+			}
+			if mutate != nil {
+				mutate(&cfg)
+			}
+			return NewTurnManager(asr, llm, tts, exec, cfg,
 				NewEventRecorder(infra.NewNoOpLogger(), "it"),
 				infra.NewNoOpLogger())
 		},
@@ -185,6 +196,22 @@ func itInit(t *testing.T, conn *websocket.Conn) SessionReadyMsg {
 	itSendText(t, conn, SessionInitMsg{
 		Type:  TypeSessionInit,
 		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	})
+	ready := itRead(t, conn, 5*time.Second, func(m itMsg) bool { return m.typ == TypeSessionReady })
+	var readyMsg SessionReadyMsg
+	if err := json.Unmarshal(ready.raw, &readyMsg); err != nil {
+		t.Fatalf("session_ready decode: %v", err)
+	}
+	return readyMsg
+}
+
+// itInitPractice is itInit with practice=true on session_init (13.1-05).
+func itInitPractice(t *testing.T, conn *websocket.Conn) SessionReadyMsg {
+	t.Helper()
+	itSendText(t, conn, SessionInitMsg{
+		Type:     TypeSessionInit,
+		Audio:    AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+		Practice: true,
 	})
 	ready := itRead(t, conn, 5*time.Second, func(m itMsg) bool { return m.typ == TypeSessionReady })
 	var readyMsg SessionReadyMsg
@@ -986,5 +1013,144 @@ func TestLegacyCompletedStillShortCircuits(t *testing.T) {
 	}
 	if got := len(words.submissions()); got != 0 {
 		t.Errorf("SubmitReview calls = %d, want 0", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 13.1-05 practice session over the real transport (D-11/D-12/T-13.1-11):
+// session_init(practice=true) never touches the due fetch nor the daily
+// lesson namespace, the three-stage flow runs word by word, the submit
+// writes practice_logs and NEVER SubmitReview, and the ending carries
+// practice_complete.
+// ---------------------------------------------------------------------------
+
+func TestPracticeSessionEndToEnd(t *testing.T) {
+	cst := time.FixedZone("CST", 8*3600)
+	ctx := context.Background()
+
+	// The vocabulary holds FOUR words; today's main lesson already used the
+	// first two — practice must pick only from the remaining two.
+	pool := []database.Card{
+		{ID: 1, Word: "苹果", Meaning: "cat", Example: "x"},
+		{ID: 2, Word: "香蕉", Meaning: "dog", Example: "y"},
+		{ID: 3, Word: "橘子", Meaning: "orange", Example: "z"},
+		{ID: 4, Word: "西瓜", Meaning: "melon", Example: "w"},
+	}
+	practiceSrc := &fakePracticeSource{cards: pool}
+	ps := newTestPracticeStore(t)
+
+	words := newFakeWords() // a due fetch here would mean the practice path leaked into FSRS
+	exec := newFakeExecutorNoRow("it-lesson")
+	// Seed today's main lesson row (the exclusion set's source).
+	if _, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards); err != nil {
+		t.Fatalf("seed daily row: %v", err)
+	}
+
+	asr := newFakeASR(asrScript{text: "好了"}, asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""), intentScript(intentConfirm, ""))
+	tts := newFakeTTS(2, 320)
+	tts.delay = 20 * time.Millisecond
+	srv := itServerCfg(t, asr, llm, tts, exec, words, func(cfg *TurnManagerConfig) {
+		cfg.Practice = practiceSrc
+		cfg.PracticeStore = ps
+	})
+	conn := itDial(t, srv)
+
+	ready := itInitPractice(t, conn)
+	if !strings.HasPrefix(ready.Lesson.LessonID, "r0x-") {
+		t.Fatalf("practice lesson id = %q, want the r0x- namespace (Pitfall 10)", ready.Lesson.LessonID)
+	}
+	if len(ready.Lesson.Words) != 2 {
+		t.Fatalf("practice words = %v, want the 2 non-excluded words", ready.Lesson.Words)
+	}
+	for _, w := range ready.Lesson.Words {
+		if w == "苹果" || w == "香蕉" {
+			t.Errorf("practice word %q was already dictated today (避开当日已默 broken)", w)
+		}
+	}
+	if got := words.fetchCount(); got != 0 {
+		t.Fatalf("FetchDueWords calls = %d, want 0 (practice never runs the due fetch)", got)
+	}
+	exec.mu.Lock()
+	ensureIDs := append([]string(nil), exec.ensureIDs...)
+	exec.mu.Unlock()
+	for _, id := range ensureIDs {
+		if id != "it-lesson" && !strings.HasPrefix(id, "r0x-") {
+			t.Errorf("EnsureLessonCards id = %q, want only the daily row or r0x- practice rows", id)
+		}
+	}
+
+	// Three-stage flow, word by word (逐词 manual 确认过 D-05 提交闸).
+	lessonID := ready.Lesson.LessonID
+	for i := 0; i < 2; i++ {
+		itSendUtterance(t, conn)
+		upd := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeLessonUpdate })
+		var lu LessonUpdateMsg
+		if err := json.Unmarshal(upd.raw, &lu); err != nil {
+			t.Fatalf("lesson_update decode: %v", err)
+		}
+		if lu.LessonID != lessonID {
+			t.Errorf("lesson_update %d lesson_id = %q, want %q", i, lu.LessonID, lessonID)
+		}
+		if i == 0 {
+			itAnnounceAck(t, conn) // next-word announcement
+		}
+	}
+
+	started := itReadCheckStarted(t, conn)
+	if len(started.Words) != 2 {
+		t.Fatalf("check_started.words = %v, want the 2 practice words in plaintext", started.Words)
+	}
+	itAnnounceAck(t, conn) // the check bridge
+	for i := 0; i < 2; i++ {
+		itSendText(t, conn, CheckVerdictMsg{
+			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("it-practice-v-%d", i), WordIndex: i, Correct: i == 0,
+		})
+		echo := itReadCheckVerdicts(t, conn)
+		if len(echo.Verdicts) != i+1 {
+			t.Fatalf("check_verdicts %d = %+v, want %d entries", i, echo.Verdicts, i+1)
+		}
+		for _, v := range echo.Verdicts {
+			if !v.Manual {
+				t.Errorf("verdict %+v must be manual (D-05 gate applies to practice too)", v)
+			}
+		}
+	}
+
+	// Submit: the practice write replaces the FSRS call — review_result
+	// reports the record counts, and SubmitReview is NEVER called.
+	itSendText(t, conn, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-practice-submit"})
+	rr := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeReviewResult })
+	var result ReviewResultMsg
+	if err := json.Unmarshal(rr.raw, &result); err != nil {
+		t.Fatalf("review_result decode: %v", err)
+	}
+	if result.Requested != 2 || result.Updated != 2 || result.Unchecked {
+		t.Errorf("review_result = %+v, want requested 2 / updated 2 / unchecked false", result)
+	}
+
+	// Practice wrap summary speaks, then the ack-gated ending carries
+	// practice_complete — the third ending copy (D-13).
+	ended := itAckEnding(t, conn, ReasonPracticeComplete)
+	_ = ended
+
+	if subs := words.submissions(); len(subs) != 0 {
+		t.Fatalf("SubmitReview calls = %d, want 0 (T-13.1-11: practice never enters the FSRS schedule)", len(subs))
+	}
+
+	// practice_logs holds every practiced word for the Beijing day — and
+	// review-side storage (Python-owned) is out of reach by construction.
+	day := time.Now().In(cst).Format("2006-01-02")
+	practiced, err := ps.ListPracticeWordsOn(ctx, day)
+	if err != nil {
+		t.Fatalf("ListPracticeWordsOn: %v", err)
+	}
+	if len(practiced) != 2 {
+		t.Fatalf("practice_logs rows for %s = %v, want both practice words", day, practiced)
+	}
+	for _, w := range practiced {
+		if w == "苹果" || w == "香蕉" {
+			t.Errorf("practice_logs holds today's dictated word %q (避开当日已默 broken)", w)
+		}
 	}
 }

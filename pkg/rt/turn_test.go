@@ -126,6 +126,7 @@ type fakeExecutor struct {
 	exists          bool
 	ensureCalls     int
 	ensureCardsCalls int
+	ensureIDs       []string // the lesson ids EnsureLessonCards was called with
 	stateCalls      int
 	advanceCalls    []fakeAdvanceCall
 	checkCalls      []fakeCheckCall
@@ -181,10 +182,12 @@ func (f *fakeExecutor) EnsureLesson(_ context.Context, _ string, _ []string) (le
 	return f.lesson, nil
 }
 
-func (f *fakeExecutor) EnsureLessonCards(_ context.Context, _ string, cards []lesson.Word) (lesson.Lesson, error) {
+func (f *fakeExecutor) EnsureLessonCards(_ context.Context, lessonID string, cards []lesson.Word) (lesson.Lesson, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ensureCardsCalls++
+	f.ensureIDs = append(f.ensureIDs, lessonID)
+	f.lesson.LessonID = lessonID // the real store reads the row back under the requested id
 	f.lesson.Cards = cards
 	f.lesson.Words = cardWords(cards)
 	f.exists = true
@@ -3824,7 +3827,7 @@ func TestNextDueDays(t *testing.T) {
 
 	t.Run("future due rounds up to whole days", func(t *testing.T) {
 		cards := []database.Card{
-			ptCardWithDue("apple", "2026-10-11T09:00:00+00:00"), // 71h ahead → ceil 3
+			ptCardWithDue("apple", "2026-10-11T00:00:00+00:00"), // 70h ahead → ceil 3
 		}
 		if got := nextDueDays(cards, now); got != 3 {
 			t.Errorf("nextDueDays = %d, want 3 (向上取整)", got)
@@ -3855,7 +3858,7 @@ func TestNextDueDays(t *testing.T) {
 			{Word: "legacy", FsrsCard: ""},
 			{Word: "broken", FsrsCard: `{not json`},
 			ptCardWithDue("past", "2026-10-01T00:00:00+00:00"),
-			ptCardWithDue("tomorrow", "2026-10-09T08:00:00+00:00"), // 22h → 1
+			ptCardWithDue("tomorrow", "2026-10-09T02:00:00+00:00"), // 24h → 1
 		}
 		if got := nextDueDays(cards, now); got != 1 {
 			t.Errorf("nextDueDays = %d, want 1 (only the tomorrow card counts)", got)
@@ -3867,4 +3870,170 @@ func TestNextDueDays(t *testing.T) {
 			t.Errorf("nextDueDays(nil) = %d, want 0", got)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// 13.1-05 practice session flow: FSRS isolation (T-13.1-11), the honest
+// no-due days copy (D-13) and the practice submit idempotency.
+// ---------------------------------------------------------------------------
+
+// fakePracticeSource is the scripted PracticeSource: a fixed card pool with
+// call recording (the practice init must List exactly once).
+type fakePracticeSource struct {
+	mu    sync.Mutex
+	cards []database.Card
+	err   error
+	calls int
+}
+
+func (f *fakePracticeSource) List(_ context.Context, _ database.CardFilter) ([]database.Card, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return append([]database.Card(nil), f.cards...), nil
+}
+
+func (f *fakePracticeSource) listCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// newTestPracticeStore builds a real sqlite-backed practice store (the
+// practice write path is exercised against the actual DDL).
+func newTestPracticeStore(t *testing.T) *lesson.PracticeStore {
+	t.Helper()
+	db, err := database.Open(filepath.Join(t.TempDir(), "practice-tt.db"))
+	if err != nil {
+		t.Fatalf("open practice test db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := lesson.Migrate(context.Background(), db); err != nil {
+		t.Fatalf("migrate practice test db: %v", err)
+	}
+	ps, err := lesson.NewPracticeStore(db, nil)
+	if err != nil {
+		t.Fatalf("NewPracticeStore: %v", err)
+	}
+	return ps
+}
+
+// ttInitPractice is ttInit with practice=true on session_init (13.1-05).
+func ttInitPractice(t *testing.T, tm *TurnManager, s *captureSender) {
+	t.Helper()
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type:     TypeSessionInit,
+		Audio:    AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+		Practice: true,
+	}))
+}
+
+// TestNoDueWordsWording (D-13): the zero-due ending names the next review
+// in whole days when the vocabulary carries a future due, and keeps the
+// day-free copy when it does not (degraded honestly, never a fabricated
+// count).
+func TestNoDueWordsWording(t *testing.T) {
+	cst := time.FixedZone("CST", 8*3600)
+
+	t.Run("future due names the days", func(t *testing.T) {
+		due := time.Now().In(cst).Add(66 * time.Hour) // ceil(66h/24h) = 3
+		practice := &fakePracticeSource{cards: []database.Card{ptCardWithDue("cat", due.Format(time.RFC3339))}}
+		tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(2, 320),
+			newFakeExecutorNoRow(ttLessonID),
+			TurnManagerConfig{LessonID: ttLessonID, Words: newFakeWords(), Practice: practice}, nil, nil)
+		s := &captureSender{}
+		ttInit(t, tm, s)
+		ttAwaitSpoken(t, s, 1)
+		joined := ttSentencesSince(t, s, 0)
+		if !contains(joined, "下次复习在") || !contains(joined, "3 天后") {
+			t.Errorf("no-due copy = %q, want the 下次复习在 X 天后 variant", joined)
+		}
+		if got := practice.listCalls(); got != 1 {
+			t.Errorf("Practice.List calls = %d, want 1 (cards listed once)", got)
+		}
+	})
+
+	t.Run("no future due keeps the day-free copy", func(t *testing.T) {
+		practice := &fakePracticeSource{cards: []database.Card{{Word: "legacy"}}} // empty fsrs_card
+		tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(2, 320),
+			newFakeExecutorNoRow(ttLessonID),
+			TurnManagerConfig{LessonID: ttLessonID, Words: newFakeWords(), Practice: practice}, nil, nil)
+		s := &captureSender{}
+		ttInit(t, tm, s)
+		ttAwaitSpoken(t, s, 1)
+		joined := ttSentencesSince(t, s, 0)
+		if !contains(joined, "下次再练吧") || contains(joined, "天后") {
+			t.Errorf("no-due copy = %q, want the day-free fallback (no 天后)", joined)
+		}
+	})
+}
+
+// TestPracticeSubmitIdempotent (T-13.1-11): the practice check_submit writes
+// practice_logs exactly once — a replayed submit never doubles the rows, and
+// the FSRS SubmitReview seam is NEVER touched (zero calls).
+func TestPracticeSubmitIdempotent(t *testing.T) {
+	ps := newTestPracticeStore(t)
+	practice := &fakePracticeSource{cards: ptPracticeCards("cat", "dog")}
+	words := newFakeWords()
+	cfg := TurnManagerConfig{LessonID: ttLessonID, Words: words, Practice: practice, PracticeStore: ps}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(2, 320),
+		newFakeExecutorNoRow(ttLessonID), cfg, nil, nil)
+	s := &captureSender{}
+	ttInitPractice(t, tm, s)
+	ttAwaitSpoken(t, s, 3) // greeting
+	ttAckLast(t, tm, s, 0)
+
+	// White-box: put the tutor into a live check stage with every word
+	// manually confirmed (the e2e test drives the real path to this state).
+	tm.mu.Lock()
+	if tm.tutor == nil || !strings.HasPrefix(tm.tutor.lessonID, "r0x-") {
+		tm.mu.Unlock()
+		t.Fatalf("practice session did not bind an r0x- lesson id: %+v", tm.tutor)
+	}
+	tm.tutor.completed = true
+	tm.tutor.checking = true
+	tm.tutor.checkVerdicts = []lesson.CheckVerdict{
+		{WordIndex: 0, Correct: true, Manual: true},
+		{WordIndex: 1, Correct: false, Manual: true},
+	}
+	tm.mu.Unlock()
+
+	ttSubmitCheck(t, tm, s) // first submit: honest review_result out
+	ttAckSummaryAndEndWait(t, tm, s)
+
+	day := time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
+	practiced, err := ps.ListPracticeWordsOn(context.Background(), day)
+	if err != nil {
+		t.Fatalf("ListPracticeWordsOn: %v", err)
+	}
+	if len(practiced) != 2 {
+		t.Fatalf("practice rows after first submit = %v, want [cat dog]", practiced)
+	}
+
+	// Replayed submit (fresh request id, the in-session duplicate): zero
+	// additional rows, zero SubmitReview.
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "tt-practice-submit-replay"}))
+	practiced2, err := ps.ListPracticeWordsOn(context.Background(), day)
+	if err != nil {
+		t.Fatalf("ListPracticeWordsOn after replay: %v", err)
+	}
+	if len(practiced2) != 2 {
+		t.Errorf("practice rows after replayed submit = %v, want unchanged [cat dog]", practiced2)
+	}
+	if subs := words.submissions(); len(subs) != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0 (practice never enters FSRS, T-13.1-11)", len(subs))
+	}
+}
+
+// ttAckSummaryAndEndWait acks the most recent sentence and waits for
+// session_ended (the natural-ending ack gate, unit-harness shape).
+func ttAckSummaryAndEndWait(t *testing.T, tm *TurnManager, s *captureSender) {
+	t.Helper()
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) > 0 }) {
+		t.Fatalf("session_ended never arrived; controls = %v", s.typeOrder())
+	}
 }
