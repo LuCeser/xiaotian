@@ -81,12 +81,12 @@ Plans:
 5. 完结/无到期词状态区分＋「再练一组」入口：词库随机避开当日已默、≤10 不足全给、同走三段式，结果单独记录不进 FSRS 主调度。
 6. OCR 判错可被人工改判覆盖（OCR 必错是前提），提交的评级以人工改判为准。
 
-**Plans:** 7 plans（2026-10-07 规划；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
+**Plans:** 1/7 plans executed（2026-10-07 规划；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
 
 Plans:
 **Wave 1**
 
-- [ ] 13.1-01-PLAN.md — tracer：三段式主环端到端（D-01/D-02/D-04/D-07）——契约（check_* 协议＋评级纯函数＋lessons 阶段态迁移/幂等 stage 写）＋手动改判最小闭环＋战果总结
+- [x] 13.1-01-PLAN.md — tracer：三段式主环端到端（D-01/D-02/D-04/D-07）——契约（check_* 协议＋评级纯函数＋lessons 阶段态迁移/幂等 stage 写）＋手动改判最小闭环＋战果总结（2026-10-07 完成：RED→GREEN→前端→mock e2e 四提交，go test＋npm run e2e:rt 7/7 全绿）
 
 **Wave 2** *(blocked on Wave 1 completion)*
 

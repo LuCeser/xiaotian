@@ -4,12 +4,12 @@ milestone: v2.0
 milestone_name: realtime-tutor — ACTIVE
 current_phase: 13.1
 current_phase_name: 三段式默写课堂（默写→检查→统一反馈）
-status: 13-13 暂缓（三段式先行）；下一步=第一层缺陷修复（U-9 实现/U-2/E2E 隔离）→ 13.1 规划
-stopped_at: Phase 13.1 context gathered（三段式课堂讨论收敛；顺序：第一层缺陷修复→13.1→13-13）
-last_updated: "2026-10-07T02:16:20.023Z"
+status: executing
+stopped_at: Completed 13.1-01-PLAN.md
+last_updated: "2026-10-07T07:34:54.834Z"
 last_activity: 2026-10-07
-last_activity_desc: 13-12 本机能力验收：完整课 + 回声通过 + 时序样本 + 问题台账 U-1～U-10
-state_head: 70fd839fdd6c65689411973915511dd02a64ed3a
+last_activity_desc: Phase 13.1 execution started
+state_head: 0c0f1a661c911d591e74a71e52624e378a4047a8
 progress:
   total_phases: 5
   completed_phases: 0
@@ -29,14 +29,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-04)
 
 **Core value:** 学生在浏览器与家教自然实时交流，理解上下文、允许打断、等待纸笔书写，学习结果进入真实记录。
-**Current focus:** Phase 13 — R0 真机最小闭环
+**Current focus:** Phase 13.1 — 三段式默写课堂（默写→检查→统一反馈）
 
 ## Current Position
 
-Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈）) — READY TO EXECUTE
-Plan: 13 of 13 (13-12 完结——Task 2 按用户 2026-10-06 改判为本机 E2E 代理执行；待用户三项不阻塞 13-13)
-Status: 13-13 暂缓（三段式先行）；第一层缺陷修复三项齐（U-9 ✅/U-2 ✅/E2E 隔离 ✅ 261007-22t）→ 下一步=13.1 规划
-Last activity: 2026-10-07 — Completed quick task 261007-22t: U-1 E2E 隔离规范资产化（四层 L3 落地，commits 9b11c8f/09dc38d/c1d3c94）；第一层缺陷修复三项齐：U-9 ✅/U-2 ✅/E2E 隔离 ✅
+Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈）) — EXECUTING
+Plan: 2 of 7
+Status: Ready to execute
+Last activity: 2026-10-07 — Phase 13.1 execution started
 Next: /gsd-plan-phase 13.1 → 13-13 VPS 部署+正式验收
 
 13-01～13-06 的实时语音基础已实现；状态机默写转向尚待执行 13-07～13-13，RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
@@ -46,6 +46,11 @@ Next: /gsd-plan-phase 13.1 → 13-13 VPS 部署+正式验收
 ## Performance Metrics
 
 v2.0：4 个活跃阶段，Phase 13 已完成 13/13 个实施计划（13-12 按用户改判本机 E2E 口径收口），下一计划 13-13（Wave 7：VPS 部署+正式验收）；产品验收尚未通过，待用户三项（本机能力认证/iPad 真机认证/评级映射追认）与 13-13。历史统计保留于 milestones/v1.0-STATE.md，不用于新里程碑进度。
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 13.1 P01 | 309 min | 3 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -90,6 +95,7 @@ Recent decisions affecting current work:
 - [Phase 09]: E2E net-zero pattern formalized (09-08): dedicated e2e-* units only, finally-shaped API cleanup backstops the UI deletion path, suite idempotent across consecutive runs; the duplicate-skip banner is made deterministic by API-seeding the duplicate target before the paste
 - [Phase 09]: Backstop styles shipped under Rule 2 in the e2e plan (09-08): the 2-line meaning clamp (-webkit-line-clamp on .word-meaning) and unit-name title attribute asserted by the must-haves were absent from the Plan 09-07 styles — fixed in the Task 2 commit and asserted behaviorally (rendered height within 2 line-heights; Chromium computes display:-webkit-box as flow-root while the clamp applies)
 - [Phase 13]: R0 交互模型转向「状态机默写助手」（2026-10-03 用户决策；本机预验收 rt-6 证据：12 轮对话 0 次课堂工具调用）。服务端状态机控制节奏：FSRS 取到期词（上限 10，不足取全部）→ 老师开场报词 → 等「好了/可以了/下一个」确认或 60 秒超时自动推进 → 支持重读/慢读、不会写提示、词义解释、暂停继续口令 → 完结总结写学习记录。大模型仅做意图识别与话术生成，不再拥有课堂节奏裁量权。 — 用户原始能力模型是默写助手；R0 按 13-CONTEXT 以「自由对话+可选工具」验证实时链路，体验与产品定义错位。属规划阶段翻译损耗而非执行偏移——执行与计划一致（证据：13-CONTEXT L16/L17/L20、RT-06 原文、PROJECT.md「FSRS R2 贯通」）。本决策推翻：固定 3 词不选词、沉默不跳词（RT-06 原文）、FSRS 排 R2。伴随缺陷一并修：MiMo invalid API response（实测×4）、VAD 0 秒误触发、首问候缺失（13-03/04/05 实现缝隙）。
+- [Phase 13.1]: 13.1-01 三段式tracer落码：完结写评级改为检查段(stage=checking持久化)→逐词manual改判→check_submit一次统一提交FSRS(D-02/D-07)→含对错战果总结过ACK门(D-04)；checkRating与wordRating同族共用rating常量禁分叉 — D-01/D-02/D-04/D-07模型改造(13.1-CONTEXT显式取代13-CONTEXT完结即写条款)；幂等闸=lessons.stage checking→submitted迁移+request_id去重+expected_version乐观锁，二次提交回放零副作用
 
 ### Pending Todos
 
@@ -156,6 +162,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-06T13:34:27.855Z
-Stopped at: Phase 13.1 context gathered（三段式课堂讨论收敛；顺序：第一层缺陷修复→13.1→13-13）
-Resume file: .planning/phases/13.1-three-stage-dictation-lesson/13.1-CONTEXT.md
+Last session: 2026-10-07T07:34:54.816Z
+Stopped at: Completed 13.1-01-PLAN.md
+Resume file: None
