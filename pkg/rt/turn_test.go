@@ -1007,8 +1007,10 @@ func TestTurnSessionInitHappyPath(t *testing.T) {
 		t.Errorf("session_ready.lesson = %v, want L1 v1", l)
 	}
 	gotWords := l["words"].([]any)
-	if len(gotWords) != 3 || gotWords[0] != "苹果" {
-		t.Errorf("session_ready.lesson.words = %v, want [苹果 香蕉 橘子]", gotWords)
+	// 13.1-02 student semantics (D-08 default mode): undictated words leave
+	// the wire as "" — the full reveal rides ?mode=test only (Pitfall 3).
+	if len(gotWords) != 3 || gotWords[0] != "" || gotWords[1] != "" || gotWords[2] != "" {
+		t.Errorf("session_ready.lesson.words = %v, want 3 masked student entries", gotWords)
 	}
 	if exec.ensureCardsCalls != 1 {
 		t.Errorf("EnsureLessonCards calls = %d, want 1", exec.ensureCardsCalls)
@@ -1135,8 +1137,14 @@ func TestDictationOpeningGreetsAndAnnounces(t *testing.T) {
 	if !contains(count, "2 个词") {
 		t.Errorf("greeting word count = %q, want the word count", count)
 	}
-	if !contains(firstWord, "苹果") || !contains(firstWord, "第 1 个词") {
-		t.Errorf("greeting first word = %q, want 第 1 个词 苹果", firstWord)
+	// 13.1-02 student masking (D-10): the subtitle shows the masked position,
+	// never the word text — the TTS input still speaks it (screen-only mask).
+	if !contains(firstWord, "第 1 个词") || contains(firstWord, "苹果") {
+		t.Errorf("greeting first word = %q, want the masked 第 1 个词 variant", firstWord)
+	}
+	spoken := tts.recordedTexts()
+	if len(spoken) == 0 || !contains(spoken[len(spoken)-1], "苹果") {
+		t.Errorf("tts input = %v, want the raw greeting naming 苹果", spoken)
 	}
 
 	// No listening before the ack: TTS completion and audio_end never lift
@@ -1205,11 +1213,16 @@ func TestDictationConfirmAdvancesAndAnnouncesNext(t *testing.T) {
 	}
 
 	// Next word announced (already acked above); the ack armed
-	// word_announced for the NEW index.
+	// word_announced for the NEW index. 13.1-02 student masking (D-10): the
+	// subtitle is the masked position variant; TTS keeps the raw word.
 	sents := s.controlsOf(t, TypeTeacherSentence)
 	last, _ := sents[len(sents)-1]["text"].(string)
-	if !contains(last, "香蕉") || !contains(last, "第 2 个词") {
-		t.Errorf("next announcement = %q, want 第 2 个词 香蕉", last)
+	if contains(last, "香蕉") || !contains(last, "第 2 个词") {
+		t.Errorf("next announcement = %q, want the masked 第 2 个词 variant", last)
+	}
+	spoken := tm.tts.(*fakeTTS).recordedTexts()
+	if len(spoken) == 0 || !contains(spoken[len(spoken)-1], "香蕉") {
+		t.Errorf("tts input = %v, want the raw announce naming 香蕉", spoken)
 	}
 	if !waitFor(t, 5*time.Second, func() bool { return ttEventCount(t, log, EventWordAnnounced) == 2 }) {
 		t.Fatalf("word_announced events = %d, want 2 (greeting + next word)", ttEventCount(t, log, EventWordAnnounced))
@@ -1798,8 +1811,13 @@ func TestIntentRepeatReAnnouncesCurrentWord(t *testing.T) {
 
 	ttRunIntentTurn(t, tm, s, 3)
 
-	if got := ttSentencesSince(t, s, 3); got != repeatText("苹果") {
-		t.Errorf("repeat announcement = %q, want %q", got, repeatText("苹果"))
+	// 13.1-02 student masking (D-10): the subtitle carries the masked
+	// position; TTS still reads the word (voice is the answer channel).
+	if got := ttSentencesSince(t, s, 3); got != "好，我再读一遍。第 1 个词。" {
+		t.Errorf("repeat announcement = %q, want the masked 第 1 个词 variant", got)
+	}
+	if spoken := tm.tts.(*fakeTTS).recordedTexts(); len(spoken) == 0 || !contains(spoken[len(spoken)-1], "苹果") {
+		t.Errorf("tts input = %v, want the raw repeat reading 苹果", spoken)
 	}
 	tm.mu.Lock()
 	idx := tm.tutor.currentIndex
@@ -1831,11 +1849,13 @@ func TestIntentSlowReadsWordWithPausesNotSpelling(t *testing.T) {
 	ttRunIntentTurn(t, tm, s, 3)
 
 	got := ttSentencesSince(t, s, 3)
-	if got != slowReadText("苹果") {
-		t.Errorf("slow announcement = %q, want %q", got, slowReadText("苹果"))
+	// 13.1-02 student masking (D-10): the subtitle masks both readings to the
+	// position; TTS still reads the word twice (same spoken text as before).
+	if got != "第 1 个词。第 1 个词。慢慢写，不着急。" {
+		t.Errorf("slow announcement = %q, want the masked twice-repeated position variant", got)
 	}
-	if !contains(got, "苹果。苹果。") {
-		t.Errorf("slow announcement = %q, want the word repeated twice with full-stop pauses", got)
+	if spoken := tm.tts.(*fakeTTS).recordedTexts(); len(spoken) == 0 || !contains(strings.Join(spoken, "|"), "苹果。苹果。") {
+		t.Errorf("tts input = %v, want the raw slow reading 苹果。苹果。", spoken)
 	}
 	if regexp.MustCompile(`[a-zA-Z]`).MatchString(got) {
 		t.Errorf("slow announcement = %q, want NO pinyin/letters (no spelling out)", got)
@@ -2102,8 +2122,13 @@ func TestIntentMeaningSpeaksGroundedReply(t *testing.T) {
 
 	ttRunIntentTurn(t, tm, s, 3)
 
-	if got := ttSentencesSince(t, s, 3); got != "苹果是一种水果。" {
-		t.Errorf("meaning reply = %q, want the scripted grounded reply", got)
+	// 13.1-02 student masking (D-10): an LLM reply naming the word is masked
+	// on screen (•••) while TTS speaks the reply as generated.
+	if got := ttSentencesSince(t, s, 3); got != "•••是一种水果。" {
+		t.Errorf("meaning reply subtitle = %q, want the masked ••• reply", got)
+	}
+	if spoken := tm.tts.(*fakeTTS).recordedTexts(); len(spoken) == 0 || !contains(spoken[len(spoken)-1], "苹果是一种水果。") {
+		t.Errorf("tts input = %v, want the raw grounded reply", spoken)
 	}
 	tm.mu.Lock()
 	n := len(tm.tutor.perWordOutcome)
@@ -2179,8 +2204,13 @@ func TestIntentResumeRecognizedWhilePausedAndRearmsAfterAck(t *testing.T) {
 		t.Error("countdown not re-armed after the resume ack")
 	}
 	got := ttSentencesSince(t, s, 4)
-	if !contains(got, "还是第 1 个词") || !contains(got, "苹果") {
-		t.Errorf("resume ack = %q, want the same word position (第 1 个词 苹果)", got)
+	// 13.1-02 student masking (D-10): the same-position confirmation masks
+	// the word on screen; TTS still speaks it.
+	if !contains(got, "还是第 1 个词") || contains(got, "苹果") {
+		t.Errorf("resume ack = %q, want the masked same-position variant", got)
+	}
+	if spoken := tm.tts.(*fakeTTS).recordedTexts(); len(spoken) == 0 || !contains(spoken[len(spoken)-1], "苹果") {
+		t.Errorf("tts input = %v, want the raw resume ack naming 苹果", spoken)
 	}
 	if s.listeningCount() == 0 {
 		t.Error("no listening broadcast after the resume ack settled")
@@ -3234,4 +3264,257 @@ func ttCheckStartedWanted(t *testing.T, s *captureSender) map[string]any {
 		t.Fatal("check_started never arrived")
 	}
 	return started
+}
+
+// ---------------------------------------------------------------------------
+// 13.1-02: student-mode send-side masking (U-6/U-7, D-08/D-09/D-10). The
+// masking authority is the SERVER SEND side — the DOM/devtools cannot recover
+// a word that was never sent. Four TestStudentMasking* behaviors, the
+// word_revealed advance reveal, and the Pitfall-4 red line (classification
+// input stays raw).
+// ---------------------------------------------------------------------------
+
+// ttInitMode is ttInit with an explicit UI mode on session_init.
+func ttInitMode(t *testing.T, tm *TurnManager, s *captureSender, mode string) {
+	t.Helper()
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type:  TypeSessionInit,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+		Mode:  mode,
+	}))
+}
+
+// TestStudentMaskingLessonView: the student-mode session_ready projection
+// carries word text ONLY for i < currentIndex (revealed words); undictated
+// positions are "". Test mode keeps the full reveal (13.1 之前 behavior).
+func TestStudentMaskingLessonView(t *testing.T) {
+	cards := ttCards("苹果", "香蕉", "橘子")
+	exec := newFakeExecutor(ttLessonID, cards)
+	exec.setRow(1, 2) // mid-lesson reconnect: word 0 revealed
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(newFakeWords(cards)), nil, nil)
+	s := &captureSender{}
+	ttInit(t, tm, s) // absent mode → student
+
+	ready := s.controlsOf(t, TypeSessionReady)
+	if len(ready) != 1 {
+		t.Fatalf("session_ready count = %d, want 1", len(ready))
+	}
+	got := ready[0]["lesson"].(map[string]any)["words"].([]any)
+	if len(got) != 3 || got[0] != "苹果" || got[1] != "" || got[2] != "" {
+		t.Errorf("student lesson.words = %v, want [苹果 \"\" \"\"] (i < currentIndex only)", got)
+	}
+
+	// Test mode: full reveal, behavior unchanged from before 13.1.
+	exec2 := newFakeExecutor(ttLessonID, cards)
+	exec2.setRow(1, 2)
+	tm2 := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec2, ttConfig(newFakeWords(cards)), nil, nil)
+	s2 := &captureSender{}
+	ttInitMode(t, tm2, s2, ModeTest)
+	ready2 := s2.controlsOf(t, TypeSessionReady)
+	if len(ready2) != 1 {
+		t.Fatalf("test-mode session_ready count = %d, want 1", len(ready2))
+	}
+	got2 := ready2[0]["lesson"].(map[string]any)["words"].([]any)
+	if len(got2) != 3 || got2[0] != "苹果" || got2[1] != "香蕉" || got2[2] != "橘子" {
+		t.Errorf("test lesson.words = %v, want the full reveal [苹果 香蕉 橘子]", got2)
+	}
+}
+
+// TestStudentMaskingAnnounce: student-mode word announcements carry the
+// masked 「第 N 个词」 subtitle (never the word text) while the TTS input
+// stays the raw template — masking is screen-only (D-10).
+func TestStudentMaskingAnnounce(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR(asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tts := newFakeTTS(1, 320)
+	tm := NewTurnManager(asr, llm, tts, newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
+	s := &captureSender{}
+	ttInit(t, tm, s) // absent mode → student
+	ttAwaitSpoken(t, s, 3)
+
+	// No greeting subtitle names the word; the last one is the masked spot.
+	sents := s.controlsOf(t, TypeTeacherSentence)
+	for _, m := range sents {
+		text, _ := m["text"].(string)
+		if contains(text, "苹果") {
+			t.Errorf("greeting subtitle leaks the word: %q", text)
+		}
+	}
+	last, _ := sents[len(sents)-1]["text"].(string)
+	if !contains(last, "第 1 个词") {
+		t.Errorf("greeting subtitle = %q, want the masked 第 1 个词 variant", last)
+	}
+	// TTS still speaks the raw word.
+	spoken := tts.recordedTexts()
+	if len(spoken) == 0 || !contains(spoken[len(spoken)-1], "苹果") {
+		t.Errorf("tts input = %v, want the raw greeting naming 苹果", spoken)
+	}
+
+	// The confirm's next-word announcement: masked subtitle, raw TTS.
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	ttAwaitSpoken(t, s, 4)
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirm turn never settled")
+	}
+	sents = s.controlsOf(t, TypeTeacherSentence)
+	next, _ := sents[len(sents)-1]["text"].(string)
+	if contains(next, "香蕉") || !contains(next, "第 2 个词") {
+		t.Errorf("next announcement subtitle = %q, want the masked 第 2 个词 variant", next)
+	}
+	spoken = tts.recordedTexts()
+	if !contains(spoken[len(spoken)-1], "香蕉") {
+		t.Errorf("tts input = %q, want the raw announce naming 香蕉", spoken[len(spoken)-1])
+	}
+}
+
+// TestStudentMaskingTranscript: the student's transcript goes out with the
+// target word replaced by ••• while the classification input is the RAW
+// transcript — the Pitfall-4 red line (fake LLM captures its messages).
+func TestStudentMaskingTranscript(t *testing.T) {
+	cards := ttCards("apple", "banana")
+	asr := newFakeASR(asrScript{text: "apple 写好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTranscript) == 1 }) {
+		t.Fatal("transcript never went out")
+	}
+	tr := s.controlsOf(t, TypeTranscript)[0]
+	text, _ := tr["text"].(string)
+	if contains(strings.ToLower(text), "apple") {
+		t.Errorf("transcript leaks the word: %q", text)
+	}
+	if !contains(text, "•••") {
+		t.Errorf("transcript = %q, want the ••• mask", text)
+	}
+	// Red line: the classifier saw the RAW transcript.
+	if !waitFor(t, 5*time.Second, func() bool { return tm.llm.(*fakeLLM).callCount() == 1 }) {
+		t.Fatal("classification never ran")
+	}
+	var user string
+	for _, m := range tm.llm.(*fakeLLM).calls[0].messages {
+		if m.Role == "user" {
+			user += m.Content
+		}
+	}
+	if !contains(user, "apple 写好了") {
+		t.Errorf("classify input = %q, want the raw transcript apple 写好了 (Pitfall 4)", user)
+	}
+	ttAwaitSpoken(t, s, 4)
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirm turn never settled")
+	}
+}
+
+// TestWordRevealedOnAdvance: the FIRST advance commit delivers
+// word_revealed{word_index, word} in student mode so the chip flips to
+// 已默=显词＋绿勾; the idempotent replay branch never re-sends.
+func TestWordRevealedOnAdvance(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR(asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeWordRevealed) == 1 }) {
+		t.Fatal("word_revealed never arrived on the first advance commit")
+	}
+	rv := s.controlsOf(t, TypeWordRevealed)[0]
+	if rv["word_index"] != float64(0) || rv["word"] != "苹果" {
+		t.Errorf("word_revealed = %v, want index 0 苹果", rv)
+	}
+	ttAwaitSpoken(t, s, 4)
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirm turn never settled")
+	}
+
+	// The duplicate confirm replays idempotently: NO second word_revealed.
+	before := s.countOf(TypeWordRevealed)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tm.confirmTarget(s, ctx, cancel, 0, 0, "", TurnTarget{WordIndex: 0, ExpectedVersion: 1})
+	if got := s.countOf(TypeWordRevealed); got != before {
+		t.Errorf("word_revealed after replay = %d, want %d (first commit only)", got, before)
+	}
+}
+
+// TestShortHistoryUnmasked: the FSM short-history deque (and the interrupt
+// trim) record the RAW spoken text — the LLM context must never see the
+// masked copies; only the outbound wire is desensitized.
+func TestShortHistoryUnmasked(t *testing.T) {
+	cards := ttCards("apple", "banana")
+	asr := newFakeASR(asrScript{text: "apple 写好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	ttAwaitSpoken(t, s, 4)
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirm turn never settled")
+	}
+
+	tm.mu.Lock()
+	var userTexts, teacherTexts []string
+	for _, r := range tm.tutor.shortHistory {
+		if r.userText != "" {
+			userTexts = append(userTexts, r.userText)
+		}
+		if r.teacherText != "" {
+			teacherTexts = append(teacherTexts, r.teacherText)
+		}
+	}
+	tm.mu.Unlock()
+	if joined := strings.Join(userTexts, "|"); !contains(joined, "apple 写好了") {
+		t.Errorf("shortHistory user text = %q, want the raw transcript (LLM context stays unmasked)", joined)
+	}
+	if joined := strings.Join(teacherTexts, "|"); !contains(joined, "banana") {
+		t.Errorf("shortHistory teacher text = %q, want the raw announcement (LLM context stays unmasked)", joined)
+	}
 }

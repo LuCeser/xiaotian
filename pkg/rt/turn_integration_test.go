@@ -298,15 +298,19 @@ func TestDictationOverConnHappyPath(t *testing.T) {
 	conn := itDial(t, srv)
 
 	ready := itInit(t, conn)
-	if len(ready.Lesson.Words) != 3 || ready.Lesson.Words[0] != "苹果" {
-		t.Fatalf("session_ready.lesson.words = %v, want the 3 due words", ready.Lesson.Words)
+	// 13.1-02 student semantics (D-08 default): undictated words leave the
+	// wire as "" — the full reveal rides ?mode=test only.
+	if len(ready.Lesson.Words) != 3 || ready.Lesson.Words[0] != "" || ready.Lesson.Words[2] != "" {
+		t.Fatalf("session_ready.lesson.words = %v, want 3 masked student entries", ready.Lesson.Words)
 	}
 
 	// Opening greeting (teacher speaks immediately after session_ready);
-	// the announcement's PCM bytes must reach the client side.
+	// the announcement's PCM bytes must reach the client side. The subtitle
+	// is the masked position variant (D-10) — the word rides the audio only.
 	greeting, greetingFrames := itAnnounceAckCounted(t, conn)
-	if len(greeting) < 2 || !strings.Contains(greeting[len(greeting)-1], "苹果") {
-		t.Fatalf("greeting = %v, want the opening plus the first word 苹果", greeting)
+	joinedGreeting := strings.Join(greeting, "")
+	if len(greeting) < 2 || !strings.Contains(joinedGreeting, "第 1 个词") || strings.Contains(joinedGreeting, "苹果") {
+		t.Fatalf("greeting = %v, want the masked 第 1 个词 opening", greeting)
 	}
 	if greetingFrames < 2 {
 		t.Errorf("greeting binary frames = %d, want >0 (word-announcement audio bytes must reach the client)", greetingFrames)
