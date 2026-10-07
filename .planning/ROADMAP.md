@@ -81,7 +81,7 @@ Plans:
 5. 完结/无到期词状态区分＋「再练一组」入口：词库随机避开当日已默、≤10 不足全给、同走三段式，结果单独记录不进 FSRS 主调度。
 6. OCR 判错可被人工改判覆盖（OCR 必错是前提），提交的评级以人工改判为准。
 
-**Plans:** 5/7 plans executed（2026-10-07 规划；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
+**Plans:** 7/7 plans executed（2026-10-07 规划；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
 
 Plans:
 **Wave 1**
@@ -110,7 +110,7 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 13.1-07-PLAN.md — 阶段收口：落地 13.1-03 延期拍照 mock 用例＋全量回归＋真通道隔离冒烟（e2e:rt-real）＋13-13 交接清单
+- [x] 13.1-07-PLAN.md — 阶段收口：落地 13.1-03 延期拍照 mock 用例＋全量回归＋真通道隔离冒烟（e2e:rt-real）＋13-13 交接清单
 
 ### Phase 14: R1 对话接真实课堂
 

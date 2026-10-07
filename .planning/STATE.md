@@ -4,17 +4,17 @@ milestone: v2.0
 milestone_name: realtime-tutor — ACTIVE
 current_phase: 13.1
 current_phase_name: 三段式默写课堂（默写→检查→统一反馈）
-status: executing
-stopped_at: Completed 13.1-06-PLAN.md
-last_updated: "2026-10-07T19:00:25.070Z"
+status: verifying
+stopped_at: Completed 13.1-07-PLAN.md — Phase 13.1 all 7 plans complete, ready for 13-13
+last_updated: "2026-10-07T19:55:49.505Z"
 last_activity: 2026-10-07
 last_activity_desc: Phase 13.1 execution started
-state_head: 7c3d310e520fef67d333c8e6ec6bd23055087331
+state_head: 1d451331e22df238704360779c13e1505600feca
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 20
-  completed_plans: 17
+  completed_plans: 19
   percent: 0
 ---
 
@@ -35,7 +35,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 
 Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈）) — EXECUTING
 Plan: 7 of 7
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-10-07 — Phase 13.1 execution started
 Next: /gsd-plan-phase 13.1 → 13-13 VPS 部署+正式验收
 
@@ -56,6 +56,7 @@ v2.0：4 个活跃阶段，Phase 13 已完成 13/13 个实施计划（13-12 按�
 | Phase 13.1 P04 | 245 min（含配额中断恢复等待） | 3 tasks | 10 files |
 | Phase 13.1 P05 | 47 min | 3 tasks | 17 files |
 | Phase 13.1 P06 | 25 min | 2 tasks | 7 files |
+| Phase 13.1 P07 | 41 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -117,6 +118,9 @@ Recent decisions affecting current work:
 - [Phase 13.1]: 13.1-06 语音改判与点按同一条 ApplyVerdict 幂等路径（RT-07）：request_id 服务端生成 lessonID-verdict-<index>-v<version>-voice，version 烘进键、每次成功写 bump version——同一词的后续语音改判绝不回放首次写（OCR retake 教训）
 - [Phase 13.1]: 13.1-06 check_spelling 的判对错来自 GradeWord 而非 intent 字面：口述写法与词一致→correct、近错→wrong+「差一个字母很接近了」鼓励话术（判对错权威=人的口令＋GradeWord，服务端确定性逻辑，模型无裁量权）；口述写法经 ocr_result 通道显示在行侧，零前端改动
 - [Phase 13.1]: 13.1-06 检查阶段语音分类走单独构建的 buildCheckClassifySystemPrompt（全词表＋逐词判定态；提示词 9 值＝3 检查 intent＋6 个仍合法基础 intent，hint 按 chat）；白名单恒 11 值 parseIntentJSON 不变（Pitfall 8/T-13-13）
+- [Phase 13.1]: 13.1-07 收口：13.1-03 延期拍照 mock e2e 四族落地（D-05 双端提交闸、D-06① 人工改判、重拍清缓冲、纯人工降级）；全量回归零回归零弱化——go test 15 包＋npm test＋e2e:rt 21/21，pkg/rt 生产码零改动（修复权未触发）
+- [Phase 13.1]: L3 真通道驱动扩展到三段式终态：driver checkStageAct（手写体夹具拍照→真 MiMo OCR→逐词 manual→一次统一提交）25/25 hard-pass；生产实例零接触两次运行证明（lessons 2→2、review_logs 25→25、e2e-% 恒 0）
+- [Phase 13.1]: 13.1-07 flake 分类：首跑 g_interrupt 失败（old_epoch 3 帧）同代码重跑即 clean——环境性 flake（TTS 流速竞态），如实记录不掩码不放宽；i_vocab 版本断言按三段式写路径改为单调下限（review 集合算术保持精确）
 
 ### Pending Todos
 
@@ -183,6 +187,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-07T19:00:25.051Z
-Stopped at: Completed 13.1-06-PLAN.md
+Last session: 2026-10-07T19:55:32.391Z
+Stopped at: Completed 13.1-07-PLAN.md — Phase 13.1 all 7 plans complete, ready for 13-13
 Resume file: None
