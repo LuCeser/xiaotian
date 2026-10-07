@@ -11,10 +11,13 @@ completed lesson row.
 
 import sqlite3
 import json
+import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
 
-DB_PATH = "./.hta-data/vocab.db"
+# Anchored to this script's location (repo root/.hta-data), same paradigm as
+# scripts/check_db.py — the same database is found from any CWD.
+DB_PATH = str(pathlib.Path(__file__).resolve().parent.parent / ".hta-data" / "vocab.db")
 
 # Asia/Shanghai as a fixed offset — UTC+8, no DST. Same rule as
 # resolveLessonID (pkg/rt/dictation.go:515-521): never machine-local time.
