@@ -81,11 +81,17 @@ Plans:
 5. 完结/无到期词状态区分＋「再练一组」入口：词库随机避开当日已默、≤10 不足全给、同走三段式，结果单独记录不进 FSRS 主调度。
 6. OCR 判错可被人工改判覆盖（OCR 必错是前提），提交的评级以人工改判为准。
 
-**Plans:** 0 plans
+**Plans:** 7 plans（2026-10-07 规划；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 13.1 to break down)
+- [ ] 13.1-01-PLAN.md — tracer：三段式主环端到端（D-01/D-02/D-04/D-07）——契约（check_* 协议＋评级纯函数＋lessons 阶段态迁移/幂等 stage 写）＋手动改判最小闭环＋战果总结
+- [ ] 13.1-02-PLAN.md — 学生模式（D-08/D-09/D-10）：服务端发送侧打码、三态词表、双列 trace、检查阶段全量揭示
+- [ ] 13.1-03-PLAN.md — 拍照 OCR 检查环（D-05/D-06①）：photo 分块通道（base64 JSON）、多词识别、GradeWord 比对预填、人工改判覆盖
+- [ ] 13.1-04-PLAN.md — 未核对兜底＋跨会话恢复＋事后修正（D-03）：关闭即降档落库、resume/correction 路径、差异重写
+- [ ] 13.1-05-PLAN.md — 再练一组＋收尾状态区分（D-11/D-12/D-13）：随机避开当日、practice_logs 独立存储零 FSRS 污染、两种收尾文案
+- [ ] 13.1-06-PLAN.md — 检查阶段语音改判口令（D-06②）：11 值意图白名单、index/text 载荷、语音与点按同路径
+- [ ] 13.1-07-PLAN.md — 阶段收口：全量回归＋真通道隔离冒烟（e2e:rt-real）＋13-13 交接清单
 
 ### Phase 14: R1 对话接真实课堂
 
