@@ -833,10 +833,6 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	return 0
 }
 
-// ensure fmt is referenced even if future refactors remove the only call
-// site. Cheap to keep, painful to forget.
-var _ = fmt.Sprintf
-
 // rtSessionCounter disambiguates /rt session ids for the per-connection
 // EventRecorder (Phase 13). It advances in lockstep with rt's internal
 // session counter — one factory call per TurnManager construction — so the
