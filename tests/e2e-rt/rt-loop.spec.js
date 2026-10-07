@@ -86,6 +86,48 @@ async function getTrace(page) {
 /** Silence the RMS auto-detector; tests interrupt explicitly. */
 const QUIET_PARAMS = 'interrupt_rms=99&interrupt_sustain_ms=999999';
 
+/** Mock lesson vocabulary (mock-rt-server.js WORDS mirror). */
+const MOCK_WORDS = ['apple', 'banana', 'cat'];
+
+/** Parse the mock's recorded outbound frame log (JSON strings). */
+function parseFrames(frames) {
+  return frames.map((f) => JSON.parse(f));
+}
+
+/**
+ * Wire-side no-leak walk (13.1-02, D-10): replays the recorded frames in
+ * order and returns leak entries — occurrences of a NOT-YET-REVEALED word
+ * string in any student-visible text frame (session_ready.lesson.words,
+ * teacher_sentence, transcript). word_revealed contributes its own word to
+ * the revealed set; check_started is the wholesale unmask point.
+ */
+function wireLeaks(frames, words) {
+  const leaks = [];
+  const revealed = new Set();
+  let unmasked = false;
+  for (const m of parseFrames(frames)) {
+    if (m.type === 'word_revealed' && typeof m.word_index === 'number') {
+      revealed.add(m.word_index);
+      continue;
+    }
+    if (m.type === 'check_started') {
+      unmasked = true;
+      continue;
+    }
+    if (unmasked) continue;
+    let text = null;
+    if (m.type === 'session_ready') text = JSON.stringify((m.lesson || {}).words || []);
+    else if (m.type === 'teacher_sentence' || m.type === 'transcript') text = String(m.text || '');
+    if (text === null) continue;
+    for (let i = 0; i < words.length; i++) {
+      if (!revealed.has(i) && text.includes(words[i])) {
+        leaks.push(m.type + '#' + i);
+      }
+    }
+  }
+  return leaks;
+}
+
 /**
  * Drive the 13.1-01 check stage from the page: wait for the check panel
  * (3 rows from check_started.words), click 对/错 per row (marks[i]=false →
@@ -145,6 +187,13 @@ test('complete classroom runs on a single getUserMedia authorization', async ({ 
     .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
       { timeout: 20_000 })
     .toBeTruthy();
+
+  // 13.1-02 deliberate student-mode migration: the default URL is STUDENT
+  // mode — the word table starts fully masked (placeholders only).
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.sessionState.words.join('|')),
+      { timeout: 10_000 })
+    .toBe('||');
 
   // The scripted lesson runs its 3 confirms; the last commit OPENS THE
   // CHECK STAGE (13.1-01) instead of summarizing — drive the manual
@@ -550,6 +599,152 @@ test('partial save renders the honest M/N copy, never fabricated success', async
   const s = await getFinalSession(page);
   expect(s.reviewResults).toBe(1);
   expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// 13.1-02: student-mode anti-leak (D-08/D-09/D-10) — the server is the
+// masking authority: no not-yet-revealed word string may appear in the page
+// text OR in the recorded WS frames during dictation; check_started unmasks.
+// ---------------------------------------------------------------------------
+
+test('student mode never leaks undictated words on page or wire; check_started unmasks', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + QUIET_PARAMS);
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+
+  // Dictation stage: EVERY step sample is atomic with the revealed-set read
+  // (one evaluate) — no unrevealed word string may appear in the page text
+  // while the mock ticks through the lesson.
+  let sawCheck = false;
+  for (let i = 0; i < 120; i++) {
+    const sample = await page.evaluate((words) => {
+      const st = window.__rtTutor.sessionState;
+      const revealed = st.words.filter((w) => w !== '').length;
+      return {
+        checkActive: window.__rtTutor.observe().check.active,
+        leaked: words.slice(revealed).filter((w) => document.body.innerText.includes(w))
+      };
+    }, MOCK_WORDS);
+    expect(sample.leaked, `page-text leak at step ${i}`).toEqual([]);
+    if (sample.checkActive) {
+      sawCheck = true;
+      break;
+    }
+    await page.waitForTimeout(250);
+  }
+  expect(sawCheck, 'the walk never reached the check stage').toBe(true);
+
+  // check_started unmasks the chip list wholesale: every chip now shows its
+  // server-sent word (the green ✓ rides the CSS pseudo-element and is not
+  // part of the DOM text).
+  await expect(page.locator('#rt-words .rt-word-done')).toHaveCount(3);
+  for (let i = 0; i < 3; i++) {
+    await expect(page.locator('#rt-words .rt-word-chip').nth(i)).toHaveText(MOCK_WORDS[i]);
+  }
+
+  // Regression (13.1-01 in student mode): the three-stage manual check path
+  // still completes end-to-end to the natural ending.
+  await driveCheckStage(page);
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+
+  // Wire-side no-leak over the mock's FULL outbound frame log: no frame
+  // before its reveal/check_started may carry an unrevealed word string.
+  const s = await getFinalSession(page);
+  expect(s.mode).toBe('student');
+  const leaks = wireLeaks(s.frames, MOCK_WORDS);
+  expect(leaks, 'wire leak entries: ' + JSON.stringify(leaks)).toEqual([]);
+  const frames = parseFrames(s.frames);
+  const ready = frames.find((m) => m.type === 'session_ready');
+  expect(ready.lesson.words, 'student session_ready words masked').toEqual(['', '', '']);
+  const reveals = frames.filter((m) => m.type === 'word_revealed').map((m) => m.word);
+  expect(reveals, 'one word_revealed per dictated word, in order').toEqual(MOCK_WORDS);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('three-state chip progression: placeholder → highlighted placeholder → word+check', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + QUIET_PARAMS);
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+
+  // Unrevealed (D-09): all three chips are index placeholders; the CURRENT
+  // index is the highlighted placeholder and carries NO word text.
+  await expect(page.locator('#rt-words .rt-word-chip')).toHaveCount(3);
+  await expect(page.locator('#rt-words .rt-word-hidden')).toHaveCount(3);
+  await expect(page.locator('#rt-words .rt-word-current')).toHaveCount(1);
+  await expect(page.locator('#rt-words .rt-word-current')).toHaveText('1');
+  for (let i = 0; i < 3; i++) {
+    await expect(page.locator('#rt-words .rt-word-chip').nth(i)).not.toHaveText(/apple|banana|cat/);
+  }
+
+  // Revealed: after the first mock confirm the first chip shows the word
+  // (green check rides the CSS pseudo-element) and the highlight moves on.
+  await expect(page.locator('#rt-words .rt-word-done')).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.locator('#rt-words .rt-word-chip').nth(0)).toHaveText('apple');
+  await expect(page.locator('#rt-words .rt-word-chip').nth(1)).toHaveClass(/rt-word-hidden/);
+  await expect(page.locator('#rt-words .rt-word-chip').nth(1)).toHaveClass(/rt-word-current/);
+  await expect(page.locator('#rt-words .rt-word-current')).toHaveText('2');
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('dual-column conversation trace in student AND test modes', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  // Student mode (default): teacher lines left, persistent student
+  // transcript lines right (U-7/D-10), subtitles masked.
+  await page.goto('/tutor/?' + QUIET_PARAMS);
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+  await expect(page.locator('#rt-trace .rt-trace-teacher').first()).toBeVisible({ timeout: 30_000 });
+  const teacherLine = await page.locator('#rt-trace .rt-trace-teacher').first().textContent();
+  expect(teacherLine).toContain('👩‍🏫');
+  expect(teacherLine, 'student-mode teacher subtitle is masked').not.toContain('apple');
+  // The simulated student utterance rides the first confirm tick and stays
+  // as its own persistent line (never replace-in-place).
+  await expect(page.locator('#rt-trace .rt-trace-student').first()).toBeVisible({ timeout: 30_000 });
+  const studentLine = await page.locator('#rt-trace .rt-trace-student').first().textContent();
+  expect(studentLine).toContain('🧒');
+  expect(studentLine).toContain('•••');
+
+  // Test mode (?mode=test): the SAME two columns; full reveal like before
+  // 13.1 — chips show words, the opening subtitle names the word, the
+  // transcript is plaintext.
+  await page.goto('/tutor/?' + QUIET_PARAMS + '&mode=test');
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+  await expect(page.locator('#rt-trace .rt-trace-teacher').first()).toBeVisible({ timeout: 30_000 });
+  const tTeacherLine = await page.locator('#rt-trace .rt-trace-teacher').first().textContent();
+  expect(tTeacherLine).toContain('👩‍🏫');
+  expect(tTeacherLine, 'test mode keeps the full reveal').toContain('apple');
+  await expect(page.locator('#rt-words .rt-word-chip').nth(0)).toHaveText('apple');
+  await expect(page.locator('#rt-trace .rt-trace-student').first()).toBeVisible({ timeout: 30_000 });
+  const tStudentLine = await page.locator('#rt-trace .rt-trace-student').first().textContent();
+  expect(tStudentLine).toContain('🧒');
+  expect(tStudentLine).toContain('apple 写好了');
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });

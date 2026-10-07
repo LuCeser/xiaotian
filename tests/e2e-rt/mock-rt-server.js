@@ -62,6 +62,16 @@
  * recorded, answered with nothing — no second review_result, no second
  * summary (Pitfall 6 / T-13.1-01 mirror).
  *
+ * 13.1-02 mode contract (mirrors the Go send-side masking, D-08/D-09/D-10):
+ * the DEFAULT (no mode param) is STUDENT mode — session_ready.lesson.words
+ * carry text only for already-revealed indexes ("" elsewhere), word-bearing
+ * announcement subtitles use the masked 「第N个词」 form, the simulated
+ * student transcript masks the target word to •••, and a word_revealed
+ * frame rides every lesson_update. ?mode=test mirrors the pre-13.1 full
+ * reveal. check_started stays the wholesale unmask point in BOTH modes.
+ * Every outbound control frame is recorded in the session's `frames` log
+ * (the wire-side no-leak assertion source for rt-loop.spec.js).
+ *
  * Unknown/wrong-epoch/duplicate sentence_acks are recorded as REJECTED
  * observations and never end the session (T-13-24: a forged or stale ack
  * must not become completion evidence). Test introspection: GET
@@ -172,6 +182,7 @@ function handleTestState(res) {
       checkVerdicts: s.checkVerdicts,
       checkSubmits: s.checkSubmits,
       reviewResults: s.reviewResults,
+      frames: s.frames,
       summaries: s.summaries,
       lessonCompleteSent: s.lessonCompleteSent,
       noDueSent: s.noDueSent,
@@ -275,6 +286,9 @@ wss.on('connection', (ws, req, query) => {
     checkVerdicts: [],
     checkSubmits: [],
     reviewResults: 0,
+    /** 13.1-02: every outbound control frame, as its JSON string (the
+        wire-side no-leak assertion source). */
+    frames: [],
     summaries: 0,
     lessonCompleteSent: false,
     noDueSent: false,
@@ -301,8 +315,27 @@ wss.on('connection', (ws, req, query) => {
   sessions.set(state.id, state);
 
   function send(msg) {
+    state.frames.push(JSON.stringify(msg));
     if (ws.readyState !== ws.OPEN) return;
     try { ws.send(JSON.stringify(msg)); } catch (sendErr) { /* closing */ }
+  }
+
+  // 13.1-02 mode contract helpers (the server is the masking authority; the
+  // page renders only what it was sent).
+
+  /** LessonView words by UI mode: student carries text ONLY for already-
+      revealed indexes (D-09); test keeps the full reveal. */
+  function lessonWordsForMode() {
+    if (state.mode === 'test') return state.words.slice();
+    return state.words.map((w, i) => (i < state.currentIndex ? w : ''));
+  }
+
+  /** Word-bearing announcement text by UI mode (D-10): student subtitles use
+      the masked 「第N个词」 form; test names the word. */
+  function wordAnnounceText(prefix, idx) {
+    const n = idx + 1;
+    if (state.mode === 'test') return prefix + '第' + n + '个单词：' + state.words[idx];
+    return prefix + '第' + n + '个词';
   }
 
   function sendBinary(buf) {
@@ -366,11 +399,16 @@ wss.on('connection', (ws, req, query) => {
     });
   }
 
-  // One simulated student confirmation: advance the cursor, publish the
-  // lesson_update, then announce the next word — or, at the end of the word
-  // list, OPEN THE CHECK STAGE (13.1-01: no immediate summary any more).
+  // One simulated student confirmation: the student "says" the word (the
+  // transcript frame — masked to ••• in student mode, D-10), the cursor
+  // advances with lesson_update (+ the student-mode word_revealed reveal,
+  // 13.1-02), then the next word is announced — or, at the end of the word
+  // list, THE CHECK STAGE OPENS (13.1-01: no immediate summary any more).
   function confirmAndAdvance() {
     if (state.ended || state.pauseActive) return;
+    const saidWord = state.words[state.currentIndex];
+    const said = state.mode === 'test' ? saidWord + ' 写好了' : '••• 写好了';
+    send({ type: 'transcript', turn_id: state.turn + 1, text: said });
     state.currentIndex += 1;
     state.version += 1;
     state.lessonUpdates += 1;
@@ -378,12 +416,17 @@ wss.on('connection', (ws, req, query) => {
       type: 'lesson_update', lesson_id: LESSON_ID, version: state.version,
       current_index: state.currentIndex, request_id: 'advance-' + state.currentIndex
     });
+    if (state.mode !== 'test') {
+      // 13.1-02 (D-09): the reveal rides the advance — the chip flips to
+      // 已默=显词＋绿勾 (the mock tick IS the first commit).
+      send({ type: 'word_revealed', word_index: state.currentIndex - 1, word: saidWord });
+    }
     send({ type: 'state', value: 'listening' });
     if (state.currentIndex >= state.words.length) {
       startCheckStage();
     } else {
       announce('w' + (state.currentIndex + 1),
-        '第' + (state.currentIndex + 1) + '个单词：' + state.words[state.currentIndex],
+        wordAnnounceText('', state.currentIndex),
         PLAN_WORD, (state.currentIndex + 1) * 100,
         () => { send({ type: 'state', value: 'listening' }); armConfirmTimer(); });
     }
@@ -463,8 +506,9 @@ wss.on('connection', (ws, req, query) => {
       return;
     }
     // Opening: the first word announcement IS the greeting (13-08: zero LLM,
-    // template wording — the mock mirrors the shape, not the model).
-    announce('w1', '我们开始默写课堂，第一个单词：' + state.words[0], PLAN_WORD, 100, () => {
+    // template wording — the mock mirrors the shape, not the model). Student
+    // mode masks the word to its position (13.1-02, D-10).
+    announce('w1', wordAnnounceText('我们开始默写课堂，', 0), PLAN_WORD, 100, () => {
       send({ type: 'state', value: 'listening' });
       if (mockMode.pause) {
         // Pause path: confirmation speech plays, THEN paused — and it
@@ -516,7 +560,7 @@ wss.on('connection', (ws, req, query) => {
           session_id: state.id,
           audio: { sampleRate: 16000, format: 's16le', channels: 1 },
           tts: { sampleRate: TTS_RATE },
-          lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: state.words }
+          lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() }
         });
         break;
       }
@@ -553,7 +597,7 @@ wss.on('connection', (ws, req, query) => {
         later(300, () => {
           if (state.ended || state.pauseActive) return;
           if (state.currentIndex === 0) {
-            announce('w1', '我们继续，第一个单词：' + state.words[0], PLAN_WORD, 100, () => {
+            announce('w1', wordAnnounceText('我们继续，', 0), PLAN_WORD, 100, () => {
               send({ type: 'state', value: 'listening' });
               armConfirmTimer();
             });
@@ -561,7 +605,7 @@ wss.on('connection', (ws, req, query) => {
             startCheckStage();
           } else {
             announce('w' + (state.currentIndex + 1),
-              '我们继续，第' + (state.currentIndex + 1) + '个单词：' + state.words[state.currentIndex],
+              wordAnnounceText('我们继续，', state.currentIndex),
               PLAN_WORD, (state.currentIndex + 1) * 100,
               () => { send({ type: 'state', value: 'listening' }); armConfirmTimer(); });
           }
