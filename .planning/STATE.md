@@ -5,16 +5,16 @@ milestone_name: realtime-tutor — ACTIVE
 current_phase: 13.1
 current_phase_name: 三段式默写课堂（默写→检查→统一反馈）
 status: executing
-stopped_at: Completed 13.1-02-PLAN.md
-last_updated: "2026-10-07T12:06:57.989Z"
+stopped_at: Completed 13.1-03-PLAN.md
+last_updated: "2026-10-07T13:02:09.302Z"
 last_activity: 2026-10-07
 last_activity_desc: Phase 13.1 execution started
-state_head: 65f5f7133434628e75acd8f143dde216e36dd11f
+state_head: 09eff252bc8a42e2a982ef1d0c26e920f2db4273
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 20
-  completed_plans: 14
+  completed_plans: 15
   percent: 0
 ---
 
@@ -34,7 +34,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈）) — EXECUTING
-Plan: 3 of 7
+Plan: 4 of 7
 Status: Ready to execute
 Last activity: 2026-10-07 — Phase 13.1 execution started
 Next: /gsd-plan-phase 13.1 → 13-13 VPS 部署+正式验收
@@ -52,6 +52,7 @@ v2.0：4 个活跃阶段，Phase 13 已完成 13/13 个实施计划（13-12 按�
 |------|----------|-------|-------|
 | Phase 13.1 P01 | 309 min | 3 tasks | 17 files |
 | Phase 13.1 P02 | 244 min | 3 tasks | 8 files |
+| Phase 13.1 P03 | 31 min | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -100,6 +101,9 @@ Recent decisions affecting current work:
 - [Phase 13.1]: 打码权威在服务端发送侧（spoken+display 双轨）：TTS/LLM 语境/trim 恒原文，字幕与词表按学生模式脱敏，词明文不再上线；前端只画收到的内容
 - [Phase 13.1]: maskTranscript 以 grading.Normalize 为唯一比对口径（按词 script 选 en/zh），替换落在原始 span，窗口=归一化词长+8，不写第二套归一化
 - [Phase 13.1]: word_revealed 每个首提交 advance 无差别下发（含末词），幂等回放/冲突不发，测试模式完全不发；repeat/slow/resume 用显式打码模板变体避免叠词
+- [Phase 13.1]: 13.1-03 拍照检查走 base64 JSON 控制消息分块（32KiB 原始块 base64 后 43.7KB<65551 读上限；音频二进制通道零改动）；装配纪律＝1-based 连续 seq＋seq1 重置＋1MiB 上限拒绝即清＋cancel/close 清扫（Pitfall 5 不复发、privacy P2 图片仅内存不落盘不入库不打日志）
+- [Phase 13.1]: 13.1-03 OCR 判定只作预填：ProcessWords 任一项低于置信度阈值即整张照片不预填（读数按位保留仅显示，门的所有权独占在管线，失败方向是多人工确认而非错误预填）；预填经 ApplyVerdict(manual=false) 且 request_id 带 OCR 轮次（重拍的新读数不被幂等回放钉死）；乐观锁冲突时该词已有 manual 判定则丢弃预填（D-06① 人工优先）
+- [Phase 13.1]: 13.1-03 统一提交闸维持 13.1-01 逐词 manual=true 口径——零人工动作的 OCR 预填提交在服务端不可能（TestOcrSubmitRequiresManualConfirmation 钉死）；前端待确认高亮＋提交按钮禁用与服务端闸双镜像；判对错只用 GradeWord 的 Correct/NearMiss 布尔，绝不读 j.Rating 旧语义
 
 ### Pending Todos
 
@@ -166,6 +170,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-07T12:04:13.256Z
-Stopped at: Completed 13.1-02-PLAN.md
+Last session: 2026-10-07T12:59:54.954Z
+Stopped at: Completed 13.1-03-PLAN.md
 Resume file: None
