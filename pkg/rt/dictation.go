@@ -70,17 +70,34 @@ const (
 	intentChat    = "chat"    // 其它对话
 )
 
+// Check-stage voice-correction intents (13.1-06, D-06②): the spoken
+// per-word verdict commands. They ride the SAME whitelist — parseIntentJSON
+// stays stage-agnostic — and only the checking stage's dispatcher consumes
+// them (dictation-stage prompts never offer them, so the model has no
+// reason to emit one there; the check-stage prompt is a separate build,
+// Pitfall 8).
+const (
+	intentCheckRight    = "check_right"    // 第 N 个词对了
+	intentCheckWrong    = "check_wrong"    // 第 N 个词错了
+	intentCheckSpelling = "check_spelling" // 写的是 aple（口述实际写法）
+)
+
 // intentWhitelist is the authoritative intent set; parseIntentJSON rejects
-// everything else (T-13-13: the model output is untrusted input).
+// everything else (T-13-13: the model output is untrusted input). ELEVEN
+// values: the eight dictation intents plus the three check-stage voice
+// corrections.
 var intentWhitelist = map[string]bool{
-	intentConfirm: true,
-	intentRepeat:  true,
-	intentSlow:    true,
-	intentHint:    true,
-	intentMeaning: true,
-	intentPause:   true,
-	intentResume:  true,
-	intentChat:    true,
+	intentConfirm:       true,
+	intentRepeat:        true,
+	intentSlow:          true,
+	intentHint:          true,
+	intentMeaning:       true,
+	intentPause:         true,
+	intentResume:        true,
+	intentChat:          true,
+	intentCheckRight:    true,
+	intentCheckWrong:    true,
+	intentCheckSpelling: true,
 }
 
 // Per-word outcome constants recorded in DictationTutor.perWordOutcome.
@@ -931,10 +948,78 @@ meaning 的 reply 只能依据上面给出的释义与例句组织；两者都�
 	return b.String()
 }
 
-// intentPayload is the strict classification JSON shape.
+// buildCheckClassifySystemPrompt assembles the CHECK stage's classification
+// prompt (13.1-06, D-06②) — built separately from buildClassifySystemPrompt,
+// never reusing the dictation eight-word-table (Pitfall 8: a stage-expanded
+// whitelist with a stale prompt lands every spoken verdict in chat):
+//   - persona + child-safety wording carried over VERBATIM;
+//   - the FULL word list with 1-based positions and each word's current
+//     verdict state (check stage is unmasked — words may be named);
+//   - the three check intents plus the base intents that stay legal in the
+//     check stage (repeat/slow/pause/resume/meaning/chat); hint is NOT
+//     offered — the dictation is done, a hint request classifies as chat;
+//   - the strict output contract extended with the optional check payload:
+//     index (1-based position heard) and text (the actual written form the
+//     student spelled out, verbatim, never corrected), required only for the
+//     three check intents. The consumer validates both — the model is never
+//     trusted with bounds (T-13.1-13).
+func buildCheckClassifySystemPrompt(words []lesson.Word, verdicts []lesson.CheckVerdict) string {
+	var b strings.Builder
+	b.WriteString(`你是一位亲切、耐心的小学听写家教老师，正在通过语音陪学生完成听写练习。回应要简短、自然、温暖，适合小学生：写对了就真诚表扬，写错了就耐心鼓励再试一次。严禁任何羞辱、恐吓、惩罚性或让孩子难过的表述。
+课堂节奏由服务端负责，你不能推进课程，只判断学生这句话的意图并给出回应。
+现在是检查阶段：默写已经全部结束，屏幕上正展示全部词的检查面板。学生正在逐词核对纸上的答案，可能会逐词说出对错，也可能说出某个词实际写成的样子。
+`)
+	correctByIndex := make(map[int]lesson.CheckVerdict, len(verdicts))
+	for _, v := range verdicts {
+		correctByIndex[v.WordIndex] = v
+	}
+	for i, w := range words {
+		line := fmt.Sprintf("第 %d 个词：%s", i+1, w.Word)
+		if v, ok := correctByIndex[i]; ok {
+			switch {
+			case v.Manual && v.Correct:
+				line += "——已判定：对"
+			case v.Manual:
+				line += "——已判定：错"
+			default:
+				line += "——有待确认的识别结果"
+			}
+		} else {
+			line += "——还没有判定"
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	b.WriteString(`意图词表（intent 只能是以下值之一）：
+check_right：学生说第几个词写对了
+check_wrong：学生说第几个词写错了
+check_spelling：学生说出某个词实际写成了什么样（比如「写的是 aple」）
+repeat：再读一遍
+slow：慢一点读
+pause：要休息/暂停
+resume：要继续
+meaning：问词义
+chat：其它对话（以前求提示的口令现在也按 chat 处理——默写已经结束，不再有提示）
+输出契约：只输出一个 JSON 对象，不要输出任何其它内容：{"intent":"<意图>","reply":"<给学生听的回复>","index":<词的序号>,"text":"<学生口述的实际写法>"}
+index 和 text 只有 intent 为 check_right/check_wrong/check_spelling 时才需要，其它意图不要输出这两个键。
+index 是学生说的第几个词（从 1 数起）；text 是学生口述的那个词的实际写法，原样记录，绝不改正、绝不补全。
+reply 只有 intent 为 meaning/chat 时才需要，其它意图 reply 给空字符串。
+meaning 的 reply 只能依据上面词表里该词的信息组织；没有信息时，reply 固定原样输出：老师这边没有这个词的释义，你看着纸上的字自己核对吧。`)
+	return b.String()
+}
+
+// intentPayload is the strict classification JSON shape. Index/Text are the
+// check-stage optional payload (13.1-06): Index is the 1-based word position
+// the student named, Text the actual written form they spoke. Both are MODEL
+// output — untrusted — so the parser accepts them shape-only and the
+// CHECK-STAGE CONSUMER validates: Index bounds-checked against the lesson
+// (1..len(words)), Text rune-capped via truncateRunes before any use
+// (T-13.1-13).
 type intentPayload struct {
 	Intent string `json:"intent"`
 	Reply  string `json:"reply"`
+	Index  int    `json:"index"`
+	Text   string `json:"text"`
 }
 
 // extractJSON extracts the first balanced braces block from text (models
@@ -977,6 +1062,24 @@ func parseIntentJSON(text string) (intentPayload, bool) {
 	return p, true
 }
 
+// appendShortHistoryLocked writes the FSM short-history deque (last 4
+// rounds) into a classification user message so chat/meaning replies stay
+// coherent. Caller holds tm.mu (single-lock discipline).
+func (t *DictationTutor) appendShortHistoryLocked(b *strings.Builder) {
+	if len(t.shortHistory) == 0 {
+		return
+	}
+	b.WriteString("\n最近对话：")
+	for _, r := range t.shortHistory {
+		if r.userText != "" {
+			fmt.Fprintf(b, "\n学生：%s", r.userText)
+		}
+		if r.teacherText != "" {
+			fmt.Fprintf(b, "\n老师：%s", r.teacherText)
+		}
+	}
+}
+
 // buildClassifyMessages assembles the classification request: the system
 // prompt (persona + intent vocabulary + word ground truth + output
 // contract) plus one user message carrying the transcript and the FSM
@@ -994,17 +1097,7 @@ func (tm *TurnManager) buildClassifyMessages(transcript string, target TurnTarge
 		if target.WordIndex >= 0 && target.WordIndex < total {
 			card = tm.tutor.words[target.WordIndex]
 		}
-		if len(tm.tutor.shortHistory) > 0 {
-			user.WriteString("\n最近对话：")
-			for _, r := range tm.tutor.shortHistory {
-				if r.userText != "" {
-					fmt.Fprintf(&user, "\n学生：%s", r.userText)
-				}
-				if r.teacherText != "" {
-					fmt.Fprintf(&user, "\n老师：%s", r.teacherText)
-				}
-			}
-		}
+		tm.tutor.appendShortHistoryLocked(&user)
 	}
 	tm.mu.Unlock()
 	system := buildClassifySystemPrompt(card, target.WordIndex, total)
@@ -1045,14 +1138,21 @@ func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, targ
 
 // classifyOnce runs one Chat hop and parses its strict JSON output.
 func (tm *TurnManager) classifyOnce(ctx context.Context, msgs []mimo.Message) (intent, reply string, ok bool) {
-	resp, err := tm.llm.Chat(ctx, msgs,
-		mimo.WithThinkingDisabled(), mimo.WithMaxTokens(classifyMaxTokens))
-	if err != nil {
-		return "", "", false
-	}
-	p, ok := parseIntentJSON(resp.Text())
+	p, ok := tm.classifyOncePayload(ctx, msgs)
 	if !ok {
 		return "", "", false
 	}
 	return p.Intent, p.Reply, true
+}
+
+// classifyOncePayload is classifyOnce returning the FULL parsed payload —
+// the check stage's dispatcher (13.1-06) also consumes the optional
+// Index/Text fields beside intent/reply.
+func (tm *TurnManager) classifyOncePayload(ctx context.Context, msgs []mimo.Message) (intentPayload, bool) {
+	resp, err := tm.llm.Chat(ctx, msgs,
+		mimo.WithThinkingDisabled(), mimo.WithMaxTokens(classifyMaxTokens))
+	if err != nil {
+		return intentPayload{}, false
+	}
+	return parseIntentJSON(resp.Text())
 }

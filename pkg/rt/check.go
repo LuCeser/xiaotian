@@ -33,6 +33,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/grading"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
+	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
 )
 
@@ -1071,4 +1072,263 @@ func (tm *TurnManager) applyOcrPrefills(s Sender, entries []OcrResultEntry) {
 // client) so the UI can show what was recognized next to each row.
 func (tm *TurnManager) broadcastOcrEntries(s Sender, entries []OcrResultEntry) {
 	_ = s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: entries})
+}
+
+// ---------------------------------------------------------------------------
+// Check-stage voice corrections (13.1-06, D-06②): the student speaks the
+// per-word verdicts («第 N 个词对了») and the actual written forms («写的
+// 是 aple»). The spoken utterance classifies through the CHECK prompt
+// (buildCheckClassifySystemPrompt, Pitfall 8) and the verdict lands through
+// the SAME ApplyVerdict write the screen buttons use (RT-07 — voice, taps
+// and OCR prefills converge on one idempotent path). The LLM owns intent and
+// wording only: intent→verdict is server-side deterministic logic, and the
+// model's index/text payload is validated server-side before anything is
+// written (T-13.1-13).
+// ---------------------------------------------------------------------------
+
+// checkVoiceClarifyText is the deterministic fallback when the spoken
+// verdict's payload is unusable (missing/out-of-range index, spelling line
+// without the actual text): the teacher asks again instead of guessing —
+// no write, no fabricated verdict (T-13.1-13).
+const checkVoiceClarifyText = "你说的是第几个词？再说一次好吗？"
+
+// checkResumeAckText is the check-stage resume ack: the pause bit clears but
+// there is no current word to re-announce in the check stage (the dictation
+// resume line names one) — the panel simply continues.
+func checkResumeAckText() string {
+	return "好，我们继续检查。"
+}
+
+// verdictAckText is the teacher's spoken ack after a voice right/wrong
+// verdict lands: it names the marked position (D-06②) with encouragement
+// only (prohibition P1).
+func verdictAckText(idx int, correct bool) string {
+	if correct {
+		return fmt.Sprintf("好，第 %d 个词对了，你真棒！", idx)
+	}
+	return fmt.Sprintf("好，第 %d 个词错了，我们在纸上把它改一改吧。", idx)
+}
+
+// spellingFeedbackText builds the teacher's line after a spoken spelling
+// correction («写的是 aple»): the GradeWord diff drives the tone — an exact
+// match confirms the word is right; a near miss gets the 差一个字母很接近了
+// encouragement that names nothing shameful (prohibition P1); a larger
+// distance gets a gentle let's-look-again line that SPOKEN-quotes the
+// correct word (the check stage is unmasked — speaking the word is fine).
+func spellingFeedbackText(word, actual string, j grading.WordJudgment) string {
+	switch {
+	case j.Correct:
+		return fmt.Sprintf("对，%s 写的就是 %s，这个词写对了，真棒！", word, actual)
+	case j.NearMiss:
+		return fmt.Sprintf("%s 你写成了 %s，差一个字母，很接近了！把它改过来就更棒啦。", word, actual)
+	default:
+		return fmt.Sprintf("我们再看看 %s 这个词：你写的是 %s，把它改过来吧。", word, actual)
+	}
+}
+
+// buildCheckClassifyMessages assembles the CHECK stage's classification
+// request: the check prompt (full word list + verdict states + the extended
+// output contract) plus one user message carrying the transcript and the
+// same FSM short-history deque the dictation path uses.
+func (tm *TurnManager) buildCheckClassifyMessages(transcript string) []mimo.Message {
+	var user strings.Builder
+	user.WriteString("学生说：")
+	user.WriteString(transcript)
+	tm.mu.Lock()
+	var system string
+	if tm.tutor != nil {
+		words := append([]lesson.Word(nil), tm.tutor.words...)
+		verdicts := append([]lesson.CheckVerdict(nil), tm.tutor.checkVerdicts...)
+		system = buildCheckClassifySystemPrompt(words, verdicts)
+		tm.tutor.appendShortHistoryLocked(&user)
+	}
+	tm.mu.Unlock()
+	return []mimo.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user.String()},
+	}
+}
+
+// classifyCheckTurn is the CHECK stage's per-turn classification: the same
+// ONE-call-plus-ONE-retry discipline as classifyTurn (invalid-response
+// discipline), the same EventIntentClassified emission, then the check
+// dispatch. A second unusable output collapses deterministically to chat
+// with the fixed fallback wording.
+func (tm *TurnManager) classifyCheckTurn(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, transcript string) {
+	msgs := tm.buildCheckClassifyMessages(transcript)
+	p, ok := tm.classifyOncePayload(ctx, msgs)
+	if !ok {
+		msgs = append(msgs, mimo.Message{
+			Role:    "user",
+			Content: "你刚才的输出不符合要求。请只输出一个 JSON 对象，键为 intent 与 reply（检查口令再加 index 与 text），不要输出任何其它内容。",
+		})
+		p, ok = tm.classifyOncePayload(ctx, msgs)
+	}
+	if !ok {
+		p = intentPayload{Intent: intentChat, Reply: classifyFallbackReply}
+		// The LLM half of the invalid-response discipline: exactly one
+		// correction retry, then the deterministic spoken fallback.
+		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("attempts", 2))
+	}
+	// Desensitization boundary (T-13-06b): the intent label only.
+	tm.recorder.Emit(EventIntentClassified, infra.F("intent", p.Intent))
+	tm.checkDispatch(s, ctx, cancel, turnID, epoch, p)
+}
+
+// checkDispatch routes one classified check-stage turn. The three check
+// intents converge on the verdict write; every other intent keeps the
+// dictation dispatch semantics (repeat/slow re-read, pause/resume own the
+// pause bit, meaning/chat speak the reply) against a NO-TARGET marker —
+// the check stage has no advance target, and confirm/hint degrade to plain
+// announcements there. An empty model reply is substituted with the fixed
+// fallback so every reply-driven branch announces and settles (a bare
+// return here would strand the FSM mid-turn).
+func (tm *TurnManager) checkDispatch(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, p intentPayload) {
+	switch p.Intent {
+	case intentCheckRight, intentCheckWrong, intentCheckSpelling:
+		tm.applyVoiceVerdict(s, ctx, cancel, epoch, p)
+	case intentResume:
+		// Resume in the check stage clears the pause bit; the dictation
+		// resume line re-announces the CURRENT word, which does not exist
+		// here — speak the stage-appropriate continuation instead.
+		tm.mu.Lock()
+		if tm.tutor != nil {
+			tm.tutor.paused = false
+		}
+		tm.mu.Unlock()
+		tm.runAnnouncement(s, ctx, cancel, checkResumeAckText(), purposeChat, nil)
+	default:
+		reply := p.Reply
+		if reply == "" {
+			reply = classifyFallbackReply
+		}
+		tm.dispatchTurn(s, ctx, cancel, turnID, epoch, p.Intent, reply, TurnTarget{WordIndex: -1})
+	}
+}
+
+// applyVoiceVerdict validates the model's payload and lands the spoken
+// verdict through the executor's idempotent ApplyVerdict — the SAME write
+// the screen taps use (RT-07):
+//   - invalid payload (index outside 1..len(words), or a spelling line
+//     without the actual text): the clarification question announces, NO
+//     write — the model is never guessed around (T-13.1-13);
+//   - check_right/check_wrong: manual=true with the intent's correctness;
+//   - check_spelling: the spoken written form is graded with GradeWord (the
+//     single judgement engine); correctness follows the GRADE — the child
+//     just told us what is on the paper, and grading it is server-side
+//     deterministic logic, never model discretion. The verdict carries the
+//     text as OcrText and the recognized entry rides the ocr_result display
+//     channel beside the row;
+//   - a store conflict aligns from the stored truth and retries ONCE on the
+//     fresh version; a failed write degrades through failTurn honestly.
+//
+// The teacher's spoken ack goes through runAnnouncement — the ACK gate the
+// check stage never bypasses (Pitfall 9).
+func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, p intentPayload) {
+	tm.mu.Lock()
+	alive := tm.tutor != nil && !tm.closed && tm.tutor.checking
+	lessonID := tm.tutor.lessonID
+	version := tm.tutor.version
+	total := len(tm.tutor.words)
+	tm.mu.Unlock()
+	if !alive {
+		// The session closed (or left the check stage) mid-turn: nothing to
+		// act on, nothing to announce.
+		return
+	}
+
+	spelling := p.Intent == intentCheckSpelling
+	text := truncateRunes(strings.TrimSpace(p.Text), maxReplyRunes)
+	if p.Index < 1 || p.Index > total || (spelling && text == "") {
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeInvalidMessage),
+			infra.F("at", "voice_verdict"),
+		)
+		tm.runAnnouncement(s, ctx, cancel, checkVoiceClarifyText, purposeChat, nil)
+		return
+	}
+	idx := p.Index - 1
+
+	var (
+		correct bool
+		line    string
+		entry   *OcrResultEntry
+	)
+	if spelling {
+		word := tm.tutorWordAt(idx)
+		j := grading.GradeWord(word, text, wordLang(word))
+		correct = j.Correct
+		line = spellingFeedbackText(word, text, j)
+		entry = &OcrResultEntry{WordIndex: idx, OcrText: text, Correct: j.Correct, NearMiss: j.NearMiss}
+	} else {
+		correct = p.Intent == intentCheckRight
+		line = verdictAckText(p.Index, correct)
+	}
+
+	verdict := lesson.CheckVerdict{WordIndex: idx, Correct: correct, Manual: true}
+	if spelling {
+		verdict.OcrText = text
+	}
+
+	// Server-generated idempotency key, unique per voice mutation: the
+	// version read fresh under the lock is baked in, and every successful
+	// ApplyVerdict bumps the version — so a later spoken flip of the same
+	// word never replays the earlier write (a replayed key would silently
+	// pin the FIRST verdict, the OCR retake lesson).
+	requestID := fmt.Sprintf("%s-verdict-%d-v%d-voice", lessonID, idx, version)
+	res, err := tm.exec.ApplyVerdict(ctx, lessonID, version, requestID, verdict)
+	if err != nil {
+		var conflict *lesson.ConflictError
+		if !errors.As(err, &conflict) {
+			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
+			return
+		}
+		// Conflict: align from the stored truth and retry once on the fresh
+		// version (same discipline as the OCR prefill path).
+		l, gerr := tm.exec.GetLessonState(ctx, lessonID)
+		if gerr != nil {
+			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
+			return
+		}
+		tm.mu.Lock()
+		tm.tutor.align(l.CurrentIndex, l.Version)
+		tm.tutor.resyncCheck(l)
+		tm.mu.Unlock()
+		version = l.Version
+		requestID = fmt.Sprintf("%s-verdict-%d-v%d-voice", lessonID, idx, version)
+		res, err = tm.exec.ApplyVerdict(ctx, lessonID, version, requestID, verdict)
+		if err != nil {
+			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
+			return
+		}
+	}
+
+	tm.mu.Lock()
+	tm.tutor.version = res.NewVersion
+	tm.tutor.checkVerdicts = res.Verdicts
+	verdicts := append([]lesson.CheckVerdict(nil), res.Verdicts...)
+	tm.mu.Unlock()
+	tm.broadcastCheckVerdicts(s, verdicts)
+	if entry != nil {
+		_ = s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: []OcrResultEntry{*entry}})
+	}
+	if !res.Idempotent {
+		tm.recorder.Emit(EventVerdictApplied,
+			infra.F("word_index", idx),
+			infra.F("manual", true),
+			infra.F("correct", correct),
+		)
+	}
+	tm.runAnnouncement(s, ctx, cancel, line, purposeChat, nil)
+}
+
+// tutorWordAt snapshots one lesson word (empty when out of range). Caller
+// does NOT hold tm.mu — the single-lock discipline applies to every field.
+func (tm *TurnManager) tutorWordAt(idx int) string {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.tutor == nil || idx < 0 || idx >= len(tm.tutor.words) {
+		return ""
+	}
+	return tm.tutor.words[idx].Word
 }

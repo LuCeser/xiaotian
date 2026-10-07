@@ -1021,22 +1021,24 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		tm.mu.Unlock()
 		return
 	}
-	if tm.tutor.checking {
-		// 13.1-01: the check stage's input is the SCREEN (check_verdict
-		// frames); voice turns are 13.1-06. Dropping the segment here keeps
-		// the cursor-target capture safe (currentIndex == len(words) would
-		// panic turnTarget) and never disturbs the check panel.
-		tm.mu.Unlock()
-		return
-	}
+	// 13.1-06 (D-06②): the check stage has a VOICE input now — per-word
+	// verdict commands classify through the CHECK prompt and converge on the
+	// same ApplyVerdict write as the screen buttons (RT-07). The advance
+	// target below must NOT be captured here: the cursor sits at
+	// len(words) in the check stage and turnTarget would panic.
+	checking := tm.tutor.checking
 	epoch := tm.epoch
 	turnID := tm.nextTurnIDLocked()
 	tm.state = StateProcessing
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.turnCancel = cancel
-	// Immutable advance target captured BEFORE classification (T-13-15c):
-	// a late confirm may only ever act on this word/version pair.
-	target := tm.tutor.turnTarget()
+	var target TurnTarget
+	if !checking {
+		// Immutable advance target captured BEFORE classification
+		// (T-13-15c): a late confirm may only ever act on this word/version
+		// pair.
+		target = tm.tutor.turnTarget()
+	}
 	tm.mu.Unlock()
 	defer cancel()
 
@@ -1075,7 +1077,9 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	}
 	// Transcript desensitization (13.1-02 D-10, Pitfall 4 red line): the
 	// OUTBOUND copy masks still-unrevealed words; the history and the
-	// classification input keep the raw transcript.
+	// classification input keep the raw transcript. In the check stage the
+	// masked set is empty by construction (nothing re-masks after
+	// check_started) — the display copy is the raw transcript either way.
 	display := transcript
 	tm.mu.Lock()
 	tm.tutor.appendUserRound(transcript)
@@ -1084,6 +1088,14 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	}
 	tm.mu.Unlock()
 	_ = s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: display})
+
+	if checking {
+		// 13.1-06: the check stage's classification runs against the CHECK
+		// prompt (Pitfall 8) and dispatches verdicts through the SAME
+		// ApplyVerdict path as the screen buttons (RT-07).
+		tm.classifyCheckTurn(s, ctx, cancel, turnID, epoch, transcript)
+		return
+	}
 
 	intent, reply := tm.classifyTurn(ctx, transcript, target)
 	if !tm.epochCurrent(epoch) {
