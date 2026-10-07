@@ -20,7 +20,7 @@
 # (.local-certs/hta-lan.pem). The mkcert root CA must be trusted by the client
 # browser (it is on this machine; iPads install it via the 8765 distribution
 # page). Health endpoint stays on 127.0.0.1:8081; logs tee to
-# server-8443.err.log. HTTP :8080 and HTTPS :8443 can run side by side.
+# logs/server-8443.err.log. HTTP :8080 and HTTPS :8443 can run side by side.
 #
 # iPad reaches it at: http://<host-LAN-IP>:8080/test-interface.html
 # config.yaml ws.allowedOrigins MUST include the host LAN IP (see config.yaml ws: block).
@@ -113,8 +113,10 @@ if ($listeners.Count -gt 0) {
 # Logs go via redirect: stderr -> the mode's log (the service logs JSON to
 # stderr per config log.output=stderr), stdout -> companion .out log.
 # Truncated at each start so logs reflect only the current instance.
-$logErr = Join-Path $root $logName
-$logOut = if ($Https) { Join-Path $root 'server-8443.out.log' } else { Join-Path $root 'server.out.log' }
+$logDir = Join-Path $root 'logs'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$logErr = Join-Path $logDir $logName
+$logOut = if ($Https) { Join-Path $logDir 'server-8443.out.log' } else { Join-Path $logDir 'server.out.log' }
 "" | Set-Content $logErr -ErrorAction SilentlyContinue
 "" | Set-Content $logOut -ErrorAction SilentlyContinue
 Write-Host "[run.ps1] building service (incremental)..." -ForegroundColor Cyan
@@ -124,7 +126,7 @@ $p = Start-Process -FilePath (Join-Path $root 'bin\service.exe') `
     -ArgumentList '-config', $configFile `
     -WorkingDirectory $root -WindowStyle Hidden `
     -RedirectStandardError $logErr -RedirectStandardOutput $logOut -PassThru
-Write-Host "[run.ps1] service started in background, PID $($p.Id)  (logs: $logName / $(Split-Path -Leaf $logOut))" -ForegroundColor Green
+Write-Host "[run.ps1] service started in background, PID $($p.Id)  (logs: logs\$logName / $(Split-Path -Leaf $logOut))" -ForegroundColor Green
 Write-Host "[run.ps1] entry URL: $entryUrl" -ForegroundColor Cyan
 if ($Https) { Write-Host "[run.ps1] mic-ready secure context; health: http://127.0.0.1:8081/health" -ForegroundColor Cyan }
 
@@ -139,7 +141,7 @@ if ($ready) {
     Write-Host "[run.ps1] :$port is listening — ready" -ForegroundColor Green
 } else {
     Write-Host "[run.ps1] WARNING: :$port not listening within 10s (exit=$($p.HasExited))" -ForegroundColor Yellow
-    Write-Host "[run.ps1] last log lines ($logName):" -ForegroundColor Yellow
+    Write-Host "[run.ps1] last log lines (logs\$logName):" -ForegroundColor Yellow
     Get-Content $logErr -Tail 5 -ErrorAction SilentlyContinue
 }
 Write-Host "[run.ps1] stop with: .\stop.ps1" -ForegroundColor Cyan

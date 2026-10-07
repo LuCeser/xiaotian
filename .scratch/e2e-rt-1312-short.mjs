@@ -32,7 +32,7 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const OUT = path.join(ROOT, '.scratch', 'e2e-1312', 'track2');
 fs.mkdirSync(OUT, { recursive: true });
 const FIX = path.join(ROOT, '.scratch', 'fixtures-1312');
-const SERVER_LOG = path.join(ROOT, 'server-8443.err.log');
+const SERVER_LOG = path.join(ROOT, 'logs', 'server-8443.err.log');
 const URL = 'wss://127.0.0.1:8443/rt';
 
 const TOTAL_MS = 150 * 1000; // watchdog — well under the 3-minute discipline

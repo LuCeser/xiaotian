@@ -4,7 +4,7 @@
  * The service under test is the REAL Go backend started by the repo's dev
  * launcher (run.ps1): it loads .env (TTS credentials), kills any stale :8080
  * listener, runs `go run ./cmd/service -config config.yaml`, and tees output
- * to server.log. Static files come from pkg/web/static at route "/".
+ * to logs/server.log. Static files come from pkg/web/static at route "/".
  *
  * Local run:  npm run e2e   (or: npx playwright test)
  * Requires:   npx playwright install chromium  (one-time)
@@ -32,7 +32,7 @@ module.exports = defineConfig({
   },
   webServer: {
     // Repo-root dev launcher: loads .env, frees :8080, starts the service,
-    // tees logs to server.log (read it when the webServer never comes up).
+    // tees logs to logs/server.log (read it when the webServer never comes up).
     command: 'pwsh -NoProfile -File run.ps1',
     url: 'http://localhost:8080/',
     reuseExistingServer: true,

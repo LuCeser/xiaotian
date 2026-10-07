@@ -32,9 +32,11 @@ foreach ($procId in ($listeners.OwningProcess | Sort-Object -Unique)) {
     Start-Sleep -Seconds 1
 }
 
+$logs = Join-Path $root 'logs'
+New-Item -ItemType Directory -Force -Path $logs | Out-Null
 $p = Start-Process -FilePath (Join-Path $root 'bin\service.exe') `
     -ArgumentList '-config', 'config.local.yaml' `
     -WorkingDirectory $root -WindowStyle Hidden `
-    -RedirectStandardError (Join-Path $root 'server-8443.err.log') `
-    -RedirectStandardOutput (Join-Path $root 'server-8443.out.log') -PassThru
-Write-Host "service started, PID $($p.Id), logs: server-8443.err.log / server-8443.out.log"
+    -RedirectStandardError (Join-Path $logs 'server-8443.err.log') `
+    -RedirectStandardOutput (Join-Path $logs 'server-8443.out.log') -PassThru
+Write-Host "service started, PID $($p.Id), logs: logs\server-8443.err.log / logs\server-8443.out.log"
