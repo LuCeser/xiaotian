@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/pkg/errors"
@@ -55,6 +56,12 @@ const (
 	// "this lesson was NEVER checked" — the row's unchecked marker plus this
 	// event distinguish the fallback from a checked submission (T-13.1-10).
 	EventUncheckedFallback = "unchecked_fallback"
+	// EventReviewCorrection: the correction session submitted its diff —
+	// only the words the student OVERRID against the derived fallback hints
+	// (13.1-04, Pitfall 7 discipline). Fields carry the changed count plus
+	// the honest updated count: the audit chain "first write (or fallback) →
+	// correction" stays replayable from the JSONL stream (T-13.1-10).
+	EventReviewCorrection = "review_correction"
 )
 
 // purposeCheckBridge is the announcement purpose of the check-stage bridge
@@ -84,6 +91,22 @@ const (
 // framed as the lesson's next game, never as a judgment (prohibition P1).
 func checkBridgeText(total int) string {
 	return fmt.Sprintf("全都写完啦，真棒！现在我们一起检查：屏幕上有 %d 个词，想一想你写的是对还是错，点「对」或「错」告诉我吧。", total)
+}
+
+// checkResumeBridgeText speaks the reconnect-into-check transition
+// (13.1-04): the student resumes exactly where they left off (Pitfall 2).
+// ACK-gated like every announcement; word-free wording (the words are
+// already on the screen — check_started unmasked them).
+func checkResumeBridgeText(total int) string {
+	return fmt.Sprintf("欢迎回来！我们继续检查刚才那 %d 个词，接着点「对」或「错」告诉我吧。", total)
+}
+
+// checkCorrectionBridgeText speaks the correction-mode transition (13.1-04,
+// D-03): the fallback rated the lesson without a check, and this session
+// re-checks it. The derived hints are framed as the teacher's first guess —
+// never as a verdict (prohibition P1; D-05: the human call is mandatory).
+func checkCorrectionBridgeText(total int) string {
+	return fmt.Sprintf("欢迎回来！上次没来得及检查，我们现在补上：屏幕上有 %d 个词，老师先猜了一个，你来点「对」或「错」告诉老师真正的答案吧。", total)
 }
 
 // checkedSummaryText builds the post-submit battle summary (D-04): the
@@ -150,6 +173,108 @@ func wireVerdicts(verdicts []lesson.CheckVerdict) []WireVerdict {
 // client renders ONLY this server state, never local optimistic state).
 func (tm *TurnManager) broadcastCheckVerdicts(s Sender, verdicts []lesson.CheckVerdict) {
 	_ = s.SendControl(CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: wireVerdicts(verdicts)})
+}
+
+// derivedVerdicts projects the STORED behavior snapshot onto pending check
+// verdicts (13.1-04 correction mode): a word derives correct iff its
+// behavior rating was good (the D-03 fallback read 无提示说好 and stored it
+// one level down), everything else derives wrong. Manual stays FALSE — the
+// derivation is a display hint, never a confirmation (D-05: every word is
+// confirmed by a human before the correction submit proceeds).
+func derivedVerdicts(words []lesson.Word, outcomes map[string]lesson.WordOutcome) []lesson.CheckVerdict {
+	out := make([]lesson.CheckVerdict, 0, len(words))
+	for i := range words {
+		o := outcomes[strconv.Itoa(i)]
+		out = append(out, lesson.CheckVerdict{
+			WordIndex: i,
+			Correct:   wordRating(o.Outcome, o.Hints) == ratingGood,
+			Manual:    false,
+		})
+	}
+	return out
+}
+
+// startCheckResume restores a session whose lesson row still sits in
+// stage='checking' (13.1-04, Pitfall 2): the check never finished and the
+// close fallback never landed (a crash before the close path, a failed
+// fallback write, or a row from before the fallback existed). The check
+// panel reopens from the STORED state and the student resumes exactly where
+// they left off.
+func (tm *TurnManager) startCheckResume(s Sender, l lesson.Lesson) {
+	tm.startCheckPanelSession(s, l, CheckStartedReasonResume, false)
+}
+
+// startCheckCorrection reopens a SUBMITTED row carrying the D-03 unchecked
+// marker (13.1-04): the fallback already rated the lesson from behavior, so
+// this session is the post-hoc correction — the derived downgraded verdicts
+// show as pending hints and check_submit runs the diff-only correction
+// path.
+func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson) {
+	tm.startCheckPanelSession(s, l, CheckStartedReasonCorrection, true)
+}
+
+// startCheckPanelSession is the shared body of the two reconnect-into-check
+// starters: bind the tutor from the row (stored verdicts/outcomes into the
+// caches), answer session_ready with the mode-appropriate lesson view
+// (dictation is done, so the student view reveals every word), broadcast
+// check_started with the FULL plaintext list (the D-10 unmask point — the
+// same message the dictation_done entry uses, only the reason differs) plus
+// the authoritative verdict echo, then speak the reason's bridge through the
+// ACK gate. No due-fetch, no word timers, no rating write — those belong to
+// the paths that FINISH the check (handleCheckVerdict / handleCheckSubmit).
+func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason string, correction bool) {
+	words := make([]string, 0, len(l.Cards))
+	for _, c := range l.Cards {
+		words = append(words, c.Word)
+	}
+	// The panel's initial verdict state: stored verdicts for a resume, the
+	// derived fallback hints for a correction (pending, manual=false).
+	panelVerdicts := append([]lesson.CheckVerdict(nil), l.Verdicts...)
+	if correction {
+		panelVerdicts = derivedVerdicts(l.Cards, l.Outcomes)
+	}
+
+	tm.mu.Lock()
+	tm.tutor = newDictationTutor(l)
+	tm.tutor.completed = true  // word pacing is over; the countdown stays disarmed
+	tm.tutor.checking = true   // the check panel owns the input surface
+	tm.tutor.correction = correction
+	tm.tutor.checkVerdicts = panelVerdicts
+	tm.tutor.restoreOutcomes(l.Outcomes)
+	tm.state = StateListening
+	tm.sessionReadyAt = time.Now()
+	tm.mu.Unlock()
+
+	_ = s.SendControl(SessionReadyMsg{
+		Type:      TypeSessionReady,
+		SessionID: tm.session,
+		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
+		Lesson:    tm.lessonViewFor(l),
+	})
+	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
+
+	tm.recorder.Emit(EventCheckStarted, infra.F("total", len(words)))
+	_ = s.SendControl(CheckStartedMsg{
+		Type:   TypeCheckStarted,
+		Words:  words,
+		Reason: reason,
+	})
+	tm.broadcastCheckVerdicts(s, panelVerdicts)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	tm.turnCancel = cancel
+	tm.mu.Unlock()
+	bridge := checkResumeBridgeText(len(words))
+	if correction {
+		bridge = checkCorrectionBridgeText(len(words))
+	}
+	// Own goroutine: handleSessionInit runs on the transport READ loop, and
+	// the announcement blocks on its playback ack — the same shape
+	// startDictationSession uses for the greeting (the ack must stay
+	// servable).
+	go tm.runAnnouncement(s, ctx, cancel, bridge, purposeCheckBridge, nil)
 }
 
 // enterCheck opens the check stage; reachable ONLY from advanceTarget's
@@ -310,6 +435,25 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		tm.sendError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
 		return
 	}
+
+	tm.mu.Lock()
+	correction := tm.tutor.correction
+	correctionSeen := correction && tm.tutor.reviewSeen
+	tm.mu.Unlock()
+	if correction {
+		if correctionSeen {
+			// Duplicate correction submit: the diff batch already ran —
+			// never a second SubmitReview (Pitfall 6, same discipline as
+			// the normal path above).
+			tm.recorder.Emit(EventError,
+				infra.F("code", ErrCodeInvalidMessage),
+				infra.F("duplicate", "correction_submit"),
+			)
+			return
+		}
+		tm.submitCorrections(s, m)
+		return
+	}
 	if m.RequestID == "" {
 		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
 		return
@@ -448,6 +592,190 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 	_ = s.SendControl(result)
 
 	summary := checkedSummaryText(total, correct, result.Updated, requested, saveFailed)
+	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
+}
+
+// ---------------------------------------------------------------------------
+// Correction mode (13.1-04, D-03): a submitted+unchecked row reopens for the
+// post-hoc check. The derived fallback verdicts are display hints; the
+// human confirms every word (D-05) and check_submit runs the DIFF-ONLY
+// second write — only overridden words ride the correction batch (Pitfall 7:
+// the smallest possible second review, honestly recorded as a correction).
+// ---------------------------------------------------------------------------
+
+// submitCorrections is the correction-mode check_submit: the SAME per-word
+// manual gate as the normal submit, but the row is already 'submitted' (the
+// CompleteCheck latch fell with the fallback), so instead of a stage
+// transition the confirmed verdicts are diffed against the DERIVED fallback
+// hints and only overridden words are re-rated via checkRating and written.
+// ClearUnchecked then resets the marker idempotently, the honest wrap line
+// speaks through the ACK gate, and session_ended(lesson_complete) closes.
+// All-agreeing confirmations produce an empty diff: no review write runs,
+// the marker still clears, the wrap still thanks — the student confirmed
+// the fallback as it stands.
+func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
+	if m.RequestID == "" {
+		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
+		return
+	}
+
+	// Submit gate (D-05, identical to the normal path): every word needs a
+	// MANUAL verdict — the derived hints never satisfy it.
+	tm.mu.Lock()
+	lessonID := tm.tutor.lessonID
+	total := len(tm.tutor.words)
+	manual := make(map[int]bool, total)
+	for _, v := range tm.tutor.checkVerdicts {
+		if v.Manual {
+			manual[v.WordIndex] = true
+		}
+	}
+	tm.mu.Unlock()
+	if len(manual) < total {
+		tm.sendError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
+		return
+	}
+
+	// The row is the authority for the diff inputs (stored outcomes →
+	// derived hints, current version for ClearUnchecked).
+	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	tm.turnCancel = cancel
+	tm.mu.Unlock()
+	l, err := tm.exec.GetLessonState(ctx, lessonID)
+	if err != nil {
+		tm.sendError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		return
+	}
+
+	tm.mu.Lock()
+	confirmed := append([]lesson.CheckVerdict(nil), tm.tutor.checkVerdicts...)
+	tm.mu.Unlock()
+	hints := make(map[int]int, len(l.Cards))
+	for key, o := range l.Outcomes {
+		if idx, perr := strconv.Atoi(key); perr == nil {
+			hints[idx] = o.Hints
+		}
+	}
+	derived := derivedVerdicts(l.Cards, l.Outcomes)
+	changed := make(map[string]string)
+	for _, v := range confirmed {
+		if v.WordIndex < 0 || v.WordIndex >= len(l.Cards) {
+			continue
+		}
+		var base *lesson.CheckVerdict
+		for i := range derived {
+			if derived[i].WordIndex == v.WordIndex {
+				base = &derived[i]
+				break
+			}
+		}
+		if base != nil && base.Correct == v.Correct {
+			continue // the human call agrees with the derivation: stored rating stands
+		}
+		result := checkWrong
+		if v.Correct {
+			result = checkCorrect
+		}
+		rating := checkRating(result, hints[v.WordIndex])
+		if rating == "" {
+			continue
+		}
+		changed[l.Cards[v.WordIndex].Word] = rating
+	}
+	correct := 0
+	for _, v := range confirmed {
+		if v.Correct && v.WordIndex >= 0 && v.WordIndex < len(l.Cards) {
+			correct++
+		}
+	}
+
+	go tm.finishCorrections(s, ctx, cancel, correctionInputs{
+		requestID: m.RequestID,
+		lessonID:  lessonID,
+		version:   l.Version,
+		changed:   changed,
+		total:     total,
+		correct:   correct,
+	})
+}
+
+// correctionInputs carries the diff result into the finishing goroutine.
+type correctionInputs struct {
+	requestID string
+	lessonID  string
+	version   int
+	changed   map[string]string
+	total     int
+	correct   int
+}
+
+// finishCorrections runs on its own goroutine (runNaturalEnding blocks on
+// the summary ack, and the read loop must keep serving that ack): the
+// diff-only SubmitReview, the correction event, ClearUnchecked, the honest
+// review_result, then the wrap line and the acked ending.
+func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel context.CancelFunc, in correctionInputs) {
+	defer cancel()
+
+	requested := len(in.changed)
+	updated := 0
+	saveFailed := false
+	if requested > 0 {
+		wres, err := tm.cfg.Words.SubmitReview(ctx, in.changed)
+		switch {
+		case err != nil:
+			// Honest failure: the correction was NOT saved — never a
+			// narrated success (transparency prohibition).
+			saveFailed = true
+			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+		default:
+			updated = len(wres.Updated)
+			tm.recorder.Emit(EventReviewCorrection,
+				infra.F("changed", requested),
+				infra.F("updated", updated),
+			)
+			if updated < requested {
+				// Partial/zero update with nil error is not success (S-05).
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+			}
+		}
+	}
+
+	// Clear the D-03 marker: idempotent, deterministic key. It runs even on
+	// a failed/empty diff submit? NO — on a FAILED review write the row
+	// keeps its unchecked marker so the next session can retry the
+	// correction; only a clean run (or an empty diff) closes the loop.
+	if !saveFailed {
+		if _, err := tm.exec.ClearUnchecked(ctx, in.lessonID, in.version, in.lessonID+"-clear-unchecked"); err != nil {
+			// A failed marker reset leaves the row re-openable for
+			// correction — honest, recoverable, never retried blindly.
+			tm.recorder.Emit(EventError,
+				infra.F("code", ErrCodeProviderFailed),
+				infra.F("at", "clear_unchecked"),
+			)
+		}
+	}
+
+	tm.mu.Lock()
+	tm.tutor.version = in.version
+	tm.tutor.checking = false
+	tm.tutor.reviewSeen = true
+	tm.mu.Unlock()
+
+	result := ReviewResultMsg{
+		Type:      TypeReviewResult,
+		Requested: requested,
+		Updated:   updated,
+		Missing:   0,
+		Unchecked: false,
+	}
+	if saveFailed {
+		result.Updated = 0
+		result.Missing = requested
+	}
+	_ = s.SendControl(result)
+
+	summary := checkedSummaryText(in.total, in.correct, result.Updated, requested, saveFailed)
 	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
 }
 

@@ -636,6 +636,181 @@ func (e *Executor) CompleteCheck(ctx context.Context, lessonID string, expectedV
 	return res, nil
 }
 
+// ClearUncheckedResult is the outcome of one clear_unchecked execution
+// (13.1-04): the unchecked marker is gone and the row version moved.
+type ClearUncheckedResult struct {
+	Stage      string `json:"stage"`
+	NewVersion int    `json:"new_version"`
+	Idempotent bool   `json:"-"`
+}
+
+// ClearUnchecked resets the lessons row's unchecked marker (13.1-04): the
+// correction path flips it once every word is human-confirmed and the
+// diff-only review correction is recorded. Same idempotent framework as the
+// other classroom tools — request_id dedupe (tool_requests PK) plus the
+// expected_version optimistic lock. There is deliberately NO stage gate (the
+// row is already 'submitted'); the UPDATE carries `AND unchecked = 1`, so an
+// already-cleared row under a NEW request_id is an idempotent no-op instead
+// of a second version bump, and a stale expected_version is a conflict that
+// writes nothing. Same short-transaction discipline as AdvanceWord (L-3).
+func (e *Executor) ClearUnchecked(ctx context.Context, lessonID string, expectedVersion int, requestID string) (ClearUncheckedResult, error) {
+	if lessonID == "" || requestID == "" || expectedVersion < 1 {
+		e.logger.Warn("clear unchecked rejected: invalid arguments",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", lessonID),
+			infra.F("request_id", requestID),
+			infra.F("expected_version", expectedVersion),
+		)
+		return ClearUncheckedResult{}, errors.Wrap(ErrInvalidLesson, "clear unchecked: lesson_id/request_id must be non-empty and expected_version >= 1")
+	}
+
+	tx, err := e.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		e.logger.Error("clear unchecked: begin tx failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", lessonID),
+			infra.F("request_id", requestID),
+			infra.ErrField(err),
+		)
+		return ClearUncheckedResult{}, errors.Wrap(err, "clear unchecked: begin tx")
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// (a) Claim the request_id (typed constraint detection, review L-2). A
+	// duplicate replays the FIRST stored result, never a second write.
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO tool_requests (request_id, lesson_id, tool, result) VALUES (?, ?, 'clear_unchecked', '')",
+		requestID, lessonID,
+	); err != nil {
+		var serr *sqlite.Error
+		if errors.As(err, &serr) && (serr.Code() == lib.SQLITE_CONSTRAINT_PRIMARYKEY ||
+			serr.Code() == lib.SQLITE_CONSTRAINT_UNIQUE ||
+			serr.Code() == lib.SQLITE_CONSTRAINT) {
+			_ = tx.Rollback()
+			stored, gerr := e.storedCheckResult(ctx, lessonID, requestID, "clear_unchecked")
+			if gerr != nil {
+				return ClearUncheckedResult{}, gerr
+			}
+			var res ClearUncheckedResult
+			if uerr := json.Unmarshal([]byte(stored), &res); uerr != nil {
+				return ClearUncheckedResult{}, errors.Wrap(uerr, "clear unchecked: unmarshal stored result")
+			}
+			res.Idempotent = true
+			return res, nil
+		}
+		e.logger.Error("clear unchecked: insert tool_requests failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", lessonID),
+			infra.F("request_id", requestID),
+			infra.ErrField(err),
+		)
+		return ClearUncheckedResult{}, errors.Wrap(err, "clear unchecked: insert tool_requests")
+	}
+
+	// (b) The guarded write: optimistic lock plus the unchecked=1 gate.
+	result, err := tx.ExecContext(ctx,
+		"UPDATE lessons SET unchecked = 0, version = version + 1, updated_at = datetime('now') WHERE lesson_id = ? AND version = ? AND unchecked = 1",
+		lessonID, expectedVersion,
+	)
+	if err != nil {
+		e.logger.Error("clear unchecked: update lessons failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", lessonID),
+			infra.F("request_id", requestID),
+			infra.ErrField(err),
+		)
+		return ClearUncheckedResult{}, errors.Wrap(err, "clear unchecked: update lessons")
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return ClearUncheckedResult{}, errors.Wrap(err, "clear unchecked: rows affected")
+	}
+	if rows == 0 {
+		// Distinguish already-cleared (idempotent no-op) from version
+		// conflict — both leave the row untouched, only the verdict differs.
+		var curVersion int
+		var curStage string
+		var curUnchecked int
+		qerr := tx.QueryRowContext(ctx,
+			"SELECT version, stage, unchecked FROM lessons WHERE lesson_id = ?",
+			lessonID,
+		).Scan(&curVersion, &curStage, &curUnchecked)
+		if qerr != nil {
+			if errors.Is(qerr, sql.ErrNoRows) {
+				e.logger.Error("clear unchecked: lesson not found",
+					infra.F("component", "lesson/executor"),
+					infra.F("lesson_id", lessonID),
+					infra.F("request_id", requestID),
+				)
+				return ClearUncheckedResult{}, errors.Wrap(ErrLessonNotFound, fmt.Sprintf("clear unchecked for lesson %q", lessonID))
+			}
+			return ClearUncheckedResult{}, errors.Wrap(qerr, "clear unchecked: read current version")
+		}
+		if curUnchecked == 0 {
+			// Already cleared (a lost response retried under a fresh
+			// request_id, or a racing clear): an idempotent no-op. The
+			// request claim rolls back with the transaction — no empty
+			// result residue is left behind.
+			e.logger.Info("clear unchecked: already cleared, replaying stored state",
+				infra.F("component", "lesson/executor"),
+				infra.F("lesson_id", lessonID),
+				infra.F("request_id", requestID),
+			)
+			return ClearUncheckedResult{Stage: curStage, NewVersion: curVersion, Idempotent: true}, nil
+		}
+		e.logger.Warn("clear unchecked: version conflict",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", lessonID),
+			infra.F("request_id", requestID),
+			infra.F("expected_version", expectedVersion),
+			infra.F("current_version", curVersion),
+		)
+		return ClearUncheckedResult{}, &ConflictError{CurrentVersion: curVersion}
+	}
+
+	// (c) Read back, persist the typed result, commit — atomically with the
+	// marker reset above.
+	rb, err := readCheckStageTx(ctx, tx, lessonID)
+	if err != nil {
+		return ClearUncheckedResult{}, errors.Wrap(err, "clear unchecked: read back")
+	}
+	res := ClearUncheckedResult{Stage: rb.Stage, NewVersion: rb.NewVersion}
+	resultJSON, err := json.Marshal(res)
+	if err != nil {
+		return ClearUncheckedResult{}, errors.Wrap(err, "clear unchecked: marshal result")
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE tool_requests SET result = ? WHERE request_id = ?",
+		string(resultJSON), requestID,
+	); err != nil {
+		e.logger.Error("clear unchecked: store result failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", lessonID),
+			infra.F("request_id", requestID),
+			infra.ErrField(err),
+		)
+		return ClearUncheckedResult{}, errors.Wrap(err, "clear unchecked: store result")
+	}
+	if err := tx.Commit(); err != nil {
+		e.logger.Error("clear unchecked: commit failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", lessonID),
+			infra.F("request_id", requestID),
+			infra.ErrField(err),
+		)
+		return ClearUncheckedResult{}, errors.Wrap(err, "clear unchecked: commit")
+	}
+
+	e.logger.Info("clear unchecked committed",
+		infra.F("component", "lesson/executor"),
+		infra.F("lesson_id", lessonID),
+		infra.F("request_id", requestID),
+		infra.F("expected_version", expectedVersion),
+		infra.F("new_version", rb.NewVersion),
+	)
+	return res, nil
+}
+
 // checkStageTx is the shared transaction skeleton of the three check-stage
 // tools, mirroring advanceTx: (a) claim request_id in tool_requests (a
 // duplicate rolls back and replays the FIRST stored result), (b) apply the

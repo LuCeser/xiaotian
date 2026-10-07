@@ -84,6 +84,9 @@ type LessonExecutor interface {
 	// idempotency latch (only its first commit may drive the one FSRS
 	// write).
 	CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error)
+	// ClearUnchecked resets the D-03 unchecked marker (13.1-04) once the
+	// correction session confirmed every word and recorded its diff.
+	ClearUnchecked(ctx context.Context, lessonID string, expectedVersion int, requestID string) (lesson.ClearUncheckedResult, error)
 }
 
 // TurnManagerConfig configures one TurnManager.
@@ -511,7 +514,17 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 		// frozen boundary). Visible failure — never a re-RunDue, never a
 		// fake backfill.
 		tm.failLessonInit(s)
+	case l.Stage == lesson.StageChecking:
+		// 13.1-04 (Pitfall 2): the check never finished and the close
+		// fallback never landed — reopen the check panel from the row.
+		tm.startCheckResume(s, l)
+	case l.Stage == lesson.StageSubmitted && l.Unchecked:
+		// 13.1-04 (D-03): the fallback rated this lesson unchecked —
+		// reopen as the post-hoc correction instead of short-circuiting.
+		tm.startCheckCorrection(s, l)
 	case l.CurrentIndex >= len(l.Cards):
+		// Legacy + normally completed rows short-circuit exactly as before
+		// (stage first, index second — the new branches never swallow them).
 		tm.startCompletedSession(s, l)
 	default:
 		tm.startDictationSession(s, l)

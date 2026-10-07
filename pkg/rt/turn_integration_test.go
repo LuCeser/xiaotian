@@ -701,7 +701,9 @@ func itReadCheckVerdicts(t *testing.T, conn *websocket.Conn) CheckVerdictsMsg {
 
 // itSeedCheckRow persists a stage='checking' row (with outcomes and optional
 // verdicts) through the executor's own idempotent writes — the state a
-// session leaves behind when it dies before any close path ran.
+// session leaves behind when it dies before any close path ran. The cursor
+// advances to the end first, mirroring the only real path into the check
+// stage (the last advance commit's finished branch).
 func itSeedCheckRow(t *testing.T, exec *fakeExecutor, outcomes map[string]lesson.WordOutcome, verdicts ...lesson.CheckVerdict) lesson.Lesson {
 	t.Helper()
 	ctx := context.Background()
@@ -709,11 +711,19 @@ func itSeedCheckRow(t *testing.T, exec *fakeExecutor, outcomes map[string]lesson
 	if err != nil {
 		t.Fatalf("EnsureLessonCards: %v", err)
 	}
-	ec, err := exec.EnterCheck(ctx, "it-lesson", l.Version, "it-lesson-enter-check", outcomes)
+	version := l.Version
+	for i := range itCards {
+		res, err := exec.AdvanceWord(ctx, "it-lesson", version, fmt.Sprintf("it-seed-adv-%d", i))
+		if err != nil {
+			t.Fatalf("AdvanceWord seed %d: %v", i, err)
+		}
+		version = res.NewVersion
+	}
+	ec, err := exec.EnterCheck(ctx, "it-lesson", version, "it-lesson-enter-check", outcomes)
 	if err != nil {
 		t.Fatalf("EnterCheck: %v", err)
 	}
-	version := ec.NewVersion
+	version = ec.NewVersion
 	for i, v := range verdicts {
 		res, err := exec.ApplyVerdict(ctx, "it-lesson", version, fmt.Sprintf("it-seed-v-%d", i), v)
 		if err != nil {
@@ -836,7 +846,15 @@ func TestUncheckedCorrection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureLessonCards: %v", err)
 	}
-	ec, err := exec.EnterCheck(ctx, "it-lesson", l.Version, "it-lesson-enter-check", map[string]lesson.WordOutcome{
+	version := l.Version
+	for i := range itCards {
+		res, aerr := exec.AdvanceWord(ctx, "it-lesson", version, fmt.Sprintf("it-seed-adv-%d", i))
+		if aerr != nil {
+			t.Fatalf("AdvanceWord seed %d: %v", i, aerr)
+		}
+		version = res.NewVersion
+	}
+	ec, err := exec.EnterCheck(ctx, "it-lesson", version, "it-lesson-enter-check", map[string]lesson.WordOutcome{
 		"0": {Outcome: "confirmed", Hints: 0},
 		"1": {Outcome: "confirmed", Hints: 1},
 	})
@@ -951,7 +969,13 @@ func TestLegacyCompletedStillShortCircuits(t *testing.T) {
 	if len(ready.Lesson.Words) == 0 {
 		t.Fatalf("session_ready.lesson.words = %v, want the completed lesson view", ready.Lesson.Words)
 	}
-	ended := itReadUntilSessionEnded(t, conn, &atomic.Bool{})
+	// The short-circuit announces nothing: session_ended follows
+	// session_ready directly (no ack gate involved).
+	endedRaw := itRead(t, conn, 10*time.Second, func(m itMsg) bool { return m.typ == TypeSessionEnded })
+	var ended SessionEndedMsg
+	if err := json.Unmarshal(endedRaw.raw, &ended); err != nil {
+		t.Fatalf("session_ended decode: %v", err)
+	}
 	if ended.Reason != ReasonLessonComplete {
 		t.Errorf("reason = %q, want %s", ended.Reason, ReasonLessonComplete)
 	}

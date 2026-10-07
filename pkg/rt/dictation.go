@@ -296,6 +296,13 @@ type DictationTutor struct {
 	// (Pitfall 6 / T-13.1-01).
 	reviewSeen   bool
 	reviewResult ReviewResultMsg
+	// correction marks a session that reopened a SUBMITTED row carrying the
+	// D-03 unchecked marker (13.1-04): the check panel shows the derived
+	// downgraded verdicts as pending hints and check_submit takes the
+	// diff-only correction path instead of the CompleteCheck latch. checking
+	// holds too — the panel, the verdict writes and the voice gate behave
+	// exactly as in a live check stage.
+	correction bool
 }
 
 // newDictationTutor binds the FSM to a lesson row read back from the
@@ -425,12 +432,30 @@ func (t *DictationTutor) snapshotCheckOutcomes() map[string]lesson.WordOutcome {
 	return out
 }
 
+// restoreOutcomes rebuilds the in-memory behavior caches from the row's
+// stored outcome snapshot — the rating input of the resume/correction
+// sessions (13.1-04): perWordOutcome/perWordHints feed the fallback and the
+// correction diff exactly as they fed EnterCheck's snapshot. Unknown indexes
+// are skipped. Caller holds tm.mu (single-lock discipline).
+func (t *DictationTutor) restoreOutcomes(outcomes map[string]lesson.WordOutcome) {
+	for key, o := range outcomes {
+		idx, err := strconv.Atoi(key)
+		if err != nil || idx < 0 || idx >= len(t.words) {
+			continue
+		}
+		t.perWordOutcome[idx] = o.Outcome
+		t.perWordHints[idx] = o.Hints
+	}
+}
+
 // resyncCheck aligns the in-memory check state to an externally observed
 // lessons row (a conflict read-back or an executor replay): the cache always
-// bends to the store. Caller holds tm.mu (single-lock discipline).
+// bends to the store. A correction session (13.1-04) keeps its panel open —
+// the row's stage is 'submitted' by construction there. Caller holds tm.mu
+// (single-lock discipline).
 func (t *DictationTutor) resyncCheck(l lesson.Lesson) {
 	t.version = l.Version
-	t.checking = l.Stage == lesson.StageChecking
+	t.checking = t.correction || l.Stage == lesson.StageChecking
 	t.checkVerdicts = l.Verdicts
 	if l.Stage == lesson.StageSubmitted {
 		t.completed = true

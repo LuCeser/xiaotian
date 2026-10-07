@@ -169,6 +169,12 @@ func (t *LessonTools) CompleteCheck(ctx context.Context, lessonID string, expect
 	return t.exec.CompleteCheck(ctx, lessonID, expectedVersion, requestID, unchecked)
 }
 
+// ClearUnchecked resets the D-03 unchecked marker (13.1-04, clear_unchecked
+// tool) once the correction session recorded its diff.
+func (t *LessonTools) ClearUnchecked(ctx context.Context, lessonID string, expectedVersion int, requestID string) (lesson.ClearUncheckedResult, error) {
+	return t.exec.ClearUnchecked(ctx, lessonID, expectedVersion, requestID)
+}
+
 // Compile-time interface check: the LessonTools adapter satisfies the turn
 // manager's classroom seam (13-06 key_link).
 var _ LessonExecutor = (*LessonTools)(nil)
@@ -185,6 +191,7 @@ var (
 	_ func(*lesson.Executor, context.Context, string, int, string, map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) = (*lesson.Executor).EnterCheck
 	_ func(*lesson.Executor, context.Context, string, int, string, lesson.CheckVerdict) (lesson.ApplyVerdictResult, error)        = (*lesson.Executor).ApplyVerdict
 	_ func(*lesson.Executor, context.Context, string, int, string, bool) (lesson.CompleteCheckResult, error)                      = (*lesson.Executor).CompleteCheck
+	_ func(*lesson.Executor, context.Context, string, int, string) (lesson.ClearUncheckedResult, error)                            = (*lesson.Executor).ClearUnchecked
 )
 
 // pyfsrsFetchLockHours is the fetch-lock window PyFSRS explicitly passes on

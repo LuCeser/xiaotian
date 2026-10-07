@@ -311,6 +311,35 @@ func (f *fakeExecutor) CompleteCheck(_ context.Context, lessonID string, expecte
 	return res, nil
 }
 
+// ClearUnchecked mirrors the real executor's clear_unchecked semantics on
+// the in-memory row (13.1-04): request_id replay, `AND unchecked = 1` gate
+// (an already-cleared row is an idempotent no-op), optimistic lock.
+func (f *fakeExecutor) ClearUnchecked(_ context.Context, lessonID string, expectedVersion int, requestID string) (lesson.ClearUncheckedResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{"clear_unchecked", lessonID, expectedVersion, requestID})
+	if stored, ok := f.checkResults[requestID]; ok {
+		res := stored.(lesson.ClearUncheckedResult)
+		res.Idempotent = true
+		return res, nil
+	}
+	if !f.exists {
+		return lesson.ClearUncheckedResult{}, lesson.ErrLessonNotFound
+	}
+	if !f.lesson.Unchecked {
+		// Already cleared: idempotent no-op, no version bump.
+		return lesson.ClearUncheckedResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Idempotent: true}, nil
+	}
+	if f.lesson.Version != expectedVersion {
+		return lesson.ClearUncheckedResult{}, &lesson.ConflictError{CurrentVersion: f.lesson.Version}
+	}
+	f.lesson.Version++
+	f.lesson.Unchecked = false
+	res := lesson.ClearUncheckedResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version}
+	f.checkResults[requestID] = res
+	return res, nil
+}
+
 func (f *fakeExecutor) checkCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
