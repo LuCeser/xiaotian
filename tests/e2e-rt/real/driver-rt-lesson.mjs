@@ -62,6 +62,18 @@
 // Exit code: 0 = all hard assertions pass (observations excluded); 2 = at
 // least one hard assertion failed (results still complete). Findings are
 // EVIDENCE ONLY — no fix attempts here.
+//
+// 13.1-07 check-stage act (three-stage terminal state, D-14): the last
+// confirm no longer completes the lesson — the server persists
+// stage='checking' and broadcasts check_started. After the dictation plan
+// the driver runs the CHECK ACT: it uploads the committed notebook fixture
+// (fixtures/notebook-words.jpg) as photo_chunk JSON frames (one REAL MiMo
+// vision OCR pass in the check stage), waits for the OCR round to settle,
+// then confirms every word manually (check_verdict, the screen-tap wire
+// path) and fires the ONE unified check_submit — review_result +
+// ack-gated session_ended(lesson_complete). The m_* assertion group pins
+// the check stage; the review write now surfaces as the server's
+// review_submitted rt_event (the pre-13.1 review_written is gone).
 import WebSocket from 'ws';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -70,6 +82,10 @@ import { execFileSync } from 'node:child_process';
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..'); // tests/e2e-rt/real → repo root
 const OUT = process.env.E2E_RT_OUT || path.join(ROOT, '.scratch', 'e2e-rt-data');
 const FIX = process.env.E2E_RT_FIXTURES || path.join(ROOT, 'tests', 'e2e-rt', 'real', 'fixtures');
+// The committed notebook-page photo for the check stage's REAL OCR pass
+// (13.1-07): the ten seeded words rendered handwriting-style. Kept under the
+// client upload cap (768 KiB) and the server photo cap (1 MiB).
+const PHOTO_FIXTURE = path.join(FIX, 'notebook-words.jpg');
 const SERVER_LOG = process.env.E2E_RT_SERVER_LOG || path.join(OUT, 'server-e2e.err.log');
 const DB = process.env.E2E_RT_DB || path.join(OUT, 'vocab.db');
 const URL = process.env.E2E_RT_URL || 'ws://127.0.0.1:8790/rt';
@@ -193,6 +209,12 @@ const S = {
   sentenceLog: [], // {id, epoch, t_ms} — every teacher_sentence seen
   nonJson: [], // captured unparseable server text frames {t_ms, hex, utf8}
   greeting: null, // {sentences, audioEnds, done, doneTs}
+  // 13.1-07 check-stage evidence
+  checkStarted: null, // CheckStartedMsg (words carry the full plaintext — memory only)
+  ocrResult: null, // OcrResultMsg (entries carry recognized text — memory only)
+  lastVerdicts: [], // latest check_verdicts echo
+  verdictEchoes: 0,
+  reviewResult: null, // ReviewResultMsg
 };
 
 const OPEN = WebSocket.OPEN;
@@ -293,6 +315,26 @@ function handleText(m) {
       break;
     case 'session_ended':
       S.sessionEnded = m;
+      break;
+    case 'check_started':
+      // 13.1: the check stage opened. The word list is memory-only evidence
+      // (the timing log carries counts, never text).
+      S.checkStarted = m;
+      tlog('check_started', { reason: m.reason, total: (m.words || []).length });
+      break;
+    case 'check_verdicts':
+      S.lastVerdicts = m.verdicts || [];
+      S.verdictEchoes += 1;
+      break;
+    case 'ocr_result':
+      // Recognized text stays in messages-timeline only (local); the count
+      // rides the timing log.
+      S.ocrResult = m;
+      tlog('ocr_result', { entries: (m.entries || []).length });
+      break;
+    case 'review_result':
+      S.reviewResult = m;
+      tlog('review_result', { requested: m.requested, updated: m.updated, missing: m.missing });
       break;
     case 'pong': {
       const sentAt = S._pingSentAt || Date.now();
@@ -554,6 +596,90 @@ async function timeoutAct(boundMs = 80000) {
   await waitFor(() => S.state === 'listening' && S.lastStateChangeTs > S.lastTurnStartTs, 30000);
   await sleep(400);
   return { advanced, waitMs, turnsDuringWait, newIndex };
+}
+
+// ---------------------------------------------------------------------------
+// 13.1-07: the check-stage act — the three-stage terminal state's third leg.
+// photo_chunk upload (one REAL MiMo vision OCR pass) → per-word manual
+// check_verdicts (the screen-tap wire path) → the ONE unified check_submit →
+// review_result → ack-gated session_ended(lesson_complete).
+// ---------------------------------------------------------------------------
+
+const PHOTO_CHUNK_BYTES = 32768; // RTPhoto.CHUNK_BYTES mirror (base64 stays under the 65551 read limit)
+
+/** Ship the committed notebook fixture as photo_chunk JSON control frames
+    (sequences from 1, final=true on the last — the server's OCR pass fires
+    on it). Returns the chunk count, or 0 when the fixture is absent. */
+function shipPhoto() {
+  if (!fs.existsSync(PHOTO_FIXTURE)) return 0;
+  const jpeg = fs.readFileSync(PHOTO_FIXTURE);
+  const total = Math.ceil(jpeg.length / PHOTO_CHUNK_BYTES);
+  for (let i = 0; i < total; i++) {
+    const chunk = jpeg.subarray(i * PHOTO_CHUNK_BYTES, Math.min((i + 1) * PHOTO_CHUNK_BYTES, jpeg.length));
+    send({ type: 'photo_chunk', seq: i + 1, data: chunk.toString('base64'), final: i === total - 1 });
+  }
+  return total;
+}
+
+async function checkStageAct() {
+  const out = {
+    started: false, reason: '', total: 0, bridgeSettled: false,
+    photoChunks: 0, ocrArrived: false, ocrEntries: 0,
+    verdictsApplied: false, submitted: false, reviewArrived: false,
+    ended: false,
+  };
+
+  // The last confirm's first commit persists stage='checking' and opens the
+  // panel with the full plaintext list.
+  out.started = await waitFor(() => S.checkStarted !== null, 60000);
+  if (!out.started) return out;
+  out.reason = S.checkStarted.reason || '';
+  out.total = (S.checkStarted.words || []).length;
+
+  // The bridge announcement is ack-gated like every sentence; wait for it
+  // to settle before touching the check surface.
+  out.bridgeSettled = await waitFor(() => S.state === 'listening', 30000);
+  await sleep(600);
+
+  // One REAL OCR pass: the fixture photo rides photo_chunk JSON frames.
+  out.photoChunks = shipPhoto();
+  if (out.photoChunks > 0) {
+    tlog('photo_uploaded', { chunks: out.photoChunks });
+    // The OCR round settles either with per-word entries or with the
+    // honest failure notice (a provider error keeps the check manual-only).
+    await waitFor(
+      () => S.ocrResult !== null || S.errors.some((e) => e.code === 'provider_failed'),
+      40000,
+    );
+    out.ocrArrived = S.ocrResult !== null;
+    out.ocrEntries = S.ocrResult ? (S.ocrResult.entries || []).length : 0;
+  }
+
+  // Manual confirmation for every word (D-05: the human pass is mandatory;
+  // OCR prefills carry manual=false and never satisfy the submit gate).
+  // Sequential sends: each verdict lands through the executor's idempotent
+  // write before the next frame is read.
+  for (let i = 0; i < S.N; i++) {
+    send({
+      type: 'check_verdict',
+      request_id: `e2e-check-verdict-${i}-${nowMs()}`,
+      word_index: i,
+      correct: true,
+    });
+    await sleep(80);
+  }
+  out.verdictsApplied = await waitFor(
+    () => S.lastVerdicts.length >= S.N && S.lastVerdicts.every((v) => v.manual),
+    20000,
+  );
+
+  // The unified submission (exactly once) → review_result → the ack-gated
+  // battle summary → session_ended(lesson_complete).
+  send({ type: 'check_submit', request_id: `e2e-check-submit-${nowMs()}` });
+  out.reviewArrived = await waitFor(() => S.reviewResult !== null, 30000);
+  out.submitted = out.reviewArrived;
+  out.ended = await waitFor(() => S.sessionEnded !== null, 60000);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -863,7 +989,7 @@ async function main() {
       detail: `actionable words=${M} < 5: full five-feature spread needs ≥5 due words — this run still covers ${M >= 3 ? 'interrupt+timeout' : M === 2 ? 'interrupt' : 'neither'}; rerun on a fuller due batch if needed` });
   }
 
-  const outcomes = { probes: null, commands: null, pauseResume: null, interrupt: null, timeout: null };
+  const outcomes = { probes: null, commands: null, pauseResume: null, interrupt: null, timeout: null, checkStage: null };
   const confirmFiles = ['hao_le.wav', 'keyi_le.wav', 'xiayige.wav'];
   let confirmIdx = 0;
   let interruptedAnnouncedWord = -1;
@@ -903,11 +1029,9 @@ async function main() {
         } else {
           await speakTurn(file, 'listening');
         }
-        if (isLast) {
-          // Completion: summary announcement → lesson_complete → session_ended.
-          const ended = await waitFor(() => S.sessionEnded !== null, 60000);
-          if (!ended) console.log('  session_ended not observed within 60s of last confirm');
-        }
+        // NOTE (13.1): the last confirm no longer completes the lesson — it
+        // opens the check stage. The checkStageAct below drives the unified
+        // submission that produces session_ended.
       }
     } catch (e) {
       console.error(`act ${step.act} threw:`, e && e.message);
@@ -915,7 +1039,17 @@ async function main() {
     }
   }
 
-  // Post-lesson settle (in case the last act wasn't a confirming confirm).
+  // Post-lesson: the three-stage check act (13.1) — photo OCR pass, manual
+  // verdicts, unified submit. This is what actually ends the lesson.
+  console.log(`act checkStage t=${nowMs()}ms state=${S.state}`);
+  try {
+    outcomes.checkStage = await checkStageAct();
+  } catch (e) {
+    console.error('act checkStage threw:', e && e.message);
+    results.push({ assertion: 'act_checkStage_error', pass: false, detail: String(e && e.message) });
+  }
+
+  // Post-lesson settle (in case the check act could not run at all).
   if (!S.sessionEnded) {
     await waitFor(() => S.sessionEnded !== null, 30000);
   }
@@ -936,7 +1070,9 @@ async function main() {
   const serverEvents = sessionId ? extractServerEvents(sessionId) : [];
   const evCount = (name) => serverEvents.filter((e) => e.event === name).length;
   const intents = serverEvents.filter((e) => e.event === 'intent_classified').map((e) => e.intent);
-  const review = serverEvents.find((e) => e.event === 'review_written') || null;
+  // 13.1: the unified check submit emits review_submitted (the pre-13.1
+  // review_written event is gone from the check path).
+  const review = serverEvents.find((e) => e.event === 'review_submitted') || null;
   const errEvents = serverEvents.filter((e) => e.event === 'error');
   const speechStarted = evCount('speech_started');
   const wordAnnounced = evCount('word_announced');
@@ -975,7 +1111,7 @@ async function main() {
   assert('d_event_chain_counts',
     wordAnnounced === expectedAnnounced && wordAdvanced === M && lessonComplete === 1 &&
     !!review && S.lessonUpdates.length === M,
-    `word_announced=${wordAnnounced} (expect ${expectedAnnounced}${interruptedAnnouncedWord >= 0 ? `, announcement of absolute word ${interruptedAnnouncedWord} was interrupted` : ''}) word_advanced=${wordAdvanced}/${M} lesson_complete=${lessonComplete} review_written=${review ? 1 : 0} client lesson_update=${S.lessonUpdates.length}/${M}`);
+    `word_announced=${wordAnnounced} (expect ${expectedAnnounced}${interruptedAnnouncedWord >= 0 ? `, announcement of absolute word ${interruptedAnnouncedWord} was interrupted` : ''}) word_advanced=${wordAdvanced}/${M} lesson_complete=${lessonComplete} review_submitted=${review ? 1 : 0} client lesson_update=${S.lessonUpdates.length}/${M}`);
 
   // e. four commands (server intent labels + client no-advance)
   const cmd = outcomes.commands || {};
@@ -1012,22 +1148,51 @@ async function main() {
     `advanced=${to ? to.advanced : false} silent_wait_ms=${to ? to.waitMs : 'n/a'} turns_during_wait=${to ? to.turnsDuringWait : '?'} server timeout_fired=${timeoutFired}`);
 
   // i. vocab write (ISOLATED db — the only DB this session may write)
-  // Version arithmetic: baseline row absent (fresh DB lifecycle) → the lesson
-  // row was created this session at version 1, so M advances land at 1+M;
-  // baseline row present at version V (resume) → V+M. Both fold into
-  // (lessonsBefore.version || 1) + M.
+  // Version arithmetic (13.1): the row's final version is
+  // (base + M advances) + 1 enter-check + (any OCR prefills) + N manual
+  // verdicts + 1 complete-check — the prefill count is OCR-outcome
+  // dependent, so the exact pre-13.1 equality becomes a monotonic floor:
+  // every one of those writes bumps the version at least once. The review
+  // set arithmetic stays EXACT (requested/updated/missing), and the
+  // review_logs delta still proves the real write.
   const requested = review ? review.requested : -1;
   const updated = review ? review.updated : -1;
   const missing = review ? review.missing : -1;
+  const versionFloor = (lessonsBefore.version || 1) + M + 1 + S.N + 1;
   const rowOk = !!lessonsAfter.lesson_id &&
     lessonsAfter.lesson_id === LESSON_ID &&
     lessonsAfter.current_index === S.N &&
-    lessonsAfter.version === (lessonsBefore.version || 1) + M;
+    lessonsAfter.version >= versionFloor;
   const reviewDeltaOk = reviewAfter >= 0 && reviewBefore >= 0 &&
     (reviewAfter - reviewBefore) === updated;
   assert('i_vocab_db_written',
     rowOk && !!review && requested === M && updated >= 0 && updated + missing === requested && reviewDeltaOk,
-    `row ${lessonsAfter.lesson_id || '?'}: index ${lessonsAfter.current_index}/${S.N} version ${lessonsAfter.version} (expect ${S.N}/${(lessonsBefore.version || 1) + M}); review requested=${requested}/${M} updated=${updated} missing=${missing}; review_logs delta=${reviewAfter - reviewBefore} (vs updated=${updated})`);
+    `row ${lessonsAfter.lesson_id || '?'}: index ${lessonsAfter.current_index}/${S.N} version ${lessonsAfter.version} (floor ${versionFloor} = base+advances+enter-check+verdicts+complete-check); review requested=${requested}/${M} updated=${updated} missing=${missing}; review_logs delta=${reviewAfter - reviewBefore} (vs updated=${updated})`);
+
+  // m. check stage (13.1-07): the three-stage terminal state's third leg —
+  // check_started after the last advance, one REAL OCR pass in the check
+  // stage, manual verdicts, the ONE unified submission.
+  const cs = outcomes.checkStage || {};
+  const ocrEvents = serverEvents.filter((e) => e.event === 'ocr_completed').length;
+  const checkStartedEvents = serverEvents.filter((e) => e.event === 'check_started').length;
+  const verdictEvents = serverEvents.filter((e) => e.event === 'verdict_applied').length;
+  assert('m1_check_stage_opened',
+    !!cs.started && cs.reason === 'dictation_done' && cs.total === S.N && checkStartedEvents === 1,
+    `check_started reason=${cs.reason || 'none'} total=${cs.total}/${S.N} server check_started=${checkStartedEvents} bridgeSettled=${cs.bridgeSettled}`);
+  assert('m2_photo_uploaded',
+    cs.photoChunks > 0,
+    `photo_chunk frames sent=${cs.photoChunks} (fixture ${path.basename(PHOTO_FIXTURE)}; absent fixture would report 0)`);
+  assert('m3_real_ocr_pass',
+    cs.ocrArrived && ocrEvents >= 1,
+    `ocr_result entries=${cs.ocrEntries} server ocr_completed=${ocrEvents} (one real MiMo vision pass in the check stage)`);
+  assert('m4_manual_verdicts_cover_all',
+    !!cs.verdictsApplied && S.lastVerdicts.length >= S.N && S.lastVerdicts.every((v) => v.manual),
+    `echo verdicts=${S.lastVerdicts.length}/${S.N} allManual=${S.lastVerdicts.every((v) => v.manual)} server verdict_applied=${verdictEvents}`);
+  assert('m5_unified_submit_once',
+    !!S.reviewResult && S.reviewResult.requested === S.N &&
+    S.reviewResult.updated + S.reviewResult.missing === S.reviewResult.requested &&
+    S.reviewResult.unchecked === false && !!cs.ended,
+    `review_result requested=${S.reviewResult ? S.reviewResult.requested : 'n/a'}/${S.N} updated=${S.reviewResult ? S.reviewResult.updated : 'n/a'} missing=${S.reviewResult ? S.reviewResult.missing : 'n/a'} unchecked=${S.reviewResult ? S.reviewResult.unchecked : 'n/a'} session_ended=${cs.ended}`);
 
   // j. isolation proofs — U-1 防复发 gate: the production DB must show ZERO
   // trace of this run (no e2e-% lesson rows ever; lessons/review_logs counts
