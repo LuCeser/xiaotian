@@ -86,6 +86,41 @@ async function getTrace(page) {
 /** Silence the RMS auto-detector; tests interrupt explicitly. */
 const QUIET_PARAMS = 'interrupt_rms=99&interrupt_sustain_ms=999999';
 
+/**
+ * Drive the 13.1-01 check stage from the page: wait for the check panel
+ * (3 rows from check_started.words), click 对/错 per row (marks[i]=false →
+ * 错), wait for each server echo to register (RT-07: the page renders ONLY
+ * the echo), then press the unified submit and wait for the honest
+ * review_result copy. Returns the submit button locator.
+ */
+async function driveCheckStage(page, { submit = true, marks = null } = {}) {
+  await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
+  const rows = page.locator('#rt-check .rt-check-row');
+  await expect(rows).toHaveCount(3);
+  for (let i = 0; i < 3; i++) {
+    const wrong = marks ? !marks[i] : false;
+    await rows.nth(i).locator('button').nth(wrong ? 1 : 0).click();
+    await expect
+      .poll(() => page.evaluate(() => window.__rtTutor.observe().check.checked),
+        { timeout: 10_000 })
+      .toBe(i + 1);
+  }
+  const submitBtn = page.locator('#rt-check .rt-check-submit');
+  // The submit gate lives in the server echo: enabled only when every word
+  // carries a manual verdict.
+  await expect(submitBtn).toBeEnabled({ timeout: 10_000 });
+  if (submit) {
+    await submitBtn.click();
+    await expect
+      .poll(async () => {
+        const c = (await page.evaluate(() => window.__rtTutor.observe())).check;
+        return !c.submitPending && c.resultText !== '' ? 'done' : 'waiting';
+      }, { timeout: 30_000 })
+      .toBe('done');
+  }
+  return submitBtn;
+}
+
 test('complete classroom runs on a single getUserMedia authorization', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(String(err)));
@@ -111,7 +146,11 @@ test('complete classroom runs on a single getUserMedia authorization', async ({ 
       { timeout: 20_000 })
     .toBeTruthy();
 
-  // The scripted lesson runs to its natural end (3 confirms + summary).
+  // The scripted lesson runs its 3 confirms; the last commit OPENS THE
+  // CHECK STAGE (13.1-01) instead of summarizing — drive the manual
+  // verdicts and the unified submit, then the natural end.
+  await driveCheckStage(page);
+
   await expect
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
     .toBe('ended');
@@ -167,12 +206,23 @@ test('complete classroom runs on a single getUserMedia authorization', async ({ 
       { timeout: 20_000 })
     .toBeGreaterThanOrEqual(1);
 
-  // Mock-side: exactly 3 lesson_updates, terminal order ack-gated.
+  // Mock-side: exactly 3 lesson_updates, terminal order ack-gated, and the
+  // 13.1-01 check stage ran once with one honest review_result.
   const s = await getFinalSession(page);
   expect(s.lessonUpdates).toBe(3);
   expect(s.currentIndex).toBe(3);
+  expect(s.mode).toBe('student');
+  expect(s.checkActive).toBe(true);
+  expect(s.checkVerdicts).toHaveLength(3);
+  expect(s.checkSubmits).toHaveLength(1);
+  expect(s.reviewResults).toBe(1);
+  expect(s.summaries).toBe(1);
   expect(s.lessonCompleteSent).toBe(true);
   expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  // The check panel kept the honest full-save copy from review_result.
+  const checkObs = await page.evaluate(() => window.__rtTutor.observe().check);
+  expect(checkObs.resultText).toContain('保存好了');
 });
 
 test('interrupt during the second announcement bumps the epoch and the lesson still completes', async ({ page }) => {
@@ -216,7 +266,9 @@ test('interrupt during the second announcement bumps the epoch and the lesson st
   const oldAcks = s.acks.filter((a) => a.epoch === first.epoch && a.sentence_id === first.last_sentence_id);
   expect(oldAcks.length, 'interrupted sentence never acked').toBe(0);
 
-  // The classroom continues under the new epoch to its natural completion.
+  // The classroom continues under the new epoch into the check stage —
+  // drive the manual verdicts and unified submit to the natural completion.
+  await driveCheckStage(page);
   await expect
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
     .toBe('ended');
@@ -323,6 +375,11 @@ test('playback-ack timeout drains with sources queued and releases only after th
       { timeout: 20_000 })
     .toBeTruthy();
 
+  // 13.1-01: the degraded order fires only AFTER the unified submit — drive
+  // the check stage first (the summary with the 6 s schedule is announced on
+  // check_submit).
+  await driveCheckStage(page);
+
   // The degraded order arrives while the summary is still playing.
   await expect
     .poll(async () => ((await getTrace(page)).includes('error:playback_ack_timeout') ? 'y' : 'n'),
@@ -385,6 +442,114 @@ test('playback-ack timeout drains with sources queued and releases only after th
   expect(s.terminalOrder).toEqual(['timeout_error', 'session_ended', 'close']);
   expect(s.summaryAcked).toBe(false);
   expect(s.lessonCompleteSent).toBe(true);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// 13.1-01: three-stage manual check path — submit gating, double-submit
+// replay, partial-save honest copy.
+// ---------------------------------------------------------------------------
+
+test('check submit stays disabled until every word carries a manual verdict', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + QUIET_PARAMS);
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+
+  // The check panel opens after the 3rd auto-confirm.
+  await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
+  const submitBtn = page.locator('#rt-check .rt-check-submit');
+  await expect(submitBtn).toBeDisabled();
+
+  // One verdict is not enough: still disabled, and NO check_submit frame
+  // has left the page.
+  await page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(0).click();
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.checked), { timeout: 10_000 })
+    .toBe(1);
+  await expect(submitBtn).toBeDisabled();
+
+  // Complete the remaining rows — the server echo enables the gate.
+  for (let i = 1; i < 3; i++) {
+    await page.locator('#rt-check .rt-check-row').nth(i).locator('button').nth(0).click();
+  }
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.allChecked), { timeout: 10_000 })
+    .toBe(true);
+  await expect(submitBtn).toBeEnabled();
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('double check_submit replays exactly one review_result and one summary', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + QUIET_PARAMS);
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+
+  await driveCheckStage(page); // first submit: full honest flow
+
+  // Force a second check_submit frame (network retry / second tap stand-in):
+  // the page shows nothing new and the mock answers with NOTHING — no
+  // second review_result, no second summary (Pitfall 6 mirror).
+  await page.evaluate(() =>
+    window.__rtTutor.client.sendJSON({ type: 'check_submit', request_id: 'force-double-submit' }));
+
+  // Natural completion still lands exactly once, ack-gated.
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+  const s = await getFinalSession(page);
+  expect(s.reviewResults).toBe(1);
+  expect(s.summaries).toBe(1);
+  expect(s.checkSubmits).toHaveLength(2); // both frames recorded
+  expect(s.lessonCompleteSent).toBe(true);
+  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('partial save renders the honest M/N copy, never fabricated success', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + QUIET_PARAMS + '&mock_partial_save=1');
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+
+  // 3 words, all marked correct — but the mock saves only 2 of 3.
+  await driveCheckStage(page);
+
+  // review_result copy is honest: 保存了 2 / 3, not full success.
+  const checkObs = await page.evaluate(() => window.__rtTutor.observe().check);
+  expect(checkObs.resultText).toContain('保存了 2 / 3');
+
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+
+  // The completion banner carries the same honest note.
+  await expect(page.locator('#rt-banner')).toBeVisible();
+  const bannerText = await page.textContent('#rt-banner');
+  expect(bannerText).toContain('保存了 2 / 3');
+
+  const s = await getFinalSession(page);
+  expect(s.reviewResults).toBe(1);
+  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });

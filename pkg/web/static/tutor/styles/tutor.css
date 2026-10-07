@@ -284,6 +284,12 @@ body[data-page="tutor"] {
   gap: 10px;
 }
 
+/* display:flex would defeat the hidden attribute (UA display:none loses to
+   an author display rule) — re-arm it explicitly. */
+.rt-check[hidden] {
+  display: none;
+}
+
 .rt-check-title {
   margin: 0;
   font-size: 18px;

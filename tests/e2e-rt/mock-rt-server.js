@@ -45,6 +45,22 @@
  *                       ORIGINAL natural reason; the timeout code is NEVER
  *                       a reason) → normal close, while sources are still
  *                       queued client-side
+ *   ?mock_partial_save=1 13.1-01: review_result carries updated=N-1,
+ *                       missing=1 so the page's honest-copy branch renders
+ *                       「保存了 N-1 / N」 instead of full success
+ *
+ * 13.1-01 three-stage flow (mirrors pkg/rt/protocol.go + pkg/rt/check.go
+ * field-for-field): after the last word's confirmation the mock OPENS THE
+ * CHECK STAGE instead of summarizing — check_started(full words, reason
+ * dictation_done) → bridge teacher_sentence → waits for client
+ * check_verdict frames (echoing the authoritative check_verdicts list after
+ * each) → on check_submit (gated: every word needs a manual verdict;
+ * incomplete → recoverable invalid_message, NO stage transition) →
+ * review_result(requested=N, updated=N±, missing) → battle summary
+ * teacher_sentence → session_ended(lesson_complete) gated on the summary's
+ * MATCHING sentence_ack (13-11 gating). A second check_submit is a REPLAY:
+ * recorded, answered with nothing — no second review_result, no second
+ * summary (Pitfall 6 / T-13.1-01 mirror).
  *
  * Unknown/wrong-epoch/duplicate sentence_acks are recorded as REJECTED
  * observations and never end the session (T-13-24: a forged or stale ack
@@ -151,6 +167,12 @@ function handleTestState(res) {
       version: s.version,
       currentIndex: s.currentIndex,
       lessonUpdates: s.lessonUpdates,
+      mode: s.mode,
+      checkActive: s.checkActive,
+      checkVerdicts: s.checkVerdicts,
+      checkSubmits: s.checkSubmits,
+      reviewResults: s.reviewResults,
+      summaries: s.summaries,
       lessonCompleteSent: s.lessonCompleteSent,
       noDueSent: s.noDueSent,
       pauseSent: s.pauseSent,
@@ -230,11 +252,13 @@ wss.on('connection', (ws, req, query) => {
     stepMs: Math.max(50, parseInt(query.get('mock_step_ms') || '1500', 10) || 1500),
     pause: query.get('mock_pause') === '1',
     empty: query.get('mock_empty') === '1',
-    ackTimeout: query.get('mock_ack_timeout') === '1'
+    ackTimeout: query.get('mock_ack_timeout') === '1',
+    partialSave: query.get('mock_partial_save') === '1'
   };
-  mockMode.name = mockMode.ackTimeout ? 'ack_timeout'
-    : mockMode.empty ? 'empty'
-      : mockMode.pause ? 'pause' : 'default';
+  mockMode.name = mockMode.partialSave ? 'partial_save'
+    : mockMode.ackTimeout ? 'ack_timeout'
+      : mockMode.empty ? 'empty'
+        : mockMode.pause ? 'pause' : 'default';
 
   const state = {
     id: 'mock-' + Date.now().toString(36) + '-' + (++sessionCounter),
@@ -246,6 +270,12 @@ wss.on('connection', (ws, req, query) => {
     version: 1,
     currentIndex: 0,
     lessonUpdates: 0,
+    mode: null,
+    checkActive: false,
+    checkVerdicts: [],
+    checkSubmits: [],
+    reviewResults: 0,
+    summaries: 0,
     lessonCompleteSent: false,
     noDueSent: false,
     pauseSent: false,
@@ -337,8 +367,8 @@ wss.on('connection', (ws, req, query) => {
   }
 
   // One simulated student confirmation: advance the cursor, publish the
-  // lesson_update, then announce the next word — or, at the end of the
-  // word list, the wrap-up summary (ack-gated / timeout-scripted).
+  // lesson_update, then announce the next word — or, at the end of the word
+  // list, OPEN THE CHECK STAGE (13.1-01: no immediate summary any more).
   function confirmAndAdvance() {
     if (state.ended || state.pauseActive) return;
     state.currentIndex += 1;
@@ -350,7 +380,7 @@ wss.on('connection', (ws, req, query) => {
     });
     send({ type: 'state', value: 'listening' });
     if (state.currentIndex >= state.words.length) {
-      announceSummary();
+      startCheckStage();
     } else {
       announce('w' + (state.currentIndex + 1),
         '第' + (state.currentIndex + 1) + '个单词：' + state.words[state.currentIndex],
@@ -359,10 +389,29 @@ wss.on('connection', (ws, req, query) => {
     }
   }
 
-  function announceSummary() {
+  // 13.1-01: the check stage — check_started (full plaintext list, the
+  // unmask point) + a bridge teacher sentence, then wait for client
+  // check_verdict frames.
+  function startCheckStage() {
+    if (state.checkActive || state.ended) return;
+    state.checkActive = true;
+    send({ type: 'check_started', words: state.words.slice(), reason: 'dictation_done' });
+    announce('chk', '全都写完啦！我们一起检查：屏幕上有' + state.words.length +
+      '个词，想一想你写的是对还是错，点「对」或「错」告诉我。', PLAN_NOTICE, 800,
+      () => { send({ type: 'state', value: 'listening' }); });
+  }
+
+  // The unified-submit battle summary (D-04 mirror): battle counts plus the
+  // honest save note when the save was partial.
+  function announceSummary(correct, updated, requested) {
+    state.summaries += 1;
     const plan = mockMode.ackTimeout ? PLAN_SUMMARY_TIMEOUT : PLAN_SUMMARY;
-    const text = '今天的默写课堂结束啦，' + state.words.length +
-      '个单词都完成了，我们下次再见。';
+    let text = '今天' + requested + '个词对了' + correct + '个，你真棒！' +
+      '今天的默写课堂结束啦，我们下次再见。';
+    if (updated < requested) {
+      text = '今天' + requested + '个词对了' + correct + '个。本次保存' + updated +
+        '/' + requested + '个。今天的默写课堂结束啦，我们下次再见。';
+    }
     announce('sum', text, plan, 900, (epoch, sid) => {
       state.lessonCompleteSent = true;
       if (mockMode.ackTimeout) {
@@ -459,6 +508,8 @@ wss.on('connection', (ws, req, query) => {
           return;
         }
         state.ready = true;
+        // 13.1 D-08: mirror the page's UI mode (absent → student).
+        state.mode = msg.mode === 'test' ? 'test' : 'student';
         // LessonView field-for-field (id / version / current_index / words).
         send({
           type: 'session_ready',
@@ -507,7 +558,7 @@ wss.on('connection', (ws, req, query) => {
               armConfirmTimer();
             });
           } else if (state.currentIndex >= state.words.length) {
-            announceSummary();
+            startCheckStage();
           } else {
             announce('w' + (state.currentIndex + 1),
               '我们继续，第' + (state.currentIndex + 1) + '个单词：' + state.words[state.currentIndex],
@@ -542,6 +593,53 @@ wss.on('connection', (ws, req, query) => {
           state.terminalOrder.push('terminal_ack');
           fireNaturalEnd(pending.reason);
         }
+        break;
+      }
+
+      case 'check_verdict': {
+        // 13.1-01 mirror: one screen verdict — validate, upsert by
+        // word_index, echo the FULL authoritative list (RT-07).
+        if (!state.checkActive) {
+          send({ type: 'error', code: 'invalid_message', message: 'mock: no check stage', recoverable: true });
+          break;
+        }
+        const vi = msg.word_index;
+        if (!msg.request_id || typeof vi !== 'number' || vi < 0 || vi >= state.words.length) {
+          send({ type: 'error', code: 'invalid_message', message: 'mock: bad check_verdict', recoverable: true });
+          break;
+        }
+        const verdict = { word_index: vi, correct: !!msg.correct, manual: true };
+        const found = state.checkVerdicts.find((v) => v.word_index === vi);
+        if (found) Object.assign(found, verdict);
+        else state.checkVerdicts.push(verdict);
+        send({ type: 'check_verdicts', verdicts: state.checkVerdicts.map((v) => ({ ...v })) });
+        break;
+      }
+
+      case 'check_submit': {
+        // 13.1-01 mirror: the unified-submit gate — every word needs a
+        // manual verdict; the transition latches after ONE review_result.
+        if (!state.checkActive) {
+          send({ type: 'error', code: 'invalid_message', message: 'mock: no check stage', recoverable: true });
+          break;
+        }
+        state.checkSubmits.push(msg.request_id || '');
+        if (state.checkVerdicts.length < state.words.length) {
+          send({ type: 'error', code: 'invalid_message', message: '还有词没有检查哦', recoverable: true });
+          break;
+        }
+        if (state.reviewResults > 0) {
+          // Replay (network retry or second tap): recorded, answered with
+          // NOTHING — no second review_result, no second summary (Pitfall 6).
+          break;
+        }
+        const n = state.words.length;
+        const correct = state.checkVerdicts.filter((v) => v.correct).length;
+        const updated = mockMode.partialSave ? n - 1 : n;
+        const missing = n - updated;
+        state.reviewResults += 1;
+        send({ type: 'review_result', requested: n, updated, missing, unchecked: false });
+        announceSummary(correct, updated, n);
         break;
       }
 
