@@ -228,6 +228,26 @@ body[data-page="tutor"] {
   line-height: 1.5;
 }
 
+/* 13.1-05 D-13 ending-banner variants + the 再练一组 entry button. The
+   practice variant (practice_complete) is visually calmer — no next action
+   lives inside it (one tap = one set). Button: >=60px touch target. */
+.rt-banner .rt-practice-btn {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  min-height: 60px; /* ipad-layout touch target */
+  border: none;
+  border-radius: 14px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #ffffff;
+  background: #2fb96b;
+  cursor: pointer;
+  transition: transform 0.08s ease, background 0.2s ease;
+}
+.rt-banner .rt-practice-btn:active { transform: scale(0.97); }
+.rt-banner .rt-practice-btn:disabled { background: #9db8a9; }
+
 /* Error panel (RT-10: reasons in plain Chinese) ------------------------ */
 
 .rt-error {

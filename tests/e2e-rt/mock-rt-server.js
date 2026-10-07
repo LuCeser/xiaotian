@@ -129,6 +129,16 @@ const TTS_RATE = 24000;
 const WORDS = ['apple', 'banana', 'cat'];
 const LESSON_ID = 'mock-lesson-13-11';
 
+// 13.1-05 (D-11/D-12): the practice pool the 「再练一组」 flow picks from.
+// The scripted already-done set is WORDS (the lesson the student just
+// finished) — the mock-side exclusion mirrors pickPracticeWords and is
+// deterministic: the first two remaining words, never a random flake.
+const PRACTICE_POOL = ['apple', 'banana', 'cat', 'dog', 'egg'];
+function practicePick(doneWords) {
+  return PRACTICE_POOL.filter((w) => !doneWords.includes(w)).slice(0, 2);
+}
+let practiceCounter = 0;
+
 // ---------------------------------------------------------------------
 // Static file serving (production URL shape: /tutor/ + relative assets)
 // ---------------------------------------------------------------------
@@ -197,10 +207,14 @@ function handleTestState(res) {
       epoch: s.epoch,
       turn: s.turn,
       words: s.words,
+      lessonId: s.lessonId,
       version: s.version,
       currentIndex: s.currentIndex,
       lessonUpdates: s.lessonUpdates,
       mode: s.mode,
+      practiceInit: s.practiceInit,
+      practiceSubmits: s.practiceSubmits,
+      practiceCompleteSent: s.practiceCompleteSent,
       checkActive: s.checkActive,
       checkVerdicts: s.checkVerdicts,
       checkSubmits: s.checkSubmits,
@@ -348,10 +362,14 @@ wss.on('connection', (ws, req, query) => {
     epoch: 1,
     turn: 0,
     words: mockMode.empty ? [] : WORDS.slice(),
+    lessonId: LESSON_ID,
     version: 1,
     currentIndex: 0,
     lessonUpdates: 0,
     mode: null,
+    practiceInit: false,
+    practiceSubmits: 0,
+    practiceCompleteSent: false,
     checkActive: false,
     checkVerdicts: [],
     checkSubmits: [],
@@ -493,7 +511,7 @@ wss.on('connection', (ws, req, query) => {
       pair.lessonUpdates = state.lessonUpdates;
     }
     send({
-      type: 'lesson_update', lesson_id: LESSON_ID, version: state.version,
+      type: 'lesson_update', lesson_id: state.lessonId, version: state.version,
       current_index: state.currentIndex, request_id: 'advance-' + state.currentIndex
     });
     if (state.mode !== 'test') {
@@ -591,6 +609,7 @@ wss.on('connection', (ws, req, query) => {
     state.terminalOrder.push('session_ended');
     if (reason === 'lesson_complete') state.lessonCompleteSent = true;
     if (reason === 'no_due_words') state.noDueSent = true;
+    if (reason === 'practice_complete') state.practiceCompleteSent = true;
     if (pair) pair.phase = 'done'; // any later connection short-circuits
     send({ type: 'session_ended', reason });
     closeSoon();
@@ -601,9 +620,10 @@ wss.on('connection', (ws, req, query) => {
     state.started = true;
     send({ type: 'state', value: 'listening' });
     if (mockMode.empty) {
-      // Zero due words: the explainer sentence, then reason=no_due_words
-      // strictly after that sentence's matching ack.
-      announce('nodue', '今天没有到期单词，休息一天，明天再来吧。', PLAN_NOTICE, 500, (epoch, sid) => {
+      // Zero due words: the D-13 days copy (the real server computes X from
+      // the vocabulary's fsrs due data — the mock pins 3 for determinism),
+      // then reason=no_due_words strictly after that sentence's matching ack.
+      announce('nodue', '今天没有要到期的单词，下次复习大约在 3 天后，好好休息，我们 3 天后再练吧。', PLAN_NOTICE, 500, (epoch, sid) => {
         state.pendingTerminal = { reason: 'no_due_words', epoch, sentence_id: sid };
       });
       return;
@@ -658,6 +678,27 @@ wss.on('connection', (ws, req, query) => {
         // 13.1 D-08: mirror the page's UI mode (absent → student).
         state.mode = msg.mode === 'test' ? 'test' : 'student';
         if (pair) pair.mode = state.mode;
+        if (msg.practice === true) {
+          // 13.1-05 practice branch (D-11/D-12, handlePracticeInit parity):
+          // deterministic random pick over the pool EXCLUDING the scripted
+          // already-done words, a fresh r0x- lesson id (Pitfall 10 — the
+          // daily r0- namespace is never touched), then the SAME three-stage
+          // flow — only the submit/ending differ (practice_submitted +
+          // practice_complete).
+          state.practiceInit = true;
+          state.words = practicePick(WORDS);
+          state.currentIndex = 0;
+          state.version = 1;
+          state.lessonId = 'r0x-mock-' + (++practiceCounter);
+          send({
+            type: 'session_ready',
+            session_id: state.id,
+            audio: { sampleRate: 16000, format: 's16le', channels: 1 },
+            tts: { sampleRate: TTS_RATE },
+            lesson: { id: state.lessonId, version: state.version, current_index: 0, words: lessonWordsForMode() }
+          });
+          break;
+        }
         if (pair && pair.phase === 'done') {
           // 13.1-04 regression mirror: a COMPLETED lesson reconnects and
           // short-circuits — session_ready + session_ended(lesson_complete),
@@ -838,6 +879,21 @@ wss.on('connection', (ws, req, query) => {
         }
         const n = state.words.length;
         const correct = state.checkVerdicts.filter((v) => v.correct).length;
+        if (state.practiceInit) {
+          // 13.1-05 practice mirror (T-13.1-11): the practice submit writes
+          // the Go-owned practice records INSTEAD of the FSRS review — the
+          // result reports the RECORD counts and the session records NO
+          // review (state.reviewResults stays 0: the wire-side proof the
+          // spec asserts). Ending: ack-gated session_ended(practice_complete).
+          state.practiceSubmits += 1;
+          state.reviewResults += 0; // deliberate: never an FSRS write here
+          send({ type: 'review_result', requested: n, updated: n, missing: 0, unchecked: false });
+          state.summaries += 1;
+          announce('psum', '这组练习' + n + '个词对了' + correct + '个，很棒！', PLAN_SUMMARY, 900, (epoch, sid) => {
+            state.pendingTerminal = { reason: 'practice_complete', epoch, sentence_id: sid };
+          });
+          break;
+        }
         if (mockMode.name === 'unchecked_pair') {
           // 13.1-04 correction mirror: diff the CONFIRMED verdicts against
           // the derived fallback hints — ONLY overridden words ride the
@@ -902,5 +958,6 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('[mock-rt-server] http+ws on http://127.0.0.1:' + PORT +
     ' (static root ' + STATIC_ROOT + ', dictation flow 13-11, /rt ws endpoint,' +
     ' script selectors ?mock_step_ms/?mock_pause/?mock_empty/?mock_ack_timeout,' +
+    ' practice flow 13.1-05 keyed on session_init.practice,' +
     ' /__test/state introspection)');
 });

@@ -304,6 +304,17 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
+	// 13.1-05 (D-12): the Go-owned practice-record store — practice results
+	// land here and NEVER in the FSRS schedule (review_logs stays
+	// Python-owned). Same boot-fail-fast discipline as every constructor.
+	practiceStore, err := lesson.NewPracticeStore(db, logger)
+	if err != nil {
+		logger.Error("practice store construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
 
 	// Construct repositories (D-07, D-42 constructor DI).
 	cardRepo, err := database.NewCardRepository(db, logger)
@@ -598,6 +609,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			OCR:             rtOCR,
 			PhotoMaxBytes:   cfg.Photo.MaxImageBytes,
 			PhotoConfidence: cfg.Photo.ConfidenceThreshold,
+			// 13.1-05 再练一组 (D-11/D-12): the read-only vocabulary source is
+			// the SAME CardRepository instance the parent pages already use
+			// (zero new config keys); practice writes go to the Go-owned
+			// practice_logs store, never the FSRS schedule.
+			Practice:      cardRepo,
+			PracticeStore: practiceStore,
 		}
 		rtHandler, err := rt.NewHandler(rtServerCfg, func() rt.SessionManager {
 			// Per-connection factory: one TurnManager + one EventRecorder per

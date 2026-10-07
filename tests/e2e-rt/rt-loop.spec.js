@@ -130,18 +130,19 @@ function wireLeaks(frames, words) {
 
 /**
  * Drive the 13.1-01 check stage from the page: wait for the check panel
- * (3 rows from check_started.words), click 对/错 per row (marks[i]=false →
- * 错), wait for each server echo to register (RT-07: the page renders ONLY
- * the echo), then press the unified submit and wait for the honest
- * review_result copy. Returns the submit button locator.
+ * (`rows` rows from check_started.words — 3 for the daily lesson, 2 for a
+ * 13.1-05 practice set), click 对/错 per row (marks[i]=false → 错), wait for
+ * each server echo to register (RT-07: the page renders ONLY the echo), then
+ * press the unified submit and wait for the honest review_result copy.
+ * Returns the submit button locator.
  */
-async function driveCheckStage(page, { submit = true, marks = null } = {}) {
+async function driveCheckStage(page, { submit = true, marks = null, rows = 3 } = {}) {
   await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
-  const rows = page.locator('#rt-check .rt-check-row');
-  await expect(rows).toHaveCount(3);
-  for (let i = 0; i < 3; i++) {
+  const rowLoc = page.locator('#rt-check .rt-check-row');
+  await expect(rowLoc).toHaveCount(rows);
+  for (let i = 0; i < rows; i++) {
     const wrong = marks ? !marks[i] : false;
-    await rows.nth(i).locator('button').nth(wrong ? 1 : 0).click();
+    await rowLoc.nth(i).locator('button').nth(wrong ? 1 : 0).click();
     await expect
       .poll(() => page.evaluate(() => window.__rtTutor.observe().check.checked),
         { timeout: 10_000 })
@@ -395,10 +396,15 @@ test('pause stays paused after the confirmation speech; no-due path ends honestl
   expect(endedIdx, 'session_ended strictly after the explainer ack').toBeGreaterThan(ackIdx);
   expect(trace).toContain('drain:drained');
 
-  // The no-due notice renders; no completion banner for this reason.
+  // The no-due notice renders AND the D-13 banner mirrors the server's
+  // spoken days copy, offering the 再练一组 entry (13.1-05).
   const notice = await page.textContent('#rt-notice');
   expect(notice).toContain('今天没有到期单词');
-  expect(await page.locator('#rt-banner').isVisible()).toBe(false);
+  await expect(page.locator('#rt-banner')).toBeVisible();
+  const noDueBanner = await page.textContent('#rt-banner');
+  expect(noDueBanner).toContain('词库暂无到期词');
+  expect(noDueBanner).toContain('下次复习在 3 天后');
+  await expect(page.locator('#rt-banner .rt-practice-btn')).toBeVisible();
 
   // Child-audio privacy boundary: every MediaStreamTrack is stopped.
   await expect
@@ -917,6 +923,90 @@ test('mid-check resume: reconnect restores the stored verdicts and finishes with
   expect(rr).toEqual({ type: 'review_result', requested: 3, updated: 3, missing: 0, unchecked: false });
   expect(s2.lessonCompleteSent).toBe(true);
   expect(s2.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// 13.1-05: 再练一组 closed loop — the D-13 lesson_complete banner offers the
+// practice entry, the tap restarts with session_init(practice=true) picking
+// NEW words (r0x- namespace, none from the just-finished set), the practice
+// set runs the SAME three-stage flow, and its ending carries
+// practice_complete with NO FSRS-write semantics on the wire.
+// ---------------------------------------------------------------------------
+
+test('practice full loop: lesson_complete offers 再练一组, the practice set runs isolated', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  // --- Session 1: the normal lesson finishes → the D-13 banner + entry.
+  await page.goto('/tutor/?' + QUIET_PARAMS);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await driveCheckStage(page); // 3-word lesson, all correct, full save
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+
+  // D-13 regression: the lesson_complete banner carries the N-words copy
+  // AND the 再练一组 button (≥60px target rides the CSS class).
+  await expect(page.locator('#rt-banner')).toBeVisible();
+  const doneBanner = await page.textContent('#rt-banner');
+  expect(doneBanner).toContain('今天的 3 个词都默写完了');
+  const practiceBtn = page.locator('#rt-banner .rt-practice-btn');
+  await expect(practiceBtn).toBeVisible();
+  expect(await practiceBtn.boundingBox()).toBeTruthy();
+  expect((await practiceBtn.boundingBox()).height).toBeGreaterThanOrEqual(60);
+
+  // --- Session 2: the tap restarts with practice=true (one tap = one set).
+  // The restart goes through the SAME start flow, so the drain must have
+  // released the start button first (the human flow's own gating).
+  const sid1 = await page.evaluate(() => window.__rtTutor.client.sessionId);
+  await expect(page.locator('#rt-start')).toBeEnabled({ timeout: 20_000 });
+  await practiceBtn.click();
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.client.sessionId), { timeout: 20_000 })
+    .not.toBe(sid1);
+  const s2 = await getSession(page);
+  expect(s2.practiceInit, 'the restart carried session_init.practice=true').toBe(true);
+
+  // The r0x- namespace (Pitfall 10) and NEW words only: the mock picks from
+  // the pool minus the just-finished set — none of apple/banana/cat again.
+  const ready2 = parseFrames(s2.frames).find((m) => m.type === 'session_ready');
+  expect(ready2.lesson.id, 'practice lesson id in the r0x- namespace')
+    .toMatch(/^r0x-/);
+  const newWords = ready2.lesson.words;
+  expect(newWords).toHaveLength(2);
+  for (const w of newWords) {
+    expect(MOCK_WORDS, 'practice word ' + w + ' differs from the finished set').not.toContain(w);
+  }
+
+  // The practice set runs the SAME three-stage flow (2 rows) to its
+  // practice_complete ending.
+  await driveCheckStage(page, { rows: 2 });
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+
+  // Wire-side: the practice submit reported RECORD counts, the session
+  // recorded NO FSRS review write (state.reviewResults stays 0 — the
+  // T-13.1-11 mirror), and the ack-gated ending carried practice_complete.
+  const f2 = await getFinalSession(page);
+  expect(f2.practiceSubmits).toBe(1);
+  expect(f2.reviewResults, 'no FSRS-review write semantics recorded').toBe(0);
+  const prr = parseFrames(f2.frames).filter((m) => m.type === 'review_result');
+  expect(prr).toHaveLength(1);
+  expect(prr[0]).toEqual({ type: 'review_result', requested: 2, updated: 2, missing: 0, unchecked: false });
+  expect(f2.practiceCompleteSent).toBe(true);
+  expect(f2.lessonCompleteSent).toBe(false);
+  expect(f2.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  // The practice banner shows WITHOUT the practice button (one tap = one
+  // set; the restart path is 开始上课).
+  await expect(page.locator('#rt-banner')).toBeVisible();
+  const practiceBanner = await page.textContent('#rt-banner');
+  expect(practiceBanner).toContain('这组练习完成啦');
+  expect(await page.locator('#rt-banner .rt-practice-btn').count()).toBe(0);
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });

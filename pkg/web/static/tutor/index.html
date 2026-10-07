@@ -18,7 +18,7 @@
   <meta name="theme-color" content="#4f8ef7">
   <meta name="description" content="自然实时家教 — 听说小老师">
   <title>听说小老师 · 自然实时家教</title>
-  <link rel="stylesheet" href="styles/tutor.css?v=20261007b">
+  <link rel="stylesheet" href="styles/tutor.css?v=20261008a">
 </head>
 <body data-page="tutor">
 
@@ -105,10 +105,10 @@
     (registerProcessor scope has no AudioWorkletProcessor under a plain
     script tag; loading it here would throw and break the page).
   -->
-  <script src="js/rt-client.js?v=20261007b"></script>
-  <script src="js/rt-capture.js?v=20261007b"></script>
-  <script src="js/rt-playback.js?v=20261007b"></script>
-  <script src="js/rt-photo.js?v=20261007b"></script>
+  <script src="js/rt-client.js?v=20261008a"></script>
+  <script src="js/rt-capture.js?v=20261008a"></script>
+  <script src="js/rt-playback.js?v=20261008a"></script>
+  <script src="js/rt-photo.js?v=20261008a"></script>
   <script>
     (function () {
       'use strict';
@@ -142,6 +142,15 @@
 
       var lesson = { words: [], currentIndex: 0, version: 0 };
       var started = false;
+      // 13.1-05 D-11: the 「再练一组」 one-shot intent. The banner button sets
+      // it; the start flow consumes it into client.initPractice for exactly
+      // ONE practice session (one tap = one set — the practice ending never
+      // offers the button again, so the loop is bounded by design).
+      var practiceNext = false;
+      // 13.1-05 D-13: the most recent teacher sentence text — the no-due
+      // banner mirrors the server's spoken days copy from it (the server is
+      // the copy authority; the page never invents a count).
+      var lastTeacherText = '';
 
       // ----- UI mode (13.1 D-08) ---------------------------------------------
       // Only the exact value "test" keeps the full-reveal behavior; anything
@@ -194,16 +203,49 @@
         noticeEl.hidden = false;
       }
 
-      function showCompletionBanner() {
+      // ----- ending banners (13.1-05, D-13: three endings, three copies) ----
+      // lesson_complete: 今天的 N 个词都默写完了 + 再练一组. practice_complete:
+      // the practice wrap WITHOUT the button (one tap = one set — the student
+      // restarts through 开始上课, so the loop is bounded). no_due_words: the
+      // days copy mirrored from the server's spoken line + 再练一组.
+      function addPracticeButton(container) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'rt-btn rt-practice-btn';
+        btn.textContent = '再练一组';
+        btn.addEventListener('click', function () {
+          if (started) return;
+          btn.disabled = true; // one tap = one set; stays disabled while connecting
+          practiceNext = true;
+          startBtn.click(); // the SAME start flow (one gesture, RT-02)
+        });
+        container.appendChild(btn);
+      }
+
+      function noDueBannerText() {
+        var match = /下次复习大约在\s*(\d+)\s*天后/.exec(lastTeacherText || '');
+        if (match) return '词库暂无到期词，下次复习在 ' + match[1] + ' 天后。';
+        return '词库暂无到期词，好好休息。';
+      }
+
+      function showEndingBanner(reason) {
         clearChildren(bannerEl);
         var p = document.createElement('p');
-        // 13.1-01: when the check stage ran, the banner carries the honest
-        // save result (review_result) — never a fabricated full success.
-        p.textContent = check.resultText
-          ? '今天的默写课堂完成啦！' + check.resultText
-          : '今天的默写课堂完成啦，真棒！';
-        bannerEl.appendChild(p);
-        bannerEl.hidden = false;
+        if (reason === 'lesson_complete') {
+          // N from the check state (the panel's rows = the checked words).
+          p.textContent = '今天的 ' + check.words.length + ' 个词都默写完了！' +
+            (check.resultText || '真棒！');
+          bannerEl.appendChild(p);
+          addPracticeButton(bannerEl);
+        } else if (reason === 'practice_complete') {
+          p.textContent = '这组练习完成啦，真棒！想再练就点「开始上课」。';
+          bannerEl.appendChild(p); // no practice button — bounded loop by design
+        } else if (reason === 'no_due_words') {
+          p.textContent = noDueBannerText();
+          bannerEl.appendChild(p);
+          addPracticeButton(bannerEl);
+        }
+        bannerEl.hidden = bannerEl.childNodes.length === 0;
       }
 
       // ----- check panel (13.1-01) --------------------------------------------
@@ -431,6 +473,9 @@
         lesson.words = (m.lesson && m.lesson.words) || [];
         lesson.currentIndex = (m.lesson && m.lesson.current_index) || 0;
         lesson.version = (m.lesson && m.lesson.version) || 0;
+        // Fresh session: the previous ending's banner/notice step aside.
+        bannerEl.hidden = true;
+        noticeEl.hidden = true;
         renderProgress();
         setConn('connected', '已连接');
         endBtn.disabled = false;
@@ -450,6 +495,7 @@
       });
 
       client.on('teacher_sentence', function (m) {
+        lastTeacherText = (m && m.text) || '';
         addTeacherLine(m);
       });
 
@@ -583,21 +629,26 @@
         setStatus('ended');
         setConn('closed', '课程已结束');
         endBtn.disabled = true;
-        // Only the two natural reasons branch here — playback_ack_timeout is
-        // an ErrorMsg.Code, never a SessionEndedMsg.Reason (13-07 contract).
+        // Only the three natural reasons branch here — playback_ack_timeout
+        // is an ErrorMsg.Code, never a SessionEndedMsg.Reason (13-07
+        // contract); practice_complete is the 13.1-05 third ending.
         if (reason === 'lesson_complete') {
-          // Subtitles keep the wrap-up summary; banner marks completion.
-          showCompletionBanner();
-          showNotice('本次课程已结束。需要再练一次就点「开始上课」。');
+          // D-13: 今天的 N 个词都默写完了 + the 再练一组 entry.
+          showEndingBanner(reason);
+          showNotice('本次课程已结束。想加练一组就点「再练一组」。');
+        } else if (reason === 'practice_complete') {
+          showEndingBanner(reason);
+          showNotice('练习结束啦，休息一下吧。');
         } else if (reason === 'no_due_words') {
-          showNotice('今天没有到期单词，休息一天吧。');
+          showEndingBanner(reason);
+          showNotice('今天没有到期单词，想加练一组就点「再练一组」。');
         }
         if (terminalDraining) {
           // Timeout path: presentation only — the drain armed at error time
           // releases shared playback resources after the real last onended.
           return;
         }
-        if (reason === 'lesson_complete' || reason === 'no_due_words') {
+        if (reason === 'lesson_complete' || reason === 'no_due_words' || reason === 'practice_complete') {
           // Natural ending without a prior ErrorMsg takes the SAME drain
           // flow — no stopNow truncation of the scheduled audio.
           beginTerminalDrain();
@@ -669,6 +720,11 @@
         })['catch'](function (errType) {
           showError(errType, '');
         });
+        // 13.1-05 D-11: a 「再练一组」 tap consumed HERE — exactly one
+        // practice session_init per tap (the flag resets; the mode param
+        // rides along unchanged, D-08).
+        client.initPractice = practiceNext;
+        practiceNext = false;
         // Page query params ride along on the upgrade request (Go's mux
         // matches /rt by path and ignores the query); the mock e2e reads
         // them to pick its session script (?mock_pause / ?mock_empty /
