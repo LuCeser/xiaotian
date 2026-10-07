@@ -110,13 +110,15 @@ func checkCorrectionBridgeText(total int) string {
 }
 
 // checkedSummaryText builds the post-submit battle summary (D-04): the
-// 对/错 battle count first, encouraging wording only (no shaming on wrong
-// words, prohibition P1), then the honest save note — the failure suffix
-// when the write errored, the M/N note when fewer words saved than
+// D-13 lesson_complete phrasing first (今天的 N 个词都默写完了 — the
+// completion ending's own copy, distinct from the no-due and practice
+// endings), the 对/错 battle count, encouraging wording only (no shaming on
+// wrong words, prohibition P1), then the honest save note — the failure
+// suffix when the write errored, the M/N note when fewer words saved than
 // requested (S-05: never a fabricated full success).
 func checkedSummaryText(total, correct, updated, requested int, saveFailed bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "今天 %d 个词对了 %d 个。", total, correct)
+	fmt.Fprintf(&b, "今天的 %d 个词都默写完了，对了 %d 个。", total, correct)
 	switch {
 	case correct == total && total > 0:
 		b.WriteString("全部都写对了，你真棒！")
@@ -452,6 +454,24 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 			return
 		}
 		tm.submitCorrections(s, m)
+		return
+	}
+	tm.mu.Lock()
+	practice := tm.tutor.practice
+	practiceSeen := practice && tm.tutor.reviewSeen
+	tm.mu.Unlock()
+	if practice {
+		if practiceSeen {
+			// Duplicate practice submit (13.1-05): the practice records
+			// already landed — never a second practice_logs write (Pitfall 6
+			// discipline; T-13.1-11 keeps FSRS isolation irrelevant here).
+			tm.recorder.Emit(EventError,
+				infra.F("code", ErrCodeInvalidMessage),
+				infra.F("duplicate", "practice_submit"),
+			)
+			return
+		}
+		tm.submitPractice(s, m)
 		return
 	}
 	if m.RequestID == "" {

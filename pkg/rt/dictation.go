@@ -303,6 +303,12 @@ type DictationTutor struct {
 	// holds too — the panel, the verdict writes and the voice gate behave
 	// exactly as in a live check stage.
 	correction bool
+	// practice marks a PRACTICE session (13.1-05, D-11/D-12): the word set
+	// was randomly picked from the vocabulary (r0x- lesson id), and the
+	// check submit writes practice_logs instead of SubmitReview. The FSM is
+	// stage-agnostic — practice differs ONLY at the submit (and the ending
+	// reason), never at pacing, the check panel, or the D-05 gate.
+	practice bool
 }
 
 // newDictationTutor binds the FSM to a lesson row read back from the
@@ -682,9 +688,19 @@ func announceText(idx, total int, word string) string {
 // (13.1-01, D-01/D-04): the wrap-up now speaks the CHECKED battle counts
 // (checkedSummaryText in check.go) after the unified submit.
 
-// noDueWordsText explains the zero-due-words ending.
+// noDueWordsText explains the zero-due-words ending — the no-data fallback
+// when the vocabulary's next due is not presentable (no future due at all,
+// or the Practice source is unavailable). The D-13 days variant lives in
+// noDueWordsTextWithDays.
 func noDueWordsText() string {
 	return "今天没有要到期的单词，你真棒，好好休息，我们下次再练吧。"
+}
+
+// noDueWordsTextWithDays is the D-13 no-due copy variant that names the next
+// review in whole days (nextDueDays computed from the vocabulary's fsrs due
+// data). Two endings, two copies — never a shared template (D-13).
+func noDueWordsTextWithDays(days int) string {
+	return fmt.Sprintf("今天没有要到期的单词，下次复习大约在 %d 天后，好好休息，我们 %d 天后再练吧。", days, days)
 }
 
 // reviewFailedSuffix is appended to the summary when the review write

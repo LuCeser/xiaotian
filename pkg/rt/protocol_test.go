@@ -397,6 +397,9 @@ func TestProtocolPausedAndReasonLiterals(t *testing.T) {
 	if got := ReasonNoDueWords; got != "no_due_words" {
 		t.Errorf("ReasonNoDueWords = %q, want %q", got, "no_due_words")
 	}
+	if got := ReasonPracticeComplete; got != "practice_complete" {
+		t.Errorf("ReasonPracticeComplete = %q, want %q (13.1-05)", got, "practice_complete")
+	}
 	if ReasonPlaybackAckTimeoutExists() {
 		t.Error("playback_ack_timeout leaked into the SessionEndedMsg.Reason vocabulary")
 	}
@@ -409,7 +412,8 @@ func TestProtocolPausedAndReasonLiterals(t *testing.T) {
 // function to return true and the test above fails.
 func ReasonPlaybackAckTimeoutExists() bool {
 	return ReasonLessonComplete == ErrCodePlaybackAckTimeout ||
-		ReasonNoDueWords == ErrCodePlaybackAckTimeout
+		ReasonNoDueWords == ErrCodePlaybackAckTimeout ||
+		ReasonPracticeComplete == ErrCodePlaybackAckTimeout
 }
 
 // TestErrorCode maps the protocol sentinels (bare and wrapped) to their

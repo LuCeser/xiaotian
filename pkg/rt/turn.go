@@ -124,6 +124,18 @@ type TurnManagerConfig struct {
 	// PhotoConfidence is the OCR prefill confidence floor (0 → 0.6,
 	// PhotoConfig.ConfidenceThreshold semantics).
 	PhotoConfidence float64
+	// Practice is the vocabulary read seam for 「再练一组」 (13.1-05, D-11):
+	// random practice picks List the FULL vocabulary through it — never the
+	// due fetch (RunDue takes the lock and only returns due words). The
+	// production implementation is the CardRepository instance the parent
+	// pages already use. Nil Practice degrades practice_init to a coded
+	// honest error — never a silent fallback into a due lesson.
+	Practice PracticeSource
+	// PracticeStore is the Go-owned practice-record write seam (13.1-05,
+	// D-12): practice results land HERE and only here — never review_logs,
+	// never the FSRS schedule. A practice session without it answers the
+	// same honest degraded error as a nil Practice source.
+	PracticeStore *lesson.PracticeStore
 }
 
 // defaultWordTimeout is the per-word confirm wait used when
@@ -444,6 +456,8 @@ func (tm *TurnManager) HandleControl(s Sender, data []byte) {
 // handleSessionInit validates the negotiated audio format, then establishes
 // the classroom under the per-lesson init lock: one creator runs the due
 // fetch; legacy-empty and already-completed rows take their explicit paths.
+// A practice=true init (13.1-05) branches off BEFORE the due-fetch flow —
+// practice never touches FetchDueWords nor the r0-YYYYMMDD namespace.
 func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	if err := ValidateAudioInit(m.Audio); err != nil {
 		tm.sendError(s, ErrCodeUnsupportedFormat, "仅支持 16000Hz、s16le、单声道的上行音频", true)
@@ -458,13 +472,6 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 		tm.sendError(s, ErrCodeProviderFailed, "服务器课堂模块未就绪", false)
 		return
 	}
-	if tm.cfg.Words == nil {
-		// T-13-14: fixed human wording; the adapter is wired by 13-10.
-		tm.sendError(s, ErrCodeLessonUnavailable, lessonUnavailableNotice, false)
-		return
-	}
-
-	lessonID := resolveLessonID(tm.cfg.LessonID, time.Now())
 
 	// Retain the write half for server-initiated announcements that have no
 	// request context behind them (the 13-09 timeout auto-advance), and the
@@ -474,6 +481,19 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	tm.sender = s
 	tm.mode = normalizeSessionMode(m.Mode)
 	tm.mu.Unlock()
+
+	if m.Practice {
+		tm.handlePracticeInit(s)
+		return
+	}
+
+	if tm.cfg.Words == nil {
+		// T-13-14: fixed human wording; the adapter is wired by 13-10.
+		tm.sendError(s, ErrCodeLessonUnavailable, lessonUnavailableNotice, false)
+		return
+	}
+
+	lessonID := resolveLessonID(tm.cfg.LessonID, time.Now())
 
 	unlock := lockLessonInit(lessonID)
 	defer unlock()
@@ -527,7 +547,7 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 		// (stage first, index second — the new branches never swallow them).
 		tm.startCompletedSession(s, l)
 	default:
-		tm.startDictationSession(s, l)
+		tm.startDictationSession(s, l, false)
 	}
 }
 
@@ -551,8 +571,9 @@ func normalizeSessionMode(mode string) string {
 }
 
 // startNoDueSession answers session_ready with an empty word table, lets
-// the teacher explain (zero due words), and ends the session only after the
-// explanation's actual playback ack (or its bounded timeout).
+// the teacher explain (zero due words — with the D-13 days variant when the
+// vocabulary's due data names the next review), and ends the session only
+// after the explanation's actual playback ack (or its bounded timeout).
 func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 	tm.mu.Lock()
 	tm.state = StateListening
@@ -572,7 +593,7 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 	tm.mu.Lock()
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
-	go tm.runNaturalEnding(s, ctx, cancel, noDueWordsText(), purposeNoDue, ReasonNoDueWords)
+	go tm.runNaturalEnding(s, ctx, cancel, tm.noDueWordsTextForNow(), purposeNoDue, ReasonNoDueWords)
 }
 
 // startCompletedSession restores the completion state for an
@@ -599,10 +620,12 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
 // startDictationSession binds the FSM to the lesson row and immediately
 // speaks the opening greeting (first greeting + first word) — the RT-04
 // structure where first-audible latency contains only the FSRS fetch and
-// the TTS first packet, no LLM call.
-func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson) {
+// the TTS first packet, no LLM call. practice (13.1-05) flips only the
+// submit-path flag; pacing, the check stage and the D-05 gate are identical.
+func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice bool) {
 	tm.mu.Lock()
 	tm.tutor = newDictationTutor(l)
+	tm.tutor.practice = practice
 	tm.state = StateListening
 	tm.sessionReadyAt = time.Now()
 	first := tm.tutor.words[tm.tutor.currentIndex]
@@ -888,7 +911,7 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 // persists its downgraded ratings once (the write needs the live tutor).
 func (tm *TurnManager) handleEndSession(s Sender) {
 	tm.uncheckedCloseFallback()
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: "client_end"})
+	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonClientEnd})
 	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 	tm.internalClose()
 }

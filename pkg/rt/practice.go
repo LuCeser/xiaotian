@@ -14,11 +14,17 @@ package rt
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 )
 
@@ -37,6 +43,11 @@ type PracticeSource interface {
 // due lesson (D-11), fewer when the vocabulary minus today's words runs out.
 const practiceWordsLimit = dueWordsLimit
 
+// practiceListTimeout bounds the one vocabulary List the practice/no-due
+// paths make (a read-only direct query — the same request-timeout class as
+// the photo OCR pass, not the classroom pacing clock).
+const practiceListTimeout = 5 * time.Second
+
 // practiceUnavailableNotice is the fixed honest wording when the practice
 // pick cannot run (nil Practice source, List failure): a coded degraded
 // answer, never a silent fallback into a due-word lesson (T-13.1-14 class).
@@ -47,6 +58,29 @@ const practiceUnavailableNotice = "练习暂时取不到词，请稍后再试"
 // practiced today): the session answers ready + this notice and ends —
 // never an empty lesson.
 const practiceAllPracticedNotice = "今天的词都练过啦，好好休息，明天再来吧！"
+
+// Practice timing-event vocabulary (13.1-05; the check-stage constants live
+// in check.go beside their users, timing.go untouched — same convention).
+// Fields stay count-class only (T-13-06b desensitization boundary).
+const (
+	// EventPracticeStarted: a practice session initialized; the picked count
+	// only — never the word text.
+	EventPracticeStarted = "practice_started"
+	// EventPracticeSubmitted: the practice submit landed its practice_logs
+	// batch; fields carry the requested/recorded counts. THE audit marker
+	// that a practice write happened instead of an FSRS review (T-13.1-11).
+	EventPracticeSubmitted = "practice_submitted"
+)
+
+// purposePracticeSummary is the announcement purpose of the practice wrap
+// line — a natural ending like purposeSummary but WITHOUT the lesson_complete
+// event (the practice ending audits through EventPracticeSubmitted instead).
+const purposePracticeSummary = "practice_summary"
+
+// ReasonClientEnd names the explicit-goodbye reason (the literal
+// handleEndSession has always shipped); 13.1-05 reuses it for the
+// nothing-left-to-practice ending — no new reason, per plan.
+const ReasonClientEnd = "client_end"
 
 // pickPracticeWords samples up to n practice words from the vocabulary,
 // EXCLUDING every word in excludeToday (the day's dictated lesson words ∪
@@ -130,4 +164,302 @@ func nextDueDays(cards []database.Card, now time.Time) int {
 		return 0
 	}
 	return int(math.Ceil(minDue.Sub(now).Hours() / 24))
+}
+
+// beijingDay is the "2006-01-02" Beijing-calendar date string — the
+// reviewed_day authority of practice_logs and the exclusion-set scope.
+func beijingDay(now time.Time) string {
+	return now.In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
+}
+
+// noDueWordsTextForNow picks the no-due ending copy (D-13): the days variant
+// when the Practice source lists the vocabulary once and a presentable
+// future due exists; the day-free fallback on any degradation (nil source,
+// List error, no future due). Never a fabricated count.
+func (tm *TurnManager) noDueWordsTextForNow() string {
+	if tm.cfg.Practice == nil {
+		return noDueWordsText()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), practiceListTimeout)
+	defer cancel()
+	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{})
+	if err != nil {
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeProviderFailed),
+			infra.F("at", "no_due_days_list"),
+		)
+		return noDueWordsText()
+	}
+	if days := nextDueDays(cards, time.Now()); days > 0 {
+		return noDueWordsTextWithDays(days)
+	}
+	return noDueWordsText()
+}
+
+// handlePracticeInit is the practice=true branch of session_init (13.1-05,
+// D-11): resolve an r0x- id, build today's exclusion set (the daily lesson's
+// words ∪ the day's practiced words), randomly pick ≤10 words from the FULL
+// vocabulary (never the due fetch), and start the SAME three-stage FSM with
+// the practice flag set. Runs on the transport read loop — DB calls are the
+// same short-transaction class as the main init.
+func (tm *TurnManager) handlePracticeInit(s Sender) {
+	if tm.cfg.Practice == nil || tm.cfg.PracticeStore == nil {
+		// Honest degraded answer (lesson_unavailable class) — never a
+		// silent fallback into a due-word lesson.
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeLessonUnavailable),
+			infra.F("practice", "no_source"),
+		)
+		tm.sendError(s, ErrCodeLessonUnavailable, practiceUnavailableNotice, false)
+		return
+	}
+
+	now := time.Now()
+	lessonID := resolvePracticeLessonID(now)
+
+	// The per-lesson init lock discipline: two simultaneous practice
+	// connections must not both create a row for the same id.
+	unlock := lockLessonInit(lessonID)
+	defer unlock()
+
+	ctx := context.Background()
+
+	// The exclusion set: today's dictated lesson words first (tolerate
+	// ErrLessonNotFound — a day with no lesson yet means nothing to exclude
+	// from that side).
+	exclude := map[string]bool{}
+	dailyID := resolveLessonID(tm.cfg.LessonID, now)
+	if l, err := tm.exec.GetLessonState(ctx, dailyID); err != nil {
+		if !errors.Is(err, lesson.ErrLessonNotFound) {
+			tm.failLessonInit(s)
+			return
+		}
+	} else {
+		for _, c := range l.Cards {
+			exclude[c.Word] = true
+		}
+	}
+
+	// ...then today's already-practiced words (避开当日已默, D-11).
+	practiced, err := tm.cfg.PracticeStore.ListPracticeWordsOn(ctx, beijingDay(now))
+	if err != nil {
+		tm.failLessonInit(s)
+		return
+	}
+	for _, w := range practiced {
+		exclude[w] = true
+	}
+
+	// Random pick over the FULL vocabulary (read-only direct List — never
+	// RunDue's lock, T-13.1-12 accepts the single-family scan scale).
+	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{})
+	if err != nil {
+		tm.failLessonInit(s)
+		return
+	}
+	picked := pickPracticeWords(cards, exclude, practiceWordsLimit, rand.New(rand.NewSource(now.UnixNano())))
+	if len(picked) == 0 {
+		// Honest empty answer: ready + spoken notice + ack-gated ending.
+		// No new reason — the client_end-style explicit end (plan).
+		tm.mu.Lock()
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		tm.mu.Unlock()
+		_ = s.SendControl(SessionReadyMsg{
+			Type:      TypeSessionReady,
+			SessionID: tm.session,
+			Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+			TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
+			Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
+		})
+		tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
+
+		nctx, cancel := context.WithCancel(context.Background())
+		tm.mu.Lock()
+		tm.turnCancel = cancel
+		tm.mu.Unlock()
+		go tm.runNaturalEnding(s, nctx, cancel, practiceAllPracticedNotice, purposeNoDue, ReasonClientEnd)
+		return
+	}
+
+	l, err := tm.exec.EnsureLessonCards(ctx, lessonID, picked)
+	if err != nil {
+		tm.failLessonInit(s)
+		return
+	}
+	tm.recorder.Emit(EventPracticeStarted, infra.F("picked", len(picked)))
+	tm.startDictationSession(s, l, true)
+}
+
+// practiceSummaryText builds the practice wrap line (13.1-05, D-13's third
+// ending copy): the set's battle count in practice wording — distinct from
+// checkedSummaryText (lesson_complete) and noDueWordsText (no_due_words),
+// never a shared template. A failed practice-record write appends the honest
+// save-failure suffix (S-05: never a fabricated success).
+func practiceSummaryText(total, correct int, saveFailed bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "这组练习 %d 个词对了 %d 个，很棒！", total, correct)
+	if saveFailed {
+		b.WriteString(reviewFailedSuffix())
+	}
+	return b.String()
+}
+
+// submitPractice is the practice check_submit (13.1-05): the SAME per-word
+// manual gate (a practice check is still a check — D-05), the SAME
+// CompleteCheck stage latch, but past the gate the per-word D-02 ratings go
+// to PracticeStore.RecordPractice INSTEAD of WordSource.SubmitReview
+// (T-13.1-11: the FSRS write channel is never touched). The honest
+// review_result reports the record counts, the practice wrap line speaks
+// through the ACK gate, and the ending carries practice_complete.
+func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
+	if m.RequestID == "" {
+		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
+		return
+	}
+
+	// Submit gate (D-05, identical to every other submit): every word needs
+	// a MANUAL verdict. The word list is captured under the lock here — the
+	// finishing goroutine reads the copy, never the live tutor.
+	tm.mu.Lock()
+	lessonID := tm.tutor.lessonID
+	expected := tm.tutor.version
+	total := len(tm.tutor.words)
+	wordsList := make([]lesson.Word, total)
+	copy(wordsList, tm.tutor.words)
+	manual := make(map[int]bool, total)
+	for _, v := range tm.tutor.checkVerdicts {
+		if v.Manual {
+			manual[v.WordIndex] = true
+		}
+	}
+	tm.mu.Unlock()
+	if len(manual) < total {
+		tm.sendError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
+		return
+	}
+
+	// Latch: the same stage transition — only its first commit proceeds
+	// (the replay/idempotency protection is the store's, not a session
+	// memory artifact).
+	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	tm.turnCancel = cancel
+	tm.mu.Unlock()
+
+	res, err := tm.exec.CompleteCheck(ctx, lessonID, expected, m.RequestID, false)
+	if err != nil {
+		var conflict *lesson.ConflictError
+		if errors.As(err, &conflict) {
+			tm.mu.Lock()
+			tm.tutor.checking = false
+			tm.mu.Unlock()
+			tm.recorder.Emit(EventError,
+				infra.F("code", ErrCodeProviderFailed),
+				infra.F("duplicate", "practice_submit_conflict"),
+			)
+			return
+		}
+		tm.sendError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		return
+	}
+	if res.Idempotent {
+		// The latch already fell elsewhere: nothing to write, nothing to
+		// replay (the honest no-op).
+		tm.mu.Lock()
+		tm.tutor.checking = false
+		tm.mu.Unlock()
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeProviderFailed),
+			infra.F("duplicate", "practice_submit_latch"),
+		)
+		return
+	}
+
+	tm.mu.Lock()
+	tm.tutor.version = res.NewVersion
+	tm.tutor.checking = false
+	tm.mu.Unlock()
+
+	go tm.finishPracticeSubmit(s, ctx, cancel, lessonID, wordsList, res)
+}
+
+// finishPracticeSubmit runs on its own goroutine (the ACK-gated ending
+// blocks; the read loop must keep serving acks): ONE RecordPractice batch
+// from the STORED verdicts + outcomes readback (the row is the authority),
+// the honest practice feedback, the wrap line, then
+// session_ended(practice_complete).
+func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, lessonID string, wordsList []lesson.Word, res lesson.CompleteCheckResult) {
+	defer cancel()
+
+	// The D-02 matrix over the STORED readback — the same single rating
+	// discipline as the main submit (never a second table, Pitfall 1).
+	ratings := checkRatings(wordsList, res.Verdicts, res.Outcomes)
+
+	correct := 0
+	correctByWord := make(map[string]bool, len(res.Verdicts))
+	for _, v := range res.Verdicts {
+		if v.WordIndex < 0 || v.WordIndex >= len(wordsList) {
+			continue
+		}
+		correctByWord[wordsList[v.WordIndex].Word] = v.Correct
+		if v.Correct {
+			correct++
+		}
+	}
+	hintsByWord := make(map[string]int, len(res.Outcomes))
+	for key, o := range res.Outcomes {
+		idx, perr := strconv.Atoi(key)
+		if perr != nil || idx < 0 || idx >= len(wordsList) {
+			continue
+		}
+		hintsByWord[wordsList[idx].Word] = o.Hints
+	}
+
+	day := beijingDay(time.Now())
+	records := make([]lesson.PracticeRecord, 0, len(ratings))
+	for word, rating := range ratings {
+		records = append(records, lesson.PracticeRecord{
+			LessonID:    lessonID,
+			Word:        word,
+			Rating:      rating,
+			Correct:     correctByWord[word],
+			Hints:       hintsByWord[word],
+			ReviewedDay: day,
+		})
+	}
+
+	total := len(wordsList)
+	requested := len(records)
+	recorded := 0
+	saveFailed := false
+	if requested > 0 {
+		if err := tm.cfg.PracticeStore.RecordPractice(ctx, records); err != nil {
+			// Honest failure: the practice records were NOT saved — never a
+			// narrated success (transparency prohibition, S-05).
+			saveFailed = true
+			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+		} else {
+			recorded = requested
+			tm.recorder.Emit(EventPracticeSubmitted,
+				infra.F("requested", requested),
+				infra.F("recorded", recorded),
+			)
+		}
+	}
+
+	tm.mu.Lock()
+	tm.tutor.reviewSeen = true
+	tm.mu.Unlock()
+
+	_ = s.SendControl(ReviewResultMsg{
+		Type:      TypeReviewResult,
+		Requested: requested,
+		Updated:   recorded,
+		Missing:   0,
+		Unchecked: false,
+	})
+
+	summary := practiceSummaryText(total, correct, saveFailed)
+	tm.runNaturalEnding(s, ctx, cancel, summary, purposePracticeSummary, ReasonPracticeComplete)
 }

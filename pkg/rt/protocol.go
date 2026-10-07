@@ -197,10 +197,16 @@ type LessonView struct {
 // unsupported_format ErrorMsg. Mode carries the page's UI mode (13.1 D-08:
 // "student" default, "test" keeps the full-reveal behavior); an absent or
 // invalid value normalizes to student.
+//
+// Practice=true (13.1-05, D-11) requests a PRACTICE session instead of the
+// daily due lesson: random words from the full vocabulary minus today's
+// dictated/practiced words, the same three-stage flow, results recorded to
+// the Go-owned practice_logs only — never the FSRS schedule (D-12).
 type SessionInitMsg struct {
-	Type  string    `json:"type"`
-	Audio AudioSpec `json:"audio"`
-	Mode  string    `json:"mode,omitempty"`
+	Type     string    `json:"type"`
+	Audio    AudioSpec `json:"audio"`
+	Mode     string    `json:"mode,omitempty"`
+	Practice bool      `json:"practice,omitempty"`
 }
 
 // UI mode values carried by SessionInitMsg.Mode (13.1 D-08). Anything else —
@@ -364,9 +370,9 @@ type ErrorMsg struct {
 }
 
 // SessionEndedMsg.Reason vocabulary for NATURAL classroom endings (the
-// state-machine dictation-tutor loop, 2026-10-03 pivot). These are the only
-// two natural-end reasons; explicit end_session, idle timeout, or fatal
-// error keep using their existing reason strings.
+// state-machine dictation-tutor loop, 2026-10-03 pivot; 13.1-05 adds the
+// practice ending). Explicit end_session, idle timeout, or fatal error keep
+// using their existing reason strings.
 const (
 	// ReasonLessonComplete: the wrap-up summary has been produced and the
 	// learning record written after the last word completed.
@@ -374,20 +380,26 @@ const (
 	// ReasonNoDueWords: zero FSRS due words; the teacher explained that and
 	// ended the session.
 	ReasonNoDueWords = "no_due_words"
+	// ReasonPracticeComplete: a PRACTICE set (13.1-05, D-11) finished its
+	// three-stage flow; the results went to practice_logs only, never the
+	// FSRS schedule (D-12). The practice ending is the ONLY ending that
+	// carries this reason.
+	ReasonPracticeComplete = "practice_complete"
 )
 
 // SessionEndedMsg is the server's final message before closing the
 // connection (explicit end_session, idle timeout, fatal error, or a natural
-// classroom end carrying ReasonLessonComplete / ReasonNoDueWords).
+// classroom end carrying ReasonLessonComplete / ReasonNoDueWords /
+// ReasonPracticeComplete).
 //
 // Sequencing contract for natural endings: the SessionEndedMsg must be sent
 // only after the matching playback-completion sentence_ack has been received
 // for the final announcement. If that bounded wait times out, the server
 // first sends ErrorMsg(code=playback_ack_timeout) and THEN sends the
-// SessionEndedMsg still carrying the original lesson_complete/no_due_words
-// reason. That degraded order means only "the server stopped waiting" — it
-// is never evidence that the announcement was actually played, and
-// playback_ack_timeout itself is an ErrorMsg.Code, never a
+// SessionEndedMsg still carrying the original lesson_complete/no_due_words/
+// practice_complete reason. That degraded order means only "the server
+// stopped waiting" — it is never evidence that the announcement was actually
+// played, and playback_ack_timeout itself is an ErrorMsg.Code, never a
 // SessionEndedMsg.Reason.
 type SessionEndedMsg struct {
 	Type   string `json:"type"`
