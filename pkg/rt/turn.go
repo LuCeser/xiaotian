@@ -533,7 +533,7 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
 		SessionID: tm.session,
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
 		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    lessonViewOf(l),
+		Lesson:    tm.lessonViewFor(l),
 	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
@@ -551,6 +551,7 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson) {
 	tm.sessionReadyAt = time.Now()
 	first := tm.tutor.words[tm.tutor.currentIndex]
 	total := len(tm.tutor.words)
+	mode := tm.mode
 	tm.mu.Unlock()
 
 	_ = s.SendControl(SessionReadyMsg{
@@ -558,7 +559,7 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson) {
 		SessionID: tm.session,
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
 		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    lessonViewOf(l),
+		Lesson:    tm.lessonViewFor(l),
 	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
@@ -566,18 +567,74 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson) {
 	tm.mu.Lock()
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
-	go tm.runAnnouncement(s, ctx, cancel, greetingText(total, first.Word), purposeGreeting, func() {
+	spoken := greetingText(total, first.Word)
+	display := spoken
+	if mode != ModeTest {
+		// 13.1-02 student masking (D-10): the greeting subtitle drops the
+		// first word's text; the TTS input stays the raw greeting.
+		display = greetingMaskedText(total)
+	}
+	go tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeGreeting, func() {
 		tm.announceAcked(s)
 	})
 }
 
-// lessonViewOf projects a lesson row into the wire LessonView.
+// lessonViewOf projects a lesson row into the wire LessonView (test mode and
+// the full-reveal shape: every word's plaintext).
 func lessonViewOf(l lesson.Lesson) LessonView {
 	words := make([]string, 0, len(l.Cards))
 	for _, c := range l.Cards {
 		words = append(words, c.Word)
 	}
 	return LessonView{LessonID: l.LessonID, Version: l.Version, CurrentIndex: l.CurrentIndex, Words: words}
+}
+
+// lessonViewStudent is the D-09 student projection: revealed words (i <
+// currentIndex) carry text; every undictated position is "". The reveal
+// primitive is word_revealed, the wholesale unmask point is check_started.
+func lessonViewStudent(l lesson.Lesson) LessonView {
+	words := make([]string, 0, len(l.Cards))
+	for i, c := range l.Cards {
+		if i < l.CurrentIndex {
+			words = append(words, c.Word)
+		} else {
+			words = append(words, "")
+		}
+	}
+	return LessonView{LessonID: l.LessonID, Version: l.Version, CurrentIndex: l.CurrentIndex, Words: words}
+}
+
+// sessionMode returns the normalized UI mode (ModeStudent before session_init
+// stores one — the absent case must never leak words, D-08).
+func (tm *TurnManager) sessionMode() string {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.mode
+}
+
+// lessonViewFor projects a lesson row through the session's mode: student
+// masks undictated words (D-09); test keeps the full reveal.
+func (tm *TurnManager) lessonViewFor(l lesson.Lesson) LessonView {
+	if tm.sessionMode() == ModeTest {
+		return lessonViewOf(l)
+	}
+	return lessonViewStudent(l)
+}
+
+// replyDisplay returns the SCREEN copy of an LLM reply: in student mode the
+// reply passes through maskTranscript (a leaking hint/meaning/chat reply is
+// masked on screen) while TTS still speaks it as generated; test mode and
+// pre-session turns return it unchanged.
+func (tm *TurnManager) replyDisplay(reply string) string {
+	if reply == "" {
+		return reply
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.mode == ModeTest || tm.tutor == nil {
+		return reply
+	}
+	return maskTranscript(reply, tm.tutor.maskedWords())
 }
 
 // announceAcked is the ack-armed callback of word announcements: mark the
@@ -600,13 +657,21 @@ func (tm *TurnManager) announceAcked(s Sender) {
 // lives in dictation.go next to the rest of the 13-09 timer logic.
 // stopWordTimer suspends it (the pause command).
 
-// runAnnouncement speaks one FSM announcement and settles the FSM only
+// runAnnouncement speaks one FSM announcement whose display text equals its
+// spoken text (non-word-bearing announcements) and settles the FSM only
 // after its valid final playback ack — TTS send completion and audio_end
 // NEVER restore listening (uplink stays gated through the ack; 13-09 adds
 // the 500ms echo tail afterwards). Timeout degrades per purpose: ordinary
 // announcements orderly-close; natural endings still ship their original
 // reason first.
 func (tm *TurnManager) runAnnouncement(s Sender, ctx context.Context, cancel context.CancelFunc, text, purpose string, onAck func()) {
+	tm.runAnnouncementDisplay(s, ctx, cancel, text, text, purpose, onAck)
+}
+
+// runAnnouncementDisplay is runAnnouncement with SEPARATE spoken and display
+// texts (13.1-02 student masking): spoken feeds TTS, the LLM history, and the
+// interrupt trim; display rides the teacher_sentence subtitle only.
+func (tm *TurnManager) runAnnouncementDisplay(s Sender, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
 	defer cancel()
 
 	tm.mu.Lock()
@@ -614,7 +679,7 @@ func (tm *TurnManager) runAnnouncement(s Sender, ctx context.Context, cancel con
 	turnID := tm.nextTurnIDLocked()
 	tm.mu.Unlock()
 
-	ref := tm.speakTurn(s, turnID, epoch, text, purpose, ctx, cancel)
+	ref := tm.speakTurn(s, turnID, epoch, spoken, display, purpose, ctx, cancel)
 	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
 	if !completed {
 		if timedOut {
@@ -641,7 +706,7 @@ func (tm *TurnManager) runNaturalEnding(s Sender, ctx context.Context, cancel co
 	turnID := tm.nextTurnIDLocked()
 	tm.mu.Unlock()
 
-	ref := tm.speakTurn(s, turnID, epoch, text, purpose, ctx, cancel)
+	ref := tm.speakTurn(s, turnID, epoch, text, text, purpose, ctx, cancel)
 	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
 	if !completed && !timedOut {
 		// Interrupted or disconnected: cancel the wait, never message.
@@ -921,10 +986,17 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		tm.settleListening(s)
 		return
 	}
-	_ = s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: transcript})
+	// Transcript desensitization (13.1-02 D-10, Pitfall 4 red line): the
+	// OUTBOUND copy masks still-unrevealed words; the history and the
+	// classification input keep the raw transcript.
+	display := transcript
 	tm.mu.Lock()
 	tm.tutor.appendUserRound(transcript)
+	if tm.mode != ModeTest {
+		display = maskTranscript(transcript, tm.tutor.maskedWords())
+	}
 	tm.mu.Unlock()
+	_ = s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: display})
 
 	intent, reply := tm.classifyTurn(ctx, transcript, target)
 	if !tm.epochCurrent(epoch) {
@@ -956,9 +1028,9 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		}
 		tm.confirmTarget(s, ctx, cancel, turnID, epoch, reply, target)
 	case intentRepeat:
-		tm.speakCurrentWordReading(s, ctx, cancel, repeatText)
+		tm.speakCurrentWordReading(s, ctx, cancel, repeatText, repeatMaskedText)
 	case intentSlow:
-		tm.speakCurrentWordReading(s, ctx, cancel, slowReadText)
+		tm.speakCurrentWordReading(s, ctx, cancel, slowReadText, slowMaskedText)
 	case intentHint:
 		// U-9 ruling (2026-10-06): every hint request increments the word's
 		// hint count and pre-records the hint outcome. The pre-record is
@@ -980,9 +1052,11 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 				infra.F("hint_count", n),
 			)
 		}
-		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, tm.armWordTimer)
+		// LLM replies mask on screen in student mode (a leaking hint is still
+		// masked); TTS speaks the reply as generated (D-10).
+		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	case intentMeaning:
-		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, tm.armWordTimer)
+		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	case intentPause:
 		tm.mu.Lock()
 		if tm.tutor != nil {
@@ -993,30 +1067,43 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		tm.runAnnouncement(s, ctx, cancel, pauseAckText(), purposeChat, nil)
 	case intentResume:
 		tm.mu.Lock()
-		idx, word := 0, ""
+		idx, word, mode := 0, "", tm.mode
 		if tm.tutor != nil {
 			tm.tutor.paused = false
 			idx = tm.tutor.currentIndex + 1
 			word = tm.tutor.words[tm.tutor.currentIndex].Word
 		}
 		tm.mu.Unlock()
-		tm.runAnnouncement(s, ctx, cancel, resumeAckText(idx, word), purposeChat, tm.armWordTimer)
+		spoken := resumeAckText(idx, word)
+		display := spoken
+		if mode != ModeTest {
+			display = resumeMaskedText(idx)
+		}
+		tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
 	case intentChat:
-		tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, tm.armWordTimer)
+		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	}
 }
 
 // speakCurrentWordReading announces a template re-reading (repeat/slow) of
-// the CURRENT word — the cursor never moves — and re-arms the per-word
-// countdown after the reading's valid final ack.
-func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, cancel context.CancelFunc, template func(string) string) {
+// the CURRENT word — the cursor never moves. The template SPEAKS the word
+// (voice is the answer channel, D-10); the masked variant rides the subtitle
+// in student mode. Re-arms the per-word countdown after the reading's valid
+// final ack.
+func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, cancel context.CancelFunc, template func(string) string, masked func(int) string) {
 	tm.mu.Lock()
-	word := ""
+	word, mode, idx := "", tm.mode, 0
 	if tm.tutor != nil && tm.tutor.currentIndex < len(tm.tutor.words) {
 		word = tm.tutor.words[tm.tutor.currentIndex].Word
+		idx = tm.tutor.currentIndex + 1
 	}
 	tm.mu.Unlock()
-	tm.runAnnouncement(s, ctx, cancel, template(word), purposeChat, tm.armWordTimer)
+	spoken := template(word)
+	display := spoken
+	if mode != ModeTest {
+		display = masked(idx)
+	}
+	tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
 }
 
 // confirmTarget advances the classroom through the target captured at
@@ -1103,6 +1190,16 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		CurrentIndex: res.NewIndex,
 		RequestID:    requestID,
 	})
+	if tm.sessionMode() != ModeTest {
+		// 13.1-02 (D-09): the chip flips to 已默=显词＋绿勾 — the reveal rides
+		// the FIRST commit only (idempotent replays and conflicts never
+		// re-send, mirroring the EventWordAdvanced rule).
+		_ = s.SendControl(WordRevealedMsg{
+			Type:      TypeWordRevealed,
+			WordIndex: target.WordIndex,
+			Word:      target.Word,
+		})
+	}
 	tm.recorder.Emit(EventWordAdvanced,
 		infra.F("word_index", target.WordIndex),
 		infra.F("new_index", res.NewIndex),
@@ -1119,9 +1216,17 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 
 	tm.mu.Lock()
 	word := tm.tutor.words[res.NewIndex]
-	text := announceText(res.NewIndex+1, len(tm.tutor.words), word.Word)
+	total := len(tm.tutor.words)
+	mode := tm.mode
 	tm.mu.Unlock()
-	tm.runAnnouncement(s, ctx, cancel, text, purposeAnnounce, func() {
+	spoken := announceText(res.NewIndex+1, total, word.Word)
+	display := spoken
+	if mode != ModeTest {
+		// 13.1-02 student masking (D-10): the announcement subtitle is the
+		// masked position; TTS still announces the word itself.
+		display = announceMaskedText(res.NewIndex+1, total)
+	}
+	tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeAnnounce, func() {
 		tm.announceAcked(s)
 	})
 }
@@ -1134,15 +1239,25 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 // The behavior data (outcomeCounts/hintAccounting) survives inside
 // EventReviewSubmitted's fields.
 
-// speakTurn streams the text sentence by sentence: subtitle first, audio
-// chunks forwarded the instant they arrive. Each sentence's pendingPlayback
-// entry is registered in the SAME locked section that queues its
-// audio_start — an ack can never outrun its pending entry (T-13-15b). The
-// FSM stays speaking/playback-pending on return; the caller awaits the
+// speakTurn streams the announcement sentence by sentence: subtitle first,
+// audio chunks forwarded the instant they arrive. spoken drives TTS, the LLM
+// history, and the interrupt trim; display (13.1-02 student masking) rides
+// the teacher_sentence subtitle only — the pair is per-sentence aligned, and
+// any count mismatch falls back to the spoken text. Each sentence's
+// pendingPlayback entry is registered in the SAME locked section that queues
+// its audio_start — an ack can never outrun its pending entry (T-13-15b).
+// The FSM stays speaking/playback-pending on return; the caller awaits the
 // final ack via awaitPlaybackCompletion.
-func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, text, purpose string, ctx context.Context, cancel context.CancelFunc) PlaybackRef {
-	text = truncateRunes(text, maxReplyRunes)
-	sentences := splitSentences(text)
+func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display, purpose string, ctx context.Context, cancel context.CancelFunc) PlaybackRef {
+	spoken = truncateRunes(spoken, maxReplyRunes)
+	display = truncateRunes(display, maxReplyRunes)
+	spokenSents := splitSentences(spoken)
+	displaySents := splitSentences(display)
+	if len(displaySents) != len(spokenSents) {
+		// Masking must never change the sentence count; a mismatching display
+		// falls back to the spoken text rather than corrupting the stream.
+		displaySents = spokenSents
+	}
 
 	tm.mu.Lock()
 	if tm.epoch != epoch {
@@ -1151,7 +1266,8 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, text, purpose s
 		return PlaybackRef{}
 	}
 	if tm.tutor != nil {
-		tm.tutor.recordTeacherReply(text)
+		// RAW: the LLM context never sees the masked copies (Pitfall 4).
+		tm.tutor.recordTeacherReply(spoken)
 	}
 	tm.turnSentences = nil
 	tm.acked = map[string]bool{}
@@ -1163,7 +1279,7 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, text, purpose s
 
 	var ref PlaybackRef
 	ref.Epoch = epoch
-	for i, sentence := range sentences {
+	for i, sentence := range spokenSents {
 		sentID := fmt.Sprintf("t%d-s%d", turnID, i)
 
 		// Subtitle first (字幕先行) + pending registration BEFORE
@@ -1178,7 +1294,7 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, text, purpose s
 		tm.pendingPlayback[pendingKey(epoch, sentID)] = &pendingPlayback{purpose: purpose, done: make(chan struct{})}
 		tm.turnSentences = append(tm.turnSentences, sentenceInfo{id: sentID, text: sentence})
 		_ = s.SendControl(TeacherSentenceMsg{
-			Type: TypeTeacherSentence, TurnID: turnID, Epoch: epoch, SentenceID: sentID, Text: sentence,
+			Type: TypeTeacherSentence, TurnID: turnID, Epoch: epoch, SentenceID: sentID, Text: displaySents[i],
 		})
 		_ = s.SendControl(AudioStartMsg{Type: TypeAudioStart, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
 		tm.mu.Unlock()

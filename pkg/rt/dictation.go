@@ -11,10 +11,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/grading"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
@@ -394,6 +397,22 @@ func (t *DictationTutor) resyncCheck(l lesson.Lesson) {
 	}
 }
 
+// maskedWords returns the STILL-MASKED word set for outbound masking: every
+// not-yet-revealed word (index >= currentIndex — the current word included,
+// D-09). Once the check stage opens the set is empty: check_started already
+// delivered the full plaintext list, and nothing re-masks after it (D-10).
+// Caller holds tm.mu (single-lock discipline).
+func (t *DictationTutor) maskedWords() []string {
+	if t.checking {
+		return nil
+	}
+	out := make([]string, 0, len(t.words))
+	for i := t.currentIndex; i < len(t.words); i++ {
+		out = append(out, t.words[i].Word)
+	}
+	return out
+}
+
 // appendUserRound appends the student's transcription as a new round,
 // dropping the oldest beyond the 4-round cap.
 func (t *DictationTutor) appendUserRound(text string) {
@@ -645,6 +664,132 @@ func resumeAckText(idx int, word string) string {
 // paused: pacing stays suspended — no advance, no lesson_update.
 func confirmPausedRejectText() string {
 	return "我们还在休息呢，想继续的时候说继续，老师再陪你写这个词。"
+}
+
+// ---------------------------------------------------------------------------
+// Student-mode masked templates (13.1-02, D-10): the SCREEN copies of
+// word-bearing announcements. Voice is the answer channel — TTS always gets
+// the raw template — while the subtitle carries the masked variant so the
+// spelling never reaches the wire. Beside the pure-function family above.
+// ---------------------------------------------------------------------------
+
+// maskWord is the FIXED masked placeholder for a not-yet-revealed word.
+// Fixed length by design — a length-proportional mask would leak the word's
+// own length, which is itself a hint.
+func maskWord() string {
+	return "•••"
+}
+
+// wordPositionText names a word by its 1-based position — the masked form
+// teacher subtitles use (「第 N 个词」, 13.1 D-10).
+func wordPositionText(idx int) string {
+	return fmt.Sprintf("第 %d 个词", idx)
+}
+
+// greetingMaskedText mirrors greetingText with the first word's text dropped.
+func greetingMaskedText(wordCount int) string {
+	if wordCount == 1 {
+		return "你好呀！今天我们只有一个词要写。听好哦：第 1 个词。"
+	}
+	return fmt.Sprintf("你好呀！今天我们有 %d 个词要写。听好哦：%s。", wordCount, wordPositionText(1))
+}
+
+// announceMaskedText announces one word's position only (「第 N 个词。」);
+// total mirrors announceText's signature for call-site symmetry.
+func announceMaskedText(idx, total int) string {
+	return wordPositionText(idx) + "。"
+}
+
+// repeatMaskedText mirrors repeatText with the word masked to its position.
+func repeatMaskedText(idx int) string {
+	return fmt.Sprintf("好，我再读一遍。%s。", wordPositionText(idx))
+}
+
+// slowMaskedText mirrors slowReadText (the whole-word pause shape preserved,
+// still zero spelling) with the word masked to its position.
+func slowMaskedText(idx int) string {
+	return fmt.Sprintf("%s。%s。慢慢写，不着急。", wordPositionText(idx), wordPositionText(idx))
+}
+
+// resumeMaskedText mirrors resumeAckText with the word masked to its
+// position.
+func resumeMaskedText(idx int) string {
+	return fmt.Sprintf("好，我们继续。还是%s，慢慢写。", wordPositionText(idx))
+}
+
+// maskTranscript replaces every occurrence of a still-masked lesson word in
+// text with maskWord(). Comparison goes through grading.Normalize — the
+// SINGLE normalization authority (case folding + language-aware punctuation
+// stripping; the language regime follows each word's script) — while the
+// replacement lands on the ORIGINAL raw span, so the surrounding sentence
+// keeps its exact characters. Callers pass only the STILL-MASKED word set:
+// words already revealed (the check stage) are never masked again (D-10).
+//
+// The scan window per start position is bounded (normalized word length plus
+// a small punctuation slack): normalization only ever REMOVES runes from a
+// span, so a matching span cannot be much longer than the word itself.
+func maskTranscript(text string, words []string) string {
+	if text == "" || len(words) == 0 {
+		return text
+	}
+	const maskWindowSlack = 8
+	runes := []rune(text)
+	type span struct{ start, end int }
+	var spans []span
+	for _, w := range words {
+		if w == "" {
+			continue
+		}
+		lang := "en"
+		for _, r := range w {
+			if unicode.Is(unicode.Han, r) {
+				lang = "zh"
+				break
+			}
+		}
+		nw := grading.Normalize(w, lang)
+		window := len([]rune(nw)) + maskWindowSlack
+		if window <= 0 {
+			continue
+		}
+		for i := 0; i < len(runes); i++ {
+			matched := 0
+			for j := i + 1; j <= len(runes) && j-i <= window; j++ {
+				if grading.Normalize(string(runes[i:j]), lang) == nw {
+					matched = j
+					break
+				}
+			}
+			if matched > 0 {
+				spans = append(spans, span{i, matched})
+				i = matched - 1 // the match consumes its span
+			}
+		}
+	}
+	if len(spans) == 0 {
+		return text
+	}
+	sort.Slice(spans, func(a, b int) bool { return spans[a].start < spans[b].start })
+	merged := []span{spans[0]}
+	for _, s := range spans[1:] {
+		last := &merged[len(merged)-1]
+		if s.start <= last.end {
+			if s.end > last.end {
+				last.end = s.end
+			}
+			continue
+		}
+		merged = append(merged, s)
+	}
+	var b strings.Builder
+	prev := 0
+	for _, s := range merged {
+		b.WriteString(string(runes[prev:s.start]))
+		b.WriteString(maskWord())
+		prev = s.end
+	}
+	b.WriteString(string(runes[prev:]))
+	return b.String()
 }
 
 // resolveLessonID derives the R0 lesson id: the configured id when present,
