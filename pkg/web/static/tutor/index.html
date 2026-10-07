@@ -60,6 +60,15 @@
       <div class="rt-transcript" id="rt-transcript" aria-live="polite"></div>
     </section>
 
+    <!--
+      Check panel (13.1-01): hidden until check_started opens the check
+      stage; renders one 对/错 row per word from check_started.words and
+      re-renders EXCLUSIVELY from authoritative check_verdicts echoes
+      (RT-07 — no local optimistic verdict state). 提交 gates on every word
+      carrying a manual verdict in the latest echo.
+    -->
+    <section class="rt-check" id="rt-check" hidden aria-label="默写检查"></section>
+
     <!-- Error panel: code → human-readable Chinese reason (RT-10) -->
     <section class="rt-error" id="rt-error" hidden role="alert">
       <p class="rt-error-code" id="rt-error-code"></p>
@@ -124,6 +133,22 @@
       var lesson = { words: [], currentIndex: 0, version: 0 };
       var started = false;
 
+      // ----- UI mode (13.1 D-08) ---------------------------------------------
+      // Only the exact value "test" keeps today's full-reveal behavior;
+      // anything else — including absent — is student mode (the iPad
+      // bookmark must never land the child on a full word table). The mode
+      // rides session_init via client.initMode; this plan's only visible
+      // mode-dependent surface is the check panel (masking lands in 13.1-02).
+      var mode = new URLSearchParams(window.location.search).get('mode') === 'test' ? 'test' : 'student';
+      client.initMode = mode;
+
+      // ----- check-stage state (13.1-01) --------------------------------------
+      // verdicts is a server-echo mirror ONLY: it is written by
+      // check_verdicts messages and read by rendering — the 对/错 buttons
+      // never mutate it on press (RT-07: no local optimistic verdict state;
+      // only disabled/pending UI changes at press time).
+      var check = { active: false, words: [], verdicts: {}, submitPending: false, resultText: '' };
+
       // ----- DOM helpers ----------------------------------------------------
       // The ONLY element-removal helper on this page: server-sourced text
       // (subtitles, transcripts, errors, teacher lines) never touches an HTML
@@ -159,9 +184,94 @@
       function showCompletionBanner() {
         clearChildren(bannerEl);
         var p = document.createElement('p');
-        p.textContent = '今天的默写课堂完成啦，真棒！';
+        // 13.1-01: when the check stage ran, the banner carries the honest
+        // save result (review_result) — never a fabricated full success.
+        p.textContent = check.resultText
+          ? '今天的默写课堂完成啦！' + check.resultText
+          : '今天的默写课堂完成啦，真棒！';
         bannerEl.appendChild(p);
         bannerEl.hidden = false;
+      }
+
+      // ----- check panel (13.1-01) --------------------------------------------
+      function requestUID() {
+        return 'v' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e8).toString(36);
+      }
+
+      function allChecked() {
+        for (var i = 0; i < check.words.length; i++) {
+          if (!check.verdicts[i] || !check.verdicts[i].manual) return false;
+        }
+        return true;
+      }
+
+      function renderCheckPanel() {
+        var panel = $('rt-check');
+        clearChildren(panel);
+        if (!check.active || !check.words.length) {
+          panel.hidden = true;
+          return;
+        }
+        panel.hidden = false;
+
+        var title = document.createElement('p');
+        title.className = 'rt-check-title';
+        title.textContent = '检查时间：每个词点「对」还是「错」';
+        panel.appendChild(title);
+
+        check.words.forEach(function (word, i) {
+          var row = document.createElement('div');
+          row.className = 'rt-check-row';
+
+          var w = document.createElement('span');
+          w.className = 'rt-check-word';
+          w.textContent = (i + 1) + '. ' + word;
+          row.appendChild(w);
+
+          // Highlight comes from the LATEST server echo only (RT-07).
+          var st = check.verdicts[i];
+          var yes = document.createElement('button');
+          yes.type = 'button';
+          yes.className = 'rt-btn rt-check-btn' + (st && st.correct ? ' rt-check-yes-on' : '');
+          yes.textContent = '对';
+          yes.addEventListener('click', function () { sendVerdict(i, true); });
+          var no = document.createElement('button');
+          no.type = 'button';
+          no.className = 'rt-btn rt-check-btn' + (st && !st.correct ? ' rt-check-no-on' : '');
+          no.textContent = '错';
+          no.addEventListener('click', function () { sendVerdict(i, false); });
+          row.appendChild(yes);
+          row.appendChild(no);
+          panel.appendChild(row);
+        });
+
+        var submit = document.createElement('button');
+        submit.type = 'button';
+        submit.className = 'rt-btn rt-check-submit';
+        submit.textContent = check.submitPending ? '正在提交…' : '检查完了，提交';
+        // 提交 gates on the server echo covering EVERY word with a manual
+        // verdict — never on local taps (RT-07).
+        submit.disabled = !allChecked() || check.submitPending;
+        submit.addEventListener('click', sendSubmit);
+        panel.appendChild(submit);
+      }
+
+      function sendVerdict(index, correct) {
+        client.sendJSON({
+          type: 'check_verdict',
+          request_id: requestUID(),
+          word_index: index,
+          correct: correct
+        });
+        // No local verdict mutation here: the authoritative check_verdicts
+        // echo re-renders the panel (RT-07).
+      }
+
+      function sendSubmit() {
+        if (!allChecked() || check.submitPending) return;
+        check.submitPending = true;
+        renderCheckPanel(); // disabled/pending UI while awaiting review_result
+        client.sendJSON({ type: 'check_submit', request_id: requestUID() });
       }
 
       function renderProgress() {
@@ -274,6 +384,45 @@
         lesson.currentIndex = m.current_index;
         lesson.version = m.version;
         renderProgress();
+      });
+
+      client.on('check_started', function (m) {
+        // The D-10 unmask point: check_started.words is the full plaintext
+        // list — the panel's single data source for rows.
+        check.active = true;
+        check.words = (m && m.words) || [];
+        check.verdicts = {};
+        check.submitPending = false;
+        check.resultText = '';
+        renderCheckPanel();
+      });
+
+      client.on('check_verdicts', function (m) {
+        if (!check.active) return;
+        var vs = (m && m.verdicts) || [];
+        var next = {};
+        vs.forEach(function (v) {
+          if (v && typeof v.word_index === 'number') {
+            next[v.word_index] = { correct: !!v.correct, manual: !!v.manual };
+          }
+        });
+        check.verdicts = next;
+        renderCheckPanel();
+      });
+
+      client.on('review_result', function (m) {
+        check.submitPending = false;
+        if (!m) return;
+        // Honest copy from the REAL sets — partial/zero updates are never
+        // dressed up as success (prohibition P3, S-05).
+        if (m.requested > 0 && m.updated < m.requested) {
+          check.resultText = '保存了 ' + m.updated + ' / ' + m.requested + ' 个，别担心，下次会补上。';
+        } else if (m.requested > 0) {
+          check.resultText = '学习记录保存好了，' + m.requested + ' 个词都记上啦。';
+        } else {
+          check.resultText = '这次没有要保存的学习记录。';
+        }
+        renderCheckPanel();
       });
 
       client.on('interrupt_ack', function () {
@@ -419,13 +568,28 @@
         // the scheduled-ahead source count, and the two flags prove the
         // drain path never releases shared playback resources before the
         // real last onended. Defensive defaults keep this honest before
-        // rt-playback.js grows the counters.
+        // rt-playback.js grows the counters. 13.1-01 adds the mode and a
+        // read-only check-state snapshot (row/verdict counts + the submit
+        // gate) for the mock e2e.
         observe: function () {
+          var checked = 0;
+          for (var i = 0; i < check.words.length; i++) {
+            if (check.verdicts[i] && check.verdicts[i].manual) checked += 1;
+          }
           return {
             terminalDraining: terminalDraining,
             playbackResourceReleased: playbackResourceReleased,
             stopNowCalls: playback.stopNowCalls || 0,
-            pendingSources: playback._sources ? playback._sources.length : 0
+            pendingSources: playback._sources ? playback._sources.length : 0,
+            mode: mode,
+            check: {
+              active: check.active,
+              rows: check.words.length,
+              checked: checked,
+              allChecked: allChecked(),
+              submitPending: check.submitPending,
+              resultText: check.resultText
+            }
           };
         }
       };

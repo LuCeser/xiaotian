@@ -271,6 +271,75 @@ body[data-page="tutor"] {
 .rt-btn-end:disabled { background: #d9a5a5; }
 .rt-btn-export { background: #5b6b7f; flex: 1; font-size: 17px; }
 
+/* Check panel (13.1-01): per-word 对/错 rows + unified submit. Placed AFTER
+   .rt-btn so the same-specificity overrides below win the cascade. */
+
+.rt-check {
+  background: #ffffff;
+  border: 1px solid #e3ecf7;
+  border-radius: 16px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rt-check-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #1f2d3d;
+}
+
+.rt-check-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rt-check-word {
+  flex: 1;
+  font-size: 19px;
+  color: #1f2d3d;
+  overflow-wrap: anywhere;
+}
+
+.rt-check-btn {
+  flex: none;
+  min-width: 88px;
+  border: 2px solid #d7e3f4;
+  border-radius: 14px;
+  background: #f6f9fe;
+  color: #3c5a80;
+}
+
+/* Server-echoed current verdict highlight (RT-07: the tint lands ONLY from
+   a check_verdicts re-render, never from the tap itself). */
+
+.rt-check-btn.rt-check-yes-on {
+  background: #e9f9ef;
+  border-color: #7ed49f;
+  color: #1f7a40;
+}
+
+.rt-check-btn.rt-check-no-on {
+  background: #fff3f2;
+  border-color: #f0b1ab;
+  color: #b05248;
+}
+
+.rt-check-submit {
+  flex: none;
+  border: none;
+  border-radius: 14px;
+  background: #2f6fed;
+}
+
+.rt-check-submit:disabled {
+  background: #b9cef0;
+  cursor: default;
+}
+
 @media (max-width: 420px) {
   .rt-controls { flex-direction: column; }
   .rt-state { flex-wrap: wrap; }

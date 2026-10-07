@@ -274,6 +274,10 @@
     this._pingStarted = false;
     this.sessionId = null;
     this.ws = null;
+    // 13.1 D-08: UI mode sent in session_init ("student"|"test"). The page
+    // sets it BEFORE connect(); absent/invalid normalizes server-side to
+    // student, so a page that never sets it stays safe by default.
+    this.initMode = null;
   }
 
   /**
@@ -313,7 +317,11 @@
 
     ws.onopen = function () {
       self.timing.push(RT_EVENTS.CONNECTED);
-      self.sendJSON({ type: 'session_init', audio: UPLINK_AUDIO_SPEC });
+      self.sendJSON({
+        type: 'session_init',
+        audio: UPLINK_AUDIO_SPEC,
+        mode: self.initMode || 'student'
+      });
     };
 
     ws.onmessage = function (ev) {
