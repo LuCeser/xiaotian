@@ -49,6 +49,12 @@ const (
 	// hint_words/hint_total — the honest re-use of the old completion
 	// event's behavior data).
 	EventReviewSubmitted = "review_submitted"
+	// EventUncheckedFallback: the D-03 close-path fallback wrote the
+	// behavior rating degraded by one level (13.1-04); fields carry the
+	// requested/updated counts only (T-13-06b). The honest audit trail for
+	// "this lesson was NEVER checked" — the row's unchecked marker plus this
+	// event distinguish the fallback from a checked submission (T-13.1-10).
+	EventUncheckedFallback = "unchecked_fallback"
 )
 
 // purposeCheckBridge is the announcement purpose of the check-stage bridge
@@ -443,6 +449,79 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 
 	summary := checkedSummaryText(total, correct, result.Updated, requested, saveFailed)
 	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
+}
+
+// ---------------------------------------------------------------------------
+// D-03 close-path fallback (13.1-04): a session that goes away while the
+// tutor still holds stage='checking' persists the behavior rating degraded
+// by ONE level plus the row's unchecked marker, so the lesson reads as
+// "never checked" and a later session can reopen the correction path.
+// ---------------------------------------------------------------------------
+
+// uncheckedCloseFallback runs synchronously in the CLOSE path's goroutine
+// (the server-side write completes after the connection is gone); it sends
+// NO client messages — the connection is going away. Idempotency (T-13.1-09):
+// CompleteCheck's first-commit branch is the ONLY write point — the DB latch
+// refuses any second submission, and replay/conflict branches do nothing, so
+// repeated closes never double-write the review. A failed write is logged as
+// an error event, never retried blindly (S-05): the row keeps
+// stage='checking' and the next session's resume path still finds it intact.
+func (tm *TurnManager) uncheckedCloseFallback() {
+	tm.mu.Lock()
+	eligible := tm.tutor != nil && !tm.closed && tm.tutor.checking
+	var lessonID string
+	var version int
+	if eligible {
+		lessonID = tm.tutor.lessonID
+		version = tm.tutor.version
+	}
+	tm.mu.Unlock()
+	if !eligible {
+		return
+	}
+
+	ctx := context.Background()
+	res, err := tm.exec.CompleteCheck(ctx, lessonID, version, lessonID+"-complete-check", true)
+	if err != nil {
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeProviderFailed),
+			infra.F("at", "unchecked_fallback"),
+		)
+		return
+	}
+	tm.mu.Lock()
+	tm.tutor.version = res.NewVersion
+	tm.tutor.checking = false
+	tm.tutor.completed = true
+	words := append([]lesson.Word(nil), tm.tutor.words...)
+	tm.mu.Unlock()
+	if res.Idempotent {
+		// The latch already fell (a racing check_submit or a prior close
+		// wrote first): never a second SubmitReview (T-13.1-09).
+		return
+	}
+
+	// First commit: the fallback batch derives from the STORED outcomes
+	// readback — never from session memory (the row is the authority).
+	ratings := uncheckedRatings(words, res.Outcomes)
+	requested, updated := len(ratings), 0
+	if len(ratings) > 0 {
+		wres, werr := tm.cfg.Words.SubmitReview(ctx, ratings)
+		switch {
+		case werr != nil:
+			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+		default:
+			updated = len(wres.Updated)
+			if updated < requested {
+				// Partial/zero update with nil error is not success (S-05).
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+			}
+		}
+	}
+	tm.recorder.Emit(EventUncheckedFallback,
+		infra.F("requested", requested),
+		infra.F("updated", updated),
+	)
 }
 
 // ---------------------------------------------------------------------------

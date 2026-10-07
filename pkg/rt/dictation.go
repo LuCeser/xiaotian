@@ -170,6 +170,46 @@ func checkRating(result string, hints int) string {
 	}
 }
 
+// downgradeOneRating is the D-03 one-level degradation of the 13.1-04
+// unverified-fallback path: a lesson closed before its check ran rates the
+// student's BEHAVIOR one level below the matrix value — good→hard,
+// hard→again, again floors at again, unknown stays "" (skipped). It is
+// deliberately NOT a new matrix row: the input is always a value wordRating
+// already produced (Pitfall 1 — never fork a second rating table).
+func downgradeOneRating(r string) string {
+	switch r {
+	case ratingGood:
+		return ratingHard
+	case ratingHard:
+		return ratingAgain
+	case ratingAgain:
+		return ratingAgain
+	default:
+		return ""
+	}
+}
+
+// uncheckedRatings assembles the D-03 fallback batch from the STORED outcome
+// snapshot (the lessons row is the authority — whatever the session recorded
+// in memory after EnterCheck is ignored): per word,
+// downgradeOneRating(wordRating(outcome, hints)). Words the matrix does not
+// recognize are skipped, exactly like ratings()/checkRatings.
+func uncheckedRatings(words []lesson.Word, outcomes map[string]lesson.WordOutcome) map[string]string {
+	out := make(map[string]string, len(outcomes))
+	for key, o := range outcomes {
+		idx, err := strconv.Atoi(key)
+		if err != nil || idx < 0 || idx >= len(words) {
+			continue
+		}
+		rating := downgradeOneRating(wordRating(o.Outcome, o.Hints))
+		if rating == "" {
+			continue
+		}
+		out[words[idx].Word] = rating
+	}
+	return out
+}
+
 // Classification bounds: one Chat call per turn, thinking disabled, a tight
 // token cap (the reply is one or two spoken sentences), and a short-history
 // deque of the last 4 rounds for coherence.

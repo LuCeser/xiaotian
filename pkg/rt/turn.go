@@ -870,8 +870,11 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 	})
 }
 
-// handleEndSession is the explicit goodbye (RT-10/SC7 server half).
+// handleEndSession is the explicit goodbye (RT-10/SC7 server half). The D-03
+// fallback (13.1-04) runs BEFORE the state reset: a session ended mid-check
+// persists its downgraded ratings once (the write needs the live tutor).
 func (tm *TurnManager) handleEndSession(s Sender) {
+	tm.uncheckedCloseFallback()
 	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: "client_end"})
 	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 	tm.internalClose()
@@ -910,7 +913,9 @@ func (tm *TurnManager) orderlyClose() {
 
 // Close implements SessionManager: the transport read loop exited for any
 // reason (disconnect, deadline, read error). Idempotent — an end_session
-// path already closed the session.
+// path already closed the session. The D-03 fallback (13.1-04) runs BEFORE
+// the state reset: a disconnect mid-check persists its downgraded ratings
+// once (the write needs the live tutor).
 func (tm *TurnManager) Close(Sender) {
 	tm.mu.Lock()
 	already := tm.closed
@@ -918,6 +923,7 @@ func (tm *TurnManager) Close(Sender) {
 	if already {
 		return
 	}
+	tm.uncheckedCloseFallback()
 	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 	tm.internalClose()
 }
