@@ -6,10 +6,10 @@ current_phase: 13
 current_phase_name: R0 真机最小闭环
 status: executing
 stopped_at: 2026-10-06 晚 本机能力验收会话收口——完整 7 词课通过、回声两档静默通过、时序样本已采（首问候 153ms/句末→首音 P50 2.8s）；问题台账 13-UAT-ISSUES-20261006.md U-1～U-10；评级映射用户已裁定待实现（U-9）；剩余 5 验收项待下节活跃课。用户决策：当日讨论内容由用户新会话梳理规划
-last_updated: "2026-10-07T01:29:41.707Z"
+last_updated: "2026-10-07T02:35:37.740Z"
 last_activity: 2026-10-07
 last_activity_desc: 13-12 本机能力验收：完整课 + 回声通过 + 时序样本 + 问题台账 U-1～U-10
-state_head: 60c129a2896178fa6c243779bf2d06e00780b846
+state_head: 34932d33d40f403c974b541a0388c915a9138459
 progress:
   total_phases: 4
   completed_phases: 0
@@ -36,7 +36,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 Phase: 13 (R0 真机最小闭环) — EXECUTING
 Plan: 13 of 13 (13-12 完结——Task 2 按用户 2026-10-06 改判为本机 E2E 代理执行；待用户三项不阻塞 13-13)
 Status: 13-13 ready
-Last activity: 2026-10-07 — 快任务 261007-drn：playwright 配置归位 tests/——git mv 双配置（rename 84%）+ testDir 相对化（./e2e、./e2e-rt）+ 双 webServer.cwd 指回仓库根 + Makefile/package.json/注释调用形态全部 -c tests/ 化；干跑双门 7/4（零 rt-loop）与 4/1（零存量 spec）全绿、加载期 cwd+testDir 断言通过，冻结证据件 server-8443.err.log 与 rt-timing-20261006-202012.jsonl 前后字节数不变（12099/7538），单原子提交 4df02dc 未 push
+Last activity: 2026-10-07 — 快任务 261007-e95：路径漂移修正收尾——plan13 双 JSON 六处 npx playwright test -c 更新为 tests/ 前缀形态（13-13 前瞻工件，全仓旧形态清零，.planning 冻结历史不动）、serve-rootca.ps1 两个日志重定向对齐 logs/（随 261007-d9t 惯例）；settings.local.json 权限规则替换被会话权限系统移出范围（两次拒绝），留用户手动替换 Bash(./reset-vocab.py *) → Bash(py -3 scripts/reset-vocab.py *)
 Next: /gsd-execute-phase 13 → 13-13（VPS 部署+正式验收）
 
 13-01～13-06 的实时语音基础已实现；状态机默写转向尚待执行 13-07～13-13，RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
@@ -137,6 +137,7 @@ None yet.
 | 261007-coe | 根目录梳理第二轮：test-interface.html 与 reset-vocab.py 归位、工具产物清理、卫生 todo 收尾 | 2026-10-07 | 60c129a | complete | [261007-coe-test-interface-html-reset-vocab-py-codex](./quick/261007-coe-test-interface-html-reset-vocab-py-codex/) |
 | 261007-d9t | run.ps1 日志归位 logs/：四日志落点迁移+目录自建+注释同步，路径级引用 playwright/e2e 驱动同提交对齐；实机两模式起停验证，冻结证据件零字节变化 | 2026-10-07 | d09ce65 | complete | [261007-d9t-run-ps1-logs-l61-l117-logs-l23-logs-giti](./quick/261007-d9t-run-ps1-logs-l61-l117-logs-l23-logs-giti/) |
 | 261007-drn | playwright 配置归位 tests/：git mv 双配置（rename 84%）+testDir 相对化+webServer.cwd 指回仓库根+调用方 -c 同步；干跑双门 7/4 与 4/1 全绿、加载期 cwd 断言通过，冻结证据件零字节变化 | 2026-10-07 | 4df02dc | complete | [261007-drn-playwright-tests-playwright-config-js-pl](./quick/261007-drn-playwright-tests-playwright-config-js-pl/) |
+| 261007-e95 | 路径漂移修正收尾：plan13 双 JSON 六处 -c tests/ 化（全仓旧形态清零）、serve-rootca.ps1 日志归位 logs/；settings.local.json 权限规则替换被权限系统移出范围，留用户手动 | 2026-10-07 | 34932d3 | complete | [261007-e95-plan13-json-6-playwright-c-tests-serve-r](./quick/261007-e95-plan13-json-6-playwright-c-tests-serve-r/) |
 
 ### Roadmap Evolution
 
