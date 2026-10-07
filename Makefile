@@ -46,7 +46,7 @@ test-short:
 # go run ./cmd/service), then Chromium drives the student UI at
 # http://localhost:8080. One-time setup: npx playwright install chromium.
 e2e:
-	npx playwright test
+	npx playwright test -c tests/playwright.config.js
 
 lint:
 	golangci-lint run ./...

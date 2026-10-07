@@ -6,10 +6,11 @@
  * webServer boots the REAL Go backend via run.ps1 — if rt-loop.spec.js
  * lived there, `npm run e2e` would run mock-protocol tests against the
  * production service. Directory isolation (testDir tests/e2e-rt) keeps the
- * legacy suite untouched: `npx playwright test --list` must NOT list
+ * legacy suite untouched: `npx playwright test -c tests/playwright.config.js
+ * --list` must NOT list
  * rt-loop (asserted in the plan's acceptance criteria).
  *
- * Local run:  npm run e2e:rt   (or: npx playwright test -c playwright.rt.config.js)
+ * Local run:  npm run e2e:rt   (or: npx playwright test -c tests/playwright.rt.config.js)
  * Requires:   npx playwright install chromium  (one-time, shared with e2e)
  */
 // @ts-check
@@ -28,7 +29,7 @@ process.env.NO_PROXY = process.env.NO_PROXY
 process.env.no_proxy = process.env.NO_PROXY;
 
 module.exports = defineConfig({
-  testDir: 'tests/e2e-rt',
+  testDir: './e2e-rt',
   // 10 scripted rounds ≈ 12-15 s per test on a slow machine; stay generous.
   timeout: 90_000,
   fullyParallel: false,
@@ -50,6 +51,9 @@ module.exports = defineConfig({
     }
   },
   webServer: {
+    // cwd pinned to the repo root (this config lives in tests/) so the
+    // mock-server script path resolves from the repo root as written.
+    cwd: require('node:path').resolve(__dirname, '..'),
     command: 'node tests/e2e-rt/mock-rt-server.js --port 8099',
     url: 'http://127.0.0.1:8099/',
     reuseExistingServer: true,

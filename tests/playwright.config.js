@@ -6,14 +6,14 @@
  * listener, runs `go run ./cmd/service -config config.yaml`, and tees output
  * to logs/server.log. Static files come from pkg/web/static at route "/".
  *
- * Local run:  npm run e2e   (or: npx playwright test)
+ * Local run:  npm run e2e   (or: npx playwright test -c tests/playwright.config.js)
  * Requires:   npx playwright install chromium  (one-time)
  */
 // @ts-check
 const { defineConfig } = require('@playwright/test');
 
 module.exports = defineConfig({
-  testDir: 'tests/e2e',
+  testDir: './e2e',
   // Session start waits on real FSRS + TTS pregeneration (pregenTimeout is
   // 120s server-side); keep per-test budget generous.
   timeout: 120_000,
@@ -33,6 +33,9 @@ module.exports = defineConfig({
   webServer: {
     // Repo-root dev launcher: loads .env, frees :8080, starts the service,
     // tees logs to logs/server.log (read it when the webServer never comes up).
+    // cwd is pinned to the repo root (this config lives in tests/): run.ps1,
+    // .env and logs/server.log all resolve relative to the repo root.
+    cwd: require('node:path').resolve(__dirname, '..'),
     command: 'pwsh -NoProfile -File run.ps1',
     url: 'http://localhost:8080/',
     reuseExistingServer: true,

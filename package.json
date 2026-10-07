@@ -1,8 +1,8 @@
 {
   "scripts": {
     "test": "node tests/test-voice-command-controller.js && node tests/test-pcm-conversion.js && node tests/test-photo-controller.js && node tests/test-batch-form.js && node tests/test-feedback-report.js && node tests/test-timing.js && node tests/test-parent-batch-parser.js && node tests/test-rt-playback.js && node tests/test-rt-timing.js",
-    "e2e": "playwright test",
-    "e2e:rt": "playwright test -c playwright.rt.config.js",
+    "e2e": "playwright test -c tests/playwright.config.js",
+    "e2e:rt": "playwright test -c tests/playwright.rt.config.js",
     "rt-report": "node scripts/rt-timing-report.js"
   },
   "dependencies": {

@@ -4,8 +4,8 @@
  * directory (tests/e2e-rt) with its own config (playwright.rt.config.js) so
  * the legacy suite (playwright.config.js: testDir tests/e2e, real Go backend
  * webServer, NO testMatch filter) never picks this spec up — the isolation
- * is itself an acceptance criterion (`npx playwright test --list` must not
- * contain rt-loop, review H-1).
+ * is itself an acceptance criterion (`npx playwright test -c
+ * tests/playwright.config.js --list` must not contain rt-loop, review H-1).
  *
  * The page is loaded with ?interrupt_rms=99&interrupt_sustain_ms=999999 so
  * the RMS auto-detector cannot fire on Chromium's fake audio device — the
