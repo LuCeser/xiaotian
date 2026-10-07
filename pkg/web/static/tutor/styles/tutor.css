@@ -374,6 +374,56 @@ body[data-page="tutor"] {
   cursor: default;
 }
 
+/* Photo path (13.1-03, D-05): the whole-notebook-page capture + retake
+   controls (≥60px touch targets), the per-word recognized text from
+   ocr_result, and the 待确认 tint on rows whose only verdict is an OCR
+   prefill (manual=false — never counts toward the submit gate). */
+
+.rt-check-photo-row {
+  display: flex;
+  gap: 10px;
+}
+
+.rt-check-photo,
+.rt-check-retake {
+  flex: 1;
+  min-height: 60px;
+  border: 2px dashed #9fc1ef;
+  border-radius: 14px;
+  background: #f2f7ff;
+  color: #2f6fed;
+}
+
+.rt-check-photo:disabled {
+  background: #eef2f8;
+  border-color: #d7e0ec;
+  color: #7d8ea3;
+}
+
+.rt-check-retake {
+  border-style: solid;
+  background: #ffffff;
+}
+
+.rt-ocr-text {
+  flex: none;
+  max-width: 40%;
+  font-size: 14px;
+  color: #5b7aa3;
+  overflow-wrap: anywhere;
+}
+
+.rt-check-row.rt-check-pending .rt-check-word {
+  color: #b07b1f;
+}
+
+.rt-check-row.rt-check-pending::after {
+  content: '待确认';
+  flex: none;
+  font-size: 13px;
+  color: #b07b1f;
+}
+
 @media (max-width: 420px) {
   .rt-controls { flex-direction: column; }
   .rt-state { flex-wrap: wrap; }

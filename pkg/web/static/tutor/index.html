@@ -18,7 +18,7 @@
   <meta name="theme-color" content="#4f8ef7">
   <meta name="description" content="自然实时家教 — 听说小老师">
   <title>听说小老师 · 自然实时家教</title>
-  <link rel="stylesheet" href="styles/tutor.css?v=20261007">
+  <link rel="stylesheet" href="styles/tutor.css?v=20261007b">
 </head>
 <body data-page="tutor">
 
@@ -69,8 +69,11 @@
       Check panel (13.1-01): hidden until check_started opens the check
       stage; renders one 对/错 row per word from check_started.words and
       re-renders EXCLUSIVELY from authoritative check_verdicts echoes
-      (RT-07 — no local optimistic verdict state). 提交 gates on every word
-      carrying a manual verdict in the latest echo.
+      (RT-07 — no local optimistic verdict state). 13.1-03 adds the photo
+      path (拍照检查/重拍) and the per-word recognized text from ocr_result;
+      提交 gates on every word carrying a MANUAL verdict in the latest echo
+      — an OCR prefill shows the row as 待确认 and never counts toward the
+      gate (D-05).
     -->
     <section class="rt-check" id="rt-check" hidden aria-label="默写检查"></section>
 
@@ -96,14 +99,16 @@
       js/rt-client.js    → RTCClient / TimingLog / estimateClockOffset / …
       js/rt-capture.js   → RTCapture / resampleTo16k / floatToInt16
       js/rt-playback.js  → RTCPlayback / playedUntilMs / interrupt tuning
+      js/rt-photo.js     → RTPhoto / check-stage photo_chunk upload (13.1-03)
     The AudioWorklet module js/rt-pcm-worklet.js is NOT a <script> — it is
     loaded from rt-capture.js via audioContext.audioWorklet.addModule()
     (registerProcessor scope has no AudioWorkletProcessor under a plain
     script tag; loading it here would throw and break the page).
   -->
-  <script src="js/rt-client.js?v=20261007"></script>
-  <script src="js/rt-capture.js?v=20261007"></script>
-  <script src="js/rt-playback.js?v=20261007"></script>
+  <script src="js/rt-client.js?v=20261007b"></script>
+  <script src="js/rt-capture.js?v=20261007b"></script>
+  <script src="js/rt-playback.js?v=20261007b"></script>
+  <script src="js/rt-photo.js?v=20261007b"></script>
   <script>
     (function () {
       'use strict';
@@ -133,6 +138,7 @@
       var client = new RTCClient({ timing: timing });
       var capture = new RTCapture({ timing: timing });
       var playback = new RTCPlayback({ timing: timing, client: client });
+      var photo = new RTPhoto(client); // 13.1-03: check-stage photo capture
 
       var lesson = { words: [], currentIndex: 0, version: 0 };
       var started = false;
@@ -151,8 +157,10 @@
       // verdicts is a server-echo mirror ONLY: it is written by
       // check_verdicts messages and read by rendering — the 对/错 buttons
       // never mutate it on press (RT-07: no local optimistic verdict state;
-      // only disabled/pending UI changes at press time).
-      var check = { active: false, words: [], verdicts: {}, submitPending: false, resultText: '' };
+      // only disabled/pending UI changes at press time). ocr is the
+      // ocr_result mirror (13.1-03): display-only recognized text next to
+      // each row; the verdicts still come from check_verdicts alone.
+      var check = { active: false, words: [], verdicts: {}, ocr: {}, submitPending: false, resultText: '' };
 
       // ----- DOM helpers ----------------------------------------------------
       // The ONLY element-removal helper on this page: server-sourced text
@@ -226,15 +234,27 @@
 
         check.words.forEach(function (word, i) {
           var row = document.createElement('div');
-          row.className = 'rt-check-row';
+          // An OCR prefill (manual=false in the echo) keeps the row visibly
+          // 待确认 — it never counts toward the submit gate (D-05).
+          var st = check.verdicts[i];
+          row.className = 'rt-check-row' +
+            (st && !st.manual ? ' rt-check-pending' : '');
 
           var w = document.createElement('span');
           w.className = 'rt-check-word';
           w.textContent = (i + 1) + '. ' + word;
           row.appendChild(w);
 
-          // Highlight comes from the LATEST server echo only (RT-07).
-          var st = check.verdicts[i];
+          // The recognized text rides ocr_result (display-only context);
+          // highlighting still comes from the LATEST verdict echo (RT-07).
+          var ocr = check.ocr[i];
+          if (ocr && ocr.text) {
+            var ocrEl = document.createElement('span');
+            ocrEl.className = 'rt-ocr-text';
+            ocrEl.textContent = '识别：' + ocr.text + (ocr.nearMiss ? '（好像差一点点）' : '');
+            row.appendChild(ocrEl);
+          }
+
           var yes = document.createElement('button');
           yes.type = 'button';
           yes.className = 'rt-btn rt-check-btn' + (st && st.correct ? ' rt-check-yes-on' : '');
@@ -250,12 +270,39 @@
           panel.appendChild(row);
         });
 
+        // Photo controls (13.1-03, D-05): the whole notebook page in one
+        // shot; 重拍 discards the in-flight upload (photo_cancel — the
+        // controller only sends it after chunks shipped) and re-opens the
+        // picker. Touch targets ≥60px (ipad-layout spec).
+        var photoRow = document.createElement('div');
+        photoRow.className = 'rt-check-photo-row';
+        var take = document.createElement('button');
+        take.type = 'button';
+        take.className = 'rt-btn rt-check-photo';
+        take.textContent = photo.isProcessing ? '正在识别…' : '拍照检查';
+        take.disabled = photo.isProcessing || !photo.supported;
+        take.addEventListener('click', function () { photo.pickPhoto(); });
+        photoRow.appendChild(take);
+        if (Object.keys(check.ocr).length > 0 || photo.isProcessing) {
+          var retake = document.createElement('button');
+          retake.type = 'button';
+          retake.className = 'rt-btn rt-check-retake';
+          retake.textContent = '重拍';
+          retake.addEventListener('click', function () {
+            photo.cancel();    // photo_cancel only when chunks shipped
+            photo.pickPhoto(); // re-open the picker
+          });
+          photoRow.appendChild(retake);
+        }
+        panel.appendChild(photoRow);
+
         var submit = document.createElement('button');
         submit.type = 'button';
         submit.className = 'rt-btn rt-check-submit';
         submit.textContent = check.submitPending ? '正在提交…' : '检查完了，提交';
-        // 提交 gates on the server echo covering EVERY word with a manual
-        // verdict — never on local taps (RT-07).
+        // 提交 gates on the server echo covering EVERY word with a MANUAL
+        // verdict — never on local taps, and an OCR prefill alone never
+        // enables it (RT-07 + D-05; the server refuses such a submit too).
         submit.disabled = !allChecked() || check.submitPending;
         submit.addEventListener('click', sendSubmit);
         panel.appendChild(submit);
@@ -446,10 +493,32 @@
         check.active = true;
         check.words = (m && m.words) || [];
         check.verdicts = {};
+        check.ocr = {};
         check.submitPending = false;
         check.resultText = '';
         lesson.words = check.words.slice();
         renderProgress();
+        renderCheckPanel();
+      });
+
+      client.on('ocr_result', function (m) {
+        // 13.1-03 (D-05): what the vision model recognized per word —
+        // display-only context next to each row; the verdicts themselves
+        // still arrive via check_verdicts (RT-07 single render source). An
+        // OCR prefill keeps its row 待确认 and never counts toward the
+        // submit gate — every word still needs a manual 对/错 tap.
+        check.ocr = {};
+        var entries = (m && m.entries) || [];
+        entries.forEach(function (e) {
+          if (e && typeof e.word_index === 'number') {
+            check.ocr[e.word_index] = {
+              text: e.ocr_text || '',
+              correct: !!e.correct,
+              nearMiss: !!e.near_miss
+            };
+          }
+        });
+        photo.reset(); // the recognition round is over — the button unlocks
         renderCheckPanel();
       });
 
@@ -489,6 +558,10 @@
         var code = m && m.code ? m.code : '';
         playback.note('error:' + (code || 'unknown'));
         showError(code, m && m.message);
+        // A failed/gated photo round must leave the 拍照检查 button usable
+        // (13.1-03): the OCR failure and unavailable paths answer an ErrorMsg
+        // with no ocr_result — unlock the controller here.
+        photo.reset();
         if (code === 'playback_ack_timeout') {
           // Honest degraded order: the timeout code itself is NOT a
           // completion proof — drain the scheduled audio, wait for the
@@ -644,7 +717,9 @@
               checked: checked,
               allChecked: allChecked(),
               submitPending: check.submitPending,
-              resultText: check.resultText
+              resultText: check.resultText,
+              ocrRows: Object.keys(check.ocr).length,
+              photoProcessing: photo.isProcessing
             }
           };
         }
