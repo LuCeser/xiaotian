@@ -1010,3 +1010,211 @@ test('practice full loop: lesson_complete offers 再练一组, the practice set 
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
+
+// ---------------------------------------------------------------------------
+// 13.1-06: check-stage voice verdicts (D-06②) over the mock — the scripted
+// __test_voice channel drives the same verdict/announcement frames the real
+// server's voice path produces; the page renders them exactly like screen
+// verdicts (RT-07: one render source) and they converge into the ONE
+// unified submission.
+// ---------------------------------------------------------------------------
+
+/** URL params for the voice-verdict tests: the flag plus a fast tick. */
+const VOICE_PARAMS = QUIET_PARAMS + '&mock_voice_verdict=1&mock_step_ms=400';
+
+/** Send one scripted student line through the test-only voice channel. */
+async function sendVoiceLine(page, line) {
+  await page.evaluate((l) => window.__rtTutor.client.sendJSON({ type: '__test_voice', line: l }), line);
+}
+
+/** Wait for the check panel AND the settled bridge (listening) — voice
+    lines land only once the panel owns the input surface. */
+async function awaitCheckPanelSettled(page, rows = 3) {
+  await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator('#rt-check .rt-check-row')).toHaveCount(rows);
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 30_000 })
+    .toBe('listening');
+}
+
+/** True once any teacher subtitle carries all the given fragments. */
+async function teacherSaid(page, fragments, timeout = 15_000) {
+  await expect
+    .poll(async () => {
+      const lines = await page.locator('#rt-trace .rt-trace-teacher').allTextContents();
+      return lines.some((t) => fragments.every((f) => t.includes(f))) ? 'y' : 'n';
+    }, { timeout })
+    .toBe('y');
+}
+
+/** Mark the remaining rows 对 via buttons, submit, and wait for the honest
+    result copy (the manual completion of a voice-started check). */
+async function finishCheckWithButtons(page, fromRow, rows = 3) {
+  for (let i = fromRow; i < rows; i++) {
+    await page.locator('#rt-check .rt-check-row').nth(i).locator('button').nth(0).click();
+  }
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.allChecked), { timeout: 10_000 })
+    .toBe(true);
+  await page.locator('#rt-check .rt-check-submit').click();
+  await expect
+    .poll(async () => {
+      const c = (await page.evaluate(() => window.__rtTutor.observe())).check;
+      return !c.submitPending && c.resultText !== '' ? 'done' : 'waiting';
+    }, { timeout: 30_000 })
+    .toBe('done');
+}
+
+test('voice right-verdict flips the row, speaks the ack line, and submits converged', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + VOICE_PARAMS);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await awaitCheckPanelSettled(page);
+
+  // 「第一个词对了」: the row flips from the server echo (RT-07 render
+  // source) and the teacher's ack subtitle speaks the marked position.
+  await sendVoiceLine(page, '第一个词对了');
+  await expect(page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(0))
+    .toHaveClass(/rt-check-yes-on/, { timeout: 10_000 });
+  await teacherSaid(page, ['第1个词对了']);
+
+  // The verdict write is real: the mock recorded one voice verdict through
+  // the same upsert the button taps use.
+  const s1 = await getSession(page);
+  expect(s1.voiceVerdicts).toBe(1);
+  expect(s1.checkVerdicts).toEqual([{ word_index: 0, correct: true, manual: true }]);
+
+  // Manual completion + unified submit: the voice verdict counts toward the
+  // same gate and the same honest result (RT-07 convergence).
+  await finishCheckWithButtons(page, 1);
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+  const s = await getFinalSession(page);
+  expect(s.voiceVerdicts).toBe(1);
+  expect(s.reviewResults).toBe(1);
+  expect(s.checkVerdicts).toHaveLength(3);
+  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('voice spelling correction marks wrong with the actual text shown and the near-miss line', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + VOICE_PARAMS);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await awaitCheckPanelSettled(page);
+
+  // 「第一个词写的是 aple」: the verdict grades WRONG (aple vs apple), the
+  // actual written form displays beside the row via the ocr_result channel,
+  // and the near-miss encouragement plays — naming nothing shameful.
+  await sendVoiceLine(page, '第一个词写的是 aple');
+  await expect(page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(1))
+    .toHaveClass(/rt-check-no-on/, { timeout: 10_000 });
+  const rowText = await page.locator('#rt-check .rt-check-row').nth(0).textContent();
+  expect(rowText).toContain('识别：aple');
+  expect(rowText).toContain('好像差一点点');
+  await teacherSaid(page, ['apple', '很接近了']);
+
+  // The stored verdict carries the actual text (the mock mirror of the real
+  // ocr_text verdict field).
+  const s1 = await getSession(page);
+  expect(s1.checkVerdicts).toEqual([
+    { word_index: 0, correct: false, manual: true, ocr_text: 'aple' }
+  ]);
+
+  // Finish and submit: the spelling-corrected word rides the same unified
+  // submission as the button-confirmed rest.
+  await finishCheckWithButtons(page, 1);
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+  const s = await getFinalSession(page);
+  expect(s.reviewResults).toBe(1);
+  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('mixed button and voice verdicts converge into one submission (RT-07)', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + VOICE_PARAMS);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await awaitCheckPanelSettled(page);
+
+  // One voice flip (word 1 right) and two button flips (word 2 wrong,
+  // word 3 right) — different words, two input paths, ONE human check.
+  await sendVoiceLine(page, '第一个词对了');
+  await expect(page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(0))
+    .toHaveClass(/rt-check-yes-on/, { timeout: 10_000 });
+  await page.locator('#rt-check .rt-check-row').nth(1).locator('button').nth(1).click();
+  await expect(page.locator('#rt-check .rt-check-row').nth(1).locator('button').nth(1))
+    .toHaveClass(/rt-check-no-on/, { timeout: 10_000 });
+  await page.locator('#rt-check .rt-check-row').nth(2).locator('button').nth(0).click();
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.allChecked), { timeout: 10_000 })
+    .toBe(true);
+
+  await page.locator('#rt-check .rt-check-submit').click();
+  await expect
+    .poll(async () => {
+      const c = (await page.evaluate(() => window.__rtTutor.observe())).check;
+      return !c.submitPending && c.resultText !== '' ? 'done' : 'waiting';
+    }, { timeout: 30_000 })
+    .toBe('done');
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+
+  // The final verdict state reflects BOTH paths; the submission reported
+  // all three words once (the ratings follow the human calls: 2 对 1 错).
+  const s = await getFinalSession(page);
+  expect(s.voiceVerdicts).toBe(1);
+  expect(s.reviewResults).toBe(1);
+  expect(s.checkVerdicts).toEqual([
+    { word_index: 0, correct: true, manual: true },
+    { word_index: 1, correct: false, manual: true },
+    { word_index: 2, correct: true, manual: true }
+  ]);
+  const rr = parseFrames(s.frames).find((m) => m.type === 'review_result');
+  expect(rr).toEqual({ type: 'review_result', requested: 3, updated: 3, missing: 0, unchecked: false });
+  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('an index-less voice line asks again and changes no verdict', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + VOICE_PARAMS);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await awaitCheckPanelSettled(page);
+
+  // The stand-in classifier maps this line to a check intent WITHOUT an
+  // index — the clarification fallback must ask again with NO write
+  // (T-13.1-13 mirror).
+  await sendVoiceLine(page, '嗯那个词怎么样');
+  await teacherSaid(page, ['你说的是第几个词']);
+  const s1 = await getSession(page);
+  expect(s1.voiceVerdicts).toBe(0);
+  expect(s1.checkVerdicts).toHaveLength(0);
+
+  // The classroom stayed live: a button verdict still applies afterwards.
+  await page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(0).click();
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.checked), { timeout: 10_000 })
+    .toBe(1);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});

@@ -218,6 +218,8 @@ function handleTestState(res) {
       checkActive: s.checkActive,
       checkVerdicts: s.checkVerdicts,
       checkSubmits: s.checkSubmits,
+      voiceLines: s.voiceLines,
+      voiceVerdicts: s.voiceVerdicts,
       reviewResults: s.reviewResults,
       checkStartedReason: s.checkStartedReason,
       correctionDiff: s.correctionDiff,
@@ -247,6 +249,17 @@ function handleTestState(res) {
 // Scripted PCM: 100 ms 440 Hz sine chunks at 24 kHz s16le mono
 // ---------------------------------------------------------------------
 
+// 13.1-06 (D-06②) scripted voice lines: the stand-in classifier maps the
+// test-only __test_voice lines to the check-stage intents exactly as the
+// real server's check-prompt classification would. The third line has NO
+// index on purpose — the missing-payload clarification case (T-13.1-13
+// mirror: no guess, no write, ask again).
+const VOICE_LINES = {
+  '第一个词对了': { intent: 'check_right', index: 1 },
+  '第一个词写的是 aple': { intent: 'check_spelling', index: 1, text: 'aple' },
+  '嗯那个词怎么样': { intent: 'check_right' }
+};
+
 const SAMPLES_PER_CHUNK = TTS_RATE / 10; // 2400 samples = 100 ms
 
 function sineChunk(chunkIndex) {
@@ -259,6 +272,31 @@ function sineChunk(chunkIndex) {
     buf.writeInt16LE(v, i * 2);
   }
   return buf;
+}
+
+// grading.GradeWord stand-in for the scripted lines (mock vocabulary is
+// ASCII): normalized equality is correct; a non-blank wrong answer within
+// edit distance 1 on a word of >= 2 characters is a near miss — the same
+// boolean outcomes the real voice path consumes.
+function mockGrade(expected, heard) {
+  const norm = (w) => w.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const e = norm(expected);
+  const h = norm(heard);
+  if (e === h) return { correct: true, nearMiss: false };
+  const dp = [];
+  for (let i = 0; i <= e.length; i++) dp.push([i].concat(Array(h.length).fill(0)));
+  for (let j = 1; j <= h.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= e.length; i++) {
+    for (let j = 1; j <= h.length; j++) {
+      dp[i][j] = Math.min(
+        dp[i - 1][j - 1] + (e[i - 1] === h[j - 1] ? 0 : 1),
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1
+      );
+    }
+  }
+  const dist = dp[e.length][h.length];
+  return { correct: false, nearMiss: dist <= 1 && e.length >= 2 };
 }
 
 // Announcement chunk plans. Word/opening/notice sentences are short; the
@@ -340,12 +378,14 @@ wss.on('connection', (ws, req, query) => {
     pause: query.get('mock_pause') === '1',
     empty: query.get('mock_empty') === '1',
     ackTimeout: query.get('mock_ack_timeout') === '1',
-    partialSave: query.get('mock_partial_save') === '1'
+    partialSave: query.get('mock_partial_save') === '1',
+    voiceVerdict: query.get('mock_voice_verdict') === '1'
   };
-  mockMode.name = mockMode.partialSave ? 'partial_save'
-    : mockMode.ackTimeout ? 'ack_timeout'
-      : mockMode.empty ? 'empty'
-        : mockMode.pause ? 'pause' : 'default';
+  mockMode.name = mockMode.voiceVerdict ? 'voice_verdict'
+    : mockMode.partialSave ? 'partial_save'
+      : mockMode.ackTimeout ? 'ack_timeout'
+        : mockMode.empty ? 'empty'
+          : mockMode.pause ? 'pause' : 'default';
 
   // 13.1-04 reconnect pair binding (persistent lesson state across page
   // loads; the pair id comes from the spec test).
@@ -373,6 +413,11 @@ wss.on('connection', (ws, req, query) => {
     checkActive: false,
     checkVerdicts: [],
     checkSubmits: [],
+    /** 13.1-06 voice-verdict mirror: scripted lines received and verdict
+        writes applied through the __test_voice channel. */
+    voiceLines: [],
+    voiceVerdicts: 0,
+    voiceTurns: 0,
     reviewResults: 0,
     checkStartedReason: null,
     correctionDiff: null,
@@ -562,6 +607,53 @@ wss.on('connection', (ws, req, query) => {
         try { ws.terminate(); } catch (termErr) { /* gone */ }
       });
     }
+  }
+
+  // 13.1-06 (D-06②) voice-verdict mirror: one scripted student line → the
+  // SAME frames the real server's voice path would produce. Validation
+  // first (T-13.1-13 mirror): a missing/out-of-range index or a spelling
+  // line without the actual text asks again with NO verdict write; a valid
+  // payload upserts the verdict (manual=true — it satisfies the submit gate
+  // like any human call), echoes check_verdicts, rides the ocr_result
+  // display channel for spelling, and speaks the teacher's ack line.
+  function applyVoiceVerdict(v) {
+    if (state.ended || !state.checkActive) return;
+    const total = state.words.length;
+    const idx = (v.index || 0) - 1;
+    const spelling = v.intent === 'check_spelling';
+    const text = typeof v.text === 'string' ? v.text.trim() : '';
+    if (idx < 0 || idx >= total || (spelling && !text)) {
+      announce('v' + (++state.voiceTurns), '你说的是第几个词？再说一次好吗？', PLAN_NOTICE, 1500,
+        () => { send({ type: 'state', value: 'listening' }); });
+      return;
+    }
+    let correct = v.intent === 'check_right';
+    let ocrEntry = null;
+    if (spelling) {
+      const g = mockGrade(state.words[idx], text);
+      correct = g.correct;
+      ocrEntry = { word_index: idx, ocr_text: text, correct: g.correct, near_miss: g.nearMiss };
+    }
+    const verdict = { word_index: idx, correct, manual: true };
+    if (spelling) verdict.ocr_text = text;
+    const found = state.checkVerdicts.find((x) => x.word_index === idx);
+    if (found) Object.assign(found, verdict);
+    else state.checkVerdicts.push(verdict);
+    state.voiceVerdicts += 1;
+    send({ type: 'check_verdicts', verdicts: state.checkVerdicts.map((x) => ({ ...x })) });
+    if (ocrEntry) send({ type: 'ocr_result', entries: [ocrEntry] });
+    let line;
+    if (spelling) {
+      if (ocrEntry.correct) line = '对，' + state.words[idx] + ' 写的就是 ' + text + '，这个词写对了，真棒！';
+      else if (ocrEntry.near_miss) line = state.words[idx] + ' 你写成了 ' + text + '，差一个字母，很接近了！把它改过来就更棒啦。';
+      else line = '我们再看看 ' + state.words[idx] + ' 这个词：你写的是 ' + text + '，把它改过来吧。';
+    } else {
+      line = correct
+        ? '好，第' + (idx + 1) + '个词对了，你真棒！'
+        : '好，第' + (idx + 1) + '个词错了，我们在纸上把它改一改吧。';
+    }
+    announce('v' + (++state.voiceTurns), line, PLAN_NOTICE, 1600 + idx * 10,
+      () => { send({ type: 'state', value: 'listening' }); });
   }
 
   // The unified-submit battle summary (D-04 mirror): battle counts plus the
@@ -929,6 +1021,20 @@ wss.on('connection', (ws, req, query) => {
           send({ type: 'state', value: 'listening' });
           armConfirmTimer();
         }
+        break;
+      }
+
+      case '__test_voice': {
+        // 13.1-06 test-only channel (?mock_voice_verdict=1): a scripted
+        // student line rides in as a control frame (the __test_resume
+        // precedent for test-only channels); the stand-in classifier maps
+        // it to the check-stage intent and runs the same verdict/announce
+        // frames the real server's voice path would. Unknown lines are
+        // recorded and ignored — the stand-in has no opinion on them.
+        if (!mockMode.voiceVerdict) break;
+        state.voiceLines.push(String(msg.line || ''));
+        const said = VOICE_LINES[String(msg.line || '')];
+        if (said) applyVoiceVerdict(said);
         break;
       }
 
