@@ -446,6 +446,11 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		var rtASR rt.ASRProvider
 		var rtLLM rt.LLMProvider
 		var rtTTS rt.TTSSynthesizer
+		// 13.1-03: the check-stage photo OCR reader. Nil when MIMO_API_KEY is
+		// absent — the TurnManager answers photo_chunk with a coded
+		// photo_unavailable error and the check stage keeps working
+		// manual-only (RT-10 degraded semantics).
+		var rtOCR rt.OCRReader
 		if apiKey := os.Getenv("MIMO_API_KEY"); apiKey != "" {
 			// The shared client's HTTP timeout must cover the slowest caller:
 			// photo's vision OCR (20s) over voice's ASR+LLM sequence (15s).
@@ -528,6 +533,11 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 				logger,
 				cfg.Photo,
 			)
+			// 13.1-03: the /rt check stage shares the SAME mimo client, vision
+			// model and key as the legacy photoService (no conflict — the two
+			// consumers sit on separate endpoints; the conversion is the only
+			// difference between ocr.Reader and rt.OCRReader).
+			rtOCR = rt.OCRReader(mimoReader(mimoClient, cfg.Photo.ChatModel))
 			logger.Info("voice command pipeline enabled",
 				infra.F("component", "infra.main"),
 				infra.F("chat_model", cfg.Voice.ChatModel),
@@ -582,6 +592,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// Per-word writing timer in milliseconds (config default 60000;
 			// a 0 config value would defer to the FSM's own 60s default).
 			WordTimeout: time.Duration(cfg.RT.WordTimeoutMs) * time.Millisecond,
+			// 13.1-03 photo check: the shared vision reader plus the existing
+			// photo config block's caps — no new env vars, no new config
+			// sections (nil reader degrades the check stage to manual-only).
+			OCR:             rtOCR,
+			PhotoMaxBytes:   cfg.Photo.MaxImageBytes,
+			PhotoConfidence: cfg.Photo.ConfidenceThreshold,
 		}
 		rtHandler, err := rt.NewHandler(rtServerCfg, func() rt.SessionManager {
 			// Per-connection factory: one TurnManager + one EventRecorder per
