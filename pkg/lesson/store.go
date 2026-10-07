@@ -136,6 +136,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		lessonsDDL,
 		toolRequestsDDL,
 		idxToolRequestsLesson,
+		practiceLogsDDL, // 13.1-05 (D-12): Go-owned practice records, never the FSRS schedule
+		idxPracticeLogsDay,
 	}
 
 	for _, stmt := range statements {
