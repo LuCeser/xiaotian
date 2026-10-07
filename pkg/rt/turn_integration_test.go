@@ -281,6 +281,10 @@ func itReadUntilSessionEnded(t *testing.T, conn *websocket.Conn, ackSent *atomic
 func TestDictationOverConnHappyPath(t *testing.T) {
 	cards := ttCards("苹果", "香蕉", "橘子")
 	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉", "橘子"},
+		Updated:   []string{"苹果", "香蕉", "橘子"},
+	}
 	exec := newFakeExecutorNoRow("it-lesson")
 	asr := newFakeASR(asrScript{text: "好了"}, asrScript{text: "好了"}, asrScript{text: "好了"})
 	llm := newFakeLLM(
@@ -333,19 +337,70 @@ func TestDictationOverConnHappyPath(t *testing.T) {
 		t.Errorf("lesson_update indexes = %v, want [1 2 3]", indexes)
 	}
 
-	// Completion summary: hold the final ack — no session_ended may arrive
-	// before it.
+	// 13.1-01: the last commit opens the CHECK stage — no immediate summary,
+	// no SubmitReview yet. check_started carries the FULL plaintext list
+	// (the D-10 unmask point over the real wire).
+	startedRaw := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeCheckStarted })
+	var started CheckStartedMsg
+	if err := json.Unmarshal(startedRaw.raw, &started); err != nil {
+		t.Fatalf("check_started decode: %v", err)
+	}
+	if len(started.Words) != 3 || started.Words[0] != "苹果" || started.Words[2] != "橘子" {
+		t.Errorf("check_started.words = %v, want the full plaintext [苹果 香蕉 橘子]", started.Words)
+	}
+	if started.Reason != CheckStartedReasonDictationDone {
+		t.Errorf("check_started.reason = %q, want %s", started.Reason, CheckStartedReasonDictationDone)
+	}
+	if got := len(words.submissions()); got != 0 {
+		t.Fatalf("SubmitReview calls before check_submit = %d, want 0 (D-01)", got)
+	}
+
+	// The check bridge announcement settles through the ACK gate; then the
+	// harness marks every word correct via check_verdict frames and reads
+	// the authoritative echoes.
+	itAnnounceAck(t, conn)
+	for i := 0; i < 3; i++ {
+		itSendText(t, conn, CheckVerdictMsg{
+			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("it-v-%d", i), WordIndex: i, Correct: true,
+		})
+		verdictsRaw := itRead(t, conn, 10*time.Second, func(m itMsg) bool { return m.typ == TypeCheckVerdicts })
+		var echo CheckVerdictsMsg
+		if err := json.Unmarshal(verdictsRaw.raw, &echo); err != nil {
+			t.Fatalf("check_verdicts decode: %v", err)
+		}
+		if len(echo.Verdicts) != i+1 {
+			t.Fatalf("check_verdicts %d = %+v, want %d entries", i, echo.Verdicts, i+1)
+		}
+		for _, v := range echo.Verdicts {
+			if !v.Manual || !v.Correct {
+				t.Errorf("verdict %+v, want manual correct (screen echo is the render source)", v)
+			}
+		}
+	}
+
+	// Unified submit: one honest review_result, THEN the battle summary
+	// held for its ack, THEN session_ended(lesson_complete).
+	itSendText(t, conn, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-submit"})
+	rr := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeReviewResult })
+	var result ReviewResultMsg
+	if err := json.Unmarshal(rr.raw, &result); err != nil {
+		t.Fatalf("review_result decode: %v", err)
+	}
+	if result.Requested != 3 || result.Updated != 3 || result.Missing != 0 {
+		t.Errorf("review_result = %+v, want requested 3 / updated 3 / missing 0", result)
+	}
+
 	var (
-		summaryTexts   []string
-		lastAckID      string
-		lastAckEpoch   uint64
+		summaryTexts    []string
+		lastAckID       string
+		lastAckEpoch    uint64
 		summaryAudioEnd int
 	)
 	deadline := time.Now().Add(15 * time.Second)
 	for summaryAudioEnd < 2 { // summary = 2 sentences for a full 3/3 batch
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			t.Fatal("completion summary never fully streamed")
+			t.Fatal("battle summary never fully streamed")
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(remaining))
 		mt, data, err := conn.ReadMessage()
@@ -367,8 +422,8 @@ func TestDictationOverConnHappyPath(t *testing.T) {
 			t.Fatal("session_ended arrived before the summary ack (ack gate broken)")
 		}
 	}
-	if len(summaryTexts) < 1 || !strings.Contains(strings.Join(summaryTexts, ""), "3 个词") {
-		t.Errorf("summary = %v, want the 3-word wrap-up", summaryTexts)
+	if len(summaryTexts) < 1 || !strings.Contains(strings.Join(summaryTexts, ""), "3 个词对了 3 个") {
+		t.Errorf("summary = %v, want the 3/3 battle wrap-up (D-04)", summaryTexts)
 	}
 
 	ackSent := itHoldThenAck(t, conn, 600*time.Millisecond, lastAckID, lastAckEpoch)
@@ -377,7 +432,8 @@ func TestDictationOverConnHappyPath(t *testing.T) {
 		t.Errorf("reason = %q, want %s", ended.Reason, ReasonLessonComplete)
 	}
 
-	// One full-batch review write, executed before the summary aired.
+	// One full-batch review write through the stage latch, executed before
+	// the summary aired; the checked-correct-no-hint words rate good.
 	subs := words.submissions()
 	if len(subs) != 1 {
 		t.Fatalf("SubmitReview calls = %d, want exactly 1", len(subs))

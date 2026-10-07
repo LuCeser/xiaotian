@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -134,6 +135,38 @@ func wordRating(outcome string, hints int) string {
 	}
 }
 
+// Check-stage result vocabulary (13.1-01, D-02): whether the written word
+// was judged correct at check time — by the screen 对/错 tap in this plan,
+// by the OCR+manual-correction loop from 13.1-03 on. checkRating is
+// wordRating's SIBLING function sharing the ratingGood/ratingHard/
+// ratingAgain constants (single matrix family, never a fork; same discipline
+// as the wordRating comment above).
+const (
+	checkCorrect = "correct" // 检查对
+	checkWrong   = "wrong"   // 检查错
+)
+
+// checkRating derives one word's FSRS rating from its CHECK result and its
+// hint count — the D-02 unified-submit table (2026-10-06 裁定, 13.1-CONTEXT):
+//
+//   - checked correct, no hint        → good  (写对了，没要提示)
+//   - checked correct, after hint(s)  → hard  (要了提示但写对了)
+//   - checked wrong (any hints)       → again (检查结果优先于行为)
+//   - anything else → "" (checkRatings skips the word, like ratings())
+func checkRating(result string, hints int) string {
+	switch result {
+	case checkCorrect:
+		if hints > 0 {
+			return ratingHard
+		}
+		return ratingGood
+	case checkWrong:
+		return ratingAgain
+	default:
+		return ""
+	}
+}
+
 // Classification bounds: one Chat call per turn, thinking disabled, a tight
 // token cap (the reply is one or two spoken sentences), and a short-history
 // deque of the last 4 rounds for coherence.
@@ -199,6 +232,27 @@ type DictationTutor struct {
 	// flowing so the resume command is recognized through the real ASR /
 	// classification path.
 	paused bool
+
+	// --- 13.1-01 check-stage state (same single-lock discipline) -----------
+
+	// checking marks the lesson as inside the check stage (stage='checking'
+	// persisted): word pacing is over, verdicts are pending, and the unified
+	// submit has not run. Voice turns are gated off while it holds (the
+	// screen path is this plan's input; voice corrections are 13.1-06).
+	checking bool
+	// checkVerdicts caches the stored verdict list for rendering/announce
+	// purposes — NOT the authority: the lessons row is. Every write goes
+	// through the executor and resyncs this cache from the returned row
+	// state (resyncCheck), so the cache can never drift from the store for
+	// longer than one call.
+	checkVerdicts []lesson.CheckVerdict
+	// reviewSeen marks the unified submit as delivered in this session (the
+	// in-session mirror of stage='submitted'); reviewResult keeps that
+	// delivery's honest sets so a duplicate check_submit can be recognized
+	// and answered with NO second SubmitReview and NO second summary
+	// (Pitfall 6 / T-13.1-01).
+	reviewSeen   bool
+	reviewResult ReviewResultMsg
 }
 
 // newDictationTutor binds the FSM to a lesson row read back from the
@@ -310,6 +364,34 @@ func (t *DictationTutor) hintAccounting() (hintWords, hintTotal int) {
 		hintTotal += n
 	}
 	return hintWords, hintTotal
+}
+
+// snapshotCheckOutcomes flattens the recorded per-word behavior into the
+// persisted WordOutcome map (keyed by word index string) the check stage
+// stores at EnterCheck — the hint counts must survive into the unified
+// rating (checkRating(result, hints)) even across a reconnect. Caller holds
+// tm.mu (single-lock discipline).
+func (t *DictationTutor) snapshotCheckOutcomes() map[string]lesson.WordOutcome {
+	out := make(map[string]lesson.WordOutcome, len(t.words))
+	for idx := range t.words {
+		out[strconv.Itoa(idx)] = lesson.WordOutcome{
+			Outcome: t.perWordOutcome[idx],
+			Hints:   t.perWordHints[idx],
+		}
+	}
+	return out
+}
+
+// resyncCheck aligns the in-memory check state to an externally observed
+// lessons row (a conflict read-back or an executor replay): the cache always
+// bends to the store. Caller holds tm.mu (single-lock discipline).
+func (t *DictationTutor) resyncCheck(l lesson.Lesson) {
+	t.version = l.Version
+	t.checking = l.Stage == lesson.StageChecking
+	t.checkVerdicts = l.Verdicts
+	if l.Stage == lesson.StageSubmitted {
+		t.completed = true
+	}
 }
 
 // appendUserRound appends the student's transcription as a new round,
@@ -512,25 +594,9 @@ func announceText(idx, total int, word string) string {
 	return fmt.Sprintf("第 %d 个词，%s。", idx, word)
 }
 
-// completionSummaryText builds the wrap-up summary: honest counts, short
-// spoken sentences, encouraging wording only (child-safety prohibition).
-func completionSummaryText(total, confirmed, timedOut, hinted int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "今天一共写了 %d 个词。", total)
-	switch {
-	case confirmed == total && total > 0:
-		b.WriteString("全部都写完了，你真棒！")
-	case confirmed > 0:
-		fmt.Fprintf(&b, "自己写完了 %d 个，很厉害！", confirmed)
-	}
-	if hinted > 0 {
-		fmt.Fprintf(&b, "有 %d 个词看了提示，多练几次就更牢啦。", hinted)
-	}
-	if timedOut > 0 {
-		fmt.Fprintf(&b, "有 %d 个词是超时跳过的，下次遇到了别紧张。", timedOut)
-	}
-	return b.String()
-}
+// completionSummaryText RETIRED with the write-at-completion model
+// (13.1-01, D-01/D-04): the wrap-up now speaks the CHECKED battle counts
+// (checkedSummaryText in check.go) after the unified submit.
 
 // noDueWordsText explains the zero-due-words ending.
 func noDueWordsText() string {

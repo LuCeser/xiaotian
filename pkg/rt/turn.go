@@ -73,6 +73,16 @@ type LessonExecutor interface {
 	// AdvanceWord moves the cursor forward one word, idempotently by
 	// requestID, guarded by expectedVersion.
 	AdvanceWord(ctx context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error)
+	// EnterCheck opens the check stage (13.1-01): persists stage='checking'
+	// plus the behavior snapshot, idempotently by requestID.
+	EnterCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, outcomes map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error)
+	// ApplyVerdict upserts one check-stage verdict, idempotently by
+	// requestID, and returns the FULL stored verdict list.
+	ApplyVerdict(ctx context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error)
+	// CompleteCheck flips stage checking→submitted — the unified-submit
+	// idempotency latch (only its first commit may drive the one FSRS
+	// write).
+	CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error)
 }
 
 // TurnManagerConfig configures one TurnManager.
@@ -259,6 +269,9 @@ type TurnManager struct {
 	turnID uint64
 	// tutor is the dictation FSM state; nil until a lesson session starts.
 	tutor *DictationTutor
+	// mode is the page-supplied UI mode (13.1 D-08, normalized to
+	// student/test at session_init); plan 02's masking consumes it.
+	mode string
 	// turnSentences are the sentences sent for the current announcement, in
 	// order (the interrupt-trim source).
 	turnSentences []sentenceInfo
@@ -371,6 +384,10 @@ func (tm *TurnManager) HandleControl(s Sender, data []byte) {
 		tm.handlePing(s, m)
 	case EndSessionMsg:
 		tm.handleEndSession(s)
+	case CheckVerdictMsg:
+		tm.handleCheckVerdict(s, m) // 13.1-01 check stage (check.go)
+	case CheckSubmitMsg:
+		tm.handleCheckSubmit(s, m) // 13.1-01 unified submit (check.go)
 	default:
 		// Server→client types parse but are not accepted from a client;
 		// the transport only moves bytes — this is the enforcement point.
@@ -404,9 +421,12 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	lessonID := resolveLessonID(tm.cfg.LessonID, time.Now())
 
 	// Retain the write half for server-initiated announcements that have no
-	// request context behind them (the 13-09 timeout auto-advance).
+	// request context behind them (the 13-09 timeout auto-advance), and the
+	// page's UI mode (13.1 D-08: "test" keeps today's full-reveal behavior;
+	// absent/invalid → student — the iPad bookmark must never leak words).
 	tm.mu.Lock()
 	tm.sender = s
+	tm.mode = normalizeSessionMode(m.Mode)
 	tm.mu.Unlock()
 
 	unlock := lockLessonInit(lessonID)
@@ -460,6 +480,18 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 func (tm *TurnManager) failLessonInit(s Sender) {
 	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable))
 	tm.sendError(s, ErrCodeLessonUnavailable, lessonUnavailableNotice, false)
+}
+
+// normalizeSessionMode normalizes the page-supplied UI mode (13.1 D-08):
+// only the exact "test" value selects test mode; anything else — including
+// an absent field — is student mode. Stored on the TurnManager at
+// session_init; 13.1-01 has no visible difference beyond the check panel
+// (the masking itself lands in 13.1-02).
+func normalizeSessionMode(mode string) string {
+	if mode == ModeTest {
+		return ModeTest
+	}
+	return ModeStudent
 }
 
 // startNoDueSession answers session_ready with an empty word table, lets
@@ -837,6 +869,14 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		tm.mu.Unlock()
 		return
 	}
+	if tm.tutor.checking {
+		// 13.1-01: the check stage's input is the SCREEN (check_verdict
+		// frames); voice turns are 13.1-06. Dropping the segment here keeps
+		// the cursor-target capture safe (currentIndex == len(words) would
+		// panic turnTarget) and never disturbs the check panel.
+		tm.mu.Unlock()
+		return
+	}
 	epoch := tm.epoch
 	turnID := tm.nextTurnIDLocked()
 	tm.state = StateProcessing
@@ -1070,7 +1110,10 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 	)
 
 	if finished {
-		tm.enterCompletion(s, ctx, cancel, epoch)
+		// 13.1-01 (D-01): the last word's first commit enters the CHECK
+		// stage instead of writing ratings — the unified FSRS write moves
+		// behind check_submit (check.go).
+		tm.enterCheck(s, ctx, cancel, epoch)
 		return
 	}
 
@@ -1083,56 +1126,13 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 	})
 }
 
-// enterCompletion runs the wrap-up: reachable only from the first-commit
-// branch (the completed flag is set under mu below, and a duplicate confirm
-// of the same word replays idempotently — it can never re-enter).
-// Order is 先执行后播报: the review write actually executes first; the
-// spoken summary then reports the REAL result sets; session_ended
-// (lesson_complete) waits for the summary's valid playback ack.
-func (tm *TurnManager) enterCompletion(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64) {
-	if !tm.epochCurrent(epoch) {
-		return
-	}
-	tm.mu.Lock()
-	tm.tutor.markCompleted()
-	total := len(tm.tutor.words)
-	confirmed, timedOutN, hinted := tm.tutor.outcomeCounts()
-	results := tm.tutor.ratings()
-	hintWords, hintTotal := tm.tutor.hintAccounting()
-	tm.mu.Unlock()
-
-	summary := completionSummaryText(total, confirmed, timedOutN, hinted)
-	if len(results) > 0 {
-		wres, err := tm.cfg.Words.SubmitReview(ctx, results)
-		switch {
-		case err != nil:
-			// Honest failure: the record was NOT saved; the student hears
-			// that — never a narrated success (transparency prohibition).
-			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
-			summary += reviewFailedSuffix()
-		default:
-			// Real result sets decide the reported success: requested vs
-			// updated vs missing, never "nil error = full success". A
-			// partial or zero update ships the same event with the real
-			// counts plus a server-side error marker and an honest
-			// "saved M/N" spoken note — and the batch is NEVER retried
-			// blindly (S-05).
-			tm.recorder.Emit(EventReviewWritten,
-				infra.F("requested", len(wres.Requested)),
-				infra.F("updated", len(wres.Updated)),
-				infra.F("missing", len(wres.Missing)),
-				infra.F("hint_words", hintWords),
-				infra.F("hint_total", hintTotal),
-			)
-			if updated := len(wres.Updated); updated < len(results) {
-				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
-				summary += fmt.Sprintf("本次保存 %d/%d 个。", updated, len(results))
-			}
-		}
-	}
-
-	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
-}
+// enterCompletion was REPLACED by the check stage (13.1-01, D-01): the last
+// word's first advance commit now calls enterCheck (check.go) — the unified
+// FSRS write happens only after check_submit, the battle summary speaks
+// after that write, and the completionSummaryText wording retired with the
+// write-at-completion model (the D-02/D-04 summary is checkedSummaryText).
+// The behavior data (outcomeCounts/hintAccounting) survives inside
+// EventReviewSubmitted's fields.
 
 // speakTurn streams the text sentence by sentence: subtitle first, audio
 // chunks forwarded the instant they arrive. Each sentence's pendingPlayback

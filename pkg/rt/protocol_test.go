@@ -471,3 +471,161 @@ func TestProtocolValidateAudioInitMatrix(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Check-stage wire contract (13.1-01): round-trips and exact wire keys. The
+// tutor page and the mock e2e mirror these field-for-field (mock-mirror
+// discipline starts here).
+// ---------------------------------------------------------------------------
+
+// TestProtocolSessionInitModeRoundTrip: the 13.1 D-08 mode field rides
+// session_init as "mode" and is omitted when empty (absent = student).
+func TestProtocolSessionInitModeRoundTrip(t *testing.T) {
+	msg := SessionInitMsg{
+		Type:  TypeSessionInit,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+		Mode:  ModeTest,
+	}
+	got := roundTrip(t, msg, SessionInitMsg{}).(SessionInitMsg)
+	if got.Mode != ModeTest {
+		t.Errorf("mode = %q, want %q", got.Mode, ModeTest)
+	}
+	w := wireKeys(t, msg)
+	if got := wantString(t, w, "mode"); got != "test" {
+		t.Errorf("wire mode = %q, want test", got)
+	}
+
+	absent := SessionInitMsg{Type: TypeSessionInit, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1}}
+	w = wireKeys(t, absent)
+	if _, ok := w["mode"]; ok {
+		t.Error("wire mode present for an empty value, want omitted (absent = student)")
+	}
+}
+
+func TestProtocolCheckVerdictRoundTrip(t *testing.T) {
+	msg := CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "req-v-1", WordIndex: 2, Correct: true}
+	got := roundTrip(t, msg, CheckVerdictMsg{}).(CheckVerdictMsg)
+	if got != msg {
+		t.Errorf("round trip = %+v, want %+v", got, msg)
+	}
+	w := wireKeys(t, msg)
+	if got := wantString(t, w, "type"); got != "check_verdict" {
+		t.Errorf("wire type = %q, want check_verdict", got)
+	}
+	if got := wantString(t, w, "request_id"); got != "req-v-1" {
+		t.Errorf("wire request_id = %q, want req-v-1", got)
+	}
+	if got := wantNumber(t, w, "word_index"); got != 2 {
+		t.Errorf("wire word_index = %v, want 2", got)
+	}
+	if got := w["correct"]; got != true {
+		t.Errorf("wire correct = %v, want true", got)
+	}
+}
+
+func TestProtocolCheckSubmitRoundTrip(t *testing.T) {
+	msg := CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-submit-9"}
+	got := roundTrip(t, msg, CheckSubmitMsg{}).(CheckSubmitMsg)
+	if got != msg {
+		t.Errorf("round trip = %+v, want %+v", got, msg)
+	}
+	w := wireKeys(t, msg)
+	if got := wantString(t, w, "type"); got != "check_submit" {
+		t.Errorf("wire type = %q, want check_submit", got)
+	}
+	if got := wantString(t, w, "request_id"); got != "req-submit-9" {
+		t.Errorf("wire request_id = %q, want req-submit-9", got)
+	}
+}
+
+func TestProtocolCheckStartedRoundTrip(t *testing.T) {
+	msg := CheckStartedMsg{
+		Type:   TypeCheckStarted,
+		Words:  []string{"苹果", "香蕉"},
+		Reason: CheckStartedReasonDictationDone,
+	}
+	got := roundTrip(t, msg, CheckStartedMsg{}).(CheckStartedMsg)
+	if got.Reason != msg.Reason || len(got.Words) != 2 || got.Words[1] != "香蕉" {
+		t.Errorf("round trip = %+v, want %+v", got, msg)
+	}
+	w := wireKeys(t, msg)
+	if got := wantString(t, w, "type"); got != "check_started" {
+		t.Errorf("wire type = %q, want check_started", got)
+	}
+	words := w["words"].([]any)
+	if len(words) != 2 || words[0] != "苹果" {
+		t.Errorf("wire words = %v, want the full plaintext list", words)
+	}
+	if got := wantString(t, w, "reason"); got != CheckStartedReasonDictationDone {
+		t.Errorf("wire reason = %q, want %q", got, CheckStartedReasonDictationDone)
+	}
+	// The reason vocabulary is frozen (D-10 consumers switch on it).
+	if CheckStartedReasonResume != "resume" || CheckStartedReasonCorrection != "correction" {
+		t.Error("check_started reason vocabulary drifted")
+	}
+}
+
+func TestProtocolCheckVerdictsRoundTrip(t *testing.T) {
+	msg := CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: []WireVerdict{
+		{WordIndex: 0, Correct: true, Manual: true},
+		{WordIndex: 1, Correct: false, Manual: true},
+	}}
+	got := roundTrip(t, msg, CheckVerdictsMsg{}).(CheckVerdictsMsg)
+	if len(got.Verdicts) != 2 || got.Verdicts[1].WordIndex != 1 || got.Verdicts[1].Correct {
+		t.Errorf("round trip = %+v, want %+v", got, msg)
+	}
+	w := wireKeys(t, msg)
+	if got := wantString(t, w, "type"); got != "check_verdicts" {
+		t.Errorf("wire type = %q, want check_verdicts", got)
+	}
+	vs := w["verdicts"].([]any)
+	first := vs[0].(map[string]any)
+	if got := wantNumber(t, first, "word_index"); got != 0 {
+		t.Errorf("wire verdicts[0].word_index = %v, want 0", got)
+	}
+	if first["correct"] != true || first["manual"] != true {
+		t.Errorf("wire verdicts[0] = %v, want correct/manual true", first)
+	}
+}
+
+func TestProtocolReviewResultRoundTrip(t *testing.T) {
+	msg := ReviewResultMsg{Type: TypeReviewResult, Requested: 3, Updated: 2, Missing: 1, Unchecked: false}
+	got := roundTrip(t, msg, ReviewResultMsg{}).(ReviewResultMsg)
+	if got != msg {
+		t.Errorf("round trip = %+v, want %+v", got, msg)
+	}
+	w := wireKeys(t, msg)
+	if got := wantString(t, w, "type"); got != "review_result" {
+		t.Errorf("wire type = %q, want review_result", got)
+	}
+	if got := wantNumber(t, w, "requested"); got != 3 {
+		t.Errorf("wire requested = %v, want 3", got)
+	}
+	if got := wantNumber(t, w, "updated"); got != 2 {
+		t.Errorf("wire updated = %v, want 2", got)
+	}
+	if got := wantNumber(t, w, "missing"); got != 1 {
+		t.Errorf("wire missing = %v, want 1", got)
+	}
+	if _, ok := w["unchecked"]; !ok {
+		t.Error("wire unchecked missing (the S-05 honesty fields must always ride the message)")
+	}
+}
+
+func TestProtocolWordRevealedRoundTrip(t *testing.T) {
+	msg := WordRevealedMsg{Type: TypeWordRevealed, WordIndex: 4, Word: "橘子"}
+	got := roundTrip(t, msg, WordRevealedMsg{}).(WordRevealedMsg)
+	if got != msg {
+		t.Errorf("round trip = %+v, want %+v", got, msg)
+	}
+	w := wireKeys(t, msg)
+	if got := wantString(t, w, "type"); got != "word_revealed" {
+		t.Errorf("wire type = %q, want word_revealed", got)
+	}
+	if got := wantNumber(t, w, "word_index"); got != 4 {
+		t.Errorf("wire word_index = %v, want 4", got)
+	}
+	if got := wantString(t, w, "word"); got != "橘子" {
+		t.Errorf("wire word = %q, want 橘子", got)
+	}
+}

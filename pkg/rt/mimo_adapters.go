@@ -153,18 +153,38 @@ func (t *LessonTools) AdvanceWord(ctx context.Context, lessonID string, expected
 	return t.exec.AdvanceWord(ctx, lessonID, expectedVersion, requestID)
 }
 
+// EnterCheck opens the lesson's check stage (13.1-01, enter_check tool).
+func (t *LessonTools) EnterCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, outcomes map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) {
+	return t.exec.EnterCheck(ctx, lessonID, expectedVersion, requestID, outcomes)
+}
+
+// ApplyVerdict records one check-stage verdict (13.1-01, check_verdict tool).
+func (t *LessonTools) ApplyVerdict(ctx context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
+	return t.exec.ApplyVerdict(ctx, lessonID, expectedVersion, requestID, verdict)
+}
+
+// CompleteCheck runs the unified-submit stage transition (13.1-01,
+// check_submit tool) — the FSRS idempotency latch.
+func (t *LessonTools) CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
+	return t.exec.CompleteCheck(ctx, lessonID, expectedVersion, requestID, unchecked)
+}
+
 // Compile-time interface check: the LessonTools adapter satisfies the turn
 // manager's classroom seam (13-06 key_link).
 var _ LessonExecutor = (*LessonTools)(nil)
 
-// Compile-time signature checks binding pkg/lesson's methods (13-01) to the
-// LessonExecutor seam — if any of the three signatures drifts, this file
-// stops compiling instead of failing at wiring time.
+// Compile-time signature checks binding pkg/lesson's methods (13-01, plus
+// the 13.1-01 check-stage trio) to the LessonExecutor seam — if any of the
+// signatures drifts, this file stops compiling instead of failing at wiring
+// time.
 var (
 	_ func(*lesson.Store, context.Context, string, []string) (lesson.Lesson, error) = (*lesson.Store).EnsureLesson
 	_ func(*lesson.Store, context.Context, string, []lesson.Word) (lesson.Lesson, error) = (*lesson.Store).EnsureLessonCards
 	_ func(*lesson.Executor, context.Context, string) (lesson.Lesson, error)        = (*lesson.Executor).GetLessonState
 	_ func(*lesson.Executor, context.Context, string, int, string) (lesson.AdvanceResult, error) = (*lesson.Executor).AdvanceWord
+	_ func(*lesson.Executor, context.Context, string, int, string, map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) = (*lesson.Executor).EnterCheck
+	_ func(*lesson.Executor, context.Context, string, int, string, lesson.CheckVerdict) (lesson.ApplyVerdictResult, error)        = (*lesson.Executor).ApplyVerdict
+	_ func(*lesson.Executor, context.Context, string, int, string, bool) (lesson.CompleteCheckResult, error)                      = (*lesson.Executor).CompleteCheck
 )
 
 // pyfsrsFetchLockHours is the fetch-lock window PyFSRS explicitly passes on

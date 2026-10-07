@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
@@ -44,6 +45,10 @@ var (
     cards TEXT NOT NULL DEFAULT '[]', -- JSON array, elements are Word
     current_index INTEGER NOT NULL DEFAULT 0,
     version INTEGER NOT NULL DEFAULT 1,
+    stage TEXT NOT NULL DEFAULT '',   -- 13.1 check stage: '' | 'checking' | 'submitted'
+    outcomes TEXT NOT NULL DEFAULT '{}',  -- JSON object: word index → WordOutcome
+    verdicts TEXT NOT NULL DEFAULT '[]',  -- JSON array of CheckVerdict
+    unchecked INTEGER NOT NULL DEFAULT 0, -- 13.1 D-03: lesson closed without a check
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 )`
@@ -62,6 +67,17 @@ var (
 	// tables created before it existed (13-06 deployments). Purely additive:
 	// existing rows keep their data and read cards as the empty '[]' array.
 	alterLessonsAddCards = `ALTER TABLE lessons ADD COLUMN cards TEXT NOT NULL DEFAULT '[]'`
+
+	// The 13.1 check-stage columns (alterLessonsAddStage/Outcomes/Verdicts/
+	// Unchecked) follow the same purely-additive PRAGMA-probe pattern: legacy
+	// rows read back the defaults (stage=''/outcomes='{}'/verdicts='[]'/
+	// unchecked=0) and keep short-circuiting as completed sessions. The
+	// unchecked column is owned HERE (13.1-04 consumes Lesson.Unchecked for
+	// the fallback/correction paths on top of this task's scan).
+	alterLessonsAddStage = `ALTER TABLE lessons ADD COLUMN stage TEXT NOT NULL DEFAULT ''`
+	alterLessonsAddOutcomes = `ALTER TABLE lessons ADD COLUMN outcomes TEXT NOT NULL DEFAULT '{}'`
+	alterLessonsAddVerdicts = `ALTER TABLE lessons ADD COLUMN verdicts TEXT NOT NULL DEFAULT '[]'`
+	alterLessonsAddUnchecked = `ALTER TABLE lessons ADD COLUMN unchecked INTEGER NOT NULL DEFAULT 0`
 )
 
 // Word is one vocabulary card carried with the lesson row: the surface word,
@@ -78,13 +94,43 @@ type Word struct {
 	Example string `json:"example"`
 }
 
+// WordOutcome is one word's recorded dictation-stage behavior (13.1-01):
+// the U-9 outcome vocabulary ("confirmed"/"timeout"/"hint") plus the word's
+// hint-request count. The check stage snapshots these into the lessons row
+// at EnterCheck so the unified rating (checkRating(result, hints)) survives
+// reconnects — per-word behavior used to live only in memory.
+type WordOutcome struct {
+	Outcome string `json:"outcome"`
+	Hints   int    `json:"hints"`
+}
+
+// CheckVerdict is one word's check-stage verdict (13.1-01): whether the
+// written word was judged correct, whether the verdict came from a human
+// (screen 对/错 tap in this plan; OCR prefills arrive in 13.1-03 with
+// Manual=false), and the recognized handwriting text when an OCR source
+// produced it. Verdicts persist in the lessons row's verdicts JSON column.
+type CheckVerdict struct {
+	WordIndex int    `json:"word_index"`
+	Correct   bool   `json:"correct"`
+	Manual    bool   `json:"manual"`
+	OcrText   string `json:"ocr_text,omitempty"`
+}
+
+// Lesson-stage stage values stored in the lessons row (13.1-01). Empty means
+// "no check stage recorded" — every pre-13.1 row and every completed session
+// keeps the empty default and short-circuits on reconnect exactly as before.
+const (
+	StageChecking  = "checking"
+	StageSubmitted = "submitted"
+)
+
 // Migrate creates the lesson package's Go-owned tables and index if they do
-// not exist, then idempotently backfills the cards column on legacy lessons
-// tables that predate it: the live schema is probed via PRAGMA
-// table_info(lessons) and ALTER TABLE runs only when the column is absent,
-// so VPS databases created during 13-06 gain the column with no manual
-// intervention. Idempotent overall: safe to call on every boot, mirroring
-// database.Migrate.
+// not exist, then idempotently backfills the additive columns (cards, then
+// the 13.1 check-stage columns) on legacy lessons tables that predate them:
+// the live schema is probed via PRAGMA table_info(lessons) and ALTER TABLE
+// runs only when a column is absent, so VPS databases created during 13-06
+// gain everything with no manual intervention. Idempotent overall: safe to
+// call on every boot, mirroring database.Migrate.
 func Migrate(ctx context.Context, db *sql.DB) error {
 	statements := []string{
 		lessonsDDL,
@@ -98,22 +144,34 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
-	hasCards, err := lessonsHasCardsColumn(ctx, db)
-	if err != nil {
-		return fmt.Errorf("lesson/migrate: %w", err)
-	}
-	if !hasCards {
-		if _, err := db.ExecContext(ctx, alterLessonsAddCards); err != nil {
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"cards", alterLessonsAddCards},
+		{"stage", alterLessonsAddStage},
+		{"outcomes", alterLessonsAddOutcomes},
+		{"verdicts", alterLessonsAddVerdicts},
+		{"unchecked", alterLessonsAddUnchecked},
+	} {
+		has, err := lessonsHasColumn(ctx, db, col.name)
+		if err != nil {
 			return fmt.Errorf("lesson/migrate: %w", err)
+		}
+		if !has {
+			if _, err := db.ExecContext(ctx, col.ddl); err != nil {
+				return fmt.Errorf("lesson/migrate: %w", err)
+			}
 		}
 	}
 
 	return nil
 }
 
-// lessonsHasCardsColumn reports whether the lessons table already carries
-// the cards column.
-func lessonsHasCardsColumn(ctx context.Context, db *sql.DB) (bool, error) {
+// lessonsHasColumn reports whether the lessons table already carries the
+// named column (the generalized PRAGMA table_info probe; the original
+// cards-column check was its first caller).
+func lessonsHasColumn(ctx context.Context, db *sql.DB, name string) (bool, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info(lessons)")
 	if err != nil {
 		return false, err
@@ -123,16 +181,16 @@ func lessonsHasCardsColumn(ctx context.Context, db *sql.DB) (bool, error) {
 	for rows.Next() {
 		var (
 			cid       int
-			name      string
+			colName   string
 			ctype     string
 			notNull   int
 			dfltValue sql.NullString
 			pk        int
 		)
-		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+		if err := rows.Scan(&cid, &colName, &ctype, &notNull, &dfltValue, &pk); err != nil {
 			return false, err
 		}
-		if name == "cards" {
+		if colName == name {
 			return true, nil
 		}
 	}
@@ -144,12 +202,23 @@ func lessonsHasCardsColumn(ctx context.Context, db *sql.DB) (bool, error) {
 // ([]Word) — the meaning/example ground truth persisted with the classroom
 // row so a same-day reconnect does not lose it. Version drives optimistic
 // concurrency for advance_word writes (Executor.AdvanceWord).
+//
+// The 13.1 check-stage fields (Stage/Outcomes/Verdicts/Unchecked) persist the
+// three-stage classroom across sessions: Stage records '' (no check recorded)
+// / "checking" / "submitted"; Outcomes snapshots the dictation-stage behavior
+// keyed by word index ("0", "1", …); Verdicts carries the stored check
+// verdicts in submission order; Unchecked marks a lesson that was closed
+// without finishing its check (the D-03 fallback consumer is 13.1-04).
 type Lesson struct {
 	LessonID     string
 	Words        []string
 	Cards        []Word
 	CurrentIndex int
 	Version      int
+	Stage        string
+	Outcomes     map[string]WordOutcome
+	Verdicts     []CheckVerdict
+	Unchecked    bool
 	CreatedAt    string
 	UpdatedAt    string
 }
@@ -262,23 +331,67 @@ func (s *Store) EnsureLessonCards(ctx context.Context, lessonID string, cards []
 	return created, nil
 }
 
+// decodeOutcomesJSON decodes the lessons outcomes column with legacy-default
+// tolerance: an empty raw value (a row written before the column's backfill)
+// decodes to the empty map, corrupted non-empty JSON surfaces as an error.
+func decodeOutcomesJSON(raw string) (map[string]WordOutcome, error) {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]WordOutcome{}, nil
+	}
+	var m map[string]WordOutcome
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil, err
+	}
+	if m == nil {
+		m = map[string]WordOutcome{}
+	}
+	return m, nil
+}
+
+// decodeVerdictsJSON decodes the lessons verdicts column with the same
+// legacy-default tolerance as decodeOutcomesJSON.
+func decodeVerdictsJSON(raw string) ([]CheckVerdict, error) {
+	if strings.TrimSpace(raw) == "" {
+		return []CheckVerdict{}, nil
+	}
+	var v []CheckVerdict
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return nil, err
+	}
+	if v == nil {
+		v = []CheckVerdict{}
+	}
+	return v, nil
+}
+
 // GetLesson returns the lessons row for lessonID. Returns ErrLessonNotFound
 // when no row exists. A corrupted words or cards column (invalid JSON)
-// surfaces as a wrapped unmarshal error.
+// surfaces as a wrapped unmarshal error. The four 13.1 check-stage columns
+// are decoded with legacy-default tolerance: an empty raw value (a row that
+// predates a column's backfill) decodes to the zero default instead of
+// failing, so historical rows keep reading as stageless/unchecked.
 func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) {
 	var (
-		l         Lesson
-		wordsJSON string
-		cardsJSON string
+		l           Lesson
+		wordsJSON   string
+		cardsJSON   string
+		stage       string
+		outcomesJSON string
+		verdictsJSON string
+		unchecked   int
 	)
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT lesson_id, words, cards, current_index, version, created_at, updated_at FROM lessons WHERE lesson_id = ?",
+		"SELECT lesson_id, words, cards, stage, outcomes, verdicts, unchecked, current_index, version, created_at, updated_at FROM lessons WHERE lesson_id = ?",
 		lessonID,
 	).Scan(
 		&l.LessonID,
 		&wordsJSON,
 		&cardsJSON,
+		&stage,
+		&outcomesJSON,
+		&verdictsJSON,
+		&unchecked,
 		&l.CurrentIndex,
 		&l.Version,
 		&l.CreatedAt,
@@ -313,6 +426,33 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 		)
 		return Lesson{}, errors.Wrap(err, fmt.Sprintf("get lesson %q: unmarshal cards", lessonID))
 	}
+
+	// Check-stage columns: legacy-default tolerance for EMPTY raw values;
+	// corrupted non-empty JSON still surfaces as a wrapped error (the same
+	// honesty contract as words/cards — a silently-empty verdicts column
+	// could double-submit FSRS reviews).
+	l.Stage = stage
+	l.Unchecked = unchecked != 0
+	outcomes, err := decodeOutcomesJSON(outcomesJSON)
+	if err != nil {
+		s.logger.Error("lesson get: unmarshal outcomes failed",
+			infra.F("component", "lesson/store"),
+			infra.F("lesson_id", lessonID),
+			infra.ErrField(err),
+		)
+		return Lesson{}, errors.Wrap(err, fmt.Sprintf("get lesson %q: unmarshal outcomes", lessonID))
+	}
+	l.Outcomes = outcomes
+	verdicts, err := decodeVerdictsJSON(verdictsJSON)
+	if err != nil {
+		s.logger.Error("lesson get: unmarshal verdicts failed",
+			infra.F("component", "lesson/store"),
+			infra.F("lesson_id", lessonID),
+			infra.ErrField(err),
+		)
+		return Lesson{}, errors.Wrap(err, fmt.Sprintf("get lesson %q: unmarshal verdicts", lessonID))
+	}
+	l.Verdicts = verdicts
 
 	return l, nil
 }

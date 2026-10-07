@@ -257,7 +257,7 @@ func TestMigrateAddsCardsColumnToLegacyTable(t *testing.T) {
 		t.Fatalf("second Migrate on legacy db: %v", err)
 	}
 
-	hasCards, err := lessonsHasCardsColumn(ctx, db)
+	hasCards, err := lessonsHasColumn(ctx, db, "cards")
 	if err != nil {
 		t.Fatalf("probe cards column: %v", err)
 	}

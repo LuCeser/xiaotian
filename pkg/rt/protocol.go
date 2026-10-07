@@ -39,11 +39,13 @@ const TTSOutputSampleRate = 24000
 
 // Client → server control message type constants.
 const (
-	TypeSessionInit = "session_init"
-	TypeInterrupt   = "interrupt"
-	TypeSentenceAck = "sentence_ack"
-	TypePing        = "ping"
-	TypeEndSession  = "end_session"
+	TypeSessionInit  = "session_init"
+	TypeInterrupt    = "interrupt"
+	TypeSentenceAck  = "sentence_ack"
+	TypePing         = "ping"
+	TypeEndSession   = "end_session"
+	TypeCheckVerdict = "check_verdict" // 13.1-01: one screen 对/错 verdict
+	TypeCheckSubmit  = "check_submit"  // 13.1-01: the unified-submit request
 )
 
 // Server → client control message type constants.
@@ -60,6 +62,10 @@ const (
 	TypeState           = "state"
 	TypeError           = "error"
 	TypeSessionEnded    = "session_ended"
+	TypeCheckStarted    = "check_started"  // 13.1-01: the check stage opened (D-10 unmask)
+	TypeCheckVerdicts   = "check_verdicts" // 13.1-01: authoritative verdict echo (RT-07)
+	TypeReviewResult    = "review_result"  // 13.1-01: honest unified-submit result (S-05)
+	TypeWordRevealed    = "word_revealed"  // 13.1-01: one word's plaintext reveal
 )
 
 // StateMsg.Value vocabulary for the student-facing connection state.
@@ -181,11 +187,22 @@ type LessonView struct {
 // SessionInitMsg is the first client → server message. The client declares
 // the audio format it will uplink (post-downsample); the server validates
 // with ValidateAudioInit and answers with SessionReadyMsg or an
-// unsupported_format ErrorMsg.
+// unsupported_format ErrorMsg. Mode carries the page's UI mode (13.1 D-08:
+// "student" default, "test" keeps the full-reveal behavior); an absent or
+// invalid value normalizes to student.
 type SessionInitMsg struct {
 	Type  string    `json:"type"`
 	Audio AudioSpec `json:"audio"`
+	Mode  string    `json:"mode,omitempty"`
 }
+
+// UI mode values carried by SessionInitMsg.Mode (13.1 D-08). Anything else —
+// including an absent field — is student mode: the iPad bookmark must never
+// land the child on a full-reveal word table by accident.
+const (
+	ModeStudent = "student"
+	ModeTest    = "test"
+)
 
 // InterruptMsg reports a client-detected interruption while the teacher was
 // speaking. Detection is client-side (playback-time local energy) because
@@ -370,6 +387,93 @@ type SessionEndedMsg struct {
 	Reason string `json:"reason"`
 }
 
+// ---------------------------------------------------------------------------
+// Check-stage messages (13.1-01): the three-stage classroom's wire contract.
+// The tutor page and the mock e2e suite mirror these field-for-field.
+// ---------------------------------------------------------------------------
+
+// CheckVerdictMsg is one screen verdict (client → server): the student (or
+// the e2e harness) tapped 对/错 for WordIndex. RequestID is the
+// CLIENT-SUPPLIED idempotency key — unique per mutation intent (a legitimate
+// 对→错→对 flip sends fresh ids; only network retries reuse one). The server
+// echoes the authoritative list via CheckVerdictsMsg; the client never
+// renders local optimistic state (RT-07).
+type CheckVerdictMsg struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	WordIndex int    `json:"word_index"`
+	Correct   bool   `json:"correct"`
+}
+
+// CheckSubmitMsg requests the unified FSRS submission (client → server).
+// The server submits at most once — the checking→submitted stage transition
+// is the idempotency latch; a replayed submit re-serves the stored result
+// without a second SubmitReview (T-13.1-01).
+type CheckSubmitMsg struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+}
+
+// CheckStartedReason vocabulary for CheckStartedMsg.Reason.
+const (
+	// CheckStartedReasonDictationDone: every word was dictated; the check
+	// stage opens right after the last advance commit (the D-10 unmask
+	// point — this message carries the full plaintext list).
+	CheckStartedReasonDictationDone = "dictation_done"
+	// CheckStartedReasonResume: a session reconnected into a lesson whose
+	// check stage never finished (13.1-04 recovery path).
+	CheckStartedReasonResume = "resume"
+	// CheckStartedReasonCorrection: a stored unchecked lesson reopens for
+	// the post-hoc photo correction (13.1-04).
+	CheckStartedReasonCorrection = "correction"
+)
+
+// CheckStartedMsg opens the check stage (server → client). Words is the
+// FULL plaintext list — the unmask point (D-10): before this message the
+// student-facing surfaces must not carry undictated word text. The client
+// renders one check row per entry.
+type CheckStartedMsg struct {
+	Type   string   `json:"type"`
+	Words  []string `json:"words"`
+	Reason string   `json:"reason"`
+}
+
+// WireVerdict is one verdict of the authoritative echo list.
+type WireVerdict struct {
+	WordIndex int  `json:"word_index"`
+	Correct   bool `json:"correct"`
+	Manual    bool `json:"manual"`
+}
+
+// CheckVerdictsMsg carries the FULL stored verdict list (server → client) —
+// the single render source for the check panel (RT-07): every screen state
+// derives from this echo, never from local optimistic state.
+type CheckVerdictsMsg struct {
+	Type     string        `json:"type"`
+	Verdicts []WireVerdict `json:"verdicts"`
+}
+
+// ReviewResultMsg reports the unified FSRS submission honestly (server →
+// client, S-05): Requested/Updated/Missing are the REAL set sizes — partial
+// and zero updates accompany a successful write, and the client must never
+// fabricate full success when Updated < Requested. Unchecked marks the D-03
+// behavior-fallback path (13.1-04) — always false for a checked submission.
+type ReviewResultMsg struct {
+	Type      string `json:"type"`
+	Requested int    `json:"requested"`
+	Updated   int    `json:"updated"`
+	Missing   int    `json:"missing"`
+	Unchecked bool   `json:"unchecked"`
+}
+
+// WordRevealedMsg carries one word's plaintext reveal (server → client, the
+// per-word unmask primitive the student-mode masking of 13.1-02 consumes).
+type WordRevealedMsg struct {
+	Type      string `json:"type"`
+	WordIndex int    `json:"word_index"`
+	Word      string `json:"word"`
+}
+
 // ParseControl decodes one control message (the payload of a WebSocket
 // TextMessage frame) into its concrete message struct. It recognizes the
 // full type vocabulary so both directions round-trip in tests and conformance
@@ -412,6 +516,42 @@ func ParseControl(data []byte) (any, error) {
 		return m, nil
 	case TypeEndSession:
 		var m EndSessionMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		return m, nil
+	case TypeCheckVerdict:
+		var m CheckVerdictMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		return m, nil
+	case TypeCheckSubmit:
+		var m CheckSubmitMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		return m, nil
+	case TypeCheckStarted:
+		var m CheckStartedMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		return m, nil
+	case TypeCheckVerdicts:
+		var m CheckVerdictsMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		return m, nil
+	case TypeReviewResult:
+		var m ReviewResultMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		return m, nil
+	case TypeWordRevealed:
+		var m WordRevealedMsg
 		if err := json.Unmarshal(data, &m); err != nil {
 			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
 		}

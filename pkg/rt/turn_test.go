@@ -116,6 +116,8 @@ func (c *captureSender) listeningCount() int {
 // call recording. conflictVersion > 0 makes every AdvanceWord return a
 // ConflictError; requestResults replays the first stored result for a
 // duplicate requestID (Idempotent=true), mirroring the tool_requests table.
+// The 13.1 check-stage methods follow the same first-commit/replay/conflict
+// shape on the in-memory row (checkResults holds their stored results).
 type fakeExecutor struct {
 	mu              sync.Mutex
 	lesson          lesson.Lesson
@@ -124,11 +126,20 @@ type fakeExecutor struct {
 	ensureCardsCalls int
 	stateCalls      int
 	advanceCalls    []fakeAdvanceCall
+	checkCalls      []fakeCheckCall
 	conflictVersion int
 	requestResults  map[string]lesson.AdvanceResult
+	checkResults    map[string]any
 }
 
 type fakeAdvanceCall struct {
+	lessonID        string
+	expectedVersion int
+	requestID       string
+}
+
+type fakeCheckCall struct {
+	tool            string
 	lessonID        string
 	expectedVersion int
 	requestID       string
@@ -149,6 +160,7 @@ func newFakeExecutor(lessonID string, cards []lesson.Word) *fakeExecutor {
 		lesson:         lesson.Lesson{LessonID: lessonID, Words: cardWords(cards), Cards: cards, CurrentIndex: 0, Version: 1},
 		exists:         true,
 		requestResults: map[string]lesson.AdvanceResult{},
+		checkResults:   map[string]any{},
 	}
 }
 
@@ -209,6 +221,100 @@ func (f *fakeExecutor) advanceCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.advanceCalls)
+}
+
+// --- 13.1-01 check-stage fakes (first-commit / replay / conflict, mirroring
+// the real executor's tool_requests semantics on the in-memory row) -------
+
+func (f *fakeExecutor) EnterCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, outcomes map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{"enter_check", lessonID, expectedVersion, requestID})
+	if stored, ok := f.checkResults[requestID]; ok {
+		res := stored.(lesson.EnterCheckResult)
+		res.Idempotent = true
+		return res, nil
+	}
+	if f.conflictVersion > 0 {
+		return lesson.EnterCheckResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
+	}
+	if !f.exists {
+		return lesson.EnterCheckResult{}, lesson.ErrLessonNotFound
+	}
+	f.lesson.Version++
+	f.lesson.Stage = lesson.StageChecking
+	f.lesson.Outcomes = outcomes
+	res := lesson.EnterCheckResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Outcomes: outcomes, Verdicts: f.lesson.Verdicts}
+	f.checkResults[requestID] = res
+	return res, nil
+}
+
+func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{"apply_verdict", lessonID, expectedVersion, requestID})
+	if stored, ok := f.checkResults[requestID]; ok {
+		res := stored.(lesson.ApplyVerdictResult)
+		res.Idempotent = true
+		return res, nil
+	}
+	if f.conflictVersion > 0 {
+		return lesson.ApplyVerdictResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
+	}
+	if !f.exists {
+		return lesson.ApplyVerdictResult{}, lesson.ErrLessonNotFound
+	}
+	replaced := false
+	for i := range f.lesson.Verdicts {
+		if f.lesson.Verdicts[i].WordIndex == verdict.WordIndex {
+			f.lesson.Verdicts[i] = verdict
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		f.lesson.Verdicts = append(f.lesson.Verdicts, verdict)
+	}
+	f.lesson.Version++
+	res := lesson.ApplyVerdictResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Verdicts: f.lesson.Verdicts}
+	f.checkResults[requestID] = res
+	return res, nil
+}
+
+func (f *fakeExecutor) CompleteCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{"complete_check", lessonID, expectedVersion, requestID})
+	if stored, ok := f.checkResults[requestID]; ok {
+		res := stored.(lesson.CompleteCheckResult)
+		res.Idempotent = true
+		return res, nil
+	}
+	if !f.exists {
+		return lesson.CompleteCheckResult{}, lesson.ErrLessonNotFound
+	}
+	if f.lesson.Stage == lesson.StageSubmitted {
+		// The latch already fell: idempotent no-op with the stored state.
+		return lesson.CompleteCheckResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: f.lesson.Unchecked, Idempotent: true}, nil
+	}
+	if f.conflictVersion > 0 {
+		return lesson.CompleteCheckResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
+	}
+	f.lesson.Version++
+	f.lesson.Stage = lesson.StageSubmitted
+	f.lesson.Unchecked = unchecked
+	res := lesson.CompleteCheckResult{
+		Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: unchecked,
+		Verdicts: f.lesson.Verdicts, Outcomes: f.lesson.Outcomes,
+	}
+	f.checkResults[requestID] = res
+	return res, nil
+}
+
+func (f *fakeExecutor) checkCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.checkCalls)
 }
 
 func (f *fakeExecutor) setRow(index, version int) {
@@ -398,22 +504,24 @@ func TestClassifyFallsBackToChatAfterSecondFailure(t *testing.T) {
 // Completion path: honest review write + ack-gated natural ending (Task 2)
 // ---------------------------------------------------------------------------
 
-// TestCompletionWritesReviewAndWaitsForPlaybackAck: the review write
-// actually executes BEFORE the summary is spoken; after the summary's
-// audio_end but before its ack the session must NOT end; the ack releases
-// session_ended(lesson_complete).
-func TestCompletionWritesReviewAndWaitsForPlaybackAck(t *testing.T) {
+// TestCheckSubmitWritesReviewAndWaitsForPlaybackAck (13.1-01 rewrite of the
+// completion test): the unified write executes BEFORE the summary is spoken
+// and ONLY after check_submit; the checked-correct-no-hint word rates good;
+// after the summary's audio_end but before its ack the session must NOT end;
+// the ack releases session_ended(lesson_complete).
+func TestCheckSubmitWritesReviewAndWaitsForPlaybackAck(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
-	tm, s, log, exec, done := ttConfirmToCompletion(t, words, 5)
+	tm, s, log, exec := ttConfirmToCheckSummary(t, words)
 
-	// 先执行后播报: the write already ran while the summary plays.
+	// 先提交后总结: the write already ran while the summary plays, and it
+	// ran exactly once through the stage latch.
 	if got := len(words.submissions()); got != 1 {
 		t.Fatalf("SubmitReview calls = %d, want 1 (and before the summary)", got)
 	}
 	ratings := words.submissions()[0]
 	if ratings["苹果"] != "good" {
-		t.Errorf("submitted rating = %v, want 苹果:good", ratings)
+		t.Errorf("submitted rating = %v, want 苹果:good (checked correct, no hint)", ratings)
 	}
 
 	// audio_end seen, no ack: no session end yet.
@@ -422,143 +530,98 @@ func TestCompletionWritesReviewAndWaitsForPlaybackAck(t *testing.T) {
 		t.Fatalf("session_ended before the summary ack = %d, want 0", got)
 	}
 
-	ttAckLast(t, tm, s, 0)
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
-		t.Fatal("session_ended never arrived after the summary ack")
-	}
-	ended := s.controlsOf(t, TypeSessionEnded)[0]
-	if ended["reason"] != ReasonLessonComplete {
-		t.Errorf("reason = %v, want %s", ended["reason"], ReasonLessonComplete)
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("completion goroutine did not finish")
-	}
+	ttAckSummaryAndEnd(t, tm, s, nil)
 	if exec.advanceCount() != 1 {
 		t.Errorf("advance calls = %d, want 1", exec.advanceCount())
 	}
-	updated := ttEventField(t, log, EventReviewWritten, "updated")
+	updated := ttEventField(t, log, EventReviewSubmitted, "updated")
 	if len(updated) != 1 || updated[0] != 1 {
-		t.Errorf("review_written updated = %v, want [1]", updated)
+		t.Errorf("review_submitted updated = %v, want [1]", updated)
 	}
 }
 
-// TestCompletionPartialReviewReportsActualCount: nil error with a PARTIAL
-// update set is not success — the summary carries the honest "saved M/N"
-// note, the event carries the real counts, the server records an error
-// marker, and SubmitReview runs exactly once (no blind batch retry).
-func TestCompletionPartialReviewReportsActualCount(t *testing.T) {
+// TestCheckSubmitPartialReviewReportsActualCount (13.1-01 rewrite): nil
+// error with a PARTIAL update set is not success — the summary carries the
+// honest "saved M/N" note, review_submitted carries the real counts, the
+// server records an error marker, and SubmitReview runs exactly once (no
+// blind batch retry).
+func TestCheckSubmitPartialReviewReportsActualCount(t *testing.T) {
 	words := newFakeWords(ttCards("苹果", "香蕉"))
 	words.reviewResult = ReviewWriteResult{
 		Requested: []string{"苹果", "香蕉"},
 		Updated:   []string{"苹果"},
 		Missing:   []string{"香蕉"},
 	}
-	tm, s, log, _, done := ttDriveTwoConfirmCompletion(t, words)
+	tm, s, log, _ := ttDriveToCheck(t, ttCards("苹果", "香蕉"), words)
+	ttCheckAll(t, tm, s, 2)
+	ttSubmitCheck(t, tm, s)
 
 	if got := len(words.submissions()); got != 1 {
 		t.Fatalf("SubmitReview calls = %d, want exactly 1 (no batch retry)", got)
 	}
-	sents := s.controlsOf(t, TypeTeacherSentence)
-	last, _ := sents[len(sents)-1]["text"].(string)
-	if !contains(last, "保存 1/2") {
-		t.Errorf("summary = %q, want the honest 保存 1/2 note", last)
-	}
-	updated := ttEventField(t, log, EventReviewWritten, "updated")
+	ttLastSentenceEventually(t, s, "保存 1/2")
+	updated := ttEventField(t, log, EventReviewSubmitted, "updated")
 	if len(updated) != 1 || updated[0] != 1 {
-		t.Errorf("review_written updated = %v, want [1] (real count)", updated)
+		t.Errorf("review_submitted updated = %v, want [1] (real count)", updated)
 	}
-	requested := ttEventField(t, log, EventReviewWritten, "requested")
+	requested := ttEventField(t, log, EventReviewSubmitted, "requested")
 	if len(requested) != 1 || requested[0] != 2 {
-		t.Errorf("review_written requested = %v, want [2]", requested)
+		t.Errorf("review_submitted requested = %v, want [2]", requested)
 	}
 	if got := ttEventCount(t, log, EventError); got == 0 {
 		t.Error("no server-side error marker for the partial update")
 	}
 
-	ttAckLast(t, tm, s, 0)
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
-		t.Fatal("session_ended never arrived after the summary ack")
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("completion goroutine did not finish")
-	}
+	ttAckSummaryAndEnd(t, tm, s, nil)
 }
 
-// TestCompletionZeroUpdatedWithNilErrorIsNotSuccess: nil error + zero
-// updates must still surface as a failure — the spoken summary reports 0/1
-// and the server records the error marker.
-func TestCompletionZeroUpdatedWithNilErrorIsNotSuccess(t *testing.T) {
+// TestCheckSubmitZeroUpdatedWithNilErrorIsNotSuccess (13.1-01 rewrite): nil
+// error + zero updates must still surface as a failure — the spoken summary
+// reports 0/1 and the server records the error marker.
+func TestCheckSubmitZeroUpdatedWithNilErrorIsNotSuccess(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	words.reviewResult = ReviewWriteResult{
 		Requested: []string{"苹果"},
 		Updated:   nil,
 		Missing:   []string{"苹果"},
 	}
-	tm, s, log, _, done := ttConfirmToCompletion(t, words, 6)
+	tm, s, log, _ := ttConfirmToCheckSummary(t, words)
 
 	if got := len(words.submissions()); got != 1 {
 		t.Fatalf("SubmitReview calls = %d, want exactly 1", got)
 	}
-	sents := s.controlsOf(t, TypeTeacherSentence)
-	last, _ := sents[len(sents)-1]["text"].(string)
-	if !contains(last, "保存 0/1") {
-		t.Errorf("summary = %q, want the honest 保存 0/1 note", last)
-	}
-	updated := ttEventField(t, log, EventReviewWritten, "updated")
+	ttLastSentenceEventually(t, s, "保存 0/1")
+	updated := ttEventField(t, log, EventReviewSubmitted, "updated")
 	if len(updated) != 1 || updated[0] != 0 {
-		t.Errorf("review_written updated = %v, want [0]", updated)
+		t.Errorf("review_submitted updated = %v, want [0]", updated)
 	}
 	if got := ttEventCount(t, log, EventError); got == 0 {
 		t.Error("no server-side error marker for the zero update")
 	}
 
-	ttAckLast(t, tm, s, 0)
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
-		t.Fatal("session_ended never arrived after the summary ack")
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("completion goroutine did not finish")
-	}
+	ttAckSummaryAndEnd(t, tm, s, nil)
 }
 
-// TestCompletionReviewFailureSpeaksHonestSuffix: a real SubmitReview error
-// appends the record-not-saved wording — the student never hears a false
-// "saved" (transparency prohibition).
-func TestCompletionReviewFailureSpeaksHonestSuffix(t *testing.T) {
+// TestCheckSubmitReviewFailureSpeaksHonestSuffix (13.1-01 rewrite): a real
+// SubmitReview error appends the record-not-saved wording — the student
+// never hears a false "saved" (transparency prohibition).
+func TestCheckSubmitReviewFailureSpeaksHonestSuffix(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	words.reviewErr = fmt.Errorf("pybridge run review failed")
-	tm, s, log, _, done := ttConfirmToCompletion(t, words, 6)
+	tm, s, log, _ := ttConfirmToCheckSummary(t, words)
 
 	if got := len(words.submissions()); got != 1 {
 		t.Fatalf("SubmitReview calls = %d, want exactly 1", got)
 	}
-	sents := s.controlsOf(t, TypeTeacherSentence)
-	last, _ := sents[len(sents)-1]["text"].(string)
-	if !contains(last, "没有保存成功") {
-		t.Errorf("summary = %q, want the honest record-not-saved suffix", last)
-	}
-	if got := ttEventCount(t, log, EventReviewWritten); got != 0 {
-		t.Errorf("review_written events = %d, want 0 (the write failed)", got)
+	ttLastSentenceEventually(t, s, "没有保存成功")
+	if got := ttEventCount(t, log, EventReviewSubmitted); got != 0 {
+		t.Errorf("review_submitted events = %d, want 0 (the write failed)", got)
 	}
 	if got := ttEventCount(t, log, EventError); got == 0 {
 		t.Error("no server-side error marker for the failed write")
 	}
 
-	ttAckLast(t, tm, s, 0)
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
-		t.Fatal("session_ended never arrived after the summary ack")
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("completion goroutine did not finish")
-	}
+	ttAckSummaryAndEnd(t, tm, s, nil)
 }
 
 // TestNoDueWordsWaitsForPlaybackAck: the zero-due explanation is fully
@@ -604,11 +667,14 @@ func TestNoDueWordsWaitsForPlaybackAck(t *testing.T) {
 // bounded wait expires — ErrorMsg(playback_ack_timeout) goes out FIRST,
 // then session_ended still carries the original lesson_complete reason (the
 // degraded order; the timeout itself is never an end reason). No fabricated
-// completion evidence appears.
+// completion evidence appears. (13.1-01: the summary only exists after the
+// unified submit, so the drive runs through the check stage.)
 func TestPlaybackAckTimeoutIsVisibleAndBounded(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
-	_, s, log, _, done := ttConfirmToCompletion(t, words, 5) // no ack is ever sent
+	tm, s, log, _ := ttDriveToCheck(t, ttCards("苹果"), words)
+	ttCheckAll(t, tm, s, 1)
+	ttSubmitCheck(t, tm, s) // no summary ack is ever sent
 
 	// The wait is bounded (min 3s): the timeout ErrorMsg must appear well
 	// inside the test budget, then the natural end follows.
@@ -646,9 +712,9 @@ func TestPlaybackAckTimeoutIsVisibleAndBounded(t *testing.T) {
 		t.Errorf("reason = %v, want the original %s (never a timeout reason)", ended["reason"], ReasonLessonComplete)
 	}
 
-	// No fabricated completion evidence: the review ran once, no extra
-	// word_announced (the timeout must not arm the word timer or pretend a
-	// word was announced).
+	// No fabricated completion evidence: the review ran once through the
+	// latch, no extra word_announced (the bridge announcement must not arm
+	// the word timer or pretend a word was announced).
 	if got := len(words.submissions()); got != 1 {
 		t.Errorf("SubmitReview calls = %d, want 1", got)
 	}
@@ -658,27 +724,26 @@ func TestPlaybackAckTimeoutIsVisibleAndBounded(t *testing.T) {
 	if got := ttEventCount(t, log, EventPlaybackAckTimeout); got != 1 {
 		t.Errorf("playback_ack_timeout events = %d, want 1", got)
 	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("completion goroutine did not finish after the timeout")
+	tm.mu.Lock()
+	closed := tm.closed
+	tm.mu.Unlock()
+	if !closed {
+		t.Error("session never closed after the degraded ending")
 	}
 }
 
-// TestCompletionDisconnectCancelsAckWait: a disconnect during the summary's
-// ack wait cancels the wait — the session closes without any further
-// messages (no session_ended, no timeout notice).
-func TestCompletionDisconnectCancelsAckWait(t *testing.T) {
+// TestCheckSubmitDisconnectCancelsAckWait (13.1-01 rewrite): a disconnect
+// during the summary's ack wait cancels the wait — the session closes
+// without any further messages (no session_ended, no timeout notice). The
+// bounded wait's floor is 3s, so four quiet seconds after the Close prove
+// the waiter never fired it.
+func TestCheckSubmitDisconnectCancelsAckWait(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
-	tm, s, log, _, done := ttConfirmToCompletion(t, words, 5)
+	tm, s, log, _ := ttConfirmToCheckSummary(t, words)
 
 	tm.Close(s) // transport read loop exited: cancels the ack wait
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("completion goroutine did not return after the disconnect")
-	}
+	time.Sleep(4 * time.Second)
 	if got := s.countOf(TypeSessionEnded); got != 0 {
 		t.Errorf("session_ended after disconnect = %d, want 0", got)
 	}
@@ -688,13 +753,29 @@ func TestCompletionDisconnectCancelsAckWait(t *testing.T) {
 }
 
 // ttDriveTwoConfirmCompletion runs a TWO-word lesson through both confirms
-// into the summary's audio_end window, returning before the summary ack.
-func ttDriveTwoConfirmCompletion(t *testing.T, words *fakeWordSource) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor, chan struct{}) {
+// into the check stage (13.1-01: the last commit no longer summarizes — it
+// opens the check stage), leaving the classroom waiting on verdicts.
+func ttDriveTwoConfirmCompletion(t *testing.T, words *fakeWordSource) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
+	return ttDriveToCheck(t, ttCards("苹果", "香蕉"), words)
+}
+
+// ttDriveToCheck drives a lesson of len(cards) words through scripted
+// confirms into the check stage: greeting acked, every confirm advanced, the
+// last commit opened the check stage (check_started seen) and the bridge
+// announcement settled through its ack. The caller then applies verdicts and
+// submits.
+func ttDriveToCheck(t *testing.T, cards []lesson.Word, words *fakeWordSource) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
 	t.Helper()
 	log := &captureLogger{}
 	exec := newFakeExecutorNoRow(ttLessonID)
-	asr := newFakeASR(asrScript{text: "好了"}, asrScript{text: "好了"})
-	llm := newFakeLLM(intentScript(intentConfirm, ""), intentScript(intentConfirm, ""))
+	asrScripts := make([]asrScript, len(cards))
+	llmScripts := make([]llmScript, len(cards))
+	for i := range cards {
+		asrScripts[i] = asrScript{text: "好了"}
+		llmScripts[i] = intentScript(intentConfirm, "")
+	}
+	asr := newFakeASR(asrScripts...)
+	llm := newFakeLLM(llmScripts...)
 	tts := newFakeTTS(2, 320)
 	tts.delay = 20 * time.Millisecond
 	tm := NewTurnManager(asr, llm, tts, exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
@@ -704,32 +785,122 @@ func ttDriveTwoConfirmCompletion(t *testing.T, words *fakeWordSource) (*TurnMana
 	ttAckLast(t, tm, s, 0)
 	ttWaitListening(t, s)
 
-	// Turn 1: confirm word 1; the next-word announcement blocks the turn
-	// goroutine until its ack.
-	done1 := make(chan struct{})
-	go func() {
-		tm.processTurn(s, []byte("pcm"))
-		close(done1)
-	}()
-	ttAwaitSpoken(t, s, 4)
-	ttAckLast(t, tm, s, 0)
-	select {
-	case <-done1:
-	case <-time.After(5 * time.Second):
-		t.Fatal("first confirm never settled")
+	for i := 0; i < len(cards); i++ {
+		done := make(chan struct{})
+		go func() {
+			tm.processTurn(s, []byte("pcm"))
+			close(done)
+		}()
+		if i < len(cards)-1 {
+			// The next-word announcement blocks the turn until acked.
+			if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeLessonUpdate) == i+1 }) {
+				t.Fatalf("confirm %d never committed", i)
+			}
+			ttAckLast(t, tm, s, 0)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("confirm %d never settled", i)
+			}
+			continue
+		}
+		// The LAST commit opens the check stage instead of a summary.
+		ttCheckStartedWanted(t, s)
+		// Wait for the bridge sentence BEFORE acking — acking the previous
+		// announcement's last sentence would be a rejected duplicate and
+		// leave the bridge announcement awaiting forever.
+		spokenBefore := s.countOf(TypeTeacherSentence)
+		if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > spokenBefore }) {
+			t.Fatal("check bridge announcement never spoke")
+		}
+		ttAckLast(t, tm, s, 0) // the check bridge announcement
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the entering turn never settled after the bridge ack")
+		}
 	}
+	return tm, s, log, exec
+}
 
-	// Turn 2: confirm word 2 → completion summary (3 sentences).
-	done2 := make(chan struct{})
-	go func() {
-		tm.processTurn(s, []byte("pcm"))
-		close(done2)
-	}()
-	ttAwaitSpoken(t, s, 7) // 3 greeting + 1 announce + 3 summary
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioEnd) >= 7 }) {
-		t.Fatal("summary audio_end never went out")
+// ttCheckAll marks every word correct (manual screen verdicts) and waits
+// until the authoritative echo covers all n indexes.
+func ttCheckAll(t *testing.T, tm *TurnManager, s *captureSender, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("req-v-%d", i), WordIndex: i, Correct: true,
+		}))
 	}
-	return tm, s, log, exec, done2
+	if !waitFor(t, 5*time.Second, func() bool {
+		got := s.controlsOf(t, TypeCheckVerdicts)
+		if len(got) == 0 {
+			return false
+		}
+		last := got[len(got)-1]
+		vs, ok := last["verdicts"].([]any)
+		return ok && len(vs) == n
+	}) {
+		t.Fatalf("verdict echoes never covered all %d words", n)
+	}
+}
+
+// ttSubmitCheck sends check_submit and waits for the honest review_result.
+func ttSubmitCheck(t *testing.T, tm *TurnManager, s *captureSender) map[string]any {
+	t.Helper()
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-submit"}))
+	var result map[string]any
+	if !waitFor(t, 5*time.Second, func() bool {
+		got := s.controlsOf(t, TypeReviewResult)
+		if len(got) == 0 {
+			return false
+		}
+		result = got[0]
+		return true
+	}) {
+		t.Fatal("review_result never arrived after check_submit")
+	}
+	return result
+}
+
+// ttLastSentenceEventually polls until the most recent teacher sentence
+// contains substr — the battle summary streams sentence-by-sentence AFTER
+// review_result, so a sentence assertion must wait for the stream to reach
+// it instead of reading once.
+func ttLastSentenceEventually(t *testing.T, s *captureSender, substr string) {
+	t.Helper()
+	if !waitFor(t, 5*time.Second, func() bool {
+		sents := s.controlsOf(t, TypeTeacherSentence)
+		if len(sents) == 0 {
+			return false
+		}
+		last, _ := sents[len(sents)-1]["text"].(string)
+		return contains(last, substr)
+	}) {
+		t.Fatalf("teacher sentences never reached a last sentence containing %q", substr)
+	}
+}
+
+// ttAckSummaryAndEnd acks the summary's final sentence, waits for
+// session_ended(lesson_complete), and (when the caller holds a done channel)
+// waits for the completion goroutine to finish.
+func ttAckSummaryAndEnd(t *testing.T, tm *TurnManager, s *captureSender, done chan struct{}) {
+	t.Helper()
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended never arrived after the summary ack")
+	}
+	ended := s.controlsOf(t, TypeSessionEnded)[0]
+	if ended["reason"] != ReasonLessonComplete {
+		t.Errorf("session_ended.reason = %v, want %s", ended["reason"], ReasonLessonComplete)
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("completion goroutine did not finish")
+		}
+	}
 }
 
 // typeOrder returns the decoded wire type of every captured control, in
@@ -792,35 +963,20 @@ func ttWaitListening(t *testing.T, s *captureSender) {
 	}
 }
 
-// ttConfirmToCompletion drives a ONE-word lesson from session_init through
-// the completion summary's final audio_end (summary pending its ack), with
-// wantSpoken the expected total teacher-sentence count (3 greeting + N
-// summary sentences). The caller owns the summary ack.
-func ttConfirmToCompletion(t *testing.T, words *fakeWordSource, wantSpoken int) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor, chan struct{}) {
+// ttConfirmToCheckSummary drives a ONE-word lesson from session_init through
+// the check stage's unified submit: the summary streams and its final
+// audio_end is out (summary pending its ack) when this returns. The caller
+// owns the summary ack. (Supersedes ttConfirmToCompletion, 13.1-01.)
+func ttConfirmToCheckSummary(t *testing.T, words *fakeWordSource) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
 	t.Helper()
-	log := &captureLogger{}
-	exec := newFakeExecutorNoRow(ttLessonID)
-	asr := newFakeASR(asrScript{text: "好了"})
-	llm := newFakeLLM(intentScript(intentConfirm, ""))
-	tts := newFakeTTS(2, 320)
-	tts.delay = 20 * time.Millisecond
-	tm := NewTurnManager(asr, llm, tts, exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
-	s := &captureSender{}
-	ttInit(t, tm, s)
-	ttAwaitSpoken(t, s, 3)
-	ttAckLast(t, tm, s, 0)
-	ttWaitListening(t, s)
-
-	done := make(chan struct{})
-	go func() {
-		tm.processTurn(s, []byte("pcm"))
-		close(done)
-	}()
-	ttAwaitSpoken(t, s, wantSpoken)
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioEnd) >= wantSpoken }) {
-		t.Fatalf("summary audio_end never went out (spoken=%d)", s.countOf(TypeTeacherSentence))
+	tm, s, log, exec := ttDriveToCheck(t, ttCards("苹果"), words)
+	ttCheckAll(t, tm, s, 1)
+	audioEndBefore := s.countOf(TypeAudioEnd)
+	ttSubmitCheck(t, tm, s)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioEnd) > audioEndBefore }) {
+		t.Fatal("summary audio_end never went out after the unified submit")
 	}
-	return tm, s, log, exec, done
+	return tm, s, log, exec
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,7 +1249,7 @@ func TestDictationDoubleConfirmIdempotent(t *testing.T) {
 		"lesson_update":   s.countOf(TypeLessonUpdate),
 		"teacher_sentence": s.countOf(TypeTeacherSentence),
 		"word_advanced":   ttEventCount(t, log, EventWordAdvanced),
-		"review":          ttEventCount(t, log, EventReviewWritten),
+		"review":          ttEventCount(t, log, EventReviewSubmitted),
 	}
 
 	// The late duplicate confirm carries the ORIGINAL captured target.
@@ -1116,7 +1272,7 @@ func TestDictationDoubleConfirmIdempotent(t *testing.T) {
 	if got := ttEventCount(t, log, EventWordAdvanced); got != before["word_advanced"] {
 		t.Errorf("word_advanced after duplicate = %d, want %d", got, before["word_advanced"])
 	}
-	if got := ttEventCount(t, log, EventReviewWritten); got != before["review"] {
+	if got := ttEventCount(t, log, EventReviewSubmitted); got != before["review"] {
 		t.Errorf("review_written after duplicate = %d, want %d (no completion)", got, before["review"])
 	}
 	if s.listeningCount() == 0 {
@@ -1224,7 +1380,7 @@ func TestCompletedReconnectDoesNotReviewOrNarrate(t *testing.T) {
 	if got := len(words.submissions()); got != 0 {
 		t.Errorf("SubmitReview calls = %d, want 0 (no second review)", got)
 	}
-	if ttEventCount(t, log, EventReviewWritten) != 0 {
+	if ttEventCount(t, log, EventReviewSubmitted) != 0 {
 		t.Error("review_written emitted on a completed reconnect")
 	}
 }
@@ -1876,11 +2032,12 @@ func TestHintCountIncrementsAndEvents(t *testing.T) {
 	}
 }
 
-// TestCompletionReviewCarriesHintAccounting: a hinted-then-confirmed word
-// submits hard (U-9 裁定 2026-10-06) and review_written carries the hint
-// aggregates hint_words=1 / hint_total=1 — the rating evidence stays
-// replayable from the JSONL stream.
-func TestCompletionReviewCarriesHintAccounting(t *testing.T) {
+// TestCheckSubmitReviewCarriesHintAccounting (13.1-01 rewrite): a
+// hinted-then-confirmed word checks correct and submits HARD (the D-02
+// hint degradation) and review_submitted carries the hint aggregates
+// hint_words=1 / hint_total=1 — the rating evidence stays replayable from
+// the JSONL stream across the three-stage rewrite.
+func TestCheckSubmitReviewCarriesHintAccounting(t *testing.T) {
 	cards := ttCards("苹果")
 	words := newFakeWords(cards)
 	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
@@ -1891,44 +2048,47 @@ func TestCompletionReviewCarriesHintAccounting(t *testing.T) {
 	// Turn 1: the hint (no advance; the reply re-arms the countdown).
 	ttRunIntentTurn(t, tm, s, 3)
 
-	// Turn 2: the confirm commits the word, drives completion; the summary
-	// plays and blocks the turn goroutine until the test acks it.
+	// Turn 2: the confirm commits the word and opens the check stage; the
+	// bridge announcement plays and blocks the turn goroutine until acked.
 	prev := s.countOf(TypeTeacherSentence)
-	audioEndBefore := s.countOf(TypeAudioEnd)
 	done := make(chan struct{})
 	go func() {
 		tm.processTurn(s, []byte("pcm"))
 		close(done)
 	}()
-	ttAwaitSpoken(t, s, prev+2) // the wrap-up summary (2 sentences: the hint line counts only words whose FINAL outcome is hint)
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioEnd) > audioEndBefore }) {
-		t.Fatal("summary audio_end never went out")
+	ttCheckStartedWanted(t, s)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > prev }) {
+		t.Fatal("check bridge announcement never spoke")
 	}
 	ttAckLast(t, tm, s, 0)
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
-		t.Fatal("session_ended never arrived after the summary ack")
-	}
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("completion goroutine did not finish")
+		t.Fatal("the entering turn never settled after the bridge ack")
 	}
+
+	// Checked correct (the student insists they wrote it right) — with the
+	// hint on record the unified rating must degrade to hard.
+	ttCheckAll(t, tm, s, 1)
+	ttSubmitCheck(t, tm, s)
 
 	subs := words.submissions()
 	if len(subs) != 1 {
 		t.Fatalf("SubmitReview calls = %d, want 1", len(subs))
 	}
 	if got := subs[0]["苹果"]; got != "hard" {
-		t.Errorf("submitted rating = %q, want hard (U-9 裁定 2026-10-06)", got)
+		t.Errorf("submitted rating = %q, want hard (checked correct after a hint, D-02)", got)
 	}
-	hintWords := ttEventField(t, log, EventReviewWritten, "hint_words")
+	hintWords := ttEventField(t, log, EventReviewSubmitted, "hint_words")
 	if len(hintWords) != 1 || hintWords[0] != 1 {
-		t.Errorf("review_written hint_words = %v, want [1]", hintWords)
+		t.Errorf("review_submitted hint_words = %v, want [1]", hintWords)
 	}
-	hintTotal := ttEventField(t, log, EventReviewWritten, "hint_total")
+	hintTotal := ttEventField(t, log, EventReviewSubmitted, "hint_total")
 	if len(hintTotal) != 1 || hintTotal[0] != 1 {
-		t.Errorf("review_written hint_total = %v, want [1]", hintTotal)
+		t.Errorf("review_submitted hint_total = %v, want [1]", hintTotal)
 	}
+
+	ttAckSummaryAndEnd(t, tm, s, nil)
 }
 
 // TestIntentMeaningSpeaksGroundedReply: meaning speaks the classification
