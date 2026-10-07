@@ -1854,7 +1854,7 @@ func TestIntentSlowReadsWordWithPausesNotSpelling(t *testing.T) {
 	if got != "第 1 个词。第 1 个词。慢慢写，不着急。" {
 		t.Errorf("slow announcement = %q, want the masked twice-repeated position variant", got)
 	}
-	if spoken := tm.tts.(*fakeTTS).recordedTexts(); len(spoken) == 0 || !contains(strings.Join(spoken, "|"), "苹果。苹果。") {
+	if spoken := tm.tts.(*fakeTTS).recordedTexts(); len(spoken) == 0 || !contains(strings.Join(spoken, ""), "苹果。苹果。") {
 		t.Errorf("tts input = %v, want the raw slow reading 苹果。苹果。", spoken)
 	}
 	if regexp.MustCompile(`[a-zA-Z]`).MatchString(got) {
@@ -2959,8 +2959,10 @@ func TestPausedStillRecognizesResumeThroughRealProcessTurn(t *testing.T) {
 	if ttPaused(t, tm) {
 		t.Error("classroom still paused after the recognized resume")
 	}
-	if got := ttSentencesSince(t, s, 4); !contains(got, "还是第 1 个词") || !contains(got, "苹果") {
-		t.Errorf("resume ack = %q, want the same word position", got)
+	// 13.1-02 student masking (D-10): the resume ack masks the word on
+	// screen while keeping the same position.
+	if got := ttSentencesSince(t, s, 4); !contains(got, "还是第 1 个词") || contains(got, "苹果") {
+		t.Errorf("resume ack = %q, want the masked same-position variant", got)
 	}
 	if s.listeningCount() == 0 {
 		t.Error("listening not restored after the resume ack")
