@@ -98,7 +98,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 13.1-04-PLAN.md — 未核对兜底＋跨会话恢复＋事后修正（D-03）：关闭即降档落库、resume/correction 路径、差异重写
+- [x] 13.1-04-PLAN.md — 未核对兜底＋跨会话恢复＋事后修正（D-03）：关闭即降档落库、resume/correction 路径、差异重写（2026-10-07 完成：RED→GREEN→mock e2e 五提交，go test 两包＋npm run e2e:rt 12/12 全绿）
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
