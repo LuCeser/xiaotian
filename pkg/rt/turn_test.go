@@ -3368,8 +3368,8 @@ func TestThreeStageManualPath(t *testing.T) {
 		t.Errorf("review_result = %v, want requested 3 / updated 2 / missing 1 (real sets)", reviewResult)
 	}
 	joined := ttSentencesSince(t, s, 0)
-	if !contains(joined, "3 个词对了 2 个") {
-		t.Errorf("summary missing the battle count: %s", joined)
+	if !contains(joined, "对了 2 个") || !contains(joined, "都默写完了") {
+		t.Errorf("summary missing the battle count + D-13 completion phrasing: %s", joined)
 	}
 	if !contains(joined, "保存 2/3") {
 		t.Errorf("summary missing the honest save note (updated 2 of 3): %s", joined)
@@ -3948,8 +3948,8 @@ func TestNoDueWordsWording(t *testing.T) {
 		ttInit(t, tm, s)
 		ttAwaitSpoken(t, s, 1)
 		joined := ttSentencesSince(t, s, 0)
-		if !contains(joined, "下次复习在") || !contains(joined, "3 天后") {
-			t.Errorf("no-due copy = %q, want the 下次复习在 X 天后 variant", joined)
+		if !contains(joined, "下次复习大约在") || !contains(joined, "3 天后") {
+			t.Errorf("no-due copy = %q, want the 下次复习大约在 X 天后 variant", joined)
 		}
 		if got := practice.listCalls(); got != 1 {
 			t.Errorf("Practice.List calls = %d, want 1 (cards listed once)", got)
@@ -3986,8 +3986,9 @@ func TestPracticeSubmitIdempotent(t *testing.T) {
 	ttAwaitSpoken(t, s, 3) // greeting
 	ttAckLast(t, tm, s, 0)
 
-	// White-box: put the tutor into a live check stage with every word
-	// manually confirmed (the e2e test drives the real path to this state).
+	// White-box: put the tutor into a live check stage, then drive the two
+	// verdicts through the REAL check_verdict path — the executor row must
+	// hold them (the submit reads back the stored verdicts, never the cache).
 	tm.mu.Lock()
 	if tm.tutor == nil || !strings.HasPrefix(tm.tutor.lessonID, "r0x-") {
 		tm.mu.Unlock()
@@ -3995,11 +3996,15 @@ func TestPracticeSubmitIdempotent(t *testing.T) {
 	}
 	tm.tutor.completed = true
 	tm.tutor.checking = true
-	tm.tutor.checkVerdicts = []lesson.CheckVerdict{
-		{WordIndex: 0, Correct: true, Manual: true},
-		{WordIndex: 1, Correct: false, Manual: true},
-	}
 	tm.mu.Unlock()
+	for i, correct := range []bool{true, false} {
+		tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("tt-practice-v-%d", i), WordIndex: i, Correct: correct,
+		}))
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckVerdicts) >= 2 }) {
+		t.Fatalf("check_verdicts echoes = %d, want 2", s.countOf(TypeCheckVerdicts))
+	}
 
 	ttSubmitCheck(t, tm, s) // first submit: honest review_result out
 	ttAckSummaryAndEndWait(t, tm, s)

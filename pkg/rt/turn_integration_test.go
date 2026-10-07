@@ -455,7 +455,7 @@ func TestDictationOverConnHappyPath(t *testing.T) {
 			t.Fatal("session_ended arrived before the summary ack (ack gate broken)")
 		}
 	}
-	if len(summaryTexts) < 1 || !strings.Contains(strings.Join(summaryTexts, ""), "3 个词对了 3 个") {
+	if len(summaryTexts) < 1 || !strings.Contains(strings.Join(summaryTexts, ""), "对了 3 个") {
 		t.Errorf("summary = %v, want the 3/3 battle wrap-up (D-04)", summaryTexts)
 	}
 
@@ -1079,6 +1079,10 @@ func TestPracticeSessionEndToEnd(t *testing.T) {
 			t.Errorf("EnsureLessonCards id = %q, want only the daily row or r0x- practice rows", id)
 		}
 	}
+
+	// The practice greeting settles through the ACK gate before any
+	// utterance (the uplink gate would otherwise drop it).
+	itAnnounceAck(t, conn)
 
 	// Three-stage flow, word by word (逐词 manual 确认过 D-05 提交闸).
 	lessonID := ready.Lesson.LessonID
