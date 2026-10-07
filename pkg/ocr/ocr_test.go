@@ -411,7 +411,16 @@ func TestParseWordsJSON(t *testing.T) {
 			wantConfs: []float64{0},
 			wantOK:    true,
 		},
-		{name: "single object is not an array", reply: `{"text":"apple","confidence":0.9}`, wantOK: false},
+		{
+			// A single-object reply ignores the array contract: the regex
+			// fallback recovers it as ONE reading at confidence 0.5 — gated,
+			// so the caller displays it but never prefills from it.
+			name:      "single object reply degrades to one gated reading",
+			reply:     `{"text":"apple","confidence":0.9}`,
+			wantTexts: []string{"apple"},
+			wantConfs: []float64{0.5},
+			wantOK:    true,
+		},
 		{name: "garbage", reply: "no json at all", wantOK: false},
 	}
 
