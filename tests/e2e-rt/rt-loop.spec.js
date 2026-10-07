@@ -748,3 +748,175 @@ test('dual-column conversation trace in student AND test modes', async ({ page }
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
+
+// ---------------------------------------------------------------------------
+// 13.1-04: reconnect pairs — the mid-check hard close (D-03 close-fallback
+// stand-in), the correction panel (derived hints as pending rows, diff-only
+// second batch), the mid-check resume (stored verdicts restored), and the
+// completed-lesson short-circuit regression. The persistent per-pair lesson
+// state lives in the mock process (?mock_pair=<unique id> per test).
+// ---------------------------------------------------------------------------
+
+/** Poll helper for one page's session id (fresh page load per session). */
+async function awaitSessionId(page) {
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+}
+
+test('unchecked fallback then correction: mid-check close reopens with pending derived hints and only the override rides the second batch', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+  const pair = 'pair-correction-' + Date.now();
+  const url = '/tutor/?' + QUIET_PARAMS + '&mock_unchecked=1&mock_step_ms=250&mock_pair=' + pair;
+
+  // Session 1: dictation runs, the check stage opens, the mock HARD-CLOSES
+  // the socket before ANY verdict leaves the page (the real close path
+  // would persist the D-03 downgraded fallback + the unchecked marker here).
+  await page.goto(url);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  let s1 = null;
+  await expect
+    .poll(async () => {
+      s1 = await getSession(page);
+      return s1.closedMidCheck ? 'closed' : 'dictating';
+    }, { timeout: 60_000 })
+    .toBe('closed');
+  const frames1 = parseFrames(s1.frames);
+  const started1 = frames1.find((m) => m.type === 'check_started');
+  expect(started1, 'session 1 reached the check stage').toBeTruthy();
+  expect(started1.reason).toBe('dictation_done');
+  expect(frames1.filter((m) => m.type === 'check_verdict'), 'no verdict before the hard close').toHaveLength(0);
+
+  // Session 2 (same pair id): the lesson reopens as the CORRECTION panel —
+  // check_started(reason=correction), the derived fallback verdicts visible
+  // as PENDING rows (manual=false: 待确认 highlight, submit gate shut).
+  await page.goto(url);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
+  expect((await getSession(page)).checkStartedReason).toBe('correction');
+  await expect(page.locator('#rt-check .rt-check-row')).toHaveCount(3);
+  await expect(page.locator('#rt-check .rt-check-pending')).toHaveCount(3);
+  await expect(page.locator('#rt-check .rt-check-submit')).toBeDisabled();
+
+  // The server gate as well: a forced early check_submit is REFUSED with no
+  // second write (the page's own gate never fired — Pitfall 6 mirror).
+  await page.evaluate(() =>
+    window.__rtTutor.client.sendJSON({ type: 'check_submit', request_id: 'cor-early' }));
+  await expect
+    .poll(async () => (await getSession(page)).checkSubmits.length, { timeout: 10_000 })
+    .toBe(1);
+  expect((await getSession(page)).reviewResults).toBe(0);
+
+  // Confirm every word; cat (derived wrong) is OVERRIDDEN to correct —
+  // exactly one override, exactly one changed word in the second batch.
+  for (let i = 0; i < 3; i++) {
+    await page.locator('#rt-check .rt-check-row').nth(i).locator('button').nth(0).click();
+  }
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.allChecked), { timeout: 10_000 })
+    .toBe(true);
+  await expect(page.locator('#rt-check .rt-check-pending')).toHaveCount(0);
+  await page.locator('#rt-check .rt-check-submit').click();
+  await expect
+    .poll(async () => {
+      const c = (await page.evaluate(() => window.__rtTutor.observe())).check;
+      return !c.submitPending && c.resultText !== '' ? 'done' : 'waiting';
+    }, { timeout: 30_000 })
+    .toBe('done');
+  // Honest diff copy: exactly the ONE override was saved.
+  const checkObs = await page.evaluate(() => window.__rtTutor.observe().check);
+  expect(checkObs.resultText).toContain('1 个词都记上啦');
+
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+  const s2 = await getFinalSession(page);
+  expect(s2.correctionDiff).toBe(1);
+  expect(s2.reviewResults).toBe(1);
+  const rr = parseFrames(s2.frames).find((m) => m.type === 'review_result');
+  expect(rr).toEqual({ type: 'review_result', requested: 1, updated: 1, missing: 0, unchecked: false });
+  expect(s2.lessonCompleteSent).toBe(true);
+  expect(s2.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  // Session 3: the COMPLETED lesson reconnect short-circuits —
+  // session_ready + session_ended(lesson_complete), no panel, no narration.
+  await page.goto(url);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  let s3 = null;
+  await expect
+    .poll(async () => {
+      s3 = await getSession(page);
+      return s3.sessionEndedSent ? 'ended' : 'waiting';
+    }, { timeout: 20_000 })
+    .toBe('ended');
+  const frames3 = parseFrames(s3.frames);
+  expect(frames3.filter((m) => m.type === 'check_started')).toHaveLength(0);
+  expect(frames3.filter((m) => m.type === 'teacher_sentence')).toHaveLength(0);
+  expect(frames3.filter((m) => m.type === 'session_ended'))
+    .toEqual([{ type: 'session_ended', reason: 'lesson_complete' }]);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('mid-check resume: reconnect restores the stored verdicts and finishes with full ratings', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+  const pair = 'pair-resume-' + Date.now();
+  const url = '/tutor/?' + QUIET_PARAMS + '&mock_resume=1&mock_step_ms=250&mock_pair=' + pair;
+
+  // Session 1: dictation → check stage → TWO verdicts applied → hard close.
+  await page.goto(url);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await expect
+    .poll(async () => ((await getSession(page)).closedMidCheck ? 'closed' : 'dictating'),
+      { timeout: 60_000 })
+    .toBe('closed');
+  const echo1 = parseFrames((await getSession(page)).frames)
+    .filter((m) => m.type === 'check_verdicts');
+  expect(echo1.length, 'the applied verdicts were echoed once').toBe(1);
+  expect(echo1[0].verdicts).toEqual([
+    { word_index: 0, correct: true, manual: true },
+    { word_index: 1, correct: false, manual: true }
+  ]);
+
+  // Session 2 (same pair id): check_started(reason=resume) with the STORED
+  // verdicts verbatim — the student resumes exactly where they left off.
+  await page.goto(url);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
+  expect((await getSession(page)).checkStartedReason).toBe('resume');
+  // The stored verdicts render CONFIRMED (no pending highlight); only the
+  // untouched third word still needs its human tap.
+  await expect(page.locator('#rt-check .rt-check-pending')).toHaveCount(0);
+  await expect(page.locator('#rt-check .rt-check-submit')).toBeDisabled();
+  await page.locator('#rt-check .rt-check-row').nth(2).locator('button').nth(0).click();
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.allChecked), { timeout: 10_000 })
+    .toBe(true);
+  await page.locator('#rt-check .rt-check-submit').click();
+  await expect
+    .poll(async () => {
+      const c = (await page.evaluate(() => window.__rtTutor.observe())).check;
+      return !c.submitPending && c.resultText !== '' ? 'done' : 'waiting';
+    }, { timeout: 30_000 })
+    .toBe('done');
+
+  // The resumed submit takes the NORMAL unified path: FULL ratings.
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
+    .toBe('ended');
+  const s2 = await getFinalSession(page);
+  const rr = parseFrames(s2.frames).find((m) => m.type === 'review_result');
+  expect(rr).toEqual({ type: 'review_result', requested: 3, updated: 3, missing: 0, unchecked: false });
+  expect(s2.lessonCompleteSent).toBe(true);
+  expect(s2.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});

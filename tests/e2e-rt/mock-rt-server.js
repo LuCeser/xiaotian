@@ -49,6 +49,29 @@
  *                       missing=1 so the page's honest-copy branch renders
  *                       「保存了 N-1 / N」 instead of full success
  *
+ * 13.1-04 reconnect pairs (?mock_unchecked=1 / ?mock_resume=1, both with
+ * ?mock_pair=<id> — the persistent per-pair lesson state lives in THIS
+ * process so two page loads reconnect into the SAME lesson):
+ *   ?mock_unchecked=1    session 1 dictates normally, the check stage opens
+ *                       (check_started reason=dictation_done), and the socket
+ *                       is HARD-CLOSED before any verdict — the stand-in for
+ *                       the real close-path D-03 fallback (which would
+ *                       persist downgraded ratings + the unchecked marker).
+ *                       Session 2 (same pair id) reopens the lesson as the
+ *                       CORRECTION panel: check_started(reason=correction)
+ *                       with the derived fallback verdicts as pending
+ *                       (manual=false) rows; check_submit runs the diff —
+ *                       only words whose human verdict OVERRIDES the
+ *                       derivation ride the second batch (Pitfall 7), and
+ *                       review_result carries requested=updated=changed with
+ *                       unchecked=false. A THIRD connection after the natural
+ *                       end short-circuits (completed lesson, no panel).
+ *   ?mock_resume=1       session 1 reaches the check stage and TWO verdicts
+ *                       are already applied when the socket dies; session 2
+ *                       receives check_started(reason=resume) plus the STORED
+ *                       verdicts echo and finishes the check with the normal
+ *                       unified submit (full ratings).
+ *
  * 13.1-01 three-stage flow (mirrors pkg/rt/protocol.go + pkg/rt/check.go
  * field-for-field): after the last word's confirmation the mock OPENS THE
  * CHECK STAGE instead of summarizing — check_started(full words, reason
@@ -182,6 +205,9 @@ function handleTestState(res) {
       checkVerdicts: s.checkVerdicts,
       checkSubmits: s.checkSubmits,
       reviewResults: s.reviewResults,
+      checkStartedReason: s.checkStartedReason,
+      correctionDiff: s.correctionDiff,
+      closedMidCheck: s.closedMidCheck,
       frames: s.frames,
       summaries: s.summaries,
       lessonCompleteSent: s.lessonCompleteSent,
@@ -230,6 +256,42 @@ const PLAN_SUMMARY = { chunks: 20, chunkGapMs: 90, firstDelayMs: 30 };
 const PLAN_SUMMARY_TIMEOUT = { chunks: 60, chunkGapMs: 20, firstDelayMs: 20 };
 
 // ---------------------------------------------------------------------
+// 13.1-04 reconnect pairs: persistent per-pair lesson state (keyed by the
+// ?mock_pair= value; each spec test uses its own pair id, and the single
+// Playwright worker keeps the map deterministic). phase:
+//   dictation → checking (socket dies mid-check) → panel (session 2 reopens)
+//   → done (any later connection short-circuits as a completed lesson).
+// ---------------------------------------------------------------------
+
+/** @type {Map<string, Object>} pair id → shared lesson state */
+const lessonPairs = new Map();
+
+function pairState(pairId) {
+  let p = lessonPairs.get(pairId);
+  if (!p) {
+    p = {
+      phase: 'dictation',
+      words: WORDS.slice(),
+      currentIndex: 0,
+      version: 1,
+      lessonUpdates: 0,
+      mode: 'student',
+      /** Stored verdicts (the resume case's echo source). */
+      checkVerdicts: [],
+      /** Derived fallback verdicts (the correction case's display hints):
+          apple/banana confirmed clean → derived correct; cat carried a hint →
+          the D-03 fallback rated it again → derived wrong. manual=false: a
+          display hint, never a confirmation. */
+      derived: WORDS.map((_, i) => ({ word_index: i, correct: i < 2, manual: false })),
+      correctionDiff: null,
+      closedMidCheck: false
+    };
+    lessonPairs.set(pairId, p);
+  }
+  return p;
+}
+
+// ---------------------------------------------------------------------
 // /rt session state machine
 // ---------------------------------------------------------------------
 
@@ -271,6 +333,14 @@ wss.on('connection', (ws, req, query) => {
       : mockMode.empty ? 'empty'
         : mockMode.pause ? 'pause' : 'default';
 
+  // 13.1-04 reconnect pair binding (persistent lesson state across page
+  // loads; the pair id comes from the spec test).
+  const pairId = query.get('mock_pair') || '';
+  const wantUnchecked = query.get('mock_unchecked') === '1';
+  const wantResume = query.get('mock_resume') === '1';
+  const pair = (wantUnchecked || wantResume) && pairId ? pairState(pairId) : null;
+  if (pair) mockMode.name = wantResume ? 'resume_pair' : 'unchecked_pair';
+
   const state = {
     id: 'mock-' + Date.now().toString(36) + '-' + (++sessionCounter),
     ready: false,
@@ -286,6 +356,9 @@ wss.on('connection', (ws, req, query) => {
     checkVerdicts: [],
     checkSubmits: [],
     reviewResults: 0,
+    checkStartedReason: null,
+    correctionDiff: null,
+    closedMidCheck: false,
     /** 13.1-02: every outbound control frame, as its JSON string (the
         wire-side no-leak assertion source). */
     frames: [],
@@ -412,6 +485,13 @@ wss.on('connection', (ws, req, query) => {
     state.currentIndex += 1;
     state.version += 1;
     state.lessonUpdates += 1;
+    if (pair) {
+      // 13.1-04 pair mirror: the shared lesson state keeps the cursor the
+      // reconnect resumes from.
+      pair.currentIndex = state.currentIndex;
+      pair.version = state.version;
+      pair.lessonUpdates = state.lessonUpdates;
+    }
     send({
       type: 'lesson_update', lesson_id: LESSON_ID, version: state.version,
       current_index: state.currentIndex, request_id: 'advance-' + state.currentIndex
@@ -434,7 +514,9 @@ wss.on('connection', (ws, req, query) => {
 
   // 13.1-01: the check stage — check_started (full plaintext list, the
   // unmask point) + a bridge teacher sentence, then wait for client
-  // check_verdict frames.
+  // check_verdict frames. 13.1-04 pair scripts: the socket DIES mid-check
+  // (the real close-path fallback's stand-in) after optionally applying two
+  // verdicts (the resume case).
   function startCheckStage() {
     if (state.checkActive || state.ended) return;
     state.checkActive = true;
@@ -442,6 +524,26 @@ wss.on('connection', (ws, req, query) => {
     announce('chk', '全都写完啦！我们一起检查：屏幕上有' + state.words.length +
       '个词，想一想你写的是对还是错，点「对」或「错」告诉我。', PLAN_NOTICE, 800,
       () => { send({ type: 'state', value: 'listening' }); });
+    if (pair) {
+      pair.phase = 'checking';
+      if (wantResume) {
+        // Two verdicts already applied before the disconnect (the student
+        // tapped twice): apple correct, banana wrong — the stored state the
+        // reconnect must restore verbatim.
+        pair.checkVerdicts = [
+          { word_index: 0, correct: true, manual: true },
+          { word_index: 1, correct: false, manual: true }
+        ];
+        send({ type: 'check_verdicts', verdicts: pair.checkVerdicts.map((v) => ({ ...v })) });
+      }
+      later(500, () => {
+        pair.phase = 'panel';
+        pair.closedMidCheck = true;
+        state.closedMidCheck = true; // session-side mirror for introspection
+        cancelPending();
+        try { ws.terminate(); } catch (termErr) { /* gone */ }
+      });
+    }
   }
 
   // The unified-submit battle summary (D-04 mirror): battle counts plus the
@@ -489,6 +591,7 @@ wss.on('connection', (ws, req, query) => {
     state.terminalOrder.push('session_ended');
     if (reason === 'lesson_complete') state.lessonCompleteSent = true;
     if (reason === 'no_due_words') state.noDueSent = true;
+    if (pair) pair.phase = 'done'; // any later connection short-circuits
     send({ type: 'session_ended', reason });
     closeSoon();
   }
@@ -554,6 +657,59 @@ wss.on('connection', (ws, req, query) => {
         state.ready = true;
         // 13.1 D-08: mirror the page's UI mode (absent → student).
         state.mode = msg.mode === 'test' ? 'test' : 'student';
+        if (pair) pair.mode = state.mode;
+        if (pair && pair.phase === 'done') {
+          // 13.1-04 regression mirror: a COMPLETED lesson reconnects and
+          // short-circuits — session_ready + session_ended(lesson_complete),
+          // no narration, no check panel (startCompletedSession parity).
+          state.currentIndex = pair.currentIndex;
+          state.version = pair.version;
+          state.lessonUpdates = pair.lessonUpdates;
+          state.started = true; // binary uplink must not start the classroom
+          send({
+            type: 'session_ready',
+            session_id: state.id,
+            audio: { sampleRate: 16000, format: 's16le', channels: 1 },
+            tts: { sampleRate: TTS_RATE },
+            lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() }
+          });
+          state.ended = true;
+          state.sessionEndedSent = true;
+          state.lessonCompleteSent = true;
+          state.terminalOrder.push('session_ended');
+          send({ type: 'session_ended', reason: 'lesson_complete' });
+          closeSoon();
+          break;
+        }
+        if (pair && pair.phase === 'panel') {
+          // 13.1-04 reconnect: the pair reopens the check panel from the
+          // SHARED lesson state — resume echoes the STORED verdicts,
+          // correction shows the derived fallback hints as pending rows.
+          state.currentIndex = pair.currentIndex;
+          state.version = pair.version;
+          state.lessonUpdates = pair.lessonUpdates;
+          state.started = true; // binary uplink must not start the classroom
+          state.checkActive = true;
+          state.checkStartedReason = wantResume ? 'resume' : 'correction';
+          const initial = (wantResume ? pair.checkVerdicts : pair.derived).map((v) => ({ ...v }));
+          state.checkVerdicts = initial.map((v) => ({ ...v }));
+          send({
+            type: 'session_ready',
+            session_id: state.id,
+            audio: { sampleRate: 16000, format: 's16le', channels: 1 },
+            tts: { sampleRate: TTS_RATE },
+            lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() }
+          });
+          send({ type: 'check_started', words: state.words.slice(), reason: state.checkStartedReason });
+          send({ type: 'check_verdicts', verdicts: initial });
+          const bridge = wantResume
+            ? '欢迎回来！我们继续检查刚才那' + state.words.length + '个词，接着点「对」或「错」告诉我。'
+            : '欢迎回来！上次没来得及检查，我们现在补上：屏幕上有' + state.words.length +
+              '个词，老师先猜了一个，你来点「对」或「错」告诉老师真正的答案吧。';
+          announce('chk', bridge, PLAN_NOTICE, 1200,
+            () => { send({ type: 'state', value: 'listening' }); });
+          break;
+        }
         // LessonView field-for-field (id / version / current_index / words).
         send({
           type: 'session_ready',
@@ -662,13 +818,16 @@ wss.on('connection', (ws, req, query) => {
 
       case 'check_submit': {
         // 13.1-01 mirror: the unified-submit gate — every word needs a
-        // manual verdict; the transition latches after ONE review_result.
+        // manual verdict (13.1-04: derived pending hints carry manual=false
+        // and do NOT satisfy this gate, D-05); the transition latches after
+        // ONE review_result.
         if (!state.checkActive) {
           send({ type: 'error', code: 'invalid_message', message: 'mock: no check stage', recoverable: true });
           break;
         }
         state.checkSubmits.push(msg.request_id || '');
-        if (state.checkVerdicts.length < state.words.length) {
+        const manualCount = state.checkVerdicts.filter((v) => v.manual).length;
+        if (manualCount < state.words.length) {
           send({ type: 'error', code: 'invalid_message', message: '还有词没有检查哦', recoverable: true });
           break;
         }
@@ -679,6 +838,23 @@ wss.on('connection', (ws, req, query) => {
         }
         const n = state.words.length;
         const correct = state.checkVerdicts.filter((v) => v.correct).length;
+        if (mockMode.name === 'unchecked_pair') {
+          // 13.1-04 correction mirror: diff the CONFIRMED verdicts against
+          // the derived fallback hints — ONLY overridden words ride the
+          // second batch (Pitfall 7), and the result carries the
+          // unchecked=false semantics of a checked submission.
+          let changed = 0;
+          for (let i = 0; i < n; i++) {
+            const v = state.checkVerdicts.find((x) => x.word_index === i);
+            const d = pair.derived.find((x) => x.word_index === i);
+            if (v && d && v.correct !== d.correct) changed += 1;
+          }
+          state.correctionDiff = changed;
+          state.reviewResults += 1;
+          send({ type: 'review_result', requested: changed, updated: changed, missing: 0, unchecked: false });
+          announceSummary(correct, changed, changed);
+          break;
+        }
         const updated = mockMode.partialSave ? n - 1 : n;
         const missing = n - updated;
         state.reviewResults += 1;
