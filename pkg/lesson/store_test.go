@@ -342,3 +342,93 @@ func TestGetLessonCorruptedCardsJSON(t *testing.T) {
 		t.Errorf("GetLesson corrupted cards error = %v, want wrapped unmarshal-cards failure", err)
 	}
 }
+
+// TestStoreMigrateAddsStageColumns (13.1-01): a lessons table from before the
+// check stage (13-06-era schema: cards exists, the four 13.1 columns do not)
+// gains stage/outcomes/verdicts/unchecked idempotently — historical rows keep
+// their short-circuit defaults (stage=''/outcomes='{}'/verdicts='[]'/unchecked=0,
+// the values startCompletedSession relies on), two consecutive Migrate runs
+// stay no-ops, and fresh rows through the store default cleanly.
+func TestStoreMigrateAddsStageColumns(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "legacy-stage.db"))
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+
+	legacyDDL := `CREATE TABLE IF NOT EXISTS lessons (
+    lesson_id TEXT PRIMARY KEY,
+    words TEXT NOT NULL,
+    cards TEXT NOT NULL DEFAULT '[]',
+    current_index INTEGER NOT NULL DEFAULT 0,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`
+	if _, err := db.ExecContext(ctx, legacyDDL); err != nil {
+		t.Fatalf("create legacy lessons: %v", err)
+	}
+	// A completed historical lesson row (the startCompletedSession case).
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO lessons (lesson_id, words, cards, current_index, version) VALUES ('LEGACY-DONE', ?, '[]', 1, 2)",
+		`["旧词"]`,
+	); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("Migrate on legacy db: %v", err)
+	}
+	// Second run must stay idempotent (probe finds every column, no ALTER).
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("second Migrate on legacy db: %v", err)
+	}
+
+	for _, col := range []string{"stage", "outcomes", "verdicts", "unchecked"} {
+		has, err := lessonsHasColumn(ctx, db, col)
+		if err != nil {
+			t.Fatalf("probe %s column: %v", col, err)
+		}
+		if !has {
+			t.Errorf("%s column missing after Migrate on legacy table", col)
+		}
+	}
+
+	var stage, outcomes, verdicts string
+	var unchecked int
+	if err := db.QueryRowContext(ctx,
+		"SELECT stage, outcomes, verdicts, unchecked FROM lessons WHERE lesson_id = 'LEGACY-DONE'",
+	).Scan(&stage, &outcomes, &verdicts, &unchecked); err != nil {
+		t.Fatalf("read legacy row defaults: %v", err)
+	}
+	if stage != "" || outcomes != "{}" || verdicts != "[]" || unchecked != 0 {
+		t.Errorf("legacy row defaults = stage %q / outcomes %q / verdicts %q / unchecked %d, want '' / '{}' / '[]' / 0",
+			stage, outcomes, verdicts, unchecked)
+	}
+
+	// The historical row reads back through the store with legacy-default
+	// tolerance (empty Stage / empty collections / Unchecked=false) — the
+	// completed-session short circuit keeps working.
+	store, err := NewStore(db, infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	got, err := store.GetLesson(ctx, "LEGACY-DONE")
+	if err != nil {
+		t.Fatalf("GetLesson legacy row: %v", err)
+	}
+	if got.Stage != "" || len(got.Outcomes) != 0 || len(got.Verdicts) != 0 || got.Unchecked {
+		t.Errorf("legacy read-back = stage %q / outcomes %+v / verdicts %+v / unchecked %v, want defaults",
+			got.Stage, got.Outcomes, got.Verdicts, got.Unchecked)
+	}
+
+	// Fresh rows created after the migration default cleanly too.
+	fresh, err := store.EnsureLessonCards(ctx, "FRESH", []Word{{Word: "新词", Meaning: "new", Example: "新例句。"}})
+	if err != nil {
+		t.Fatalf("EnsureLessonCards fresh: %v", err)
+	}
+	if fresh.Stage != "" || len(fresh.Outcomes) != 0 || len(fresh.Verdicts) != 0 || fresh.Unchecked {
+		t.Errorf("fresh read-back = %+v, want check-stage defaults", fresh)
+	}
+}

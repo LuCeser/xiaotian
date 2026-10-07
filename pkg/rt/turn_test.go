@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 )
@@ -1815,6 +1817,33 @@ func TestWordRatingMatrix(t *testing.T) {
 	}
 }
 
+// TestCheckRatingMatrix: the check-stage rating table (13.1 D-02 裁定) pinned
+// table-driven beside the behavior matrix — checkRating shares
+// ratingGood/ratingHard/ratingAgain with wordRating (single matrix family,
+// never a fork): 检查对＋无提示=good；检查对＋有提示=hard；检查错=again；
+// unknown results skip (""), exactly like the behavior matrix's default.
+func TestCheckRatingMatrix(t *testing.T) {
+	cases := []struct {
+		name    string
+		result  string
+		hints   int
+		want    string
+	}{
+		{"correct no hint", checkCorrect, 0, "good"},
+		{"correct after hints", checkCorrect, 2, "hard"},
+		{"wrong no hint", checkWrong, 0, "again"},
+		{"wrong after hints", checkWrong, 3, "again"},
+		{"unknown result skipped", "bogus", 0, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := checkRating(tc.result, tc.hints); got != tc.want {
+				t.Errorf("checkRating(%q, %d) = %q, want %q", tc.result, tc.hints, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestHintCountIncrementsAndEvents: every hint dispatch increments the
 // word's hint count and emits hint_given with count-class fields only
 // (word_index + hint_count, the U-9 裁定 2026-10-06 per-word accounting) —
@@ -2746,4 +2775,303 @@ func TestPausedStillRecognizesResumeThroughRealProcessTurn(t *testing.T) {
 	if s.listeningCount() == 0 {
 		t.Error("listening not restored after the resume ack")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 13.1-01 tracer: the three-stage manual path (dictation → check → unified
+// submit → summary) over a REAL lesson Store (temp SQLite)
+// ---------------------------------------------------------------------------
+
+// TestThreeStageManualPath: the tracer's whole chain on the REAL lesson
+// executor (temp database, not the in-memory fake — the check stage is a
+// persistence-level model change). (a) The last word's first advance commit
+// no longer writes ratings: check_started arrives with the FULL plaintext
+// list (D-10 unmask point) and reason=dictation_done. (b) Per-word
+// check_verdict frames echo the authoritative check_verdicts list
+// (manual=true, RT-07 single render source); invalid frames are rejected
+// without a write. (c) check_submit latches exactly ONE SubmitReview whose
+// ratings follow the D-02 table (检查对＋无提示=good；检查对＋有提示=hard；
+// 检查错=again — the hinted word degrades to hard). (d) review_result
+// reports the REAL requested/updated/missing sets and the spoken summary
+// carries the battle count plus the honest save note. (e) session_ended
+// (lesson_complete) waits for the summary's sentence_ack. (f) A duplicate
+// check_submit replays: no second FSRS write, no second review_result, no
+// second summary (Pitfall 6 / T-13.1-01).
+func TestThreeStageManualPath(t *testing.T) {
+	cards := ttCards("苹果", "香蕉", "橘子")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉", "橘子"},
+		Updated:   []string{"苹果", "橘子"},
+		Missing:   []string{"香蕉"},
+	}
+
+	// Real lesson Store over a temp database, bound through the production
+	// LessonTools adapter (the same seam main.go wires).
+	db, err := database.Open(filepath.Join(t.TempDir(), "three-stage.db"))
+	if err != nil {
+		t.Fatalf("open temp db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := lesson.Migrate(context.Background(), db); err != nil {
+		t.Fatalf("migrate temp db: %v", err)
+	}
+	store, err := lesson.NewStore(db, nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	exec, err := lesson.NewExecutor(store, nil)
+	if err != nil {
+		t.Fatalf("NewExecutor: %v", err)
+	}
+	tools, err := NewLessonTools(store, exec)
+	if err != nil {
+		t.Fatalf("NewLessonTools: %v", err)
+	}
+
+	// Word 1: confirm. Word 2: hint then confirm (the hint factor must
+	// degrade the checked-correct rating to hard). Word 3: confirm.
+	asr := newFakeASR(
+		asrScript{text: "好了"},
+		asrScript{text: "这个字不会写"}, asrScript{text: "好了"},
+		asrScript{text: "好了"},
+	)
+	llm := newFakeLLM(
+		intentScript(intentConfirm, ""),
+		intentScript(intentHint, "上面是草字头哦"), intentScript(intentConfirm, ""),
+		intentScript(intentConfirm, ""),
+	)
+	tts := newFakeTTS(1, 320)
+	log := &captureLogger{}
+	tm := NewTurnManager(asr, llm, tts, tools, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	// runConfirmTurn drives one confirm utterance and acks whatever
+	// announcement it produced (next word or the check bridge).
+	spokenBefore := s.countOf(TypeTeacherSentence)
+	runConfirmTurn := func() {
+		done := make(chan struct{})
+		go func() {
+			tm.processTurn(s, []byte("pcm"))
+			close(done)
+		}()
+		if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > spokenBefore }) {
+			t.Fatal("confirm announcement never spoke")
+		}
+		ttAckLast(t, tm, s, 0)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("confirm turn never settled after the announcement ack")
+		}
+	}
+	runConfirmTurn()                                          // word 1 → announces word 2
+	ttRunIntentTurn(t, tm, s, s.countOf(TypeTeacherSentence)) // hint on word 2
+	spokenBefore = s.countOf(TypeTeacherSentence)
+	runConfirmTurn() // word 2 → announces word 3
+	spokenBefore = s.countOf(TypeTeacherSentence)
+
+	// (a) The LAST confirm enters the check stage instead of writing ratings.
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	var started map[string]any
+	if !waitFor(t, 5*time.Second, func() bool {
+		got := s.controlsOf(t, TypeCheckStarted)
+		if len(got) == 0 {
+			return false
+		}
+		started = got[0]
+		return true
+	}) {
+		t.Fatal("check_started never arrived after the last word advanced")
+	}
+	gotWords := started["words"].([]any)
+	if len(gotWords) != 3 || gotWords[0] != "苹果" || gotWords[1] != "香蕉" || gotWords[2] != "橘子" {
+		t.Errorf("check_started.words = %v, want the full plaintext [苹果 香蕉 橘子]", gotWords)
+	}
+	if started["reason"] != CheckStartedReasonDictationDone {
+		t.Errorf("check_started.reason = %v, want %s", started["reason"], CheckStartedReasonDictationDone)
+	}
+	if got := len(words.submissions()); got != 0 {
+		t.Fatalf("SubmitReview calls before check_submit = %d, want 0 (D-01: dictation end writes no rating)", got)
+	}
+	if ttEventCount(t, log, EventReviewSubmitted) != 0 {
+		t.Error("review_submitted emitted before check_submit")
+	}
+
+	// The check bridge announcement plays through the ACK gate.
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > spokenBefore }) {
+		t.Fatal("check bridge announcement never spoke")
+	}
+	ttAckLast(t, tm, s, 0)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the entering turn never settled after the bridge ack")
+	}
+
+	// (b) Per-word manual verdicts: 对 / 对 / 错. Each echo carries the FULL
+	// stored list with manual=true (the only render source, RT-07).
+	verdictCorrect := []bool{true, true, false}
+	for i, correct := range verdictCorrect {
+		tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("req-v-%d", i), WordIndex: i, Correct: correct,
+		}))
+		if !waitFor(t, 5*time.Second, func() bool {
+			got := s.controlsOf(t, TypeCheckVerdicts)
+			return len(got) == i+1
+		}) {
+			t.Fatalf("check_verdicts echo %d never arrived", i+1)
+		}
+	}
+	echo := s.controlsOf(t, TypeCheckVerdicts)
+	last := echo[len(echo)-1]
+	echoVerdicts, ok := last["verdicts"].([]any)
+	if !ok || len(echoVerdicts) != 3 {
+		t.Fatalf("check_verdicts.verdicts = %v, want 3 entries", last["verdicts"])
+	}
+	for i, v := range echoVerdicts {
+		m := v.(map[string]any)
+		if m["word_index"] != float64(i) {
+			t.Errorf("verdicts[%d].word_index = %v, want %d", i, m["word_index"], i)
+		}
+		if m["manual"] != true {
+			t.Errorf("verdicts[%d].manual = %v, want true (screen verdicts are manual)", i, m["manual"])
+		}
+		if m["correct"] != verdictCorrect[i] {
+			t.Errorf("verdicts[%d].correct = %v, want %v", i, m["correct"], verdictCorrect[i])
+		}
+	}
+
+	// Invalid frames are rejected without a write: out-of-range index and an
+	// empty request_id each answer a visible error and echo nothing new.
+	echoCount := len(s.controlsOf(t, TypeCheckVerdicts))
+	tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+		Type: TypeCheckVerdict, RequestID: "req-bad-range", WordIndex: 9, Correct: true,
+	}))
+	tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+		Type: TypeCheckVerdict, RequestID: "", WordIndex: 0, Correct: true,
+	}))
+	if got := len(s.controlsOf(t, TypeError)); got < 2 {
+		t.Errorf("error messages for invalid verdict frames = %d, want >= 2", got)
+	}
+	if got := len(s.controlsOf(t, TypeCheckVerdicts)); got != echoCount {
+		t.Errorf("check_verdicts echoes after invalid frames = %d, want %d (no write)", got, echoCount)
+	}
+
+	// (c) check_submit: exactly ONE SubmitReview with the D-02 table ratings.
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-submit-1"}))
+	var reviewResult map[string]any
+	if !waitFor(t, 5*time.Second, func() bool {
+		got := s.controlsOf(t, TypeReviewResult)
+		if len(got) == 0 {
+			return false
+		}
+		reviewResult = got[0]
+		return true
+	}) {
+		t.Fatal("review_result never arrived after check_submit")
+	}
+	subs := words.submissions()
+	if len(subs) != 1 {
+		t.Fatalf("SubmitReview calls = %d, want exactly 1 (D-07 unified submit)", len(subs))
+	}
+	wantRatings := map[string]string{
+		"苹果": "good",  // checked correct, no hint
+		"香蕉": "hard",  // checked correct, after one hint (D-02 degradation)
+		"橘子": "again", // checked wrong
+	}
+	for word, want := range wantRatings {
+		if subs[0][word] != want {
+			t.Errorf("submitted rating[%s] = %q, want %q", word, subs[0][word], want)
+		}
+	}
+
+	// (d) Honest result sets + the battle summary. Fake review: 2/3 saved.
+	if reviewResult["requested"] != float64(3) || reviewResult["updated"] != float64(2) || reviewResult["missing"] != float64(1) {
+		t.Errorf("review_result = %v, want requested 3 / updated 2 / missing 1 (real sets)", reviewResult)
+	}
+	joined := ttSentencesSince(t, s, 0)
+	if !contains(joined, "3 个词对了 2 个") {
+		t.Errorf("summary missing the battle count: %s", joined)
+	}
+	if !contains(joined, "保存 2/3") {
+		t.Errorf("summary missing the honest save note (updated 2 of 3): %s", joined)
+	}
+
+	// In-session duplicate submit (network retry of the same request_id)
+	// replays NOTHING: still one FSRS write, one review_result, no second
+	// summary, and the session has not ended yet (summary awaits its ack).
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-submit-1"}))
+	time.Sleep(200 * time.Millisecond)
+	if got := len(words.submissions()); got != 1 {
+		t.Errorf("SubmitReview calls after duplicate submit = %d, want still 1", got)
+	}
+	if got := s.countOf(TypeReviewResult); got != 1 {
+		t.Errorf("review_result count after duplicate submit = %d, want 1 (no second replay message)", got)
+	}
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended before the summary ack = %d, want 0", got)
+	}
+
+	// (e) session_ended(lesson_complete) strictly after the summary ack.
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended never arrived after the summary ack")
+	}
+	ended := s.controlsOf(t, TypeSessionEnded)[0]
+	if ended["reason"] != ReasonLessonComplete {
+		t.Errorf("session_ended.reason = %v, want %s", ended["reason"], ReasonLessonComplete)
+	}
+	// Ordering: review_result precedes the last summary sentence (D-04: the
+	// summary speaks only after the unified write).
+	order := s.typeOrder()
+	reviewIdx, lastSentenceIdx := -1, -1
+	for i, typ := range order {
+		if typ == TypeReviewResult && reviewIdx < 0 {
+			reviewIdx = i
+		}
+		if typ == TypeTeacherSentence {
+			lastSentenceIdx = i
+		}
+	}
+	if reviewIdx < 0 || lastSentenceIdx < 0 || reviewIdx > lastSentenceIdx {
+		t.Errorf("review_result at %d must precede the summary's last sentence at %d", reviewIdx, lastSentenceIdx)
+	}
+
+	// Event evidence: count-class fields only.
+	if got := ttEventCount(t, log, EventCheckStarted); got != 1 {
+		t.Errorf("check_started events = %d, want 1", got)
+	}
+	if got := ttEventCount(t, log, EventVerdictApplied); got != 3 {
+		t.Errorf("verdict_applied events = %d, want 3", got)
+	}
+	if got := ttEventCount(t, log, EventReviewSubmitted); got != 1 {
+		t.Errorf("review_submitted events = %d, want 1", got)
+	}
+}
+
+// ttCheckStartedWanted is a tiny helper used by check-stage tests to wait for
+// the FIRST check_started message and return it decoded.
+func ttCheckStartedWanted(t *testing.T, s *captureSender) map[string]any {
+	t.Helper()
+	var started map[string]any
+	if !waitFor(t, 5*time.Second, func() bool {
+		got := s.controlsOf(t, TypeCheckStarted)
+		if len(got) == 0 {
+			return false
+		}
+		started = got[0]
+		return true
+	}) {
+		t.Fatal("check_started never arrived")
+	}
+	return started
 }

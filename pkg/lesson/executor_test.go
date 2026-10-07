@@ -372,3 +372,158 @@ func TestAdvanceWordNotFound(t *testing.T) {
 		t.Fatalf("AdvanceWord unknown lesson error = %v, want ErrLessonNotFound", err)
 	}
 }
+
+// TestApplyVerdictIdempotent (13.1-01): one screen verdict is an idempotent
+// write — the same request_id replays the FIRST stored result without a
+// second write, while a stale expected_version with a NEW request_id hits
+// the optimistic lock as *ConflictError (T-13.1-03).
+func TestApplyVerdictIdempotent(t *testing.T) {
+	ex, store := newExecutorForTest(t)
+	ctx := context.Background()
+
+	if _, err := store.EnsureLessonCards(ctx, "L1", []Word{
+		{Word: "苹果", Meaning: "cat", Example: "x"},
+		{Word: "香蕉", Meaning: "dog", Example: "y"},
+	}); err != nil {
+		t.Fatalf("EnsureLessonCards: %v", err)
+	}
+	ec, err := ex.EnterCheck(ctx, "L1", 1, "L1-enter-check", map[string]WordOutcome{
+		"0": {Outcome: "confirmed", Hints: 0},
+		"1": {Outcome: "confirmed", Hints: 1},
+	})
+	if err != nil {
+		t.Fatalf("EnterCheck: %v", err)
+	}
+	if ec.Idempotent || ec.Stage != "checking" {
+		t.Fatalf("EnterCheck first call = %+v, want fresh checking stage", ec)
+	}
+
+	first, err := ex.ApplyVerdict(ctx, "L1", ec.NewVersion, "req-v-0", CheckVerdict{WordIndex: 0, Correct: true, Manual: true})
+	if err != nil {
+		t.Fatalf("ApplyVerdict first call: %v", err)
+	}
+	if first.Idempotent {
+		t.Errorf("first ApplyVerdict = %+v, want a real write (Idempotent:false)", first)
+	}
+	if len(first.Verdicts) != 1 || first.Verdicts[0] != (CheckVerdict{WordIndex: 0, Correct: true, Manual: true}) {
+		t.Errorf("first ApplyVerdict verdicts = %+v, want the stored manual verdict", first.Verdicts)
+	}
+
+	// Network retry with the SAME request_id: replay the stored result, no
+	// second write, version untouched.
+	replay, err := ex.ApplyVerdict(ctx, "L1", ec.NewVersion, "req-v-0", CheckVerdict{WordIndex: 0, Correct: true, Manual: true})
+	if err != nil {
+		t.Fatalf("ApplyVerdict replay: %v", err)
+	}
+	if !replay.Idempotent {
+		t.Errorf("replay ApplyVerdict = %+v, want Idempotent:true", replay)
+	}
+	if len(replay.Verdicts) != 1 {
+		t.Errorf("replay verdicts = %+v, want still exactly 1 entry (no double write)", replay.Verdicts)
+	}
+	var version int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT version FROM lessons WHERE lesson_id = 'L1'",
+	).Scan(&version); err != nil {
+		t.Fatalf("read lessons.version: %v", err)
+	}
+	if version != first.NewVersion {
+		t.Errorf("lessons.version after replay = %d, want %d (replay must not bump)", version, first.NewVersion)
+	}
+
+	// A NEW request_id with the STALE expected_version is a conflict, and
+	// nothing is written.
+	_, err = ex.ApplyVerdict(ctx, "L1", ec.NewVersion, "req-v-1", CheckVerdict{WordIndex: 1, Correct: false, Manual: true})
+	if !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("ApplyVerdict stale version error = %v, want ErrVersionConflict", err)
+	}
+	var conflict *ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("ApplyVerdict stale version error = %T (%v), want *ConflictError", err, err)
+	}
+	if conflict.CurrentVersion != first.NewVersion {
+		t.Errorf("ConflictError.CurrentVersion = %d, want %d", conflict.CurrentVersion, first.NewVersion)
+	}
+	var verdictsJSON string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT verdicts FROM lessons WHERE lesson_id = 'L1'",
+	).Scan(&verdictsJSON); err != nil {
+		t.Fatalf("read lessons.verdicts: %v", err)
+	}
+	if strings.Contains(verdictsJSON, `"word_index":1`) {
+		t.Errorf("conflicted verdict leaked into the row: %s", verdictsJSON)
+	}
+}
+
+// TestCompleteCheckGate (13.1-01): the checking→submitted stage transition
+// IS the unified-submit idempotency latch. A same-request_id replay returns
+// the stored result; a NEW request_id at the CURRENT version must not pass
+// the latch either — the row is already submitted, so no caller can drive a
+// second submission through (T-13.1-01).
+func TestCompleteCheckGate(t *testing.T) {
+	ex, store := newExecutorForTest(t)
+	ctx := context.Background()
+
+	if _, err := store.EnsureLessonCards(ctx, "L1", []Word{
+		{Word: "苹果", Meaning: "cat", Example: "x"},
+		{Word: "香蕉", Meaning: "dog", Example: "y"},
+	}); err != nil {
+		t.Fatalf("EnsureLessonCards: %v", err)
+	}
+	ec, err := ex.EnterCheck(ctx, "L1", 1, "L1-enter-check", nil)
+	if err != nil {
+		t.Fatalf("EnterCheck: %v", err)
+	}
+	if _, err := ex.ApplyVerdict(ctx, "L1", ec.NewVersion, "req-v-0", CheckVerdict{WordIndex: 0, Correct: true, Manual: true}); err != nil {
+		t.Fatalf("ApplyVerdict 0: %v", err)
+	}
+	av, err := ex.ApplyVerdict(ctx, "L1", ec.NewVersion+1, "req-v-1", CheckVerdict{WordIndex: 1, Correct: false, Manual: true})
+	if err != nil {
+		t.Fatalf("ApplyVerdict 1: %v", err)
+	}
+
+	first, err := ex.CompleteCheck(ctx, "L1", av.NewVersion, "sub-1", false)
+	if err != nil {
+		t.Fatalf("CompleteCheck first call: %v", err)
+	}
+	if first.Idempotent || first.Stage != "submitted" || first.Unchecked {
+		t.Errorf("first CompleteCheck = %+v, want fresh submitted stage, unchecked=false", first)
+	}
+
+	// Same request_id replay.
+	replay, err := ex.CompleteCheck(ctx, "L1", av.NewVersion, "sub-1", false)
+	if err != nil {
+		t.Fatalf("CompleteCheck same-request replay: %v", err)
+	}
+	if !replay.Idempotent || replay.Stage != "submitted" {
+		t.Errorf("CompleteCheck replay = %+v, want idempotent replay of the stored result", replay)
+	}
+
+	// A NEW request_id at the CURRENT version cannot pass the latch either:
+	// the stage gate (checking→submitted) refuses it as an idempotent no-op,
+	// never a second submission.
+	second, err := ex.CompleteCheck(ctx, "L1", first.NewVersion, "sub-2", false)
+	if err != nil {
+		t.Fatalf("CompleteCheck new-request after submit: %v", err)
+	}
+	if !second.Idempotent || second.Stage != "submitted" {
+		t.Errorf("CompleteCheck after latch = %+v, want idempotent replay (stage gate)", second)
+	}
+
+	// The row itself must show exactly one transition: version bumped once
+	// past the verdict writes, stage submitted, unchecked flag stored.
+	var version int
+	var stage string
+	var unchecked int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT version, stage, unchecked FROM lessons WHERE lesson_id = 'L1'",
+	).Scan(&version, &stage, &unchecked); err != nil {
+		t.Fatalf("read lessons row: %v", err)
+	}
+	if version != first.NewVersion {
+		t.Errorf("lessons.version after replays = %d, want %d (no double transition)", version, first.NewVersion)
+	}
+	if stage != "submitted" || unchecked != 0 {
+		t.Errorf("lessons stage/unchecked = %q/%d, want submitted/0", stage, unchecked)
+	}
+}
