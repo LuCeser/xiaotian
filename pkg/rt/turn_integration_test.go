@@ -8,6 +8,7 @@
 package rt
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -21,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 )
 
 // itOrigin is the whitelisted Origin these tests dial with.
@@ -624,5 +626,341 @@ func TestDictationOverConnNoDueWaitsForAck(t *testing.T) {
 	}
 	if got := len(words.submissions()); got != 0 {
 		t.Errorf("SubmitReview calls = %d, want 0 (no due words, no review)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 13.1-04 reconnect paths: check resume (row still checking — crash before
+// the close fallback, or a pre-fallback row), the unchecked-correction flow
+// (row submitted+unchecked after the D-03 fallback), and the legacy
+// completed short-circuit that must keep working under the new branches.
+// ---------------------------------------------------------------------------
+
+// itAckEnding reads through a natural-ending announcement, acks every
+// sentence as its audio_end arrives, and returns the session_ended message
+// (asserting its reason). session_ended before ANY ack fails the test (the
+// ack gate).
+func itAckEnding(t *testing.T, conn *websocket.Conn, wantReason string) SessionEndedMsg {
+	t.Helper()
+	acks := 0
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatal("natural ending never produced session_ended")
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(remaining))
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("itAckEnding read: %v", err)
+		}
+		m := itProbe(mt, data)
+		switch m.typ {
+		case TypeAudioEnd:
+			var ae AudioEndMsg
+			_ = json.Unmarshal(data, &ae)
+			itSendText(t, conn, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: ae.SentenceID, Epoch: ae.Epoch})
+			acks++
+		case TypeSessionEnded:
+			if acks == 0 {
+				t.Fatal("session_ended arrived before any sentence_ack (ack gate broken)")
+			}
+			var ended SessionEndedMsg
+			if err := json.Unmarshal(data, &ended); err != nil {
+				t.Fatalf("session_ended decode: %v", err)
+			}
+			if ended.Reason != wantReason {
+				t.Fatalf("session_ended.reason = %q, want %s", ended.Reason, wantReason)
+			}
+			return ended
+		}
+	}
+}
+
+// itReadCheckStarted reads the check_started frame and decodes it.
+func itReadCheckStarted(t *testing.T, conn *websocket.Conn) CheckStartedMsg {
+	t.Helper()
+	m := itRead(t, conn, 10*time.Second, func(m itMsg) bool { return m.typ == TypeCheckStarted })
+	var started CheckStartedMsg
+	if err := json.Unmarshal(m.raw, &started); err != nil {
+		t.Fatalf("check_started decode: %v", err)
+	}
+	return started
+}
+
+// itReadCheckVerdicts reads the authoritative verdict echo and decodes it.
+func itReadCheckVerdicts(t *testing.T, conn *websocket.Conn) CheckVerdictsMsg {
+	t.Helper()
+	m := itRead(t, conn, 10*time.Second, func(m itMsg) bool { return m.typ == TypeCheckVerdicts })
+	var echo CheckVerdictsMsg
+	if err := json.Unmarshal(m.raw, &echo); err != nil {
+		t.Fatalf("check_verdicts decode: %v", err)
+	}
+	return echo
+}
+
+// itSeedCheckRow persists a stage='checking' row (with outcomes and optional
+// verdicts) through the executor's own idempotent writes — the state a
+// session leaves behind when it dies before any close path ran.
+func itSeedCheckRow(t *testing.T, exec *fakeExecutor, outcomes map[string]lesson.WordOutcome, verdicts ...lesson.CheckVerdict) lesson.Lesson {
+	t.Helper()
+	ctx := context.Background()
+	l, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards)
+	if err != nil {
+		t.Fatalf("EnsureLessonCards: %v", err)
+	}
+	ec, err := exec.EnterCheck(ctx, "it-lesson", l.Version, "it-lesson-enter-check", outcomes)
+	if err != nil {
+		t.Fatalf("EnterCheck: %v", err)
+	}
+	version := ec.NewVersion
+	for i, v := range verdicts {
+		res, err := exec.ApplyVerdict(ctx, "it-lesson", version, fmt.Sprintf("it-seed-v-%d", i), v)
+		if err != nil {
+			t.Fatalf("ApplyVerdict seed %d: %v", i, err)
+		}
+		version = res.NewVersion
+	}
+	return l
+}
+
+// itCards is the shared integration card list (2 words: the second carries a
+// hint so the rating tables are distinguishable).
+var itCards = []lesson.Word{
+	{Word: "苹果", Meaning: "cat", Example: "x"},
+	{Word: "香蕉", Meaning: "dog", Example: "y"},
+}
+
+// TestCheckResumeMidCheck (13.1-04, Pitfall 2): a row still sitting in
+// stage='checking' reopens INTO the check panel — session_ready, then
+// check_started(reason=resume) with the full plaintext list, the STORED
+// verdicts echoed verbatim — and the student finishes the check normally:
+// the remaining verdict, the unified submit, the battle summary, the acked
+// ending. Ratings derive from checkRating over the STORED behavior.
+func TestCheckResumeMidCheck(t *testing.T) {
+	words := newFakeWords(itCards)
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉"},
+		Updated:   []string{"苹果", "香蕉"},
+	}
+	exec := newFakeExecutorNoRow("it-lesson")
+	itSeedCheckRow(t, exec,
+		map[string]lesson.WordOutcome{
+			"0": {Outcome: "confirmed", Hints: 0},
+			"1": {Outcome: "confirmed", Hints: 1},
+		},
+		lesson.CheckVerdict{WordIndex: 0, Correct: true, Manual: true},
+	)
+	tts := newFakeTTS(3, 320)
+	tts.delay = 10 * time.Millisecond
+	srv := itServer(t, newFakeASR(), newFakeLLM(), tts, exec, words)
+	conn := itDial(t, srv)
+
+	ready := itInit(t, conn)
+	// Dictation is done (cursor at the end): the student view reveals ALL
+	// words even before check_started (D-09 revealed=all on resume).
+	if len(ready.Lesson.Words) != 2 || ready.Lesson.Words[0] != "苹果" || ready.Lesson.Words[1] != "香蕉" {
+		t.Fatalf("session_ready.lesson.words = %v, want fully revealed (dictation done)", ready.Lesson.Words)
+	}
+
+	started := itReadCheckStarted(t, conn)
+	if started.Reason != CheckStartedReasonResume {
+		t.Errorf("check_started.reason = %q, want %s", started.Reason, CheckStartedReasonResume)
+	}
+	if len(started.Words) != 2 || started.Words[0] != "苹果" || started.Words[1] != "香蕉" {
+		t.Errorf("check_started.words = %v, want full plaintext", started.Words)
+	}
+	echo := itReadCheckVerdicts(t, conn)
+	if len(echo.Verdicts) != 1 || echo.Verdicts[0].WordIndex != 0 || !echo.Verdicts[0].Manual || !echo.Verdicts[0].Correct {
+		t.Fatalf("check_verdicts = %+v, want the STORED verdict for word 0 (manual correct)", echo.Verdicts)
+	}
+
+	// The resume bridge settles through the ACK gate before the panel is
+	// usable (every announcement does; the ack order is what the gate owns).
+	itAnnounceAck(t, conn)
+
+	// Finish the check: word 1 correct, then the unified submit.
+	itSendText(t, conn, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-resume-v-1", WordIndex: 1, Correct: true})
+	echo = itReadCheckVerdicts(t, conn)
+	if len(echo.Verdicts) != 2 {
+		t.Fatalf("check_verdicts after resume verdict = %+v, want 2 entries", echo.Verdicts)
+	}
+	itSendText(t, conn, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-resume-submit"})
+	m := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeReviewResult })
+	var result ReviewResultMsg
+	if err := json.Unmarshal(m.raw, &result); err != nil {
+		t.Fatalf("review_result decode: %v", err)
+	}
+	if result.Requested != 2 || result.Updated != 2 || result.Unchecked {
+		t.Errorf("review_result = %+v, want 2/2 checked submit", result)
+	}
+
+	itAckEnding(t, conn, ReasonLessonComplete)
+
+	// Ratings = the D-02 checkRating table over stored behavior: 苹果
+	// correct+0 hints → good; 香蕉 correct+1 hint → hard. Exactly ONE
+	// SubmitReview (no fallback ran — the row never closed mid-check).
+	subs := words.submissions()
+	if len(subs) != 1 {
+		t.Fatalf("SubmitReview calls = %d, want exactly 1", len(subs))
+	}
+	if subs[0]["苹果"] != "good" || subs[0]["香蕉"] != "hard" {
+		t.Errorf("ratings = %v, want 苹果=good (correct,0) 香蕉=hard (correct,1)", subs[0])
+	}
+	exec.mu.Lock()
+	stage, unchecked := exec.lesson.Stage, exec.lesson.Unchecked
+	exec.mu.Unlock()
+	if stage != lesson.StageSubmitted || unchecked {
+		t.Errorf("row = stage %q unchecked %v, want submitted/false", stage, unchecked)
+	}
+}
+
+// TestUncheckedCorrection (13.1-04, D-03 post-hoc correction): a
+// submitted+unchecked row (what the close fallback persists) reopens into
+// the CORRECTION panel — check_started(reason=correction) with the derived
+// downgraded verdicts visible as pending (manual=false) hints; check_submit
+// is REFUSED until every word is human-confirmed (no second write); after
+// per-word confirmation with ONE override only the overridden word rides the
+// second SubmitReview batch, the correction event carries the changed count,
+// ClearUnchecked resets the marker, and the honest wrap ends the session.
+func TestUncheckedCorrection(t *testing.T) {
+	words := newFakeWords(itCards)
+	words.reviewResult = ReviewWriteResult{Requested: []string{"香蕉"}, Updated: []string{"香蕉"}}
+	exec := newFakeExecutorNoRow("it-lesson")
+	// Seed exactly what uncheckedCloseFallback persists: outcomes stored,
+	// stage submitted, unchecked=1, verdicts empty. 苹果: confirmed+0 →
+	// fallback hard (derived correct); 香蕉: confirmed+1 → fallback again
+	// (derived wrong).
+	ctx := context.Background()
+	l, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards)
+	if err != nil {
+		t.Fatalf("EnsureLessonCards: %v", err)
+	}
+	ec, err := exec.EnterCheck(ctx, "it-lesson", l.Version, "it-lesson-enter-check", map[string]lesson.WordOutcome{
+		"0": {Outcome: "confirmed", Hints: 0},
+		"1": {Outcome: "confirmed", Hints: 1},
+	})
+	if err != nil {
+		t.Fatalf("EnterCheck: %v", err)
+	}
+	if _, err := exec.CompleteCheck(ctx, "it-lesson", ec.NewVersion, "it-lesson-complete-check", true); err != nil {
+		t.Fatalf("CompleteCheck seed: %v", err)
+	}
+	tts := newFakeTTS(3, 320)
+	tts.delay = 10 * time.Millisecond
+	srv := itServer(t, newFakeASR(), newFakeLLM(), tts, exec, words)
+	conn := itDial(t, srv)
+
+	itInit(t, conn)
+	started := itReadCheckStarted(t, conn)
+	if started.Reason != CheckStartedReasonCorrection {
+		t.Errorf("check_started.reason = %q, want %s", started.Reason, CheckStartedReasonCorrection)
+	}
+	if len(started.Words) != 2 {
+		t.Errorf("check_started.words = %v, want full plaintext", started.Words)
+	}
+	echo := itReadCheckVerdicts(t, conn)
+	if len(echo.Verdicts) != 2 {
+		t.Fatalf("check_verdicts = %+v, want 2 derived entries", echo.Verdicts)
+	}
+	for _, v := range echo.Verdicts {
+		if v.Manual {
+			t.Errorf("derived verdict %+v must stay manual=false (display hint, D-05)", v)
+		}
+	}
+	if !echo.Verdicts[0].Correct || echo.Verdicts[1].Correct {
+		t.Errorf("derived verdicts = %+v, want [correct (苹果 good→hard), wrong (香蕉 hard→again)]", echo.Verdicts)
+	}
+	itAnnounceAck(t, conn) // the correction bridge
+
+	// Submit BEFORE confirming every word: refused, zero writes.
+	itSendText(t, conn, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-cor-early"})
+	errRaw := itRead(t, conn, 10*time.Second, func(m itMsg) bool { return m.typ == TypeError })
+	var errMsg ErrorMsg
+	if err := json.Unmarshal(errRaw.raw, &errMsg); err != nil {
+		t.Fatalf("error decode: %v", err)
+	}
+	if errMsg.Message != checkSubmitIncompleteNotice {
+		t.Errorf("early submit error = %q, want %q", errMsg.Message, checkSubmitIncompleteNotice)
+	}
+	if got := len(words.submissions()); got != 0 {
+		t.Fatalf("SubmitReview calls after early submit = %d, want 0", got)
+	}
+
+	// Confirm every word; 香蕉 is OVERRIDDEN to correct (the photo showed it
+	// right — the human call wins, D-06①).
+	itSendText(t, conn, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-cor-v-0", WordIndex: 0, Correct: true})
+	itReadCheckVerdicts(t, conn) // echo 1
+	itSendText(t, conn, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-cor-v-1", WordIndex: 1, Correct: true})
+	echo = itReadCheckVerdicts(t, conn)
+	if len(echo.Verdicts) != 2 {
+		t.Fatalf("check_verdicts after confirmations = %+v, want 2 manual entries", echo.Verdicts)
+	}
+	for _, v := range echo.Verdicts {
+		if !v.Manual || !v.Correct {
+			t.Fatalf("confirmed verdicts = %+v, want all manual correct", echo.Verdicts)
+		}
+	}
+
+	// The correction submit: only the OVERRIDDEN word rides the second
+	// batch (Pitfall 7 — smallest possible second write).
+	itSendText(t, conn, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-cor-submit"})
+	m := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeReviewResult })
+	var result ReviewResultMsg
+	if err := json.Unmarshal(m.raw, &result); err != nil {
+		t.Fatalf("review_result decode: %v", err)
+	}
+	if result.Requested != 1 || result.Updated != 1 || result.Unchecked {
+		t.Errorf("review_result = %+v, want the 1-word correction batch (香蕉), unchecked=false", result)
+	}
+
+	itAckEnding(t, conn, ReasonLessonComplete)
+
+	// Two SubmitReview calls total would mean the fallback reran — the
+	// correction session itself writes exactly the diff batch. The seeded
+	// fallback write never happened in-process, so exactly 1 call exists.
+	subs := words.submissions()
+	if len(subs) != 1 {
+		t.Fatalf("SubmitReview calls = %d, want exactly 1 (the correction diff)", len(subs))
+	}
+	if len(subs[0]) != 1 || subs[0]["香蕉"] != "hard" {
+		t.Errorf("correction batch = %v, want only 香蕉=hard (correct+1 hint)", subs[0])
+	}
+	exec.mu.Lock()
+	stage, unchecked := exec.lesson.Stage, exec.lesson.Unchecked
+	exec.mu.Unlock()
+	if stage != lesson.StageSubmitted || unchecked {
+		t.Errorf("row after correction = stage %q unchecked %v, want submitted/false (marker cleared)", stage, unchecked)
+	}
+}
+
+// TestLegacyCompletedStillShortCircuits (13.1-04 regression): a
+// stage='submitted' row WITHOUT the unchecked marker (the normal checked
+// completion) still short-circuits on reconnect — session_ready +
+// session_ended(lesson_complete), no check_started, no narration, no
+// review write. The new stage-aware branches must not swallow it.
+func TestLegacyCompletedStillShortCircuits(t *testing.T) {
+	words := newFakeWords(itCards)
+	exec := newFakeExecutor("it-lesson", itCards)
+	exec.setRow(2, 4)
+	tts := newFakeTTS(1, 320)
+	srv := itServer(t, newFakeASR(), newFakeLLM(), tts, exec, words)
+	conn := itDial(t, srv)
+
+	ready := itInit(t, conn)
+	if len(ready.Lesson.Words) == 0 {
+		t.Fatalf("session_ready.lesson.words = %v, want the completed lesson view", ready.Lesson.Words)
+	}
+	ended := itReadUntilSessionEnded(t, conn, &atomic.Bool{})
+	if ended.Reason != ReasonLessonComplete {
+		t.Errorf("reason = %q, want %s", ended.Reason, ReasonLessonComplete)
+	}
+	for _, m := range itDrainUntilTimeout(t, conn, 800*time.Millisecond) {
+		if m.typ == TypeCheckStarted || m.typ == TypeTeacherSentence {
+			t.Fatalf("unexpected %s frame on a completed reconnect (short-circuit broken)", m.typ)
+		}
+	}
+	if got := len(words.submissions()); got != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0", got)
 	}
 }

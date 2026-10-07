@@ -527,3 +527,96 @@ func TestCompleteCheckGate(t *testing.T) {
 		t.Errorf("lessons stage/unchecked = %q/%d, want submitted/0", stage, unchecked)
 	}
 }
+
+// TestClearUnchecked (13.1-04): the correction path's marker reset. The
+// UPDATE carries `AND unchecked = 1` (plus the optimistic lock), so the
+// first clear is a real write; an already-cleared row is an idempotent
+// no-op (never a second version bump), a stale expected_version is a
+// conflict writing nothing, and a same-request_id retry replays the stored
+// result.
+func TestClearUnchecked(t *testing.T) {
+	ex, store := newExecutorForTest(t)
+	ctx := context.Background()
+
+	if _, err := store.EnsureLessonCards(ctx, "L1", []Word{
+		{Word: "苹果", Meaning: "cat", Example: "x"},
+		{Word: "香蕉", Meaning: "dog", Example: "y"},
+	}); err != nil {
+		t.Fatalf("EnsureLessonCards: %v", err)
+	}
+	ec, err := ex.EnterCheck(ctx, "L1", 1, "L1-enter-check", map[string]WordOutcome{
+		"0": {Outcome: "confirmed", Hints: 0},
+	})
+	if err != nil {
+		t.Fatalf("EnterCheck: %v", err)
+	}
+	cc, err := ex.CompleteCheck(ctx, "L1", ec.NewVersion, "sub-1", true)
+	if err != nil {
+		t.Fatalf("CompleteCheck: %v", err)
+	}
+	if !cc.Unchecked {
+		t.Fatalf("seed CompleteCheck = %+v, want unchecked=true", cc)
+	}
+
+	// Stale expected_version: conflict, the marker stays.
+	_, err = ex.ClearUnchecked(ctx, "L1", ec.NewVersion, "clear-stale")
+	if !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("ClearUnchecked stale version = %v, want ErrVersionConflict", err)
+	}
+	var unchecked int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT unchecked FROM lessons WHERE lesson_id = 'L1'",
+	).Scan(&unchecked); err != nil {
+		t.Fatalf("read lessons.unchecked: %v", err)
+	}
+	if unchecked != 1 {
+		t.Errorf("unchecked after conflicted clear = %d, want 1 (nothing written)", unchecked)
+	}
+
+	// First clear at the current version: a real write that resets the
+	// marker and bumps the version.
+	cu, err := ex.ClearUnchecked(ctx, "L1", cc.NewVersion, "clear-1")
+	if err != nil {
+		t.Fatalf("ClearUnchecked first: %v", err)
+	}
+	if cu.Idempotent || cu.Stage != StageSubmitted {
+		t.Errorf("first ClearUnchecked = %+v, want a fresh write (Idempotent:false, stage submitted)", cu)
+	}
+	var version int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT version, unchecked FROM lessons WHERE lesson_id = 'L1'",
+	).Scan(&version, &unchecked); err != nil {
+		t.Fatalf("read lessons row: %v", err)
+	}
+	if version != cu.NewVersion || unchecked != 0 {
+		t.Errorf("row after clear = version %d unchecked %d, want version %d unchecked 0", version, unchecked, cu.NewVersion)
+	}
+
+	// Same request_id retry: stored-result replay, version untouched.
+	replay, err := ex.ClearUnchecked(ctx, "L1", cc.NewVersion, "clear-1")
+	if err != nil {
+		t.Fatalf("ClearUnchecked replay: %v", err)
+	}
+	if !replay.Idempotent || replay.NewVersion != cu.NewVersion {
+		t.Errorf("ClearUnchecked replay = %+v, want idempotent replay of %d", replay, cu.NewVersion)
+	}
+
+	// Already-cleared row under a NEW request_id: idempotent no-op, never a
+	// second version bump.
+	noop, err := ex.ClearUnchecked(ctx, "L1", cu.NewVersion, "clear-2")
+	if err != nil {
+		t.Fatalf("ClearUnchecked after clear: %v", err)
+	}
+	if !noop.Idempotent || noop.NewVersion != cu.NewVersion {
+		t.Errorf("ClearUnchecked no-op = %+v, want idempotent no-op at version %d", noop, cu.NewVersion)
+	}
+	var version2 int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT version FROM lessons WHERE lesson_id = 'L1'",
+	).Scan(&version2); err != nil {
+		t.Fatalf("read lessons.version: %v", err)
+	}
+	if version2 != cu.NewVersion {
+		t.Errorf("lessons.version after no-op = %d, want %d (no double transition)", version2, cu.NewVersion)
+	}
+}
