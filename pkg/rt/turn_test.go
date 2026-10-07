@@ -2020,6 +2020,149 @@ func TestCheckRatingMatrix(t *testing.T) {
 	}
 }
 
+// TestUncheckedDowngrade (13.1-04, D-03): the unverified-fallback rating is
+// the behavior-matrix value degraded by ONE level — good→hard, hard→again,
+// again floors at again, unknown stays "" (skipped). The derivation MUST go
+// through wordRating (single matrix discipline, no second matrix).
+func TestUncheckedDowngrade(t *testing.T) {
+	cases := []struct {
+		name    string
+		outcome string
+		hints   int
+		want    string
+	}{
+		{"confirmed no hint: good→hard", outcomeConfirmed, 0, ratingHard},
+		{"confirmed after hints: hard→again", outcomeConfirmed, 1, ratingAgain},
+		{"timeout no hint: hard→again", outcomeTimeout, 0, ratingAgain},
+		{"timeout after hints: again floors", outcomeTimeout, 2, ratingAgain},
+		{"hint pre-record: again floors", outcomeHint, 0, ratingAgain},
+		{"unknown outcome stays empty", "bogus", 0, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := downgradeOneRating(wordRating(tc.outcome, tc.hints))
+			if got != tc.want {
+				t.Errorf("downgradeOneRating(wordRating(%q, %d)) = %q, want %q", tc.outcome, tc.hints, got, tc.want)
+			}
+		})
+	}
+	// The pure function itself is pinned directly, too: "" must stay "" so
+	// unrecognized words are skipped by the batch assembly, not rated.
+	for _, r := range []string{ratingGood, ratingHard, ratingAgain, ""} {
+		want := map[string]string{ratingGood: ratingHard, ratingHard: ratingAgain, ratingAgain: ratingAgain, "": ""}[r]
+		if got := downgradeOneRating(r); got != want {
+			t.Errorf("downgradeOneRating(%q) = %q, want %q", r, got, want)
+		}
+	}
+}
+
+// TestUncheckedFallbackOnClose (13.1-04, D-03 / T-13.1-09): closing the
+// session while the tutor still holds stage='checking' persists the fallback
+// rating — EXACTLY ONE SubmitReview carrying the downgraded table derived
+// from the STORED outcomes — flips the row to stage='submitted' with
+// unchecked=1, sends no client messages, and never writes twice: a repeated
+// Close AND a late end_session are both no-ops (the CompleteCheck latch plus
+// the closed-session guard).
+func TestUncheckedFallbackOnClose(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	tm, s, log, exec := ttDriveToCheck(t, cards, words)
+	if got := len(words.submissions()); got != 0 {
+		t.Fatalf("SubmitReview calls before close = %d, want 0", got)
+	}
+
+	// The stored row snapshot (what EnterCheck persisted) is the rating
+	// input: word 0 was confirmed after 2 hints (hard → again), word 1
+	// confirmed clean (good → hard). Mutating the tutor's memory NOW must
+	// not matter — the row is the authority.
+	exec.mu.Lock()
+	exec.lesson.Outcomes["0"] = lesson.WordOutcome{Outcome: outcomeConfirmed, Hints: 2}
+	exec.lesson.Outcomes["1"] = lesson.WordOutcome{Outcome: outcomeConfirmed, Hints: 0}
+	exec.mu.Unlock()
+	tm.mu.Lock()
+	tm.tutor.perWordHints[0] = 99 // memory noise the fallback must ignore
+	tm.mu.Unlock()
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉"},
+		Updated:   []string{"苹果"},
+		Missing:   []string{"香蕉"},
+	}
+
+	tm.Close(s) // transport read loop exited mid-check
+
+	subs := words.submissions()
+	if len(subs) != 1 {
+		t.Fatalf("SubmitReview calls after close = %d, want exactly 1", len(subs))
+	}
+	if subs[0]["苹果"] != ratingAgain {
+		t.Errorf("fallback rating 苹果 = %q, want again (confirmed+2 hints → hard → again)", subs[0]["苹果"])
+	}
+	if subs[0]["香蕉"] != ratingHard {
+		t.Errorf("fallback rating 香蕉 = %q, want hard (confirmed no hint → good → hard)", subs[0]["香蕉"])
+	}
+
+	exec.mu.Lock()
+	stage, unchecked := exec.lesson.Stage, exec.lesson.Unchecked
+	exec.mu.Unlock()
+	if stage != lesson.StageSubmitted || !unchecked {
+		t.Errorf("row after close = stage %q unchecked %v, want submitted/true (D-03 marker)", stage, unchecked)
+	}
+
+	// No client messages belong to the fallback (the connection is gone);
+	// the close itself stays the plain transport close.
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Errorf("session_ended on disconnect-close = %d, want 0 (fallback sends no messages)", got)
+	}
+
+	// Repeated close AND a late end_session frame: the latch holds, no
+	// second write, no second CompleteCheck.
+	tm.Close(s)
+	tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+	if got := len(words.submissions()); got != 1 {
+		t.Errorf("SubmitReview calls after double close = %d, want still 1", got)
+	}
+	completeCalls := 0
+	for _, c := range exec.checkCalls {
+		if c.tool == "complete_check" {
+			completeCalls++
+		}
+	}
+	if completeCalls != 1 {
+		t.Errorf("CompleteCheck calls = %d, want 1 (idempotent latch)", completeCalls)
+	}
+	if got := ttEventCount(t, log, EventUncheckedFallback); got != 1 {
+		t.Errorf("unchecked_fallback events = %d, want 1", got)
+	}
+}
+
+// TestCheckedSubmitNotFallback (13.1-04 regression): a lesson submitted
+// through the NORMAL check flow is never touched by the close hook — no
+// second SubmitReview, no unchecked marker, no fallback event.
+func TestCheckedSubmitNotFallback(t *testing.T) {
+	cards := ttCards("苹果")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
+	tm, s, log, exec := ttConfirmToCheckSummary(t, words)
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls after normal submit = %d, want 1", got)
+	}
+
+	tm.Close(s) // closed AFTER the natural submit: the fallback must no-op
+
+	if got := len(words.submissions()); got != 1 {
+		t.Errorf("SubmitReview calls after close = %d, want still 1", got)
+	}
+	exec.mu.Lock()
+	stage, unchecked := exec.lesson.Stage, exec.lesson.Unchecked
+	exec.mu.Unlock()
+	if stage != lesson.StageSubmitted || unchecked {
+		t.Errorf("row = stage %q unchecked %v, want submitted/false", stage, unchecked)
+	}
+	if got := ttEventCount(t, log, EventUncheckedFallback); got != 0 {
+		t.Errorf("unchecked_fallback events = %d, want 0 (checked submit never falls back)", got)
+	}
+}
+
 // TestHintCountIncrementsAndEvents: every hint dispatch increments the
 // word's hint count and emits hint_given with count-class fields only
 // (word_index + hint_count, the U-9 裁定 2026-10-06 per-word accounting) —
