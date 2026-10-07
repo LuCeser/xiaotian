@@ -5,16 +5,16 @@ milestone_name: realtime-tutor — ACTIVE
 current_phase: 13.1
 current_phase_name: 三段式默写课堂（默写→检查→统一反馈）
 status: executing
-stopped_at: Completed 13.1-05-PLAN.md
-last_updated: "2026-10-07T18:14:19.048Z"
+stopped_at: Completed 13.1-06-PLAN.md
+last_updated: "2026-10-07T19:00:25.070Z"
 last_activity: 2026-10-07
 last_activity_desc: Phase 13.1 execution started
-state_head: f5cb2060b22f039e5db1282ee360c3ed3743a23b
+state_head: 7c3d310e520fef67d333c8e6ec6bd23055087331
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 20
-  completed_plans: 16
+  completed_plans: 17
   percent: 0
 ---
 
@@ -34,7 +34,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈）) — EXECUTING
-Plan: 6 of 7
+Plan: 7 of 7
 Status: Ready to execute
 Last activity: 2026-10-07 — Phase 13.1 execution started
 Next: /gsd-plan-phase 13.1 → 13-13 VPS 部署+正式验收
@@ -55,6 +55,7 @@ v2.0：4 个活跃阶段，Phase 13 已完成 13/13 个实施计划（13-12 按�
 | Phase 13.1 P03 | 31 min | 3 tasks | 14 files |
 | Phase 13.1 P04 | 245 min（含配额中断恢复等待） | 3 tasks | 10 files |
 | Phase 13.1 P05 | 47 min | 3 tasks | 17 files |
+| Phase 13.1 P06 | 25 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -113,6 +114,9 @@ Recent decisions affecting current work:
 - [Phase 13.1]: 13.1-05 练习提交零 FSRS 污染（T-13.1-11）：同款 D-05 逐词手动闸＋CompleteCheck stage 闸＋checkRating 单一矩阵，唯一写点 PracticeStore.RecordPractice（Go 自有 practice_logs）；SubmitReview 零调用有负向断言（集成＋单元双测试钉死），r0x-YYYYMMDD-HHMMSS 独立命名空间防次日恢复逻辑误捡
 - [Phase 13.1]: 13.1-05 计划文本冲突裁定：Task 3 spec 的「练习会话线上无 review_result」与 Task 2 明示的「复用 ReviewResultMsg 报记录数」矛盾——按 Task 2 协议决定执行（review_result requested/updated=记录数、unchecked=false），e2e 断言改为「无 FSRS 写语义」（mock state.reviewResults==0＋恰一条结果消息）；mock 与 protocol 逐字段一致纪律支撑
 - [Phase 13.1]: 13.1-05 no-due 天数文案 nextDueDays 解析 fsrs_card JSON 的 due 字段（计划明示的 Card「opaque JSON」唯一豁免；解析失败容错跳过；当天到期不算→文案降级无天数版本）；完结/无到期/练习三种收尾文案三套模板不共用（D-13），前端再练一组按钮点击＝一次 practice 会话（practice_complete 横幅无按钮，环有界）
+- [Phase 13.1]: 13.1-06 语音改判与点按同一条 ApplyVerdict 幂等路径（RT-07）：request_id 服务端生成 lessonID-verdict-<index>-v<version>-voice，version 烘进键、每次成功写 bump version——同一词的后续语音改判绝不回放首次写（OCR retake 教训）
+- [Phase 13.1]: 13.1-06 check_spelling 的判对错来自 GradeWord 而非 intent 字面：口述写法与词一致→correct、近错→wrong+「差一个字母很接近了」鼓励话术（判对错权威=人的口令＋GradeWord，服务端确定性逻辑，模型无裁量权）；口述写法经 ocr_result 通道显示在行侧，零前端改动
+- [Phase 13.1]: 13.1-06 检查阶段语音分类走单独构建的 buildCheckClassifySystemPrompt（全词表＋逐词判定态；提示词 9 值＝3 检查 intent＋6 个仍合法基础 intent，hint 按 chat）；白名单恒 11 值 parseIntentJSON 不变（Pitfall 8/T-13-13）
 
 ### Pending Todos
 
@@ -179,6 +183,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-07T18:10:08.794Z
-Stopped at: Completed 13.1-05-PLAN.md
+Last session: 2026-10-07T19:00:25.051Z
+Stopped at: Completed 13.1-06-PLAN.md
 Resume file: None

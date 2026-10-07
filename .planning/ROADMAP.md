@@ -106,7 +106,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 13.1-06-PLAN.md — 检查阶段语音改判口令（D-06②）：11 值意图白名单、index/text 载荷、语音与点按同路径
+- [x] 13.1-06-PLAN.md — 检查阶段语音改判口令（D-06②）：11 值意图白名单、index/text 载荷、语音与点按同路径（2026-10-08 完成：TDD RED→GREEN＋mock e2e 三提交，go test 全仓＋npm run e2e:rt 17/17 全绿）
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
