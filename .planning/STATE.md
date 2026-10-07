@@ -5,16 +5,16 @@ milestone_name: realtime-tutor — ACTIVE
 current_phase: 13.1
 current_phase_name: 三段式默写课堂（默写→检查→统一反馈）
 status: executing
-stopped_at: Completed 13.1-04-PLAN.md
-last_updated: "2026-10-07T17:14:06.806Z"
+stopped_at: Completed 13.1-05-PLAN.md
+last_updated: "2026-10-07T18:14:19.048Z"
 last_activity: 2026-10-07
 last_activity_desc: Phase 13.1 execution started
-state_head: a699a98e3e9ffafa4531e0d83091871b0f430481
+state_head: f5cb2060b22f039e5db1282ee360c3ed3743a23b
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 20
-  completed_plans: 15
+  completed_plans: 16
   percent: 0
 ---
 
@@ -34,7 +34,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈）) — EXECUTING
-Plan: 5 of 7
+Plan: 6 of 7
 Status: Ready to execute
 Last activity: 2026-10-07 — Phase 13.1 execution started
 Next: /gsd-plan-phase 13.1 → 13-13 VPS 部署+正式验收
@@ -54,6 +54,7 @@ v2.0：4 个活跃阶段，Phase 13 已完成 13/13 个实施计划（13-12 按�
 | Phase 13.1 P02 | 244 min | 3 tasks | 8 files |
 | Phase 13.1 P03 | 31 min | 3 tasks | 14 files |
 | Phase 13.1 P04 | 245 min（含配额中断恢复等待） | 3 tasks | 10 files |
+| Phase 13.1 P05 | 47 min | 3 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,10 @@ Recent decisions affecting current work:
 - [Phase 13.1]: 13.1-04 D-03 兜底触发点＝会话关闭：Close/handleEndSession 在 internalClose 前同步走 uncheckedCloseFallback，internalClose 本身不自动兜底（自然完结课按构造 no-op）；CompleteCheck 首提交分支是唯一写点，重复关闭/迟到 end_session 绝不双写 — T-13.1-09 幂等闸在 DB 层；兜底写失败如实记 error 事件不盲重试（S-05），行保持 checking 由恢复路径接手
 - [Phase 13.1]: 13.1-04 修正提交用判定级 diff：人工确认与派生提示逐词比对，只有改判词进第二次 SubmitReview 批次（EventReviewCorrection 带改判数），空 diff 也走 ClearUnchecked——计划文本的 diff 基准按其自身的空 diff 分支与「只有改判词进批次」测试规范裁定为判定级而非评级级 — 评级级 diff 会让最常见的无提示课（检查对+0提示=good vs 兜底 hard）永远非空，与计划明示的空 diff 分支矛盾
 - [Phase 13.1]: 13.1-04 ClearUnchecked 携 AND unchecked=1 门＋request_id 去重＋乐观锁：已清行的新请求是幂等 no-op 绝不二次 bump 版本；startCheckResume/startCheckCorrection 按 stage 优先排序挂在 startCompletedSession 短路之前，历史行行为不变 — 跨会话修正路径的幂等与历史兼容（Pitfall 2 恢复路径＋13.1-01 回归）
+- [Phase 13.1]: 13.1-05 练习选词与「当日」口径：CardRepository.List 只读直连＋Go 侧随机采样（禁 RunDue——取锁且只回到期词）；「当日已默」排除集＝当日 r0-YYYYMMDD 课行词 ∪ practice_logs 当日记录，practice_logs 用显式 reviewed_day 列（北京日历日，与 r0-YYYYMMDD 同口径——SQLite datetime('now') 是 UTC 不可依赖）
+- [Phase 13.1]: 13.1-05 练习提交零 FSRS 污染（T-13.1-11）：同款 D-05 逐词手动闸＋CompleteCheck stage 闸＋checkRating 单一矩阵，唯一写点 PracticeStore.RecordPractice（Go 自有 practice_logs）；SubmitReview 零调用有负向断言（集成＋单元双测试钉死），r0x-YYYYMMDD-HHMMSS 独立命名空间防次日恢复逻辑误捡
+- [Phase 13.1]: 13.1-05 计划文本冲突裁定：Task 3 spec 的「练习会话线上无 review_result」与 Task 2 明示的「复用 ReviewResultMsg 报记录数」矛盾——按 Task 2 协议决定执行（review_result requested/updated=记录数、unchecked=false），e2e 断言改为「无 FSRS 写语义」（mock state.reviewResults==0＋恰一条结果消息）；mock 与 protocol 逐字段一致纪律支撑
+- [Phase 13.1]: 13.1-05 no-due 天数文案 nextDueDays 解析 fsrs_card JSON 的 due 字段（计划明示的 Card「opaque JSON」唯一豁免；解析失败容错跳过；当天到期不算→文案降级无天数版本）；完结/无到期/练习三种收尾文案三套模板不共用（D-13），前端再练一组按钮点击＝一次 practice 会话（practice_complete 横幅无按钮，环有界）
 
 ### Pending Todos
 
@@ -174,6 +179,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-07T17:14:06.789Z
-Stopped at: Completed 13.1-04-PLAN.md
+Last session: 2026-10-07T18:10:08.794Z
+Stopped at: Completed 13.1-05-PLAN.md
 Resume file: None

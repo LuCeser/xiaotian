@@ -81,7 +81,7 @@ Plans:
 5. 完结/无到期词状态区分＋「再练一组」入口：词库随机避开当日已默、≤10 不足全给、同走三段式，结果单独记录不进 FSRS 主调度。
 6. OCR 判错可被人工改判覆盖（OCR 必错是前提），提交的评级以人工改判为准。
 
-**Plans:** 3/7 plans executed（2026-10-07 规划；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
+**Plans:** 5/7 plans executed（2026-10-07 规划；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
 
 Plans:
 **Wave 1**
@@ -102,7 +102,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 13.1-05-PLAN.md — 再练一组＋收尾状态区分（D-11/D-12/D-13）：随机避开当日、practice_logs 独立存储零 FSRS 污染、两种收尾文案
+- [x] 13.1-05-PLAN.md — 再练一组＋收尾状态区分（D-11/D-12/D-13）：随机避开当日、practice_logs 独立存储零 FSRS 污染、两种收尾文案（2026-10-08 完成：两族 TDD RED→GREEN＋前端/mock e2e 五提交，go test 全仓＋npm run e2e:rt 13/13 全绿）
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
