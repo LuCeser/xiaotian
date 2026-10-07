@@ -10,9 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -3691,4 +3693,178 @@ func TestShortHistoryUnmasked(t *testing.T) {
 	if joined := strings.Join(teacherTexts, "|"); !contains(joined, "banana") {
 		t.Errorf("shortHistory teacher text = %q, want the raw announcement (LLM context stays unmasked)", joined)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 13.1-05 practice pure layer: random word picking (D-11), the r0x- practice
+// lesson-id namespace (Pitfall 10), and the next-due-days copy input (D-13).
+// ---------------------------------------------------------------------------
+
+// ptPracticeCards builds a database.Card pool with distinct words (the
+// pickPracticeWords input shape — the CardRepository.List output).
+func ptPracticeCards(words ...string) []database.Card {
+	cards := make([]database.Card, 0, len(words))
+	for _, w := range words {
+		cards = append(cards, database.Card{ID: int64(len(cards) + 1), Word: w, Meaning: "释义-" + w, Example: "例句-" + w})
+	}
+	return cards
+}
+
+// ptPickedWords flattens a pick result to its word strings.
+func ptPickedWords(picked []lesson.Word) []string {
+	out := make([]string, 0, len(picked))
+	for _, w := range picked {
+		out = append(out, w.Word)
+	}
+	return out
+}
+
+// TestPickPracticeWords: the D-11 sampler — excludes today's words, returns
+// exactly n when enough remain, everything when fewer, nil when nothing is
+// left (the caller's honest-notice path), and maps card ground truth through.
+func TestPickPracticeWords(t *testing.T) {
+	pool := ptPracticeCards("apple", "banana", "cat", "dog", "egg")
+
+	t.Run("excludes today's words", func(t *testing.T) {
+		picked := pickPracticeWords(pool, map[string]bool{"apple": true, "cat": true}, 10, rand.New(rand.NewSource(1)))
+		got := ptPickedWords(picked)
+		if len(got) != 3 {
+			t.Fatalf("picked = %v, want the 3 non-excluded words", got)
+		}
+		for _, w := range []string{"apple", "cat"} {
+			for _, p := range got {
+				if p == w {
+					t.Errorf("picked contains excluded word %q: %v", w, got)
+				}
+			}
+		}
+		// Card ground truth rides through (the hint/meaning prompts need it).
+		if picked[0].Meaning == "" || picked[0].Example == "" {
+			t.Errorf("picked[0] = %+v, want Meaning/Example carried from the card", picked[0])
+		}
+	})
+
+	t.Run("more available than n returns exactly n", func(t *testing.T) {
+		picked := pickPracticeWords(pool, nil, 3, rand.New(rand.NewSource(1)))
+		got := ptPickedWords(picked)
+		if len(got) != 3 {
+			t.Fatalf("picked = %v, want exactly 3", got)
+		}
+		seen := map[string]bool{}
+		for _, w := range got {
+			if seen[w] {
+				t.Errorf("duplicate word %q in %v", w, got)
+			}
+			seen[w] = true
+		}
+	})
+
+	t.Run("fewer available than n returns all", func(t *testing.T) {
+		picked := pickPracticeWords(pool, nil, 99, rand.New(rand.NewSource(1)))
+		if len(picked) != len(pool) {
+			t.Errorf("picked = %d words, want all %d (不足全给)", len(picked), len(pool))
+		}
+	})
+
+	t.Run("zero available returns nil", func(t *testing.T) {
+		picked := pickPracticeWords(pool, map[string]bool{"apple": true, "banana": true, "cat": true, "dog": true, "egg": true}, 10, rand.New(rand.NewSource(1)))
+		if len(picked) != 0 {
+			t.Errorf("picked = %v, want nil/empty (honest-notice path)", picked)
+		}
+	})
+
+	t.Run("shuffled across seeds", func(t *testing.T) {
+		signatures := map[string]bool{}
+		for seed := int64(1); seed <= 10; seed++ {
+			picked := pickPracticeWords(pool, nil, 5, rand.New(rand.NewSource(seed)))
+			signatures[strings.Join(ptPickedWords(picked), ",")] = true
+		}
+		if len(signatures) < 2 {
+			t.Errorf("10 seeds produced %d distinct orderings, want >=2 (randomness)", len(signatures))
+		}
+	})
+}
+
+// TestResolvePracticeLessonID: the r0x- id namespace — Beijing calendar date
+// plus a time suffix so multiple same-day practice sets stay distinct, and
+// the r0x- prefix keeps every daily r0-YYYYMMDD lookup from ever matching it
+// (Pitfall 10).
+func TestResolvePracticeLessonID(t *testing.T) {
+	cst := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 10, 8, 12, 30, 45, 0, cst)
+	got := resolvePracticeLessonID(now)
+	if !strings.HasPrefix(got, "r0x-") {
+		t.Errorf("practice lesson id = %q, want the r0x- prefix (never matches the r0-YYYYMMDD lookup)", got)
+	}
+	if !strings.Contains(got, "20261008") {
+		t.Errorf("practice lesson id = %q, want the Beijing-calendar date 20261008", got)
+	}
+	later := time.Date(2026, 10, 8, 12, 30, 46, 0, cst)
+	if resolvePracticeLessonID(now) == resolvePracticeLessonID(later) {
+		t.Error("two practice sets one second apart share an id, want distinct (time suffix)")
+	}
+}
+
+// ptCardWithDue builds one card whose fsrs_card JSON carries the given due
+// timestamp (the py-fsrs Card.to_json shape nextDueDays parses).
+func ptCardWithDue(word, dueRFC3339 string) database.Card {
+	return database.Card{
+		Word:     word,
+		FsrsCard: `{"due":` + strconv.Quote(dueRFC3339) + `,"stability":1.0,"difficulty":5.0,"reps":1,"lapses":0,"state":"Review"}`,
+	}
+}
+
+// TestNextDueDays: the no-due copy input (D-13) — the nearest FUTURE due in
+// whole days rounded up; a due later TODAY never counts (当天到期不算), an
+// unparseable fsrs_card is skipped, and no future due at all returns 0 (the
+// copy degrades to the no-days variant).
+func TestNextDueDays(t *testing.T) {
+	cst := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 10, 8, 10, 0, 0, 0, cst)
+
+	t.Run("future due rounds up to whole days", func(t *testing.T) {
+		cards := []database.Card{
+			ptCardWithDue("apple", "2026-10-11T09:00:00+00:00"), // 71h ahead → ceil 3
+		}
+		if got := nextDueDays(cards, now); got != 3 {
+			t.Errorf("nextDueDays = %d, want 3 (向上取整)", got)
+		}
+	})
+
+	t.Run("nearest future due wins", func(t *testing.T) {
+		cards := []database.Card{
+			ptCardWithDue("apple", "2026-10-15T00:00:00+00:00"),
+			ptCardWithDue("banana", "2026-10-10T02:00:00+00:00"), // ~40h → 2
+		}
+		if got := nextDueDays(cards, now); got != 2 {
+			t.Errorf("nextDueDays = %d, want 2 (min of the future dues)", got)
+		}
+	})
+
+	t.Run("due later today does not count", func(t *testing.T) {
+		cards := []database.Card{
+			ptCardWithDue("apple", "2026-10-08T06:00:00+00:00"), // 18h ahead, still TODAY in Beijing
+		}
+		if got := nextDueDays(cards, now); got != 0 {
+			t.Errorf("nextDueDays = %d, want 0 (当天到期不算 → copy degrades)", got)
+		}
+	})
+
+	t.Run("past and unparseable dues are skipped", func(t *testing.T) {
+		cards := []database.Card{
+			{Word: "legacy", FsrsCard: ""},
+			{Word: "broken", FsrsCard: `{not json`},
+			ptCardWithDue("past", "2026-10-01T00:00:00+00:00"),
+			ptCardWithDue("tomorrow", "2026-10-09T08:00:00+00:00"), // 22h → 1
+		}
+		if got := nextDueDays(cards, now); got != 1 {
+			t.Errorf("nextDueDays = %d, want 1 (only the tomorrow card counts)", got)
+		}
+	})
+
+	t.Run("no cards returns zero", func(t *testing.T) {
+		if got := nextDueDays(nil, now); got != 0 {
+			t.Errorf("nextDueDays(nil) = %d, want 0", got)
+		}
+	})
 }
