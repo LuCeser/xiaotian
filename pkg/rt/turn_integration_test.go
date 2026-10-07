@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1156,5 +1157,226 @@ func TestPracticeSessionEndToEnd(t *testing.T) {
 		if w == "苹果" || w == "香蕉" {
 			t.Errorf("practice_logs holds today's dictated word %q (避开当日已默 broken)", w)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 13.1-06: check-stage voice verdicts (D-06②) — the spoken per-word
+// correction path converging on the same ApplyVerdict write as the screen
+// buttons (RT-07), with the model's index/text payload validated server-side
+// (T-13.1-13).
+// ---------------------------------------------------------------------------
+
+// checkIntentScript builds one classification response carrying the
+// check-stage payload: index is the 1-based word position the student named,
+// text the actual written form they spoke. omitempty drops zero values, so a
+// scripted "missing index / missing text" case really reaches the server
+// without those fields.
+func checkIntentScript(intent string, index int, text string) llmScript {
+	payload, _ := json.Marshal(struct {
+		Intent string `json:"intent"`
+		Reply  string `json:"reply"`
+		Index  int    `json:"index,omitempty"`
+		Text   string `json:"text,omitempty"`
+	}{Intent: intent, Index: index, Text: text})
+	wire := `{"choices":[{"index":0,"message":{"role":"assistant","content":` + strconv.Quote(string(payload)) + `}}]}`
+	return llmScript{wire: wire}
+}
+
+// itVoiceCheckSession seeds a stage='checking' row (2 words, no verdicts
+// beyond the optional seed list), opens the resume check panel over the real
+// transport, and settles the bridge announcement — the harness state every
+// voice-verdict test starts from.
+func itVoiceCheckSession(t *testing.T, asr *fakeASR, llm *fakeLLM, exec *fakeExecutor, seedVerdicts ...lesson.CheckVerdict) (*websocket.Conn, *fakeWordSource) {
+	t.Helper()
+	words := newFakeWords(itCards)
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉"},
+		Updated:   []string{"苹果", "香蕉"},
+	}
+	itSeedCheckRow(t, exec,
+		map[string]lesson.WordOutcome{
+			"0": {Outcome: "confirmed", Hints: 0},
+			"1": {Outcome: "confirmed", Hints: 0},
+		},
+		seedVerdicts...,
+	)
+	tts := newFakeTTS(3, 320)
+	tts.delay = 10 * time.Millisecond
+	srv := itServer(t, asr, llm, tts, exec, words)
+	conn := itDial(t, srv)
+	itInit(t, conn)
+	itReadCheckStarted(t, conn)
+	itReadCheckVerdicts(t, conn)
+	itAnnounceAck(t, conn) // the resume bridge
+	return conn, words
+}
+
+// itCountApplyVerdicts counts the executor's recorded apply_verdict calls.
+func itCountApplyVerdicts(exec *fakeExecutor) int {
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	n := 0
+	for _, c := range exec.checkCalls {
+		if c.tool == "apply_verdict" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCheckVoiceVerdict: 「第一个词对了」 marks word 1 through the SAME
+// executor path as the screen button (RT-07), echoes the authoritative
+// verdicts, and speaks the ack line through the ACK gate; 「第二个词写的是
+// 香焦」 carries the actual written form — the verdict grades WRONG via
+// GradeWord (one rune off → near miss), the recognized text rides the
+// ocr_result display channel, and the teacher line delivers the near-miss
+// encouragement (差一个字母很接近了), never a shaming form.
+func TestCheckVoiceVerdict(t *testing.T) {
+	exec := newFakeExecutorNoRow("it-lesson")
+	asr := newFakeASR(
+		asrScript{text: "第一个词对了"},
+		asrScript{text: "第二个词写的是香焦"},
+	)
+	llm := newFakeLLM(
+		checkIntentScript(intentCheckRight, 1, ""),
+		checkIntentScript(intentCheckSpelling, 2, "香焦"),
+	)
+	conn, _ := itVoiceCheckSession(t, asr, llm, exec)
+
+	// Voice right-verdict: write → echo → ack-gated announcement.
+	itSendUtterance(t, conn)
+	echo := itReadCheckVerdicts(t, conn)
+	if len(echo.Verdicts) != 1 || echo.Verdicts[0].WordIndex != 0 || !echo.Verdicts[0].Correct || !echo.Verdicts[0].Manual {
+		t.Fatalf("check_verdicts after voice right = %+v, want word 1 manual correct", echo.Verdicts)
+	}
+	ack := itAnnounceAck(t, conn)
+	if joined := strings.Join(ack, ""); !strings.Contains(joined, "第 1 个词对了") {
+		t.Errorf("verdict ack = %v, want the 第 1 个词对了 wording", ack)
+	}
+
+	// Voice spelling correction with the actual written form.
+	itSendUtterance(t, conn)
+	echo = itReadCheckVerdicts(t, conn)
+	if len(echo.Verdicts) != 2 {
+		t.Fatalf("check_verdicts after spelling = %+v, want 2 entries", echo.Verdicts)
+	}
+	if v := echo.Verdicts[1]; v.WordIndex != 1 || v.Correct || !v.Manual {
+		t.Fatalf("spelling verdict = %+v, want word 2 manual WRONG", v)
+	}
+	ocrRaw := itRead(t, conn, 10*time.Second, func(m itMsg) bool { return m.typ == TypeOcrResult })
+	var ocr OcrResultMsg
+	if err := json.Unmarshal(ocrRaw.raw, &ocr); err != nil {
+		t.Fatalf("ocr_result decode: %v", err)
+	}
+	if len(ocr.Entries) != 1 || ocr.Entries[0].WordIndex != 1 || ocr.Entries[0].OcrText != "香焦" || !ocr.Entries[0].NearMiss {
+		t.Fatalf("ocr_result = %+v, want word 2 香焦 near-miss entry", ocr.Entries)
+	}
+	ack = itAnnounceAck(t, conn)
+	joined := strings.Join(ack, "")
+	if !strings.Contains(joined, "很接近") || !strings.Contains(joined, "香蕉") || strings.Contains(joined, "笨") {
+		t.Errorf("spelling feedback = %v, want gentle near-miss encouragement naming the word", ack)
+	}
+
+	// The executor row holds both human verdicts; the spelling verdict
+	// carries the spoken written form.
+	exec.mu.Lock()
+	stored := append([]lesson.CheckVerdict(nil), exec.lesson.Verdicts...)
+	exec.mu.Unlock()
+	if len(stored) != 2 {
+		t.Fatalf("stored verdicts = %+v, want 2", stored)
+	}
+	if !stored[0].Manual || !stored[0].Correct {
+		t.Errorf("stored word 1 = %+v, want manual correct", stored[0])
+	}
+	if !stored[1].Manual || stored[1].Correct || stored[1].OcrText != "香焦" {
+		t.Errorf("stored word 2 = %+v, want manual wrong with ocr_text 香焦", stored[1])
+	}
+}
+
+// TestCheckVoiceSamePathAsButton: the same word flipped by the screen button
+// and then by voice — both human inputs ride the executor's ONE ApplyVerdict
+// method (RT-07), the button with its client request_id, the voice with the
+// server-generated lessonID-verdict-<index>-v<version>-voice key, and the
+// final state is the LAST human call.
+func TestCheckVoiceSamePathAsButton(t *testing.T) {
+	exec := newFakeExecutorNoRow("it-lesson")
+	asr := newFakeASR(asrScript{text: "第一个词对了"})
+	llm := newFakeLLM(checkIntentScript(intentCheckRight, 1, ""))
+	conn, _ := itVoiceCheckSession(t, asr, llm, exec)
+
+	// Button first: the screen flips word 1 to WRONG.
+	itSendText(t, conn, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-btn-0", WordIndex: 0, Correct: false})
+	echo := itReadCheckVerdicts(t, conn)
+	if len(echo.Verdicts) != 1 || echo.Verdicts[0].Correct {
+		t.Fatalf("button echo = %+v, want word 1 wrong", echo.Verdicts)
+	}
+
+	// Then voice: the SAME word flipped back to RIGHT — the spoken
+	// correction converges on the same write and the echo shows the new
+	// authoritative state.
+	itSendUtterance(t, conn)
+	echo = itReadCheckVerdicts(t, conn)
+	if len(echo.Verdicts) != 1 || !echo.Verdicts[0].Correct || !echo.Verdicts[0].Manual {
+		t.Fatalf("final echo = %+v, want word 1 manual correct (voice overrode the button)", echo.Verdicts)
+	}
+	itAnnounceAck(t, conn)
+
+	// Both human inputs rode apply_verdict on the executor — exactly one
+	// call each, with the two request-id families.
+	exec.mu.Lock()
+	buttons, voices := 0, 0
+	for _, c := range exec.checkCalls {
+		if c.tool != "apply_verdict" {
+			continue
+		}
+		switch {
+		case c.requestID == "it-btn-0":
+			buttons++
+		case strings.Contains(c.requestID, "-verdict-0-v") && strings.HasSuffix(c.requestID, "-voice"):
+			voices++
+		}
+	}
+	exec.mu.Unlock()
+	if buttons != 1 || voices != 1 {
+		t.Fatalf("apply_verdict calls button=%d voice=%d, want 1/1 (same executor path, RT-07)", buttons, voices)
+	}
+}
+
+// TestCheckVoiceInvalidIndex: the model's index/text payload is untrusted —
+// a missing index, an out-of-range index, and a spelling line without the
+// actual text ALL fall back to the clarification question with ZERO verdict
+// writes and no crash; the classroom stays live afterwards.
+func TestCheckVoiceInvalidIndex(t *testing.T) {
+	exec := newFakeExecutorNoRow("it-lesson")
+	asr := newFakeASR(
+		asrScript{text: "那个词对了"},    // check_right with NO index
+		asrScript{text: "第五个词错了"},   // check_wrong index 5 (out of range)
+		asrScript{text: "第一个词写的是"}, // check_spelling with NO text
+	)
+	llm := newFakeLLM(
+		checkIntentScript(intentCheckRight, 0, ""),
+		checkIntentScript(intentCheckWrong, 5, ""),
+		checkIntentScript(intentCheckSpelling, 1, ""),
+	)
+	conn, _ := itVoiceCheckSession(t, asr, llm, exec)
+
+	for i := 0; i < 3; i++ {
+		itSendUtterance(t, conn)
+		ack := itAnnounceAck(t, conn)
+		if joined := strings.Join(ack, ""); !strings.Contains(joined, "你说的是第几个词") {
+			t.Fatalf("invalid payload %d announcement = %v, want the clarification fallback", i+1, ack)
+		}
+		if got := itCountApplyVerdicts(exec); got != 0 {
+			t.Fatalf("invalid payload %d produced %d apply_verdict writes, want 0 (no guessing)", i+1, got)
+		}
+	}
+
+	// The classroom survived: the screen path still applies verdicts after
+	// the clarification rounds (the FSM settled back to listening).
+	itSendText(t, conn, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-after-invalid", WordIndex: 0, Correct: true})
+	echo := itReadCheckVerdicts(t, conn)
+	if len(echo.Verdicts) != 1 || !echo.Verdicts[0].Correct {
+		t.Fatalf("post-clarification echo = %+v, want the button verdict applied", echo.Verdicts)
 	}
 }

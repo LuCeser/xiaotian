@@ -535,6 +535,98 @@ func TestClassifyFallsBackToChatAfterSecondFailure(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 13.1-06 check-stage voice correction (D-06②): classification contract
+// ---------------------------------------------------------------------------
+
+// TestCheckClassifyWhitelist: parseIntentJSON accepts the three check-stage
+// intents (the ELEVEN-value whitelist) together with their optional
+// index/text payload, keeps accepting the eight base intents, and still
+// rejects non-whitelisted intents (T-13-13 regression).
+func TestCheckClassifyWhitelist(t *testing.T) {
+	for _, intent := range []string{
+		intentCheckRight, intentCheckWrong, intentCheckSpelling,
+		intentConfirm, intentRepeat, intentSlow, intentHint, intentMeaning,
+		intentPause, intentResume, intentChat,
+	} {
+		p, ok := parseIntentJSON(`{"intent":"` + intent + `","reply":"","index":2,"text":"香焦"}`)
+		if !ok {
+			t.Fatalf("parseIntentJSON(%s) rejected, want accepted (11-value whitelist)", intent)
+		}
+		switch intent {
+		case intentCheckRight, intentCheckWrong, intentCheckSpelling:
+			if p.Index != 2 || p.Text != "香焦" {
+				t.Errorf("check payload for %s = %+v, want index 2 text 香焦", intent, p)
+			}
+		}
+	}
+	// Payload-less check intents parse fine — the CONSUMER validates
+	// Index/Text (model output is untrusted; the parser stays shape-only).
+	if p, ok := parseIntentJSON(`{"intent":"check_spelling","reply":""}`); !ok || p.Index != 0 || p.Text != "" {
+		t.Errorf("payload-less check_spelling = (%+v, %v), want parsed with zero Index/Text", p, ok)
+	}
+	// Non-whitelisted intents are still rejected.
+	if _, ok := parseIntentJSON(`{"intent":"advance_all"}`); ok {
+		t.Error("non-whitelisted intent accepted — T-13-13 regression")
+	}
+	if _, ok := parseIntentJSON(`not json at all`); ok {
+		t.Error("unparseable output accepted")
+	}
+}
+
+// TestDictationStageUnaffected: the dictation stage's classification still
+// runs through the EIGHT-value prompt — the fake LLM's captured system
+// message carries the base vocabulary and NEITHER the check-stage intents
+// NOR the verdict-state list. The check-stage prompt is a SEPARATE build
+// carrying the full word list with per-word verdict states plus the three
+// check intents — and never offers hint (the dictation is done; a hint
+// request must classify as chat there).
+func TestDictationStageUnaffected(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR(asrScript{text: "这个字不会写"})
+	llm := newFakeLLM(intentScript(intentHint, "上面是草字头哦"))
+	tm, s, _, _ := ttIntentFixture(t, cards, asr, llm)
+	ttRunIntentTurn(t, tm, s, 3)
+
+	if llm.callCount() != 1 {
+		t.Fatalf("llm calls = %d, want 1", llm.callCount())
+	}
+	system := llm.calls[0].messages[0].Content
+	for _, want := range []string{"confirm", "repeat", "slow", "hint", "meaning", "pause", "resume", "chat"} {
+		if !contains(system, want) {
+			t.Errorf("dictation system prompt missing base intent %q", want)
+		}
+	}
+	for _, forbidden := range []string{intentCheckRight, intentCheckWrong, intentCheckSpelling} {
+		if contains(system, forbidden) {
+			t.Errorf("dictation system prompt leaked check-stage intent %q", forbidden)
+		}
+	}
+	if contains(system, "已判定") {
+		t.Error("dictation system prompt leaked the check-stage verdict-state word list")
+	}
+
+	// Contrast: the check prompt is built separately and carries the full
+	// word list with verdict states and the three check intents — hint is
+	// NOT offered there.
+	tm.mu.Lock()
+	words := append([]lesson.Word(nil), tm.tutor.words...)
+	tm.mu.Unlock()
+	verdicts := []lesson.CheckVerdict{{WordIndex: 0, Correct: true, Manual: true}}
+	checkPrompt := buildCheckClassifySystemPrompt(words, verdicts)
+	for _, want := range []string{
+		"苹果", "香蕉", intentCheckRight, intentCheckWrong, intentCheckSpelling,
+		"已判定", "还没有判定", "JSON", "严禁任何羞辱",
+	} {
+		if !contains(checkPrompt, want) {
+			t.Errorf("check system prompt missing %q", want)
+		}
+	}
+	if contains(checkPrompt, "hint：") {
+		t.Error("check system prompt offers hint — the dictation is done, hint requests must classify as chat")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Completion path: honest review write + ack-gated natural ending (Task 2)
 // ---------------------------------------------------------------------------
 
