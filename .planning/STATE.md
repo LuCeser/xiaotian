@@ -6,10 +6,10 @@ current_phase: 13
 current_phase_name: R0 真机最小闭环
 status: executing
 stopped_at: 2026-10-06 晚 本机能力验收会话收口——完整 7 词课通过、回声两档静默通过、时序样本已采（首问候 153ms/句末→首音 P50 2.8s）；问题台账 13-UAT-ISSUES-20261006.md U-1～U-10；评级映射用户已裁定待实现（U-9）；剩余 5 验收项待下节活跃课。用户决策：当日讨论内容由用户新会话梳理规划
-last_updated: "2026-10-06T16:10:44.664Z"
-last_activity: 2026-10-06
+last_updated: "2026-10-07T01:29:41.707Z"
+last_activity: 2026-10-07
 last_activity_desc: 13-12 本机能力验收：完整课 + 回声通过 + 时序样本 + 问题台账 U-1～U-10
-state_head: 9ac19968f6332c82c8c992ff45a6e65c5f49b953
+state_head: 60c129a2896178fa6c243779bf2d06e00780b846
 progress:
   total_phases: 4
   completed_phases: 0
@@ -36,7 +36,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 Phase: 13 (R0 真机最小闭环) — EXECUTING
 Plan: 13 of 13 (13-12 完结——Task 2 按用户 2026-10-06 改判为本机 E2E 代理执行；待用户三项不阻塞 13-13)
 Status: 13-13 ready
-Last activity: 2026-10-07 — 快任务 261006-u7o：整理项目根目录（3 个真实改动原子提交 A–C、25 个 CRLF 幻影清零、垃圾删除+gitignore 加固 D、docs/scripts 分类归档 E、.scratch 13-12 证据入库 F；根 git status 清零，构建/测试与基线一致）
+Last activity: 2026-10-07 — 快任务 261007-coe：根目录梳理第二轮——test-interface.html 归位 scripts/archive（main.go 路由改指归档路径 + httptest 锁定 URL 契约，顺路清 3 条死页路由）、reset-vocab.py 归位 scripts/（DB 路径按 __file__ 锚定仓库根）、.codex-network-log 与 test-results 与 server-8443.out.log 删除、README 布局补全 + 4 个残留 .gitkeep 退库 + main.go fmt 占位清除；证据件原位未动，构建/测试与基线一致
 Next: /gsd-execute-phase 13 → 13-13（VPS 部署+正式验收）
 
 13-01～13-06 的实时语音基础已实现；状态机默写转向尚待执行 13-07～13-13，RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
@@ -134,6 +134,7 @@ None yet.
 | 20 | 新建 13-UAT-ISSUES-20261006 本机验收问题台账（U-1 E2E 残留三处已清/防复发待办、U-2 去重版本倒退缺陷立账未修、U-3 确认误判观察） | 2026-10-06 | 4b39357 | — | — |
 | 261006-tnr | reset-vocab.py 补当天课堂行删除：cards FSRS 重置 + 抓取锁清理之外，按上海时区算 r0-YYYYMMDD，先删 tool_requests 再删 lessons 当天行，重连 /rt 走新课堂重新取词（对齐 pkg/rt/dictation.go resolveLessonID） | 2026-10-06 | ed94a38 | — | [261006-tnr-add-today-lesson-row-deletion-to-root-re](./quick/261006-tnr-add-today-lesson-row-deletion-to-root-re/) |
 | 261006-u7o | 整理项目根目录：盘点一级文件与 .scratch/，可删的删、该提交的提交、建文件夹分类归档 | 2026-10-06 | 9ac1996 | — | [261006-u7o-scratch](./quick/261006-u7o-scratch/) |
+| 261007-coe | 根目录梳理第二轮：test-interface.html 与 reset-vocab.py 归位、工具产物清理、卫生 todo 收尾 | 2026-10-07 | 60c129a | complete | [261007-coe-test-interface-html-reset-vocab-py-codex](./quick/261007-coe-test-interface-html-reset-vocab-py-codex/) |
 
 ### Roadmap Evolution
 
