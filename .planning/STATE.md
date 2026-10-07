@@ -5,16 +5,16 @@ milestone_name: realtime-tutor — ACTIVE
 current_phase: 13.1
 current_phase_name: 三段式默写课堂（默写→检查→统一反馈）
 status: executing
-stopped_at: Completed 13.1-01-PLAN.md
-last_updated: "2026-10-07T07:34:54.834Z"
+stopped_at: Completed 13.1-02-PLAN.md
+last_updated: "2026-10-07T12:06:57.989Z"
 last_activity: 2026-10-07
 last_activity_desc: Phase 13.1 execution started
-state_head: 0c0f1a661c911d591e74a71e52624e378a4047a8
+state_head: 65f5f7133434628e75acd8f143dde216e36dd11f
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 20
-  completed_plans: 12
+  completed_plans: 14
   percent: 0
 ---
 
@@ -34,7 +34,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 ## Current Position
 
 Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈）) — EXECUTING
-Plan: 2 of 7
+Plan: 3 of 7
 Status: Ready to execute
 Last activity: 2026-10-07 — Phase 13.1 execution started
 Next: /gsd-plan-phase 13.1 → 13-13 VPS 部署+正式验收
@@ -51,6 +51,7 @@ v2.0：4 个活跃阶段，Phase 13 已完成 13/13 个实施计划（13-12 按�
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 13.1 P01 | 309 min | 3 tasks | 17 files |
+| Phase 13.1 P02 | 244 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,9 @@ Recent decisions affecting current work:
 - [Phase 09]: Backstop styles shipped under Rule 2 in the e2e plan (09-08): the 2-line meaning clamp (-webkit-line-clamp on .word-meaning) and unit-name title attribute asserted by the must-haves were absent from the Plan 09-07 styles — fixed in the Task 2 commit and asserted behaviorally (rendered height within 2 line-heights; Chromium computes display:-webkit-box as flow-root while the clamp applies)
 - [Phase 13]: R0 交互模型转向「状态机默写助手」（2026-10-03 用户决策；本机预验收 rt-6 证据：12 轮对话 0 次课堂工具调用）。服务端状态机控制节奏：FSRS 取到期词（上限 10，不足取全部）→ 老师开场报词 → 等「好了/可以了/下一个」确认或 60 秒超时自动推进 → 支持重读/慢读、不会写提示、词义解释、暂停继续口令 → 完结总结写学习记录。大模型仅做意图识别与话术生成，不再拥有课堂节奏裁量权。 — 用户原始能力模型是默写助手；R0 按 13-CONTEXT 以「自由对话+可选工具」验证实时链路，体验与产品定义错位。属规划阶段翻译损耗而非执行偏移——执行与计划一致（证据：13-CONTEXT L16/L17/L20、RT-06 原文、PROJECT.md「FSRS R2 贯通」）。本决策推翻：固定 3 词不选词、沉默不跳词（RT-06 原文）、FSRS 排 R2。伴随缺陷一并修：MiMo invalid API response（实测×4）、VAD 0 秒误触发、首问候缺失（13-03/04/05 实现缝隙）。
 - [Phase 13.1]: 13.1-01 三段式tracer落码：完结写评级改为检查段(stage=checking持久化)→逐词manual改判→check_submit一次统一提交FSRS(D-02/D-07)→含对错战果总结过ACK门(D-04)；checkRating与wordRating同族共用rating常量禁分叉 — D-01/D-02/D-04/D-07模型改造(13.1-CONTEXT显式取代13-CONTEXT完结即写条款)；幂等闸=lessons.stage checking→submitted迁移+request_id去重+expected_version乐观锁，二次提交回放零副作用
+- [Phase 13.1]: 打码权威在服务端发送侧（spoken+display 双轨）：TTS/LLM 语境/trim 恒原文，字幕与词表按学生模式脱敏，词明文不再上线；前端只画收到的内容
+- [Phase 13.1]: maskTranscript 以 grading.Normalize 为唯一比对口径（按词 script 选 en/zh），替换落在原始 span，窗口=归一化词长+8，不写第二套归一化
+- [Phase 13.1]: word_revealed 每个首提交 advance 无差别下发（含末词），幂等回放/冲突不发，测试模式完全不发；repeat/slow/resume 用显式打码模板变体避免叠词
 
 ### Pending Todos
 
@@ -162,6 +166,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-07T07:34:54.816Z
-Stopped at: Completed 13.1-01-PLAN.md
+Last session: 2026-10-07T12:04:13.256Z
+Stopped at: Completed 13.1-02-PLAN.md
 Resume file: None
