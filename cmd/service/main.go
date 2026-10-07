@@ -676,10 +676,10 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			)
 			// Debug interfaces remain reachable at their explicit paths; ServeMux
 			// prefers these longer patterns over the "/" prefix so they do not
-			// collide with the static FileServer.
-			for _, dbg := range debugInterfaces {
-				publicMux.HandleFunc("/"+dbg, serveRepoRootFile(dbg))
-			}
+			// collide with the static FileServer. The sole surviving debug page
+			// now lives archived under scripts/archive/ (root-directory cleanup,
+			// 261007-coe) — the URL contract /test-interface.html is unchanged.
+			publicMux.HandleFunc("/test-interface.html", serveRepoRootFile("scripts/archive/test-interface.html"))
 		} else {
 			publicMux.HandleFunc("/", serveDebugRoot)
 		}
@@ -853,22 +853,11 @@ func homeDir() string {
 	return "."
 }
 
-// debugInterfaces lists the repo-root HTML debug harnesses that should remain
-// reachable even when the student interface is mounted at "/". These are
-// developer-facing pages (Phase 7.1 audio regression harnesses, interface
-// debug pages); they are registered at their explicit paths so ServeMux
-// prefers them over the static "/" prefix handler.
-var debugInterfaces = []string{
-	"test-interface.html",
-	"test-interface-debug.html",
-	"test-audio-sequence-bug.html",
-	"test-audio-bug-frontend.html",
-}
-
-// serveRepoRootFile returns a handler that serves a single file from the
-// process CWD, responding 404 if the file is absent. Used to keep debug
-// harnesses reachable without exposing them through the static FileServer
-// (which is rooted at the student interface directory).
+// serveRepoRootFile returns a handler that serves a single repository-relative
+// file (resolved from the process CWD, normally the repository root),
+// responding 404 if the file is absent. Used to keep debug harnesses
+// reachable without exposing them through the static FileServer (which is
+// rooted at the student interface directory).
 func serveRepoRootFile(filename string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := os.Stat(filename); err != nil {
@@ -881,19 +870,15 @@ func serveRepoRootFile(filename string) http.HandlerFunc {
 
 // serveDebugRoot is the fallback root handler used ONLY when static serving
 // is disabled (server.staticDir empty). It preserves the pre-Phase-8 root
-// behaviour: serve test-interface.html at "/" plus the other debug harnesses
-// at their named paths, so existing developer workflows survive the
-// introduction of the student interface config.
+// behaviour with the debug page now read from its archived location
+// (scripts/archive/, root-directory cleanup 261007-coe): the page is served
+// at both "/" and its named /test-interface.html path. The other legacy
+// debug harnesses were archived and their routes removed, so those paths
+// fall through to 404 exactly as a missing file would.
 func serveDebugRoot(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/", "/test-interface.html":
-		http.ServeFile(w, r, "test-interface.html")
-	case "/test-interface-debug.html":
-		http.ServeFile(w, r, "test-interface-debug.html")
-	case "/test-audio-sequence-bug.html":
-		http.ServeFile(w, r, "test-audio-sequence-bug.html")
-	case "/test-audio-bug-frontend.html":
-		http.ServeFile(w, r, "test-audio-bug-frontend.html")
+		http.ServeFile(w, r, "scripts/archive/test-interface.html")
 	default:
 		http.NotFound(w, r)
 	}
