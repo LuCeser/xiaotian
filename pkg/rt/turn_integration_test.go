@@ -1343,6 +1343,360 @@ func TestCheckVoiceSamePathAsButton(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 13.1-08 cross-connection regression (gap[1]/CR-01 + the same-family
+// correction path): two websocket connections share ONE lesson row through
+// the closure-captured fakes (conn.go builds one TurnManager per connection
+// via h.factory(), while exec/words ride the itServer closure) — exactly the
+// multi-tab / reconnect shape 13.1-04 declares supported. The loser of a
+// submit race gets the honest terminal signal (session_ended(lesson_complete)
+// + one duplicate_submit diagnostic) and NEVER a fabricated review_result or
+// a second FSRS write.
+// ---------------------------------------------------------------------------
+
+// itServerLogged is the 13.1-08 harness variant: identical to itServer, but
+// the per-connection event recorders share one capturing logger so a test
+// can assert the server-side rt_event stream (the duplicate-submit
+// diagnostics) beside the wire behavior. Two TurnManagers appending to one
+// capture is safe — every Emit appends under the captureLogger's mutex.
+func itServerLogged(t *testing.T, asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, exec LessonExecutor, words WordSource, log *captureLogger) *httptest.Server {
+	t.Helper()
+	h, err := NewHandler(
+		ServerConfig{
+			AllowedOrigins:    []string{itOrigin},
+			HeartbeatInterval: 30 * time.Second,
+		},
+		func() SessionManager {
+			return NewTurnManager(asr, llm, tts, exec,
+				TurnManagerConfig{LessonID: "it-lesson", Words: words},
+				NewEventRecorder(log, "it"), infra.NewNoOpLogger())
+		},
+		infra.NewNoOpLogger(),
+	)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleWebSocket))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// itDuplicateMarkers counts the rt_event error entries that carry the
+// duplicate_submit code with exactly the given duplicate marker. The code is
+// pinned as the literal (not the protocol constant): it is a frozen wire
+// identifier whose value 13-13 acceptance greps by — same discipline as
+// TestTimingEventVocabulary.
+func itDuplicateMarkers(t *testing.T, log *captureLogger, marker string) int {
+	t.Helper()
+	n := 0
+	for _, e := range log.snapshot() {
+		if e.msg != "rt_event" {
+			continue
+		}
+		var event, code, dup string
+		for _, f := range e.fields {
+			switch f.Key {
+			case "event":
+				event, _ = f.Value.(string)
+			case "code":
+				code, _ = f.Value.(string)
+			case "duplicate":
+				dup, _ = f.Value.(string)
+			}
+		}
+		if event == EventError && code == "duplicate_submit" && dup == marker {
+			n++
+		}
+	}
+	return n
+}
+
+// itCollectUntilSessionEnded reads the connection's remaining stream and
+// collects every control type in arrival order until session_ended arrives
+// (the ended message is returned, excluded from the collected types). The
+// loser-path tests use it to pin down exactly what the losing connection was
+// shown BEFORE the terminal signal.
+func itCollectUntilSessionEnded(t *testing.T, conn *websocket.Conn, timeout time.Duration) ([]string, SessionEndedMsg) {
+	t.Helper()
+	var types []string
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatal("stream never reached session_ended")
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(remaining))
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("itCollectUntilSessionEnded read: %v", err)
+		}
+		m := itProbe(mt, data)
+		if m.typ == TypeSessionEnded {
+			var ended SessionEndedMsg
+			if err := json.Unmarshal(data, &ended); err != nil {
+				t.Fatalf("session_ended decode: %v", err)
+			}
+			return types, ended
+		}
+		if m.typ != "" {
+			types = append(types, m.typ)
+		}
+	}
+}
+
+// TestCrossConnectionDoubleSubmitSingleReview (13.1-08, gap[1]/CR-01):
+// connection A walks the full 3-word dictation into the check stage; while A
+// sits in the check panel, connection B dials in and resumes the SAME
+// checking row (two TurnManagers, one lesson row). A checks all three words
+// and submits first (the winner: review_result → acked summary →
+// session_ended). B then submits with its own request id — the executor
+// answers a latch replay (Idempotent=true, EMPTY verdict readback) and B
+// must get the honest terminal signal: exactly ONE SubmitReview total, zero
+// review_result on B, exactly one session_ended(lesson_complete), and one
+// duplicate_submit/check_submit_latch diagnostic on the event stream.
+func TestCrossConnectionDoubleSubmitSingleReview(t *testing.T) {
+	cards := ttCards("苹果", "香蕉", "橘子")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉", "橘子"},
+		Updated:   []string{"苹果", "香蕉", "橘子"},
+	}
+	exec := newFakeExecutorNoRow("it-lesson")
+	log := &captureLogger{}
+	asr := newFakeASR(asrScript{text: "好了"}, asrScript{text: "好了"}, asrScript{text: "好了"})
+	llm := newFakeLLM(
+		intentScript(intentConfirm, ""),
+		intentScript(intentConfirm, ""),
+		intentScript(intentConfirm, ""),
+	)
+	tts := newFakeTTS(2, 320)
+	tts.delay = 20 * time.Millisecond
+	srv := itServerLogged(t, asr, llm, tts, exec, words, log)
+
+	// Connection A: the full dictation into the check stage.
+	connA := itDial(t, srv)
+	itInit(t, connA)
+	itAnnounceAck(t, connA) // the opening greeting
+	for i := 0; i < 3; i++ {
+		itSendUtterance(t, connA)
+		itRead(t, connA, 15*time.Second, func(m itMsg) bool { return m.typ == TypeLessonUpdate })
+		if i < 2 {
+			itAnnounceAck(t, connA) // next-word announcement
+		}
+	}
+	started := itReadCheckStarted(t, connA)
+	if started.Reason != CheckStartedReasonDictationDone {
+		t.Errorf("A check_started.reason = %q, want %s", started.Reason, CheckStartedReasonDictationDone)
+	}
+	itAnnounceAck(t, connA) // the check bridge
+	for i := 0; i < 3; i++ {
+		itSendText(t, connA, CheckVerdictMsg{
+			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("it-v-%d", i), WordIndex: i, Correct: true,
+		})
+		itReadCheckVerdicts(t, connA)
+	}
+
+	// Connection B: dials into the SAME checking row — the resume path
+	// restores the check panel from the row (3 stored manual verdicts).
+	connB := itDial(t, srv)
+	itInit(t, connB)
+	startedB := itReadCheckStarted(t, connB)
+	if startedB.Reason != CheckStartedReasonResume {
+		t.Errorf("B check_started.reason = %q, want %s", startedB.Reason, CheckStartedReasonResume)
+	}
+	echoB := itReadCheckVerdicts(t, connB)
+	if len(echoB.Verdicts) != 3 {
+		t.Fatalf("B resync verdicts = %+v, want A's 3 stored manual verdicts", echoB.Verdicts)
+	}
+	itAnnounceAck(t, connB) // B's resume bridge
+
+	// A submits first and wins the latch: honest result, acked ending.
+	itSendText(t, connA, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-submit-a"})
+	m := itRead(t, connA, 15*time.Second, func(m itMsg) bool { return m.typ == TypeReviewResult })
+	var result ReviewResultMsg
+	if err := json.Unmarshal(m.raw, &result); err != nil {
+		t.Fatalf("A review_result decode: %v", err)
+	}
+	if result.Requested != 3 || result.Updated != 3 || result.Unchecked {
+		t.Errorf("A review_result = %+v, want 3/3 checked submit", result)
+	}
+	itAckEnding(t, connA, ReasonLessonComplete)
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls after A = %d, want exactly 1", got)
+	}
+
+	// B submits second — the cross-connection loser.
+	itSendText(t, connB, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-submit-b"})
+	loserTypes, ended := itCollectUntilSessionEnded(t, connB, 15*time.Second)
+	for _, typ := range loserTypes {
+		if typ == TypeReviewResult || typ == TypeCheckStarted {
+			t.Fatalf("loser B saw %s before session_ended (collected %v) — a fabricated result/stage broadcast", typ, loserTypes)
+		}
+	}
+	if ended.Reason != ReasonLessonComplete {
+		t.Errorf("loser B session_ended.reason = %q, want %s", ended.Reason, ReasonLessonComplete)
+	}
+	// Nothing trails the terminal signal: no late review_result, no second
+	// session_ended.
+	for _, m := range itDrainUntilTimeout(t, connB, 800*time.Millisecond) {
+		if m.typ == TypeReviewResult {
+			t.Fatalf("loser B received a post-terminal review_result (fabricated)")
+		}
+		if m.typ == TypeSessionEnded {
+			t.Fatalf("loser B received a second session_ended")
+		}
+	}
+
+	// Exactly one FSRS write for the whole cross-connection race.
+	subs := words.submissions()
+	if len(subs) != 1 {
+		t.Fatalf("SubmitReview calls = %d, want exactly 1 (the winner's)", len(subs))
+	}
+	if subs[0]["苹果"] != "good" || subs[0]["橘子"] != "good" {
+		t.Errorf("ratings = %v, want the winner's D-02 batch", subs[0])
+	}
+	// The audit trail: exactly one duplicate_submit diagnostic with the
+	// check_submit_latch marker, exactly one review_submitted (the winner).
+	if got := itDuplicateMarkers(t, log, "check_submit_latch"); got != 1 {
+		t.Errorf("duplicate_submit/check_submit_latch events = %d, want exactly 1", got)
+	}
+	if got := ttEventCount(t, log, EventReviewSubmitted); got != 1 {
+		t.Errorf("review_submitted events = %d, want exactly 1", got)
+	}
+	exec.mu.Lock()
+	stage := exec.lesson.Stage
+	exec.mu.Unlock()
+	if stage != lesson.StageSubmitted {
+		t.Errorf("row stage = %q, want submitted", stage)
+	}
+}
+
+// TestCrossConnectionCorrectionStraggler (13.1-08, gap[1] same family — the
+// full build-out the review asked for): a submitted+unchecked row (the D-03
+// fallback state) reopened for correction by TWO connections in sequence.
+// A and B each dial in, enter the correction panel, and hand-confirm both
+// words. A submits first: the one-word diff batch (香蕉 overridden to
+// correct) runs SubmitReview and its Clean run clears the unchecked marker
+// (the review_result only ships after ClearUnchecked, check.go write order).
+// B — the straggler — then submits: the row reads unchecked=false, so the
+// read-side guard fires and B gets the terminal signal with ZERO second
+// diff write, zero review_result, one correction_submit_latch diagnostic.
+func TestCrossConnectionCorrectionStraggler(t *testing.T) {
+	words := newFakeWords(itCards)
+	words.reviewResult = ReviewWriteResult{Requested: []string{"香蕉"}, Updated: []string{"香蕉"}}
+	exec := newFakeExecutorNoRow("it-lesson")
+	// Seed exactly what uncheckedCloseFallback persists: outcomes stored,
+	// stage submitted, unchecked=1, verdicts empty.
+	ctx := context.Background()
+	l, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards)
+	if err != nil {
+		t.Fatalf("EnsureLessonCards: %v", err)
+	}
+	version := l.Version
+	for i := range itCards {
+		res, aerr := exec.AdvanceWord(ctx, "it-lesson", version, fmt.Sprintf("it-seed-adv-%d", i))
+		if aerr != nil {
+			t.Fatalf("AdvanceWord seed %d: %v", i, aerr)
+		}
+		version = res.NewVersion
+	}
+	ec, err := exec.EnterCheck(ctx, "it-lesson", version, "it-lesson-enter-check", map[string]lesson.WordOutcome{
+		"0": {Outcome: "confirmed", Hints: 0},
+		"1": {Outcome: "confirmed", Hints: 1},
+	})
+	if err != nil {
+		t.Fatalf("EnterCheck: %v", err)
+	}
+	if _, err := exec.CompleteCheck(ctx, "it-lesson", ec.NewVersion, "it-lesson-complete-check", true); err != nil {
+		t.Fatalf("CompleteCheck seed: %v", err)
+	}
+	log := &captureLogger{}
+	tts := newFakeTTS(3, 320)
+	tts.delay = 10 * time.Millisecond
+	srv := itServerLogged(t, newFakeASR(), newFakeLLM(), tts, exec, words, log)
+
+	// Both connections reopen the correction panel over the shared row.
+	connA := itDial(t, srv)
+	itInit(t, connA)
+	startedA := itReadCheckStarted(t, connA)
+	if startedA.Reason != CheckStartedReasonCorrection {
+		t.Fatalf("A check_started.reason = %q, want %s", startedA.Reason, CheckStartedReasonCorrection)
+	}
+	itAnnounceAck(t, connA) // the correction bridge
+	// A confirms both words; 香蕉 is OVERRIDDEN to correct — the one-word diff.
+	itSendText(t, connA, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-cor-a-v0", WordIndex: 0, Correct: true})
+	itReadCheckVerdicts(t, connA)
+	itSendText(t, connA, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-cor-a-v1", WordIndex: 1, Correct: true})
+	itReadCheckVerdicts(t, connA)
+
+	connB := itDial(t, srv)
+	itInit(t, connB)
+	startedB := itReadCheckStarted(t, connB)
+	if startedB.Reason != CheckStartedReasonCorrection {
+		t.Fatalf("B check_started.reason = %q, want %s (the row is still unchecked)", startedB.Reason, CheckStartedReasonCorrection)
+	}
+	itAnnounceAck(t, connB) // B's own correction bridge
+	itSendText(t, connB, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-cor-b-v0", WordIndex: 0, Correct: true})
+	itReadCheckVerdicts(t, connB)
+	itSendText(t, connB, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-cor-b-v1", WordIndex: 1, Correct: true})
+	itReadCheckVerdicts(t, connB)
+
+	// A submits first: the one-word diff batch runs and the marker clears
+	// (observing review_result proves ClearUnchecked already ran — the
+	// message only ships after it, check.go write order).
+	itSendText(t, connA, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-cor-a"})
+	m := itRead(t, connA, 15*time.Second, func(m itMsg) bool { return m.typ == TypeReviewResult })
+	var result ReviewResultMsg
+	if err := json.Unmarshal(m.raw, &result); err != nil {
+		t.Fatalf("A review_result decode: %v", err)
+	}
+	if result.Requested != 1 || result.Updated != 1 || result.Unchecked {
+		t.Errorf("A review_result = %+v, want the 1-word correction batch", result)
+	}
+	itAckEnding(t, connA, ReasonLessonComplete)
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls after A = %d, want exactly 1 (the diff batch)", got)
+	}
+
+	// B — the straggler — submits into a now-cleared row.
+	itSendText(t, connB, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-cor-b"})
+	loserTypes, ended := itCollectUntilSessionEnded(t, connB, 15*time.Second)
+	for _, typ := range loserTypes {
+		if typ == TypeReviewResult || typ == TypeCheckStarted {
+			t.Fatalf("straggler B saw %s before session_ended (collected %v)", typ, loserTypes)
+		}
+	}
+	if ended.Reason != ReasonLessonComplete {
+		t.Errorf("straggler B session_ended.reason = %q, want %s", ended.Reason, ReasonLessonComplete)
+	}
+	for _, m := range itDrainUntilTimeout(t, connB, 800*time.Millisecond) {
+		if m.typ == TypeReviewResult || m.typ == TypeSessionEnded {
+			t.Fatalf("straggler B received a post-terminal %s", m.typ)
+		}
+	}
+
+	// Zero second diff write: the straggler never reaches SubmitReview.
+	subs := words.submissions()
+	if len(subs) != 1 {
+		t.Fatalf("SubmitReview calls = %d, want exactly 1 (A's diff)", len(subs))
+	}
+	if len(subs[0]) != 1 || subs[0]["香蕉"] != "hard" {
+		t.Errorf("correction batch = %v, want only 香蕉=hard", subs[0])
+	}
+	if got := itDuplicateMarkers(t, log, "correction_submit_latch"); got != 1 {
+		t.Errorf("duplicate_submit/correction_submit_latch events = %d, want exactly 1", got)
+	}
+	if got := ttEventCount(t, log, EventReviewCorrection); got != 1 {
+		t.Errorf("review_correction events = %d, want exactly 1", got)
+	}
+	exec.mu.Lock()
+	stage, unchecked := exec.lesson.Stage, exec.lesson.Unchecked
+	exec.mu.Unlock()
+	if stage != lesson.StageSubmitted || unchecked {
+		t.Errorf("row = stage %q unchecked %v, want submitted/false", stage, unchecked)
+	}
+}
+
 // TestCheckVoiceInvalidIndex: the model's index/text payload is untrusted —
 // a missing index, an out-of-range index, and a spelling line without the
 // actual text ALL fall back to the clarification question with ZERO verdict
