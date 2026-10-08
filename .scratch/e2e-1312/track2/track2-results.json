@@ -1,0 +1,105 @@
+{
+  "task": "13-12 Task 2 Track 2 — Playwright real-channel /tutor/ UI verification + paired-timing sample attempt",
+  "generated_at": "2026-10-06T06:00:00+08:00",
+  "environment": {
+    "service_pid": 50472,
+    "service_binary": "bin/service.exe -config config.local.yaml",
+    "target": "https://127.0.0.1:8443/tutor/",
+    "day_keyed_lesson": "r0-20261006",
+    "lesson_state": "completed (current_index 10/10, version 11 — written by Track 1 rt-7)",
+    "due_words_peek": 10,
+    "due_words_units": { "TestUnit1": 5, "e2e-0907-unit-1790694195008": 2, "e2e-0907-unit-del-1790694469304": 1, "": 2 },
+    "reachability_note": "resolveLessonID is day-keyed (pkg/rt/dictation.go L512-520); the completed row short-circuits handleSessionInit into startCompletedSession (pkg/rt/turn.go L451-452, L493-509) BEFORE the due fetch (FetchDueWords only runs on lesson-not-found, turn.go L422-433). Due words therefore cannot yield an active lesson today. vocab.db untouched, service not restarted — no legitimate path to an active dictation lesson."
+  },
+  "step1_due_check": {
+    "command": "third_party/python/.venv/Scripts/python.exe third_party/python/vocab_manager.py --db .hta-data/vocab.db due --peek",
+    "result": "N=10 due words (>0) — task branch 3A/step-2 selected",
+    "interpreter_note": "bare `py vocab_manager.py` silently exits 9009 (shebang #!/usr/bin/env python3 resolves to the WindowsApps python3 stub); the service's venv interpreter is the working authority"
+  },
+  "step2_short_session": {
+    "driver": ".scratch/e2e-rt-1312-short.mjs (corrected per-turn first_audio_played machinery from .scratch/e2e-rt-1312.mjs)",
+    "session_id": "rt-10",
+    "path_taken": "completed_resume",
+    "duration_class": "<1 min, watchdog 150s unused",
+    "side_effects": "none on user data (completed-resume performs no due fetch, no review write)",
+    "results": [
+      { "assertion": "a_session_ready", "pass": true, "detail": "session_ready session=rt-10 lesson=r0-20261006 words=10 current_index=10 version=11" },
+      { "assertion": "b_path_taken", "pass": true, "detail": "completed-resume: session_ended(lesson_complete) with no actionable word (10/10) — pkg/rt/turn.go startCompletedSession; greeting/confirm impossible today, recorded honestly" },
+      { "assertion": "c_no_audio_expected", "pass": true, "detail": "audio_starts=0 first_audio_played=false (completed resume plays nothing)" },
+      { "assertion": "d_no_turns_expected", "pass": true, "detail": "client turns=0 (uplink turns impossible before close)" },
+      { "assertion": "e_server_events_completed_resume", "pass": true, "detail": "server rt_events: connected=1 session_end=0 (session_end=0 by design — internalClose L508 pre-marks closed, Close() L772-781 idempotently skips emission)" }
+    ],
+    "pairing_result": {
+      "report_command": "node scripts/rt-timing-report.js .scratch/e2e-1312/track2/rt-timing-track2.jsonl --server-log server-8443.err.log",
+      "matched_pairs": 0,
+      "speech_ended_total_turns": 0,
+      "calibrated_n": 0,
+      "first_audio_played_anchor_samples": 0,
+      "greeting_check": "auth_complete 后无 first_audio_played（首问候从未可听）— honest failure, root cause completed-resume short-circuit",
+      "verdict": "配对数=0 如实记录：修正后 driver 的 JSONL 发射路径本身工作正常（坏行 0、事件 schema 正确、greeting 检查给出诚实失败原因），但今日环境不可能产生任何用户轮次/音频，配对>0 需要活跃课（次日 r0-20261007 新课或真实学生场景）",
+      "driver_fix_note": "service zap writer may lag the wire (~rt-8 connected line materialized after an immediate tail read) — driver now polls the log tail up to 10s (extractServerEventsPolled)"
+    }
+  },
+  "step3_playwright_real_channel": {
+    "config": ".scratch/pw-real-1312.config.js",
+    "spec": ".scratch/e2e-1312/track2/tutor-real.spec.js",
+    "invocation": "npx playwright test -c .scratch/pw-real-1312.config.js",
+    "outcome": "2 passed (1.3s)",
+    "assertions": [
+      { "assertion": "pw_page_loads_over_real_tls", "pass": true, "detail": "body[data-page=tutor] visible at https://127.0.0.1:8443/tutor/ (ignoreHTTPSErrors, NO_PROXY loopback)" },
+      { "assertion": "pw_progress_placeholder", "pass": true, "detail": "#rt-progress-text = '第 - / - 个词' before start (dynamic total)" },
+      { "assertion": "pw_session_ready_arrives", "pass": true, "detail": "__rtTutor.client.sessionId set within 20s of #rt-start click" },
+      { "assertion": "pw_progress_completed_presentation", "pass": true, "detail": "#rt-progress-text = '已完成', fill width 100% (completed resume 10/10 renders the completed state, never '第 11 / 10 个词')" },
+      { "assertion": "pw_word_chips", "pass": true, "detail": "10 .rt-word-chip rendered, 0 .rt-word-current (index 10 past last chip — no out-of-range highlight)" },
+      { "assertion": "pw_ended_state", "pass": true, "detail": "#rt-status[data-state] = 'ended' (session_ended lesson_complete handler)" },
+      { "assertion": "pw_completion_banner", "pass": true, "detail": "#rt-banner visible with '今天的默写课堂完成啦，真棒！'" },
+      { "assertion": "pw_end_notice", "pass": true, "detail": "#rt-notice contains '本次课程已结束。需要再练一次就点「开始上课」。'" },
+      { "assertion": "pw_error_box_hidden", "pass": true, "detail": "#rt-error hidden — completed resume plays nothing and fails nothing" },
+      { "assertion": "pw_uplink_released_drain", "pass": true, "detail": "capture.isCapturing=false (child-audio privacy boundary via natural-drain)" },
+      { "assertion": "pw_zero_stopnow_drain", "pass": true, "detail": "observe().stopNowCalls=0 and playbackResourceReleased=true — T-13-24/24b natural-ending contract holds on the REAL channel" },
+      { "assertion": "pw_conn_closed", "pass": true, "detail": "#rt-conn[data-conn]='closed'" },
+      { "assertion": "pw_restart_entry_reenabled", "pass": true, "detail": "#rt-start re-enabled after drain (releasePlaybackResources)" },
+      { "assertion": "pw_no_pageerrors", "pass": true, "detail": "zero pageerror events across the completed-resume run" },
+      { "assertion": "pw_error_mapping_served_js", "pass": true, "detail": "real-channel /tutor/js/rt-client.js contains lesson_unavailable→'取词失败了，请稍后再试' and playback_ack_timeout→'播放确认超时，老师会先把已收到的语音播完；若卡住将自动结束'" },
+      { "assertion": "pw_error_wiring_served_html", "pass": true, "detail": "real-channel /tutor/ HTML contains lesson_unavailable retry hint, playback_ack_timeout drain branch, no_due_words notice '今天没有到期单词，休息一天吧。'" },
+      { "assertion": "pw_live_error_box_still_hidden", "pass": true, "detail": "fresh /tutor/ load: #rt-error hidden (neither unreachable trigger condition exists today)" }
+    ]
+  },
+  "code_level_verification": [
+    {
+      "item": "lesson_unavailable 用户文案",
+      "mapping": "取词失败了，请稍后再试",
+      "code_location": "pkg/web/static/tutor/js/rt-client.js ERROR_MESSAGES (~L75) + index.html client.on('error') ~L292-299 (追加 '点「开始上课」可以重新试一次。' 并重新启用开始按钮)",
+      "trigger_condition": "failLessonInit (pkg/rt/turn.go L458-463): cfg.Words=nil (L398-402)、RunDue 错误 (L426-429)、EnsureLessonCards 错误 (L434-441)、legacy 空 cards (L445-450)",
+      "reachability_today": "不可达 — 今日课行走 completed-resume，failLessonInit 的全部触发条件均不成立",
+      "verification": "代码级验证 + 真实通道静态断言（served JS/HTML 含映射文案与 retry wiring）"
+    },
+    {
+      "item": "playback_ack_timeout 用户文案",
+      "mapping": "播放确认超时，老师会先把已收到的语音播完；若卡住将自动结束",
+      "code_location": "pkg/web/static/tutor/js/rt-client.js ERROR_MESSAGES (~L79) + index.html client.on('error') ~L287-291 (beginTerminalDrain，永不 stopNow)；服务端 pkg/rt/turn.go awaitPlaybackCompletion L1215+ (bounded wait → ErrorMsg → orderlyClose L765-767)",
+      "reachability_today": "不可达 — 需要公告播出的活跃课；completed-resume 无任何公告/ack 等待",
+      "verification": "代码级验证 + 真实通道静态断言（served JS 含映射文案、served HTML 含 drain 分支）"
+    },
+    {
+      "item": "no_due_words UI 人话呈现",
+      "mapping": "今天没有到期单词，休息一天吧。 (index.html ~L314-315 showNotice；无 banner，L322 natural drain)",
+      "code_location": "pkg/web/static/tutor/index.html session_ended handler；服务端 startNoDueSession (turn.go L468-488)",
+      "reachability_today": "不可达 — due=10 且 completed row 短路在 due fetch 之前",
+      "verification": "代码级验证（served HTML 已静态断言含该文案）"
+    },
+    {
+      "item": "paused chip 渲染路径",
+      "mapping": "#rt-status[data-state='paused']（13-11 StatePaused，index.html state handler L267-271 直接 setStatus）",
+      "code_location": "pkg/web/static/tutor/index.html + styles/tutor.css data-state 选择器",
+      "reachability_today": "不可达 — 需要活跃课里的 xiuxi 语音 pause 意图",
+      "verification": "代码级验证"
+    }
+  ],
+  "defect_candidates": [],
+  "observations_non_defects": [
+    "completed-resume 会话的服务端 zap 行内 session_id 字段重复两次（rt-8/rt-9/rt-10 行：infra.F 覆盖写入）；无功能影响，仅日志冗余",
+    "Track 1 已知候选 b2_vad_noise_no_turn（noise fixture 可开语音段）非本轮产物，状态不变",
+    "步骤 2 短会话真实跑了 3 次（rt-8/rt-9/rt-10）：rt-8 验证了日志写入滞后、rt-9 修正断言预期、rt-10 为最终全绿证据；completed-resume 路径无用户数据副作用"
+  ]
+}

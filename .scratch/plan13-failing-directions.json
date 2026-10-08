@@ -1,0 +1,331 @@
+{
+  "status": "ok",
+  "commands": [
+    {
+      "command": "go test ./pkg/lesson/ -run TestStore -count=1",
+      "statement": "non-zero exit，或输出含 \"no tests to run\"（-run 过滤落空）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-01-PLAN.md",
+      "task": "Task 1: pkg/lesson/store.go — lessons/tool_requests 表 + Migrate + EnsureLesson"
+    },
+    {
+      "command": "go test ./pkg/lesson/ -count=1 && go vet ./pkg/lesson/",
+      "statement": "任一 stage non-zero exit，或 go test 输出含 \"FAIL\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-01-PLAN.md",
+      "task": "Task 2: pkg/lesson/executor.go — AdvanceWord 幂等事务 + 版本冲突哨兵"
+    },
+    {
+      "command": "go build ./pkg/mimo/ && go test ./pkg/mimo/ -short -count=1",
+      "statement": "任一 stage non-zero exit，或 go test 输出含 \"FAIL\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-02-PLAN.md",
+      "task": "Task 1: types.go — tools/thinking/tool_calls wire 类型与选项"
+    },
+    {
+      "command": "go test ./pkg/mimo/ -run \"TestChat|TestToolMessage\" -count=1",
+      "statement": "non-zero exit，或输出含 \"no tests to run\"，或 \"FAIL\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-02-PLAN.md",
+      "task": "Task 2: chat_tools_test.go — httptest 断言 wire 请求与 tool_calls 解析"
+    },
+    {
+      "command": "go test ./pkg/mimo/ -run TestLiveChatTools -count=1 -v",
+      "statement": "non-zero exit（SKIP 不算失败），或输出含 \"no tests to run\"，或 \"--- FAIL\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-02-PLAN.md",
+      "task": "Task 3: chat_tools_live_test.go — 真 key 烟测（thinking 关闭 + 工具调用）"
+    },
+    {
+      "command": "go test ./pkg/rt/ -run TestProtocol -count=1",
+      "statement": "non-zero exit，或输出含 \"no tests to run\"，或 \"FAIL\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-03-PLAN.md",
+      "task": "Task 1: protocol.go — 控制消息全集 + session_init 协商校验"
+    },
+    {
+      "command": "go test ./pkg/rt/ -run \"TestTiming|TestFakes\" -count=1",
+      "statement": "non-zero exit，或输出含 \"no tests to run\"，或 \"FAIL\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-03-PLAN.md",
+      "task": "Task 2: providers.go + timing.go — 可替换接口与时序事件记录器"
+    },
+    {
+      "command": "go test ./pkg/rt/ -count=1 && go vet ./pkg/rt/",
+      "statement": "任一 stage non-zero exit，或 go test 输出含 \"FAIL\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-03-PLAN.md",
+      "task": "Task 3: conn.go — /rt WSS 端点（升级/Origin/读限/心跳/单写者泵/SessionManager 分派）"
+    },
+    {
+      "command": "go test ./pkg/rt/ -run TestVAD -count=1",
+      "statement": "non-zero exit，或输出含 \"no tests to run\"，或 \"FAIL\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-04-PLAN.md",
+      "task": "Task 1: vad.go — 能量 VAD 切句（hysteresis/hangover/pre-roll/max-segment）"
+    },
+    {
+      "command": "go test ./pkg/rt/ -count=1 && go vet ./pkg/rt/",
+      "statement": "任一 stage non-zero exit，或 go test 输出含 \"FAIL\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-04-PLAN.md",
+      "task": "Task 2: turn.go — 轮次 FSM + epoch 取消 + MiMo 工具环 + 逐句流式 TTS"
+    },
+    {
+      "command": "go test ./pkg/rt/ -run TestTurnOverConn -count=1 -v",
+      "statement": "non-zero exit，或输出含 \"no tests to run\"，或输出缺少 \"--- PASS\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-04-PLAN.md",
+      "task": "Task 3: turn_integration_test.go — 进程内整链集成（conn → TurnManager → fakes）"
+    },
+    {
+      "command": "node tests/test-rt-timing.js && node -e \"new Function(require('fs').readFileSync('pkg/web/static/tutor/js/rt-client.js','utf8')); console.log('parse-ok')\"",
+      "statement": "任一 stage non-zero exit，或 stdout 缺 \"parse-ok\"，或测试断言失败退出非零",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-05-PLAN.md",
+      "task": "Task 1: rt-client.js + tutor 页骨架 + 旧页降级横幅"
+    },
+    {
+      "command": "node -e \"['rt-capture.js','rt-playback.js','rt-pcm-worklet.js'].forEach(f=>new Function(require('fs').readFileSync('pkg/web/static/tutor/js/'+f,'utf8'))); console.log('parse-ok')\"",
+      "statement": "non-zero exit（任一文件语法错误即抛出），或 stdout 缺 \"parse-ok\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-05-PLAN.md",
+      "task": "Task 2: rt-capture.js + rt-pcm-worklet.js + rt-playback.js — 采集、播放与打断"
+    },
+    {
+      "command": "npm test && npx playwright test -c tests/playwright.rt.config.js",
+      "statement": "任一 stage non-zero exit；或 npm test 输出缺新测试文件执行痕迹；或 playwright 汇总行非 \"3 passed\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-05-PLAN.md",
+      "task": "Task 3: node 单测 + mock WSS e2e（10 轮环与打断）——独立 tests/e2e-rt/ 目录"
+    },
+    {
+      "command": "npx playwright test --list",
+      "statement": "non-zero exit，或输出含 \"rt-loop\"（存量套件拾取了新 spec = 隔离失败，H-1）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-05-PLAN.md",
+      "task": "Task 3: node 单测 + mock WSS e2e（10 轮环与打断）——独立 tests/e2e-rt/ 目录"
+    },
+    {
+      "command": "go test ./pkg/infra/ -run \"TestTLS|TestRT\" -count=1 && go test ./pkg/infra/ -short -count=1",
+      "statement": "任一 stage non-zero exit，或第一条命令输出含 \"no tests to run\"（过滤词落空），或 \"FAIL\"",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-06-PLAN.md",
+      "task": "Task 1: infra config — server.tls 与 rt 配置段"
+    },
+    {
+      "command": "go build ./... && go vet ./cmd/service/ ./pkg/rt/ && go test ./pkg/rt/ ./pkg/lesson/ -count=1",
+      "statement": "任一 stage non-zero exit（build 失败/vet 报告/测试 FAIL）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-06-PLAN.md",
+      "task": "Task 2: mimo_adapters.go + main.go 接线（/rt、/tutor/、TLS、lesson 迁移）"
+    },
+    {
+      "command": "go test ./cmd/service/ -run \"TestRunTLS|TestRunNoTLS\" -count=1 -v && go test ./cmd/service/ -short -count=1",
+      "statement": "任一 stage non-zero exit，或 -v 输出对 TestRunTLSHTTPSServesTutorAndRT 既无 \"--- PASS\" 也无 \"--- SKIP\"（用例未被执行）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-06-PLAN.md",
+      "task": "Task 3: TLS 接线测试 + DEPLOYMENT.md 证书部署段"
+    },
+    {
+      "command": "go build ./... && go test ./pkg/mimo/ -short -count=1 -run \"TestASR|TestTranscribe\" -v",
+      "statement": "non-zero exit，或输出缺少新增的两个用例名（空 choices 用例未跑到）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-07-PLAN.md",
+      "task": "Task 1: pkg/mimo — ASR 空转写哨兵 ErrEmptyTranscription"
+    },
+    {
+      "command": "go test ./pkg/lesson/ -count=1 -v",
+      "statement": "non-zero exit，或输出不含 TestEnsureLessonCards / TestMigrateAddsCardsColumnToLegacyTable 任一行",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-07-PLAN.md",
+      "task": "Task 2: pkg/lesson — Word 类型与 lessons.cards 列（幂等迁移）"
+    },
+    {
+      "command": "go test ./pkg/rt/ -run \"TestProtocol|TestErrorCode\" -count=1 && go build ./... && go vet ./pkg/rt/",
+      "statement": "non-zero exit，或测试输出 \"0 tests\" 类空跑（-run 过滤命中 0 个用例）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-07-PLAN.md",
+      "task": "Task 3: pkg/rt/protocol — paused / lesson_unavailable / 结束原因词表"
+    },
+    {
+      "command": "go build ./... && go vet ./pkg/rt/ && go test ./pkg/rt/ -count=1 -run \"TestDictation\" -v",
+      "statement": "non-zero exit，或输出不含 TestDictationOpeningGreetsAndAnnounces / TestDictationConfirmAdvancesAndAnnouncesNext / TestDictationDoubleConfirmIdempotent 三行 ok",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-08-PLAN.md",
+      "task": "Task 1: 端到端默写主环 — dictation.go 状态机 + turn.go 管线重排"
+    },
+    {
+      "command": "go test ./pkg/rt/ -count=1 -run \"TestClassify|TestCompletion\" -v",
+      "statement": "non-zero exit，或五个新增用例名任一未出现在输出中",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-08-PLAN.md",
+      "task": "Task 2: 意图分类契约 + 完结路径（总结/学习记录/诚实失败）"
+    },
+    {
+      "command": "go test ./pkg/rt/ -count=1 && go test ./pkg/rt/ -count=1 -run \"TestDictationOverConn\" -v",
+      "statement": "non-zero exit，或集成双用例任一 FAIL",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-08-PLAN.md",
+      "task": "Task 3: 测试套件收口 — tool 环测试改写 + 整链集成双用例"
+    },
+    {
+      "command": "go test ./pkg/rt/ -count=1 -run \"TestIntent\" -v",
+      "statement": "non-zero exit，或六个用例名任一缺失或 FAIL",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-09-PLAN.md",
+      "task": "Task 1: 四类口令意图实现（repeat/slow/hint/meaning 的模板与 reply 路径）"
+    },
+    {
+      "command": "go test ./pkg/rt/ -count=1 -run \"TestWordTimer|TestWordTimeout|TestStaleTimer|TestTimeoutConfirmRace\" -v",
+      "statement": "non-zero exit，或五个用例名任一缺失或 FAIL",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-09-PLAN.md",
+      "task": "Task 2: 60 秒词计时器 — 武装/重置/挂起/到点推进"
+    },
+    {
+      "command": "go test ./pkg/rt/ -count=1 -run \"TestVAD|TestASR|TestDictationOverConn\" -v && go vet ./pkg/rt/",
+      "statement": "non-zero exit，或新增用例名（TestVADStartGraceSuppressesEarlyAudio / TestVADEchoTailSuppressesPostSpeechAudio / TestASREmptyTranscriptionSilentlyIgnored / TestASRInvalidResponseRetriedOnce / TestDictationOverConnEarlyNoiseDoesNotStartTurn）任一缺失或 FAIL",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-09-PLAN.md",
+      "task": "Task 3: 缺陷修复 — VAD 静默期门控 + ASR 空转写容忍 + 坏响应重试整合"
+    },
+    {
+      "command": "go test ./pkg/infra/ -short -count=1 -run \"TestRT|TestTLS|TestLoadConfig\" -v",
+      "statement": "non-zero exit，或输出不含 TestRTAndTLSEnvBinding 的 ok 行",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-10-PLAN.md",
+      "task": "Task 1: RTConfig 重构 — lessonWords 退场、lessonId 可空、wordTimeoutMs"
+    },
+    {
+      "command": "go test ./pkg/rt/ -count=1 -run \"TestPyFSRS\" -v && go build ./...",
+      "statement": "non-zero exit，或三个用例名任一缺失",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-10-PLAN.md",
+      "task": "Task 2: rt.PyFSRS 适配器 — pybridge.Executor → WordSource"
+    },
+    {
+      "command": "go build ./... && go vet ./cmd/service/ ./pkg/rt/ && go test ./cmd/service/ -short -count=1 && go test ./pkg/rt/ ./pkg/infra/ -short -count=1 && grep -q wordTimeoutMs docs/DEPLOYMENT.md && grep -q lesson_unavailable docs/DEPLOYMENT.md && grep -q vocabDBPath docs/DEPLOYMENT.md",
+      "statement": "non-zero exit，或 cmd/service 测试输出出现 FAIL",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-10-PLAN.md",
+      "task": "Task 3: main.go 注线 + wiring 测试 + DEPLOYMENT.md rt 段"
+    },
+    {
+      "command": "npm test",
+      "statement": "non-zero exit，或输出不含 test-rt-timing 的通过行",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-11-PLAN.md",
+      "task": "Task 1: tutor 页 — paused/完结/无到期词/错误映射/动态进度"
+    },
+    {
+      "command": "if (rg -q 'innerHTML' pkg/web/static/tutor/index.html pkg/web/static/tutor/js/rt-client.js pkg/web/static/tutor/js/rt-playback.js pkg/web/static/tutor/js/rt-capture.js) { 'FAIL: innerHTML found'; exit 1 } else { 'clean: no innerHTML' }",
+      "statement": "输出 \"FAIL: innerHTML found\"（退出码 1）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-11-PLAN.md",
+      "task": "Task 1: tutor 页 — paused/完结/无到期词/错误映射/动态进度"
+    },
+    {
+      "command": "node --check tests/e2e-rt/mock-rt-server.js",
+      "statement": "non-zero exit（语法错误）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-11-PLAN.md",
+      "task": "Task 2: mock 服务重写 — 默写流脚本（报词/推进/暂停/完结）"
+    },
+    {
+      "command": "npx playwright test -c tests/playwright.rt.config.js",
+      "statement": "non-zero exit，或汇总行显示任何 failed（预期 3 passed）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-11-PLAN.md",
+      "task": "Task 3: e2e 三用例重写 + 隔离复检"
+    },
+    {
+      "command": "npx playwright test --list",
+      "statement": "non-zero exit，或输出含 \"rt-loop\"（存量套件拾取 mock spec = 隔离失败）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-11-PLAN.md",
+      "task": "Task 3: e2e 三用例重写 + 隔离复检"
+    },
+    {
+      "command": "go test ./pkg/... ./cmd/... -short -count=1 && npm test && npx playwright test -c tests/playwright.rt.config.js",
+      "statement": "任一 stage non-zero exit，或 playwright 汇总行含 failed",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-12-PLAN.md",
+      "task": "Task 1: 全量预检 + 新构建重启本机预验收通道 + 取词冒烟"
+    },
+    {
+      "command": "npx playwright test --list",
+      "statement": "non-zero exit，或输出含 \"rt-loop\"（存量套件隔离失败）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-12-PLAN.md",
+      "task": "Task 1: 全量预检 + 新构建重启本机预验收通道 + 取词冒烟"
+    },
+    {
+      "command": "node scripts/rt-timing-report.js --self-test && git diff --cached --stat",
+      "statement": "self-test non-zero exit，或暂存区为空（证据未提交）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-12-PLAN.md",
+      "task": "Task 3: 时序报告 + 证据落档提交"
+    },
+    {
+      "command": "go test ./pkg/... ./cmd/... -short -count=1 && npm test && node scripts/rt-timing-report.js --self-test && sha256sum bin/home-tutor-agent-linux",
+      "statement": "任一 stage non-zero exit，或 sha256 无输出（构建产物缺失）",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-13-PLAN.md",
+      "task": "Task 1: 预检 + Linux 部署包 + 配置差异与前提清单"
+    },
+    {
+      "command": "node scripts/rt-timing-report.js --self-test && git diff --cached --stat",
+      "statement": "self-test non-zero exit，或暂存区为空",
+      "status": "ok",
+      "severity": "none",
+      "plan": "13-13-PLAN.md",
+      "task": "Task 4: 第六周口径报告 + 检查行落档 + 证据提交"
+    }
+  ],
+  "counts": {
+    "blocker": 0,
+    "warning": 0,
+    "total": 40
+  },
+  "readError": null
+}

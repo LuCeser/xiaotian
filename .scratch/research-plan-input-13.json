@@ -1,0 +1,13 @@
+{
+  "ecosystem": "npm",
+  "config": { "exa_search": false, "brave_search": false, "firecrawl": true },
+  "questions": [
+    { "text": "Does Xiaomi MiMo LLM chat completions API support function calling / tools parameter (OpenAI-compatible tools, tool_calls)?", "kind": "docs", "library": "xiaomi-mimo", "version": "mimo-v2.5" },
+    { "text": "MiMo ASR whole-segment audio input API: accepted audio formats, max audio duration or size, streaming text output behavior", "kind": "docs", "library": "xiaomi-mimo", "version": "mimo-v2.5-asr" },
+    { "text": "MiMo TTS streaming SSE: chunk wire format, first-chunk latency, pcm16 output support", "kind": "docs", "library": "xiaomi-mimo", "version": "mimo-v2.5-tts" },
+    { "text": "Server-side voice activity detection (VAD) in pure Go without CGO for a WebSocket voice agent: energy-based VAD vs Silero VAD ONNX vs webrtcvad cgo", "kind": "web" },
+    { "text": "iPad Safari AudioWorklet continuous microphone capture getUserMedia constraints echoCancellation autoGainControl noiseSuppression iOS support", "kind": "web" },
+    { "text": "Browser voice agent barge-in interruption design: prevent self-interruption from speaker echo, half-duplex gating while TTS playing", "kind": "web" },
+    { "text": "WebSocket realtime audio protocol: binary audio frames plus JSON control messages multiplexing best practices", "kind": "web" }
+  ]
+}

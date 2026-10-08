@@ -1,0 +1,47 @@
+{
+  "generated_at": "2026-10-06T05:48:12.760Z",
+  "session_id": "rt-10",
+  "lesson_id": "r0-20261006",
+  "words_count": 10,
+  "current_index": 10,
+  "duration_ms": 645,
+  "exit_context": "completed_resume",
+  "path_taken": "completed_resume",
+  "observations": {
+    "client_turns": 0,
+    "first_audio_played_events": 0,
+    "clock_offset_events": 0,
+    "sentence_acks_sent": 0,
+    "audio_starts": 0,
+    "audio_ends": 0,
+    "lesson_updates": 0,
+    "errors": []
+  },
+  "results": [
+    {
+      "assertion": "a_session_ready",
+      "pass": true,
+      "detail": "session_ready session=rt-10 lesson=r0-20261006 words=10 current_index=10 version=11"
+    },
+    {
+      "assertion": "b_path_taken",
+      "pass": true,
+      "detail": "completed-resume path: session_ended(lesson_complete) arrived with no actionable word (index 10/10) — pkg/rt/turn.go startCompletedSession; greeting/confirm impossible today, recorded honestly"
+    },
+    {
+      "assertion": "c_no_audio_expected",
+      "pass": true,
+      "detail": "audio_starts=0 first_audio_played=false (completed resume plays nothing)"
+    },
+    {
+      "assertion": "d_no_turns_expected",
+      "pass": true,
+      "detail": "client turns=0 (uplink turns impossible before close)"
+    },
+    {
+      "assertion": "e_server_events_completed_resume",
+      "pass": true,
+      "detail": "server rt_events: connected=1 session_end=0 (session_end=0 is by design — internalClose pre-marks closed; session=rt-10)"
+    }
+  ]
+}

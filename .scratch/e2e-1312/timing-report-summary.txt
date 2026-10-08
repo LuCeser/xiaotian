@@ -1,0 +1,29 @@
+=== RT 鏃跺簭璇佹嵁鍒嗘瀽 (rt-timing-report) ===
+瀹㈡埛绔細璇?1 | 鏈嶅姟绔細璇?7 | 閰嶅 0 | 瀹㈡埛绔潖琛?0
+鍙ｅ緞: 瀹㈡埛绔?t_ms=椤甸潰鍗曡皟閽? 鏈嶅姟绔?t_mono_ns=杩涚▼鍗曡皟閽? 璺ㄦ満鏃跺埢浠呯粡 clock_offset 涓綅鏁版牎鍑嗘崲绠楀苟闄?卤RTT/2 璇樊鐣? 缁濅笉鐩存帴鐩稿噺銆?鏍锋湰鏀跨瓥: P50/P95 鍩轰簬瀹屾垚鏍锋湰锛涘け璐?鏃爋ffset/鏃犻敋鐐规牱鏈樉寮忚鏁颁笉鍓旈櫎锛涜法鏈烘椂鍒讳粎缁?clock_offset 涓綅鏁版牎鍑嗘崲绠楀苟闄?卤RTT/2 璇樊鐣?
+[浼氳瘽閰嶅 (turn_id 闆嗗悎鏈€澶ч噸鍙?]
+  鏈厤瀵瑰鎴风浼氳瘽: .scratch/e2e-1312/rt-timing-e2e-1312.jsonl
+  鏈厤瀵规湇鍔＄浼氳瘽: rt-1, rt-2, rt-3, rt-4, rt-5, rt-6, rt-7
+
+[棣栨闂€?auth_complete -> first_audio_played (瀹㈡埛绔挓)]
+  .scratch/e2e-1312/rt-timing-e2e-1312.jsonl  澶辫触: 缂?auth_complete 浜嬩欢
+  鍚堣: n=0 澶辫触=1 P50=n/ams P95=n/ams
+
+[鍙ユ湯 -> 棣栧疄闄呭彲鍚?(RT-04 绗叚鍛ㄥ垽瀹氬彛寰?]
+  clock_offset 鏍″噯绔埌绔? n=0 (鏃犲彲绠楁牱鏈?
+  鏃犳湇鍔＄閰嶅浼氳瘽: 1 涓?(璺ㄦ満鎸囨爣涓嶅彲绠?
+  杈呭姪鍚岄挓瀵圭収 (涓嶈法鏈虹浉鍑?:
+    鏈嶅姟绔?speech_ended -> first_audio_received: n=0 P50=n/ams P95=n/ams
+    瀹㈡埛绔?(connected 鍚庨浜嬩欢) -> first_audio_played: n=0 P50=n/ams P95=n/ams
+
+[鍝嶅簲鏍锋湰 (姣忚疆 speech_ended 涓轰竴杞? 澶辫触鏍锋湰淇濈暀璁℃暟)]
+  speech_ended 鎬昏疆鏁?0 瀹屾垚(鏈夐煶棰?=0 澶辫触(鏃犻煶棰?=0 鏈嶅姟绔?error 浜嬩欢=0 瀹㈡埛绔嫭鏈夐煶棰戣疆=0
+  鏍″噯鍙畻 n=0 鏃爋ffset鍗曠嫭璁?0 鏃犻煶棰戝け璐?0
+
+[鎵撴柇 interrupt_start -> interrupt_stop (瀹㈡埛绔挓)]
+  start 鎬绘暟=1 瀹屾垚=1 澶辫触(鏃爏top)=0 瀛ゅ効stop=0 鏈嶅姟绔?handled=0
+  P50=1ms P95=1ms (鍩轰簬瀹屾垚鏍锋湰; 澶辫触璁℃暟瑙佷笂, 鏈墧闄?
+
+[鏈嶅姟绔伐鍏锋墽琛?(tool_start -> tool_end, 鎸?request_id 閰嶅)]
+  (鏃犲伐鍏蜂簨浠?
+  lesson_version 浜嬩欢: 0

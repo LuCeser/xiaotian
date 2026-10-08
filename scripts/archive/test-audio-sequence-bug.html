@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Audio Sequence Bug Test</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #eee; }
+        .test-section { border: 1px solid #444; padding: 15px; margin: 10px 0; border-radius: 5px; }
+        .bug-demonstration { background: #3a1a1a; border-color: #844; }
+        .fix-demonstration { background: #1a3a1a; border-color: #484; }
+        code { background: #222; padding: 2px 6px; border-radius: 3px; }
+        pre { background: #222; padding: 10px; border-radius: 5px; overflow-x: auto; }
+        .result { margin: 10px 0; padding: 10px; border-radius: 5px; }
+        .bug { background: #622; }
+        .correct { background: #262; }
+    </style>
+</head>
+<body>
+    <h1>Audio Sequence Bug Analysis & Test</h1>
+
+    <div class="test-section bug-demonstration">
+        <h2>🐛 Bug Demonstration (Current Code)</h2>
+        <h3>Problem: streamer.go lines 93-96</h3>
+        <pre><code>// Current BUGGY code:
+if startSeq > 0 {
+    startIndex = int(startSeq - 1)  // ❌ WRONG!
+}</code></pre>
+
+        <h3>Test Cases:</h3>
+        <div id="bug-results"></div>
+    </div>
+
+    <div class="test-section fix-demonstration">
+        <h2>✅ Fix Demonstration</h2>
+        <h3>Corrected Code:</h3>
+        <pre><code>// Fixed code:
+if startSeq > 0 {
+    startIndex = int(startSeq)  // ✅ CORRECT
+}</code></pre>
+
+        <h3>Test Cases:</h3>
+        <div id="fix-results"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>🔍 Root Cause Analysis</h2>
+        <p><strong>The bug:</strong> When <code>startSeq=1</code> is passed, the current code does <code>startIndex = 1 - 1 = 0</code>, then later at line 115 it does <code>currentSeq = 0 + 1 = 1</code>. This is correct!</p>
+        <p><strong>BUT WAIT:</strong> There's a subtle interaction bug. Let me trace through what happens when you play "hello" (word 1):</p>
+        <ol>
+            <li><code>handlePlayWord</code> calls <code>streamer.StreamWord(ctx, client, sessionID, "hello", 0)</code></li>
+            <li>The bug is in the <strong>sequence numbering</strong>, not the start index</li>
+        </ol>
+        <p><strong>Actual Bug:</strong> Look at streamer.go line 115: <code>currentSeq := uint32(i + 1)</code></p>
+        <p>When you have 5 words and play word 1 ("hello"), the streamer sends sequences 1,2,3... for "hello". But if there's any buffering or cross-contamination, sequences from other words might mix in!</p>
+    </div>
+
+    <div class="test-section">
+        <h2>🎯 Real Bug: Sequence Number Reuse</h2>
+        <p><strong>Hypothesis:</strong> The sequence counter is not per-word, it's global or reused. When multiple words are generated in a session, their audio frames might have overlapping or conflicting sequence numbers.</p>
+        <div id="sequence-test"></div>
+    </div>
+
+    <script>
+        // Test 1: Demonstrate the startSeq logic
+        function testStartSeqLogic() {
+            const bugResults = document.getElementById('bug-results');
+            const fixResults = document.getElementById('fix-results');
+
+            const testCases = [
+                { startSeq: 0, description: "First word (should play all frames)" },
+                { startSeq: 1, description: "Resume from sequence 1" },
+                { startSeq: 5, description: "Resume from sequence 5" }
+            ];
+
+            bugResults.innerHTML = '<h4>Current (Buggy) Behavior:</h4>';
+            fixResults.innerHTML = '<h4>Fixed Behavior:</h4>';
+
+            testCases.forEach(({startSeq, description}) => {
+                // Current buggy logic
+                let startIndex_bug = 0;
+                if (startSeq > 0) {
+                    startIndex_bug = startSeq - 1; // BUG!
+                }
+                const firstSeq_bug = startIndex_bug + 1;
+
+                // Fixed logic
+                let startIndex_fix = 0;
+                if (startSeq > 0) {
+                    startIndex_fix = startSeq; // FIX
+                }
+                const firstSeq_fix = startIndex_fix + 1;
+
+                bugResults.innerHTML += `<div class="result bug">
+                    <strong>${description}</strong><br>
+                    startSeq=${startSeq} → startIndex=${startIndex_bug} → firstSeq=${firstSeq_bug}<br>
+                    <span style="color: #f66">❌ Skips frames 0-${startIndex_bug-1} (if any)</span>
+                </div>`;
+
+                fixResults.innerHTML += `<div class="result correct">
+                    <strong>${description}</strong><br>
+                    startSeq=${startSeq} → startIndex=${startIndex_fix} → firstSeq=${firstSeq_fix}<br>
+                    <span style="color: #6f6">✅ Correctly resumes from sequence ${startSeq}</span>
+                </div>`;
+            });
+        }
+
+        // Test 2: Demonstrate the real bug - sequence number reuse
+        function testSequenceReuse() {
+            const container = document.getElementById('sequence-test');
+            container.innerHTML = '<h4>Sequence Number Analysis:</h4>';
+
+            // Simulate what happens with 5 words
+            const words = ['hello', 'world', 'water', 'apple', 'banana'];
+            let globalSequence = 1; // Hypothesis: sequences are global
+
+            container.innerHTML += '<p><strong>Scenario:</strong> You play word 1 ("hello"), but the audio contains all 5 words:</p>';
+            container.innerHTML += '<table border="1" style="border-collapse: collapse; width: 100%;">';
+            container.innerHTML += '<tr><th>Word</th><th>Frames</th><th>Sequences (if global counter)</th></tr>';
+
+            let allSequences = [];
+            words.forEach(word => {
+                const frameCount = Math.floor(Math.random() * 20) + 10; // 10-30 frames per word
+                const sequences = [];
+                for (let i = 0; i < frameCount; i++) {
+                    sequences.push(globalSequence++);
+                }
+                allSequences.push({ word, sequences });
+                container.innerHTML += `<tr><td>${word}</td><td>${frameCount}</td><td>${sequences[0]}-${sequences[sequences.length-1]}</td></tr>`;
+            });
+
+            container.innerHTML += '</table>';
+            container.innerHTML += `<p class="result bug">
+                <strong>🐛 BUG:</strong> If all 5 words' audio is in one buffer and sequences are global,
+                when you request "hello" (sequences 1-${allSequences[0].sequences.length}),
+                the streamer might send ALL frames from sequence 1 onwards, which includes words 2-5!
+            </p>`;
+
+            container.innerHTML += `<p class="result correct">
+                <strong>✅ FIX:</strong> Each <code>StreamWord</code> call should reset sequence numbering to 1,
+                OR the <code>SliceToFrames</code> should only contain frames for THAT specific word.
+            </p>`;
+        }
+
+        // Run tests
+        testStartSeqLogic();
+        testSequenceReuse();
+    </script>
+</body>
+</html>

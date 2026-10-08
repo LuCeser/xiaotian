@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Debug Interface - Audio Bug Investigation</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: monospace; background: #1a1a1a; color: #eee; padding: 20px; }
+
+        .debug-section {
+            border: 1px solid #444;
+            background: #2a2a2a;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+
+        .bug-alert {
+            background: #3a1a1a;
+            border: 2px solid #844;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+
+        .log-entry { padding: 2px 5px; border-left: 3px solid #444; margin: 2px 0; }
+        .log-frame { border-left-color: #484; }
+        .log-control { border-left-color: #448; }
+        .log-status { border-left-color: #848; }
+        .log-bug { border-left-color: #844; background: #2a1a1a; }
+
+        button { padding: 8px 16px; margin: 5px; border: none; border-radius: 4px; cursor: pointer; }
+        .btn-primary { background: #448; color: white; }
+        .btn-danger { background: #844; color: white; }
+        .btn-success { background: #484; color: white; }
+
+        input { padding: 8px; margin: 5px; background: #333; border: 1px solid #555; color: white; border-radius: 4px; }
+
+        #debugLog { height: 400px; overflow-y: auto; background: #111; padding: 10px; border-radius: 5px; font-size: 12px; }
+        .stats { display: flex; gap: 20px; padding: 10px; background: #333; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>🔍 Audio Bug Debug Interface</h1>
+
+    <div class="bug-alert">
+        <h2>🐛 Bug Investigation Focus</h2>
+        <p><strong>Symptom:</strong> Playing word 1 ("hello") plays words 1-5 with gaps/silence</p>
+        <p><strong>Hypothesis:</strong> Frontend continues collecting audio frames after word_complete, or backend sends multiple words' frames</p>
+    </div>
+
+    <div class="debug-section">
+        <h2>Connection Controls</h2>
+        <input type="text" id="userId" value="test" placeholder="User ID">
+        <button class="btn-primary" onclick="connect()">Connect</button>
+        <button class="btn-danger" onclick="disconnect()">Disconnect</button>
+        <div id="wsStatus">Status: Disconnected</div>
+    </div>
+
+    <div class="debug-section">
+        <h2>Session Controls</h2>
+        <input type="number" id="wordCount" value="5" min="1" max="10">
+        <button class="btn-success" onclick="startSession()">Start Session</button>
+        <div id="sessionInfo"></div>
+    </div>
+
+    <div class="debug-section">
+        <h2>Word Playback Test</h2>
+        <div id="wordButtons"></div>
+        <button class="btn-primary" onclick="testSingleWord()">Test Word 1 Only</button>
+        <button class="btn-danger" onclick="clearDebugLog()">Clear Log</button>
+    </div>
+
+    <div class="debug-section">
+        <h2>Frame Collection Stats</h2>
+        <div class="stats">
+            <div>Frames Collected: <strong id="frameCount">0</strong></div>
+            <div>Current State: <strong id="playbackState">idle</strong></div>
+            <div>Active Word: <strong id="activeWord">none</strong></div>
+            <div>Last Sequence: <strong id="lastSequence">0</strong></div>
+            <div>Word Complete Received: <strong id="wordCompleteCount">0</strong></div>
+        </div>
+    </div>
+
+    <div class="debug-section">
+        <h2>🔍 Debug Log (Enhanced)</h2>
+        <div id="debugLog"></div>
+    </div>
+
+    <script>
+        // ==================== DEBUG STATE TRACKING ====================
+        let ws = null;
+        let connectionState = 'CLOSED';
+
+        // Enhanced playback state with debugging
+        let playback = {
+            active: false,
+            wordId: null,
+            audioBuffer: [],
+            startTime: null,
+            frameCount: 0,
+            expectedFrames: 0,
+            state: 'idle' // idle, requesting, collecting, playing, completed
+        };
+
+        let sessionWords = [];
+        let currentSessionId = null;
+        let debugLog = [];
+        let wordCompleteReceived = 0;
+        let sequenceNumbers = [];
+
+        // ==================== PROTOCOL CONSTANTS ====================
+        const MsgType = { Audio: 0x01, Control: 0x02, Error: 0x03, Heartbeat: 0x04, Session: 0x05, Status: 0x06 };
+        const HeaderSize = 16;
+        const AudioFrameSize = 640;
+
+        // ==================== DEBUG LOGGING ====================
+        function debug(message, type = 'status') {
+            const timestamp = new Date().toISOString().substr(11, 12);
+            const entry = `[${timestamp}] [${type.toUpperCase()}] ${message}`;
+            debugLog.push(entry);
+
+            const logDiv = document.getElementById('debugLog');
+            const entryDiv = document.createElement('div');
+            entryDiv.className = `log-entry log-${type}`;
+            entryDiv.textContent = entry;
+            logDiv.appendChild(entryDiv);
+            logDiv.scrollTop = logDiv.scrollHeight;
+
+            updateStats();
+        }
+
+        function clearDebugLog() {
+            debugLog = [];
+            document.getElementById('debugLog').innerHTML = '';
+        }
+
+        function updateStats() {
+            document.getElementById('frameCount').textContent = playback.frameCount;
+            document.getElementById('playbackState').textContent = playback.state;
+            document.getElementById('activeWord').textContent = playback.wordId || 'none';
+            document.getElementById('lastSequence').textContent = sequenceNumbers.length > 0 ? sequenceNumbers[sequenceNumbers.length - 1] : 0;
+            document.getElementById('wordCompleteCount').textContent = wordCompleteReceived;
+        }
+
+        // ==================== WEBSOCKET CONNECTION ====================
+        function connect() {
+            const userId = document.getElementById('userId').value || 'test';
+            const wsHost = window.location.hostname + ':8080';
+            const wsUrl = 'ws://' + wsHost + '/ws?user_id=' + encodeURIComponent(userId) + '&device=web';
+
+            document.getElementById('wsStatus').textContent = 'Status: Connecting...';
+            debug(`Connecting to ${wsUrl}`, 'control');
+
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                connectionState = 'OPEN';
+                document.getElementById('wsStatus').textContent = 'Status: Connected';
+                debug('WebSocket connected', 'control');
+            };
+
+            ws.onmessage = (event) => handleMessage(event.data);
+
+            ws.onerror = () => {
+                connectionState = 'ERROR';
+                document.getElementById('wsStatus').textContent = 'Status: Error';
+                debug('WebSocket error', 'bug');
+            };
+
+            ws.onclose = (event) => {
+                connectionState = 'CLOSED';
+                document.getElementById('wsStatus').textContent = 'Status: Disconnected';
+                debug(`WebSocket closed: ${event.code} ${event.reason}`, 'control');
+            };
+        }
+
+        function disconnect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close(1000, 'User disconnected');
+            }
+        }
+
+        // ==================== MESSAGE HANDLING ====================
+        function handleMessage(data) {
+            if (!(data instanceof ArrayBuffer)) {
+                debug(`Received non-binary data: ${data}`, 'bug');
+                return;
+            }
+
+            const header = parseFrameHeader(data.slice(0, HeaderSize));
+            const payload = new Uint8Array(data, HeaderSize);
+
+            switch (header.msgType) {
+                case MsgType.Audio:
+                    handleAudioFrame(payload, header);
+                    break;
+                case MsgType.Control:
+                    handleControlFrame(payload);
+                    break;
+                case MsgType.Status:
+                    handleStatusFrame(payload);
+                    break;
+                default:
+                    debug(`Unknown msgType: 0x${header.msgType.toString(16)}`, 'bug');
+            }
+        }
+
+        // ==================== AUDIO FRAME HANDLING (DEBUG VERSION) ====================
+        function handleAudioFrame(payload, header) {
+            const sequence = header.sequence;
+            sequenceNumbers.push(sequence);
+
+            // 🔍 CRITICAL DEBUG: Check state BEFORE processing frame
+            const stateBefore = playback.state;
+            const activeWord = playback.wordId;
+            const wasActive = playback.active;
+
+            if (!playback.active) {
+                debug(`Frame ${sequence} IGNORED (playback.active=false)`, 'frame');
+                return;
+            }
+
+            if (payload.length !== AudioFrameSize) {
+                debug(`Frame ${sequence} INVALID (size ${payload.length} != ${AudioFrameSize})`, 'bug');
+                return;
+            }
+
+            // 🔍 CRITICAL DEBUG: Collecting frame
+            playback.audioBuffer.push(new Uint8Array(payload));
+            playback.frameCount++;
+
+            // 🐛 BUG DETECTION: Check if we're still collecting after word_complete
+            if (playback.state === 'completed') {
+                debug(`🐛 BUG DETECTED: Frame ${sequence} collected AFTER word_complete!`, 'bug');
+                debug(`🐛 This means we're collecting frames for the wrong word!`, 'bug');
+            }
+
+            // Log every 10th frame to reduce spam
+            if (playback.frameCount % 10 === 0 || playback.frameCount <= 5) {
+                debug(`Frame ${sequence} collected (total: ${playback.frameCount}) for word "${activeWord}"`, 'frame');
+            }
+
+            // Check for duplicates
+            if (sequenceNumbers.length > 1) {
+                const lastSeq = sequenceNumbers[sequenceNumbers.length - 2];
+                if (sequence <= lastSeq) {
+                    debug(`🐛 DUPLICATE SEQUENCE: ${sequence} (previous: ${lastSeq})`, 'bug');
+                }
+            }
+        }
+
+        // ==================== STATUS FRAME HANDLING (DEBUG VERSION) ====================
+        function handleStatusFrame(payload) {
+            const text = new TextDecoder().decode(payload);
+            let data;
+            try {
+                data = JSON.parse(text);
+            } catch (e) {
+                debug(`Status frame (non-JSON): ${text.substring(0, 100)}`, 'status');
+                return;
+            }
+
+            if (data.type === 'word_complete') {
+                wordCompleteReceived++;
+                const completedWord = data.word_id;
+
+                debug(`📨 word_complete received for "${completedWord}"`, 'status');
+
+                // 🔍 CRITICAL DEBUG: Check if this matches our active word
+                if (playback.wordId !== completedWord) {
+                    debug(`🐛 BUG: word_complete for "${completedWord}" but active word is "${playback.wordId}"`, 'bug');
+                }
+
+                // 🔍 CRITICAL DEBUG: What state are we in?
+                if (playback.state !== 'collecting') {
+                    debug(`🐛 BUG: word_complete received but state is "${playback.state}" not "collecting"`, 'bug');
+                }
+
+                // 🐛 BUG DETECTION: Does playback.active stay true?
+                if (playback.active) {
+                    debug(`🐛 BUG DETECTED: playback.active=true AFTER word_complete!`, 'bug');
+                    debug(`🐛 This means we'll continue collecting frames for the NEXT word!`, 'bug');
+                }
+
+                // Set state to completed
+                playback.state = 'completed';
+                debug(`State changed: collecting → completed`, 'status');
+            } else {
+                debug(`Status frame: ${text.substring(0, 100)}`, 'status');
+            }
+
+            updateStats();
+        }
+
+        // ==================== CONTROL FRAME HANDLING ====================
+        function handleControlFrame(payload) {
+            const text = new TextDecoder().decode(payload);
+            let data;
+            try {
+                data = JSON.parse(text);
+            } catch (e) {
+                debug(`Control frame (non-JSON): ${text.substring(0, 100)}`, 'control');
+                return;
+            }
+
+            debug(`Control frame: ${data.type}`, 'control');
+
+            switch (data.type) {
+                case 'session_ready':
+                    handleSessionReady(data);
+                    break;
+                default:
+                    debug(`Control type: ${data.type}`, 'control');
+            }
+        }
+
+        function handleSessionReady(data) {
+            currentSessionId = data.session_id;
+            sessionWords = data.words || [];
+
+            debug(`Session ready: ${currentSessionId} with ${sessionWords.length} words`, 'control');
+            document.getElementById('sessionInfo').textContent = `Session: ${currentSessionId}`;
+
+            // Create word buttons
+            const buttonDiv = document.getElementById('wordButtons');
+            buttonDiv.innerHTML = '';
+            sessionWords.forEach((word, i) => {
+                const btn = document.createElement('button');
+                btn.textContent = `Play Word ${i + 1}: "${word}"`;
+                btn.className = 'btn-primary';
+                btn.onclick = () => playWord(i);
+                buttonDiv.appendChild(btn);
+            });
+        }
+
+        // ==================== WORD PLAYBACK (DEBUG VERSION) ====================
+        function playWord(index) {
+            if (!currentSessionId || index >= sessionWords.length) {
+                debug(`Invalid play request: session=${currentSessionId}, index=${index}`, 'bug');
+                return;
+            }
+
+            const word = sessionWords[index];
+
+            // 🔍 DEBUG: Starting new word playback
+            debug(`🎵 Starting playback for word ${index + 1}: "${word}"`, 'control');
+
+            // Reset state
+            playback = {
+                active: true,
+                wordId: word,
+                audioBuffer: [],
+                startTime: Date.now(),
+                frameCount: 0,
+                expectedFrames: 0,
+                state: 'collecting'
+            };
+
+            wordCompleteReceived = 0;
+            sequenceNumbers = [];
+
+            debug(`State reset → collecting, wordId="${word}"`, 'control');
+            updateStats();
+
+            // Send play_word command
+            const payload = JSON.stringify({
+                type: 'play_word',
+                params: { word_id: word, session_id: currentSessionId }
+            });
+
+            const header = {
+                version: 1,
+                msgType: MsgType.Control,
+                sequence: 1,
+                timestamp: Math.floor(Date.now() * 1000),
+                payloadLen: payload.length,
+                reserved: 0
+            };
+
+            const frame = encodeFrame(header, payload);
+            ws.send(frame);
+
+            debug(`Sent play_word for "${word}"`, 'control');
+
+            // ⏱️ Set a timeout to detect bug
+            setTimeout(() => {
+                if (playback.state === 'collecting') {
+                    debug(`🐛 BUG DETECTED: Still in "collecting" state after 5 seconds!`, 'bug');
+                    debug(`🐛 Frames collected: ${playback.frameCount}, word_complete received: ${wordCompleteReceived}`, 'bug');
+                }
+            }, 5000);
+        }
+
+        function testSingleWord() {
+            playWord(0); // Play first word only
+        }
+
+        function startSession() {
+            const limit = parseInt(document.getElementById('wordCount').value) || 5;
+
+            const payload = JSON.stringify({
+                type: 'start_session',
+                params: { limit: limit, category: '' }
+            });
+
+            const header = {
+                version: 1,
+                msgType: MsgType.Control,
+                sequence: 1,
+                timestamp: Math.floor(Date.now() * 1000),
+                payloadLen: payload.length,
+                reserved: 0
+            };
+
+            const frame = encodeFrame(header, payload);
+            ws.send(frame);
+
+            debug(`Sent start_session with limit=${limit}`, 'control');
+        }
+
+        // ==================== FRAME ENCODING ====================
+        function parseFrameHeader(arrayBuffer) {
+            const view = new DataView(arrayBuffer);
+            return {
+                version: view.getUint8(0),
+                msgType: view.getUint8(1),
+                sequence: view.getUint32(2, false),
+                timestamp: view.getUint32(6, false),
+                payloadLen: view.getUint16(10, false),
+                reserved: view.getUint16(12, false)
+            };
+        }
+
+        function encodeFrame(header, payloadStr) {
+            const payloadBytes = new TextEncoder().encode(payloadStr);
+            const buffer = new ArrayBuffer(16 + payloadBytes.length);
+            const view = new DataView(buffer);
+
+            view.setUint8(0, header.version);
+            view.setUint8(1, header.msgType);
+            view.setUint32(2, header.sequence, false);
+            view.setUint32(6, header.timestamp, false);
+            view.setUint16(10, header.payloadLen, false);
+            view.setUint16(12, header.reserved, false);
+
+            new Uint8Array(buffer).set(payloadBytes, 16);
+            return buffer;
+        }
+
+        // ==================== INITIALIZATION ====================
+        debug('Debug interface loaded', 'status');
+        updateStats();
+    </script>
+</body>
+</html>

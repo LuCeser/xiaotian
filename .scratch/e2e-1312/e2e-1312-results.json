@@ -1,0 +1,114 @@
+{
+  "generated_at": "2026-10-06T05:24:10.008Z",
+  "session_id": "rt-7",
+  "lesson_id": "r0-20261006",
+  "words_count": 10,
+  "duration_ms": 265931,
+  "exit_context": "complete",
+  "observations": {
+    "zero_length_server_binary_frames": 20,
+    "non_json_server_text_frames": [],
+    "client_turns": 11,
+    "sentence_acks_sent": 19,
+    "server_audio_ends": 19
+  },
+  "defect_candidates": [
+    {
+      "assertion": "b2_vad_noise_no_turn",
+      "pass": false,
+      "detail": "noise probe turn_start=1 — noise fixture (sustained RMS≈0.058) opened a speech segment; StartRMS=0.02 design-consistent but per assertion matrix this is a false-trigger candidate (ASR found nothing, no user-visible effect)"
+    }
+  ],
+  "results": [
+    {
+      "assertion": "session_ready_words",
+      "pass": true,
+      "detail": "session_ready received; words=10 lesson_version=8 current_index=7"
+    },
+    {
+      "assertion": "a_first_greeting",
+      "pass": true,
+      "detail": "greeting sentences-with-chunks=3 audio_end=3 first_audio_played=true settled_listening@12108ms"
+    },
+    {
+      "assertion": "coverage_note",
+      "pass": true,
+      "detail": "actionable words=3 < 5: full five-feature spread needs ≥5 due words — this run still covers interrupt+timeout; rerun on a fuller due batch if needed"
+    },
+    {
+      "assertion": "k_session_ended_reason",
+      "pass": true,
+      "detail": "session_ended=lesson_complete"
+    },
+    {
+      "assertion": "b1_vad_silence_zero_false_trigger",
+      "pass": true,
+      "detail": "silence probe turn_start=0; client turns=11 vs server speech_started=11 (window 15388ms)"
+    },
+    {
+      "assertion": "b2_vad_noise_no_turn",
+      "pass": false,
+      "detail": "noise probe turn_start=1 — noise fixture (sustained RMS≈0.058) opened a speech segment; StartRMS=0.02 design-consistent but per assertion matrix this is a false-trigger candidate (ASR found nothing, no user-visible effect)"
+    },
+    {
+      "assertion": "c_no_invalid_api_response",
+      "pass": true,
+      "detail": "client provider/invalid errors=0; server error-events(provider_failed/invalid)=0; playback_ack_timeout=0; total server error events=0"
+    },
+    {
+      "assertion": "d_event_chain_counts",
+      "pass": true,
+      "detail": "word_announced=2 (expect 2, announcement of absolute word 8 was interrupted) word_advanced=3/3 lesson_complete=1 review_written=1 client lesson_update=3/3"
+    },
+    {
+      "assertion": "e1_repeat_reread",
+      "pass": true,
+      "detail": "repeat settled=true intent_seen=true"
+    },
+    {
+      "assertion": "e2_slow_reread",
+      "pass": true,
+      "detail": "slow settled=true intent_seen=true"
+    },
+    {
+      "assertion": "e3_hint_no_advance",
+      "pass": true,
+      "detail": "hint settled=true intent_seen=true (hint must not advance)"
+    },
+    {
+      "assertion": "e4_meaning_no_advance",
+      "pass": true,
+      "detail": "meaning settled=true intent_seen=true (meaning must not advance)"
+    },
+    {
+      "assertion": "f_pause_filler_resume",
+      "pass": true,
+      "detail": "paused@pause=paused filler: turns=1 advance=0 pausedAfter=paused resumedTo=listening intents pause/resume=true/true"
+    },
+    {
+      "assertion": "g_interrupt_stops_playback",
+      "pass": true,
+      "detail": "interrupt_ack=true old_epoch_audio_frames_after=0 late_old_epoch_sentences=0 (deng tail then settles as its own turn)"
+    },
+    {
+      "assertion": "h_timeout_auto_advance",
+      "pass": true,
+      "detail": "advanced=true silent_wait_ms=59118 turns_during_wait=0 server timeout_fired=1"
+    },
+    {
+      "assertion": "i_vocab_db_written",
+      "pass": true,
+      "detail": "row r0-20261006: index 10/10 version 11 (expect 10/11); review requested=3/3 updated=3 missing=0; review_logs delta=3 (vs updated=3)"
+    },
+    {
+      "assertion": "x_transcript_turns_consistent",
+      "pass": true,
+      "detail": "client turn_start=11 server speech_started=11"
+    },
+    {
+      "assertion": "x_ack_stream",
+      "pass": true,
+      "detail": "sentence_acks sent=19 audio_end=19 (interrupted epoch intentionally left unacked)"
+    }
+  ]
+}

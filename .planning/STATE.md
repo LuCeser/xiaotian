@@ -36,7 +36,7 @@ See: .planning/PROJECT.md (updated 2026-10-04)
 Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈） (INSERTED)) — ALL 8 PLANS COMPLETE
 Plan: 8 of 8（13.1-08 gap 闭合已交付：CR-01 恰一次＋WR-01 面板重置＋WR-02 冲突短路径＋IN-01 文案）
 Status: Phase execution complete — 13-13 程序性闸已放行（08 已落地）
-Last activity: 2026-10-08 — 13.1-08 complete (5 task commits + metadata)
+Last activity: 2026-10-08 — 13.1-08 complete (5 task commits + metadata)；2026-10-09 main 合并（261006/261007 快任务台账行并入）
 Next: /gsd-verify-work 13.1 → 13-13 VPS 部署+正式验收（真机三项＋13.1-08-SUMMARY 交接清单人工核对项）
 
 13-01～13-06 的实时语音基础已实现；状态机默写转向尚待执行 13-07～13-13，RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
@@ -169,8 +169,14 @@ None yet.
 | 260928-tsp | 测试提速：live 测试加 -short 跳过 + mimo 重试延迟压缩 + run.ps1 增量编译 + mimo RealAPI skip & run.ps1 hint restore | 2026-09-28 | 33f8c52,87534a4 | complete |  |
 | 20 | 新建 13-UAT-ISSUES-20261006 本机验收问题台账（U-1 E2E 残留三处已清/防复发待办、U-2 去重版本倒退缺陷立账未修、U-3 确认误判观察） | 2026-10-06 | 4b39357 | — | — |
 | 261006-u2o | U-9：评级映射实现＋逐词提示计数（裁定口径在 CHECKPOINTS；将来降级为 13.1 的未核对兜底路径） | 2026-10-06 | f948b17 | complete | [261006-u2o-u-9-checkpoints-13-1](./quick/261006-u2o-u-9-checkpoints-13-1/) |
+| 261006-tnr | reset-vocab.py 补当天课堂行删除：cards FSRS 重置 + 抓取锁清理之外，按上海时区算 r0-YYYYMMDD，先删 tool_requests 再删 lessons 当天行，重连 /rt 走新课堂重新取词（对齐 pkg/rt/dictation.go resolveLessonID） | 2026-10-06 | ed94a38 | — | [261006-tnr-add-today-lesson-row-deletion-to-root-re](./quick/261006-tnr-add-today-lesson-row-deletion-to-root-re/) |
+| 261006-u7o | 整理项目根目录：盘点一级文件与 .scratch/，可删的删、该提交的提交、建文件夹分类归档 | 2026-10-06 | 9ac1996 | — | [261006-u7o-scratch](./quick/261006-u7o-scratch/) |
 | 261007-0ct | U-2：去重版本倒退防护——重置课行的过期去重记录判定失效＋同事务清除重执行推进（pkg/lesson/executor.go） | 2026-10-07 | 7fdfac7 | complete | [261007-0ct-u-2-pkg-lesson-executor-go](./quick/261007-0ct-u-2-pkg-lesson-executor-go/) |
 | 261007-22t | U-1：E2E 隔离规范资产化——四层设计 L3 落地（tests/e2e-rt/real 五件套＋npm run e2e:rt-real＋docs/E2E-ISOLATION-SPEC.md，台账防复发闭环） | 2026-10-07 | 9b11c8f,09dc38d,c1d3c94 | complete | [261007-22t-e2e-memory-u-1](./quick/261007-22t-e2e-memory-u-1/) |
+| 261007-coe | 根目录梳理第二轮：test-interface.html 与 reset-vocab.py 归位、工具产物清理、卫生 todo 收尾 | 2026-10-07 | 60c129a | complete | [261007-coe-test-interface-html-reset-vocab-py-codex](./quick/261007-coe-test-interface-html-reset-vocab-py-codex/) |
+| 261007-d9t | run.ps1 日志归位 logs/：四日志落点迁移+目录自建+注释同步，路径级引用 playwright/e2e 驱动同提交对齐；实机两模式起停验证，冻结证据件零字节变化 | 2026-10-07 | d09ce65 | complete | [261007-d9t-run-ps1-logs-l61-l117-logs-l23-logs-giti](./quick/261007-d9t-run-ps1-logs-l61-l117-logs-l23-logs-giti/) |
+| 261007-drn | playwright 配置归位 tests/：git mv 双配置（rename 84%）+testDir 相对化+webServer.cwd 指回仓库根+调用方 -c 同步；干跑双门 7/4 与 4/1 全绿、加载期 cwd 断言通过，冻结证据件零字节变化 | 2026-10-07 | 4df02dc | complete | [261007-drn-playwright-tests-playwright-config-js-pl](./quick/261007-drn-playwright-tests-playwright-config-js-pl/) |
+| 261007-e95 | 路径漂移修正收尾：plan13 双 JSON 六处 -c tests/ 化（全仓旧形态清零）、serve-rootca.ps1 日志归位 logs/；settings.local.json 权限规则替换被权限系统移出范围，留用户手动 | 2026-10-07 | 34932d3 | complete | [261007-e95-plan13-json-6-playwright-c-tests-serve-r](./quick/261007-e95-plan13-json-6-playwright-c-tests-serve-r/) |
 
 ### Roadmap Evolution
 

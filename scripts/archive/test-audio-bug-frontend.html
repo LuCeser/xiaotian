@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Frontend Audio Bug Analysis</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #eee; }
+        .bug-section { border: 1px solid #844; background: #2a1a1a; padding: 15px; margin: 10px 0; border-radius: 5px; }
+        .code-section { background: #222; padding: 10px; border-radius: 5px; margin: 10px 0; }
+        pre { margin: 0; overflow-x: auto; }
+        .bug { color: #f66; }
+        .fix { color: #6f6; }
+        .warning { color: #fa0; }
+    </style>
+</head>
+<body>
+    <h1>🐛 Frontend Audio Bug Root Cause Analysis</h1>
+
+    <div class="bug-section">
+        <h2>Bug #1: Missing State Reset in playWord()</h2>
+        <p><strong>Location:</strong> test-interface.html lines 1235-1267</p>
+
+        <div class="code-section">
+            <pre><code>function playWord(index) {
+    // ... setup code ...
+    resetPlaybackState();  // ✅ Good: resets state
+
+    // Initialize fresh playback state
+    playback = {  // ✅ Good: creates new object
+        active: true,
+        wordId: word,
+        audioBuffer: [],
+        // ...
+    };
+
+    playAllQueue = []; // ✅ Good: cancels Play All
+
+    addLog('[CONTROL TX] play_word word_id="' + word + '" session=' + currentSessionId, 'control');
+    sendControl('play_word', { word_id: word, session_id: currentSessionId });
+}</code></pre>
+        </div>
+
+        <p class="fix">✅ This function looks CORRECT - it properly resets state before playing.</p>
+    </div>
+
+    <div class="bug-section">
+        <h2>Bug #2: Potential Race Condition in handleAudioFrame()</h2>
+        <p><strong>Location:</strong> test-interface.html lines 1013-1047</p>
+
+        <div class="code-section">
+            <pre><code>function handleAudioFrame(payload, sequence) {
+    // ... sequence tracking ...
+
+    // Log frame rejection reasons
+    <span class="bug">if (!playback.active) {</span>
+        // Skip logging frames when no active playback
+        return;  // ❌ POTENTIAL BUG: Silently drops frames!
+    }
+
+    // Collect frames for HTMLAudioElement playback
+    if (playback.active && payload.length === AudioFrameSize) {
+        playback.audioBuffer.push(new Uint8Array(payload));
+        // ...
+    }
+}</code></pre>
+        </div>
+
+        <p class="warning">⚠️ <strong>ISSUE:</strong> If <code>playback.active</code> becomes false mid-stream (due to timing issues), frames are silently dropped. This could cause:</p>
+        <ul>
+            <li>Lost audio frames → choppy playback</li>
+            <li>If state changes during multi-word scenarios, frames for wrong word might be collected</li>
+        </ul>
+    </div>
+
+    <div class="bug-section">
+        <h2>Bug #3: THE REAL BUG - Global Frame Collection Without Word ID Filtering!</h2>
+        <p><strong>Location:</strong> test-interface.html line 1024</p>
+
+        <div class="code-section">
+            <pre><code>function handleAudioFrame(payload, sequence) {
+    // ... sequence validation ...
+
+    <span class="bug">// Collect frames for HTMLAudioElement playback</span>
+    if (playback.active && payload.length === AudioFrameSize) {
+        // ❌ BUG: NO CHECK THAT THESE FRAMES BELONG TO THE REQUESTED WORD!
+        playback.audioBuffer.push(new Uint8Array(payload));
+    }
+}</code></pre>
+        </div>
+
+        <p class="bug"><strong>🐛 ROOT CAUSE:</strong></p>
+        <ol>
+            <li>Frontend calls <code>playWord(0)</code> for "hello" → sends <code>{word_id: "hello", session_id: "session-123"}</code></li>
+            <li>Backend starts streaming "hello" audio frames with sequences 1,2,3...</li>
+            <li>BUT if there's ANY buffering, cross-connection, or if the backend accidentally sends multiple words' frames...</li>
+            <li>The frontend collects ALL frames with <code>playback.active=true</code>, regardless of which word they belong to!</li>
+        </ol>
+
+        <p class="bug"><strong>THERE IS NO WORD ID VALIDATION IN THE FRONTEND!</strong></p>
+        <p>The frontend trusts that <code>playback.active=true</code> means "collect frames for the right word", but it doesn't verify that incoming frames actually belong to the requested word.</p>
+    </div>
+
+    <div class="bug-section">
+        <h2>Bug #4: No Word ID in Audio Frames Protocol</h2>
+        <p><strong>Architecture Issue:</strong> The WebSocket protocol sends audio frames with sequence numbers, but doesn't include word ID identification!</p>
+
+        <div class="code-section">
+            <pre><code>// Frame header structure (pkg/ws/protocol.go):
+type FrameHeader struct {
+    Version    uint8
+    MsgType    uint8    // 0x01 = Audio
+    Sequence   uint32   // ❌ NO WORD ID!
+    Timestamp  uint32
+    PayloadLen uint16
+    Reserved   uint16
+}</code></pre>
+        </div>
+
+        <p class="bug"><strong>PROBLEM:</strong> When streaming multiple words in a session, there's no way for the frontend to distinguish which word a frame belongs to. If frames from multiple words are in flight, the frontend can't filter them.</p>
+    </div>
+
+    <div class="bug-section">
+        <h2>Bug #5: Potential Backend Issue - Prefetch Cross-Contamination</h2>
+        <p><strong>Location:</strong> cmd/service/handlers.go line 188</p>
+
+        <div class="code-section">
+            <pre><code>// Prefetch the first N words for faster playback
+firstWords := make([]string, 0, 10)
+for i := 0; i < len(cards) && i < 10; i++ {
+    firstWords = append(firstWords, cards[i].Word)
+}
+if len(firstWords) > 0 {
+    streamer.PrefetchNext(sessionID, firstWords)  // ❌ POTENTIAL ISSUE
+}</code></pre>
+        </div>
+
+        <p class="warning">⚠️ <strong>POTENTIAL ISSUE:</strong> The prefetch loads ALL 10 words into memory. If there's a bug in StreamWord that causes it to read from the wrong prefetch entry, or if the prefetch map has stale data, wrong audio could be sent.</p>
+    </div>
+
+    <div class="bug-section">
+        <h2>🎯 Most Likely Root Cause</h2>
+        <p>Based on the symptoms ("plays all words instead of one") and the code analysis, the most likely causes are:</p>
+
+        <ol>
+            <li><strong>Backend sequence numbering issue:</strong> Streamer.go line 115 uses <code>currentSeq := uint32(i + 1)</code>. If multiple StreamWord calls overlap or if there's a concurrency bug, sequences might collide.</li>
+
+            <li><strong>Missing word ID validation:</strong> Frontend blindly collects all frames when <code>playback.active=true</code> without checking if they belong to the requested word.</li>
+
+            <li><strong>Prefetch cross-contamination:</strong> The prefetch system loads all words, and there might be a bug where StreamWord reads the wrong word's PCM data.</li>
+        </ol>
+
+        <p class="bug"><strong>CRITICAL MISSING PIECE:</strong> The WebSocket protocol should include word ID in audio frames, or the backend should send a clear "word_start" marker before streaming each word's audio.</p>
+    </div>
+
+    <div class="bug-section">
+        <h2>✅ Recommended Fixes</h2>
+        <ol>
+            <li><strong>Frontend defense:</strong> Stop collecting frames after receiving <code>word_complete</code> status frame for the current word.</li>
+
+            <li><strong>Backend fix:</strong> Ensure StreamWord atomically loads and streams only ONE word's PCM, with clear boundaries.</li>
+
+            <li><strong>Protocol enhancement:</strong> Add word ID to audio frame headers, or send explicit start/end markers.</li>
+
+            <li><strong>State machine:</strong> Frontend should track "awaiting word", "receiving frames", "playing audio" states explicitly.</li>
+        </ol>
+    </div>
+
+    <div id="test-results"></div>
+
+    <script>
+        // Simulate the bug scenario
+        function demonstrateBug() {
+            const container = document.getElementById('test-results');
+            container.innerHTML = '<h2>Bug Reproduction Test</h2>';
+
+            const scenario = [
+                { event: 'User clicks Play on word 1 ("hello")', state: 'playback.active=true, wordId="hello"' },
+                { event: 'Backend sends frames 1-50 for "hello"', state: 'All collected (correct)' },
+                { event: 'Backend sends word_complete for "hello"', state: 'Frontend should stop collecting...' },
+                { event: 'BUT if backend continues sending frames for word 2 ("world")', state: 'Frontend still collects them! (BUG)' },
+                { event: 'Result: Audio contains "hello" + "world"', state: 'USER HEARS TWO WORDS!' }
+            ];
+
+            container.innerHTML += '<table border="1" style="border-collapse: collapse; width: 100%; margin: 10px 0;">';
+            container.innerHTML += '<tr><th>Event</th><th>State</th></tr>';
+
+            scenario.forEach(({ event, state }) => {
+                container.innerHTML += `<tr><td>${event}</td><td>${state}</td></tr>`;
+            });
+
+            container.innerHTML += '</table>';
+
+            container.innerHTML += `<p class="bug">
+                <strong>CONCLUSION:</strong> The frontend lacks a mechanism to stop collecting frames
+                when the requested word's audio is complete. It relies on playback.active flag,
+                but nothing sets this to false when word_complete is received!
+            </p>`;
+        }
+
+        demonstrateBug();
+    </script>
+</body>
+</html>

@@ -80,10 +80,13 @@ make test-short
 
 - `cmd/service/` — Application entry point and classroom, voice, and photo handlers
 - `pkg/infra/` — Shared infrastructure package (logging, config, resource management)
-- `internal/` — Private helpers reserved for future phases
+- `internal/` — Private test helpers (pytest shell fakes, wstest WebSocket test support)
 - `pkg/web/` — Student/parent browser interfaces and REST API
 - `pkg/session/`, `pkg/voice/`, `pkg/tts/`, `pkg/mimo/` — Current dictation and speech pipelines
 - `pkg/database/`, `pkg/fsrs/`, `pkg/pybridge/` — Learning data and Python integration
+- `pkg/ws/`, `pkg/crc16/` — WebSocket hub library and streaming audio frame checksums
+- `pkg/rt/` — v2.0 realtime tutor session state machine
+- `pkg/grading/`, `pkg/lesson/`, `pkg/ocr/` — Answer grading, classroom session records, photo OCR
 - `third_party/python/` — Reused vocabulary, scheduling, and batch speech assets
 
 ## Dependencies

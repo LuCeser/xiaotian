@@ -10,11 +10,22 @@
 # so config.yaml is found and static file serving works correctly.
 #
 # Usage:
-#   .\run.ps1                 # stop old :8080 (if any), load .env, start service
-#   (Ctrl+C in the window to stop)
+#   .\run.ps1                 # HTTP  :8080  (config.yaml)      — plain dev mode
+#   .\run.ps1 -Https          # HTTPS :8443  (config.local.yaml) — secure context,
+#                              #   REQUIRED for browser microphone (getUserMedia)
+#   Service starts in the BACKGROUND (detached, hidden window). Stop with:
+#   .\stop.ps1
+#
+# -Https serves https://localhost:8443/tutor/ with the mkcert LAN certificate
+# (.local-certs/hta-lan.pem). The mkcert root CA must be trusted by the client
+# browser (it is on this machine; iPads install it via the 8765 distribution
+# page). Health endpoint stays on 127.0.0.1:8081; logs tee to
+# logs/server-8443.err.log. HTTP :8080 and HTTPS :8443 can run side by side.
 #
 # iPad reaches it at: http://<host-LAN-IP>:8080/test-interface.html
 # config.yaml ws.allowedOrigins MUST include the host LAN IP (see config.yaml ws: block).
+
+param([switch]$Https)
 
 $ErrorActionPreference = 'Stop'
 $root    = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -42,6 +53,25 @@ if (-not (Test-Path $staticDir)) {
     exit 1
 }
 
+# Mode selection: -Https uses config.local.yaml (8443 TLS + 8081 health),
+# default uses config.yaml (8080 plain). Logs tee per mode.
+$configFile = 'config.yaml';   $port = 8080; $logName = 'server.log'
+$entryUrl   = 'http://localhost:8080/test-interface.html'
+if ($Https) {
+    $configFile = 'config.local.yaml'; $port = 8443; $logName = 'server-8443.err.log'
+    $entryUrl   = 'https://localhost:8443/tutor/'
+    if (-not (Test-Path $configFile)) {
+        Write-Host "ERROR: $configFile not found in $root (gitignored local channel config)" -ForegroundColor Red
+        exit 1
+    }
+    foreach ($f in @('.local-certs/hta-lan.pem', '.local-certs/hta-lan-key.pem')) {
+        if (-not (Test-Path $f)) {
+            Write-Host "ERROR: TLS $f not found — mkcert cert missing (see 13-CHECKPOINTS 通道段)" -ForegroundColor Red
+            exit 1
+        }
+    }
+}
+
 # 1. Load .env into the process environment.
 if (Test-Path $envFile) {
     $loaded = 0
@@ -65,13 +95,13 @@ if (Test-Path $envFile) {
     Write-Host "[run.ps1] WARNING: no .env at $envFile — TTS audio generation will fail" -ForegroundColor Yellow
 }
 
-# 2. Stop any existing :8080 listener (clean restart). Avoid the $pid automatic var.
-$listeners = @(Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue)
+# 2. Stop any existing listener on this mode's port (clean restart). Avoid the $pid automatic var.
+$listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
 if ($listeners.Count -gt 0) {
     foreach ($procId in ($listeners.OwningProcess | Sort-Object -Unique)) {
         try {
             Stop-Process -Id $procId -Force -ErrorAction Stop
-            Write-Host "[run.ps1] stopped previous :8080 instance (PID $procId)" -ForegroundColor Yellow
+            Write-Host "[run.ps1] stopped previous :$port instance (PID $procId)" -ForegroundColor Yellow
         } catch {
             Write-Host "[run.ps1] could not stop PID $procId : $_" -ForegroundColor Yellow
         }
@@ -79,15 +109,39 @@ if ($listeners.Count -gt 0) {
     Start-Sleep -Seconds 2   # let the port release
 }
 
-# 3. Start the service (foreground in this window; Ctrl+C to stop).
-# Tee stderr+stdout to server.log so the orchestrator can read diagnostics
-# (the service logs JSON to stderr per config log.output=stderr). Truncated
-# at each start so server.log reflects only the current instance.
-$logPath = Join-Path $root 'server.log'
-"" | Set-Content $logPath -ErrorAction SilentlyContinue
+# 3. Build, then start the service DETACHED (background, hidden window).
+# Logs go via redirect: stderr -> the mode's log (the service logs JSON to
+# stderr per config log.output=stderr), stdout -> companion .out log.
+# Truncated at each start so logs reflect only the current instance.
+$logDir = Join-Path $root 'logs'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$logErr = Join-Path $logDir $logName
+$logOut = if ($Https) { Join-Path $logDir 'server-8443.out.log' } else { Join-Path $logDir 'server.out.log' }
+"" | Set-Content $logErr -ErrorAction SilentlyContinue
+"" | Set-Content $logOut -ErrorAction SilentlyContinue
 Write-Host "[run.ps1] building service (incremental)..." -ForegroundColor Cyan
 go build -o .\bin\service.exe .\cmd\service
 if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: build failed" -ForegroundColor Red; exit 1 }
-Write-Host "[run.ps1] iPad URL: http://<host-LAN-IP>:8080/test-interface.html" -ForegroundColor Cyan
-Write-Host "[run.ps1] starting: .\bin\service.exe -config config.yaml  (tee -> server.log)" -ForegroundColor Cyan
-.\bin\service.exe -config config.yaml 2>&1 | Tee-Object -FilePath $logPath
+$p = Start-Process -FilePath (Join-Path $root 'bin\service.exe') `
+    -ArgumentList '-config', $configFile `
+    -WorkingDirectory $root -WindowStyle Hidden `
+    -RedirectStandardError $logErr -RedirectStandardOutput $logOut -PassThru
+Write-Host "[run.ps1] service started in background, PID $($p.Id)  (logs: logs\$logName / $(Split-Path -Leaf $logOut))" -ForegroundColor Green
+Write-Host "[run.ps1] entry URL: $entryUrl" -ForegroundColor Cyan
+if ($Https) { Write-Host "[run.ps1] mic-ready secure context; health: http://127.0.0.1:8081/health" -ForegroundColor Cyan }
+
+# Bounded readiness wait: port listening within ~10s (early exit -> log tail hint).
+$ready = $false
+foreach ($i in 1..20) {
+    if ($p.HasExited) { break }
+    if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { $ready = $true; break }
+    Start-Sleep -Milliseconds 500
+}
+if ($ready) {
+    Write-Host "[run.ps1] :$port is listening — ready" -ForegroundColor Green
+} else {
+    Write-Host "[run.ps1] WARNING: :$port not listening within 10s (exit=$($p.HasExited))" -ForegroundColor Yellow
+    Write-Host "[run.ps1] last log lines (logs\$logName):" -ForegroundColor Yellow
+    Get-Content $logErr -Tail 5 -ErrorAction SilentlyContinue
+}
+Write-Host "[run.ps1] stop with: .\stop.ps1" -ForegroundColor Cyan

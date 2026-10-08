@@ -1,3 +1,0 @@
-# Placeholder so the js/ directory is tracked by git even before additional
-# JS modules (beyond app.js and websocket-client.js) are added. Safe to keep
-# indefinitely; harmless if other files exist alongside it.
