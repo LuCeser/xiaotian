@@ -81,7 +81,7 @@ Plans:
 5. 完结/无到期词状态区分＋「再练一组」入口：词库随机避开当日已默、≤10 不足全给、同走三段式，结果单独记录不进 FSRS 主调度。
 6. OCR 判错可被人工改判覆盖（OCR 必错是前提），提交的评级以人工改判为准。
 
-**Plans:** 8 plans（7/7 executed ＋ 1 gap-closure；2026-10-08 VERIFICATION gaps_found 6/7 → 13.1-08 闭合 CR-01/WR-01/WR-02；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
+**Plans:** 8/8 plans executed（7/7 executed ＋ 1 gap-closure；2026-10-08 VERIFICATION gaps_found 6/7 → 13.1-08 闭合 CR-01/WR-01/WR-02；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
 
 Plans:
 **Wave 1**
@@ -114,7 +114,7 @@ Plans:
 
 **Wave 8** *(gap closure — 13.1-VERIFICATION gaps_found：CR-01 BLOCKER＋WR-01/WR-02)*
 
-- [ ] 13.1-08-PLAN.md — gap 闭合（2026-10-08 reviews replan，REVIEWS 017ea67 共识并入）：CR-01 handleCheckSubmit Idempotent 守卫（败方终态信号版）＋跨连接恰一次回归测试＋修正同族守卫（gap[1]）；WR-02 enterCheck 冲突 submitted 完成短路径（gap[3]）；WR-01 session_ready 检查面板重置＋session_ended 终态解卡＋IN-01 photo_unavailable 文案（gap[2]）；duplicate_submit 专用诊断码＋TOCTOU 升格 13-13 具名交接项（程序性闸：08 落地前不得部署 13-13）
+- [x] 13.1-08-PLAN.md — gap 闭合（2026-10-08 reviews replan，REVIEWS 017ea67 共识并入）：CR-01 handleCheckSubmit Idempotent 守卫（败方终态信号版）＋跨连接恰一次回归测试＋修正同族守卫（gap[1]）；WR-02 enterCheck 冲突 submitted 完成短路径（gap[3]）；WR-01 session_ready 检查面板重置＋session_ended 终态解卡＋IN-01 photo_unavailable 文案（gap[2]）；duplicate_submit 专用诊断码＋TOCTOU 升格 13-13 具名交接项（程序性闸：08 落地前不得部署 13-13）
 
 ### Phase 14: R1 对话接真实课堂
 

@@ -5,16 +5,16 @@ milestone_name: realtime-tutor — ACTIVE
 current_phase: 13.1
 current_phase_name: 三段式默写课堂（默写→检查→统一反馈） (INSERTED)
 status: executing
-stopped_at: Completed 13.1-07-PLAN.md — Phase 13.1 all 7 plans complete, ready for 13-13
-last_updated: "2026-10-08T15:46:46.031Z"
-last_activity: 2026-10-07
-last_activity_desc: Phase 13.1 execution started
-state_head: d5dcfb5ef1c0b94991c0513de6a03656234df3bb
+stopped_at: Completed 13.1-08-PLAN.md — Phase 13.1 all 8 plans complete, ready for 13-13
+last_updated: "2026-10-08T18:25:29.623Z"
+last_activity: 2026-10-08
+last_activity_desc: Phase 13.1 plan 08 (gap closure CR-01/WR-01/WR-02 + IN-01) complete
+state_head: 62e579b3daabc9ebe9d4203b800464b1e971d2a9
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 21
-  completed_plans: 19
+  completed_plans: 20
   percent: 0
 ---
 
@@ -29,15 +29,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-04)
 
 **Core value:** 学生在浏览器与家教自然实时交流，理解上下文、允许打断、等待纸笔书写，学习结果进入真实记录。
-**Current focus:** Phase 13.1 — 三段式默写课堂（默写→检查→统一反馈）
+**Current focus:** Phase 13.1 — 三段式默写课堂（默写→检查→统一反馈） (INSERTED)
 
 ## Current Position
 
-Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈） (INSERTED)) — READY TO EXECUTE
-Plan: 7 of 8（13.1-08 已按 --reviews 重规划，待执行）
-Status: Ready to execute
-Last activity: 2026-10-08 — Phase 13.1 reviews replan complete
-Next: /gsd-execute-phase 13.1（执行 13.1-08 gap 闭合）→ 13-13 VPS 部署+正式验收
+Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈） (INSERTED)) — ALL 8 PLANS COMPLETE
+Plan: 8 of 8（13.1-08 gap 闭合已交付：CR-01 恰一次＋WR-01 面板重置＋WR-02 冲突短路径＋IN-01 文案）
+Status: Phase execution complete — 13-13 程序性闸已放行（08 已落地）
+Last activity: 2026-10-08 — 13.1-08 complete (5 task commits + metadata)
+Next: /gsd-verify-work 13.1 → 13-13 VPS 部署+正式验收（真机三项＋13.1-08-SUMMARY 交接清单人工核对项）
 
 13-01～13-06 的实时语音基础已实现；状态机默写转向尚待执行 13-07～13-13，RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
 
@@ -57,6 +57,7 @@ v2.0：4 个活跃阶段，Phase 13 已完成 13/13 个实施计划（13-12 按�
 | Phase 13.1 P05 | 47 min | 3 tasks | 17 files |
 | Phase 13.1 P06 | 25 min | 2 tasks | 7 files |
 | Phase 13.1 P07 | 41 min | 2 tasks | 5 files |
+| Phase 13.1 P08 | 140 min (2 executor runs, rate-limit pause) | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -121,6 +122,10 @@ Recent decisions affecting current work:
 - [Phase 13.1]: 13.1-07 收口：13.1-03 延期拍照 mock e2e 四族落地（D-05 双端提交闸、D-06① 人工改判、重拍清缓冲、纯人工降级）；全量回归零回归零弱化——go test 15 包＋npm test＋e2e:rt 21/21，pkg/rt 生产码零改动（修复权未触发）
 - [Phase 13.1]: L3 真通道驱动扩展到三段式终态：driver checkStageAct（手写体夹具拍照→真 MiMo OCR→逐词 manual→一次统一提交）25/25 hard-pass；生产实例零接触两次运行证明（lessons 2→2、review_logs 25→25、e2e-% 恒 0）
 - [Phase 13.1]: 13.1-07 flake 分类：首跑 g_interrupt 失败（old_epoch 3 帧）同代码重跑即 clean——环境性 flake（TTS 流速竞态），如实记录不掩码不放宽；i_vocab 版本断言按三段式写路径改为单调下限（review 集合算术保持精确）
+- [Phase 13.1]: 13.1-08 败方诚实形态＝终态信号(session_ended lesson_complete)＋一条 duplicate_submit 诊断，绝不伪造 review_result/保存数量（透明性禁令跨连接面，三家评审共识修法）；守卫先于 checkRatings 组装（latch replay 空回读会提交空批次）
+- [Phase 13.1]: 13.1-08 修正路径 TOCTOU 残窗接受不闭合：前置 ClearUnchecked 闩锁破坏 S-05「review 写失败保留标记供下次重试」；升格 13-13 具名交接项（触发签名：review_logs 同词同日、毫秒级 correction 后缀重复行）＋untested race 登记
+- [Phase 13.1]: 13.1-08 Rule 1：terminalDraining 页面级标志从无复位——submit.disabled 消费它即成跨课锁死；在会话起点（startBtn click，上一场排空已完成）复位，practice full loop e2e 首跑抓到后修复
+- [Phase 13.1]: 13.1-08 check_spelling 复核确认：applyVoiceVerdict 走 grading.GradeWord 且 correct=j.Correct（口述写法全对→correct=true），codex 13.1-06 疑虑不复现（TestCheckVoice 族 PASS，供 13-13 追认）
 
 ### Pending Todos
 
@@ -187,6 +192,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-07T19:55:32.391Z
-Stopped at: Completed 13.1-07-PLAN.md — Phase 13.1 all 7 plans complete, ready for 13-13
+Last session: 2026-10-08T18:24:46.435Z
+Stopped at: Completed 13.1-08-PLAN.md — Phase 13.1 all 8 plans complete, ready for 13-13
 Resume file: None
