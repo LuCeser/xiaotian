@@ -4134,3 +4134,85 @@ func ttAckSummaryAndEndWait(t *testing.T, tm *TurnManager, s *captureSender) {
 		t.Fatalf("session_ended never arrived; controls = %v", s.typeOrder())
 	}
 }
+
+// TestEnterCheckConflictSubmittedShortPath (13.1-08, gap[3]/WR-02): the
+// EnterCheck conflict branch re-aligns from the stored row; when that row
+// reads stage=submitted (another writer finished the whole check while this
+// session idled) the branch must take the completion SHORT PATH — one
+// session_ended(lesson_complete) terminal signal, the duplicate_submit/
+// enter_check_submitted diagnostic, internalClose — and NEVER broadcast a
+// check_started the receiver's panel can never open. Correction mode keeps
+// its panel by construction (a submitted row is its normal shape), so the
+// short path is gated on !correction.
+//
+// The conflict is driven by the fake's conflictVersion knob AFTER the row is
+// hand-mutated to submitted: the knob drives the BRANCH, not a real race —
+// the race itself is covered by the 13.1-08 cross-connection integration
+// tests (TestCrossConnectionDoubleSubmitSingleReview family).
+func TestEnterCheckConflictSubmittedShortPath(t *testing.T) {
+	log := &captureLogger{}
+	words := newFakeWords(ttCards("苹果"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 1)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+
+	// The "other writer": the row reads submitted with a bumped version,
+	// and every EnterCheck now conflicts.
+	exec.mu.Lock()
+	exec.lesson.CurrentIndex = 1
+	exec.lesson.Stage = lesson.StageSubmitted
+	exec.lesson.Version += 10
+	exec.conflictVersion = exec.lesson.Version
+	exec.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tm.enterCheck(s, ctx, cancel, 0)
+
+	// The short path's entire visible output: ONE control message.
+	if got := s.countOf(TypeSessionEnded); got != 1 {
+		t.Fatalf("session_ended count = %d, want exactly 1 (controls = %v)", got, s.typeOrder())
+	}
+	ended := s.controlsOf(t, TypeSessionEnded)[0]
+	if ended["reason"] != ReasonLessonComplete {
+		t.Errorf("session_ended.reason = %v, want %s", ended["reason"], ReasonLessonComplete)
+	}
+	if got := s.countOf(TypeCheckStarted); got != 0 {
+		t.Errorf("check_started count = %d, want 0 (no dead check panel)", got)
+	}
+
+	// internalClose ran: the FSM is down.
+	tm.mu.Lock()
+	closed := tm.closed
+	tm.mu.Unlock()
+	if !closed {
+		t.Error("tm.closed = false, want the short path to internalClose")
+	}
+	// The caller's ctx is cancelled (leak prevention beyond turnCancel).
+	select {
+	case <-ctx.Done():
+	default:
+		t.Error("ctx was not cancelled by the short path")
+	}
+
+	// Audit trail: exactly one duplicate diagnostic + one session_end.
+	if got := ttEventCount(t, log, EventError); got != 1 {
+		t.Fatalf("error events = %d, want exactly 1", got)
+	}
+	if codes := ttEventField(t, log, EventError, "code"); len(codes) != 1 || codes[0] != ErrCodeDuplicateSubmit {
+		t.Errorf("error code = %v, want [%s]", codes, ErrCodeDuplicateSubmit)
+	}
+	if dups := ttEventField(t, log, EventError, "duplicate"); len(dups) != 1 || dups[0] != "enter_check_submitted" {
+		t.Errorf("duplicate marker = %v, want [enter_check_submitted]", dups)
+	}
+	if got := ttEventCount(t, log, EventSessionEnd); got != 1 {
+		t.Errorf("session_end events = %d, want 1", got)
+	}
+	if got := len(words.submissions()); got != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0", got)
+	}
+}
