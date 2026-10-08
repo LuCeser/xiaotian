@@ -329,7 +329,30 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 		tm.mu.Lock()
 		tm.tutor.align(l.CurrentIndex, l.Version)
 		tm.tutor.resyncCheck(l)
+		alreadySubmitted := l.Stage == lesson.StageSubmitted && !tm.tutor.correction
 		tm.mu.Unlock()
+		if alreadySubmitted {
+			// The concurrent writer already submitted the row (WR-02,
+			// 13.1-08): broadcasting check_started here would hand this
+			// connection a panel that can never open. The honest completion
+			// short path (D-04) is the tail startCompletedSession has: the
+			// terminal signal — the frontend's existing lesson_complete
+			// banner + notice carry the child-facing explanation — plus one
+			// duplicate diagnostic, then close. EventCheckStarted,
+			// CheckStartedMsg and the bridge announcement all stay
+			// unsent. A correction session keeps its panel by construction
+			// (a submitted row is its normal shape), hence the
+			// !correction gate above.
+			tm.recorder.Emit(EventError,
+				infra.F("code", ErrCodeDuplicateSubmit),
+				infra.F("duplicate", "enter_check_submitted"),
+			)
+			_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
+			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+			cancel() // the caller's ctx — beyond what internalClose cancels
+			tm.internalClose()
+			return
+		}
 	}
 
 	tm.recorder.Emit(EventCheckStarted, infra.F("total", total))
