@@ -948,6 +948,13 @@ test('practice full loop: lesson_complete offers 再练一组, the practice set 
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
     .toBe('ended');
 
+  // 13.1-08: after session_ended the submit button must never stay stuck at
+  // 「正在提交…」 — the ended handler clears check.submitPending (the
+  // loser-UI unlock; e2e pin for the terminal state).
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.submitPending))
+    .toBe(false);
+
   // D-13 regression: the lesson_complete banner carries the N-words copy
   // AND the 再练一组 button (≥60px target rides the CSS class).
   await expect(page.locator('#rt-banner')).toBeVisible();
@@ -981,12 +988,30 @@ test('practice full loop: lesson_complete offers 再练一组, the practice set 
     expect(MOCK_WORDS, 'practice word ' + w + ' differs from the finished set').not.toContain(w);
   }
 
+  // WR-01 regression (13.1-08): the NEW session's session_ready fully reset
+  // the previous lesson's check panel — active=false, zero rows, no pending
+  // submit, #rt-check hidden. Before the fix the stale session-1 panel
+  // (active=true, rows=3) stayed visible/clickable during the practice
+  // dictation, able to inject old-lesson check frames into the new session.
+  await expect
+    .poll(() => page.evaluate(() => {
+      const c = window.__rtTutor.observe().check;
+      return { active: c.active, rows: c.rows, submitPending: c.submitPending };
+    }), { timeout: 20_000 })
+    .toEqual({ active: false, rows: 0, submitPending: false });
+  await expect(page.locator('#rt-check')).toBeHidden();
+
   // The practice set runs the SAME three-stage flow (2 rows) to its
   // practice_complete ending.
   await driveCheckStage(page, { rows: 2 });
   await expect
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
     .toBe('ended');
+
+  // 13.1-08: same terminal unlock pin for the practice ending.
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.submitPending))
+    .toBe(false);
 
   // Wire-side: the practice submit reported RECORD counts, the session
   // recorded NO FSRS review write (state.reviewResults stays 0 — the

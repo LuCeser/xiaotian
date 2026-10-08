@@ -171,6 +171,23 @@
       // each row; the verdicts still come from check_verdicts alone.
       var check = { active: false, words: [], verdicts: {}, ocr: {}, submitPending: false, resultText: '' };
 
+      // WR-01 (13.1-08): the ONE cross-lesson reset — a new session's
+      // session_ready fully clears the previous lesson's check panel, both
+      // the state and the DOM. Wired ONLY here: check_started keeps its own
+      // reset (in-lesson restart), because session_ready is the only
+      // cross-lesson boundary — a stale clickable panel would inject the old
+      // lesson's check_verdict/check_submit frames into the NEW connection
+      // (T-13.1-18).
+      function resetCheckState() {
+        check.active = false;
+        check.words = [];
+        check.verdicts = {};
+        check.ocr = {};
+        check.submitPending = false;
+        check.resultText = '';
+        $('rt-check').hidden = true;
+      }
+
       // ----- DOM helpers ----------------------------------------------------
       // The ONLY element-removal helper on this page: server-sourced text
       // (subtitles, transcripts, errors, teacher lines) never touches an HTML
@@ -345,7 +362,10 @@
         // 提交 gates on the server echo covering EVERY word with a MANUAL
         // verdict — never on local taps, and an OCR prefill alone never
         // enables it (RT-07 + D-05; the server refuses such a submit too).
-        submit.disabled = !allChecked() || check.submitPending;
+        // 13.1-08: terminalDraining joins the gate — after session_ended the
+        // button reads 「检查完了，提交」 and stays disabled; no further
+        // submit can ride a terminal session.
+        submit.disabled = !allChecked() || check.submitPending || terminalDraining;
         submit.addEventListener('click', sendSubmit);
         panel.appendChild(submit);
       }
@@ -476,6 +496,9 @@
         // Fresh session: the previous ending's banner/notice step aside.
         bannerEl.hidden = true;
         noticeEl.hidden = true;
+        // 13.1-08 WR-01: the previous lesson's check panel must not survive
+        // into the new session (full state + DOM reset above).
+        resetCheckState();
         renderProgress();
         setConn('connected', '已连接');
         endBtn.disabled = false;
@@ -629,6 +652,12 @@
         setStatus('ended');
         setConn('closed', '课程已结束');
         endBtn.disabled = true;
+        // 13.1-08 (loser-UI unlock, cross-AI review consensus): EVERY
+        // session_ended clears a stuck 「正在提交…」 — the loser of a
+        // cross-connection race receives the terminal signal INSTEAD of a
+        // fabricated review_result, so its submit button would never unstick
+        // without this (check.submitPending stays true forever otherwise).
+        check.submitPending = false;
         // Only the three natural reasons branch here — playback_ack_timeout
         // is an ErrorMsg.Code, never a SessionEndedMsg.Reason (13-07
         // contract); practice_complete is the 13.1-05 third ending.
@@ -652,6 +681,10 @@
           // Natural ending without a prior ErrorMsg takes the SAME drain
           // flow — no stopNow truncation of the scheduled audio.
           beginTerminalDrain();
+          // 13.1-08: re-render AFTER the terminal state — the submit button
+          // text returns to 「检查完了，提交」 and renders disabled (the
+          // terminalDraining clause), never stuck at 「正在提交…」.
+          renderCheckPanel();
           return;
         }
         // Explicit user end / other reasons: immediate teardown.
@@ -708,6 +741,14 @@
         started = true;
         startBtn.disabled = true;
         errorEl.hidden = true;
+        // 13.1-08 (Rule 1 during WR-01): terminalDraining is armed for the
+        // lifetime of ONE session's ending — a NEW session must start with a
+        // clean slate, or renderCheckPanel's terminalDraining gate would
+        // disable the new session's check submit forever (cross-lesson leak
+        // of the flag itself). Safe here: this button is only re-enabled
+        // after the previous drain completed (releasePlaybackResources), so
+        // no drain is in flight and the old socket is already closed.
+        terminalDraining = false;
         setConn('connecting', '连接中…');
 
         // ONE user gesture (RT-02): RTCapture.start synchronously runs the

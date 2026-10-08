@@ -76,7 +76,13 @@
     // 13-11 (T-13-24): the server STOPPED WAITING for a playback-completion
     // ack — never evidence that audio was heard. The wording promises the
     // already-scheduled audio keeps playing and must NOT claim completion.
-    'playback_ack_timeout': '播放确认超时，老师会先把已收到的语音播完；若卡住将自动结束'
+    'playback_ack_timeout': '播放确认超时，老师会先把已收到的语音播完；若卡住将自动结束',
+    // 13.1-08 IN-01 (13.1-03 RT-10 degraded path): no OCR reader configured
+    // server-side — the check stage keeps working manual-only. Verbatim copy
+    // of the server's fixed constant photoUnavailableNotice (pkg/rt/photo.go;
+    // wire code pkg/rt/protocol.go ErrCodePhotoUnavailable) — encouraging,
+    // child-safe wording.
+    'photo_unavailable': '拍照检查现在用不了，我们看着屏幕逐个确认吧'
   };
 
   /**
