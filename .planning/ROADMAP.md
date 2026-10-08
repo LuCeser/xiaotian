@@ -81,7 +81,7 @@ Plans:
 5. 完结/无到期词状态区分＋「再练一组」入口：词库随机避开当日已默、≤10 不足全给、同走三段式，结果单独记录不进 FSRS 主调度。
 6. OCR 判错可被人工改判覆盖（OCR 必错是前提），提交的评级以人工改判为准。
 
-**Plans:** 7/7 plans executed（2026-10-07 规划；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
+**Plans:** 8 plans（7/7 executed ＋ 1 gap-closure；2026-10-08 VERIFICATION gaps_found 6/7 → 13.1-08 闭合 CR-01/WR-01/WR-02；wave 1～7 顺序执行——turn.go/check.go/index.html 单文件瓶颈决定不可并行）
 
 Plans:
 **Wave 1**
@@ -111,6 +111,10 @@ Plans:
 **Wave 7** *(blocked on Wave 6 completion)*
 
 - [x] 13.1-07-PLAN.md — 阶段收口：落地 13.1-03 延期拍照 mock 用例＋全量回归＋真通道隔离冒烟（e2e:rt-real）＋13-13 交接清单
+
+**Wave 8** *(gap closure — 13.1-VERIFICATION gaps_found：CR-01 BLOCKER＋WR-01/WR-02)*
+
+- [ ] 13.1-08-PLAN.md — gap 闭合：CR-01 handleCheckSubmit Idempotent 守卫＋跨连接恰一次回归测试＋finishCorrections 同族守卫（gap[1]）；WR-02 enterCheck 冲突 submitted 完成短路径（gap[3]）；WR-01 session_ready 检查面板重置＋IN-01 photo_unavailable 文案（gap[2]）
 
 ### Phase 14: R1 对话接真实课堂
 
