@@ -355,7 +355,7 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 			tm.tutor.checking = false
 			tm.mu.Unlock()
 			tm.recorder.Emit(EventError,
-				infra.F("code", ErrCodeProviderFailed),
+				infra.F("code", ErrCodeDuplicateSubmit),
 				infra.F("duplicate", "practice_submit_conflict"),
 			)
 			return
@@ -370,7 +370,7 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 		tm.tutor.checking = false
 		tm.mu.Unlock()
 		tm.recorder.Emit(EventError,
-			infra.F("code", ErrCodeProviderFailed),
+			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "practice_submit_latch"),
 		)
 		return

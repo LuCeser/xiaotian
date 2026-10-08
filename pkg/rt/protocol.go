@@ -118,6 +118,19 @@ const (
 	// photo-check path is disabled (13.1-03; RT-10 degraded semantics — the
 	// check stage keeps working manual-only).
 	ErrCodePhotoUnavailable = "photo_unavailable"
+	// ErrCodeDuplicateSubmit: an ABSORBED duplicate submission (13.1-08) —
+	// a stage-latch replay or a cross-connection write race whose latch
+	// branch fired (the duplicate= field names which: check_submit_latch /
+	// correction_submit_latch / check_submit_conflict /
+	// practice_submit_conflict / practice_submit_latch /
+	// enter_check_submitted). Diagnostic taxonomy, NOT a provider fault:
+	// provider_failed keeps meaning a real ASR/LLM/TTS/store failure, so
+	// 13-13 acceptance can grep error rates per code without counting
+	// absorbed duplicates as failures. In-session frame-level duplicates
+	// (the reviewSeen gate's duplicate=check_submit / correction_submit /
+	// practice_submit markers) stay invalid_message — they are client
+	// protocol violations, not absorbed races.
+	ErrCodeDuplicateSubmit = "duplicate_submit"
 )
 
 // Sentinel errors carrying the protocol error codes above. Callers map them

@@ -515,12 +515,38 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 			tm.tutor.checking = false
 			tm.mu.Unlock()
 			tm.recorder.Emit(EventError,
-				infra.F("code", ErrCodeProviderFailed),
+				infra.F("code", ErrCodeDuplicateSubmit),
 				infra.F("duplicate", "check_submit_conflict"),
 			)
 			return
 		}
 		tm.sendError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		return
+	}
+	if res.Idempotent {
+		// The latch already fell elsewhere (a cross-connection race — the
+		// other tab / the reconnected session submitted first). This caller
+		// is the absorbed duplicate: NEVER finishCheckSubmit (the one
+		// SubmitReview call site), NEVER checkRatings — the latch replay's
+		// readback carries EMPTY verdicts/outcomes (executor.go:908), so
+		// assembling here would build an empty batch; and NEVER a
+		// review_result or a save count — fabricating one would violate the
+		// transparency prohibition (S-05) across connections. The loser's
+		// honest shape is the terminal signal (session_ended with the
+		// existing lesson_complete copy) plus one diagnostic event
+		// (13.1-08 review consensus). internalClose cancels the turnCancel
+		// stored above, so no separate cancel is needed.
+		tm.mu.Lock()
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checking = false
+		tm.mu.Unlock()
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeDuplicateSubmit),
+			infra.F("duplicate", "check_submit_latch"),
+		)
+		_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
+		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+		tm.internalClose()
 		return
 	}
 
@@ -666,6 +692,31 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	l, err := tm.exec.GetLessonState(ctx, lessonID)
 	if err != nil {
 		tm.sendError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		return
+	}
+	if !l.Unchecked {
+		// Same-family guard of the main submit's Idempotent branch
+		// (13.1-08): another connection's correction already cleared the
+		// marker — this straggler's diff batch must NEVER run (zero
+		// SubmitReview, zero ClearUnchecked, zero review_result). The
+		// honest shape is the terminal signal plus one diagnostic event.
+		// Accepted residual race (FA-GAP08-TOCTOU, named in the 13-13
+		// handoff): two connections reading unchecked=1 within the same
+		// millisecond both pass this read-side gate — closing it fully
+		// needs a preemptive ClearUnchecked latch, which would break the
+		// S-05 retry semantics below (a failed review write must keep the
+		// marker for the next session).
+		tm.mu.Lock()
+		tm.tutor.align(l.CurrentIndex, l.Version)
+		tm.tutor.checking = false
+		tm.mu.Unlock()
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeDuplicateSubmit),
+			infra.F("duplicate", "correction_submit_latch"),
+		)
+		_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
+		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+		tm.internalClose()
 		return
 	}
 
