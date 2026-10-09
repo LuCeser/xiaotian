@@ -6,7 +6,7 @@
 | capability | decision | reason |
 |---|---|---|
 | chat.completions 非流式（messages/system/max_tokens 等） | INTEGRATE | 意图识别与话术生成主路径（13-08 classifyTurn 单轮 JSON 文本输出；转向前为 13-04 工具环） |
-| chat.completions function calling（`tools`/`tool_choice`/`tool_calls`/`role:"tool"`/`finish_reason`） | OPT-OUT | 2026-10-03 交互模型转向：LLM 不再拥有课堂节奏裁量权，意图识别走 chat.completions 的 JSON 文本输出（上表第一行承载），课堂读写由服务端状态机直连 pkg/lesson；13-02 的 wire 层支持保留供后续阶段按需复用 |
+| chat.completions function calling | OPT-OUT | 参数范围：`tools`/`tool_choice`/`tool_calls`/`role:"tool"`/`finish_reason`。2026-10-03 交互模型转向：LLM 不再拥有课堂节奏裁量权，意图识别走 chat.completions 的 JSON 文本输出（上表第一行承载），课堂读写由服务端状态机直连 pkg/lesson；13-02 的 wire 层支持保留供后续阶段按需复用 |
 | chat.completions `thinking` 开关（`{"type":"disabled"}`） | INTEGRATE | RT-04 延迟大头（RESEARCH Pitfall 1），WithThinkingDisabled |
 | chat.completions 流式 SSE（chat.completion.chunk） | OPT-OUT | R0 非流式 LLM + 逐句流式 TTS 已满足成环；第六周不达标再评估（RESEARCH Alternatives 已记录升级路径） |
 | 图像理解（ChatVision / image-understanding） | OPT-OUT | 照片 OCR 属存量冻结栈（photo 管线），CONTEXT Deferred 明确 OCR/批改不前置 |

@@ -1,5 +1,7 @@
 # R0～R3 时间检查与真机证据
 
+> **2026-10-09 当前范围：** Phase 13 只做本地开发机运行与人工验收。本文 VPS 命令和真机正式检查保留作历史参考，执行归独立 [Phase 13.2](../13.2-vps-deployment-and-device-acceptance/13.2-CONTEXT.md)，本地未通过不得执行。历史 Pending 与失败不会因拆分被记成通过。
+
 **T0:** 2026-09-30（本轮规划启动，规划计时）
 **Timezone:** Asia/Shanghai，截止当日 23:59
 **Current status:** 尚未实施新的实时语音，三次检查全部待执行；本文件不是通过报告。

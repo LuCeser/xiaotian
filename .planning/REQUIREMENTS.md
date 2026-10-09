@@ -26,20 +26,24 @@
 
 R0 必须含真实 FSRS 到期读取、状态机幂等推进及学习记录写入；写操作包含课堂 ID、请求 ID、预期版本，重试不重复推进。到期词上限 10、不足取全部、0 词优雅结束；LLM 仅做意图识别与话术生成，课堂节奏由服务端状态机拥有。2026-10-03 转向决策取代旧「固定 3 词 + LLM 工具环 + 普通沉默永不推进」口径。
 
+## Acceptance Scope Update — 2026-10-09
+
+Phase 13/13.1 当前只验收本地开发机；VPS 部署、公网真 iPad 正式证据移至独立 Phase 13.2，须本地人工通过后启动。产品正式验收标准不降低，未取得正式证据的 RT 项保持未验收；本地阶段完成不以部署为条件。
+
 ## Traceability
 
 | Requirement | Phase | Status |
 |---|---|---|
-| RT-01 | Phase 13 | Pending |
-| RT-02 | Phase 13 | Pending |
+| RT-01 | Phase 13（本地入口）/ Phase 13.2（VPS/iPad 正式入口） | Pending |
+| RT-02 | Phase 13（本地持续听说）/ Phase 13.2（正式复验） | Pending |
 | RT-03 | Phase 14（Phase 13 先验证 3 词场景） | Pending |
-| RT-04 | Phase 13（第六周检查，Phase 16 复验） | Pending |
-| RT-05 | Phase 13（第六周检查，Phase 16 复验） | Pending |
+| RT-04 | Phase 13（本地测量）/ Phase 13.2（正式采样；第六周检查，Phase 16 复验） | Pending |
+| RT-05 | Phase 13（本地打断）/ Phase 13.2（正式采样；第六周检查，Phase 16 复验） | Pending |
 | RT-06 | Phase 14（Phase 13 先验证 60 秒计时、提示与暂停继续） | Pending |
 | RT-07 | Phase 14（Phase 13 先验证读写工具） | Complete |
 | RT-08 | Phase 15 | Pending |
 | RT-09 | Phase 13.1（检查+统一提交提前实现）/ Phase 15（家长确认与恢复） | Complete |
-| RT-10 | Phase 13（Phase 14 完善，Phase 16 复验） | Pending |
+| RT-10 | Phase 13（本地故障可见）/ Phase 13.2（正式复验；Phase 14 完善，Phase 16 复验） | Pending |
 
 **Coverage:** 10 个需求，10 个主责阶段映射，全部 Pending；Phase 16 全量复验。既有组件证据及未完成的 v1 项见 [归档需求](milestones/v1.0-REQUIREMENTS.md)。
 

@@ -23,7 +23,7 @@ Students receive personalized, real-time dictation practice with immediate feedb
 
 **Target features:** 自研交互＋MiMo 可替换接口，Phase 13～16（R0～R3）；先 WebSocket，Phase 16 替换 pion WebRTC，触发时间检查时切火山 Plan B。
 
-**Next:** /gsd-execute-phase 13；日期及切换步骤见 ROADMAP 和 docs/REALTIME-TUTOR-PLAN-B.md。
+**Next:** 本地开发机验收 Phase 13 与 13.1，发现问题先修复；VPS 部署拆为独立 Phase 13.2，等待本地人工通过后再规划和启动。日期检查仍如实记录，不强行进入部署。
 
 ## Requirements
 
@@ -37,7 +37,7 @@ Students receive personalized, real-time dictation practice with immediate feedb
 - [ ] **自研 RTC 层** - 先 WebSocket 成环、后 WebRTC（Go pion），传输层可替换接口
 - [ ] **词库管理与 FSRS** - 已交付组件（词库/单元、FSRS 选词与参数更新）；R0 接入到期取词与课末 review，R2 再接批改、家长确认和 durable 恢复闭环
 - [ ] **家长反馈** - R2 交付（吸收旧 Phase 10 的 FEED-01~04：批改确认/覆盖与进度统计）
-- [ ] **iPad Safari 真机 + 业主证书 HTTPS** - 业主现有证书部署 VPS，iPad 走真实网络验收（RT-01）
+- [ ] **iPad Safari 真机 + 业主证书 HTTPS** - 独立 Phase 13.2，在 Phase 13/13.1 本地人工验收通过后部署 VPS 并完成正式复验（RT-01）；当前不部署
 - [ ] **资源受限部署** - 1C 1G VPS 上高效运行（150MB 限定口径见 Constraints）
 - [ ] **按钮听写页（RT-10 降级模式）** - 功能冻结，只修阻塞 bug；作为备用按钮路径保留，不再作为产品主交互演进
 - [ ] **音频时延（RT-04 口径）** - 以「首个实际可听响应」衡量：授权完成至首次可听问候 ≤3 秒；句末至首个实际可听响应 P50≤1.5 秒、P95≤2.5 秒
