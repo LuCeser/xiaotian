@@ -80,6 +80,39 @@ func TestReceiptBeginInsertsPendingRow(t *testing.T) {
 	}
 }
 
+// TestReceiptBeginRejectsInvalidArguments: an anonymous receipt (empty
+// lesson_id/request_id/kind) could never be joined back to a lesson or an
+// idempotency key honestly — Begin rejects the whole input before anything
+// is written (the RecordPractice whole-batch discipline).
+func TestReceiptBeginRejectsInvalidArguments(t *testing.T) {
+	store, err := NewReceiptStore(newLessonTestDB(t), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewReceiptStore: %v", err)
+	}
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		in   ReceiptInput
+	}{
+		{"empty lesson id", ReceiptInput{RequestID: "req-1", Kind: ReceiptKindCheck}},
+		{"empty request id", ReceiptInput{LessonID: "r0-1", Kind: ReceiptKindCheck}},
+		{"empty kind", ReceiptInput{LessonID: "r0-1", RequestID: "req-1"}},
+	} {
+		if _, err := store.Begin(ctx, tc.in); err == nil {
+			t.Errorf("%s: Begin error = nil, want ErrInvalidLesson", tc.name)
+		}
+	}
+
+	var count int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM lesson_save_receipts").Scan(&count); err != nil {
+		t.Fatalf("count receipts: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("lesson_save_receipts rows = %d, want 0 after rejected inputs", count)
+	}
+}
+
 // TestReceiptCompleteFillsRealOutcome (behavior 2): Complete flips the SAME
 // row to saved/failed with the REAL updated/missing sets and a non-empty
 // completed_at. The failed shape carries nil updated (nothing landed) and

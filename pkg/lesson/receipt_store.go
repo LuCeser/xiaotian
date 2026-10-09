@@ -19,6 +19,10 @@ package lesson
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
@@ -130,31 +134,179 @@ func NewReceiptStore(db *sql.DB, logger infra.Logger) (*ReceiptStore, error) {
 }
 
 // Begin records phase one: INSERT one status='pending' row carrying the
-// sorted requested word set. RED scaffold — the INSERT lands in the GREEN
-// commit.
+// sorted requested word set, and returns the receipt (id filled). An empty
+// lesson_id/request_id/kind rejects before anything is written — an
+// anonymous row could never be joined back to a lesson honestly.
 func (s *ReceiptStore) Begin(ctx context.Context, in ReceiptInput) (Receipt, error) {
-	_ = ctx
-	_ = in
-	return Receipt{}, nil // RED scaffold
+	if in.LessonID == "" || in.RequestID == "" || in.Kind == "" {
+		return Receipt{}, errors.Wrap(ErrInvalidLesson, "begin receipt: lesson_id, request_id and kind must be non-empty")
+	}
+	requested, err := encodeWordSet(in.Requested)
+	if err != nil {
+		return Receipt{}, errors.Wrap(err, "begin receipt: encode requested set")
+	}
+	res, err := s.db.ExecContext(ctx,
+		"INSERT INTO lesson_save_receipts ("+receiptColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		in.LessonID, in.RequestID, in.Kind, requested, "[]", "[]", ReceiptStatusPending, "", "",
+	)
+	if err != nil {
+		s.logger.Error("receipt begin: insert failed",
+			infra.F("component", "lesson/receipt_store"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+			infra.F("kind", in.Kind),
+			infra.ErrField(err),
+		)
+		return Receipt{}, errors.Wrap(err, "begin receipt: insert")
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Receipt{}, errors.Wrap(err, "begin receipt: last insert id")
+	}
+	// Single-statement contract: the returned Receipt carries what the
+	// INSERT wrote; created_at/completed_at stay DB-side (the row readback
+	// happens through ListByLesson).
+	return Receipt{
+		ID:        id,
+		LessonID:  in.LessonID,
+		RequestID: in.RequestID,
+		Kind:      in.Kind,
+		Requested: sortedCopy(in.Requested),
+		Status:    ReceiptStatusPending,
+	}, nil
 }
 
 // Complete records phase two: UPDATE the pending row to saved/failed with
 // the real updated/missing sets and a completion timestamp. Idempotent by
 // construction — the WHERE status='pending' guard makes a second Complete
-// zero-match into a no-op. RED scaffold — the UPDATE lands in GREEN.
+// zero-match into a no-op (the FIRST completion is history; a late
+// duplicate callback never rewrites a settled outcome).
 func (s *ReceiptStore) Complete(ctx context.Context, id int64, updated, missing []string, saved bool) error {
-	_ = ctx
-	_ = id
-	_ = updated
-	_ = missing
-	_ = saved
-	return nil // RED scaffold
+	if id <= 0 {
+		return errors.Wrap(ErrInvalidLesson, "complete receipt: id must be positive")
+	}
+	updatedJSON, err := encodeWordSet(updated)
+	if err != nil {
+		return errors.Wrap(err, "complete receipt: encode updated set")
+	}
+	missingJSON, err := encodeWordSet(missing)
+	if err != nil {
+		return errors.Wrap(err, "complete receipt: encode missing set")
+	}
+	status := ReceiptStatusFailed
+	if saved {
+		status = ReceiptStatusSaved
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE lesson_save_receipts SET updated = ?, missing = ?, status = ?, completed_at = datetime('now') WHERE id = ? AND status = ?",
+		updatedJSON, missingJSON, status, id, ReceiptStatusPending,
+	); err != nil {
+		s.logger.Error("receipt complete: update failed",
+			infra.F("component", "lesson/receipt_store"),
+			infra.F("receipt_id", id),
+			infra.F("status", status),
+			infra.ErrField(err),
+		)
+		return errors.Wrap(err, "complete receipt: update")
+	}
+	// Zero affected rows = the row was already completed: the deliberate
+	// idempotent no-op, not an error.
+	return nil
 }
 
 // ListByLesson returns every receipt row of the lesson, first-recorded
-// first. RED scaffold — the query lands in GREEN.
+// first. An unknown lesson lists zero rows with no error. Word-set columns
+// decode with legacy-default tolerance (an empty raw value reads as the
+// empty set); corrupted non-empty JSON surfaces as a wrapped error — a
+// silently-empty set would misstate what was saved.
 func (s *ReceiptStore) ListByLesson(ctx context.Context, lessonID string) ([]Receipt, error) {
-	_ = ctx
-	_ = lessonID
-	return nil, nil // RED scaffold
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, "+receiptColumns+" FROM lesson_save_receipts WHERE lesson_id = ? ORDER BY id",
+		lessonID,
+	)
+	if err != nil {
+		s.logger.Error("receipt list by lesson failed",
+			infra.F("component", "lesson/receipt_store"),
+			infra.F("lesson_id", lessonID),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "list receipts by lesson")
+	}
+	defer rows.Close()
+
+	var receipts []Receipt
+	for rows.Next() {
+		var (
+			r             Receipt
+			requestedJSON string
+			updatedJSON   string
+			missingJSON   string
+		)
+		if err := rows.Scan(&r.ID, &r.LessonID, &r.RequestID, &r.Kind, &requestedJSON, &updatedJSON, &missingJSON, &r.Status, &r.CreatedAt, &r.CompletedAt); err != nil {
+			return nil, errors.Wrap(err, "list receipts: scan")
+		}
+		if r.Requested, err = decodeWordSet(requestedJSON); err != nil {
+			s.logger.Error("receipt list: decode requested failed",
+				infra.F("component", "lesson/receipt_store"),
+				infra.F("receipt_id", r.ID),
+				infra.ErrField(err),
+			)
+			return nil, errors.Wrap(err, fmt.Sprintf("list receipts: receipt %d: decode requested", r.ID))
+		}
+		if r.Updated, err = decodeWordSet(updatedJSON); err != nil {
+			s.logger.Error("receipt list: decode updated failed",
+				infra.F("component", "lesson/receipt_store"),
+				infra.F("receipt_id", r.ID),
+				infra.ErrField(err),
+			)
+			return nil, errors.Wrap(err, fmt.Sprintf("list receipts: receipt %d: decode updated", r.ID))
+		}
+		if r.Missing, err = decodeWordSet(missingJSON); err != nil {
+			s.logger.Error("receipt list: decode missing failed",
+				infra.F("component", "lesson/receipt_store"),
+				infra.F("receipt_id", r.ID),
+				infra.ErrField(err),
+			)
+			return nil, errors.Wrap(err, fmt.Sprintf("list receipts: receipt %d: decode missing", r.ID))
+		}
+		receipts = append(receipts, r)
+	}
+	return receipts, rows.Err()
+}
+
+// encodeWordSet serializes a word set deterministically: sorted copy, then
+// JSON — map iteration order must never leak into a stored row payload.
+func encodeWordSet(words []string) (string, error) {
+	b, err := json.Marshal(sortedCopy(words))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// decodeWordSet decodes a stored word-set column: an empty raw value (a row
+// predating the column, or a hand edit) reads as the empty set, corrupted
+// non-empty JSON surfaces as an error (same honesty contract as
+// decodeOutcomesJSON).
+func decodeWordSet(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return []string{}, nil
+	}
+	var words []string
+	if err := json.Unmarshal([]byte(raw), &words); err != nil {
+		return nil, err
+	}
+	if words == nil {
+		words = []string{}
+	}
+	return words, nil
+}
+
+// sortedCopy returns a sorted copy of words — the caller's slice order is
+// never mutated.
+func sortedCopy(words []string) []string {
+	sorted := make([]string, len(words))
+	copy(sorted, words)
+	sort.Strings(sorted)
+	return sorted
 }
