@@ -1,19 +1,19 @@
 ---
-gsd_state_version: 1.0
+gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: realtime-tutor — ACTIVE
-current_phase: 13.1
-current_phase_name: 三段式默写课堂（默写→检查→统一反馈） (INSERTED)
-status: executing
-stopped_at: Completed 13.1-08-PLAN.md — Phase 13.1 all 8 plans complete, ready for 13-13
-last_updated: "2026-10-08T18:25:29.623Z"
-last_activity: 2026-10-08
-last_activity_desc: Phase 13.1 plan 08 (gap closure CR-01/WR-01/WR-02 + IN-01) complete
-state_head: 62e579b3daabc9ebe9d4203b800464b1e971d2a9
+current_phase: "13.3"
+current_phase_name: 家长端融合——统一首页与学习成果可读 (INSERTED)
+status: verifying
+stopped_at: Phase 13 local UAT Test 1 awaiting user; Phase 13.2 not started
+last_updated: "2026-10-09T15:30:46.433Z"
+last_activity: 2026-10-09
+last_activity_desc: 用户将 VPS 从 Phase 13 拆为独立 13.2；本地未通过不部署
+state_head: 0e836a0662328da4e3272d0f857aa0191108fed8
 progress:
-  total_phases: 5
-  completed_phases: 0
-  total_plans: 21
+  total_phases: 7
+  completed_phases: 2
+  total_plans: 26
   completed_plans: 20
   percent: 0
 ---
@@ -29,23 +29,25 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-04)
 
 **Core value:** 学生在浏览器与家教自然实时交流，理解上下文、允许打断、等待纸笔书写，学习结果进入真实记录。
-**Current focus:** Phase 13.1 — 三段式默写课堂（默写→检查→统一反馈） (INSERTED)
+**Current focus:** Phase 13/13.1 本地运行、人工验收与修复；不部署 VPS
 
 ## Current Position
 
-Phase: 13.1 (三段式默写课堂（默写→检查→统一反馈） (INSERTED)) — ALL 8 PLANS COMPLETE
-Plan: 8 of 8（13.1-08 gap 闭合已交付：CR-01 恰一次＋WR-01 面板重置＋WR-02 冲突短路径＋IN-01 文案）
-Status: Phase execution complete — 13-13 程序性闸已放行（08 已落地）
-Last activity: 2026-10-08 — 13.1-08 complete (5 task commits + metadata)；2026-10-09 main 合并（261006/261007 快任务台账行并入）
-Next: /gsd-verify-work 13.1 → 13-13 VPS 部署+正式验收（真机三项＋13.1-08-SUMMARY 交接清单人工核对项）
+Phase: 13.3 (家长端融合——统一首页与学习成果可读 (INSERTED)) — READY TO EXECUTE
+Plan: 12 of 12 implementation plans complete; 13-13 moved to Phase 13.2 reference
+Status: Verifying — Phase 13/13.1 local human acceptance pending; VPS deployment not started
+Last activity: 2026-10-09 — 用户将 VPS 从 Phase 13 拆为独立 13.2；本地未通过不部署
+Next: $gsd-verify-work 13 → 13.1 本地人工验收及修复；通过后运行 /gsd-plan-phase 13.3（家长端融合，纯本地）。Phase 13.2（VPS）已搁置（2026-10-09）
 
-13-01～13-06 的实时语音基础已实现；状态机默写转向尚待执行 13-07～13-13，RT-01～RT-10 全部待验收。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
+本地验收未通过项（2026-10-09 14:33 北京时间）：用户报告“再练一组功能测试不通过”。已登记于 [Phase 13.1 UAT](phases/13.1-three-stage-dictation-lesson/13.1-UAT.md) 测试 6 / G-13.1-local-4；具体表现待补充，尚未诊断或修复。
+
+13-01～13-12 实施已完成；Phase 13 和 13.1 本地人工验收尚未通过。原未执行 13-13 已移出 Phase 13，独立 Phase 13.2 等待本地通过后再规划部署；正式 RT 产品验收按各项证据判定，不因实施完成自动通过。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
 
 本轮规划检查：7/7 待执行计划结构有效，7/7 阶段需求覆盖；CONTEXT 决策覆盖工具因无可跟踪 ID 跳过，独立检查已核对现行能力与计划的一致性。S-01～S-06、HIGH-1 及评审修正意见已落实。13-07 历史波次的无待执行依赖仅为 INFO；7 条未分类边界探测保留 unresolved，评级优先级及真机证据仍待人工检查。本轮仅修改规划文档，未运行实现测试、部署或真机验收。
 
 ## Performance Metrics
 
-v2.0：4 个活跃阶段，Phase 13 已完成 13/13 个实施计划（13-12 按用户改判本机 E2E 口径收口），下一计划 13-13（Wave 7：VPS 部署+正式验收）；产品验收尚未通过，待用户三项（本机能力认证/iPad 真机认证/评级映射追认）与 13-13。历史统计保留于 milestones/v1.0-STATE.md，不用于新里程碑进度。
+v2.0：6 个活跃阶段；Phase 13 实施 12/12、Phase 13.1 实施 8/8，均待本地人工验收。Phase 13.2 独立负责 VPS 部署与真机正式验收，0 个可执行计划、未部署，本地未通过不得开始。历史统计保留于 milestones/v1.0-STATE.md，不用于新里程碑验收结论。
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -184,6 +186,9 @@ None yet.
 - Phase 8.1 edited: Re-scoped to ticket 02 (student-paced Mimo TTS dictation); auto-advance plans superseded by user decision 2026-08-23
 - Phase 8.6 inserted after Phase 8: Phases 8.2-8.6 inserted from speech-recognition-redesign tickets 03-07 (voice commands, photo OCR, batch submission, auto grading, multi-user); ticket 08 absorbed into Phase 12; FEED re-sourced in Phase 10. Ticket set = single source of truth (user decision 2026-08-23)
 - Phase 13.1 inserted after Phase 13: 三段式默写课堂（默写→检查→统一反馈）：R0 验收问题 U-5/U-6/U-7/U-10 讨论收敛；三段式先行于 13-13 部署（用户 2026-10-06）
+- Phase 13.2 inserted after Phase 13: 2026-10-09 用户要求：VPS 从 Phase 13 拆出；先完成 Phase 13/13.1 本地人工验收。13.2 未规划、未部署，原 13-13 计划仅保留参考。
+- Phase 13 edited: R0 范围调整为本地开发机真实语音验收，实施 12/12；部署与公网/iPad 正式验收迁至 13.2，本地验收未通过不得开始部署。
+- Phase 13.3 inserted after Phase 13.2: 家长端融合：统一首页+学习成果可读，无门禁（D-04 修订）；纯本地与 VPS 零耦合，13.2 同日搁置（家庭试用期本地即真机） (URGENT)
 
 ## Deferred Items
 
@@ -199,5 +204,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-10-08T18:24:46.435Z
-Stopped at: Completed 13.1-08-PLAN.md — Phase 13.1 all 8 plans complete, ready for 13-13
+Stopped at: Phase 13 local UAT Test 1 awaiting user; Phase 13.2 not started
 Resume file: None
