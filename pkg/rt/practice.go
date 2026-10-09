@@ -381,15 +381,18 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 	tm.tutor.checking = false
 	tm.mu.Unlock()
 
-	go tm.finishPracticeSubmit(s, ctx, cancel, lessonID, wordsList, res)
+	go tm.finishPracticeSubmit(s, ctx, cancel, lessonID, wordsList, res, m.RequestID)
 }
 
 // finishPracticeSubmit runs on its own goroutine (the ACK-gated ending
 // blocks; the read loop must keep serving acks): ONE RecordPractice batch
 // from the STORED verdicts + outcomes readback (the row is the authority),
 // the honest practice feedback, the wrap line, then
-// session_ended(practice_complete).
-func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, lessonID string, wordsList []lesson.Word, res lesson.CompleteCheckResult) {
+// session_ended(practice_complete). 13.3-01 brackets the write with the
+// two-phase save receipt — whose saved/failed expresses the PRACTICE
+// STORAGE result (practice_logs), NOT an FSRS write (practice never enters
+// the FSRS schedule, D-11).
+func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, lessonID string, wordsList []lesson.Word, res lesson.CompleteCheckResult, requestID string) {
 	defer cancel()
 
 	// The D-02 matrix over the STORED readback — the same single rating
@@ -434,17 +437,53 @@ func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cance
 	recorded := 0
 	saveFailed := false
 	if requested > 0 {
+		// 13.3-01 receipt phase one: pending marker before the practice
+		// write (same bypass discipline as every mount — a receipt failure
+		// never returns, never rewrites, S-05).
+		receiptID := int64(0)
+		requestedSet := sortedWordSet(ratings)
+		if tm.cfg.Receipts != nil {
+			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+				LessonID:  lessonID,
+				RequestID: requestID,
+				Kind:      lesson.ReceiptKindPractice,
+				Requested: requestedSet,
+			})
+			if rerr != nil || rec.ID <= 0 {
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
+			} else {
+				receiptID = rec.ID
+			}
+		}
+
 		if err := tm.cfg.PracticeStore.RecordPractice(ctx, records); err != nil {
 			// Honest failure: the practice records were NOT saved — never a
 			// narrated success (transparency prohibition, S-05).
 			saveFailed = true
 			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+			// 13.3-01 receipt phase two (failed): the PRACTICE STORAGE failed
+			// — this receipt says nothing about FSRS (zero SubmitReview calls
+			// on this path by construction, T-13.1-11). missing = the full
+			// attempted set, updated empty.
+			if tm.cfg.Receipts != nil && receiptID > 0 {
+				if cerr := tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false); cerr != nil {
+					tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
+				}
+			}
 		} else {
 			recorded = requested
 			tm.recorder.Emit(EventPracticeSubmitted,
 				infra.F("requested", requested),
 				infra.F("recorded", recorded),
 			)
+			// 13.3-01 receipt phase two (saved): every record landed —
+			// updated = the requested set, missing empty. The receipt's saved
+			// means practice_logs storage succeeded, NOT an FSRS write (D-11).
+			if tm.cfg.Receipts != nil && receiptID > 0 {
+				if cerr := tm.cfg.Receipts.Complete(ctx, receiptID, requestedSet, nil, true); cerr != nil {
+					tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
+				}
+			}
 		}
 	}
 
