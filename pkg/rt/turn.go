@@ -155,11 +155,11 @@ const (
 // endings (timeout → the original lesson_complete/no_due_words reason still
 // ships; protocol.go sequencing contract).
 const (
-	purposeGreeting = "greeting"      // opening + first word
-	purposeAnnounce = "announce"      // next-word announcement
-	purposeChat     = "chat"          // classification reply
-	purposeSummary  = "summary"       // completion wrap-up
-	purposeNoDue    = "no_due_words"  // zero-due explanation
+	purposeGreeting = "greeting"     // opening + first word
+	purposeAnnounce = "announce"     // next-word announcement
+	purposeChat     = "chat"         // classification reply
+	purposeSummary  = "summary"      // completion wrap-up
+	purposeNoDue    = "no_due_words" // zero-due explanation
 )
 
 // maxReplyRunes bounds an LLM reply before it enters TTS and subtitles
@@ -438,6 +438,8 @@ func (tm *TurnManager) HandleControl(s Sender, data []byte) {
 		tm.handlePing(s, m)
 	case EndSessionMsg:
 		tm.handleEndSession(s)
+	case ReadWordMsg:
+		tm.handleReadWord(s, m)
 	case CheckVerdictMsg:
 		tm.handleCheckVerdict(s, m) // 13.1-01 check stage (check.go)
 	case CheckSubmitMsg:
@@ -668,13 +670,12 @@ func lessonViewOf(l lesson.Lesson) LessonView {
 	return LessonView{LessonID: l.LessonID, Version: l.Version, CurrentIndex: l.CurrentIndex, Words: words}
 }
 
-// lessonViewStudent is the D-09 student projection: revealed words (i <
-// currentIndex) carry text; every undictated position is "". The reveal
-// primitive is word_revealed, the wholesale unmask point is check_started.
+// lessonViewStudent hides every answer until the whole dictation is done,
+// including completed positions restored by a mid-lesson reconnect.
 func lessonViewStudent(l lesson.Lesson) LessonView {
 	words := make([]string, 0, len(l.Cards))
-	for i, c := range l.Cards {
-		if i < l.CurrentIndex {
+	for _, c := range l.Cards {
+		if l.CurrentIndex >= len(l.Cards) {
 			words = append(words, c.Word)
 		} else {
 			words = append(words, "")
@@ -1289,16 +1290,7 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		CurrentIndex: res.NewIndex,
 		RequestID:    requestID,
 	})
-	if tm.sessionMode() != ModeTest {
-		// 13.1-02 (D-09): the chip flips to 已默=显词＋绿勾 — the reveal rides
-		// the FIRST commit only (idempotent replays and conflicts never
-		// re-send, mirroring the EventWordAdvanced rule).
-		_ = s.SendControl(WordRevealedMsg{
-			Type:      TypeWordRevealed,
-			WordIndex: target.WordIndex,
-			Word:      target.Word,
-		})
-	}
+	// Progress carries positions only. Answers arrive together in check_started.
 	tm.recorder.Emit(EventWordAdvanced,
 		infra.F("word_index", target.WordIndex),
 		infra.F("new_index", res.NewIndex),

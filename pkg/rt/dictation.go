@@ -280,7 +280,7 @@ type DictationTutor struct {
 	currentIndex   int
 	completed      bool
 	perWordOutcome map[int]string
-	perWordHints   map[int]int   // per-word hint request count (U-9, 2026-10-06)
+	perWordHints   map[int]int    // per-word hint request count (U-9, 2026-10-06)
 	shortHistory   []historyRound // capped deque, oldest dropped (last 4 rounds)
 	// paused is the independent CLASSROOM pause bit (13-09): set by a
 	// recognized pause command, cleared by a recognized resume. It is
@@ -486,8 +486,8 @@ func (t *DictationTutor) resyncCheck(l lesson.Lesson) {
 }
 
 // maskedWords returns the STILL-MASKED word set for outbound masking: every
-// not-yet-revealed word (index >= currentIndex — the current word included,
-// D-09). Once the check stage opens the set is empty: check_started already
+// word in the lesson, including already-written words. Once the check stage
+// opens the set is empty: check_started already
 // delivered the full plaintext list, and nothing re-masks after it (D-10).
 // Caller holds tm.mu (single-lock discipline).
 func (t *DictationTutor) maskedWords() []string {
@@ -495,7 +495,7 @@ func (t *DictationTutor) maskedWords() []string {
 		return nil
 	}
 	out := make([]string, 0, len(t.words))
-	for i := t.currentIndex; i < len(t.words); i++ {
+	for i := 0; i < len(t.words); i++ {
 		out = append(out, t.words[i].Word)
 	}
 	return out

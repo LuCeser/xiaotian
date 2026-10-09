@@ -113,12 +113,26 @@ body[data-page="tutor"] {
 .rt-words { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 
 .rt-word-chip {
+  min-width: 60px;
+  min-height: 60px;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
   padding: 8px 14px;
   border-radius: 12px;
   background: #f0f4fa;
   color: #5b6b7f;
   font-size: 18px;
   font-weight: 600;
+}
+
+.rt-word-chip:disabled {
+  cursor: default;
+}
+
+.rt-word-chip:focus-visible {
+  outline: 3px solid #2f6fed;
+  outline-offset: 3px;
 }
 
 /* Student-mode three states (13.1-02, D-09). Order matters: the current
@@ -133,8 +147,8 @@ body[data-page="tutor"] {
   color: #1f7a40;
 }
 
-/* 已默 = word text + green check (D-09); the ✓ rides the pseudo-element so
-   the DOM text stays exactly the server-sent word. */
+/* Completed positions keep their numbers during dictation and gain a check.
+   Answers replace numbers together when the check stage opens. */
 .rt-word-chip.rt-word-done::after {
   content: ' ✓';
   color: #2fb96b;

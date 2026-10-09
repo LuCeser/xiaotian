@@ -18,7 +18,7 @@
   <meta name="theme-color" content="#4f8ef7">
   <meta name="description" content="自然实时家教 — 听说小老师">
   <title>听说小老师 · 自然实时家教</title>
-  <link rel="stylesheet" href="styles/tutor.css?v=20261008a">
+  <link rel="stylesheet" href="styles/tutor.css?v=20261009a">
 </head>
 <body data-page="tutor">
 
@@ -142,6 +142,8 @@
 
       var lesson = { words: [], currentIndex: 0, version: 0 };
       var started = false;
+      var courseEnded = false;
+      var readPending = false;
       // 13.1-05 D-11: the 「再练一组」 one-shot intent. The banner button sets
       // it; the start flow consumes it into client.initPractice for exactly
       // ONE practice session (one tap = one set — the practice ending never
@@ -199,6 +201,7 @@
 
       function setStatus(state) {
         statusEl.setAttribute('data-state', state);
+        renderProgress();
       }
 
       function setConn(state, text) {
@@ -385,13 +388,19 @@
         if (!allChecked() || check.submitPending) return;
         check.submitPending = true;
         renderCheckPanel(); // disabled/pending UI while awaiting review_result
+        renderProgress();
         client.sendJSON({ type: 'check_submit', request_id: requestUID() });
       }
 
       function renderProgress() {
         clearChildren(wordsEl);
         for (var i = 0; i < lesson.words.length; i++) {
-          var chip = document.createElement('span');
+          var chip = document.createElement('button');
+          chip.type = 'button';
+          chip.setAttribute('aria-label', '重读第 ' + (i + 1) + ' 个词');
+          chip.title = '点击重读第 ' + (i + 1) + ' 个词';
+          chip.disabled = !canReadWord(i);
+          chip.addEventListener('click', sendReadWord.bind(null, i));
           if (mode === 'test') {
             // Test mode keeps the pre-13.1 full-reveal rendering.
             chip.className = 'rt-word-chip' + (i === lesson.currentIndex ? ' rt-word-current' : '');
@@ -400,10 +409,12 @@
             // Student mode, unrevealed (the server sent ""): index
             // placeholder; the CURRENT index is the highlighted number with
             // no word text — the announcement is voice-only (D-09).
-            chip.className = 'rt-word-chip rt-word-hidden' + (i === lesson.currentIndex ? ' rt-word-current' : '');
+            chip.className = 'rt-word-chip rt-word-hidden' +
+              (i < lesson.currentIndex ? ' rt-word-done' : '') +
+              (i === lesson.currentIndex ? ' rt-word-current' : '');
             chip.textContent = String(i + 1);
           } else {
-            // Student mode, revealed (the server sent the word): word text
+            // Check stage, revealed (the server sent the word): word text
             // plus the green check (the ✓ rides the CSS pseudo-element).
             chip.className = 'rt-word-chip rt-word-done';
             chip.textContent = lesson.words[i];
@@ -418,6 +429,25 @@
         }
         progressFill.style.width = (total > 0 ? Math.round((lesson.currentIndex / total) * 100) : 0) + '%';
         progressText.textContent = '第 ' + (lesson.currentIndex + 1) + ' / ' + (total > 0 ? total : '-') + ' 个词';
+      }
+
+      function canReadWord(index) {
+        var state = statusEl.getAttribute('data-state');
+        return started && !courseEnded && !terminalDraining && !readPending &&
+          !check.submitPending && !check.resultText &&
+          connEl.getAttribute('data-conn') === 'connected' &&
+          (state === 'listening' || state === 'speaking' || state === 'paused') &&
+          index >= 0 && index < lesson.words.length &&
+          (check.active || index <= lesson.currentIndex);
+      }
+
+      function sendReadWord(index) {
+        if (!canReadWord(index)) return;
+        // Stop the old audio before requesting a reading under the new epoch.
+        // Neither message advances the cursor or records a hint/verdict.
+        if (statusEl.getAttribute('data-state') === 'speaking') playback.interruptNow();
+        readPending = client.sendJSON({ type: 'read_word', word_index: index, current_index: lesson.currentIndex });
+        renderProgress();
       }
 
       // Trace lines (13.1-02 D-10/U-7): teacher left, student right, both
@@ -490,6 +520,8 @@
 
       // ----- client wiring (wire names mirror pkg/rt/protocol.go) -----------
       client.on('session_ready', function (m) {
+        courseEnded = false;
+        readPending = false;
         lesson.words = (m.lesson && m.lesson.words) || [];
         lesson.currentIndex = (m.lesson && m.lesson.current_index) || 0;
         lesson.version = (m.lesson && m.lesson.version) || 0;
@@ -499,8 +531,8 @@
         // 13.1-08 WR-01: the previous lesson's check panel must not survive
         // into the new session (full state + DOM reset above).
         resetCheckState();
-        renderProgress();
         setConn('connected', '已连接');
+        renderProgress();
         endBtn.disabled = false;
       });
 
@@ -535,6 +567,7 @@
       });
 
       client.on('state', function (m) {
+        readPending = false;
         // Five-state dispatch: listening / processing / speaking / paused /
         // ended (paused chip added 13-11 — StatePaused, pkg/rt/protocol.go).
         setStatus(m.value);
@@ -547,8 +580,9 @@
       });
 
       client.on('word_revealed', function (m) {
-        // Per-word reveal (13.1-02, D-09): the chip state derives ONLY from
-        // server data — the client never fills in a word it was not sent.
+        // Ignore old-server per-word reveals during dictation. The full answer
+        // list is displayed only after check_started opens the check stage.
+        if (mode !== 'test' && !check.active) return;
         if (!m || typeof m.word_index !== 'number') return;
         if (m.word_index < 0 || m.word_index >= lesson.words.length) return;
         lesson.words[m.word_index] = m.word || '';
@@ -617,6 +651,7 @@
           check.resultText = '这次没有要保存的学习记录。';
         }
         renderCheckPanel();
+        renderProgress();
       });
 
       client.on('interrupt_ack', function () {
@@ -624,6 +659,8 @@
       });
 
       client.on('error', function (m) {
+        readPending = false;
+        renderProgress();
         var code = m && m.code ? m.code : '';
         playback.note('error:' + (code || 'unknown'));
         showError(code, m && m.message);
@@ -649,6 +686,7 @@
       client.on('session_ended', function (m) {
         var reason = m && m.reason ? m.reason : '';
         playback.note('session_ended:' + reason);
+        courseEnded = true;
         setStatus('ended');
         setConn('closed', '课程已结束');
         endBtn.disabled = true;
@@ -694,7 +732,8 @@
 
       client.onClose(function () {
         playback.note('close');
-        setConn('closed', '已断开');
+        setConn('closed', courseEnded ? '课程已结束' : '连接已断开');
+        renderProgress();
         if (terminalDraining) return; // drain owns teardown; audio survives close
         stopEverything();
       });
@@ -739,6 +778,7 @@
         if (started) return;
         if (!voiceReady) return;
         started = true;
+        courseEnded = false;
         startBtn.disabled = true;
         errorEl.hidden = true;
         // 13.1-08 (Rule 1 during WR-01): terminalDraining is armed for the

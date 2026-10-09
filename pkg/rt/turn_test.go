@@ -121,18 +121,18 @@ func (c *captureSender) listeningCount() int {
 // The 13.1 check-stage methods follow the same first-commit/replay/conflict
 // shape on the in-memory row (checkResults holds their stored results).
 type fakeExecutor struct {
-	mu              sync.Mutex
-	lesson          lesson.Lesson
-	exists          bool
-	ensureCalls     int
+	mu               sync.Mutex
+	lesson           lesson.Lesson
+	exists           bool
+	ensureCalls      int
 	ensureCardsCalls int
-	ensureIDs       []string // the lesson ids EnsureLessonCards was called with
-	stateCalls      int
-	advanceCalls    []fakeAdvanceCall
-	checkCalls      []fakeCheckCall
-	conflictVersion int
-	requestResults  map[string]lesson.AdvanceResult
-	checkResults    map[string]any
+	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
+	stateCalls       int
+	advanceCalls     []fakeAdvanceCall
+	checkCalls       []fakeCheckCall
+	conflictVersion  int
+	requestResults   map[string]lesson.AdvanceResult
+	checkResults     map[string]any
 }
 
 type fakeAdvanceCall struct {
@@ -1385,10 +1385,10 @@ func TestDictationDoubleConfirmIdempotent(t *testing.T) {
 		t.Fatal("first confirm never settled after the announce ack")
 	}
 	before := map[string]int{
-		"lesson_update":   s.countOf(TypeLessonUpdate),
+		"lesson_update":    s.countOf(TypeLessonUpdate),
 		"teacher_sentence": s.countOf(TypeTeacherSentence),
-		"word_advanced":   ttEventCount(t, log, EventWordAdvanced),
-		"review":          ttEventCount(t, log, EventReviewSubmitted),
+		"word_advanced":    ttEventCount(t, log, EventWordAdvanced),
+		"review":           ttEventCount(t, log, EventReviewSubmitted),
 	}
 
 	// The late duplicate confirm carries the ORIGINAL captured target.
@@ -1538,7 +1538,7 @@ func TestSentenceAckRejectsStaleUnknownAndDuplicate(t *testing.T) {
 	ack := func(sid string, epoch uint64) {
 		tm.HandleControl(s, mustJSON(t, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: sid, Epoch: epoch}))
 	}
-	ack("t1-s0", 5) // stale epoch
+	ack("t1-s0", 5)  // stale epoch
 	ack("t1-s99", 0) // unknown sentence
 	if s.listeningCount() != 0 {
 		t.Fatal("rejected acks lifted the playback gate")
@@ -2126,10 +2126,10 @@ func TestWordRatingMatrix(t *testing.T) {
 // unknown results skip (""), exactly like the behavior matrix's default.
 func TestCheckRatingMatrix(t *testing.T) {
 	cases := []struct {
-		name    string
-		result  string
-		hints   int
-		want    string
+		name   string
+		result string
+		hints  int
+		want   string
 	}{
 		{"correct no hint", checkCorrect, 0, "good"},
 		{"correct after hints", checkCorrect, 2, "hard"},
@@ -2573,7 +2573,7 @@ func TestWordTimerResetInvalidatesQueuedCallbackSameEpochAndIndex(t *testing.T) 
 	tm.mu.Lock()
 	var queued func()
 	tm.timerFactory = func(_ time.Duration, cb func()) *time.Timer {
-		queued = cb // invoked under tm.mu by armWordTimerLocked
+		queued = cb                     // invoked under tm.mu by armWordTimerLocked
 		return time.NewTimer(time.Hour) // the injected handle never fires
 	}
 	tm.mu.Unlock()
@@ -2768,8 +2768,8 @@ func TestStaleTimerIgnored(t *testing.T) {
 	target := tm.tutor.turnTarget()
 	tm.mu.Unlock()
 
-	tm.onWordTimeout(gen-1, 0, target)                                                // stale generation
-	tm.onWordTimeout(gen, 7, target)                                                  // stale epoch
+	tm.onWordTimeout(gen-1, 0, target)                                                 // stale generation
+	tm.onWordTimeout(gen, 7, target)                                                   // stale epoch
 	tm.onWordTimeout(gen, 0, TurnTarget{WordIndex: 1, ExpectedVersion: 1, Word: "香蕉"}) // wrong word
 	tm.onWordTimeout(gen, 0, TurnTarget{WordIndex: 0, ExpectedVersion: 9, Word: "苹果"}) // stale version
 
@@ -3556,12 +3556,12 @@ func ttInitMode(t *testing.T, tm *TurnManager, s *captureSender, mode string) {
 }
 
 // TestStudentMaskingLessonView: the student-mode session_ready projection
-// carries word text ONLY for i < currentIndex (revealed words); undictated
-// positions are "". Test mode keeps the full reveal (13.1 之前 behavior).
+// keeps every word hidden during dictation, including on a mid-lesson
+// reconnect. Test mode keeps the full reveal.
 func TestStudentMaskingLessonView(t *testing.T) {
 	cards := ttCards("苹果", "香蕉", "橘子")
 	exec := newFakeExecutor(ttLessonID, cards)
-	exec.setRow(1, 2) // mid-lesson reconnect: word 0 revealed
+	exec.setRow(1, 2) // mid-lesson reconnect: word 0 is done but stays hidden
 	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(newFakeWords(cards)), nil, nil)
 	s := &captureSender{}
 	ttInit(t, tm, s) // absent mode → student
@@ -3571,8 +3571,8 @@ func TestStudentMaskingLessonView(t *testing.T) {
 		t.Fatalf("session_ready count = %d, want 1", len(ready))
 	}
 	got := ready[0]["lesson"].(map[string]any)["words"].([]any)
-	if len(got) != 3 || got[0] != "苹果" || got[1] != "" || got[2] != "" {
-		t.Errorf("student lesson.words = %v, want [苹果 \"\" \"\"] (i < currentIndex only)", got)
+	if len(got) != 3 || got[0] != "" || got[1] != "" || got[2] != "" {
+		t.Errorf("student lesson.words = %v, want [\"\" \"\" \"\"] until the check stage", got)
 	}
 
 	// Test mode: full reveal, behavior unchanged from before 13.1.
@@ -3700,10 +3700,9 @@ func TestStudentMaskingTranscript(t *testing.T) {
 	}
 }
 
-// TestWordRevealedOnAdvance: the FIRST advance commit delivers
-// word_revealed{word_index, word} in student mode so the chip flips to
-// 已默=显词＋绿勾; the idempotent replay branch never re-sends.
-func TestWordRevealedOnAdvance(t *testing.T) {
+// TestAdvanceDoesNotRevealAnswers: first advances and replays carry no
+// plaintext answers during dictation.
+func TestAdvanceDoesNotRevealAnswers(t *testing.T) {
 	cards := ttCards("苹果", "香蕉")
 	asr := newFakeASR(asrScript{text: "好了"})
 	llm := newFakeLLM(intentScript(intentConfirm, ""))
@@ -3719,14 +3718,10 @@ func TestWordRevealedOnAdvance(t *testing.T) {
 		tm.processTurn(s, []byte("pcm"))
 		close(done)
 	}()
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeWordRevealed) == 1 }) {
-		t.Fatal("word_revealed never arrived on the first advance commit")
-	}
-	rv := s.controlsOf(t, TypeWordRevealed)[0]
-	if rv["word_index"] != float64(0) || rv["word"] != "苹果" {
-		t.Errorf("word_revealed = %v, want index 0 苹果", rv)
-	}
 	ttAwaitSpoken(t, s, 4)
+	if s.countOf(TypeWordRevealed) != 0 {
+		t.Errorf("answer revealed before all words were dictated: %v", s.controlsOf(t, TypeWordRevealed))
+	}
 	ttAckLast(t, tm, s, 0)
 	select {
 	case <-done:

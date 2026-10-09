@@ -104,10 +104,10 @@
  *
  * 13.1-02 mode contract (mirrors the Go send-side masking, D-08/D-09/D-10):
  * the DEFAULT (no mode param) is STUDENT mode — session_ready.lesson.words
- * carry text only for already-revealed indexes ("" elsewhere), word-bearing
+ * carry no answer text during dictation ("" at every index), word-bearing
  * announcement subtitles use the masked 「第N个词」 form, the simulated
- * student transcript masks the target word to •••, and a word_revealed
- * frame rides every lesson_update. ?mode=test mirrors the pre-13.1 full
+ * student transcript masks answers to •••; lesson_update changes positions
+ * only. ?mode=test mirrors the pre-13.1 full
  * reveal. check_started stays the wholesale unmask point in BOTH modes.
  * Every outbound control frame is recorded in the session's `frames` log
  * (the wire-side no-leak assertion source for rt-loop.spec.js).
@@ -517,11 +517,10 @@ wss.on('connection', (ws, req, query) => {
   // 13.1-02 mode contract helpers (the server is the masking authority; the
   // page renders only what it was sent).
 
-  /** LessonView words by UI mode: student carries text ONLY for already-
-      revealed indexes (D-09); test keeps the full reveal. */
+  /** Student answers stay hidden until the entire dictation is complete. */
   function lessonWordsForMode() {
-    if (state.mode === 'test') return state.words.slice();
-    return state.words.map((w, i) => (i < state.currentIndex ? w : ''));
+    if (state.mode === 'test' || state.currentIndex >= state.words.length) return state.words.slice();
+    return state.words.map(() => '');
   }
 
   /** Word-bearing announcement text by UI mode (D-10): student subtitles use
@@ -595,8 +594,7 @@ wss.on('connection', (ws, req, query) => {
 
   // One simulated student confirmation: the student "says" the word (the
   // transcript frame — masked to ••• in student mode, D-10), the cursor
-  // advances with lesson_update (+ the student-mode word_revealed reveal,
-  // 13.1-02), then the next word is announced — or, at the end of the word
+  // advances with lesson_update, then the next word is announced — or, at the end of the word
   // list, THE CHECK STAGE OPENS (13.1-01: no immediate summary any more).
   function confirmAndAdvance() {
     if (state.ended || state.pauseActive) return;
@@ -617,11 +615,7 @@ wss.on('connection', (ws, req, query) => {
       type: 'lesson_update', lesson_id: state.lessonId, version: state.version,
       current_index: state.currentIndex, request_id: 'advance-' + state.currentIndex
     });
-    if (state.mode !== 'test') {
-      // 13.1-02 (D-09): the reveal rides the advance — the chip flips to
-      // 已默=显词＋绿勾 (the mock tick IS the first commit).
-      send({ type: 'word_revealed', word_index: state.currentIndex - 1, word: saidWord });
-    }
+    // No per-word reveal: check_started sends all answers together.
     send({ type: 'state', value: 'listening' });
     if (state.currentIndex >= state.words.length) {
       startCheckStage();
@@ -991,6 +985,25 @@ wss.on('connection', (ws, req, query) => {
         break;
       }
 
+      case 'read_word': {
+        if (!state.ready || state.ended || msg.current_index !== state.currentIndex ||
+            !Number.isInteger(msg.word_index) || msg.word_index < 0 || msg.word_index >= state.words.length ||
+            (!state.checkActive && msg.word_index > state.currentIndex)) {
+          send({ type: 'error', code: 'invalid_message', message: '现在不能重读这个词', recoverable: true });
+          break;
+        }
+        cancelPending();
+        const sid = 'read-' + (state.turn + 1);
+        state.pendingReading = { epoch: state.epoch, sentence_id: sid };
+        const text = state.checkActive
+          ? '好，我再读一遍，' + state.words[msg.word_index]
+          : wordAnnounceText('好，我再读一遍，', msg.word_index);
+        announce(sid, text, PLAN_WORD, 100, () => {
+          send({ type: 'state', value: state.pauseActive ? 'paused' : 'listening' });
+        });
+        break;
+      }
+
       case 'sentence_ack': {
         const key = msg.epoch + ':' + msg.sentence_id;
         const entry = state.announced.get(key);
@@ -1008,6 +1021,11 @@ wss.on('connection', (ws, req, query) => {
         }
         entry.acked = true;
         state.acks.push({ sentence_id: msg.sentence_id, epoch: msg.epoch });
+        const reading = state.pendingReading;
+        if (reading && reading.epoch === msg.epoch && reading.sentence_id === msg.sentence_id) {
+          state.pendingReading = null;
+          if (!state.checkActive && !state.pauseActive) armConfirmTimer();
+        }
         const pending = state.pendingTerminal;
         if (pending && pending.epoch === msg.epoch && pending.sentence_id === msg.sentence_id) {
           state.pendingTerminal = null;

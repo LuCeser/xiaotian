@@ -96,18 +96,15 @@ function parseFrames(frames) {
 
 /**
  * Wire-side no-leak walk (13.1-02, D-10): replays the recorded frames in
- * order and returns leak entries — occurrences of a NOT-YET-REVEALED word
- * string in any student-visible text frame (session_ready.lesson.words,
- * teacher_sentence, transcript). word_revealed contributes its own word to
- * the revealed set; check_started is the wholesale unmask point.
+ * order and returns leak entries — any answer sent before check_started,
+ * including old per-word reveals and student-visible text frames.
  */
 function wireLeaks(frames, words) {
   const leaks = [];
-  const revealed = new Set();
   let unmasked = false;
   for (const m of parseFrames(frames)) {
     if (m.type === 'word_revealed' && typeof m.word_index === 'number') {
-      revealed.add(m.word_index);
+      if (!unmasked) leaks.push('word_revealed#' + m.word_index);
       continue;
     }
     if (m.type === 'check_started') {
@@ -120,7 +117,7 @@ function wireLeaks(frames, words) {
     else if (m.type === 'teacher_sentence' || m.type === 'transcript') text = String(m.text || '');
     if (text === null) continue;
     for (let i = 0; i < words.length; i++) {
-      if (!revealed.has(i) && text.includes(words[i])) {
+      if (text.includes(words[i])) {
         leaks.push(m.type + '#' + i);
       }
     }
@@ -633,10 +630,10 @@ test('student mode never leaks undictated words on page or wire; check_started u
   for (let i = 0; i < 120; i++) {
     const sample = await page.evaluate((words) => {
       const st = window.__rtTutor.sessionState;
-      const revealed = st.words.filter((w) => w !== '').length;
+      const checkActive = window.__rtTutor.observe().check.active;
       return {
-        checkActive: window.__rtTutor.observe().check.active,
-        leaked: words.slice(revealed).filter((w) => document.body.innerText.includes(w))
+        checkActive: checkActive,
+        leaked: checkActive ? [] : words.filter((w) => document.body.innerText.includes(w))
       };
     }, MOCK_WORDS);
     expect(sample.leaked, `page-text leak at step ${i}`).toEqual([]);
@@ -673,12 +670,12 @@ test('student mode never leaks undictated words on page or wire; check_started u
   const ready = frames.find((m) => m.type === 'session_ready');
   expect(ready.lesson.words, 'student session_ready words masked').toEqual(['', '', '']);
   const reveals = frames.filter((m) => m.type === 'word_revealed').map((m) => m.word);
-  expect(reveals, 'one word_revealed per dictated word, in order').toEqual(MOCK_WORDS);
+  expect(reveals, 'answers are revealed together by check_started').toEqual([]);
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
 
-test('three-state chip progression: placeholder → highlighted placeholder → word+check', async ({ page }) => {
+test('numbered progress keeps completed answers hidden until checking', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(String(err)));
 
@@ -699,10 +696,10 @@ test('three-state chip progression: placeholder → highlighted placeholder → 
     await expect(page.locator('#rt-words .rt-word-chip').nth(i)).not.toHaveText(/apple|banana|cat/);
   }
 
-  // Revealed: after the first mock confirm the first chip shows the word
-  // (green check rides the CSS pseudo-element) and the highlight moves on.
+  // After the first confirm, the completed number has a green check while
+  // its answer stays hidden and the highlight moves to the next position.
   await expect(page.locator('#rt-words .rt-word-done')).toHaveCount(1, { timeout: 30_000 });
-  await expect(page.locator('#rt-words .rt-word-chip').nth(0)).toHaveText('apple');
+  await expect(page.locator('#rt-words .rt-word-chip').nth(0)).toHaveText('1');
   await expect(page.locator('#rt-words .rt-word-chip').nth(1)).toHaveClass(/rt-word-hidden/);
   await expect(page.locator('#rt-words .rt-word-chip').nth(1)).toHaveClass(/rt-word-current/);
   await expect(page.locator('#rt-words .rt-word-current')).toHaveText('2');

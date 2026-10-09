@@ -44,6 +44,7 @@ const (
 	TypeSentenceAck  = "sentence_ack"
 	TypePing         = "ping"
 	TypeEndSession   = "end_session"
+	TypeReadWord     = "read_word"     // re-read a selected announced position
 	TypeCheckVerdict = "check_verdict" // 13.1-01: one screen 对/错 verdict
 	TypeCheckSubmit  = "check_submit"  // 13.1-01: the unified-submit request
 	TypePhotoChunk   = "photo_chunk"   // 13.1-03: one base64 image chunk (check stage)
@@ -553,6 +554,14 @@ type OcrResultMsg struct {
 	Entries []OcrResultEntry `json:"entries"`
 }
 
+// ReadWordMsg requests audio only. CurrentIndex rejects clicks queued against
+// an older lesson position; the selected index never changes lesson progress.
+type ReadWordMsg struct {
+	Type         string `json:"type"`
+	WordIndex    int    `json:"word_index"`
+	CurrentIndex int    `json:"current_index"`
+}
+
 // ParseControl decodes one control message (the payload of a WebSocket
 // TextMessage frame) into its concrete message struct. It recognizes the
 // full type vocabulary so both directions round-trip in tests and conformance
@@ -569,6 +578,18 @@ func ParseControl(data []byte) (any, error) {
 		return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
 	}
 	switch probe.Type {
+	case TypeReadWord:
+		var fields struct {
+			WordIndex    *int `json:"word_index"`
+			CurrentIndex *int `json:"current_index"`
+		}
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		if fields.WordIndex == nil || fields.CurrentIndex == nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, "read_word requires word_index and current_index")
+		}
+		return ReadWordMsg{Type: probe.Type, WordIndex: *fields.WordIndex, CurrentIndex: *fields.CurrentIndex}, nil
 	case TypeSessionInit:
 		var m SessionInitMsg
 		if err := json.Unmarshal(data, &m); err != nil {
