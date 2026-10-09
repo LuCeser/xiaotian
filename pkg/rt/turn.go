@@ -136,6 +136,15 @@ type TurnManagerConfig struct {
 	// never the FSRS schedule. A practice session without it answers the
 	// same honest degraded error as a nil Practice source.
 	PracticeStore *lesson.PracticeStore
+	// Receipts is the persistent save-receipt store (13.3-01): every real
+	// save attempt (check / correction / unchecked_fallback / practice)
+	// records a two-phase lesson_save_receipts row — pending before the
+	// downstream write, saved/failed with the real word sets after — so
+	// 「已提交」 and 「已写入 FSRS」 stay distinguishable across crashes. Nil =
+	// receipts disabled (degraded/test constructions): submissions proceed
+	// exactly as before, only unrecorded. A receipt write failure is a
+	// bypass event, never a submission error (S-05).
+	Receipts *lesson.ReceiptStore
 }
 
 // defaultWordTimeout is the per-word confirm wait used when

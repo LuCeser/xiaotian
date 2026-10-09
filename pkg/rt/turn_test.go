@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -750,6 +751,71 @@ func TestCheckSubmitReviewFailureSpeaksHonestSuffix(t *testing.T) {
 	ttAckSummaryAndEnd(t, tm, s, nil)
 }
 
+// TestSaveReceiptCheckSubmit (13.3-01 tracer, behavior 5): the normal check
+// submit records exactly ONE kind=check receipt for the lesson — status
+// saved, request_id = the check_submit id, requested set == the submitted
+// ratings' word set, updated/missing the REAL write result, completed_at
+// stamped. This is the end-to-end proof of the two-phase mount (Begin before
+// SubmitReview, Complete after).
+func TestSaveReceiptCheckSubmit(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "receipt-check.db"))
+	if err != nil {
+		t.Fatalf("open receipt db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if err := lesson.Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate receipt db: %v", err)
+	}
+	receipts, err := lesson.NewReceiptStore(db, nil)
+	if err != nil {
+		t.Fatalf("NewReceiptStore: %v", err)
+	}
+
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉"},
+		Updated:   []string{"苹果"},
+		Missing:   []string{"香蕉"},
+	}
+	tm, s, _, _ := ttDriveToCheckCfg(t, ttCards("苹果", "香蕉"), words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, 2)
+	ttSubmitCheck(t, tm, s)
+	ttAckSummaryAndEnd(t, tm, s, nil)
+
+	got, err := receipts.ListByLesson(ctx, ttLessonID)
+	if err != nil {
+		t.Fatalf("ListByLesson: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("lesson_save_receipts rows = %d, want exactly 1 kind=check receipt", len(got))
+	}
+	rec := got[0]
+	if rec.Kind != lesson.ReceiptKindCheck {
+		t.Errorf("receipt kind = %q, want %q", rec.Kind, lesson.ReceiptKindCheck)
+	}
+	if rec.Status != lesson.ReceiptStatusSaved {
+		t.Errorf("receipt status = %q, want saved after the nil-error write", rec.Status)
+	}
+	if rec.RequestID != "req-submit" {
+		t.Errorf("receipt request_id = %q, want the check_submit id %q", rec.RequestID, "req-submit")
+	}
+	if want := []string{"苹果", "香蕉"}; !reflect.DeepEqual(rec.Requested, want) {
+		t.Errorf("requested = %v, want %v (the ratings word set)", rec.Requested, want)
+	}
+	if want := []string{"苹果"}; !reflect.DeepEqual(rec.Updated, want) {
+		t.Errorf("updated = %v, want %v (the real write result)", rec.Updated, want)
+	}
+	if want := []string{"香蕉"}; !reflect.DeepEqual(rec.Missing, want) {
+		t.Errorf("missing = %v, want %v (the real write result)", rec.Missing, want)
+	}
+	if rec.CompletedAt == "" {
+		t.Error("completed_at empty, want the completion timestamp")
+	}
+}
+
 // TestNoDueWordsWaitsForPlaybackAck: the zero-due explanation is fully
 // spoken and the session ends ONLY on its actual-playback ack — the ending
 // never truncates the explanation.
@@ -891,6 +957,13 @@ func ttDriveTwoConfirmCompletion(t *testing.T, words *fakeWordSource) (*TurnMana
 // announcement settled through its ack. The caller then applies verdicts and
 // submits.
 func ttDriveToCheck(t *testing.T, cards []lesson.Word, words *fakeWordSource) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
+	return ttDriveToCheckCfg(t, cards, words, nil)
+}
+
+// ttDriveToCheckCfg is ttDriveToCheck with a TurnManagerConfig override
+// (13.3-01: the save-receipt tests inject cfg.Receipts; every other field
+// and the whole drive sequence stay identical).
+func ttDriveToCheckCfg(t *testing.T, cards []lesson.Word, words *fakeWordSource, mutate func(*TurnManagerConfig)) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
 	t.Helper()
 	log := &captureLogger{}
 	exec := newFakeExecutorNoRow(ttLessonID)
@@ -904,7 +977,7 @@ func ttDriveToCheck(t *testing.T, cards []lesson.Word, words *fakeWordSource) (*
 	llm := newFakeLLM(llmScripts...)
 	tts := newFakeTTS(2, 320)
 	tts.delay = 20 * time.Millisecond
-	tm := NewTurnManager(asr, llm, tts, exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	tm := NewTurnManager(asr, llm, tts, exec, ttConfigWith(words, mutate), NewEventRecorder(log, "t"), nil)
 	s := &captureSender{}
 	ttInit(t, tm, s)
 	ttAwaitSpoken(t, s, 3)
