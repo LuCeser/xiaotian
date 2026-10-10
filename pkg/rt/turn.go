@@ -145,6 +145,15 @@ type TurnManagerConfig struct {
 	// exactly as before, only unrecorded. A receipt write failure is a
 	// bypass event, never a submission error (S-05).
 	Receipts *lesson.ReceiptStore
+	// ForceStudent is the 13.3-05 production anti-fat-finger switch (ROADMAP
+	// success criterion 6): when true, session_init's client-supplied mode is
+	// IGNORED and the classroom always runs the student projection — the
+	// mode=test full-reveal behavior disappears. Wired from
+	// infra.RTConfig.ForceStudentMode through cmd/service/main.go (rtTurnCfg).
+	// Default false keeps the existing development flow untouched (13.3-01
+	// checkpoint ① user-confirmed direction). Anti-fat-finger, NOT auth:
+	// no PIN, no session, no API gating (consensus decision 3).
+	ForceStudent bool
 }
 
 // defaultWordTimeout is the per-word confirm wait used when
@@ -488,9 +497,18 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	// request context behind them (the 13-09 timeout auto-advance), and the
 	// page's UI mode (13.1 D-08: "test" keeps today's full-reveal behavior;
 	// absent/invalid → student — the iPad bookmark must never leak words).
+	// 13.3-05: the production force switch short-circuits the SAME single
+	// adjudication point — when cfg.ForceStudent is set, the client-supplied
+	// mode is ignored and every session runs the student projection (the
+	// mode=test full-reveal behavior cannot exist server-side). Absent, the
+	// normalizeSessionMode semantics below are untouched.
 	tm.mu.Lock()
 	tm.sender = s
-	tm.mode = normalizeSessionMode(m.Mode)
+	if tm.cfg.ForceStudent {
+		tm.mode = ModeStudent
+	} else {
+		tm.mode = normalizeSessionMode(m.Mode)
+	}
 	tm.mu.Unlock()
 
 	if m.Practice {

@@ -192,3 +192,32 @@ ws:
   # Router per-MsgType channel capacity + worker count (D-16).
   # routeBuffer: 32
   # workerConcurrency: 4
+
+rt:
+  # --------------------------------------------------------------------
+  # /rt realtime dictation classroom configuration (Phase 13 / 13.3).
+  # See pkg/infra/config.go RTConfig for the authoritative schema.
+  #
+  # DEFAULTS: like ws:, this block is OPTIONAL — the service boots on
+  # sensible defaults (localhost origins, daily r0-YYYYMMDD lesson).
+  # --------------------------------------------------------------------
+
+  # 13.3-05 production anti-fat-finger switch (ROADMAP success criterion 6).
+  #
+  #   false (default) — permissive: a session_init with mode=test keeps the
+  #     full-reveal dev behavior. Existing dev configs (config.yaml carries
+  #     NO key) are untouched — the Go zero value is the default, so there
+  #     is nothing to migrate.
+  #   true  — the server FORCES the student projection for every /rt
+  #     session: the client-supplied mode (including "test") is ignored and
+  #     the word list stays masked server-side. RECOMMENDED for the family/
+  #     production entry point.
+  #
+  # The family entry point is config.local.yaml (locally untracked, NOT in
+  # git) — set rt.forceStudentMode: true there. This key is an
+  # anti-fat-finger measure, NOT an authentication mechanism: it has no
+  # PIN, no session, and no API gating — a child digging an old mode=test
+  # URL out of history/browsing simply gets the masked student view from
+  # the server (consensus decision 3).
+  #
+  # forceStudentMode: true

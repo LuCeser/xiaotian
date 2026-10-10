@@ -1385,3 +1385,67 @@ func TestRTAndTLSEnvBinding(t *testing.T) {
 			cfg.Server.TLS.KeyFile, "b.pem")
 	}
 }
+
+// TestRTForceStudentMode covers the 13.3-05 rt.forceStudentMode key (ROADMAP
+// success criterion 6): the zero value is FALSE — permissive, so existing
+// dev configs (config.yaml carries no key) keep the mode=test flow with zero
+// migration (checkpoint ① user-confirmed direction, 2026-10-10) — and an
+// explicit `rt.forceStudentMode: true` in YAML parses through mapstructure.
+// The key is an anti-fat-finger switch, NOT an auth mechanism (consensus
+// decision 3): Validate must accept either value — a bool has no illegal
+// states, so no new rejection branch is allowed.
+func TestRTForceStudentMode(t *testing.T) {
+	t.Run("zero value defaults to permissive false", func(t *testing.T) {
+		cfg := DefaultConfig()
+		if cfg.RT.ForceStudentMode {
+			t.Fatal("RT.ForceStudentMode = true on DefaultConfig, want false " +
+				"(absent key must keep the mode=test dev flow — Go zero value)")
+		}
+		var zero RTConfig
+		if zero.ForceStudentMode {
+			t.Fatal("zero RTConfig.ForceStudentMode = true, want false")
+		}
+	})
+
+	t.Run("yaml rt.forceStudentMode true parses via mapstructure", func(t *testing.T) {
+		setRequiredPythonEnv(t)
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		content := []byte("rt:\n  forceStudentMode: true\n")
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatalf("WriteFile(%s) error %v", path, err)
+		}
+		cfg, err := LoadConfig(path)
+		if err != nil {
+			t.Fatalf("LoadConfig(%s) error %v, want nil", path, err)
+		}
+		if !cfg.RT.ForceStudentMode {
+			t.Error("RT.ForceStudentMode = false, want true (mapstructure parse of rt.forceStudentMode)")
+		}
+	})
+
+	t.Run("env leaf override parses", func(t *testing.T) {
+		// Pitfall-6 invariant: every RTConfig leaf MUST be bound explicitly in
+		// bindEnvForAllLeaves or the HTA_RT_* env var is silently inert.
+		setRequiredPythonEnv(t)
+		t.Setenv("HTA_RT_FORCESTUDENTMODE", "true")
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("LoadConfig(\"\") error %v, want nil", err)
+		}
+		if !cfg.RT.ForceStudentMode {
+			t.Error("RT.ForceStudentMode = false, want true (HTA_RT_FORCESTUDENTMODE env override must bind)")
+		}
+	})
+
+	t.Run("Validate accepts either bool value", func(t *testing.T) {
+		for _, want := range []bool{false, true} {
+			cfg := DefaultConfig().RT
+			cfg.ForceStudentMode = want
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("ForceStudentMode=%v Validate() = %v, want nil (bool has no illegal state)",
+					want, err)
+			}
+		}
+	})
+}

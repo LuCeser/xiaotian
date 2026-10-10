@@ -4299,6 +4299,119 @@ func TestShortHistoryUnmasked(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 13.3-05: TurnManagerConfig.ForceStudent — the server-side production mode
+// force (ROADMAP success criterion 6). The adjudication stays the
+// normalizeSessionMode single point; ForceStudent short-circuits it to
+// ModeStudent BEFORE the exact-"test" match, so a child digging an old
+// mode=test URL out of history gets the masked student view from a
+// production server. Absent (false) keeps the dev flow byte-identical.
+// Anti-fat-finger, NOT auth (consensus decision 3).
+// ---------------------------------------------------------------------------
+
+// ttForceStudentConfig is ttConfig with the 13.3-05 force switch flipped on.
+func ttForceStudentConfig(words WordSource) TurnManagerConfig {
+	return ttConfigWith(words, func(c *TurnManagerConfig) { c.ForceStudent = true })
+}
+
+// TestForceStudent covers the four adjudication branches: the force maps a
+// mode=test init onto the student mode (1), every test-mode-unique full-reveal
+// behavior disappears under the force — session_ready projection, greeting
+// subtitle, outbound transcript (2), the absent switch keeps mode=test (3),
+// and an explicit mode=student stays student under BOTH configs (4).
+func TestForceStudent(t *testing.T) {
+	cards := ttCards("苹果", "香蕉", "橘子")
+
+	t.Run("forced config maps session_init mode=test to student", func(t *testing.T) {
+		tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320),
+			newFakeExecutorNoRow(ttLessonID), ttForceStudentConfig(newFakeWords(cards)), nil, nil)
+		s := &captureSender{}
+		ttInitMode(t, tm, s, ModeTest)
+		if got := tm.sessionMode(); got != ModeStudent {
+			t.Errorf("sessionMode() = %q, want %q (ForceStudent must short-circuit normalizeSessionMode)", got, ModeStudent)
+		}
+	})
+
+	t.Run("forced config projects student views over mode=test", func(t *testing.T) {
+		asr := newFakeASR(asrScript{text: "苹果 写好了"})
+		llm := newFakeLLM(intentScript(intentConfirm, ""))
+		tts := newFakeTTS(1, 320)
+		tm := NewTurnManager(asr, llm, tts, newFakeExecutorNoRow(ttLessonID),
+			ttForceStudentConfig(newFakeWords(cards)), nil, nil)
+		s := &captureSender{}
+		ttInitMode(t, tm, s, ModeTest)
+
+		// (a) session_ready projection: the lessonViewStudent masking, not
+		// the test-mode full reveal.
+		ready := s.controlsOf(t, TypeSessionReady)
+		if len(ready) != 1 {
+			t.Fatalf("session_ready count = %d, want 1", len(ready))
+		}
+		got := ready[0]["lesson"].(map[string]any)["words"].([]any)
+		if len(got) != 3 || got[0] != "" || got[1] != "" || got[2] != "" {
+			t.Errorf("forced lesson.words = %v, want [\"\" \"\" \"\"] (test-mode full reveal must vanish)", got)
+		}
+
+		ttAwaitSpoken(t, s, 3)
+		// (b) greeting subtitle never names the word (D-10 masked variant).
+		for _, m := range s.controlsOf(t, TypeTeacherSentence) {
+			text, _ := m["text"].(string)
+			if contains(text, "苹果") {
+				t.Errorf("greeting subtitle leaks the word: %q", text)
+			}
+		}
+
+		// (c) outbound transcript masks the word (D-10 display copy).
+		ttAckLast(t, tm, s, 0)
+		ttWaitListening(t, s)
+		done := make(chan struct{})
+		go func() {
+			tm.processTurn(s, []byte("pcm"))
+			close(done)
+		}()
+		if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTranscript) == 1 }) {
+			t.Fatal("transcript never went out")
+		}
+		tr, _ := s.controlsOf(t, TypeTranscript)[0]["text"].(string)
+		if contains(strings.ToLower(tr), "苹果") {
+			t.Errorf("forced transcript leaks the word: %q", tr)
+		}
+		if !contains(tr, "•••") {
+			t.Errorf("forced transcript = %q, want the ••• mask", tr)
+		}
+		ttAwaitSpoken(t, s, 4)
+		ttAckLast(t, tm, s, 0)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("confirm turn never settled")
+		}
+	})
+
+	t.Run("default config keeps mode=test development flow", func(t *testing.T) {
+		tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320),
+			newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
+		s := &captureSender{}
+		ttInitMode(t, tm, s, ModeTest)
+		if got := tm.sessionMode(); got != ModeTest {
+			t.Errorf("sessionMode() = %q, want %q (absent ForceStudent must keep the dev flow zero-regressed)", got, ModeTest)
+		}
+	})
+
+	t.Run("mode=student stays student under both configs", func(t *testing.T) {
+		for _, force := range []bool{false, true} {
+			cfg := ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) { c.ForceStudent = force })
+			tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320),
+				newFakeExecutorNoRow(ttLessonID), cfg, nil, nil)
+			s := &captureSender{}
+			ttInitMode(t, tm, s, ModeStudent)
+			if got := tm.sessionMode(); got != ModeStudent {
+				t.Errorf("ForceStudent=%v sessionMode() = %q, want %q (trivial branch)", force, got, ModeStudent)
+			}
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // 13.1-05 practice pure layer: random word picking (D-11), the r0x- practice
 // lesson-id namespace (Pitfall 10), and the next-due-days copy input (D-13).
 // ---------------------------------------------------------------------------
