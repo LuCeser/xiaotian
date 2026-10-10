@@ -633,6 +633,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// constructor's fail-fast above guarantees a live store here
 			// (a nil would silently disable receipts).
 			Receipts: receiptStore,
+			// 13.3-05 production anti-fat-finger switch (success criterion 6):
+			// rt.forceStudentMode=true short-circuits the session-mode
+			// adjudication to student — mode=test URLs served by this process
+			// can no longer full-reveal the word list. Default false keeps the
+			// local dev flow (anti-fat-finger, NOT auth — consensus decision 3).
+			ForceStudent: cfg.RT.ForceStudentMode,
 		}
 		rtHandler, err := rt.NewHandler(rtServerCfg, func() rt.SessionManager {
 			// Per-connection factory: one TurnManager + one EventRecorder per

@@ -497,9 +497,18 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	// request context behind them (the 13-09 timeout auto-advance), and the
 	// page's UI mode (13.1 D-08: "test" keeps today's full-reveal behavior;
 	// absent/invalid → student — the iPad bookmark must never leak words).
+	// 13.3-05: the production force switch short-circuits the SAME single
+	// adjudication point — when cfg.ForceStudent is set, the client-supplied
+	// mode is ignored and every session runs the student projection (the
+	// mode=test full-reveal behavior cannot exist server-side). Absent, the
+	// normalizeSessionMode semantics below are untouched.
 	tm.mu.Lock()
 	tm.sender = s
-	tm.mode = normalizeSessionMode(m.Mode)
+	if tm.cfg.ForceStudent {
+		tm.mode = ModeStudent
+	} else {
+		tm.mode = normalizeSessionMode(m.Mode)
+	}
 	tm.mu.Unlock()
 
 	if m.Practice {
