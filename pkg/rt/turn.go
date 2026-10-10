@@ -145,6 +145,15 @@ type TurnManagerConfig struct {
 	// exactly as before, only unrecorded. A receipt write failure is a
 	// bypass event, never a submission error (S-05).
 	Receipts *lesson.ReceiptStore
+	// ForceStudent is the 13.3-05 production anti-fat-finger switch (ROADMAP
+	// success criterion 6): when true, session_init's client-supplied mode is
+	// IGNORED and the classroom always runs the student projection — the
+	// mode=test full-reveal behavior disappears. Wired from
+	// infra.RTConfig.ForceStudentMode through cmd/service/main.go (rtTurnCfg).
+	// Default false keeps the existing development flow untouched (13.3-01
+	// checkpoint ① user-confirmed direction). Anti-fat-finger, NOT auth:
+	// no PIN, no session, no API gating (consensus decision 3).
+	ForceStudent bool
 }
 
 // defaultWordTimeout is the per-word confirm wait used when
