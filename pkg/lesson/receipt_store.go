@@ -145,9 +145,13 @@ func (s *ReceiptStore) Begin(ctx context.Context, in ReceiptInput) (Receipt, err
 	if err != nil {
 		return Receipt{}, errors.Wrap(err, "begin receipt: encode requested set")
 	}
+	// created_at is stamped DB-side (datetime('now')) — an explicit "" would
+	// overwrite the column DEFAULT and leave every receipt with an empty
+	// creation time (13.3-02 Rule 1 fix: the parent detail view reads this
+	// field verbatim). completed_at stays "" until Complete.
 	res, err := s.db.ExecContext(ctx,
-		"INSERT INTO lesson_save_receipts ("+receiptColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		in.LessonID, in.RequestID, in.Kind, requested, "[]", "[]", ReceiptStatusPending, "", "",
+		"INSERT INTO lesson_save_receipts ("+receiptColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), '')",
+		in.LessonID, in.RequestID, in.Kind, requested, "[]", "[]", ReceiptStatusPending,
 	)
 	if err != nil {
 		s.logger.Error("receipt begin: insert failed",
@@ -272,6 +276,69 @@ func (s *ReceiptStore) ListByLesson(ctx context.Context, lessonID string) ([]Rec
 		receipts = append(receipts, r)
 	}
 	return receipts, rows.Err()
+}
+
+// LatestByLessonIDs aggregates, for each requested lesson, its LATEST receipt
+// row (id max = last recorded) — the list page's save-status source (13.3-02).
+// ONE grouped query serves the whole page: the inner SELECT picks each
+// lesson's MAX(id) and the join reads exactly those rows (standard SQL, no
+// reliance on SQLite's bare-column-with-MAX special case). The caller bounds
+// the id list at the list page size (≤50); an EMPTY slice is the zero-SQL
+// fast path — the list page can be bounded to zero rows, and no query is
+// cheaper than none. Lessons with no receipt row are simply absent from the
+// map (the caller renders 「保存状态未知」, never "saved by inference").
+func (s *ReceiptStore) LatestByLessonIDs(ctx context.Context, lessonIDs []string) (map[string]Receipt, error) {
+	if len(lessonIDs) == 0 {
+		return map[string]Receipt{}, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(lessonIDs)), ",")
+	args := make([]any, len(lessonIDs))
+	for i, id := range lessonIDs {
+		args[i] = id
+	}
+
+	// The join aliases the receipt table as r; every outer column must carry
+	// the r. qualifier or lesson_id is ambiguous against the subquery.
+	outerCols := "r." + strings.ReplaceAll(receiptColumns, ", ", ", r.")
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT r.id, "+outerCols+" FROM lesson_save_receipts r JOIN (SELECT lesson_id, MAX(id) AS max_id FROM lesson_save_receipts WHERE lesson_id IN ("+placeholders+") GROUP BY lesson_id) m ON r.id = m.max_id ORDER BY r.id",
+		args...,
+	)
+	if err != nil {
+		s.logger.Error("receipt latest-by-ids failed",
+			infra.F("component", "lesson/receipt_store"),
+			infra.F("lesson_count", len(lessonIDs)),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "latest receipts by lesson ids")
+	}
+	defer rows.Close()
+
+	latest := make(map[string]Receipt, len(lessonIDs))
+	for rows.Next() {
+		var (
+			r             Receipt
+			requestedJSON string
+			updatedJSON   string
+			missingJSON   string
+		)
+		if err := rows.Scan(&r.ID, &r.LessonID, &r.RequestID, &r.Kind, &requestedJSON, &updatedJSON, &missingJSON, &r.Status, &r.CreatedAt, &r.CompletedAt); err != nil {
+			return nil, errors.Wrap(err, "latest receipts: scan")
+		}
+		if r.Requested, err = decodeWordSet(requestedJSON); err != nil {
+			return nil, errors.Wrap(err, fmt.Sprintf("latest receipts: receipt %d: decode requested", r.ID))
+		}
+		if r.Updated, err = decodeWordSet(updatedJSON); err != nil {
+			return nil, errors.Wrap(err, fmt.Sprintf("latest receipts: receipt %d: decode updated", r.ID))
+		}
+		if r.Missing, err = decodeWordSet(missingJSON); err != nil {
+			return nil, errors.Wrap(err, fmt.Sprintf("latest receipts: receipt %d: decode missing", r.ID))
+		}
+		// The inner MAX(id) is per lesson_id, so each lesson appears once.
+		latest[r.LessonID] = r
+	}
+	return latest, rows.Err()
 }
 
 // encodeWordSet serializes a word set deterministically: sorted copy, then

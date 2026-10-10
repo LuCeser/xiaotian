@@ -162,6 +162,41 @@ func (s *PracticeStore) ListPracticeWordsOn(ctx context.Context, day string) ([]
 	return words, rows.Err()
 }
 
+// ListPracticeByLesson returns every practice_logs row of the given lesson in
+// id (insert) order — the per-lesson practice detail behind the parent
+// lesson-detail read (13.3-02). An unknown lesson lists zero rows with no
+// error. Explicit columns only (the practiceLogsColumns discipline — the
+// single shared connection carries the classroom write path too, P4).
+func (s *PracticeStore) ListPracticeByLesson(ctx context.Context, lessonID string) ([]PracticeRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT "+practiceLogsColumns+" FROM practice_logs WHERE lesson_id = ? ORDER BY id ASC",
+		lessonID,
+	)
+	if err != nil {
+		s.logger.Error("practice list by lesson failed",
+			infra.F("component", "lesson/practice_store"),
+			infra.F("lesson_id", lessonID),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "list practice by lesson")
+	}
+	defer rows.Close()
+
+	var records []PracticeRecord
+	for rows.Next() {
+		var (
+			r       PracticeRecord
+			correct int
+		)
+		if err := rows.Scan(&r.LessonID, &r.Word, &r.Rating, &correct, &r.Hints, &r.ReviewedAt, &r.ReviewedDay); err != nil {
+			return nil, errors.Wrap(err, "list practice by lesson: scan")
+		}
+		r.Correct = correct != 0
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
 // practiceHasColumn reports whether practice_logs carries the named column
 // (kept symmetric with lessonsHasColumn for the migration tests).
 func practiceHasColumn(ctx context.Context, db *sql.DB, name string) (bool, error) {

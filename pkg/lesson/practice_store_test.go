@@ -128,6 +128,56 @@ func TestPracticeStoreInvalidArguments(t *testing.T) {
 	}
 }
 
+// TestListPracticeByLesson (13.3-02 behavior 3): the per-lesson practice
+// query behind the parent lesson detail — every practice_logs row of ONE
+// lesson in id (insert) order with the full record shape, and ONLY that
+// lesson's rows. An unknown lesson lists zero rows with no error.
+func TestListPracticeByLesson(t *testing.T) {
+	store, err := NewPracticeStore(newLessonTestDB(t), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewPracticeStore: %v", err)
+	}
+	ctx := context.Background()
+
+	batch := []PracticeRecord{
+		{LessonID: "r0x-20261008-120000", Word: "apple", Rating: "good", Correct: true, Hints: 0, ReviewedDay: "2026-10-08"},
+		{LessonID: "r0x-20261008-120000", Word: "banana", Rating: "again", Correct: false, Hints: 2, ReviewedDay: "2026-10-08"},
+		{LessonID: "r0x-20261009-090000", Word: "猫", Rating: "hard", Correct: true, Hints: 1, ReviewedDay: "2026-10-09"},
+	}
+	if err := store.RecordPractice(ctx, batch); err != nil {
+		t.Fatalf("RecordPractice: %v", err)
+	}
+
+	got, err := store.ListPracticeByLesson(ctx, "r0x-20261008-120000")
+	if err != nil {
+		t.Fatalf("ListPracticeByLesson: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListPracticeByLesson rows = %d, want 2 (only the requested lesson)", len(got))
+	}
+	first, second := got[0], got[1]
+	if first.Word != "apple" || second.Word != "banana" {
+		t.Errorf("rows = [%s %s], want [apple banana] (id ASC insert order)", first.Word, second.Word)
+	}
+	if first.LessonID != "r0x-20261008-120000" || first.Rating != "good" || !first.Correct || first.Hints != 0 {
+		t.Errorf("first row = %+v, want the seeded apple record", first)
+	}
+	if second.Rating != "again" || second.Correct || second.Hints != 2 {
+		t.Errorf("second row = %+v, want the seeded banana record", second)
+	}
+	if first.ReviewedDay != "2026-10-08" || first.ReviewedAt == "" {
+		t.Errorf("first row day/at = %q/%q, want seeded day + datetime('now') default", first.ReviewedDay, first.ReviewedAt)
+	}
+
+	none, err := store.ListPracticeByLesson(ctx, "r0x-unknown")
+	if err != nil {
+		t.Fatalf("ListPracticeByLesson unknown lesson: %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("ListPracticeByLesson(unknown) rows = %d, want 0", len(none))
+	}
+}
+
 // TestPracticeMigrateIdempotent: lesson.Migrate creates practice_logs on a
 // legacy database (lessons exists, practice_logs does not), two consecutive
 // runs stay idempotent, and the reviewed_day column exists for the

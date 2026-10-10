@@ -251,6 +251,76 @@ func TestReceiptCompleteIdempotent(t *testing.T) {
 	}
 }
 
+// TestLatestByLessonIDs (13.3-02 behavior 4): the list-page receipt
+// aggregation — per lesson, the LATEST receipt row (id max = last recorded).
+// An empty id slice is the zero-SQL fast path: it must return the empty map
+// WITHOUT touching the database (proven by closing the DB first — any query
+// would surface as an error).
+func TestLatestByLessonIDs(t *testing.T) {
+	store, err := NewReceiptStore(newLessonTestDB(t), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewReceiptStore: %v", err)
+	}
+	ctx := context.Background()
+
+	for _, in := range []ReceiptInput{
+		{LessonID: "r0-a", RequestID: "req-a1", Kind: ReceiptKindCheck, Requested: []string{"苹果"}},
+		{LessonID: "r0-a", RequestID: "req-a2", Kind: ReceiptKindCorrection, Requested: []string{"苹果"}},
+		{LessonID: "r0-b", RequestID: "req-b1", Kind: ReceiptKindPractice, Requested: []string{"香蕉"}},
+	} {
+		if _, err := store.Begin(ctx, in); err != nil {
+			t.Fatalf("Begin %s: %v", in.RequestID, err)
+		}
+	}
+
+	got, err := store.LatestByLessonIDs(ctx, []string{"r0-a", "r0-b", "r0-unknown"})
+	if err != nil {
+		t.Fatalf("LatestByLessonIDs: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("LatestByLessonIDs map size = %d, want 2 (unknown lesson absent)", len(got))
+	}
+	latestA, ok := got["r0-a"]
+	if !ok {
+		t.Fatal("r0-a missing from aggregation")
+	}
+	if latestA.RequestID != "req-a2" || latestA.Kind != ReceiptKindCorrection {
+		t.Errorf("r0-a latest = request:%q kind:%q, want req-a2/correction (id max = last recorded)", latestA.RequestID, latestA.Kind)
+	}
+	if latestA.ID == 0 {
+		t.Error("r0-a latest receipt id = 0, want the real row id")
+	}
+	latestB, ok := got["r0-b"]
+	if !ok {
+		t.Fatal("r0-b missing from aggregation")
+	}
+	if latestB.RequestID != "req-b1" || latestB.Kind != ReceiptKindPractice {
+		t.Errorf("r0-b latest = request:%q kind:%q, want req-b1/practice", latestB.RequestID, latestB.Kind)
+	}
+}
+
+// TestLatestByLessonIDsEmptySliceZeroSQL (13.3-02 acceptance: zero SQL on the
+// empty slice): the fast path must not issue a query — proven by closing the
+// DB before the call; any SQL attempt surfaces as "database is closed".
+func TestLatestByLessonIDsEmptySliceZeroSQL(t *testing.T) {
+	db := newLessonTestDB(t)
+	store, err := NewReceiptStore(db, infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewReceiptStore: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	got, err := store.LatestByLessonIDs(context.Background(), []string{})
+	if err != nil {
+		t.Fatalf("LatestByLessonIDs(empty) error = %v, want nil (zero-SQL fast path)", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Errorf("LatestByLessonIDs(empty) = %#v, want a non-nil empty map", got)
+	}
+}
+
 // TestReceiptListByLesson (behavior 4): ListByLesson returns every row of
 // the lesson in insert order — and only those. An unknown lesson lists zero
 // rows with no error.

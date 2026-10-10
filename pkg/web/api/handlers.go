@@ -20,9 +20,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 )
 
@@ -49,24 +51,31 @@ const maxStdoutDiagnosticRunes = 300
 // handler is the api package's http.Handler. Dependencies arrive via
 // constructor DI (D-42): the pybridge Executor for the write path
 // (Python is the sole writer, ADR write-separation), the CardRepository
-// for the read path (D-12: zero Python spawns on reads), and the
-// PythonConfig whose DataDir anchors the fsrs_config.json write path
-// (Plan 09-05 — config-derived, never user input, T-09-10).
+// for the read path (D-12: zero Python spawns on reads), the PythonConfig
+// whose DataDir anchors the fsrs_config.json write path (Plan 09-05 —
+// config-derived, never user input, T-09-10), and — since 13.3-02 — the
+// three Go-owned lesson stores behind the read-only parent achievement
+// routes (GET /lessons, GET /lessons/{id}): the lesson store for rows and
+// completion projection, the practice store for extra-practice detail, and
+// the receipt store for the honest save status (submitted ≠ written-to-FSRS).
 type handler struct {
-	exec   pybridge.Executor
-	cards  database.CardRepository
-	cfg    infra.PythonConfig
-	logger infra.Logger
+	exec     pybridge.Executor
+	cards    database.CardRepository
+	lessons  *lesson.Store
+	practice *lesson.PracticeStore
+	receipts *lesson.ReceiptStore
+	cfg      infra.PythonConfig
+	logger   infra.Logger
 }
 
 // NewHandler builds the /api/v1 handler with its internal method-pattern
 // ServeMux. Logger may be nil (NewNoOpLogger is substituted, D-47) so
 // tests can construct the handler cheaply.
-func NewHandler(exec pybridge.Executor, cards database.CardRepository, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
+func NewHandler(exec pybridge.Executor, cards database.CardRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}
-	h := &handler{exec: exec, cards: cards, cfg: cfg, logger: logger}
+	h := &handler{exec: exec, cards: cards, lessons: lessons, practice: practice, receipts: receipts, cfg: cfg, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /words", h.listWords)
@@ -77,6 +86,11 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, cfg infra
 	mux.HandleFunc("DELETE /words", h.deleteWords)
 	mux.HandleFunc("GET /settings/fsrs", h.getFSRS)
 	mux.HandleFunc("PUT /settings/fsrs", h.putFSRS)
+	// 13.3-02: the read-only parent achievement routes (ROADMAP success
+	// criterion 2). The leak guard lives in the PROJECTION — an in-progress
+	// lesson never reaches the response as anything but a summary row.
+	mux.HandleFunc("GET /lessons", h.listLessons)
+	mux.HandleFunc("GET /lessons/{id}", h.getLesson)
 	return mux
 }
 
@@ -426,4 +440,326 @@ func (h *handler) listUnits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, unitsResponse{Units: units})
+}
+
+// lessonListItem is one row of the parent lessons projection (13.3-02) —
+// summary fields ONLY. The type structurally cannot carry a word surface:
+// the list endpoint serializes exactly this shape for EVERY row, and the
+// detail endpoint reuses it for in-progress lessons (the leak guard's
+// serialization-layer white-list — "not in the JSON" is the only "not
+// leaked", RESEARCH Pattern 2).
+type lessonListItem struct {
+	LessonID    string `json:"lesson_id"`
+	CreatedAt   string `json:"created_at"`
+	WordCount   int    `json:"word_count"`
+	Stage       string `json:"stage"`
+	Kind        string `json:"kind"`
+	Completed   bool   `json:"completed"`
+	Unchecked   bool   `json:"unchecked"`
+	SaveStatus  string `json:"save_status"`
+	Correct     int    `json:"correct"`
+	Wrong       int    `json:"wrong"`
+	Unconfirmed int    `json:"unconfirmed"`
+}
+
+// lessonsResponse is the GET /lessons response envelope.
+type lessonsResponse struct {
+	Lessons []lessonListItem `json:"lessons"`
+}
+
+// lessonWordJSON is one element of the detail response's words array — the
+// meaning/example ground truth persisted with the lesson row.
+type lessonWordJSON struct {
+	Word    string `json:"word"`
+	Meaning string `json:"meaning"`
+	Example string `json:"example"`
+}
+
+// lessonResultJSON is one element of the detail response's results array.
+// Lesson rows fill word/correct/manual/hints/outcome/ocr_text (manual is
+// always present — nil would hide an OCR prefill); practice rows fill
+// word/correct/hints/rating from the practice_logs record.
+type lessonResultJSON struct {
+	Word    string `json:"word"`
+	Correct bool   `json:"correct"`
+	Manual  *bool  `json:"manual,omitempty"`
+	Hints   int    `json:"hints"`
+	Rating  string `json:"rating,omitempty"`
+	Outcome string `json:"outcome,omitempty"`
+	OcrText string `json:"ocr_text,omitempty"`
+}
+
+// receiptJSON is one element of the detail response's save_receipts array —
+// the receipt row verbatim (word-set columns are JSON string arrays by
+// storage contract).
+type receiptJSON struct {
+	LessonID    string   `json:"lesson_id"`
+	RequestID   string   `json:"request_id"`
+	Kind        string   `json:"kind"`
+	Requested   []string `json:"requested"`
+	Updated     []string `json:"updated"`
+	Missing     []string `json:"missing"`
+	Status      string   `json:"status"`
+	CreatedAt   string   `json:"created_at"`
+	CompletedAt string   `json:"completed_at"`
+}
+
+// lessonDetailResponse is the completed-lesson GET /lessons/{id} body: the
+// summary row plus the per-word detail. All three detail keys are ALWAYS
+// present (empty arrays, never null/absent) so the parent view's emptiness
+// is data-driven, not shape-driven.
+type lessonDetailResponse struct {
+	lessonListItem
+	Words        []lessonWordJSON   `json:"words"`
+	Results      []lessonResultJSON `json:"results"`
+	SaveReceipts []receiptJSON      `json:"save_receipts"`
+}
+
+// lessonKind classifies a lesson id for the parent view's type badge:
+// r0x- extra-practice sessions, r0- classroom lessons, anything else unknown.
+func lessonKind(lessonID string) string {
+	switch {
+	case strings.HasPrefix(lessonID, "r0x-"):
+		return "practice"
+	case strings.HasPrefix(lessonID, "r0-"):
+		return "lesson"
+	default:
+		return "unknown"
+	}
+}
+
+// newLessonListItem projects a store summary + the lesson's latest receipt
+// into the wire row. save_status comes ONLY from the receipt table — a
+// missing row reads "unknown" (保存状态未知), NEVER inferred from
+// stage=submitted (submitted ≠ written to FSRS). For in-progress lessons the
+// judgement counts output as 0 values: a lesson still in the room leaks
+// progress through its counts.
+func newLessonListItem(s lesson.LessonSummary, receipt lesson.Receipt, hasReceipt bool) lessonListItem {
+	saveStatus := "unknown"
+	if hasReceipt {
+		saveStatus = receipt.Status
+	}
+	item := lessonListItem{
+		LessonID:   s.LessonID,
+		CreatedAt:  s.CreatedAt,
+		WordCount:  s.WordCount,
+		Stage:      s.Stage,
+		Kind:       lessonKind(s.LessonID),
+		Completed:  s.Completed,
+		Unchecked:  s.Unchecked,
+		SaveStatus: saveStatus,
+	}
+	if s.Completed {
+		item.Correct = s.Correct
+		item.Wrong = s.Wrong
+		item.Unconfirmed = s.Unconfirmed
+	}
+	return item
+}
+
+// validLessonID mirrors the infra.RTConfig LessonID whitelist口径 (T-13.3-06):
+// at most 64 runes, no whitespace, no path separators. The mux pattern
+// already structurally excludes "/" from a path value; "/" and "\" are both
+// rejected here as defense-in-depth.
+func validLessonID(id string) bool {
+	if id == "" || utf8.RuneCountInString(id) > 64 {
+		return false
+	}
+	if strings.IndexFunc(id, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
+	}) >= 0 {
+		return false
+	}
+	return !strings.ContainsAny(id, `/\`)
+}
+
+// listLessons handles GET /lessons (13.3-02, ROADMAP success criterion 2):
+// the recent-lessons list for the parent view. Optional ?limit (default 20)
+// is validated at the gate and HARD-CAPPED in the store (≤50 — a client
+// value can never penetrate; the single-connection pool shares every query
+// with the classroom write path, T-13.3-05). Rows are summary-only and
+// include r0x- practice rows; save_status aggregates from the receipt
+// table. Errors log and use the error envelope — never raw details.
+func (h *handler) listLessons(w http.ResponseWriter, r *http.Request) {
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			writeError(w, http.StatusBadRequest, codeInvalidRequest,
+				"limit must be a positive integer")
+			return
+		}
+		limit = parsed
+	}
+
+	summaries, err := h.lessons.ListLessons(r.Context(), limit)
+	if err != nil {
+		h.logger.Error("list lessons failed",
+			infra.F("component", "web/api"),
+			infra.ErrField(err),
+		)
+		writeError(w, http.StatusInternalServerError, codeInternal,
+			"failed to list lessons")
+		return
+	}
+
+	ids := make([]string, len(summaries))
+	for i, s := range summaries {
+		ids[i] = s.LessonID
+	}
+	latest, err := h.receipts.LatestByLessonIDs(r.Context(), ids)
+	if err != nil {
+		h.logger.Error("list lessons: receipt aggregation failed",
+			infra.F("component", "web/api"),
+			infra.ErrField(err),
+		)
+		writeError(w, http.StatusInternalServerError, codeInternal,
+			"failed to list lessons")
+		return
+	}
+
+	items := make([]lessonListItem, 0, len(summaries))
+	for _, s := range summaries {
+		receipt, hasReceipt := latest[s.LessonID]
+		items = append(items, newLessonListItem(s, receipt, hasReceipt))
+	}
+	writeJSON(w, lessonsResponse{Lessons: items})
+}
+
+// getLesson handles GET /lessons/{id} (13.3-02): the per-lesson detail.
+// The whitelist projection (RESEARCH Pattern 2 / Pitfall 2) is the leak
+// guard: ONLY a completed lesson (lesson.LessonCompleted — the turn.go
+// branch-table whitelist) returns the full per-word shape; EVERYTHING else —
+// checking, mid-dictation, anything unexpected — serializes as the summary
+// row, structurally without word surfaces. Practice lessons read their
+// results from practice_logs; classroom lessons from verdicts+outcomes;
+// save receipts are output verbatim (unknown stays unknown — never
+// inferred from the stage).
+func (h *handler) getLesson(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !validLessonID(id) {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest,
+			"invalid lesson id")
+		return
+	}
+
+	l, err := h.lessons.GetLesson(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, lesson.ErrLessonNotFound) {
+			writeError(w, http.StatusNotFound, codeNotFound,
+				"lesson not found")
+			return
+		}
+		h.logger.Error("get lesson failed",
+			infra.F("component", "web/api"),
+			infra.F("lesson_id", id),
+			infra.ErrField(err),
+		)
+		writeError(w, http.StatusInternalServerError, codeInternal,
+			"internal error")
+		return
+	}
+
+	latest, err := h.receipts.LatestByLessonIDs(r.Context(), []string{id})
+	if err != nil {
+		h.logger.Error("get lesson: receipt lookup failed",
+			infra.F("component", "web/api"),
+			infra.F("lesson_id", id),
+			infra.ErrField(err),
+		)
+		writeError(w, http.StatusInternalServerError, codeInternal,
+			"internal error")
+		return
+	}
+	receipt, hasReceipt := latest[id]
+	item := newLessonListItem(lesson.SummarizeLesson(l), receipt, hasReceipt)
+
+	if !lesson.LessonCompleted(l.Stage, l.CurrentIndex, len(l.Cards)) {
+		// In-progress: the summary row IS the whole response — the word
+		// surface keys do not exist in the serialization at all.
+		writeJSON(w, item)
+		return
+	}
+
+	detail := lessonDetailResponse{
+		lessonListItem: item,
+		Words:          make([]lessonWordJSON, 0, len(l.Cards)),
+		Results:        []lessonResultJSON{},
+		SaveReceipts:   []receiptJSON{},
+	}
+	for _, c := range l.Cards {
+		detail.Words = append(detail.Words, lessonWordJSON{
+			Word:    c.Word,
+			Meaning: c.Meaning,
+			Example: c.Example,
+		})
+	}
+
+	if lessonKind(id) == "practice" {
+		// Extra-practice results live in practice_logs (never in verdicts).
+		records, err := h.practice.ListPracticeByLesson(r.Context(), id)
+		if err != nil {
+			h.logger.Error("get lesson: practice read failed",
+				infra.F("component", "web/api"),
+				infra.F("lesson_id", id),
+				infra.ErrField(err),
+			)
+			writeError(w, http.StatusInternalServerError, codeInternal,
+				"internal error")
+			return
+		}
+		for _, rec := range records {
+			correct := rec.Correct
+			detail.Results = append(detail.Results, lessonResultJSON{
+				Word:    rec.Word,
+				Correct: correct,
+				Hints:   rec.Hints,
+				Rating:  rec.Rating,
+			})
+		}
+	} else {
+		for _, v := range l.Verdicts {
+			res := lessonResultJSON{
+				Correct: v.Correct,
+				OcrText: v.OcrText,
+			}
+			manual := v.Manual
+			res.Manual = &manual
+			if v.WordIndex >= 0 && v.WordIndex < len(l.Cards) {
+				res.Word = l.Cards[v.WordIndex].Word
+			}
+			if o, ok := l.Outcomes[strconv.Itoa(v.WordIndex)]; ok {
+				res.Hints = o.Hints
+				res.Outcome = o.Outcome
+			}
+			detail.Results = append(detail.Results, res)
+		}
+	}
+
+	receiptRows, err := h.receipts.ListByLesson(r.Context(), id)
+	if err != nil {
+		h.logger.Error("get lesson: receipt list failed",
+			infra.F("component", "web/api"),
+			infra.F("lesson_id", id),
+			infra.ErrField(err),
+		)
+		writeError(w, http.StatusInternalServerError, codeInternal,
+			"internal error")
+		return
+	}
+	for _, rc := range receiptRows {
+		detail.SaveReceipts = append(detail.SaveReceipts, receiptJSON{
+			LessonID:    rc.LessonID,
+			RequestID:   rc.RequestID,
+			Kind:        rc.Kind,
+			Requested:   rc.Requested,
+			Updated:     rc.Updated,
+			Missing:     rc.Missing,
+			Status:      rc.Status,
+			CreatedAt:   rc.CreatedAt,
+			CompletedAt: rc.CompletedAt,
+		})
+	}
+
+	writeJSON(w, detail)
 }
