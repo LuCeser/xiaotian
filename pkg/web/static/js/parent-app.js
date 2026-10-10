@@ -7,6 +7,10 @@
  * (mirrors app.js IIFE + window.X availability-check pattern).
  *
  * Responsibilities:
+ *   0. Wire the page-level tabs (13.3-03: 学习记录 | 词库 | 设置) —
+ *      aria-selected + hidden-attribute panel switching, 学习记录 default
+ *      on every load (state not persisted). Runs before the component
+ *      checks so tabs survive a degraded page.
  *   1. Provide the fetchJSON wrapper: AbortController timeout +
  *      normalization of the {"error":{code,message}} envelope into a
  *      thrown Error carrying the message (error.code rides along so the
@@ -17,6 +21,9 @@
  *      unit groups + edit/rename/delete modals, Plan 09-07).
  *   3b. Mount SettingsCard into #settings-container (学习设置 card,
  *      D-15) — mounting unhides the section.
+ *   3c. Mount LessonsView into #lessons-container (学习记录 tab, 13.3-03)
+ *      — GET /api/v1/lessons list + per-lesson detail; a missing
+ *      LessonsView degrades WITHOUT blocking the other components.
  *   4. Populate the SHARED 单元 datalist (#unit-options) from
  *      GET /api/v1/units — on init (all categories), whenever an
  *      add-form category radio changes, and for the edit modal's
@@ -29,6 +36,43 @@
   'use strict';
 
   // ------------------------------------------------------------------
+  // Page-level tabs (13.3-03 Task 1): 学习记录 | 词库 | 设置. Switching
+  // toggles each tab's aria-selected plus the target panel's hidden
+  // attribute — the settingsSection hidden-attribute precedent, never
+  // display:none inline styles. The default tab is 学习记录 on EVERY
+  // load (explicit re-activation below); tab state is deliberately NOT
+  // persisted across reloads. This wiring runs BEFORE the component
+  // dependency checks so the tabs keep working even in a degraded page.
+  // ------------------------------------------------------------------
+  var pageTabs = Array.prototype.slice.call(
+    document.querySelectorAll('.parent-tabs [role="tab"]'));
+  if (!pageTabs.length) {
+    console.error('[parent-app] page tab bar missing from parent.html.');
+    return;
+  }
+
+  function activatePageTab(activeTab) {
+    pageTabs.forEach(function (tab) {
+      var active = tab === activeTab;
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      tab.classList.toggle('active', active);
+      var panel = document.getElementById(tab.getAttribute('aria-controls'));
+      if (panel) {
+        panel.hidden = !active;
+      }
+    });
+  }
+
+  pageTabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      activatePageTab(tab);
+    });
+  });
+  // Default tab on every load: the first one (学习记录) — explicit so the
+  // HTML defaults and the JS state can never disagree.
+  activatePageTab(pageTabs[0]);
+
+  // ------------------------------------------------------------------
   // Dependency availability checks (graceful degradation, app.js pattern)
   // ------------------------------------------------------------------
   if (!window.AddCard || !window.BrowseView || !window.SettingsCard) {
@@ -39,8 +83,9 @@
   var addContainer = document.getElementById('add-form-container');
   var browseContainer = document.getElementById('word-list-container');
   var settingsContainer = document.getElementById('settings-container');
+  var lessonsContainer = document.getElementById('lessons-container');
   var unitDatalist = document.getElementById('unit-options');
-  if (!addContainer || !browseContainer || !settingsContainer || !unitDatalist) {
+  if (!addContainer || !browseContainer || !settingsContainer || !lessonsContainer || !unitDatalist) {
     console.error('[parent-app] mount containers / shared datalist missing from parent.html.');
     return;
   }
@@ -219,6 +264,29 @@
     },
   });
 
+  // ------------------------------------------------------------------
+  // 学习记录 view (13.3-03): GET /api/v1/lessons renders the list,
+  // GET /api/v1/lessons/{id} renders the detail. LessonsView missing is
+  // a NON-blocking degrade: the word library and settings tabs keep
+  // working, the 学习记录 tab just stays empty with a console error.
+  // ------------------------------------------------------------------
+  var lessons = null;
+  if (!window.LessonsView) {
+    console.error('[parent-app] LessonsView unavailable — 学习记录 tab degraded (词库/设置 still work).');
+  } else {
+    lessons = new window.LessonsView(lessonsContainer, {
+      fetchLessons: function () {
+        return fetchJSON('GET', '/api/v1/lessons?limit=20').then(function (data) {
+          return (data && Array.isArray(data.lessons)) ? data.lessons : [];
+        });
+      },
+      fetchLesson: function (id) {
+        return fetchJSON('GET', '/api/v1/lessons/' + encodeURIComponent(id));
+      },
+    });
+    lessons.refresh();
+  }
+
   // Initial render: browse view + all-category unit suggestions.
   browse.refresh();
   refreshUnitOptions('');
@@ -228,6 +296,7 @@
     addCard: addCard,
     browse: browse,
     settingsCard: settingsCard,
+    lessons: lessons,
     fetchJSON: fetchJSON,
     refreshUnitOptions: refreshUnitOptions,
   };

@@ -10,7 +10,9 @@
  * BatchAddForm: the textbook-lesson capture flow — paste → 解析并预览
  * (client-side window.parseBatch) → preview table with per-line Warning
  * rows → 确认添加（{n} 个） → result banner 已添加 {a} 个，跳过 {b} 个
- * 重复单词 (one lesson = one unit, D-10).
+ * 重复单词 (one lesson = one unit, D-10) plus the 13.3-03 consensus note
+ * 新词将按复习安排选入课堂，不一定是下一课 (also on the single-add
+ * success toast — closing the "加词 = 下一课" misread).
  * SettingsCard: the 学习设置 card (D-15) — two FSRS sliders (记忆保持率,
  * 最长复习间隔) with hints and live 当前/默认 readouts, 保存设置 → PUT
  * /api/v1/settings/fsrs, 恢复默认 resetting without a request, and the
@@ -41,6 +43,14 @@
   'use strict';
 
   var TOAST_DURATION_MS = 2500;
+
+  /**
+   * 13.3-03 consensus 口径 line — appended to BOTH add success
+   * feedbacks (single-add toast + batch result banner). It closes the
+   * "加词 = 下一课" misread: the FSRS schedule picks lesson words, the
+   * parent never does. textContent-only, never markup.
+   */
+  var SELECTION_NOTE_TEXT = '新词将按复习安排选入课堂，不一定是下一课。';
 
   /** Per-request entry cap — mirrors pkg/web/api/validate.go maxEntries. */
   var MAX_BATCH_ENTRIES = 100;
@@ -340,7 +350,7 @@
     setLoading(this.submitBtn, true);
     this.onSubmit(payload)
       .then(function (result) {
-        showToast('已添加', 'success');
+        showToast('已添加。' + SELECTION_NOTE_TEXT, 'success');
         // Clear word/meaning/example; RETAIN category + unit (auto-decided).
         self.word.input.value = '';
         self.meaning.input.value = '';
@@ -665,6 +675,13 @@
         : '重复单词已跳过';
       box.appendChild(detail);
     }
+
+    // 13.3-03 consensus 口径 line on EVERY batch success (appended after
+    // the counts + skipped list so it reads as the closing note).
+    var note = document.createElement('p');
+    note.className = 'result-note';
+    note.textContent = SELECTION_NOTE_TEXT;
+    box.appendChild(note);
 
     this.banner.appendChild(box);
   };

@@ -124,6 +124,53 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/* Page-level tabs (13.3-03): 学习记录 | 词库 | 设置. Same visual        */
+/* language as the add-card tabs (accent 3px underline on the active    */
+/* tab); three EQUAL-WIDTH buttons per the 13.3-01 checkpoint ③         */
+/* wireframe. Switching toggles the hidden attribute on the target      */
+/* panel (settingsSection precedent) — never inline display styles.     */
+/* ------------------------------------------------------------------ */
+
+.parent-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 24px;
+}
+
+.parent-tab {
+  flex: 1;
+  min-height: 44px;
+  padding: 8px 4px 10px;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -1px; /* overlap the tablist hairline */
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: color 150ms ease-out, border-color 150ms ease-out;
+}
+
+.parent-tab:hover {
+  color: var(--ink);
+}
+
+.parent-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Tab panels swap via the hidden attribute (UA default display:none is
+   pinned explicitly, mirroring .add-panel[hidden]). */
+.parent-panel[hidden] {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ */
 /* Forms                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -498,6 +545,15 @@ body {
 }
 
 .result-detail {
+  font-size: 14px;
+  font-weight: 400;
+  margin-top: 4px !important;
+  overflow-wrap: anywhere;
+}
+
+/* 13.3-03 consensus 口径 line closing every add success (single + batch):
+   新词将按复习安排选入课堂，不一定是下一课. */
+.result-note {
   font-size: 14px;
   font-weight: 400;
   margin-top: 4px !important;
@@ -902,6 +958,270 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/* 学习记录 (13.3-03): lessons list rows, the four-state save chips,   */
+/* and the vertical per-word detail. Spacing/typography follow the     */
+/* file's existing tokens (--border/--muted/16px body/8px rhythm).     */
+/* ------------------------------------------------------------------ */
+
+.lessons-empty {
+  padding: 24px 0;
+}
+
+/* List rows: full-width tap targets with the 8px rhythm underneath. */
+.lesson-row {
+  display: block;
+  width: 100%;
+  padding: 12px 4px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-family: inherit;
+  font-size: 16px;
+  color: var(--ink);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.lesson-row:last-child {
+  border-bottom: none;
+}
+
+.lesson-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lesson-day {
+  font-weight: 600;
+}
+
+.lesson-kind {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--badge-en-bg);
+  color: var(--badge-en-text);
+  white-space: nowrap;
+}
+
+.lesson-kind-practice {
+  background: var(--badge-zh-bg);
+  color: var(--badge-zh-text);
+}
+
+.lesson-row-mid {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+/* Judgement counts (已核对 X 对 / Y 错 / Z 未确认) — plain numbers,
+   never a percentage. */
+.lesson-counts {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.lesson-flag {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warning);
+  border: 1px solid var(--warning);
+  border-radius: 999px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
+.lesson-stage {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.lesson-row-bottom {
+  display: flex;
+  margin-top: 6px;
+}
+
+/* Four-state save chips — one color per state, verbatim copy. */
+.save-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 2px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.save-chip-saved {
+  background: #ecfdf5;
+  color: var(--success);
+}
+
+.save-chip-failed {
+  background: #fef2f2;
+  color: var(--destructive);
+}
+
+.save-chip-pending {
+  background: #fffbeb;
+  color: var(--warning);
+}
+
+.save-chip-unknown {
+  background: var(--background);
+  color: var(--muted);
+}
+
+.save-chip-note {
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* Detail view: header (back/refresh + meta + honest summary), then the
+   vertical word list, then the receipt list. */
+.lesson-detail-head {
+  margin-bottom: 16px;
+}
+
+.lesson-detail-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.lesson-detail-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.lesson-detail-counts {
+  margin: 8px 0 0;
+  font-weight: 600;
+}
+
+.lesson-practice-note {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: var(--badge-zh-text);
+  background: var(--badge-zh-bg);
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+
+.lesson-progress-note {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+/* Vertical per-word rows: face + verdict badge on line one, meaning and
+   the 提示/outcome/识别 meta stacked beneath. */
+.lesson-words {
+  border-top: 1px solid var(--border);
+}
+
+.lesson-word-row {
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.lesson-word-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lesson-word-face {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.lesson-verdict {
+  flex: 0 0 auto;
+  min-width: 44px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.6;
+  padding: 0 10px;
+  border-radius: 999px;
+}
+
+.lesson-verdict-ok {
+  background: #ecfdf5;
+  color: var(--success);
+}
+
+.lesson-verdict-wrong {
+  background: #fef2f2;
+  color: var(--destructive);
+}
+
+.lesson-verdict-unconfirmed {
+  background: var(--background);
+  color: var(--muted);
+}
+
+.lesson-word-meaning {
+  color: var(--muted);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.lesson-word-meta {
+  font-size: 14px;
+  color: var(--muted);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+/* 保存记录 receipts: one read-only line per submission endpoint. */
+.lesson-receipts {
+  margin-top: 16px;
+}
+
+.lesson-receipts-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.lesson-receipt {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.lesson-receipt-empty {
+  color: var(--muted);
+}
+
+.lesson-receipt-kind {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.lesson-receipt-counts {
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------ */
 /* Card padding escalation (UI-SPEC Responsive Behavior): 16px mobile, */
 /* 24px >=768px.                                                       */
 /* ------------------------------------------------------------------ */
@@ -913,13 +1233,15 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
-/* >=1024px two-column grid (D-03): 浏览词库 2fr / rail (添加单词 +     */
-/* 学习设置) 1fr, container max-width 1120px centered. Explicit grid   */
-/* placement decouples the visual columns from the mobile DOM order.   */
+/* >=1024px two-column grid (D-03): 浏览词库 2fr / 添加单词 1fr rail.    */
+/* 13.3-03 tab conversion: the grid lives on the 词库 panel (the two    */
+/* cards it arranges), not on .main-content — the page-level tabs and   */
+/* the 学习记录/设置 panels stay single-column at every width. Explicit  */
+/* grid placement decouples the visual columns from the DOM order.      */
 /* ------------------------------------------------------------------ */
 
 @media (min-width: 1024px) {
-  .main-content {
+  .parent-panel-vocab {
     display: grid;
     grid-template-columns: 2fr 1fr;
     grid-template-rows: auto 1fr;
@@ -927,7 +1249,7 @@ body {
     align-items: start;
   }
 
-  .main-content .card {
+  .parent-panel-vocab .card {
     margin-bottom: 0;
   }
 
@@ -939,11 +1261,6 @@ body {
   .add-section {
     grid-column: 2;
     grid-row: 1;
-  }
-
-  .settings-section {
-    grid-column: 2;
-    grid-row: 2;
   }
 }
 
