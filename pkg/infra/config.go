@@ -233,6 +233,21 @@ type RTConfig struct {
 	// quicker verification. 0 means "use the default"; a negative value or
 	// anything above 3600000 (1h) is rejected by Validate.
 	WordTimeoutMs int `json:"wordTimeoutMs" mapstructure:"wordTimeoutMs"`
+
+	// ForceStudentMode is the 13.3-05 production anti-fat-finger switch
+	// (ROADMAP success criterion 6): when true, the server FORCES the
+	// student projection for every /rt session — the client-supplied
+	// session_init mode (including "test") is ignored at the
+	// normalizeSessionMode adjudication point (rt.TurnManagerConfig.
+	// ForceStudent, to which this key is wired verbatim through
+	// cmd/service/main.go). Default false = permissive: existing dev
+	// configs (no key) keep the full-reveal mode=test flow unchanged — the
+	// Go zero value is the backward-compatible default (13.3-01 checkpoint ①
+	// user-confirmed direction, 2026-10-10). The family entry point
+	// (config.local.yaml, untracked) sets this true. This key is an
+	// ANTI-FAT-FINGER measure, NOT an authentication/authorization
+	// mechanism — no PIN, no session, no API gating (consensus decision 3).
+	ForceStudentMode bool `json:"forceStudentMode" mapstructure:"forceStudentMode"`
 }
 
 // Validate enforces the RTConfig rules (D-04 fail-fast): origins non-empty
