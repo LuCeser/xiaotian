@@ -18,7 +18,7 @@
   <meta name="theme-color" content="#4f8ef7">
   <meta name="description" content="自然实时家教 — 听说小老师">
   <title>听说小老师 · 自然实时家教</title>
-  <link rel="stylesheet" href="styles/tutor.css?v=20261009a">
+  <link rel="stylesheet" href="styles/tutor.css?v=20261010a">
 </head>
 <body data-page="tutor">
 
@@ -498,6 +498,15 @@
       // other errors and abnormal closes keep the immediate stopEverything.
       var terminalDraining = false;
       var playbackResourceReleased = false;
+      // 13.3-04: the 「回首页」 door latch. Set ONLY by the three natural
+      // ending reasons in the session_ended handler (lesson_complete /
+      // practice_complete / no_due_words); the link itself is appended by
+      // releasePlaybackResources — i.e. only after the terminal drain has
+      // released the scheduled audio (T-13.3-10: never mid-summary — the
+      // playback_ack_timeout path arms its drain EARLY, so the link still
+      // waits for the real last onended there too). Reset at the next
+      // start (13.1-08 Rule 1 site) against cross-lesson residue (T-13.3-11).
+      var pendingHomeButton = false;
 
       function releasePlaybackResources() {
         if (playbackResourceReleased) return;
@@ -506,6 +515,19 @@
         playback.note('release');
         startBtn.disabled = false; // restart re-authorizes via the same button
         started = false;
+        // 13.3-04: the drain is COMPLETE — scheduled audio released. Only
+        // NOW may the 「回首页」 door appear (success criterion 5: the
+        // lesson truly ended, the summary finished, audio freed). The link
+        // rides the SAME callback that flips playbackResourceReleased, so
+        // it can never precede the release (createElement/textContent
+        // discipline, T-13-22 — same as every banner element).
+        if (pendingHomeButton) {
+          var home = document.createElement('a');
+          home.href = '/home.html';
+          home.className = 'rt-btn rt-btn-home';
+          home.textContent = '回首页';
+          bannerEl.appendChild(home);
+        }
       }
 
       function beginTerminalDrain() {
@@ -701,12 +723,15 @@
         // contract); practice_complete is the 13.1-05 third ending.
         if (reason === 'lesson_complete') {
           // D-13: 今天的 N 个词都默写完了 + the 再练一组 entry.
+          pendingHomeButton = true; // 13.3-04: natural ending → 回首页 after drain
           showEndingBanner(reason);
           showNotice('本次课程已结束。想加练一组就点「再练一组」。');
         } else if (reason === 'practice_complete') {
+          pendingHomeButton = true; // 13.3-04: natural ending → 回首页 after drain
           showEndingBanner(reason);
           showNotice('练习结束啦，休息一下吧。');
         } else if (reason === 'no_due_words') {
+          pendingHomeButton = true; // 13.3-04: natural ending → 回首页 after drain
           showEndingBanner(reason);
           showNotice('今天没有到期单词，想加练一组就点「再练一组」。');
         }
@@ -789,6 +814,17 @@
         // after the previous drain completed (releasePlaybackResources), so
         // no drain is in flight and the old socket is already closed.
         terminalDraining = false;
+        // 13.3-04 (T-13.3-11): the home-link latch resets with it — a stale
+        // flag from the previous lesson must not inject 「回首页」 into an
+        // unrelated ending (13.1-08 Rule 1 same-site lesson).
+        pendingHomeButton = false;
+        // 13.3-04 (Rule 1, found by the practice-loop e2e): the release
+        // latch resets too. releaseSharedResources is idempotent by design
+        // (the restarted session re-attaches a fresh AudioContext via
+        // setAudioContext), so the NEXT lesson's drain must reach it again —
+        // a never-reset latch made the second lesson's drain callback
+        // early-return, swallowing that lesson's 「回首页」 append.
+        playbackResourceReleased = false;
         setConn('connecting', '连接中…');
 
         // ONE user gesture (RT-02): RTCapture.start synchronously runs the
