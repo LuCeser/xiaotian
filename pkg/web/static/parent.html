@@ -1,12 +1,15 @@
 <!DOCTYPE html>
 <!--
-  Parent Vocabulary Management — Home Tutor Agent (Phase 9, Plan 01).
+  Parent Vocabulary Management — Home Tutor Agent (Phase 9, Plan 01;
+  Phase 13.3 page-level tabs: 学习记录 | 词库 | 设置).
   Served by the Go backend's static file server at /parent.html.
   REST page — NO connection indicator (unlike the student WebSocket page).
 
-  D-04 (URL-only access): there MUST NOT be any link to this page from the
-  student interface (pkg/web/static/index.html). The child-facing surface
-  stays free of management entry points.
+  D-04 — REVISED 2026-10-09 (13.3 consensus 拷问定案): the URL-only access
+  rule is ABOLISHED. There is no PIN, no session, no permission gate on
+  this page; the management entry is discoverable (home.html, the family
+  home, links here publicly). KEPT unchanged: the child-facing classroom
+  surface stays free of management entry points — 课堂内无管理操作.
 -->
 <html lang="zh-CN">
 <head>
@@ -20,7 +23,7 @@
   <meta name="theme-color" content="#f5f7fa">
   <meta name="description" content="单词库管理 — 添加、整理孩子的听写词库">
   <title>单词库管理</title>
-  <link rel="stylesheet" href="styles/parent.css?v=20260929">
+  <link rel="stylesheet" href="styles/parent.css?v=20261009a">
 </head>
 <body>
   <!-- Skip to main content link for accessibility (mirrors index.html) -->
@@ -33,38 +36,76 @@
       <p class="subtitle">添加、整理孩子的听写词库</p>
     </header>
 
+    <!--
+      Page-level tab bar (13.3-01 Task 1 checkpoint ③ confirmed form):
+      学习记录 | 词库 | 设置. parent-app.js toggles each tab's
+      aria-selected plus the target panel's hidden attribute — the
+      settingsSection hidden-attribute precedent, never display:none
+      inline styles. The default tab (学习记录) resets on every load;
+      tab state is deliberately NOT persisted.
+    -->
+    <nav class="parent-tabs" role="tablist" aria-label="页面切换">
+      <button type="button" class="parent-tab active" id="parent-tab-lessons"
+              role="tab" aria-selected="true" aria-controls="lessonsSection">学习记录</button>
+      <button type="button" class="parent-tab" id="parent-tab-vocab"
+              role="tab" aria-selected="false" aria-controls="vocabPanel">词库</button>
+      <button type="button" class="parent-tab" id="parent-tab-settings"
+              role="tab" aria-selected="false" aria-controls="settingsPanel">设置</button>
+    </nav>
+
     <main class="main-content" id="main-content" role="main">
       <!--
-        Section order per UI-SPEC Layout: 添加单词 → 浏览词库 → 学习设置.
-        学习设置 is present but empty in the tracer (filled in Plan 09-07);
-        a visible empty section is not acceptable, so the section carries
-        the hidden attribute until its component mounts.
+        学习记录 panel (13.3-03) — the DEFAULT tab. LessonsView
+        (parent-lessons.js) mounts into #lessons-container.
       -->
-      <section class="card add-section" id="addSection"
-               role="region" aria-labelledby="addSectionTitle">
-        <h2 class="card-title" id="addSectionTitle">添加单词</h2>
-        <!-- AddCard (parent-modes.js) mounts the 单个添加 | 批量添加 tabs
-             plus both forms here. -->
-        <div id="add-form-container"></div>
-        <!-- Shared 单元 datalist: both add forms' 单元 inputs reference
-             list="unit-options"; parent-app.js populates it from
-             GET /api/v1/units for the selected category (Plan 09-06). -->
-        <datalist id="unit-options"></datalist>
+      <section class="card lessons-section" id="lessonsSection"
+               role="tabpanel" aria-labelledby="parent-tab-lessons">
+        <h2 class="card-title" id="lessonsSectionTitle">学习记录</h2>
+        <div id="lessons-container"></div>
       </section>
 
-      <section class="card browse-section" id="browseSection"
-               role="region" aria-labelledby="browseSectionTitle" aria-live="polite">
-        <h2 class="card-title" id="browseSectionTitle">浏览词库</h2>
-        <div id="word-list-container"></div>
-      </section>
+      <!--
+        词库 panel: 添加单词 → 浏览词库, carried over UNCHANGED from the
+        pre-tab page — internal DOM ids, the shared datalist and the aria
+        structure stay exactly as they were, because AddCard/BrowseView
+        mount by id + defer order (Pitfall 8: tab conversion must not
+        break the existing components).
+        Section order per UI-SPEC Layout: 添加单词 → 浏览词库.
+      -->
+      <div class="parent-panel parent-panel-vocab" id="vocabPanel"
+           role="tabpanel" aria-labelledby="parent-tab-vocab" hidden>
+        <section class="card add-section" id="addSection"
+                 role="region" aria-labelledby="addSectionTitle">
+          <h2 class="card-title" id="addSectionTitle">添加单词</h2>
+          <!-- AddCard (parent-modes.js) mounts the 单个添加 | 批量添加 tabs
+               plus both forms here. -->
+          <div id="add-form-container"></div>
+          <!-- Shared 单元 datalist: both add forms' 单元 inputs reference
+               list="unit-options"; parent-app.js populates it from
+               GET /api/v1/units for the selected category (Plan 09-06). -->
+          <datalist id="unit-options"></datalist>
+        </section>
 
-      <!-- 学习设置 card (Plan 09-07, D-15): stays hidden until
-           SettingsCard mounts and unhides it — no JS, no empty card. -->
-      <section class="card settings-section" id="settingsSection" hidden
-               role="region" aria-labelledby="settingsSectionTitle">
-        <h2 class="card-title" id="settingsSectionTitle">学习设置</h2>
-        <div id="settings-container"></div>
-      </section>
+        <section class="card browse-section" id="browseSection"
+                 role="region" aria-labelledby="browseSectionTitle" aria-live="polite">
+          <h2 class="card-title" id="browseSectionTitle">浏览词库</h2>
+          <div id="word-list-container"></div>
+        </section>
+      </div>
+
+      <!--
+        设置 panel. 学习设置 stays hidden until SettingsCard mounts and
+        unhides it — no JS, no empty card (Plan 09-07 tracer-era contract,
+        untouched by the tab conversion).
+      -->
+      <div class="parent-panel parent-panel-settings" id="settingsPanel"
+           role="tabpanel" aria-labelledby="parent-tab-settings" hidden>
+        <section class="card settings-section" id="settingsSection" hidden
+                 role="region" aria-labelledby="settingsSectionTitle">
+          <h2 class="card-title" id="settingsSectionTitle">学习设置</h2>
+          <div id="settings-container"></div>
+        </section>
+      </div>
     </main>
   </div>
 
@@ -78,11 +119,11 @@
       js/parent-browse.js       → window.BrowseView (浏览词库: toolbar +
                                   unit groups + edit/rename/delete modals)
       js/parent-app.js          → wires them together (entry, fetchJSON,
-                                  unit datalist population)
+                                  unit datalist population, page tabs)
   -->
-  <script src="js/parent-batch-parser.js?v=20260929" defer></script>
-  <script src="js/parent-modes.js?v=20260929" defer></script>
-  <script src="js/parent-browse.js?v=20260929" defer></script>
-  <script src="js/parent-app.js?v=20260929" defer></script>
+  <script src="js/parent-batch-parser.js?v=20261009a" defer></script>
+  <script src="js/parent-modes.js?v=20261009a" defer></script>
+  <script src="js/parent-browse.js?v=20261009a" defer></script>
+  <script src="js/parent-app.js?v=20261009a" defer></script>
 </body>
 </html>

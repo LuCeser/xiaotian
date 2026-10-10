@@ -7,6 +7,10 @@
  * (mirrors app.js IIFE + window.X availability-check pattern).
  *
  * Responsibilities:
+ *   0. Wire the page-level tabs (13.3-03: 学习记录 | 词库 | 设置) —
+ *      aria-selected + hidden-attribute panel switching, 学习记录 default
+ *      on every load (state not persisted). Runs before the component
+ *      checks so tabs survive a degraded page.
  *   1. Provide the fetchJSON wrapper: AbortController timeout +
  *      normalization of the {"error":{code,message}} envelope into a
  *      thrown Error carrying the message (error.code rides along so the
@@ -27,6 +31,43 @@
 
 (function parentAppEntry() {
   'use strict';
+
+  // ------------------------------------------------------------------
+  // Page-level tabs (13.3-03 Task 1): 学习记录 | 词库 | 设置. Switching
+  // toggles each tab's aria-selected plus the target panel's hidden
+  // attribute — the settingsSection hidden-attribute precedent, never
+  // display:none inline styles. The default tab is 学习记录 on EVERY
+  // load (explicit re-activation below); tab state is deliberately NOT
+  // persisted across reloads. This wiring runs BEFORE the component
+  // dependency checks so the tabs keep working even in a degraded page.
+  // ------------------------------------------------------------------
+  var pageTabs = Array.prototype.slice.call(
+    document.querySelectorAll('.parent-tabs [role="tab"]'));
+  if (!pageTabs.length) {
+    console.error('[parent-app] page tab bar missing from parent.html.');
+    return;
+  }
+
+  function activatePageTab(activeTab) {
+    pageTabs.forEach(function (tab) {
+      var active = tab === activeTab;
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      tab.classList.toggle('active', active);
+      var panel = document.getElementById(tab.getAttribute('aria-controls'));
+      if (panel) {
+        panel.hidden = !active;
+      }
+    });
+  }
+
+  pageTabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      activatePageTab(tab);
+    });
+  });
+  // Default tab on every load: the first one (学习记录) — explicit so the
+  // HTML defaults and the JS state can never disagree.
+  activatePageTab(pageTabs[0]);
 
   // ------------------------------------------------------------------
   // Dependency availability checks (graceful degradation, app.js pattern)

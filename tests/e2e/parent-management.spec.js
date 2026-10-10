@@ -14,10 +14,16 @@
  *
  * Every selector below is read from the real frontend copy (UI-SPEC
  * Copywriting Contract):
- *   - pkg/web/static/parent.html        (section titles 添加单词/浏览词库)
+ *   - pkg/web/static/parent.html        (page tabs 学习记录/词库/设置 +
+ *                                         section titles 添加单词/浏览词库)
  *   - pkg/web/static/js/parent-modes.js (labels 单词/单元/添加单词, radios 英语/中文,
  *                                         batch tab copy 解析并预览/确认添加/结果横幅)
  *   - pkg/web/static/js/parent-browse.js (toolbar/组头/行操作/modal 文案)
+ *
+ * 13.3-03: parent.html is now a page-level three-tab workspace with
+ * 学习记录 as the DEFAULT tab. Every flow that touches the vocabulary
+ * therefore clicks the 词库 tab after page.goto (exact copy locator), and
+ * every reload resets to 学习记录 — flows re-click the tab they need.
  *
  * Test-data hygiene (T-09-12): all writes are confined to the dedicated
  * `e2e-*` units; every test removes them in a finally-shaped API cleanup,
@@ -44,6 +50,9 @@ test('tracer: parent adds one word from parent.html and sees it in the browse li
 
   await page.goto('/parent.html');
 
+  // 13.3-03: the page opens on 学习记录 — the vocabulary lives on the 词库 tab.
+  await page.getByRole('tab', { name: '词库' }).click();
+
   // The add form and browse card both render.
   const addSection = page.locator('#addSection');
   const browseSection = page.locator('#browseSection');
@@ -63,8 +72,10 @@ test('tracer: parent adds one word from parent.html and sees it in the browse li
   // Submit through the real REST → pybridge → Python → SQLite path.
   await page.getByRole('button', { name: '添加单词' }).click();
 
-  // Success toast appears (已添加) and the form is re-enabled.
-  await expect(page.locator('.toast-success')).toHaveText('已添加', { timeout: 15_000 });
+  // Success toast appears (已添加 + the 13.3-03 selection note) and the
+  // form is re-enabled.
+  await expect(page.locator('.toast-success')).toHaveText(
+    '已添加。新词将按复习安排选入课堂，不一定是下一课。', { timeout: 15_000 });
 
   // The word appears in the 浏览词库 section WITHOUT a page reload.
   await expect(
@@ -100,6 +111,8 @@ test('full flow: batch add → browse → search → edit → rename → delete 
 
   try {
     await page.goto('/parent.html');
+    // 13.3-03: the page opens on 学习记录 — the vocabulary lives on the 词库 tab.
+    await page.getByRole('tab', { name: '词库' }).click();
     const addSection = page.locator('#addSection');
     const browseSection = page.locator('#browseSection');
     await expect(addSection).toBeVisible();
@@ -153,6 +166,8 @@ test('full flow: batch add → browse → search → edit → rename → delete 
     await expect(fullGroup.locator('.unit-toggle')).toHaveAttribute('aria-expanded', 'false');
 
     await page.reload();
+    // 13.3-03: a reload resets to the default 学习记录 tab — back to 词库.
+    await page.getByRole('tab', { name: '词库' }).click();
     await expect(fullGroup).toBeVisible();
     await expect(fullBody, 'collapse state must persist across reload (localStorage)').toBeHidden();
     await expect(fullGroup.locator('.unit-toggle')).toHaveAttribute('aria-expanded', 'false');
@@ -225,11 +240,13 @@ test('full flow: batch add → browse → search → edit → rename → delete 
     await expect(renamedGroup.locator('.unit-count')).toHaveText('2 个单词');
 
     // ----------------------------------------------------------------
-    // 7. Settings: 记忆保持率 → 0.90, save, reload reflects it (slider +
-    //    GET), then exercise 恢复默认 via the UI and save (the button's
-    //    doc-default behavior is asserted below; the parent's REAL
-    //    pre-test settings are restored in the finally block, WR-04).
+    // 7. Settings (设置 tab, 13.3-03): 记忆保持率 → 0.90, save, reload
+    //    reflects it (slider + GET), then exercise 恢复默认 via the UI
+    //    and save (the button's doc-default behavior is asserted below;
+    //    the parent's REAL pre-test settings are restored in the finally
+    //    block, WR-04).
     // ----------------------------------------------------------------
+    await page.getByRole('tab', { name: '设置' }).click();
     const retention = page.locator('#settings-retention');
     await retention.evaluate((el) => {
       el.value = '0.9';
@@ -244,6 +261,9 @@ test('full flow: batch add → browse → search → edit → rename → delete 
     await expect(page.locator('.toast-success')).toHaveText('已保存，下次听写生效');
 
     await page.reload();
+    // 13.3-03: the reload reset to 学习记录 — back to 设置 for the
+    // slider + 恢复默认 assertions.
+    await page.getByRole('tab', { name: '设置' }).click();
     const saved = await (await request.get('/api/v1/settings/fsrs')).json();
     expect(saved.desired_retention, 'GET must reflect the saved 0.90').toBeCloseTo(0.9, 8);
     await expect(page.locator('#settings-retention')).toHaveValue('0.9');
@@ -262,10 +282,11 @@ test('full flow: batch add → browse → search → edit → rename → delete 
     });
 
     // ----------------------------------------------------------------
-    // 8. Cleanup via the UI: delete e2e-full-2 (exact-count copy), then
-    //    the Plan 09-01 e2e-tracer leftovers the same way. The finally
-    //    block below is the API backstop.
+    // 8. Cleanup via the UI (back on the 词库 tab): delete e2e-full-2
+    //    (exact-count copy), then the Plan 09-01 e2e-tracer leftovers the
+    //    same way. The finally block below is the API backstop.
     // ----------------------------------------------------------------
+    await page.getByRole('tab', { name: '词库' }).click();
     await renamedGroup.locator('.unit-action', { hasText: '删除' }).click();
     const unitDialog = page.getByRole('dialog', { name: '删除单元' });
     await expect(unitDialog.locator('.modal-message')).toHaveText(
@@ -302,10 +323,13 @@ test('full flow: batch add → browse → search → edit → rename → delete 
 // Plan 09-08 Task 2 — D-03 responsive matrix + UI-SPEC backstop rows.
 //
 // Discriminators are read from the real stylesheet (styles/parent.css) via
-// computed styles / window.matchMedia — the ipad-layout.spec.js approach:
-//   - <1024px: .main-content stacks (display:block), sections in DOM order
-//   - >=1024px: two-column grid (browse 2fr wider than the 1fr rail),
-//     container max-width 1120px
+// computed styles / window.matchMedia — the ipad-layout.spec.js approach.
+// 13.3-03 rebase: the page itself is single-column at every width (tab bar
+// + one visible panel); the two-column arrangement lives on the 词库 panel
+// (#vocabPanel) at >=1024px:
+//   - <1024px: the vocab panel stacks (display:block), sections in DOM order
+//   - >=1024px: the vocab panel is a two-column grid (browse 2fr wider than
+//     the 1fr rail), container max-width 1120px
 //   - every viewport: inputs report font-size >=16px (no iOS zoom-on-focus)
 //
 // Backstop fixtures (UI Considerations long-text + overflow rows): an
@@ -346,6 +370,8 @@ test('responsive matrix (phone/tablet/desktop) + backstop visual checks', async 
 
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto('/parent.html');
+    // 13.3-03: the vocabulary cards live on the 词库 tab.
+    await page.getByRole('tab', { name: '词库' }).click();
 
     const longRow = page.locator('.word-row[data-word="e2e-longtext"]');
     await expect(longRow).toBeVisible();
@@ -356,6 +382,7 @@ test('responsive matrix (phone/tablet/desktop) + backstop visual checks', async 
       const layout = await page.evaluate(() => {
         const cs = (el) => (el ? getComputedStyle(el) : null);
         const main = document.querySelector('.main-content');
+        const vocabPanel = document.querySelector('#vocabPanel');
         const browse = document.querySelector('.browse-section');
         const add = document.querySelector('.add-section');
         const toolbar = document.querySelector('.browse-toolbar');
@@ -369,7 +396,8 @@ test('responsive matrix (phone/tablet/desktop) + backstop visual checks', async 
         return {
           mq1024: window.matchMedia('(min-width: 1024px)').matches,
           mainDisplay: cs(main).display,
-          gridTracks: cs(main).gridTemplateColumns.split(' ').filter(Boolean).length,
+          panelDisplay: cs(vocabPanel).display,
+          gridTracks: cs(vocabPanel).gridTemplateColumns.split(' ').filter(Boolean).length,
           toolbarDirection: cs(toolbar).flexDirection,
           containerMaxWidth: cs(container).maxWidth,
           browseWidth: browse.getBoundingClientRect().width,
@@ -382,16 +410,18 @@ test('responsive matrix (phone/tablet/desktop) + backstop visual checks', async 
       });
 
       expect(layout.mq1024, `${vp.name}: (min-width: 1024px) MQ must match the viewport`).toBe(vp.twoCol);
+      // 13.3-03: the page itself never grids — tabs own the page chrome.
+      expect(layout.mainDisplay, `${vp.name}: main stays single-column (the tab bar owns the page)`).toBe('block');
       if (!vp.twoCol) {
-        // Single column: sections stack in DOM order, no grid, toolbar stacks.
-        expect(layout.mainDisplay, `${vp.name}: sections stack (single column)`).toBe('block');
+        // Single column: vocab panel stacks in DOM order, no grid, toolbar stacks.
+        expect(layout.panelDisplay, `${vp.name}: vocab panel stacks (single column)`).toBe('block');
         expect(layout.browseTop, `${vp.name}: browse renders below the add card`).toBeGreaterThanOrEqual(layout.addBottom);
         if (vp.assertToolbarColumn) {
           expect(layout.toolbarDirection, `${vp.name}: toolbar stacks on phone`).toBe('column');
         }
       } else {
-        // Two-column grid active: browse 2fr wider than the 1fr rail.
-        expect(layout.mainDisplay, `${vp.name}: two-column grid active at >=1024px`).toBe('grid');
+        // Two-column grid on the vocab panel: browse 2fr wider than the rail.
+        expect(layout.panelDisplay, `${vp.name}: two-column grid active on the vocab panel at >=1024px`).toBe('grid');
         expect(layout.gridTracks, `${vp.name}: grid-template-columns has two tracks`).toBe(2);
         expect(layout.browseWidth, `${vp.name}: browse column wider than the rail`).toBeGreaterThan(layout.addWidth);
         expect(layout.containerMaxWidth, `${vp.name}: container capped at 1120px`).toBe('1120px');
@@ -488,4 +518,44 @@ test('responsive matrix (phone/tablet/desktop) + backstop visual checks', async 
   } finally {
     await deleteUnit(request, OVER_UNIT);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 13.3-03 Task 1 — page-level tab smoke (real backend): the page opens on
+// 学习记录, 词库/设置 swap their panels via the hidden attribute, and a
+// reload resets to the default tab (tab state deliberately not persisted).
+// ---------------------------------------------------------------------------
+
+test('parent page tab smoke: 学习记录 default, 词库/设置 switch, reload resets', async ({ page }) => {
+  await page.goto('/parent.html');
+
+  // Default: the learning-record panel is the ONLY visible one.
+  await expect(page.locator('#lessonsSection')).toBeVisible();
+  await expect(page.getByRole('tab', { name: '学习记录' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#vocabPanel')).toBeHidden();
+  await expect(page.locator('#addSection')).toBeHidden();
+  await expect(page.locator('#settingsPanel')).toBeHidden();
+
+  // 词库 tab: both vocabulary cards render (the components mounted while
+  // their panel was hidden — the settingsSection hidden-then-mount precedent).
+  await page.getByRole('tab', { name: '词库' }).click();
+  await expect(page.locator('#addSection')).toBeVisible();
+  await expect(page.locator('#browseSection')).toBeVisible();
+  await expect(page.locator('#lessonsSection')).toBeHidden();
+  await expect(page.getByRole('tab', { name: '词库' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: '学习记录' })).toHaveAttribute('aria-selected', 'false');
+
+  // 设置 tab: the settings card renders (SettingsCard unhid its section
+  // at mount; the tab un-hides the panel).
+  await page.getByRole('tab', { name: '设置' }).click();
+  await expect(page.locator('#settingsSection')).toBeVisible();
+  await expect(page.locator('#vocabPanel')).toBeHidden();
+  await expect(page.locator('#lessonsSection')).toBeHidden();
+
+  // Reload resets to 学习记录 — tab state is not persisted.
+  await page.reload();
+  await expect(page.locator('#lessonsSection')).toBeVisible();
+  await expect(page.locator('#vocabPanel')).toBeHidden();
+  await expect(page.locator('#settingsPanel')).toBeHidden();
+  await expect(page.getByRole('tab', { name: '学习记录' })).toHaveAttribute('aria-selected', 'true');
 });

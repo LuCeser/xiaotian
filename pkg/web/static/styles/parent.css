@@ -124,6 +124,53 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/* Page-level tabs (13.3-03): 学习记录 | 词库 | 设置. Same visual        */
+/* language as the add-card tabs (accent 3px underline on the active    */
+/* tab); three EQUAL-WIDTH buttons per the 13.3-01 checkpoint ③         */
+/* wireframe. Switching toggles the hidden attribute on the target      */
+/* panel (settingsSection precedent) — never inline display styles.     */
+/* ------------------------------------------------------------------ */
+
+.parent-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 24px;
+}
+
+.parent-tab {
+  flex: 1;
+  min-height: 44px;
+  padding: 8px 4px 10px;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -1px; /* overlap the tablist hairline */
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: color 150ms ease-out, border-color 150ms ease-out;
+}
+
+.parent-tab:hover {
+  color: var(--ink);
+}
+
+.parent-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Tab panels swap via the hidden attribute (UA default display:none is
+   pinned explicitly, mirroring .add-panel[hidden]). */
+.parent-panel[hidden] {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ */
 /* Forms                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -498,6 +545,15 @@ body {
 }
 
 .result-detail {
+  font-size: 14px;
+  font-weight: 400;
+  margin-top: 4px !important;
+  overflow-wrap: anywhere;
+}
+
+/* 13.3-03 consensus 口径 line closing every add success (single + batch):
+   新词将按复习安排选入课堂，不一定是下一课. */
+.result-note {
   font-size: 14px;
   font-weight: 400;
   margin-top: 4px !important;
@@ -913,13 +969,15 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
-/* >=1024px two-column grid (D-03): 浏览词库 2fr / rail (添加单词 +     */
-/* 学习设置) 1fr, container max-width 1120px centered. Explicit grid   */
-/* placement decouples the visual columns from the mobile DOM order.   */
+/* >=1024px two-column grid (D-03): 浏览词库 2fr / 添加单词 1fr rail.    */
+/* 13.3-03 tab conversion: the grid lives on the 词库 panel (the two    */
+/* cards it arranges), not on .main-content — the page-level tabs and   */
+/* the 学习记录/设置 panels stay single-column at every width. Explicit  */
+/* grid placement decouples the visual columns from the DOM order.      */
 /* ------------------------------------------------------------------ */
 
 @media (min-width: 1024px) {
-  .main-content {
+  .parent-panel-vocab {
     display: grid;
     grid-template-columns: 2fr 1fr;
     grid-template-rows: auto 1fr;
@@ -927,7 +985,7 @@ body {
     align-items: start;
   }
 
-  .main-content .card {
+  .parent-panel-vocab .card {
     margin-bottom: 0;
   }
 
@@ -939,11 +997,6 @@ body {
   .add-section {
     grid-column: 2;
     grid-row: 1;
-  }
-
-  .settings-section {
-    grid-column: 2;
-    grid-row: 2;
   }
 }
 
