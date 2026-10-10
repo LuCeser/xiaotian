@@ -613,9 +613,9 @@ func (h *handler) listLessons(w http.ResponseWriter, r *http.Request) {
 			infra.F("component", "web/api"),
 			infra.ErrField(err),
 		)
-		writeError(w, http.StatusInternalServerError, codeInternal,
-			"failed to list lessons")
-		return
+		// Receipt metadata must not make otherwise readable lessons unavailable.
+		// Discard any partial aggregation: unknown is the honest fallback.
+		latest = nil
 	}
 
 	items := make([]lessonListItem, 0, len(summaries))
@@ -667,9 +667,7 @@ func (h *handler) getLesson(w http.ResponseWriter, r *http.Request) {
 			infra.F("lesson_id", id),
 			infra.ErrField(err),
 		)
-		writeError(w, http.StatusInternalServerError, codeInternal,
-			"internal error")
-		return
+		latest = nil
 	}
 	receipt, hasReceipt := latest[id]
 	item := newLessonListItem(lesson.SummarizeLesson(l), receipt, hasReceipt)
@@ -743,9 +741,9 @@ func (h *handler) getLesson(w http.ResponseWriter, r *http.Request) {
 			infra.F("lesson_id", id),
 			infra.ErrField(err),
 		)
-		writeError(w, http.StatusInternalServerError, codeInternal,
-			"internal error")
-		return
+		// Even a healthy latest row cannot verify an unreadable receipt history.
+		detail.SaveStatus = "unknown"
+		receiptRows = nil
 	}
 	for _, rc := range receiptRows {
 		detail.SaveReceipts = append(detail.SaveReceipts, receiptJSON{
