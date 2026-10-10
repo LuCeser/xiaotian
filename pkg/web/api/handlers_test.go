@@ -994,6 +994,132 @@ func keysOf(m map[string]any) []string {
 	return out
 }
 
+func TestLessonAPIReceiptFailureDegrades(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		stage        string
+		historical   bool
+		missingTable bool
+	}{
+		{name: "corrupt latest", stage: "submitted"},
+		{name: "corrupt history with healthy latest", stage: "submitted", historical: true},
+		{name: "missing receipt table", stage: "submitted", missingTable: true},
+		{name: "checking lesson stays summary only", stage: "checking"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, lessons, practice, receipts := newLessonTestStores(t)
+			h := newTestHandlerWithStores(&fakeExecutor{}, &fakeCardRepo{}, lessons, practice, receipts)
+			const id = "r0-20261010"
+			seedLessonRow(t, db, id, testLessonCards,
+				`[{"word_index":0,"correct":true,"manual":true}]`, `{}`,
+				tc.stage, 3, 0, "2026-10-10 12:00:00")
+			seedLessonRow(t, db, "r0-20261009", testLessonCards, `[]`, `{}`,
+				"checking", 3, 0, "2026-10-09 12:00:00")
+			brokenID, err := receipts.Begin(context.Background(), lesson.ReceiptInput{
+				LessonID: id, RequestID: "broken", Kind: lesson.ReceiptKindCheck,
+				Requested: []string{"苹果"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec("UPDATE lesson_save_receipts SET requested = ? WHERE id = ?", "{broken", brokenID.ID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.historical {
+				goodID, err := receipts.Begin(context.Background(), lesson.ReceiptInput{
+					LessonID: id, RequestID: "healthy", Kind: lesson.ReceiptKindCheck,
+					Requested: []string{"苹果"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := receipts.Complete(context.Background(), goodID.ID, []string{"苹果"}, nil, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.missingTable {
+				if _, err := db.Exec("DROP TABLE lesson_save_receipts"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			list := httptest.NewRecorder()
+			h.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/lessons", nil))
+			if list.Code != http.StatusOK {
+				t.Fatalf("list status = %d: %s", list.Code, list.Body.String())
+			}
+			var page struct {
+				Lessons []map[string]any `json:"lessons"`
+			}
+			if err := json.Unmarshal(list.Body.Bytes(), &page); err != nil {
+				t.Fatal(err)
+			}
+			if len(page.Lessons) != 2 || page.Lessons[0]["lesson_id"] != id {
+				t.Fatalf("lesson list lost rows or order: %v", page.Lessons)
+			}
+			wantListStatus := "unknown"
+			if tc.historical {
+				wantListStatus = "saved" // Latest-row aggregation is still readable.
+			}
+			if page.Lessons[0]["save_status"] != wantListStatus {
+				t.Errorf("list save_status = %v, want %s", page.Lessons[0]["save_status"], wantListStatus)
+			}
+			for _, row := range page.Lessons {
+				assertSummaryKeysExact(t, row)
+			}
+
+			detail := httptest.NewRecorder()
+			h.ServeHTTP(detail, httptest.NewRequest(http.MethodGet, "/lessons/"+id, nil))
+			if detail.Code != http.StatusOK {
+				t.Fatalf("detail status = %d: %s", detail.Code, detail.Body.String())
+			}
+			var row map[string]any
+			if err := json.Unmarshal(detail.Body.Bytes(), &row); err != nil {
+				t.Fatal(err)
+			}
+			if row["save_status"] != "unknown" {
+				t.Errorf("detail save_status = %v, want unknown", row["save_status"])
+			}
+			if tc.stage == "checking" {
+				assertSummaryKeysExact(t, row)
+				for _, canary := range []string{"苹果", "香蕉", "橘子"} {
+					if strings.Contains(detail.Body.String(), canary) {
+						t.Errorf("checking detail leaked %s", canary)
+					}
+				}
+			} else {
+				words, ok := row["words"].([]any)
+				if !ok || len(words) != 3 {
+					t.Errorf("words = %v, want all three cards", row["words"])
+				}
+				results, ok := row["results"].([]any)
+				if !ok || len(results) != 1 || row["correct"] != float64(1) {
+					t.Errorf("results/count changed: %v", row)
+				}
+				rows, ok := row["save_receipts"].([]any)
+				if !ok || len(rows) != 0 {
+					t.Errorf("save_receipts = %v, want []", row["save_receipts"])
+				}
+			}
+		})
+	}
+}
+
+func TestLessonAPIPrimaryReadFailureStillErrors(t *testing.T) {
+	db, lessons, practice, receipts := newLessonTestStores(t)
+	h := newTestHandlerWithStores(&fakeExecutor{}, &fakeCardRepo{}, lessons, practice, receipts)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/lessons", "/lessons/r0-20261010"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("%s status = %d, want 500", path, w.Code)
+		}
+	}
+}
+
 func TestListLessonsAPI(t *testing.T) {
 	db, lessons, practice, receipts := newLessonTestStores(t)
 	h := newTestHandlerWithStores(&fakeExecutor{}, &fakeCardRepo{}, lessons, practice, receipts)
