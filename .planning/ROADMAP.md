@@ -154,7 +154,7 @@ Plans:
 
 **明确砍掉（不得顺手带入）**：PIN/会话/接口权限/锁定交接、家长改评级（Phase 15）、跨日任意旧课恢复与保存对账（Phase 15）、完整对话回放、照片/音频归档、趋势与掌握度统计、指定单元/刚加词立即开课、多孩子多家长账号、SPA/CSS 合并、根路由迁移、一切 VPS 部署动作。
 
-**Plans:** 2/6 plans executed
+**Plans:** 4/6 plans executed
 
 Plans:
 **Wave 1**（checkpoint 定四项微决策后起步）
@@ -167,8 +167,8 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2；03 与 05 文件零交集同波并行)*
 
-- [ ] 13.3-03-PLAN.md — parent.html「学习记录」默认 tab：三 tab 化＋LessonsView 竖排逐词详情＋mock /api/v1 桩＋e2e（SC-3）
-- [ ] 13.3-05-PLAN.md — 生产强制 student 模式：rt.forceStudentMode 配置链→normalizeSessionMode 裁决短路（SC-6）
+- [x] 13.3-03-PLAN.md — parent.html「学习记录」默认 tab：三 tab 化＋LessonsView 竖排逐词详情＋mock /api/v1 桩＋e2e（SC-3）
+- [x] 13.3-05-PLAN.md — 生产强制 student 模式：rt.forceStudentMode 配置链→normalizeSessionMode 裁决短路（SC-6）
 
 **Wave 4** *(blocked on Wave 3——与 03 的 e2e 端口互斥，顺序执行)*
 
@@ -240,7 +240,7 @@ Plans:
 | 13. R0 本地最小闭环 | 12/12 | 本地人工验收中 | - |
 | 13.1 三段式默写课堂 | 8/8 | 本地人工验收待完成 | - |
 | 13.2 VPS 部署与真机正式验收 | 0/0 | 搁置（2026-10-09，家庭试用期暂不关注） | - |
-| 13.3 家长端融合 | 2/6 | In Progress|  |
+| 13.3 家长端融合 | 4/6 | In Progress|  |
 | 14. R1 对话接真实课堂 | 0/0 | Not started | - |
 | 15. R2 学习闭环 | 0/0 | Not started | - |
 | 16. R3 部署与容量 | 0/0 | Not started | - |
