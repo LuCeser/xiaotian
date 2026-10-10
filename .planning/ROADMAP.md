@@ -284,3 +284,11 @@ Plans:
 **问题描述：** `go build` 和 `go test` 执行时间异常长，怀疑代码中存在设置了长时间超时条件的测试用例（如 `time.Sleep`、`time.After`、自定义超时），导致每次构建/测试都需要等待超时才能完成。需要专题排查所有测试文件中的 time-related 阻塞模式，将其改为可控的 mock 或缩短超时。
 
 历史待办，未经主动提升不阻塞 Phase 13。单独 go build 不运行测试；具体慢点须分别测构建、测试、服务就绪和首个可听响应，不能仅凭测试超时推断构建慢。
+
+### Phase 999.2: Follow-up — Phase 13.3 deferred UAT follow-up: Test 1-10 (BACKLOG)
+
+**Goal:** Resolve the UAT checkpoint deferred during Phase 13.3 verification
+**Source phase:** 13.3
+**Deferred at:** 2026-10-10 during /gsd-verify-work 13.3 session completion
+**Follow-ups:**
+- [ ] Test 1-10: 用户（2026-10-10 会话）：这些验收项都应该做成端到端验证——十项真机用例的可自动化主体并入四层 E2E 体系（L3 隔离实例＋合成客户端为主战场，沿 tests/e2e-rt/real/ 范式资产化），物理项（iPad Safari bfcache/触控/音频体感）保留人工。详见 13.3 deferred-items.md 同日行。 (deferred 2026-10-10)
