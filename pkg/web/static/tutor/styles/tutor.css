@@ -262,6 +262,31 @@ body[data-page="tutor"] {
 .rt-banner .rt-practice-btn:active { transform: scale(0.97); }
 .rt-banner .rt-practice-btn:disabled { background: #9db8a9; }
 
+/* 13.3-04: the terminal-state 「回首页」 door. Appended into the ending
+   banner ONLY after the terminal drain completes (releasePlaybackResources)
+   — same banner-button form as the practice entry: full-width, >=60px
+   touch target; accent blue so it reads as navigation, not a lesson
+   action. It is an <a> element, so centering is explicit flex (a button's
+   UA default does not apply). */
+.rt-banner .rt-btn-home {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-top: 12px;
+  min-height: 60px; /* ipad-layout touch target */
+  border: none;
+  border-radius: 14px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #ffffff;
+  background: #2f6fed;
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 0.08s ease, background 0.2s ease;
+}
+.rt-banner .rt-btn-home:active { transform: scale(0.97); }
+
 /* Error panel (RT-10: reasons in plain Chinese) ------------------------ */
 
 .rt-error {

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<!--
+  Family Home — /home.html (Phase 13.3, Plan 04; ROADMAP success criteria 4/5).
+  Served by the Go backend's static file server (http.FileServer over
+  pkg/web/static) at /home.html — a pure static file, ZERO route changes
+  (PATTERNS §9: drop the file into the static root and it is served).
+
+  Form A (13.3 consensus decision 1): one family URL, two doors. The
+  student door opens the natural real-time tutor (/tutor/); the parent
+  door opens the family workspace (/parent.html — the 13.3-03 tabbed
+  学习记录 | 词库 | 设置 page).
+
+  D-04 — REVISED 2026-10-09 (consensus decision 2): NO PIN, no session,
+  no permission gate — the gate guards against inconvenience, not against
+  the child. The page is PURE navigation: zero scripts, zero inputs, zero
+  data; the whole surface is two anchor links.
+
+  The legacy / page (index.html + index-banner.js) stays the explicitly
+  labeled RT-10 degraded fallback. This file NEVER replaces the root
+  route — / keeps serving the fallback untouched.
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <!--
+    Viewport mirrors parent.html/index.html (width=device-width,
+    maximum-scale=1.0, user-scalable=no): the PRIMARY zoom-on-focus
+    defense is touch-action: manipulation in home.css per iOS Safari
+    rules. The ?v= stamp follows the parent.html cache-busting convention
+    (iPad Safari Pitfall 7).
+  -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#f5f7fa">
+  <meta name="description" content="家庭首页 — 开始今天的听写，或打开家长的记录与词库">
+  <title>听写小助手</title>
+  <link rel="stylesheet" href="styles/home.css?v=20261010a">
+</head>
+<body>
+  <!-- Skip to main content link for accessibility (parent.html precedent) -->
+  <a href="#main-content" class="skip-to-content">跳转到主要内容</a>
+
+  <div class="container">
+    <main class="home-main" id="main-content" role="main">
+      <header class="home-header">
+        <h1 class="home-title">听写小助手</h1>
+        <p class="home-subtitle">今天的听写，从这里开始</p>
+      </header>
+
+      <!--
+        The two doors (form A). They NAVIGATE, so they stay anchor
+        elements styled as buttons — never <button>s. Touch targets are
+        60px tall, exceeding the 48px iPad minimum (tutor-page parity).
+        No PIN, no session, no permission element of any kind.
+      -->
+      <nav class="home-doors" aria-label="家庭入口">
+        <a class="home-door home-door-primary" href="/tutor/">开始今天的听写</a>
+        <a class="home-door home-door-secondary" href="/parent.html">家长：记录与词库</a>
+      </nav>
+    </main>
+  </div>
+</body>
+</html>

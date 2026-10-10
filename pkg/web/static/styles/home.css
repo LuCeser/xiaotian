@@ -1,0 +1,143 @@
+/**
+ * home.css — Family Home (/home.html), Phase 13.3 Plan 04. NEW file.
+ *
+ * Serves ONLY home.html. Per the 13.3 cut list there is NO CSS merge/SPA
+ * consolidation: the spacing, type-ramp and neutral-palette CONVENTIONS
+ * are reused from parent.css by value (same custom-property names and
+ * values so the pages read as one product) — never via @import, and no
+ * existing stylesheet is modified. Mobile-first; iPad Safari is the
+ * target device.
+ */
+
+:root {
+  /* Neutral ramp (same values as parent.css so the pages read as one product) */
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --accent: #2563eb;
+  --background: #f5f7fa;
+  --surface: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: var(--background);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  touch-action: manipulation; /* primary iOS zoom-on-focus defense */
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Accessibility utilities (parent.css precedent)                      */
+/* ------------------------------------------------------------------ */
+
+.skip-to-content {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--surface);
+  color: var(--accent);
+  padding: 8px 16px;
+  border-radius: 0 0 12px 0;
+  z-index: 100;
+}
+
+.skip-to-content:focus {
+  left: 0;
+}
+
+/* Focus ring: 3px accent outline (UI-SPEC Accessibility Contract) */
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Layout: ONE centered card — the family home is a single choice,     */
+/* not a dashboard.                                                    */
+/* ------------------------------------------------------------------ */
+
+.container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.home-main {
+  width: 100%;
+  max-width: 420px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 32px 24px;
+  text-align: center;
+}
+
+.home-header {
+  margin-bottom: 24px;
+}
+
+.home-title {
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0 0 4px;
+}
+
+.home-subtitle {
+  font-size: 14px;
+  color: var(--muted);
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* The two doors: vertically stacked anchors styled as buttons.        */
+/* 60px tall — exceeds the 48px iPad touch minimum (tutor parity).     */
+/* ------------------------------------------------------------------ */
+
+.home-doors {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.home-door {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60px;
+  padding: 12px 20px;
+  font-size: 17px;
+  font-weight: 600;
+  text-decoration: none;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  touch-action: manipulation;
+  transition: transform 0.08s ease, background 0.2s ease;
+}
+
+.home-door:active {
+  transform: scale(0.98);
+}
+
+.home-door-primary {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.home-door-secondary {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--border);
+}
