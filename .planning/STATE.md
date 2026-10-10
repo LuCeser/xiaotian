@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: realtime-tutor — ACTIVE
-current_phase: "13.3"
-current_phase_name: 家长端融合——统一首页与学习成果可读
-status: executing
-stopped_at: Phase 13.3 执行+验证完成（6/6 计划，6/7 SC 自动核验通过）；待用户真机 UAT（/gsd-verify-work 13.3）
-last_updated: "2026-10-10T10:20:28.818Z"
-last_activity: 2026-10-10
-last_activity_desc: Phase 13.3 execution started
-state_head: b6c644a6e1d8074bee2b5793719b06f7f842d362
+current_phase: 13
+current_phase_name: R0 本地最小闭环
+status: planning
+stopped_at: Phase 13.3 complete, ready to plan Phase 13
+last_updated: "2026-10-10T17:02:17.244Z"
+last_activity: 2026-10-11
+last_activity_desc: Phase 13.3 complete, transitioned to Phase 13
+state_head: a82b70a841933b58f17d636a09ed5b9bcfc011e0
 progress:
   total_phases: 7
-  completed_phases: 2
+  completed_phases: 1
   total_plans: 26
   completed_plans: 26
-  percent: 29
+  percent: 14
 ---
 
 # Project State
@@ -26,20 +26,20 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-10-04)
+See: .planning/PROJECT.md (updated 2026-10-11)
 
 **Core value:** 学生在浏览器与家教自然实时交流，理解上下文、允许打断、等待纸笔书写，学习结果进入真实记录。
-**Current focus:** Phase 13.3 — 家长端融合——统一首页与学习成果可读
+**Current focus:** Phase 13 — R0 本地最小闭环（本地人工验收收口）
 
 ## Current Position
 
-Phase: 13.3 (家长端融合——统一首页与学习成果可读) — EXECUTING
-Plan: 1 of 6
-Status: Executing Phase 13.3
-Last activity: 2026-10-10 — Phase 13.3 execution started
-Next: $gsd-verify-work 13 → 13.1 本地人工验收及修复；通过后运行 /gsd-plan-phase 13.3（家长端融合，纯本地）。Phase 13.2（VPS）已搁置（2026-10-09）
+Phase: 13 — R0 本地最小闭环
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-11 — Phase 13.3 complete（UAT 10/10＋VERIFICATION 7/7 passed），transitioned to Phase 13
+Next: Phase 13/13.1 本地人工验收收口（13.3 已闭环）；Phase 13.2（VPS）已搁置（2026-10-09）；Phase 14 为下一实施阶段
 
-本地验收未通过项（2026-10-09 14:33 北京时间）：用户报告“再练一组功能测试不通过”。已登记于 [Phase 13.1 UAT](phases/13.1-three-stage-dictation-lesson/13.1-UAT.md) 测试 6 / G-13.1-local-4；具体表现待补充，尚未诊断或修复。
+本地验收未通过项（2026-10-09 14:33 北京时间）：用户报告“再练一组功能测试不通过”。已登记于 [Phase 13.1 UAT](phases/13.1-three-stage-dictation-lesson/13.1-UAT.md) 测试 6 / G-13.1-local-4。**2026-10-10 更新：13.3 真机 UAT-5「再练一组」全链路通过**（完结课总结页→再练一组→家长端「加练」记录＋「不调整复习计划」断言），提示该缺陷可能已被后续修复（13.1-08/13.3 系列改动）——建议重测后按 13.1-UAT 流程关闭 G-13.1-local-4。
 
 13-01～13-12 实施已完成；Phase 13 和 13.1 本地人工验收尚未通过。原未执行 13-13 已移出 Phase 13，独立 Phase 13.2 等待本地通过后再规划部署；正式 RT 产品验收按各项证据判定，不因实施完成自动通过。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
 
@@ -128,6 +128,10 @@ Recent decisions affecting current work:
 - [Phase 13.1]: 13.1-08 修正路径 TOCTOU 残窗接受不闭合：前置 ClearUnchecked 闩锁破坏 S-05「review 写失败保留标记供下次重试」；升格 13-13 具名交接项（触发签名：review_logs 同词同日、毫秒级 correction 后缀重复行）＋untested race 登记
 - [Phase 13.1]: 13.1-08 Rule 1：terminalDraining 页面级标志从无复位——submit.disabled 消费它即成跨课锁死；在会话起点（startBtn click，上一场排空已完成）复位，practice full loop e2e 首跑抓到后修复
 - [Phase 13.1]: 13.1-08 check_spelling 复核确认：applyVoiceVerdict 走 grading.GradeWord 且 correct=j.Correct（口述写法全对→correct=true），codex 13.1-06 疑虑不复现（TestCheckVoice 族 PASS，供 13-13 追认）
+- [Phase 13.3]: 家庭入口无门禁两扇门（fusion-consensus-2026-09 决策 2：防不方便≠防孩子）；parent.html 三 tab（学习记录默认｜词库｜设置）
+- [Phase 13.3]: 诚实保存回执四态（pending/saved/failed＋无行=unknown），加练回执=练习存储成功非 FSRS；WR-01 后回执元数据失败降级 unknown 绝不 5xx 阻塞可读性
+- [Phase 13.3]: rt.forceStudentMode 缺省 false＝放行（本机 config.yaml 不加键）；家庭正式入口 config.local.yaml 显式 true（该键 2026-10-11 时点盘上缺失——下次家庭会话前需补，验证器已登记为操作提醒非缺口）
+- [Phase 13.3]: 用户方向（2026-10-10）：UAT 真机验收项应尽量端到端自动化（并入四层 E2E 的 L3 主战场）——ROADMAP Backlog 999.2
 
 ### Pending Todos
 
@@ -203,6 +207,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-10-10T10:20:28.774Z
-Stopped at: Phase 13.3 执行+验证完成（6/6 计划，6/7 SC 自动核验通过）；待用户真机 UAT（/gsd-verify-work 13.3）
+Last session: 2026-10-11
+Stopped at: Phase 13.3 complete（真机 UAT 10/10、VERIFICATION 7/7、SECURITY 0 open、UI 审计 20/24、VALIDATION 0 gaps）；下一步 Phase 13/13.1 本地验收收口
 Resume file: None

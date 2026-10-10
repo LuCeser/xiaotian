@@ -29,7 +29,7 @@ Students receive personalized, real-time dictation practice with immediate feedb
 
 ### Validated
 
-(None yet — ship to validate)
+- ✓ **家长端成果可读与家庭首页（RT-09 成果可读部分）** — Phase 13.3（两个只读接口＋学习记录 tab＋诚实保存回执四态；真机 UAT 10/10、验证 7/7；家长确认/覆盖评分仍留 Phase 15）
 
 ### Active
 
@@ -110,8 +110,12 @@ Students receive personalized, real-time dictation practice with immediate feedb
 | SQLite vs PostgreSQL | SQLite sufficient for current scale, avoids resource overhead on 1C 1G VPS | Delivered |
 | Binary WebSocket protocol (640B frames) | Optimized for 20ms@16kHz PCM audio with proper sequence management | Delivered（功能冻结为 RT-10 降级模式） |
 | Resource budgeting (150MB Go + 50MB audio) | Prevents memory overflow on 1C 1G VPS while supporting 50-100 concurrent sessions | Delivered（Phase 1；150MB 限定 Go 业务服务） |
+| 家庭入口无门禁＋三 tab 家长页（Phase 13.3） | 防不方便≠防孩子（fusion-consensus 决策 2）；学习记录默认 tab 承载诚实四态保存回执 | Delivered（Phase 13.3，真机验收 10/10） |
+| 诚实保存回执：回执≠FSRS 写（Phase 13.3） | 「已提交」≠「已写入」；四态（pending/saved/failed/无行=unknown）＋回执元数据失败降级不阻塞可读性（WR-01） | Delivered（Phase 13.3，崩溃窗口真机复现验证） |
 
 ## Evolution
+
+**2026-10-11 — Phase 13.3（家长端融合）complete。** 家庭首页两扇门＋parent.html 三 tab（学习记录默认）＋两个只读成果接口＋诚实保存回执四态全部落地并真机验收（UAT 10/10、VERIFICATION 7/7、SECURITY 22 项威胁全闭环、VALIDATION 0 缺口、UI 审计 20/24）。RT-09 成果可读部分入 Validated。用户方向登记：UAT 验收项应尽量端到端自动化（ROADMAP Backlog 999.2，并入四层 E2E 的 L3 主战场）。G-13.1-local-4（再练一组）在 13.3 真机 UAT-5 中全链路通过，建议重测关闭。下一步：Phase 13/13.1 本地验收收口。
 
 **2026-09-30 — 正式关闭旧方案、启动 v2.0。** v1.0 为 superseded / override_closeout；Phase 10～12 不再等待恢复。Phase 9 两项人工验收未执行，结转 Phase 16。新阶段数字编号 13～16；第一周/第三周/第六周检查分别为 10-07/10-21/11-11，规划时间计入，切换不重置计时。
 
@@ -135,4 +139,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-04 — 同步 2026-10-03 状态机默写助手转向（FSRS 到期词、60 秒推进、LLM 仅意图/话术）*
+*Last updated: 2026-10-11 — Phase 13.3 完结演进（RT-09 成果可读入 Validated；家庭入口/回执决策入 Key Decisions）*
