@@ -21,6 +21,9 @@
  *      unit groups + edit/rename/delete modals, Plan 09-07).
  *   3b. Mount SettingsCard into #settings-container (学习设置 card,
  *      D-15) — mounting unhides the section.
+ *   3c. Mount LessonsView into #lessons-container (学习记录 tab, 13.3-03)
+ *      — GET /api/v1/lessons list + per-lesson detail; a missing
+ *      LessonsView degrades WITHOUT blocking the other components.
  *   4. Populate the SHARED 单元 datalist (#unit-options) from
  *      GET /api/v1/units — on init (all categories), whenever an
  *      add-form category radio changes, and for the edit modal's
@@ -80,8 +83,9 @@
   var addContainer = document.getElementById('add-form-container');
   var browseContainer = document.getElementById('word-list-container');
   var settingsContainer = document.getElementById('settings-container');
+  var lessonsContainer = document.getElementById('lessons-container');
   var unitDatalist = document.getElementById('unit-options');
-  if (!addContainer || !browseContainer || !settingsContainer || !unitDatalist) {
+  if (!addContainer || !browseContainer || !settingsContainer || !lessonsContainer || !unitDatalist) {
     console.error('[parent-app] mount containers / shared datalist missing from parent.html.');
     return;
   }
@@ -260,6 +264,29 @@
     },
   });
 
+  // ------------------------------------------------------------------
+  // 学习记录 view (13.3-03): GET /api/v1/lessons renders the list,
+  // GET /api/v1/lessons/{id} renders the detail. LessonsView missing is
+  // a NON-blocking degrade: the word library and settings tabs keep
+  // working, the 学习记录 tab just stays empty with a console error.
+  // ------------------------------------------------------------------
+  var lessons = null;
+  if (!window.LessonsView) {
+    console.error('[parent-app] LessonsView unavailable — 学习记录 tab degraded (词库/设置 still work).');
+  } else {
+    lessons = new window.LessonsView(lessonsContainer, {
+      fetchLessons: function () {
+        return fetchJSON('GET', '/api/v1/lessons?limit=20').then(function (data) {
+          return (data && Array.isArray(data.lessons)) ? data.lessons : [];
+        });
+      },
+      fetchLesson: function (id) {
+        return fetchJSON('GET', '/api/v1/lessons/' + encodeURIComponent(id));
+      },
+    });
+    lessons.refresh();
+  }
+
   // Initial render: browse view + all-category unit suggestions.
   browse.refresh();
   refreshUnitOptions('');
@@ -269,6 +296,7 @@
     addCard: addCard,
     browse: browse,
     settingsCard: settingsCard,
+    lessons: lessons,
     fetchJSON: fetchJSON,
     refreshUnitOptions: refreshUnitOptions,
   };
