@@ -9,6 +9,10 @@
  *     styles/ paths included). .js/.css carry explicit MIME types — Chromium
  *     refuses to execute a script served without a JavaScript MIME type
  *     (same lesson as pkg/infra/static.go).
+ *   - 13.3-03: READ-ONLY /api/v1 stubs for the parent learning-record e2e
+ *     (GET /api/v1/lessons + /api/v1/lessons/{id}, fixed four-lesson
+ *     dataset field-for-field with the 13.3-02 wire structs; unknown ids
+ *     answer the handlers.go error envelope with 404 not_found).
  *   - WebSocket /rt endpoint implementing the dictation-classroom flow of
  *     the 2026-10-03 pivot (pkg/rt/protocol.go is the reference; 13-08
  *     SUMMARY is the FSM behavior this mirrors; this file imports no Go
@@ -155,6 +159,189 @@ function practicePick(doneWords) {
   return PRACTICE_POOL.filter((w) => !doneWords.includes(w)).slice(0, 2);
 }
 let practiceCounter = 0;
+
+// ---------------------------------------------------------------------
+// 13.3-03 /api/v1 lessons stubs — READ-ONLY, fixed dataset for the
+// parent learning-record e2e. Field names mirror the 13.3-02 wire
+// structs FIELD-FOR-FIELD (pkg/web/api/handlers.go lessonListItem /
+// lessonDetailResponse / receiptJSON, snake_case) — the mock-parity
+// discipline: the stub proves frontend rendering, never server
+// behavior. The in-progress lesson (①) keeps its word surfaces
+// server-side but NEVER serializes them (the leak guard is the
+// summary-only projection); those strings are the spec's negative
+// canaries.
+// ---------------------------------------------------------------------
+
+const LESSON_STUBS = {
+  // ① In-progress dictation (stage='', cursor before the last word):
+  // summary-only on the list AND as the detail (the whole response).
+  'r0-20261009': {
+    summary: {
+      lesson_id: 'r0-20261009',
+      created_at: '2026-10-09 18:30:00',
+      word_count: 3,
+      stage: '',
+      kind: 'lesson',
+      completed: false,
+      unchecked: false,
+      save_status: 'unknown',
+      correct: 0,
+      wrong: 0,
+      unconfirmed: 0
+    },
+    words: ['zephyr', 'onyx', 'marina']
+  },
+  // ② Completed check lesson: saved receipt with real word sets.
+  'r0-20261008': {
+    summary: {
+      lesson_id: 'r0-20261008',
+      created_at: '2026-10-08 16:00:00',
+      word_count: 3,
+      stage: 'submitted',
+      kind: 'lesson',
+      completed: true,
+      unchecked: false,
+      save_status: 'saved',
+      correct: 2,
+      wrong: 1,
+      unconfirmed: 0
+    },
+    words: [
+      { word: 'spring', meaning: '春天', example: '' },
+      { word: 'summer', meaning: '夏天', example: '' },
+      { word: 'winter', meaning: '冬天', example: '' }
+    ],
+    results: [
+      { word: 'spring', correct: true, manual: true, hints: 0, outcome: 'confirmed' },
+      { word: 'summer', correct: false, manual: true, hints: 1, outcome: 'timeout', ocr_text: 'sumner' },
+      { word: 'winter', correct: true, manual: true, hints: 0 }
+    ],
+    save_receipts: [
+      {
+        lesson_id: 'r0-20261008',
+        request_id: 'check-stub-20261008',
+        kind: 'check',
+        requested: ['spring', 'summer', 'winter'],
+        updated: ['spring', 'summer', 'winter'],
+        missing: [],
+        status: 'saved',
+        created_at: '2026-10-08 16:05:00',
+        completed_at: '2026-10-08 16:05:01'
+      }
+    ]
+  },
+  // ③ Unchecked-close fallback lesson: derived verdicts (manual=false →
+  // 未确认), pending receipt, completed but flagged 未核对.
+  'r0-20261007': {
+    summary: {
+      lesson_id: 'r0-20261007',
+      created_at: '2026-10-07 17:20:00',
+      word_count: 2,
+      stage: 'submitted',
+      kind: 'lesson',
+      completed: true,
+      unchecked: true,
+      save_status: 'pending',
+      correct: 0,
+      wrong: 0,
+      unconfirmed: 2
+    },
+    words: [
+      { word: 'river', meaning: '河流', example: '' },
+      { word: 'stone', meaning: '石头', example: '' }
+    ],
+    results: [
+      { word: 'river', correct: true, manual: false, hints: 0 },
+      { word: 'stone', correct: false, manual: false, hints: 2 }
+    ],
+    save_receipts: [
+      {
+        lesson_id: 'r0-20261007',
+        request_id: 'r0-20261007-complete-check',
+        kind: 'unchecked_fallback',
+        requested: ['river', 'stone'],
+        updated: [],
+        missing: [],
+        status: 'pending',
+        created_at: '2026-10-07 17:25:00',
+        completed_at: ''
+      }
+    ]
+  },
+  // ④ Extra-practice lesson (r0x- namespace): results in the practice
+  // shape (word/correct/hints/rating — no manual/outcome/ocr_text) and a
+  // practice-kind receipt. Practice lessons carry no word cards, so
+  // `words` is empty (the view renders meanings only when they exist).
+  'r0x-20261009-101500': {
+    summary: {
+      lesson_id: 'r0x-20261009-101500',
+      created_at: '2026-10-09 10:15:00',
+      word_count: 2,
+      stage: 'submitted',
+      kind: 'practice',
+      completed: true,
+      unchecked: false,
+      save_status: 'saved',
+      correct: 1,
+      wrong: 1,
+      unconfirmed: 0
+    },
+    words: [],
+    results: [
+      { word: 'guitar', correct: true, hints: 0, rating: 'good' },
+      { word: 'piano', correct: false, hints: 1, rating: 'hard' }
+    ],
+    save_receipts: [
+      {
+        lesson_id: 'r0x-20261009-101500',
+        request_id: 'practice-stub-20261009',
+        kind: 'practice',
+        requested: ['guitar', 'piano'],
+        updated: ['guitar', 'piano'],
+        missing: [],
+        status: 'saved',
+        created_at: '2026-10-09 10:16:00',
+        completed_at: '2026-10-09 10:16:01'
+      }
+    ]
+  }
+};
+
+// List order = the real store query's created_at DESC.
+const LESSON_LIST_ORDER = ['r0-20261009', 'r0x-20261009-101500', 'r0-20261008', 'r0-20261007'];
+
+function lessonsStubList(res) {
+  const body = JSON.stringify({
+    lessons: LESSON_LIST_ORDER.map((id) => ({ ...LESSON_STUBS[id].summary }))
+  });
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(body);
+}
+
+function lessonsStubDetail(res, id) {
+  const stub = LESSON_STUBS[id];
+  if (!stub) {
+    // Error envelope parity: handlers.go writeError shape.
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ error: { code: 'not_found', message: 'lesson not found' } }));
+    return;
+  }
+  let body;
+  if (!stub.summary.completed) {
+    // In-progress: the summary IS the whole response — the word-bearing
+    // keys do not exist in the serialization at all (13.3-02 leak guard).
+    body = { ...stub.summary };
+  } else {
+    body = {
+      ...stub.summary,
+      words: stub.words.map((w) => ({ ...w })),
+      results: stub.results.map((r) => ({ ...r })),
+      save_receipts: stub.save_receipts.map((r) => ({ ...r }))
+    };
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(body));
+}
 
 // ---------------------------------------------------------------------
 // Static file serving (production URL shape: /tutor/ + relative assets)
@@ -378,8 +565,19 @@ function pairState(pairId) {
 // ---------------------------------------------------------------------
 
 const server = http.createServer((req, res) => {
-  if (req.url && req.url.split('?')[0] === '/__test/state') {
+  const pathname = req.url ? req.url.split('?')[0] : '/';
+  if (pathname === '/__test/state') {
     handleTestState(res);
+    return;
+  }
+  // 13.3-03: read-only /api/v1 lessons stubs (fixed dataset above).
+  if (pathname === '/api/v1/lessons') {
+    lessonsStubList(res);
+    return;
+  }
+  const lessonDetail = /^\/api\/v1\/lessons\/([^/]+)$/.exec(pathname);
+  if (lessonDetail) {
+    lessonsStubDetail(res, decodeURIComponent(lessonDetail[1]));
     return;
   }
   serveStatic(req, res);
@@ -1227,5 +1425,6 @@ server.listen(PORT, '127.0.0.1', () => {
     ' (static root ' + STATIC_ROOT + ', dictation flow 13-11, /rt ws endpoint,' +
     ' script selectors ?mock_step_ms/?mock_pause/?mock_empty/?mock_ack_timeout,' +
     ' practice flow 13.1-05 keyed on session_init.practice,' +
+    ' /api/v1 lessons stubs 13.3-03,' +
     ' /__test/state introspection)');
 });
