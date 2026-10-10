@@ -692,9 +692,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// Phase 9 (WEB-01): the /api/v1 REST surface, mounted ONCE here.
 		// All route logic (method patterns, validation, error envelope)
 		// lives inside pkg/web/api — future Phase 9 routes register in
-		// that package's internal mux, not in main.go.
+		// that package's internal mux, not in main.go. 13.3-02 adds the
+		// three Go-owned lesson stores for the read-only parent achievement
+		// routes (GET /lessons, GET /lessons/{id}) — the read path stays
+		// pure Go against SQLite, zero Python spawns (D-12).
 		publicMux.Handle("/api/v1/", http.StripPrefix("/api/v1",
-			api.NewHandler(pyBridge, cardRepo, cfg.Python, logger)))
+			api.NewHandler(pyBridge, cardRepo, lessonStore, practiceStore, receiptStore, cfg.Python, logger)))
 		logger.Info("api v1 mounted",
 			infra.F("component", "infra.main"),
 			infra.F("route", "/api/v1/"),

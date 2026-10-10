@@ -39,7 +39,8 @@ const fsrsTestConfigFile = "fsrs_config.json"
 // newFSRSTestHandler builds the handler with a temp DataDir config.
 func newFSRSTestHandler(t *testing.T, exec pybridge.Executor, dataDir string) http.Handler {
 	t.Helper()
-	return NewHandler(exec, &fakeCardRepo{}, infra.PythonConfig{DataDir: dataDir}, infra.NewNoOpLogger())
+	_, lessons, practice, receipts := newLessonTestStores(t)
+	return NewHandler(exec, &fakeCardRepo{}, lessons, practice, receipts, infra.PythonConfig{DataDir: dataDir}, infra.NewNoOpLogger())
 }
 
 func TestGetFSRSDefaults(t *testing.T) {

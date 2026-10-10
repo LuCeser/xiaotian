@@ -23,6 +23,7 @@ import (
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 )
 
@@ -49,24 +50,31 @@ const maxStdoutDiagnosticRunes = 300
 // handler is the api package's http.Handler. Dependencies arrive via
 // constructor DI (D-42): the pybridge Executor for the write path
 // (Python is the sole writer, ADR write-separation), the CardRepository
-// for the read path (D-12: zero Python spawns on reads), and the
-// PythonConfig whose DataDir anchors the fsrs_config.json write path
-// (Plan 09-05 — config-derived, never user input, T-09-10).
+// for the read path (D-12: zero Python spawns on reads), the PythonConfig
+// whose DataDir anchors the fsrs_config.json write path (Plan 09-05 —
+// config-derived, never user input, T-09-10), and — since 13.3-02 — the
+// three Go-owned lesson stores behind the read-only parent achievement
+// routes (GET /lessons, GET /lessons/{id}): the lesson store for rows and
+// completion projection, the practice store for extra-practice detail, and
+// the receipt store for the honest save status (submitted ≠ written-to-FSRS).
 type handler struct {
-	exec   pybridge.Executor
-	cards  database.CardRepository
-	cfg    infra.PythonConfig
-	logger infra.Logger
+	exec     pybridge.Executor
+	cards    database.CardRepository
+	lessons  *lesson.Store
+	practice *lesson.PracticeStore
+	receipts *lesson.ReceiptStore
+	cfg      infra.PythonConfig
+	logger   infra.Logger
 }
 
 // NewHandler builds the /api/v1 handler with its internal method-pattern
 // ServeMux. Logger may be nil (NewNoOpLogger is substituted, D-47) so
 // tests can construct the handler cheaply.
-func NewHandler(exec pybridge.Executor, cards database.CardRepository, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
+func NewHandler(exec pybridge.Executor, cards database.CardRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}
-	h := &handler{exec: exec, cards: cards, cfg: cfg, logger: logger}
+	h := &handler{exec: exec, cards: cards, lessons: lessons, practice: practice, receipts: receipts, cfg: cfg, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /words", h.listWords)
@@ -77,6 +85,11 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, cfg infra
 	mux.HandleFunc("DELETE /words", h.deleteWords)
 	mux.HandleFunc("GET /settings/fsrs", h.getFSRS)
 	mux.HandleFunc("PUT /settings/fsrs", h.putFSRS)
+	// 13.3-02: the read-only parent achievement routes (ROADMAP success
+	// criterion 2). The leak guard lives in the PROJECTION — an in-progress
+	// lesson never reaches the response as anything but a summary row.
+	mux.HandleFunc("GET /lessons", h.listLessons)
+	mux.HandleFunc("GET /lessons/{id}", h.getLesson)
 	return mux
 }
 
@@ -426,4 +439,18 @@ func (h *handler) listUnits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, unitsResponse{Units: units})
+}
+
+// listLessons handles GET /lessons (13.3-02, ROADMAP success criterion 2):
+// the recent-lessons list for the parent view. RED stub — GREEN implements
+// the bounded query + receipt aggregation + summary-only projection.
+func (h *handler) listLessons(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, codeInternal, "not implemented")
+}
+
+// getLesson handles GET /lessons/{id} (13.3-02): the per-lesson detail.
+// RED stub — GREEN implements the whitelist projection (summary-only for
+// in-progress lessons, full per-word detail for completed ones).
+func (h *handler) getLesson(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, codeInternal, "not implemented")
 }
