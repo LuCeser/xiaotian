@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -430,5 +431,203 @@ func TestStoreMigrateAddsStageColumns(t *testing.T) {
 	}
 	if fresh.Stage != "" || len(fresh.Outcomes) != 0 || len(fresh.Verdicts) != 0 || fresh.Unchecked {
 		t.Errorf("fresh read-back = %+v, want check-stage defaults", fresh)
+	}
+}
+
+// TestLessonCompleted (13.3-02 behavior 1) — the completion whitelist for the
+// parent-facing read projection, enumerated branch-by-branch against the
+// authoritative completion branch table (pkg/rt/turn.go lesson-init switch):
+// ONLY stage=submitted (the unified submission migrated the row) or a legacy
+// row (stage='' whose cursor walked past the last card) counts as completed.
+// checking (check panel open — words are on the student's screen), the
+// in-progress default branch, and the empty-cards legacy unavailable row are
+// ALL incomplete. Unchecked is deliberately NOT an input: the fallback also
+// lands at stage=submitted, so it only drives a display marker.
+func TestLessonCompleted(t *testing.T) {
+	tests := []struct {
+		name         string
+		stage        string
+		currentIndex int
+		cardLen      int
+		want         bool
+	}{
+		{"empty stage in progress", "", 1, 3, false},
+		{"checking never completed", StageChecking, 3, 3, false},
+		{"submitted completed", StageSubmitted, 3, 3, true},
+		{"submitted with unchecked fallback still completed", StageSubmitted, 3, 3, true},
+		{"legacy completed by cursor", "", 3, 3, true},
+		{"legacy cursor past cards completed", "", 5, 3, true},
+		{"legacy empty cards unavailable", "", 0, 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LessonCompleted(tc.stage, tc.currentIndex, tc.cardLen); got != tc.want {
+				t.Errorf("LessonCompleted(stage=%q, currentIndex=%d, cardLen=%d) = %v, want %v",
+					tc.stage, tc.currentIndex, tc.cardLen, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestListLessons (13.3-02 behavior 2) — the recent-lessons projection:
+// created_at DESC (RESEARCH A4: same-day r0x- practice rows sort by timestamp,
+// not lesson-id lexicographic order), both r0- and r0x- rows included, and
+// the per-row aggregates honest: WordCount from the cards JSON, Correct/Wrong
+// counting ONLY manual verdicts (完成勾≠写对), Unconfirmed = the remainder.
+func TestListLessons(t *testing.T) {
+	store, err := NewStore(newLessonTestDB(t), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ctx := context.Background()
+
+	seed := []struct {
+		lessonID    string
+		cards       string
+		verdicts    string
+		stage       string
+		currentIdx  int
+		unchecked   int
+		createdAt   string
+	}{
+		{"r0-20261010", `[{"word":"苹果","meaning":"apple","example":"s1"},{"word":"香蕉","meaning":"banana","example":"s2"},{"word":"橘子","meaning":"orange","example":"s3"}]`,
+			`[{"word_index":0,"correct":true,"manual":true},{"word_index":1,"correct":false,"manual":true},{"word_index":2,"correct":true,"manual":false}]`,
+			StageSubmitted, 3, 0, "2026-10-10 08:00:00"},
+		{"r0-20261009", `[{"word":"猫","meaning":"cat","example":"s1"},{"word":"狗","meaning":"dog","example":"s2"},{"word":"鸟","meaning":"bird","example":"s3"}]`,
+			`[]`, StageChecking, 1, 0, "2026-10-09 09:00:00"},
+		{"r0x-20261008-120000", `[{"word":"apple","meaning":"苹果","example":"s1"},{"word":"banana","meaning":"香蕉","example":"s2"}]`,
+			`[]`, "", 2, 0, "2026-10-08 12:00:00"},
+		{"r0-20261008", `[{"word":"猫","meaning":"cat","example":"s1"},{"word":"狗","meaning":"dog","example":"s2"}]`,
+			`[]`, "", 0, 0, "2026-10-08 10:00:00"},
+		{"r0-20261007", `[{"word":"太阳","meaning":"sun","example":"s1"},{"word":"月亮","meaning":"moon","example":"s2"}]`,
+			`[]`, StageSubmitted, 2, 1, "2026-10-07 10:00:00"},
+	}
+	for _, s := range seed {
+		if _, err := store.db.ExecContext(ctx,
+			"INSERT INTO lessons (lesson_id, words, cards, verdicts, stage, current_index, unchecked, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			s.lessonID, `["词"]`, s.cards, s.verdicts, s.stage, s.currentIdx, s.unchecked, s.createdAt, s.createdAt,
+		); err != nil {
+			t.Fatalf("seed %s: %v", s.lessonID, err)
+		}
+	}
+
+	// fetch runs ListLessons and fails the calling subtest unless at least n
+	// rows came back (keeps every subtest panic-free on a short read).
+	fetch := func(t *testing.T, n int) []LessonSummary {
+		t.Helper()
+		got, err := store.ListLessons(ctx, 20)
+		if err != nil {
+			t.Fatalf("ListLessons: %v", err)
+		}
+		if len(got) < n {
+			t.Fatalf("ListLessons rows = %d, want >= %d", len(got), n)
+		}
+		return got
+	}
+
+	t.Run("returns newest first including r0x- practice rows", func(t *testing.T) {
+		got := fetch(t, 5)
+		if len(got) != 5 {
+			t.Fatalf("ListLessons rows = %d, want 5", len(got))
+		}
+		wantOrder := []string{"r0-20261010", "r0-20261009", "r0x-20261008-120000", "r0-20261008", "r0-20261007"}
+		for i, wantID := range wantOrder {
+			if got[i].LessonID != wantID {
+				t.Errorf("row %d = %s, want %s (created_at DESC)", i, got[i].LessonID, wantID)
+			}
+		}
+	})
+
+	t.Run("submitted row aggregates manual verdicts only", func(t *testing.T) {
+		got := fetch(t, 1)
+		r := got[0] // r0-20261010
+		if !r.Completed {
+			t.Errorf("Completed = false, want true (stage=submitted)")
+		}
+		if r.WordCount != 3 {
+			t.Errorf("WordCount = %d, want 3 (from cards JSON)", r.WordCount)
+		}
+		// 完成勾≠写对: only Manual=true verdicts count; the manual=false OCR
+		// prefill lands in Unconfirmed, never in Correct.
+		if r.Correct != 1 || r.Wrong != 1 {
+			t.Errorf("Correct = %d, Wrong = %d, want 1 / 1 (manual verdicts only)", r.Correct, r.Wrong)
+		}
+		if r.Unconfirmed != 1 {
+			t.Errorf("Unconfirmed = %d, want 1 (3 words - 2 manual verdicts)", r.Unconfirmed)
+		}
+		if r.Stage != StageSubmitted || r.Unchecked || r.CurrentIndex != 3 {
+			t.Errorf("row fields = stage:%q unchecked:%v index:%d, want submitted/false/3", r.Stage, r.Unchecked, r.CurrentIndex)
+		}
+	})
+
+	t.Run("in-progress and checking rows are not completed", func(t *testing.T) {
+		got := fetch(t, 4)
+		if got[1].Completed {
+			t.Error("checking row completed = true, want false")
+		}
+		if got[3].Completed {
+			t.Error("in-progress row completed = true, want false")
+		}
+	})
+
+	t.Run("legacy completed practice row and unchecked marker", func(t *testing.T) {
+		got := fetch(t, 5)
+		if !got[2].Completed {
+			t.Error("legacy cursor-completed row completed = false, want true")
+		}
+		if got[2].WordCount != 2 || got[2].Correct != 0 || got[2].Wrong != 0 || got[2].Unconfirmed != 2 {
+			t.Errorf("legacy row counts = wc:%d c:%d w:%d u:%d, want 2/0/0/2 (no verdicts)",
+				got[2].WordCount, got[2].Correct, got[2].Wrong, got[2].Unconfirmed)
+		}
+		if !got[4].Unchecked {
+			t.Error("submitted+unchecked row unchecked = false, want true (display marker)")
+		}
+	})
+}
+
+// TestListLessonsLimitBounds (13.3-02 behavior 2, cap unit) — the limit
+// normalization lives in the STORE so a client-supplied large value can never
+// penetrate: <=0 → default 20, >50 → hard cap 50 (the single-connection pool
+// read-amplification guard, RESEARCH Pitfall 4).
+func TestListLessonsLimitBounds(t *testing.T) {
+	store, err := NewStore(newLessonTestDB(t), infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ctx := context.Background()
+
+	const total = 55
+	for i := 0; i < total; i++ {
+		createdAt := fmt.Sprintf("2026-10-01 %02d:%02d:00", i/60, i%60)
+		if _, err := store.db.ExecContext(ctx,
+			"INSERT INTO lessons (lesson_id, words, cards, created_at, updated_at) VALUES (?, ?, '[]', ?, ?)",
+			fmt.Sprintf("L-%02d", i), `["词"]`, createdAt, createdAt,
+		); err != nil {
+			t.Fatalf("seed row %d: %v", i, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		limit int
+		want  int
+	}{
+		{"zero takes default 20", 0, 20},
+		{"negative takes default 20", -3, 20},
+		{"above cap clamps to 50", 100, 50},
+		{"within bounds passes through", 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := store.ListLessons(ctx, tc.limit)
+			if err != nil {
+				t.Fatalf("ListLessons(%d): %v", tc.limit, err)
+			}
+			if len(got) != tc.want {
+				t.Fatalf("ListLessons(%d) rows = %d, want %d", tc.limit, len(got), tc.want)
+			}
+			if got[0].LessonID != "L-54" {
+				t.Errorf("first row = %s, want L-54 (newest)", got[0].LessonID)
+			}
+		})
 	}
 }

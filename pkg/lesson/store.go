@@ -460,3 +460,44 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 
 	return l, nil
 }
+
+// LessonCompleted reports whether a lessons row counts as completed for the
+// parent-facing read projection (13.3-02): the whitelist follows the
+// authoritative completion branch table (pkg/rt/turn.go lesson-init switch) —
+// ONLY stage=submitted, or a legacy row (stage='') whose cursor walked past
+// the last card, is completed; checking, in-progress and empty-cards rows are
+// not. Unchecked is deliberately not an input: the D-03 fallback also lands
+// at stage=submitted, so it drives a display marker only.
+//
+// RED stub (13.3-02): always false — the GREEN step fills the whitelist.
+func LessonCompleted(stage string, currentIndex, cardLen int) bool {
+	return false
+}
+
+// LessonSummary is one row of the parent-facing recent-lessons projection
+// (13.3-02): identity + display shape, NO word surface fields. Correct/Wrong
+// count ONLY manual verdicts (完成勾≠写对); Unconfirmed is the remainder.
+//
+// RED stub (13.3-02): type scaffold — populated by ListLessons in GREEN.
+type LessonSummary struct {
+	LessonID     string
+	CreatedAt    string
+	Stage        string
+	Unchecked    bool
+	CurrentIndex int
+	WordCount    int
+	Correct      int
+	Wrong        int
+	Unconfirmed  int
+	Completed    bool
+}
+
+// ListLessons returns the newest lessons rows (created_at DESC, lesson_id
+// DESC tiebreak) bounded by limit — normalized in the store: <=0 → default
+// 20, >50 → hard cap 50 (a client-supplied large value can never penetrate;
+// the single-connection pool shares every query with the classroom write
+// path). RED stub (13.3-02): returns nil — the GREEN step implements the
+// bounded SELECT.
+func (s *Store) ListLessons(ctx context.Context, limit int) ([]LessonSummary, error) {
+	return nil, nil
+}

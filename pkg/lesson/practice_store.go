@@ -162,6 +162,15 @@ func (s *PracticeStore) ListPracticeWordsOn(ctx context.Context, day string) ([]
 	return words, rows.Err()
 }
 
+// ListPracticeByLesson returns every practice_logs row of the given lesson in
+// id (insert) order — the per-lesson practice detail behind the parent
+// lesson-detail read (13.3-02). An unknown lesson lists zero rows with no
+// error. RED stub (13.3-02): returns nil — the GREEN step implements the
+// explicit-column SELECT.
+func (s *PracticeStore) ListPracticeByLesson(ctx context.Context, lessonID string) ([]PracticeRecord, error) {
+	return nil, nil
+}
+
 // practiceHasColumn reports whether practice_logs carries the named column
 // (kept symmetric with lessonsHasColumn for the migration tests).
 func practiceHasColumn(ctx context.Context, db *sql.DB, name string) (bool, error) {

@@ -274,6 +274,16 @@ func (s *ReceiptStore) ListByLesson(ctx context.Context, lessonID string) ([]Rec
 	return receipts, rows.Err()
 }
 
+// LatestByLessonIDs aggregates, for each requested lesson, its LATEST receipt
+// row (id max = last recorded) — the list-page save-status source (13.3-02).
+// An empty id slice is the zero-SQL fast path (the list page can be bounded
+// to zero rows); lessons with no receipt row are simply absent from the map.
+// RED stub (13.3-02): returns nil — the GREEN step implements the grouped
+// SELECT.
+func (s *ReceiptStore) LatestByLessonIDs(ctx context.Context, lessonIDs []string) (map[string]Receipt, error) {
+	return nil, nil
+}
+
 // encodeWordSet serializes a word set deterministically: sorted copy, then
 // JSON — map iteration order must never leak into a stored row payload.
 func encodeWordSet(words []string) (string, error) {
