@@ -3,19 +3,19 @@ gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: realtime-tutor — ACTIVE
 current_phase: "13.3"
-current_phase_name: 家长端融合——统一首页与学习成果可读 (INSERTED)
-status: verifying
+current_phase_name: 家长端融合——统一首页与学习成果可读
+status: executing
 stopped_at: Phase 13 local UAT Test 1 awaiting user; Phase 13.2 not started
-last_updated: "2026-10-09T15:30:46.433Z"
-last_activity: 2026-10-09
-last_activity_desc: 用户将 VPS 从 Phase 13 拆为独立 13.2；本地未通过不部署
-state_head: 0e836a0662328da4e3272d0f857aa0191108fed8
+last_updated: "2026-10-09T19:07:29.422Z"
+last_activity: 2026-10-10
+last_activity_desc: Phase 13.3 execution started
+state_head: 47c808ce9d9c471073021dce8d45aef028ebd166
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 26
   completed_plans: 20
-  percent: 0
+  percent: 29
 ---
 
 # Project State
@@ -29,14 +29,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-04)
 
 **Core value:** 学生在浏览器与家教自然实时交流，理解上下文、允许打断、等待纸笔书写，学习结果进入真实记录。
-**Current focus:** Phase 13/13.1 本地运行、人工验收与修复；不部署 VPS
+**Current focus:** Phase 13.3 — 家长端融合——统一首页与学习成果可读
 
 ## Current Position
 
-Phase: 13.3 (家长端融合——统一首页与学习成果可读 (INSERTED)) — READY TO EXECUTE
-Plan: 12 of 12 implementation plans complete; 13-13 moved to Phase 13.2 reference
-Status: Verifying — Phase 13/13.1 local human acceptance pending; VPS deployment not started
-Last activity: 2026-10-09 — 用户将 VPS 从 Phase 13 拆为独立 13.2；本地未通过不部署
+Phase: 13.3 (家长端融合——统一首页与学习成果可读) — EXECUTING
+Plan: 1 of 6
+Status: Executing Phase 13.3
+Last activity: 2026-10-10 — Phase 13.3 execution started
 Next: $gsd-verify-work 13 → 13.1 本地人工验收及修复；通过后运行 /gsd-plan-phase 13.3（家长端融合，纯本地）。Phase 13.2（VPS）已搁置（2026-10-09）
 
 本地验收未通过项（2026-10-09 14:33 北京时间）：用户报告“再练一组功能测试不通过”。已登记于 [Phase 13.1 UAT](phases/13.1-three-stage-dictation-lesson/13.1-UAT.md) 测试 6 / G-13.1-local-4；具体表现待补充，尚未诊断或修复。
