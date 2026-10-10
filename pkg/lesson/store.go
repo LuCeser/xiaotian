@@ -468,17 +468,17 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 // the last card, is completed; checking, in-progress and empty-cards rows are
 // not. Unchecked is deliberately not an input: the D-03 fallback also lands
 // at stage=submitted, so it drives a display marker only.
-//
-// RED stub (13.3-02): always false — the GREEN step fills the whitelist.
 func LessonCompleted(stage string, currentIndex, cardLen int) bool {
-	return false
+	if stage == StageSubmitted {
+		return true
+	}
+	return stage == "" && cardLen > 0 && currentIndex >= cardLen
 }
 
 // LessonSummary is one row of the parent-facing recent-lessons projection
-// (13.3-02): identity + display shape, NO word surface fields. Correct/Wrong
+// (13.3-02): identity + display shape, NO word surface fields (the leak
+// guard's first line — the type itself cannot carry a word). Correct/Wrong
 // count ONLY manual verdicts (完成勾≠写对); Unconfirmed is the remainder.
-//
-// RED stub (13.3-02): type scaffold — populated by ListLessons in GREEN.
 type LessonSummary struct {
 	LessonID     string
 	CreatedAt    string
@@ -492,12 +492,118 @@ type LessonSummary struct {
 	Completed    bool
 }
 
-// ListLessons returns the newest lessons rows (created_at DESC, lesson_id
-// DESC tiebreak) bounded by limit — normalized in the store: <=0 → default
-// 20, >50 → hard cap 50 (a client-supplied large value can never penetrate;
-// the single-connection pool shares every query with the classroom write
-// path). RED stub (13.3-02): returns nil — the GREEN step implements the
-// bounded SELECT.
+// ListLessons limit normalization — the bounds live HERE, in the store, so a
+// client-supplied large value can never penetrate (T-13.3-05): <=0 → default
+// 20, >50 → hard cap 50. The single-connection pool (database.Open
+// SetMaxOpenConns(1)) shares every query with the classroom write path; an
+// unbounded parent query would stall the child's lesson.
+const (
+	listLessonsDefaultLimit = 20
+	listLessonsMaxLimit     = 50
+)
+
+func normalizeListLessonsLimit(limit int) int {
+	switch {
+	case limit <= 0:
+		return listLessonsDefaultLimit
+	case limit > listLessonsMaxLimit:
+		return listLessonsMaxLimit
+	default:
+		return limit
+	}
+}
+
+// ListLessons returns the newest lessons rows (created_at DESC — RESEARCH A4:
+// same-day r0x- practice rows sort by timestamp, not lesson-id lexicographic
+// order; lesson_id DESC is the same-second tiebreak), bounded by the
+// normalized limit. Each row carries the summary aggregates ONLY: word count
+// from the cards JSON, Correct/Wrong counting manual verdicts exclusively,
+// Unconfirmed as the remainder. Explicit columns, one bounded query, one
+// connection discipline (P4). A corrupted cards/verdicts JSON surfaces as a
+// wrapped error — a silently-empty verdict list would misstate the counts.
 func (s *Store) ListLessons(ctx context.Context, limit int) ([]LessonSummary, error) {
-	return nil, nil
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT lesson_id, stage, unchecked, current_index, cards, verdicts, created_at FROM lessons ORDER BY created_at DESC, lesson_id DESC LIMIT ?",
+		normalizeListLessonsLimit(limit),
+	)
+	if err != nil {
+		s.logger.Error("lesson list failed",
+			infra.F("component", "lesson/store"),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "list lessons")
+	}
+	defer rows.Close()
+
+	var summaries []LessonSummary
+	for rows.Next() {
+		var (
+			sum          LessonSummary
+			cardsJSON    string
+			verdictsJSON string
+			unchecked    int
+		)
+		if err := rows.Scan(&sum.LessonID, &sum.Stage, &unchecked, &sum.CurrentIndex, &cardsJSON, &verdictsJSON, &sum.CreatedAt); err != nil {
+			return nil, errors.Wrap(err, "list lessons: scan")
+		}
+		sum.Unchecked = unchecked != 0
+
+		cards, err := decodeCardsJSON(cardsJSON)
+		if err != nil {
+			s.logger.Error("lesson list: unmarshal cards failed",
+				infra.F("component", "lesson/store"),
+				infra.F("lesson_id", sum.LessonID),
+				infra.ErrField(err),
+			)
+			return nil, errors.Wrap(err, fmt.Sprintf("list lessons %q: unmarshal cards", sum.LessonID))
+		}
+		sum.WordCount = len(cards)
+
+		verdicts, err := decodeVerdictsJSON(verdictsJSON)
+		if err != nil {
+			s.logger.Error("lesson list: unmarshal verdicts failed",
+				infra.F("component", "lesson/store"),
+				infra.F("lesson_id", sum.LessonID),
+				infra.ErrField(err),
+			)
+			return nil, errors.Wrap(err, fmt.Sprintf("list lessons %q: unmarshal verdicts", sum.LessonID))
+		}
+		for _, v := range verdicts {
+			if !v.Manual {
+				continue // OCR prefills and other derived verdicts stay unconfirmed
+			}
+			if v.Correct {
+				sum.Correct++
+			} else {
+				sum.Wrong++
+			}
+		}
+		sum.Unconfirmed = sum.WordCount - (sum.Correct + sum.Wrong)
+		if sum.Unconfirmed < 0 {
+			// A corrupt row carrying more manual verdicts than words must not
+			// project a negative count to the parent view.
+			sum.Unconfirmed = 0
+		}
+		sum.Completed = LessonCompleted(sum.Stage, sum.CurrentIndex, sum.WordCount)
+
+		summaries = append(summaries, sum)
+	}
+	return summaries, rows.Err()
+}
+
+// decodeCardsJSON decodes the lessons cards column with the same
+// legacy-default tolerance as decodeOutcomesJSON (an empty raw value reads as
+// the empty slice; corrupted non-empty JSON surfaces as an error).
+func decodeCardsJSON(raw string) ([]Word, error) {
+	if strings.TrimSpace(raw) == "" {
+		return []Word{}, nil
+	}
+	var cards []Word
+	if err := json.Unmarshal([]byte(raw), &cards); err != nil {
+		return nil, err
+	}
+	if cards == nil {
+		cards = []Word{}
+	}
+	return cards, nil
 }
