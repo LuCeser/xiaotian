@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -750,6 +751,511 @@ func TestCheckSubmitReviewFailureSpeaksHonestSuffix(t *testing.T) {
 	ttAckSummaryAndEnd(t, tm, s, nil)
 }
 
+// TestSaveReceiptCheckSubmit (13.3-01 tracer, behavior 5): the normal check
+// submit records exactly ONE kind=check receipt for the lesson — status
+// saved, request_id = the check_submit id, requested set == the submitted
+// ratings' word set, updated/missing the REAL write result, completed_at
+// stamped. This is the end-to-end proof of the two-phase mount (Begin before
+// SubmitReview, Complete after).
+func TestSaveReceiptCheckSubmit(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "receipt-check.db"))
+	if err != nil {
+		t.Fatalf("open receipt db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if err := lesson.Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate receipt db: %v", err)
+	}
+	receipts, err := lesson.NewReceiptStore(db, nil)
+	if err != nil {
+		t.Fatalf("NewReceiptStore: %v", err)
+	}
+
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉"},
+		Updated:   []string{"苹果"},
+		Missing:   []string{"香蕉"},
+	}
+	tm, s, _, _ := ttDriveToCheckCfg(t, ttCards("苹果", "香蕉"), words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, 2)
+	ttSubmitCheck(t, tm, s)
+	ttAckSummaryAndEnd(t, tm, s, nil)
+
+	got, err := receipts.ListByLesson(ctx, ttLessonID)
+	if err != nil {
+		t.Fatalf("ListByLesson: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("lesson_save_receipts rows = %d, want exactly 1 kind=check receipt", len(got))
+	}
+	rec := got[0]
+	if rec.Kind != lesson.ReceiptKindCheck {
+		t.Errorf("receipt kind = %q, want %q", rec.Kind, lesson.ReceiptKindCheck)
+	}
+	if rec.Status != lesson.ReceiptStatusSaved {
+		t.Errorf("receipt status = %q, want saved after the nil-error write", rec.Status)
+	}
+	if rec.RequestID != "req-submit" {
+		t.Errorf("receipt request_id = %q, want the check_submit id %q", rec.RequestID, "req-submit")
+	}
+	if want := []string{"苹果", "香蕉"}; !reflect.DeepEqual(rec.Requested, want) {
+		t.Errorf("requested = %v, want %v (the ratings word set)", rec.Requested, want)
+	}
+	if want := []string{"苹果"}; !reflect.DeepEqual(rec.Updated, want) {
+		t.Errorf("updated = %v, want %v (the real write result)", rec.Updated, want)
+	}
+	if want := []string{"香蕉"}; !reflect.DeepEqual(rec.Missing, want) {
+		t.Errorf("missing = %v, want %v (the real write result)", rec.Missing, want)
+	}
+	if rec.CompletedAt == "" {
+		t.Error("completed_at empty, want the completion timestamp")
+	}
+}
+
+// TestSaveReceiptCorrectionSubmit (13.3-01, behavior 1): the correction
+// diff submit (an unchecked lesson reopened, one word overridden) records
+// exactly ONE kind=correction receipt whose requested set is the DIFF word
+// set — not the whole lesson.
+func TestSaveReceiptCorrectionSubmit(t *testing.T) {
+	receipts := newTestReceiptStore(t)
+	ctx := context.Background()
+
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	// What the fallback persisted: 苹果 confirmed clean (derives correct),
+	// 香蕉 confirmed with a hint (derives wrong) — submitted + unchecked=1
+	// (the !l.Unchecked guard reads this marker; without it the straggler
+	// latch fires and no correction runs).
+	exec.mu.Lock()
+	exec.lesson.Outcomes = map[string]lesson.WordOutcome{
+		"0": {Outcome: outcomeConfirmed, Hints: 0},
+		"1": {Outcome: outcomeConfirmed, Hints: 1},
+	}
+	exec.lesson.Stage = lesson.StageSubmitted
+	exec.lesson.Unchecked = true
+	exec.mu.Unlock()
+	words := newFakeWords()
+	words.reviewResult = ReviewWriteResult{Requested: []string{"香蕉"}, Updated: []string{"香蕉"}}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(2, 320), exec,
+		ttConfigWith(words, func(c *TurnManagerConfig) { c.Receipts = receipts }), nil, nil)
+	s := &captureSender{}
+
+	// White-box correction mode: the 13.1-04 reopen shape (checking panel
+	// live on a submitted row, no summary seen yet).
+	ttBindTutor(tm, ttCards("苹果", "香蕉"))
+	tm.mu.Lock()
+	tm.tutor.completed = true
+	tm.tutor.checking = true
+	tm.tutor.correction = true
+	tm.mu.Unlock()
+
+	// Confirm both words; 香蕉 OVERRIDES the derived wrong (D-06① 人优先).
+	tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "tt-cor-v-0", WordIndex: 0, Correct: true}))
+	tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "tt-cor-v-1", WordIndex: 1, Correct: true}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckVerdicts) >= 2 }) {
+		t.Fatalf("verdict echoes = %d, want 2", s.countOf(TypeCheckVerdicts))
+	}
+
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "tt-cor-submit"}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) == 1 }) {
+		t.Fatalf("correction review_result never arrived; controls = %v", s.typeOrder())
+	}
+	ttAckSummaryAndEnd(t, tm, s, nil)
+
+	got, err := receipts.ListByLesson(ctx, ttLessonID)
+	if err != nil {
+		t.Fatalf("ListByLesson: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("lesson_save_receipts rows = %d, want exactly 1 kind=correction receipt", len(got))
+	}
+	rec := got[0]
+	if rec.Kind != lesson.ReceiptKindCorrection {
+		t.Errorf("receipt kind = %q, want %q", rec.Kind, lesson.ReceiptKindCorrection)
+	}
+	if rec.Status != lesson.ReceiptStatusSaved {
+		t.Errorf("receipt status = %q, want saved after the nil-error diff write", rec.Status)
+	}
+	if rec.RequestID != "tt-cor-submit" {
+		t.Errorf("receipt request_id = %q, want the correction submit id", rec.RequestID)
+	}
+	if want := []string{"香蕉"}; !reflect.DeepEqual(rec.Requested, want) {
+		t.Errorf("requested = %v, want %v (the DIFF set only)", rec.Requested, want)
+	}
+	if want := []string{"香蕉"}; !reflect.DeepEqual(rec.Updated, want) {
+		t.Errorf("updated = %v, want %v (the real write result)", rec.Updated, want)
+	}
+	if rec.CompletedAt == "" {
+		t.Error("completed_at empty, want the completion timestamp")
+	}
+}
+
+// TestSaveReceiptCorrectionEmptyDiffNoReceipt (13.3-01, behavior 5, the
+// correction arm): all-agreeing confirmations produce an empty diff — no
+// review write, and NO receipt (没有尝试就没有回执).
+func TestSaveReceiptCorrectionEmptyDiffNoReceipt(t *testing.T) {
+	receipts := newTestReceiptStore(t)
+	ctx := context.Background()
+
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	exec.mu.Lock()
+	exec.lesson.Outcomes = map[string]lesson.WordOutcome{
+		"0": {Outcome: outcomeConfirmed, Hints: 0},
+		"1": {Outcome: outcomeConfirmed, Hints: 1},
+	}
+	exec.lesson.Stage = lesson.StageSubmitted
+	exec.lesson.Unchecked = true
+	exec.mu.Unlock()
+	words := newFakeWords()
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(2, 320), exec,
+		ttConfigWith(words, func(c *TurnManagerConfig) { c.Receipts = receipts }), nil, nil)
+	s := &captureSender{}
+
+	ttBindTutor(tm, ttCards("苹果", "香蕉"))
+	tm.mu.Lock()
+	tm.tutor.completed = true
+	tm.tutor.checking = true
+	tm.tutor.correction = true
+	tm.mu.Unlock()
+
+	// Both confirmations AGREE with the derived verdicts (苹果 correct,
+	// 香蕉 wrong): empty diff by construction.
+	tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "tt-cor-agree-0", WordIndex: 0, Correct: true}))
+	tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "tt-cor-agree-1", WordIndex: 1, Correct: false}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckVerdicts) >= 2 }) {
+		t.Fatalf("verdict echoes = %d, want 2", s.countOf(TypeCheckVerdicts))
+	}
+
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "tt-cor-empty"}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) == 1 }) {
+		t.Fatalf("the empty-diff review_result never arrived; controls = %v", s.typeOrder())
+	}
+	ttAckSummaryAndEnd(t, tm, s, nil)
+
+	if subs := words.submissions(); len(subs) != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0 (empty diff never writes)", len(subs))
+	}
+	got, err := receipts.ListByLesson(ctx, ttLessonID)
+	if err != nil {
+		t.Fatalf("ListByLesson: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("lesson_save_receipts rows = %d, want 0 (no attempt, no receipt)", len(got))
+	}
+}
+
+// TestSaveReceiptUncheckedFallback (13.3-01, behavior 2 + the behavior-4
+// fallback arm): closing a checking-stage session records exactly ONE
+// kind=unchecked_fallback receipt with the CompleteCheck latch id
+// (lessonID+"-complete-check"); the idempotent replay (a repeated close AND
+// a late end_session) adds NO second receipt — the guard sits before the
+// mount.
+func TestSaveReceiptUncheckedFallback(t *testing.T) {
+	receipts := newTestReceiptStore(t)
+	ctx := context.Background()
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	tm, s, _, exec := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) { c.Receipts = receipts })
+
+	// Stored-outcome snapshot (the rating input), TestUncheckedFallbackOnClose's shape.
+	exec.mu.Lock()
+	exec.lesson.Outcomes["0"] = lesson.WordOutcome{Outcome: outcomeConfirmed, Hints: 2}
+	exec.lesson.Outcomes["1"] = lesson.WordOutcome{Outcome: outcomeConfirmed, Hints: 0}
+	exec.mu.Unlock()
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉"},
+		Updated:   []string{"苹果"},
+		Missing:   []string{"香蕉"},
+	}
+
+	tm.Close(s) // transport read loop exited mid-check → the fallback fires synchronously
+
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls after close = %d, want exactly 1", got)
+	}
+	var got []lesson.Receipt
+	var err error
+	if !waitFor(t, 5*time.Second, func() bool {
+		got, err = receipts.ListByLesson(ctx, ttLessonID)
+		return err == nil && len(got) == 1
+	}) {
+		t.Fatalf("lesson_save_receipts rows = %d (err %v), want exactly 1 kind=unchecked_fallback receipt", len(got), err)
+	}
+	rec := got[0]
+	if rec.Kind != lesson.ReceiptKindUncheckedFallback {
+		t.Errorf("receipt kind = %q, want %q", rec.Kind, lesson.ReceiptKindUncheckedFallback)
+	}
+	if rec.Status != lesson.ReceiptStatusSaved {
+		t.Errorf("receipt status = %q, want saved after the nil-error fallback write", rec.Status)
+	}
+	if want := ttLessonID + "-complete-check"; rec.RequestID != want {
+		t.Errorf("receipt request_id = %q, want the latch id %q", rec.RequestID, want)
+	}
+	if want := []string{"苹果", "香蕉"}; !reflect.DeepEqual(rec.Requested, want) {
+		t.Errorf("requested = %v, want %v (the derived batch set)", rec.Requested, want)
+	}
+
+	// The idempotent replay: repeated close AND a late end_session frame —
+	// the latch's Idempotent branch returns BEFORE any receipt work.
+	tm.Close(s)
+	tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+	if got := len(words.submissions()); got != 1 {
+		t.Errorf("SubmitReview calls after replay = %d, want still 1", got)
+	}
+	got, err = receipts.ListByLesson(ctx, ttLessonID)
+	if err != nil {
+		t.Fatalf("ListByLesson after replay: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("lesson_save_receipts rows after replay = %d, want still 1 (no second receipt)", len(got))
+	}
+}
+
+// TestSaveReceiptEmptyCloseNeverBegins (13.3-01, behavior 5, the fallback
+// arm): a close whose stored outcomes derive an EMPTY batch writes no
+// review and NO receipt — the mount sits inside the len(ratings)>0 branch,
+// so 没有尝试就没有回执 holds on the fallback path too.
+func TestSaveReceiptEmptyCloseNeverBegins(t *testing.T) {
+	receipts := newTestReceiptStore(t)
+	ctx := context.Background()
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	tm, s, log, exec := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) { c.Receipts = receipts })
+
+	// Wipe the stored outcomes: the derived batch is empty by construction.
+	exec.mu.Lock()
+	exec.lesson.Outcomes = map[string]lesson.WordOutcome{}
+	exec.mu.Unlock()
+
+	tm.Close(s)
+
+	if got := len(words.submissions()); got != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0 (empty batch never writes)", got)
+	}
+	if got := ttEventCount(t, log, EventUncheckedFallback); got != 1 {
+		t.Errorf("unchecked_fallback events = %d, want 1 (the path still ran, honestly empty)", got)
+	}
+	got, err := receipts.ListByLesson(ctx, ttLessonID)
+	if err != nil {
+		t.Fatalf("ListByLesson: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("lesson_save_receipts rows = %d, want 0 (no attempt, no receipt)", len(got))
+	}
+}
+
+// TestSaveReceiptPractice (13.3-01, behavior 3 + the behavior-4 practice
+// arm): a practice submit records exactly ONE kind=practice receipt, status
+// saved, requested = the practiced word set — and a replayed submit adds NO
+// second receipt. The receipt's saved expresses the practice_logs storage,
+// never an FSRS write (zero SubmitReview calls, T-13.1-11).
+func TestSaveReceiptPractice(t *testing.T) {
+	ps := newTestPracticeStore(t)
+	receipts := newTestReceiptStore(t)
+	practice := &fakePracticeSource{cards: ptPracticeCards("cat", "dog")}
+	words := newFakeWords()
+	cfg := TurnManagerConfig{LessonID: ttLessonID, Words: words, Practice: practice, PracticeStore: ps, Receipts: receipts}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(2, 320),
+		newFakeExecutorNoRow(ttLessonID), cfg, nil, nil)
+	s := &captureSender{}
+	ttInitPractice(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+
+	tm.mu.Lock()
+	if tm.tutor == nil || !strings.HasPrefix(tm.tutor.lessonID, "r0x-") {
+		tm.mu.Unlock()
+		t.Fatalf("practice session did not bind an r0x- lesson id")
+	}
+	lessonID := tm.tutor.lessonID
+	tm.tutor.completed = true
+	tm.tutor.checking = true
+	tm.mu.Unlock()
+	for i, correct := range []bool{true, false} {
+		tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("tt-pr-v-%d", i), WordIndex: i, Correct: correct,
+		}))
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckVerdicts) >= 2 }) {
+		t.Fatalf("check_verdicts echoes = %d, want 2", s.countOf(TypeCheckVerdicts))
+	}
+
+	ttSubmitCheck(t, tm, s)
+	ttAckSummaryAndEndWait(t, tm, s)
+
+	ctx := context.Background()
+	got, err := receipts.ListByLesson(ctx, lessonID)
+	if err != nil {
+		t.Fatalf("ListByLesson: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("lesson_save_receipts rows = %d, want exactly 1 kind=practice receipt", len(got))
+	}
+	rec := got[0]
+	if rec.Kind != lesson.ReceiptKindPractice {
+		t.Errorf("receipt kind = %q, want %q", rec.Kind, lesson.ReceiptKindPractice)
+	}
+	if rec.Status != lesson.ReceiptStatusSaved {
+		t.Errorf("receipt status = %q, want saved (practice_logs stored)", rec.Status)
+	}
+	if want := []string{"cat", "dog"}; !reflect.DeepEqual(rec.Requested, want) {
+		t.Errorf("requested = %v, want %v (the practiced set)", rec.Requested, want)
+	}
+	if want := []string{"cat", "dog"}; !reflect.DeepEqual(rec.Updated, want) {
+		t.Errorf("updated = %v, want %v (all records landed)", rec.Updated, want)
+	}
+	if len(rec.Missing) != 0 {
+		t.Errorf("missing = %v, want empty (practice has no missing words)", rec.Missing)
+	}
+	if rec.RequestID != "req-submit" {
+		t.Errorf("receipt request_id = %q, want the practice submit id", rec.RequestID)
+	}
+	if subs := words.submissions(); len(subs) != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0 (practice never enters FSRS)", len(subs))
+	}
+
+	// Replayed submit: the practice rows AND the receipts stay at one.
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "tt-pr-replay"}))
+	time.Sleep(200 * time.Millisecond)
+	got, err = receipts.ListByLesson(ctx, lessonID)
+	if err != nil {
+		t.Fatalf("ListByLesson after replay: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("lesson_save_receipts rows after replay = %d, want still 1 (no second receipt)", len(got))
+	}
+}
+
+// TestSaveReceiptPracticeStorageFailure (13.3-01, behavior 3, the failed
+// arm): when RecordPractice fails, the receipt reads status=failed — the
+// PRACTICE STORAGE failed, and the FSRS seam stays untouched (zero
+// SubmitReview calls): the receipt semantics are storage-scoped.
+func TestSaveReceiptPracticeStorageFailure(t *testing.T) {
+	// A practice store whose database closes JUST BEFORE the submit: the
+	// init path must keep working (the exclusion-set read needs a live db),
+	// only the RecordPractice write fails.
+	pdb, err := database.Open(filepath.Join(t.TempDir(), "practice-broken.db"))
+	if err != nil {
+		t.Fatalf("open broken practice db: %v", err)
+	}
+	if err := lesson.Migrate(context.Background(), pdb); err != nil {
+		t.Fatalf("migrate broken practice db: %v", err)
+	}
+	ps, err := lesson.NewPracticeStore(pdb, nil)
+	if err != nil {
+		t.Fatalf("NewPracticeStore: %v", err)
+	}
+
+	receipts := newTestReceiptStore(t)
+	practice := &fakePracticeSource{cards: ptPracticeCards("cat", "dog")}
+	words := newFakeWords()
+	cfg := TurnManagerConfig{LessonID: ttLessonID, Words: words, Practice: practice, PracticeStore: ps, Receipts: receipts}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(2, 320),
+		newFakeExecutorNoRow(ttLessonID), cfg, nil, nil)
+	s := &captureSender{}
+	ttInitPractice(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+
+	tm.mu.Lock()
+	if tm.tutor == nil || !strings.HasPrefix(tm.tutor.lessonID, "r0x-") {
+		tm.mu.Unlock()
+		t.Fatalf("practice session did not bind an r0x- lesson id")
+	}
+	lessonID := tm.tutor.lessonID
+	tm.tutor.completed = true
+	tm.tutor.checking = true
+	tm.mu.Unlock()
+	for i := range []bool{true, false} {
+		tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("tt-prf-v-%d", i), WordIndex: i, Correct: true,
+		}))
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckVerdicts) >= 2 }) {
+		t.Fatalf("check_verdicts echoes = %d, want 2", s.countOf(TypeCheckVerdicts))
+	}
+
+	// Inject the storage failure NOW (after init, before the submit).
+	if cerr := pdb.Close(); cerr != nil {
+		t.Fatalf("close broken practice db: %v", cerr)
+	}
+
+	ttSubmitCheck(t, tm, s) // the honest failed review_result still ships
+	ttAckSummaryAndEndWait(t, tm, s)
+
+	got, err := receipts.ListByLesson(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("ListByLesson: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("lesson_save_receipts rows = %d, want exactly 1 kind=practice receipt", len(got))
+	}
+	rec := got[0]
+	if rec.Kind != lesson.ReceiptKindPractice {
+		t.Errorf("receipt kind = %q, want %q", rec.Kind, lesson.ReceiptKindPractice)
+	}
+	if rec.Status != lesson.ReceiptStatusFailed {
+		t.Errorf("receipt status = %q, want failed (the practice STORAGE failed)", rec.Status)
+	}
+	if len(rec.Updated) != 0 {
+		t.Errorf("updated = %v, want empty (nothing landed)", rec.Updated)
+	}
+	if want := []string{"cat", "dog"}; !reflect.DeepEqual(rec.Missing, want) {
+		t.Errorf("missing = %v, want %v (the full attempted set)", rec.Missing, want)
+	}
+	// The FSRS seam: untouched — a practice receipt never means an FSRS write.
+	if subs := words.submissions(); len(subs) != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0 (failed practice storage is not an FSRS event)", len(subs))
+	}
+}
+
+// TestSaveReceiptFailureIsBypass (13.3-01, behavior 6 / T-13.3-02): a
+// receipt store that fails on every call must not move the submission —
+// the review_result counts, the summary copy, and the flow all stay
+// exactly what a world without receipts produces; the only trace is the
+// server-side at=save_receipt error event.
+func TestSaveReceiptFailureIsBypass(t *testing.T) {
+	broken := newBrokenReceiptStore(t)
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"苹果", "香蕉"},
+		Updated:   []string{"苹果"},
+		Missing:   []string{"香蕉"},
+	}
+	tm, s, log, _ := ttDriveToCheckCfg(t, ttCards("苹果", "香蕉"), words, func(c *TurnManagerConfig) { c.Receipts = broken })
+	ttCheckAll(t, tm, s, 2)
+	result := ttSubmitCheck(t, tm, s)
+
+	// The review_result is byte-honest: same requested/updated/missing as
+	// the no-receipt world.
+	if result["requested"] != float64(2) || result["updated"] != float64(1) || result["missing"] != float64(1) {
+		t.Errorf("review_result = %v, want requested 2 / updated 1 / missing 1", result)
+	}
+	// The summary copy is unchanged (保存 1/2, no receipt noise).
+	ttLastSentenceEventually(t, s, "保存 1/2")
+
+	// The bypass left exactly its diagnostic marker.
+	ats := ttEventField(t, log, EventError, "at")
+	found := false
+	for _, a := range ats {
+		if a == "save_receipt" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no EventError(at=save_receipt) among %v — the receipt failure went silent", ats)
+	}
+
+	ttAckSummaryAndEnd(t, tm, s, nil)
+	if subs := words.submissions(); len(subs) != 1 {
+		t.Errorf("SubmitReview calls = %d, want exactly 1 (the receipt failure must not retry the batch, S-05)", len(subs))
+	}
+}
+
 // TestNoDueWordsWaitsForPlaybackAck: the zero-due explanation is fully
 // spoken and the session ends ONLY on its actual-playback ack — the ending
 // never truncates the explanation.
@@ -891,6 +1397,13 @@ func ttDriveTwoConfirmCompletion(t *testing.T, words *fakeWordSource) (*TurnMana
 // announcement settled through its ack. The caller then applies verdicts and
 // submits.
 func ttDriveToCheck(t *testing.T, cards []lesson.Word, words *fakeWordSource) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
+	return ttDriveToCheckCfg(t, cards, words, nil)
+}
+
+// ttDriveToCheckCfg is ttDriveToCheck with a TurnManagerConfig override
+// (13.3-01: the save-receipt tests inject cfg.Receipts; every other field
+// and the whole drive sequence stay identical).
+func ttDriveToCheckCfg(t *testing.T, cards []lesson.Word, words *fakeWordSource, mutate func(*TurnManagerConfig)) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
 	t.Helper()
 	log := &captureLogger{}
 	exec := newFakeExecutorNoRow(ttLessonID)
@@ -904,7 +1417,7 @@ func ttDriveToCheck(t *testing.T, cards []lesson.Word, words *fakeWordSource) (*
 	llm := newFakeLLM(llmScripts...)
 	tts := newFakeTTS(2, 320)
 	tts.delay = 20 * time.Millisecond
-	tm := NewTurnManager(asr, llm, tts, exec, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	tm := NewTurnManager(asr, llm, tts, exec, ttConfigWith(words, mutate), NewEventRecorder(log, "t"), nil)
 	s := &captureSender{}
 	ttInit(t, tm, s)
 	ttAwaitSpoken(t, s, 3)
@@ -4006,6 +4519,47 @@ func newTestPracticeStore(t *testing.T) *lesson.PracticeStore {
 		t.Fatalf("NewPracticeStore: %v", err)
 	}
 	return ps
+}
+
+// newTestReceiptStore builds a real sqlite-backed save-receipt store (the
+// 13.3-01 receipt mounts exercise the actual DDL).
+func newTestReceiptStore(t *testing.T) *lesson.ReceiptStore {
+	t.Helper()
+	db, err := database.Open(filepath.Join(t.TempDir(), "receipt-tt.db"))
+	if err != nil {
+		t.Fatalf("open receipt test db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := lesson.Migrate(context.Background(), db); err != nil {
+		t.Fatalf("migrate receipt test db: %v", err)
+	}
+	rs, err := lesson.NewReceiptStore(db, nil)
+	if err != nil {
+		t.Fatalf("NewReceiptStore: %v", err)
+	}
+	return rs
+}
+
+// newBrokenReceiptStore returns a receipt store whose database is ALREADY
+// closed — the bypass injector (T-13.3-02): every Begin/Complete fails while
+// the submission path must carry on untouched.
+func newBrokenReceiptStore(t *testing.T) *lesson.ReceiptStore {
+	t.Helper()
+	db, err := database.Open(filepath.Join(t.TempDir(), "receipt-broken.db"))
+	if err != nil {
+		t.Fatalf("open broken receipt db: %v", err)
+	}
+	if err := lesson.Migrate(context.Background(), db); err != nil {
+		t.Fatalf("migrate broken receipt db: %v", err)
+	}
+	rs, err := lesson.NewReceiptStore(db, nil)
+	if err != nil {
+		t.Fatalf("NewReceiptStore: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close broken receipt db: %v", err)
+	}
+	return rs
 }
 
 // ttInitPractice is ttInit with practice=true on session_init (13.1-05).

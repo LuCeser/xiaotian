@@ -138,6 +138,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		idxToolRequestsLesson,
 		practiceLogsDDL, // 13.1-05 (D-12): Go-owned practice records, never the FSRS schedule
 		idxPracticeLogsDay,
+		receiptDDL, // 13.3-01 (ROADMAP SC-1): persistent save receipts, pending → saved/failed
+		idxReceiptsLesson,
 	}
 
 	for _, stmt := range statements {

@@ -315,6 +315,20 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
+	// 13.3-01 (ROADMAP SC-1): the persistent save-receipt store — every real
+	// save attempt at the four submission endpoints records a two-phase
+	// lesson_save_receipts row (pending before the downstream write,
+	// saved/failed with the real word sets after), so 「已提交」 and 「已写入
+	// FSRS」 stay distinguishable; a crash between the two phases stays
+	// pending = the parent view's 「待核实」. Same boot-fail-fast discipline.
+	receiptStore, err := lesson.NewReceiptStore(db, logger)
+	if err != nil {
+		logger.Error("receipt store construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
 
 	// Construct repositories (D-07, D-42 constructor DI).
 	cardRepo, err := database.NewCardRepository(db, logger)
@@ -615,6 +629,10 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// practice_logs store, never the FSRS schedule.
 			Practice:      cardRepo,
 			PracticeStore: practiceStore,
+			// 13.3-01: the save-receipt store rides the same DI block — the
+			// constructor's fail-fast above guarantees a live store here
+			// (a nil would silently disable receipts).
+			Receipts: receiptStore,
 		}
 		rtHandler, err := rt.NewHandler(rtServerCfg, func() rt.SessionManager {
 			// Per-connection factory: one TurnManager + one EventRecorder per

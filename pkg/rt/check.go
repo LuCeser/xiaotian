@@ -23,6 +23,7 @@ package rt
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -589,15 +590,29 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		}
 	}
 
-	go tm.finishCheckSubmit(s, ctx, cancel, ratings, total, correct)
+	go tm.finishCheckSubmit(s, ctx, cancel, ratings, total, correct, m.RequestID)
+}
+
+// sortedWordSet extracts a rating map's keys sorted — the receipt word-set
+// encoding normalizes order before storage, so map iteration order never
+// leaks into a stored row payload (13.3-01).
+func sortedWordSet(m map[string]string) []string {
+	words := make([]string, 0, len(m))
+	for w := range m {
+		words = append(words, w)
+	}
+	sort.Strings(words)
+	return words
 }
 
 // finishCheckSubmit runs on its own goroutine (D-04 order): ONE SubmitReview
 // call whose REAL result sets shape the honest review_result message and the
 // battle summary; runNaturalEnding then speaks the summary and waits for its
 // valid playback ack before session_ended(lesson_complete). This is the ONLY
-// SubmitReview call site the check stage owns.
-func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, ratings map[string]string, total, correct int) {
+// SubmitReview call site the check stage owns. 13.3-01 brackets the write
+// with the two-phase save receipt (Begin pending before, Complete with the
+// real outcome after) — a pure bypass that never alters the flow below.
+func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, ratings map[string]string, total, correct int, requestID string) {
 	defer cancel()
 
 	// Dictation-stage behavior data stays honestly reported (the D-01
@@ -605,6 +620,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 	tm.mu.Lock()
 	confirmed, timedOutN, hinted := tm.tutor.outcomeCounts()
 	hintWords, hintTotal := tm.tutor.hintAccounting()
+	lessonID := tm.tutor.lessonID
 	tm.mu.Unlock()
 
 	var (
@@ -614,6 +630,27 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		saveFailed = false
 	)
 	if len(ratings) > 0 {
+		// 13.3-01 receipt phase one: mark the attempt pending BEFORE the
+		// write, so 「已提交」 never masquerades as 「已写入 FSRS」. Bypass
+		// discipline (kept for phase two below): a receipt failure only
+		// emits a server-side error event — it never returns, never touches
+		// saveFailed/updated/missing, and NEVER drives a rewrite (S-05).
+		receiptID := int64(0)
+		requestedSet := sortedWordSet(ratings)
+		if tm.cfg.Receipts != nil {
+			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+				LessonID:  lessonID,
+				RequestID: requestID,
+				Kind:      lesson.ReceiptKindCheck,
+				Requested: requestedSet,
+			})
+			if rerr != nil || rec.ID <= 0 {
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
+			} else {
+				receiptID = rec.ID
+			}
+		}
+
 		wres, err := tm.cfg.Words.SubmitReview(ctx, ratings)
 		switch {
 		case err != nil:
@@ -640,6 +677,24 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 				// real counts ride the event plus a server-side error
 				// marker, and the batch is NEVER retried blindly (S-05).
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+			}
+		}
+
+		// 13.3-01 receipt phase two: fill the REAL outcome. SubmitReview
+		// error → failed (nothing landed, missing = the full requested
+		// set); nil error → saved with the real sets (a partial update is
+		// still saved-with-M/N — the same honesty as the review_result
+		// above, never a failed flip).
+		if tm.cfg.Receipts != nil && receiptID > 0 {
+			var cerr error
+			if err != nil {
+				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false)
+			} else {
+				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
+			}
+			if cerr != nil {
+				// The row stays pending — the parent view's honest 「待核实」.
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 			}
 		}
 	}
@@ -816,6 +871,25 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 	updated := 0
 	saveFailed := false
 	if requested > 0 {
+		// 13.3-01 receipt phase one: pending marker before the diff write
+		// (the same bypass discipline as finishCheckSubmit — a receipt
+		// failure never returns, never rewrites, S-05).
+		receiptID := int64(0)
+		changedSet := sortedWordSet(in.changed)
+		if tm.cfg.Receipts != nil {
+			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+				LessonID:  in.lessonID,
+				RequestID: in.requestID,
+				Kind:      lesson.ReceiptKindCorrection,
+				Requested: changedSet,
+			})
+			if rerr != nil || rec.ID <= 0 {
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
+			} else {
+				receiptID = rec.ID
+			}
+		}
+
 		wres, err := tm.cfg.Words.SubmitReview(ctx, in.changed)
 		switch {
 		case err != nil:
@@ -832,6 +906,21 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 			if updated < requested {
 				// Partial/zero update with nil error is not success (S-05).
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+			}
+		}
+
+		// 13.3-01 receipt phase two: the REAL diff outcome (error → failed
+		// with missing = the full diff set; nil error → saved with the real
+		// sets).
+		if tm.cfg.Receipts != nil && receiptID > 0 {
+			var cerr error
+			if err != nil {
+				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, nil, changedSet, false)
+			} else {
+				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
+			}
+			if cerr != nil {
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 			}
 		}
 	}
@@ -929,6 +1018,26 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 	ratings := uncheckedRatings(words, res.Outcomes)
 	requested, updated := len(ratings), 0
 	if len(ratings) > 0 {
+		// 13.3-01 receipt: the fallback's own kind, keyed by the CompleteCheck
+		// latch id (lessonID+"-complete-check"). Mounted AFTER the
+		// res.Idempotent guard — the replay path above stays receipt-free by
+		// construction (behavior: no attempt, no receipt).
+		receiptID := int64(0)
+		requestedSet := sortedWordSet(ratings)
+		if tm.cfg.Receipts != nil {
+			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+				LessonID:  lessonID,
+				RequestID: lessonID + "-complete-check",
+				Kind:      lesson.ReceiptKindUncheckedFallback,
+				Requested: requestedSet,
+			})
+			if rerr != nil || rec.ID <= 0 {
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
+			} else {
+				receiptID = rec.ID
+			}
+		}
+
 		wres, werr := tm.cfg.Words.SubmitReview(ctx, ratings)
 		switch {
 		case werr != nil:
@@ -938,6 +1047,21 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 			if updated < requested {
 				// Partial/zero update with nil error is not success (S-05).
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+			}
+		}
+
+		// 13.3-01 receipt completion: the REAL fallback outcome. The close
+		// path has no Sender — receipt errors ride the same bypass event
+		// (T-13.3-03: single-row writes, same pool, no new external calls).
+		if tm.cfg.Receipts != nil && receiptID > 0 {
+			var cerr error
+			if werr != nil {
+				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false)
+			} else {
+				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
+			}
+			if cerr != nil {
+				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 			}
 		}
 	}
