@@ -145,9 +145,13 @@ func (s *ReceiptStore) Begin(ctx context.Context, in ReceiptInput) (Receipt, err
 	if err != nil {
 		return Receipt{}, errors.Wrap(err, "begin receipt: encode requested set")
 	}
+	// created_at is stamped DB-side (datetime('now')) — an explicit "" would
+	// overwrite the column DEFAULT and leave every receipt with an empty
+	// creation time (13.3-02 Rule 1 fix: the parent detail view reads this
+	// field verbatim). completed_at stays "" until Complete.
 	res, err := s.db.ExecContext(ctx,
-		"INSERT INTO lesson_save_receipts ("+receiptColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		in.LessonID, in.RequestID, in.Kind, requested, "[]", "[]", ReceiptStatusPending, "", "",
+		"INSERT INTO lesson_save_receipts ("+receiptColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), '')",
+		in.LessonID, in.RequestID, in.Kind, requested, "[]", "[]", ReceiptStatusPending,
 	)
 	if err != nil {
 		s.logger.Error("receipt begin: insert failed",

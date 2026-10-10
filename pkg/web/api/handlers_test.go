@@ -1256,7 +1256,9 @@ func TestGetLessonAPI(t *testing.T) {
 		if rc.Kind != lesson.ReceiptKindCheck || rc.Status != lesson.ReceiptStatusSaved || rc.RequestID != "req-1" || rc.LessonID != "r0-20261010" {
 			t.Errorf("receipt identity = %+v, want check/saved/req-1/r0-20261010", rc)
 		}
-		if !reflect.DeepEqual(rc.Requested, []string{"苹果", "香蕉", "橘子"}) || !reflect.DeepEqual(rc.Updated, []string{"苹果", "香蕉", "橘子"}) || !reflect.DeepEqual(rc.Missing, []string{}) {
+		// Word sets are stored SORTED (the receipt storage contract), so the
+		// wire order is byte-sorted, not submission order.
+		if !reflect.DeepEqual(rc.Requested, []string{"橘子", "苹果", "香蕉"}) || !reflect.DeepEqual(rc.Updated, []string{"橘子", "苹果", "香蕉"}) || !reflect.DeepEqual(rc.Missing, []string{}) {
 			t.Errorf("receipt sets = %v/%v/%v, want full requested+updated and empty missing", rc.Requested, rc.Updated, rc.Missing)
 		}
 		if rc.CreatedAt == "" || rc.CompletedAt == "" {

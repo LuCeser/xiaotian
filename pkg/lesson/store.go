@@ -74,9 +74,9 @@ var (
 	// unchecked=0) and keep short-circuiting as completed sessions. The
 	// unchecked column is owned HERE (13.1-04 consumes Lesson.Unchecked for
 	// the fallback/correction paths on top of this task's scan).
-	alterLessonsAddStage = `ALTER TABLE lessons ADD COLUMN stage TEXT NOT NULL DEFAULT ''`
-	alterLessonsAddOutcomes = `ALTER TABLE lessons ADD COLUMN outcomes TEXT NOT NULL DEFAULT '{}'`
-	alterLessonsAddVerdicts = `ALTER TABLE lessons ADD COLUMN verdicts TEXT NOT NULL DEFAULT '[]'`
+	alterLessonsAddStage     = `ALTER TABLE lessons ADD COLUMN stage TEXT NOT NULL DEFAULT ''`
+	alterLessonsAddOutcomes  = `ALTER TABLE lessons ADD COLUMN outcomes TEXT NOT NULL DEFAULT '{}'`
+	alterLessonsAddVerdicts  = `ALTER TABLE lessons ADD COLUMN verdicts TEXT NOT NULL DEFAULT '[]'`
 	alterLessonsAddUnchecked = `ALTER TABLE lessons ADD COLUMN unchecked INTEGER NOT NULL DEFAULT 0`
 )
 
@@ -376,13 +376,13 @@ func decodeVerdictsJSON(raw string) ([]CheckVerdict, error) {
 // failing, so historical rows keep reading as stageless/unchecked.
 func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) {
 	var (
-		l           Lesson
-		wordsJSON   string
-		cardsJSON   string
-		stage       string
+		l            Lesson
+		wordsJSON    string
+		cardsJSON    string
+		stage        string
 		outcomesJSON string
 		verdictsJSON string
-		unchecked   int
+		unchecked    int
 	)
 
 	err := s.db.QueryRowContext(ctx,
@@ -459,6 +459,39 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 	l.Verdicts = verdicts
 
 	return l, nil
+}
+
+// SummarizeLesson projects an already-loaded Lesson into its parent-facing
+// summary (13.3-02) — the SAME manual-only counting rule ListLessons applies,
+// kept in ONE function so the list and detail projections cannot drift
+// (完成勾≠写对: Correct/Wrong count manual verdicts exclusively).
+func SummarizeLesson(l Lesson) LessonSummary {
+	sum := LessonSummary{
+		LessonID:     l.LessonID,
+		CreatedAt:    l.CreatedAt,
+		Stage:        l.Stage,
+		Unchecked:    l.Unchecked,
+		CurrentIndex: l.CurrentIndex,
+		WordCount:    len(l.Cards),
+	}
+	for _, v := range l.Verdicts {
+		if !v.Manual {
+			continue // OCR prefills and other derived verdicts stay unconfirmed
+		}
+		if v.Correct {
+			sum.Correct++
+		} else {
+			sum.Wrong++
+		}
+	}
+	sum.Unconfirmed = sum.WordCount - (sum.Correct + sum.Wrong)
+	if sum.Unconfirmed < 0 {
+		// A corrupt row carrying more manual verdicts than words must not
+		// project a negative count to the parent view.
+		sum.Unconfirmed = 0
+	}
+	sum.Completed = LessonCompleted(sum.Stage, sum.CurrentIndex, sum.WordCount)
+	return sum
 }
 
 // LessonCompleted reports whether a lessons row counts as completed for the
@@ -538,55 +571,39 @@ func (s *Store) ListLessons(ctx context.Context, limit int) ([]LessonSummary, er
 	var summaries []LessonSummary
 	for rows.Next() {
 		var (
-			sum          LessonSummary
+			row          Lesson
 			cardsJSON    string
 			verdictsJSON string
 			unchecked    int
 		)
-		if err := rows.Scan(&sum.LessonID, &sum.Stage, &unchecked, &sum.CurrentIndex, &cardsJSON, &verdictsJSON, &sum.CreatedAt); err != nil {
+		if err := rows.Scan(&row.LessonID, &row.Stage, &unchecked, &row.CurrentIndex, &cardsJSON, &verdictsJSON, &row.CreatedAt); err != nil {
 			return nil, errors.Wrap(err, "list lessons: scan")
 		}
-		sum.Unchecked = unchecked != 0
+		row.Unchecked = unchecked != 0
 
 		cards, err := decodeCardsJSON(cardsJSON)
 		if err != nil {
 			s.logger.Error("lesson list: unmarshal cards failed",
 				infra.F("component", "lesson/store"),
-				infra.F("lesson_id", sum.LessonID),
+				infra.F("lesson_id", row.LessonID),
 				infra.ErrField(err),
 			)
-			return nil, errors.Wrap(err, fmt.Sprintf("list lessons %q: unmarshal cards", sum.LessonID))
+			return nil, errors.Wrap(err, fmt.Sprintf("list lessons %q: unmarshal cards", row.LessonID))
 		}
-		sum.WordCount = len(cards)
+		row.Cards = cards
 
 		verdicts, err := decodeVerdictsJSON(verdictsJSON)
 		if err != nil {
 			s.logger.Error("lesson list: unmarshal verdicts failed",
 				infra.F("component", "lesson/store"),
-				infra.F("lesson_id", sum.LessonID),
+				infra.F("lesson_id", row.LessonID),
 				infra.ErrField(err),
 			)
-			return nil, errors.Wrap(err, fmt.Sprintf("list lessons %q: unmarshal verdicts", sum.LessonID))
+			return nil, errors.Wrap(err, fmt.Sprintf("list lessons %q: unmarshal verdicts", row.LessonID))
 		}
-		for _, v := range verdicts {
-			if !v.Manual {
-				continue // OCR prefills and other derived verdicts stay unconfirmed
-			}
-			if v.Correct {
-				sum.Correct++
-			} else {
-				sum.Wrong++
-			}
-		}
-		sum.Unconfirmed = sum.WordCount - (sum.Correct + sum.Wrong)
-		if sum.Unconfirmed < 0 {
-			// A corrupt row carrying more manual verdicts than words must not
-			// project a negative count to the parent view.
-			sum.Unconfirmed = 0
-		}
-		sum.Completed = LessonCompleted(sum.Stage, sum.CurrentIndex, sum.WordCount)
+		row.Verdicts = verdicts
 
-		summaries = append(summaries, sum)
+		summaries = append(summaries, SummarizeLesson(row))
 	}
 	return summaries, rows.Err()
 }
