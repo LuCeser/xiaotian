@@ -1542,6 +1542,8 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"rt.heartbeatInterval",
 		"rt.lessonId",
 		"rt.wordTimeoutMs",
+		// 13.3-05 production anti-fat-finger switch (success criterion 6).
+		"rt.forceStudentMode",
 	}
 	for _, key := range keys {
 		_ = v.BindEnv(key)
