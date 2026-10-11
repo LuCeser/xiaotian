@@ -15,6 +15,11 @@ package ocr
 // run costs ONE vision call. Run:
 //
 //	go test ./pkg/ocr/ -run TestWordlistLive -v
+//
+// Boundary (the student-photo live test's same 口径): the fixture is a
+// cleanly rendered printed-style page — no camera skew, shadows or paper
+// texture. Real-camera word-list photos remain on-device UAT, exactly as
+// real 6-12 handwriting accuracy does for the student-answer pipeline.
 
 import (
 	"bufio"

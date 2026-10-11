@@ -203,6 +203,50 @@ test('photo import: recognition failure shows the reason and retry succeeds', as
   }
 });
 
+test('photo import: reconcile-failure never shows server-confirmed adds as failures', async ({ page, request }) => {
+  await deleteUnit(request, UNIT_IMPORT);
+  await deleteUnit(request, UNIT_CLASSROOM);
+  try {
+    const panel = await openPhotoTab(page);
+    await recognize(page, FIXTURE_CLASSROOM); // sun + moon, both new
+    // Scoped: the single/batch forms carry their own 单元 comboboxes.
+    await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
+
+    // The race: ANOTHER device adds 'sun' (different meaning) after this
+    // page's snapshot was taken — the commit will add moon, skip sun.
+    const raced = await request.post('/api/v1/words', {
+      data: { category: CAT, unit: UNIT_CLASSROOM, entries: [{ word: 'sun', meaning: '太阳系' }] },
+    });
+    expect(raced.ok()).toBeTruthy();
+
+    // And the post-commit snapshot fetch fails (network blip): the banner
+    // must fall back to the server's counts — 已添加 1（服务器确认）＋未核对
+    // — never naming the added word a failure.
+    await page.route('**/api/v1/words?category=english*', async (route) => {
+      await route.abort('failed');
+    }, { times: 6 });
+    await page.getByRole('button', { name: '确认添加（2 个）' }).click();
+
+    const banner = page.locator('.result-banner');
+    await expect(banner.locator('.result-summary')).toContainText('已添加 1 个', { timeout: 30_000 });
+    await expect(banner.locator('.result-summary')).toContainText('未核对 2 个');
+    await expect(banner).toContainText('服务器确认');
+    await expect(banner).toContainText('未核对（词库读取失败，请刷新词库查看）：sun、moon');
+    await expect(banner).not.toContainText('未添加成功');
+    await page.unroute('**/api/v1/words?category=english*');
+
+    // The library truth (real reads): moon added by the page, sun kept the
+    // racing device's meaning (original preserved, no overwrite).
+    const lib = await libraryWords(request);
+    expect(lib.get('moon')).toBe('月亮');
+    expect(lib.get('sun')).toBe('太阳系');
+    expect(panel).toBeVisible(); // form still alive for the next photo
+  } finally {
+    await deleteUnit(request, UNIT_IMPORT);
+    await deleteUnit(request, UNIT_CLASSROOM);
+  }
+});
+
 test('classroom: photo-imported words are selected for dictation', async ({ page, request }) => {
   await deleteUnit(request, UNIT_CLASSROOM);
   try {

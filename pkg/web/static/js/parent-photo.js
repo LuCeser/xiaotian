@@ -591,6 +591,22 @@
 
     var statusCell = document.createElement('td');
     statusCell.className = 'preview-status photo-status photo-status-' + row.status;
+    renderStatusCell(statusCell, row);
+    tr.appendChild(statusCell);
+
+    return tr;
+  };
+
+  /**
+   * (Re)build one row's status cell content — the single writer for the
+   * chip + note markup, used by both the initial render (buildReviewRow)
+   * and the caret-preserving edit sync (onRowEdited). textContent only
+   * (Pitfall 10).
+   */
+  function renderStatusCell(statusCell, row) {
+    while (statusCell.firstChild) {
+      statusCell.removeChild(statusCell.firstChild);
+    }
     var statusText = document.createElement('span');
     statusText.textContent = statusLabel(row);
     statusCell.appendChild(statusText);
@@ -608,10 +624,7 @@
       why.textContent = describeInvalidReason(row.reason);
       statusCell.appendChild(why);
     }
-    tr.appendChild(statusCell);
-
-    return tr;
-  };
+  }
 
   /** Status chip label for one row. */
   function statusLabel(row) {
@@ -650,26 +663,7 @@
 
       var statusCell = tr.querySelector('.photo-status');
       if (statusCell) {
-        while (statusCell.firstChild) {
-          statusCell.removeChild(statusCell.firstChild);
-        }
-        var statusText = document.createElement('span');
-        statusText.textContent = statusLabel(row);
-        statusCell.appendChild(statusText);
-        if (row.status === 'conflict' || row.status === 'exists') {
-          var note = document.createElement('p');
-          note.className = 'photo-status-note';
-          note.textContent = row.status === 'conflict'
-            ? '词库释义：' + (row.existingMeaning || '（空）') + '，将保留原释义'
-            : '词库已有相同词条';
-          statusCell.appendChild(note);
-        }
-        if (row.status === 'invalid') {
-          var why = document.createElement('p');
-          why.className = 'photo-status-note';
-          why.textContent = describeInvalidReason(row.reason);
-          statusCell.appendChild(why);
-        }
+        renderStatusCell(statusCell, row);
       }
     }
     this.updateCommitButton();
@@ -724,8 +718,12 @@
     this.submitWords({ category: 'english', unit: unit, entries: entries })
       .then(function (result) {
         var outcome = result || { added: 0, skipped: 0 };
+        // Reconcile ONLY when the server reports skips (a raced duplicate).
+        // A failed snapshot fetch resolves null — "unavailable", NOT an
+        // empty library — so a network blip can never reclassify the
+        // server-confirmed adds as failures (honesty cuts both ways).
         var reconcile = (outcome.skipped || 0) > 0
-          ? self.fetchWords('english').catch(function () { return []; })
+          ? self.fetchWords('english').catch(function () { return null; })
           : Promise.resolve(null);
         return reconcile.then(function (fresh) {
           if (fresh) {
@@ -770,8 +768,13 @@
   /**
    * Per-item result view (transparency prohibition: partial success is
    * never a plain success). Groups keep every word visible with its own
-   * outcome; skipped rows that raced to existence are re-read from the
-   * fresh snapshot (fresh !== null) so 已有 is the library's truth.
+   * outcome. Three honesty modes:
+   *   - no skips: every submitted word was added (server-confirmed).
+   *   - skips + snapshot (fresh): per-word truth re-read from the library
+   *     (added / 已有 with the original kept / genuinely failed).
+   *   - skips but snapshot unavailable (fresh === null): the server's
+   *     counts stand and the skipped words are reported as UNVERIFIED —
+   *     never silently upgraded to added, never falsely named failures.
    */
   PhotoAddForm.prototype.renderCommitResult = function (outcome, submittedRows, fresh) {
     var kit = global.__parentFormKit || {};
@@ -793,10 +796,17 @@
     var added = [];
     var existed = [];
     var failed = [];
+    var unverified = [];
     var raced = (outcome.skipped || 0) > 0;
-    submittedRows.forEach(function (r) {
+    submittedRows.forEach(function (r, i) {
       if (!raced) {
         added.push(r.word);
+        return;
+      }
+      if (!fresh) {
+        // Snapshot unavailable: the server says outcome.added of these were
+        // added, but not WHICH. Naming any word a failure would be a guess.
+        unverified.push(r.word);
         return;
       }
       if (Object.prototype.hasOwnProperty.call(byWord, r.word)) {
@@ -809,13 +819,17 @@
         failed.push(r.word);
       }
     });
+    // Without a snapshot, the per-word lists stay empty by design: the
+    // summary carries the server's authoritative counts and the detail
+    // names every submitted word as 未核对 (below) — picking "winners"
+    // from an unreadable library would fabricate verdicts.
 
     var notSubmitted = this.rows.filter(function (r) {
       return r.status !== 'new' || r.checked === false;
     });
 
     var box = document.createElement('div');
-    var partial = existed.length > 0 || failed.length > 0 || notSubmitted.length > 0;
+    var partial = existed.length > 0 || failed.length > 0 || unverified.length > 0 || notSubmitted.length > 0;
     box.className = 'result-banner ' +
       (partial ? 'result-banner-warning' : 'result-banner-success');
     box.setAttribute('role', 'status');
@@ -823,16 +837,24 @@
 
     var summary = document.createElement('p');
     summary.className = 'result-summary';
-    summary.textContent = '已添加 ' + added.length + ' 个' +
+    var addedCount = raced && !fresh ? (outcome.added || 0) : added.length;
+    summary.textContent = '已添加 ' + addedCount + ' 个' +
       (existed.length ? '，已有 ' + existed.length + ' 个' : '') +
       (failed.length ? '，未添加 ' + failed.length + ' 个' : '') +
+      (unverified.length ? '，未核对 ' + unverified.length + ' 个' : '') +
       (notSubmitted.length ? '，未提交 ' + notSubmitted.length + ' 个' : '');
     box.appendChild(summary);
 
     var detail = document.createElement('p');
     detail.className = 'result-detail';
     var parts = [];
-    if (added.length) {
+    if (raced && !fresh) {
+      // Server-confirmed count only; the words themselves are listed as
+      // 未核对 below (a network blip must not fabricate per-word verdicts).
+      if (addedCount > 0) {
+        parts.push('已添加 ' + addedCount + ' 个（服务器确认）');
+      }
+    } else if (added.length) {
       parts.push('已添加：' + added.join('、'));
     }
     if (existed.length) {
@@ -840,6 +862,9 @@
     }
     if (failed.length) {
       parts.push('未添加成功（请重试）：' + failed.join('、'));
+    }
+    if (unverified.length) {
+      parts.push('未核对（词库读取失败，请刷新词库查看）：' + unverified.join('、'));
     }
     detail.textContent = parts.join('；');
     if (parts.length) {

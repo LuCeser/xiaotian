@@ -93,13 +93,40 @@
   var REQUEST_TIMEOUT_MS = 15000;
 
   /**
+   * parseEnvelope — shared response normalization for the REST wrappers:
+   * reads the body text, parses JSON when possible, and on a non-2xx turns
+   * the {"error":{code,message}} envelope into a thrown Error carrying
+   * error.message (toast copy surfaces the backend message directly,
+   * Pitfall 2) and error.code (not_found handling in the browse modals).
+   * Resolves with the parsed body on 2xx (null for an empty body).
+   */
+  function parseEnvelope(response) {
+    return response.text().then(function (text) {
+      var data = null;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          data = null;
+        }
+      }
+      if (!response.ok) {
+        var message = (data && data.error && data.error.message)
+          ? data.error.message
+          : ('HTTP ' + response.status);
+        var error = new Error(message);
+        error.status = response.status;
+        error.code = (data && data.error) ? data.error.code : undefined;
+        throw error;
+      }
+      return data;
+    });
+  }
+
+  /**
    * fetchJSON — small REST wrapper for the parent page.
    *   - Aborts via AbortController after REQUEST_TIMEOUT_MS.
-   *   - Parses the JSON body; normalizes the {"error":{code,message}}
-   *     envelope into a thrown Error carrying error.message (so toast copy
-   *     can surface the backend message directly, Pitfall 2) and
-   *     error.code (not_found handling in the browse modals).
-   *   - Resolves with the parsed body on 2xx (null for an empty body).
+   *   - Response handling via parseEnvelope (see there).
    */
   function fetchJSON(method, url, body) {
     var controller = new AbortController();
@@ -114,28 +141,7 @@
     }
 
     return fetch(url, init)
-      .then(function (response) {
-        return response.text().then(function (text) {
-          var data = null;
-          if (text) {
-            try {
-              data = JSON.parse(text);
-            } catch (e) {
-              data = null;
-            }
-          }
-          if (!response.ok) {
-            var message = (data && data.error && data.error.message)
-              ? data.error.message
-              : ('HTTP ' + response.status);
-            var error = new Error(message);
-            error.status = response.status;
-            error.code = (data && data.error) ? data.error.code : undefined;
-            throw error;
-          }
-          return data;
-        });
-      })
+      .then(parseEnvelope)
       .finally(function () {
         clearTimeout(timer);
       });
@@ -151,10 +157,10 @@
   /**
    * postImage — binary-body variant of fetchJSON for the word-list photo
    * recognize call (Issue #3). The image bytes go as the raw request body
-   * with their own Content-Type; the response keeps the shared
-   * {"error":{code,message}} envelope normalization. The timeout is its own
-   * (60s): a vision model thinking over an image legitimately outruns
-   * fetchJSON's 15s JSON budget (the server side allows 20s).
+   * with their own Content-Type; response handling reuses parseEnvelope.
+   * The timeout is its own (60s): a vision model thinking over an image
+   * legitimately outruns fetchJSON's 15s JSON budget (the server side
+   * allows 20s).
    */
   function postImage(url, blob, timeoutMs) {
     var controller = new AbortController();
@@ -168,28 +174,7 @@
       headers: { 'Content-Type': blob.type || 'application/octet-stream' },
       body: blob,
     })
-      .then(function (response) {
-        return response.text().then(function (text) {
-          var data = null;
-          if (text) {
-            try {
-              data = JSON.parse(text);
-            } catch (e) {
-              data = null;
-            }
-          }
-          if (!response.ok) {
-            var message = (data && data.error && data.error.message)
-              ? data.error.message
-              : ('HTTP ' + response.status);
-            var error = new Error(message);
-            error.status = response.status;
-            error.code = (data && data.error) ? data.error.code : undefined;
-            throw error;
-          }
-          return data;
-        });
-      })
+      .then(parseEnvelope)
       .finally(function () {
         clearTimeout(timer);
       });
