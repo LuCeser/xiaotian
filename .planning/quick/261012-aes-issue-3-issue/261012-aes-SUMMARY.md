@@ -3,7 +3,7 @@ quick_id: 261012-aes
 slug: issue-3-issue
 status: complete
 completed: 2026-10-12
-commits: 0ab9ef6,0141274,7302f8f,f045edf
+commits: 0ab9ef6,0141274,7302f8f,f045edf,eb5251b
 ---
 
 # Summary: Issue #3 英语词表照片识别收尾
@@ -34,6 +34,19 @@ note＋关闭、GSD 留痕。
 - 0141274 feat(issue-3): POST /words/photo/recognize 草稿端点与服务装配
 - 7302f8f feat(issue-3): 家长端照片导入 tab（预览核对→编辑勾选→确认添加）
 - f045edf test(issue-3): 照片导入 e2e（只替换外部识别）＋Node 分类测试＋fixture 生成
+- eb5251b fix(issue-3): 识别后核对失败的诚实展示＋code-review 清理
+
+## 吸收外来审查修复（2026-10-12 上午，经协调者裁决）
+
+提交后发现工作区有并行会话（用户手动恢复的旧 /implement #03 执行器，
+配额恢复后复活）遗留的已暂存审查修复，经协调者升级指令与交接文档
+（handoff-issue3-20261012.md）确认后吸收为 eb5251b：真 bug 修复（核对
+快照拉取失败时空数组被当词库真值，已成功添加的词被误标「未添加成功」
+→ 改为服务器计数＋「未核对」诚实模式）＋新增 e2e 回归测试＋两处消重
+（parseEnvelope/renderStatusCell）＋live 测试边界注释。package.json
+暂存里夹带的 rt 音频诊断线两个测试挂载按归属退回工作区未提交。吸收后
+三道门禁重跑全绿（go test 15 包 / npm test / e2e:parent 10/10，含新
+回归测试）。
 
 ## 边界纪律（混合工作区）
 

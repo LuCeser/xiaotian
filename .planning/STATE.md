@@ -187,7 +187,7 @@ None yet.
 | 261011-b8u | 修复 13.3 UI 审计三项优先建议：chip 对比度（#047857/#b45309，实测 5.21:1/4.84:1）、tutor 回首页统一 #2563eb、tab 触控 60px | 2026-10-11 | d6870fe | complete | [261011-b8u-13-3-ui-chip-tab](./quick/261011-b8u-13-3-ui-chip-tab/) |
 | 261011-fw2 | 准备 Phase 13/13.1 收尾验收清单：13-FINAL-ACCEPTANCE-RUNBOOK.md（一次家庭真机课收口 17+6 项＋第三周证据；含词量预案 A/B/C、P0-P4/E1-E6/S1-S13） | 2026-10-11 | a7b1290 | — | [261011-fw2-phase-13-13-1-runbook-planning-phases-13](./quick/261011-fw2-phase-13-13-1-runbook-planning-phases-13/) |
 | 261011-h8a | 标记 Phase 13/13.1 完结（2026-10-11 用户决策：验收项由用户按 13-FINAL-ACCEPTANCE-RUNBOOK 单独处理）；STATE 转向 Phase 14 | 2026-10-11 | 81881b0 | — | [261011-h8a-phase-13-13-1-2026-10-11-roadmap-progres](./quick/261011-h8a-phase-13-13-1-2026-10-11-roadmap-progres/) |
-| 261012-aes | 完成 Issue #3 英语词表照片识别收尾：半成品盘点采纳、回归验证、原子提交、issue 勾选 | 2026-10-11 | f045edf | complete | [261012-aes-issue-3-issue](./quick/261012-aes-issue-3-issue/) |
+| 261012-aes | 完成 Issue #3 英语词表照片识别收尾：半成品盘点采纳、回归验证、原子提交、issue 勾选（含吸收并行会话审查修复 eb5251b） | 2026-10-12 | 0ab9ef6,0141274,7302f8f,f045edf,eb5251b | complete | [261012-aes-issue-3-issue](./quick/261012-aes-issue-3-issue/) |
 
 ### Roadmap Evolution
 
