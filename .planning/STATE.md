@@ -135,16 +135,16 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-源自 2026-07-25 架构评审（/architecture）：
-
-- [x] **统一连接注册表** — `infra.ConnectionRegistry` vs `ws.Hub` 双轨制，需 ADR 拍单一真相源（评审 P0-2）。`todos/pending/2026-07-25-unify-connection-registry-adr.md` → Resolved: Phase 07-03 D-04 — Hub is single source of truth; ConnectionRegistry soft-deprecated from metrics path; Hub.Stats() feeds ServerSnapshot via SetConnectionStatsProvider
-- [x] **解决 WorkerPool 建而不用** — 无任何 Submit 调用，接线 or 登记 deferred（评审 P1-3）。`todos/pending/2026-07-25-resolve-workerpool-unused.md` → Resolved: Phase 07-03 D-06 — session.audit.go calls pool.Submit for Create/UpdateState/AppendEvent (first real caller)
-- [x] **Phase 4 前定 FSRS+SQLite 所有权** — Python(vocab_manager) 已实现 FSRS+SQLite，Phase 4/5 重新定义范围，需 ADR（评审 P1-4）。`todos/pending/2026-07-25-fsrs-sqlite-ownership-adr.md` → Resolved: ADR created at `.planning/adr/2026-08-01-fsrs-sqlite-ownership.md`
-- [ ] **仓库卫生批处理** — README 漂移 / gitignore 根级二进制 / 残留 .gitkeep 清理（评审 P2-5/P2-6/P3-7）；**2026-09-09 扩容为总纲**：根目录未跟踪调试产物（test-\*.html/js/py、check_\*.py、nul、\_\_pycache\_\_ 等）+ 一次性分析文档（BUG-FIX-\*.md、SESSION-\*.md 等）盘点分类后合并或删除。`todos/pending/2026-07-25-repo-hygiene-readme-gitignore-cleanup.md`
-- [ ] **iOS WebSocket 音频播放问题研究** — iPad Safari 上 WebSocket 流式 TTS 播放问题，需调研当前方案能否达到预期效果。`todos/pending/2026-08-08-research-and-fix-ios-websocket-audio-playback-issues-for-ipa.md`
-
-> 注：评审 P0-1（WS 层未接入运行时，服务监听不到 :8080）未建 todo。
-> **2026-07-25 更新**：Phase 02 手动收尾已完成（02-02/02-03 SUMMARY 补写、flaky test 修复、ROADMAP 3/3）——但这两个计划交付的是 WS *库*（Hub/Client/Server/Router），**并非** main.go 运行时接线。P0-1（main.go 监听 :8080 + mux.HandleFunc("/ws", server.HandleWebSocket)）仍属 **Phase 1 Plan 08** 范围，当前未交付、未建 todo —— 建议后续为 P0-1 单独建 todo。
+- [2026-07-25] [planning] "Phase 4 前定 FSRS + SQLite 的 single-source-of-truth 所有权（需 ADR）" — [todo file](.planning/todos/pending/2026-07-25-fsrs-sqlite-ownership-adr.md)
+- [2026-07-25] [tooling] "仓库卫生总纲：README 漂移 + gitignore + 根级调试产物与文档的合并清理" — [todo file](.planning/todos/pending/2026-07-25-repo-hygiene-readme-gitignore-cleanup.md) — Needs **先盘点分类，再分批原子提交执行**（keep / move / delete / gitignore 四类，逐文件判定）：.
+- [2026-07-25] [infra] "解决 WorkerPool 建而不用：接线 or 登记 deferred" — [todo file](.planning/todos/pending/2026-07-25-resolve-workerpool-unused.md) — Needs 二选一，并在 ROADMAP / 对应 phase 计划里登记：.
+- [2026-07-25] [architecture] "紧急：ConnectionRegistry死代码清理（1,414行）- 删除或重新连接" — [todo file](.planning/todos/pending/2026-07-25-unify-connection-registry-adr.md) — Needs **决策点：立即选择以下方案之一**.
+- [2026-08-08] [infra] Research and fix iOS WebSocket audio playback issues for iPad devices — [todo file](.planning/todos/pending/2026-08-08-research-and-fix-ios-websocket-audio-playback-issues-for-ipa.md)
+- [2026-08-09] [session] "连接 auditEvent 到事件循环或删除" — [todo file](.planning/todos/pending/2026-08-09-audit-event-not-wired.md) — Needs **决策点：**.
+- [2026-08-09] [infra] "拆分 infra/config.go 上帝文件" — [todo file](.planning/todos/pending/2026-08-09-config-god-file-split.md) — Needs **按消费包拆分配置文件**.
+- [2026-08-09] [cmd-service] "提取 main.go 重复关闭序列帮助器" — [todo file](.planning/todos/pending/2026-08-09-main-shutdown-duplication.md) — Needs **提取 shutdownAll 帮助器**.
+- [2026-08-09] [session] "折叠 Session.Start 到单一生命周期构造函数" — [todo file](.planning/todos/pending/2026-08-09-session-start-lifecycle-duplication.md) — Needs **统一到单一生命周期构造函数**.
+- [2026-10-11] [planning] "下个里程碑总纲：验收项全量端到端自动化＋本地完整回归" — [todo file](.planning/todos/pending/2026-10-11-next-milestone-uat-e2e-automation-regression.md) — Needs 里程碑规划时的展开路径（作为 /gsd-new-milestone 或下阶段规划的输入）：.
 
 ### Blockers/Concerns
 
