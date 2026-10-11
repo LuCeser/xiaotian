@@ -140,7 +140,7 @@ body {
 
 .parent-tab {
   flex: 1;
-  min-height: 44px;
+  min-height: 60px; /* home doors / .rt-btn-home touch-target parity */
   padding: 8px 4px 10px;
   font-size: 16px;
   font-weight: 600;
@@ -1065,7 +1065,7 @@ body {
 
 .save-chip-saved {
   background: #ecfdf5;
-  color: var(--success);
+  color: #047857; /* green-700: 5.21:1 on this tint (AA); --success green-600 is 3.58:1 */
 }
 
 .save-chip-failed {
@@ -1075,7 +1075,7 @@ body {
 
 .save-chip-pending {
   background: #fffbeb;
-  color: var(--warning);
+  color: #b45309; /* amber-700: 4.84:1 on this tint (AA); --warning amber-600 is 3.07:1 */
 }
 
 .save-chip-unknown {
