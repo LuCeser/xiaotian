@@ -69,9 +69,9 @@ process.on('exit', () => fs.rmSync(isolatedRoot, { recursive: true, force: true 
 
 module.exports = defineConfig({
   testDir: './e2e',
-  // Only the parent suite rides this config; the student specs stay on the
+  // Only the parent suites ride this config; the student specs stay on the
   // legacy config (they need the .env-loaded dev service).
-  testMatch: /parent-management\.spec\.js/,
+  testMatch: /parent-(management|photo-import)\.spec\.js/,
   timeout: 120_000,
   retries: 0,
   // One isolated instance, one vocabulary DB: serialize like the legacy
@@ -82,25 +82,42 @@ module.exports = defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:18080',
   },
-  webServer: {
-    // Real service, real Python, real SQLite — only the machine-specific
-    // bits (interpreter, DB/data/cache dirs) ride env overrides into the
-    // per-run temp root. Everything else comes from the committed template.
-    cwd: repoRoot,
-    command: 'go run ./cmd/service -config tests/e2e/config.parent-e2e.yaml',
-    url: 'http://127.0.0.1:18080/',
-    reuseExistingServer: false, // never adopt a stray 18080 listener
-    env: {
-      ...process.env,
-      HTA_PYTHON_INTERPRETER: resolvePython(),
-      HTA_PYTHON_VOCABDBPATH: path.join(isolatedRoot, 'vocab.db'),
-      HTA_PYTHON_DATADIR: isolatedRoot,
-      HTA_PYTHON_CACHEDIR: path.join(isolatedRoot, 'cache', 'audio'),
-      HTA_PYTHON_MANIFESTDIR: path.join(isolatedRoot, 'cache'),
-      HTA_PYTHON_ENVFILE: path.join(isolatedRoot, 'dictation.env'),
-      HTA_TTS_SESSIONDIR: path.join(isolatedRoot, 'sessions'),
+  webServer: [
+    {
+      // The EXTERNAL vision boundary for the Issue #3 photo suite: a local
+      // OpenAI-compatible stub the service's mimo client is pointed at
+      // (voice.baseUrl + the dummy MIMO_API_KEY below). Everything behind
+      // the service — Python bridge, SQLite, the static pages — stays real.
+      cwd: repoRoot,
+      command: 'node tests/e2e/helpers/mimo-stub.js --port 18180 --fixtures tests/e2e/fixtures',
+      url: 'http://127.0.0.1:18180/healthz',
+      reuseExistingServer: false,
+      timeout: 20_000,
     },
-    // First `go run` compiles the whole module; 3 minutes covers a cold cache.
-    timeout: 180_000,
-  },
+    {
+      // Real service, real Python, real SQLite — only the machine-specific
+      // bits (interpreter, DB/data/cache dirs) ride env overrides into the
+      // per-run temp root. Everything else comes from the committed template.
+      cwd: repoRoot,
+      command: 'go run ./cmd/service -config tests/e2e/config.parent-e2e.yaml',
+      url: 'http://127.0.0.1:18080/',
+      reuseExistingServer: false, // never adopt a stray 18080 listener
+      env: {
+        ...process.env,
+        HTA_PYTHON_INTERPRETER: resolvePython(),
+        HTA_PYTHON_VOCABDBPATH: path.join(isolatedRoot, 'vocab.db'),
+        HTA_PYTHON_DATADIR: isolatedRoot,
+        HTA_PYTHON_CACHEDIR: path.join(isolatedRoot, 'cache', 'audio'),
+        HTA_PYTHON_MANIFESTDIR: path.join(isolatedRoot, 'cache'),
+        HTA_PYTHON_ENVFILE: path.join(isolatedRoot, 'dictation.env'),
+        HTA_TTS_SESSIONDIR: path.join(isolatedRoot, 'sessions'),
+        // Issue #3: dummy key turns the shared mimo client ON against the
+        // local stub (config.parent-e2e.yaml voice.baseUrl). Never a real
+        // secret — it authenticates to 127.0.0.1:18180 only.
+        MIMO_API_KEY: 'parent-e2e-local-stub-key',
+      },
+      // First `go run` compiles the whole module; 3 minutes covers a cold cache.
+      timeout: 180_000,
+    },
+  ],
 });

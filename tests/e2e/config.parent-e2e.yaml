@@ -6,18 +6,24 @@
 # the legacy playwright.config.js (review H-1 precedent): that config boots
 # the dev service via run.ps1 with .env — TTS/Mimo dependent student
 # smoke tests stay there. This template serves the parent REST surface,
-# which needs real Python + real SQLite but NO voice providers, NO TTS keys
-# and NO .env (MIMO_API_KEY absent → /rt answers voice_unavailable, /api/v1
-# and the static pages are fully functional).
+# which needs real Python + real SQLite. Since Issue #3 the launcher ALSO
+# sets a dummy MIMO_API_KEY and points voice.baseUrl at the local mimo
+# stub (tests/e2e/helpers/mimo-stub.js, port 18180): the EXTERNAL vision
+# service is the ONLY replaced piece — the photo-import suite's
+# fixed-response allowance. /rt consequently boots with live-looking
+# providers against the stub; only the photo spec exercises it (its
+# assertions read session_ready, which arrives before any stubbed turn
+# traffic matters).
 #
 #   1. Independent ports — 127.0.0.1:18080 (service) / 18081 (health), both
 #      distinct from run.ps1's 8080/8081, the TLS pair 8443, and the L3
-#      real-instance pair 8790/8791.
+#      real-instance pair 8790/8791. The mimo stub rides 18180.
 #   2. Independent state — the launcher overrides python.vocabDBPath and
 #      every python.*Dir via HTA_* env (viper env > file) into a per-run
 #      OS temp dir, removed on exit. The .scratch defaults below only make
 #      the template bootable standalone.
-#   3. No secrets — nothing from .env is loaded or needed.
+#   3. No secrets — nothing from .env is loaded or needed (the dummy
+#      MIMO_API_KEY authenticates against the LOCAL stub only).
 #
 # The interpreter is NOT listed as a real path: the launcher resolves the
 # local venv and injects it via HTA_PYTHON_INTERPRETER, so machine paths
@@ -51,3 +57,22 @@ python:
   cacheDir: ./.scratch/parent-e2e/cache/audio
   manifestDir: ./.scratch/parent-e2e/cache
   envFile: ./.scratch/parent-e2e/dictation.env
+
+# The EXTERNAL vision boundary (Issue #3): the parent photo-import suite
+# replaces only the mimo service. The launcher's dummy MIMO_API_KEY turns
+# the shared mimo client on, and this BaseURL sends every vision/chat call
+# to the local stub instead of api.xiaomimimo.com. Standalone boot without
+# the stub simply leaves the recognize endpoint erroring 502 on use — the
+# rest of the parent surface never calls it.
+voice:
+  baseUrl: http://127.0.0.1:18180/v1
+
+# /rt is exercised only by the photo suite's classroom-selection check: a
+# raw WebSocket session_init (mode=test for the full-reveal lesson view)
+# whose session_ready frame proves the photo-imported words were selected.
+# Pinned lesson key = the U-1 isolation primitive (never the daily r0-
+# derivation, never a production lesson row); port-qualified origins make
+# the Node ws client's exact Origin match.
+rt:
+  lessonId: e2e-parent-photo
+  allowedOrigins: [localhost, "127.0.0.1", "localhost:18080", "127.0.0.1:18080"]
