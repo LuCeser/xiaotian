@@ -182,7 +182,7 @@ func (tm *TurnManager) noDueWordsTextForNow() string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), practiceListTimeout)
 	defer cancel()
-	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{})
+	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{ParticipatingOnly: true})
 	if err != nil {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeProviderFailed),
@@ -252,7 +252,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 
 	// Random pick over the FULL vocabulary (read-only direct List — never
 	// RunDue's lock, T-13.1-12 accepts the single-family scan scale).
-	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{})
+	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{ParticipatingOnly: true})
 	if err != nil {
 		tm.failLessonInit(s)
 		return

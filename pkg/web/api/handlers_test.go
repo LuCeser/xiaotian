@@ -33,9 +33,12 @@ type fakeExecutor struct {
 	addErr    error
 	addCalls  []pybridge.AddOpts
 
-	editResult pybridge.EditResult
-	editErr    error
-	editCalls  []pybridge.EditOpts
+	editResult          pybridge.EditResult
+	editErr             error
+	editCalls           []pybridge.EditOpts
+	participationResult pybridge.SetParticipationResult
+	participationErr    error
+	participationCalls  []pybridge.SetParticipationOpts
 
 	renameResult pybridge.RenameUnitResult
 	renameErr    error
@@ -70,6 +73,11 @@ func (f *fakeExecutor) RunUnlock(_ context.Context, _ pybridge.UnlockOpts) (pybr
 func (f *fakeExecutor) RunEdit(_ context.Context, opts pybridge.EditOpts) (pybridge.EditResult, error) {
 	f.editCalls = append(f.editCalls, opts)
 	return f.editResult, f.editErr
+}
+
+func (f *fakeExecutor) RunSetParticipation(_ context.Context, opts pybridge.SetParticipationOpts) (pybridge.SetParticipationResult, error) {
+	f.participationCalls = append(f.participationCalls, opts)
+	return f.participationResult, f.participationErr
 }
 
 func (f *fakeExecutor) RunRenameUnit(_ context.Context, opts pybridge.RenameUnitOpts) (pybridge.RenameUnitResult, error) {
@@ -402,7 +410,7 @@ func TestListWords(t *testing.T) {
 	t.Run("response body shape is words array with snake_case fields", func(t *testing.T) {
 		repo := &fakeCardRepo{cards: []database.Card{
 			{ID: 7, Word: "apple", Meaning: "苹果", Example: "I eat an apple.",
-				Unit: "L1", Category: "english"},
+				Unit: "L1", Category: "english", Participates: true},
 		}}
 		h := newTestHandler(t, &fakeExecutor{}, repo)
 		req := httptest.NewRequest(http.MethodGet, "/words", nil)
@@ -411,12 +419,13 @@ func TestListWords(t *testing.T) {
 
 		var resp struct {
 			Words []struct {
-				ID       int64  `json:"id"`
-				Word     string `json:"word"`
-				Meaning  string `json:"meaning"`
-				Example  string `json:"example"`
-				Unit     string `json:"unit"`
-				Category string `json:"category"`
+				ID           int64  `json:"id"`
+				Word         string `json:"word"`
+				Meaning      string `json:"meaning"`
+				Example      string `json:"example"`
+				Unit         string `json:"unit"`
+				Category     string `json:"category"`
+				Participates bool   `json:"participates"`
 			} `json:"words"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -427,7 +436,7 @@ func TestListWords(t *testing.T) {
 		}
 		w := resp.Words[0]
 		if w.ID != 7 || w.Word != "apple" || w.Meaning != "苹果" ||
-			w.Example != "I eat an apple." || w.Unit != "L1" || w.Category != "english" {
+			w.Example != "I eat an apple." || w.Unit != "L1" || w.Category != "english" || !w.Participates {
 			t.Errorf("word entry = %+v, want the canned card fields", w)
 		}
 	})
@@ -444,6 +453,69 @@ func TestListWords(t *testing.T) {
 		}
 		if !strings.Contains(rec.Body.String(), `"code":"internal"`) {
 			t.Errorf("body = %s, want internal error envelope", rec.Body.String())
+		}
+	})
+}
+
+func TestSetWordParticipation(t *testing.T) {
+	t.Run("false maps only the participation field", func(t *testing.T) {
+		exec := &fakeExecutor{}
+		h := newTestHandler(t, exec, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodPut, "/words/participation", strings.NewReader(`{"ids":[42,43],"participates":false}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if len(exec.participationCalls) != 1 {
+			t.Fatalf("RunSetParticipation calls = %d, want 1", len(exec.participationCalls))
+		}
+		got := exec.participationCalls[0]
+		if !reflect.DeepEqual(got.IDs, []int64{42, 43}) || got.Participates {
+			t.Fatalf("SetParticipationOpts = %+v, want ids [42 43] and false", got)
+		}
+	})
+	t.Run("missing field is rejected before Python", func(t *testing.T) {
+		exec := &fakeExecutor{}
+		h := newTestHandler(t, exec, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodPut, "/words/participation", strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		if len(exec.participationCalls) != 0 {
+			t.Fatalf("RunSetParticipation calls = %d, want 0", len(exec.participationCalls))
+		}
+	})
+	t.Run("bridge failure is reported", func(t *testing.T) {
+		exec := &fakeExecutor{participationErr: pybridge.ErrPythonTimeout}
+		h := newTestHandler(t, exec, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodPut, "/words/participation", strings.NewReader(`{"ids":[42],"participates":true}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"python_failed"`) {
+			t.Fatalf("body = %s", rec.Body.String())
+		}
+	})
+	t.Run("missing id diagnostic maps to 404 not_found (all-or-nothing rollback)", func(t *testing.T) {
+		exec := &fakeExecutor{participationErr: &pybridge.ExitError{
+			Cmd: "set-participation", ExitCode: 1,
+			Stdout: "Error: card ids not found: 7, 42", Err: pybridge.ErrPythonExit,
+		}}
+		h := newTestHandler(t, exec, &fakeCardRepo{})
+		req := httptest.NewRequest(http.MethodPut, "/words/participation", strings.NewReader(`{"ids":[7,42],"participates":false}`))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"not_found"`) ||
+			!strings.Contains(rec.Body.String(), "card ids not found: 7, 42") {
+			t.Fatalf("body = %s, want not_found envelope carrying the missing-id diagnostic", rec.Body.String())
 		}
 	})
 }

@@ -30,9 +30,11 @@ package pybridge
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -512,6 +514,252 @@ func TestE2E_RunEditRoundTrip(t *testing.T) {
 	}
 	if row["unit"] != "U1" {
 		t.Errorf("unit changed by word-only edit: %q", row["unit"])
+	}
+}
+
+func TestE2E_ParticipationExcludesDueAndPreservesFSRS(t *testing.T) {
+	b, _, cfg := e2eBridge(t, nil)
+	if _, err := b.RunAdd(context.Background(), AddOpts{
+		Category: "english", Unit: "U1",
+		Entries: []AddEntry{{Word: "apple", Meaning: "苹果"}},
+	}); err != nil {
+		t.Fatalf("RunAdd: %v", err)
+	}
+	before := fsrsCardBytes(t, cfg.VocabDBPath, "1")
+	if _, err := b.RunSetParticipation(context.Background(), SetParticipationOpts{IDs: []int64{1}, Participates: false}); err != nil {
+		t.Fatalf("disable participation: %v", err)
+	}
+	if after := fsrsCardBytes(t, cfg.VocabDBPath, "1"); after != before {
+		t.Fatalf("FSRS changed while disabling: before=%q after=%q", before, after)
+	}
+	due, err := b.RunDue(context.Background(), DueOpts{Category: "english", Peek: true})
+	if err != nil {
+		t.Fatalf("RunDue: %v", err)
+	}
+	if len(due.Cards) != 0 {
+		t.Fatalf("disabled card returned by due: %+v", due)
+	}
+	if _, err := b.RunSetParticipation(context.Background(), SetParticipationOpts{IDs: []int64{1}, Participates: true}); err != nil {
+		t.Fatalf("enable participation: %v", err)
+	}
+	due, err = b.RunDue(context.Background(), DueOpts{Category: "english", Peek: true})
+	if err != nil || len(due.Cards) != 1 || due.Cards[0].ID != 1 {
+		t.Fatalf("reenabled due = %+v, err=%v; want card 1", due, err)
+	}
+}
+
+// e2eOpenDB opens the vocabulary DB read-only through the same pure-Go
+// driver fsrsCardBytes uses, for the participation suite's direct column
+// assertions.
+func e2eOpenDB(t *testing.T, dbPath string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open %s: %v", dbPath, err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// e2eFsrsSnapshot hashes every card's fsrs_card column in id order — the
+// byte-level baseline for "participation changes never touch learning
+// state" at batch scale.
+func e2eFsrsSnapshot(t *testing.T, dbPath string) string {
+	t.Helper()
+	db := e2eOpenDB(t, dbPath)
+	rows, err := db.Query("SELECT id, fsrs_card FROM cards ORDER BY id")
+	if err != nil {
+		t.Fatalf("snapshot query: %v", err)
+	}
+	defer rows.Close()
+	h := sha256.New()
+	for rows.Next() {
+		var id int
+		var fsrs string
+		if err := rows.Scan(&id, &fsrs); err != nil {
+			t.Fatalf("snapshot scan: %v", err)
+		}
+		fmt.Fprintf(h, "%d:%s\n", id, fsrs)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("snapshot rows: %v", err)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// e2eReviewLogsCount counts the Python-owned review history rows.
+func e2eReviewLogsCount(t *testing.T, dbPath string) int {
+	t.Helper()
+	db := e2eOpenDB(t, dbPath)
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM review_logs").Scan(&n); err != nil {
+		t.Fatalf("count review_logs: %v", err)
+	}
+	return n
+}
+
+// e2eParticipates reads one card's classroom-eligibility flag straight
+// from SQLite.
+func e2eParticipates(t *testing.T, dbPath string, id int64) bool {
+	t.Helper()
+	db := e2eOpenDB(t, dbPath)
+	var flag int
+	if err := db.QueryRow("SELECT participates FROM cards WHERE id = ?", id).Scan(&flag); err != nil {
+		t.Fatalf("read participates id=%d: %v", id, err)
+	}
+	return flag == 1
+}
+
+// TestE2E_SetParticipationBatch100 proves the batch contract at the scale
+// the parent UI can reach — ONE request = ONE Python process = ONE SQLite
+// transaction (the Standards finding that killed the per-card fan-out):
+//
+//   - 100 cards seeded in one RunAdd (the entry cap), three of them given
+//     real review history first;
+//   - 60 disabled in one RunSetParticipation; due (peek) then returns
+//     exactly the 40 participants;
+//   - fsrs_card bytes for ALL 100 cards and the review_logs count are
+//     identical before/after every participation write;
+//   - re-enabling restores due to 100;
+//   - a batch naming a missing id fails with the not-found stdout
+//     diagnostic AND rolls back atomically — the surviving card keeps its
+//     previous flag (all-or-nothing, never a partial apply).
+func TestE2E_SetParticipationBatch100(t *testing.T) {
+	b, _, cfg := e2eBridge(t, nil)
+
+	entries := make([]AddEntry, 0, 100)
+	for i := 1; i <= 100; i++ {
+		entries = append(entries, AddEntry{
+			Word:    fmt.Sprintf("batch%03d", i),
+			Meaning: "批量验证",
+		})
+	}
+	add, err := b.RunAdd(context.Background(), AddOpts{
+		Category: "english", Unit: "batch100", Entries: entries,
+	})
+	if err != nil {
+		t.Fatalf("RunAdd: %v", err)
+	}
+	if add.Added != 100 {
+		t.Fatalf("RunAdd added = %d, want 100", add.Added)
+	}
+
+	// Real learning history on three cards: review_logs rows + fsrs_card
+	// moved off the fresh-card bytes (the exact state a broken batch write
+	// would destroy).
+	if _, err := b.RunReview(context.Background(), ReviewOpts{
+		Results:  map[string]string{"batch001": "good", "batch002": "good", "batch003": "hard"},
+		Category: "english",
+	}); err != nil {
+		t.Fatalf("seed reviews: %v", err)
+	}
+	beforeFsrs := e2eFsrsSnapshot(t, cfg.VocabDBPath)
+	if logs := e2eReviewLogsCount(t, cfg.VocabDBPath); logs != 3 {
+		t.Fatalf("review_logs after seeding = %d, want 3", logs)
+	}
+
+	// One batch disables ids 41..100 (fresh DB: ids are 1..100).
+	ids := make([]int64, 0, 60)
+	for id := int64(41); id <= 100; id++ {
+		ids = append(ids, id)
+	}
+	res, err := b.RunSetParticipation(context.Background(), SetParticipationOpts{IDs: ids, Participates: false})
+	if err != nil {
+		t.Fatalf("disable batch: %v", err)
+	}
+	if res.Requested != 60 || res.Updated != 60 || len(res.Missing) != 0 {
+		t.Fatalf("batch result = %+v, want requested/updated 60, no missing", res)
+	}
+
+	due, err := b.RunDue(context.Background(), DueOpts{Category: "english", Peek: true})
+	if err != nil {
+		t.Fatalf("RunDue after disable: %v", err)
+	}
+	// 40 participants, of which the 3 reviewed cards (ids 1..3) sit in a
+	// learning step (+1min/+10min) — scheduled, not due now. So exactly 37
+	// are due, every one of them a participant.
+	if len(due.Cards) != 37 {
+		t.Fatalf("due cards after disabling 60 of 100 = %d, want 37 (40 participants minus 3 in a learning step)", len(due.Cards))
+	}
+	for _, c := range due.Cards {
+		if c.ID > 40 {
+			t.Fatalf("disabled card %d returned by due (exclusion broken)", c.ID)
+		}
+	}
+	if got := e2eFsrsSnapshot(t, cfg.VocabDBPath); got != beforeFsrs {
+		t.Fatal("fsrs_card bytes changed across the 60-card disable (learning state must be untouched)")
+	}
+	if logs := e2eReviewLogsCount(t, cfg.VocabDBPath); logs != 3 {
+		t.Fatalf("review_logs after disable = %d, want 3", logs)
+	}
+
+	// Re-enable restores the pool — the flag is data, not a deletion. The
+	// 60 re-enabled cards are fresh (never reviewed) so all are due; the
+	// same 37+60 arithmetic holds.
+	if _, err := b.RunSetParticipation(context.Background(), SetParticipationOpts{IDs: ids, Participates: true}); err != nil {
+		t.Fatalf("enable batch: %v", err)
+	}
+	due, err = b.RunDue(context.Background(), DueOpts{Category: "english", Peek: true})
+	if err != nil {
+		t.Fatalf("RunDue after re-enable: %v", err)
+	}
+	if len(due.Cards) != 97 {
+		t.Fatalf("due cards after re-enable = %d, want 97 (100 minus 3 in a learning step)", len(due.Cards))
+	}
+	if got := e2eFsrsSnapshot(t, cfg.VocabDBPath); got != beforeFsrs {
+		t.Fatal("fsrs_card bytes changed across disable+enable round trip")
+	}
+
+	// All-or-nothing: a batch naming a missing id exits 1 with the
+	// not-found stdout diagnostic, and card 7 (which DOES exist) keeps its
+	// pre-call state — the rollback proof.
+	_, err = b.RunSetParticipation(context.Background(), SetParticipationOpts{
+		IDs: []int64{7, 999999}, Participates: false,
+	})
+	if err == nil {
+		t.Fatal("batch with missing id returned nil error, want ExitError")
+	}
+	var exitErr *ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("error = %v, want *ExitError", err)
+	}
+	if !strings.Contains(exitErr.Stdout, "card ids not found: 999999") {
+		t.Fatalf("stdout = %q, want the missing-id diagnostic", exitErr.Stdout)
+	}
+	if !e2eParticipates(t, cfg.VocabDBPath, 7) {
+		t.Fatal("card 7 disabled by a rolled-back batch (partial apply leaked)")
+	}
+	if got := e2eFsrsSnapshot(t, cfg.VocabDBPath); got != beforeFsrs {
+		t.Fatal("fsrs_card bytes changed across the rolled-back batch")
+	}
+}
+
+// TestE2E_ParticipationAppliesToChineseCategory pins the AC「英语、语文沿用
+// 统一管理入口」on the selection side: the participates filter rides the
+// SAME due query for the chinese category (语文), not just english.
+func TestE2E_ParticipationAppliesToChineseCategory(t *testing.T) {
+	b, _, _ := e2eBridge(t, nil)
+	if _, err := b.RunAdd(context.Background(), AddOpts{
+		Category: "chinese", Unit: "语文一组",
+		Entries: []AddEntry{
+			{Word: "春晓", Meaning: "spring dawn"},
+			{Word: "咏鹅", Meaning: "ode to the goose"},
+		},
+	}); err != nil {
+		t.Fatalf("RunAdd chinese: %v", err)
+	}
+	// Fresh DB ⇒ ids 1..2; disable 春晓 (id 1) only.
+	if _, err := b.RunSetParticipation(context.Background(), SetParticipationOpts{
+		IDs: []int64{1}, Participates: false,
+	}); err != nil {
+		t.Fatalf("disable chinese card: %v", err)
+	}
+	due, err := b.RunDue(context.Background(), DueOpts{Category: "chinese", Peek: true})
+	if err != nil {
+		t.Fatalf("RunDue chinese: %v", err)
+	}
+	if len(due.Cards) != 1 || due.Cards[0].Word != "咏鹅" {
+		t.Fatalf("chinese due = %+v, want only the participating 咏鹅", due.Cards)
 	}
 }
 

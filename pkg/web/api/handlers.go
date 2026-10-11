@@ -82,6 +82,7 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, lessons *
 	mux.HandleFunc("POST /words", h.addWords)
 	mux.HandleFunc("GET /units", h.listUnits)
 	mux.HandleFunc("PUT /words/{id}", h.editWord)
+	mux.HandleFunc("PUT /words/participation", h.setWordParticipation)
 	mux.HandleFunc("POST /units/rename", h.renameUnit)
 	mux.HandleFunc("DELETE /words", h.deleteWords)
 	mux.HandleFunc("GET /settings/fsrs", h.getFSRS)
@@ -92,6 +93,34 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, lessons *
 	mux.HandleFunc("GET /lessons", h.listLessons)
 	mux.HandleFunc("GET /lessons/{id}", h.getLesson)
 	return mux
+}
+
+// setWordParticipation handles PUT /words/participation with body
+// {"ids", "participates"} (Issue #2): batch classroom-eligibility changes
+// in ONE request → one Python process → one SQLite transaction. Validation
+// (1..500 unique positive ids, explicit participates) runs here before the
+// bridge; the script's all-or-nothing semantics mean a missing id surfaces
+// as a 404 not_found via mapBridgeError's stdout mapping (Pitfall 2), and
+// a 200 always means every requested card was updated — the parent UI can
+// trust success as full success. Success responds 200 with the script's
+// {requested, updated, missing} payload.
+func (h *handler) setWordParticipation(w http.ResponseWriter, r *http.Request) {
+	var req ParticipationRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if msg := validateParticipationRequest(&req); msg != "" {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, msg)
+		return
+	}
+	result, err := h.exec.RunSetParticipation(r.Context(), pybridge.SetParticipationOpts{
+		IDs: req.IDs, Participates: *req.Participates,
+	})
+	if err != nil {
+		h.mapBridgeError(w, "set word participation", err)
+		return
+	}
+	writeJSON(w, result)
 }
 
 // stdoutNotFoundMsg inspects the captured subprocess stdout for the
@@ -256,12 +285,13 @@ func (h *handler) deleteWords(w http.ResponseWriter, r *http.Request) {
 // wordJSON is one element of the GET /words response array. Field tags
 // are snake_case per the shared response convention (health.go:18-26).
 type wordJSON struct {
-	ID       int64  `json:"id"`
-	Word     string `json:"word"`
-	Meaning  string `json:"meaning"`
-	Example  string `json:"example"`
-	Unit     string `json:"unit"`
-	Category string `json:"category"`
+	ID           int64  `json:"id"`
+	Word         string `json:"word"`
+	Meaning      string `json:"meaning"`
+	Example      string `json:"example"`
+	Unit         string `json:"unit"`
+	Category     string `json:"category"`
+	Participates bool   `json:"participates"`
 }
 
 // wordsResponse is the GET /words response envelope.
@@ -340,12 +370,13 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 	words := make([]wordJSON, 0, len(cards))
 	for _, c := range cards {
 		words = append(words, wordJSON{
-			ID:       c.ID,
-			Word:     c.Word,
-			Meaning:  c.Meaning,
-			Example:  c.Example,
-			Unit:     c.Unit,
-			Category: c.Category,
+			ID:           c.ID,
+			Word:         c.Word,
+			Meaning:      c.Meaning,
+			Example:      c.Example,
+			Unit:         c.Unit,
+			Category:     c.Category,
+			Participates: c.Participates,
 		})
 	}
 	writeJSON(w, wordsResponse{Words: words})

@@ -155,6 +155,7 @@ def init_db(db):
             unit TEXT NOT NULL DEFAULT '',
             category TEXT NOT NULL DEFAULT 'english',
             fsrs_card TEXT NOT NULL DEFAULT '',
+            participates INTEGER NOT NULL DEFAULT 1 CHECK (participates IN (0, 1)),
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(word, category)
         );
@@ -176,6 +177,9 @@ def init_db(db):
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_cards_fetch_lock ON cards(category, fetch_locked_until)"
         )
+    if "participates" not in cols:
+        db.execute("ALTER TABLE cards ADD COLUMN participates INTEGER NOT NULL DEFAULT 1 CHECK (participates IN (0, 1))")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_cards_participates ON cards(category, participates)")
     db.commit()
 
 
@@ -266,7 +270,7 @@ def cmd_due(db, args):
     query = """
         SELECT c.id, c.word, c.meaning, c.example, c.unit, c.category, c.fsrs_card
         FROM cards c
-        WHERE c.category = ?
+        WHERE c.category = ? AND c.participates = 1
     """
     params = [args.category or "english"]
 
@@ -387,7 +391,7 @@ def cmd_new(db, args):
     query = """
         SELECT c.id, c.word, c.meaning, c.example, c.unit, c.category
         FROM cards c
-        WHERE c.category = ?
+        WHERE c.category = ? AND c.participates = 1
     """
     params = [args.category or "english"]
 
@@ -551,7 +555,7 @@ def cmd_stats(db, args):
 
     now = datetime.now(timezone.utc)
     rows = db.execute(
-        "SELECT id, fsrs_card FROM cards WHERE category = ?", (category,)
+        "SELECT id, fsrs_card FROM cards WHERE category = ? AND participates = 1", (category,)
     ).fetchall()
 
     due_count = 0
@@ -564,7 +568,7 @@ def cmd_stats(db, args):
 
     # Preload fetch_locked_until for all rows to avoid N+1 queries
     lock_rows = db.execute(
-        "SELECT id, fetch_locked_until FROM cards WHERE category = ?",
+        "SELECT id, fetch_locked_until FROM cards WHERE category = ? AND participates = 1",
         (category,),
     ).fetchall()
     lock_map = {r["id"]: r["fetch_locked_until"] for r in lock_rows}
@@ -625,7 +629,7 @@ def cmd_stats(db, args):
 def cmd_list(db, args):
     """List all words."""
     category = args.category or "english"
-    query = "SELECT id, word, meaning, example, unit FROM cards WHERE category = ?"
+    query = "SELECT id, word, meaning, example, unit, participates FROM cards WHERE category = ?"
     params = [category]
 
     if args.unit:
@@ -634,7 +638,7 @@ def cmd_list(db, args):
 
     rows = db.execute(query, params).fetchall()
     words = [
-        {"id": r["id"], "word": r["word"], "meaning": r["meaning"], "example": r["example"], "unit": r["unit"]}
+        {"id": r["id"], "word": r["word"], "meaning": r["meaning"], "example": r["example"], "unit": r["unit"], "participates": bool(r["participates"])}
         for r in rows
     ]
     print(json.dumps(words, ensure_ascii=False, indent=2))
@@ -644,7 +648,7 @@ def cmd_export(db, args):
     """Export cards in one category with their FSRS state."""
     category = args.category or "english"
     rows = db.execute(
-        "SELECT id, word, meaning, example, unit, category, fsrs_card, created_at, fetch_locked_until FROM cards WHERE category = ?",
+        "SELECT id, word, meaning, example, unit, category, fsrs_card, created_at, fetch_locked_until, participates FROM cards WHERE category = ?",
         (category,),
     ).fetchall()
 
@@ -666,6 +670,7 @@ def cmd_export(db, args):
             "difficulty": round(fsrs_card.difficulty, 2) if fsrs_card.difficulty else 0,
             "due": fsrs_card.due.astimezone(CST).strftime("%Y-%m-%d %H:%M"),
             "fetch_locked_until": row["fetch_locked_until"],
+            "participates": bool(row["participates"]),
         })
 
     print(json.dumps(export, ensure_ascii=False, indent=2))
@@ -716,6 +721,47 @@ def cmd_edit(db, args):
 
     updated = db.execute("SELECT word FROM cards WHERE id = ?", (card_id,)).fetchone()
     print(json.dumps({"edited": {"id": card_id, "word": updated["word"]}}, ensure_ascii=False))
+
+
+def cmd_set_participation(db, args):
+    """Set classroom eligibility for a batch without changing learning data.
+
+    All-or-nothing: the existence check and the update run inside ONE
+    BEGIN IMMEDIATE transaction (same pattern as cmd_due), and any missing
+    id rolls the whole batch back — the caller never sees "updated" with a
+    partially applied set. The rollback diagnostic keeps the "not found"
+    wording so the Go handler's stdout not-found mapping (Pitfall 2)
+    surfaces it as an honest 404 instead of a partial success.
+    """
+    try:
+        ids = json.loads(args.ids)
+    except json.JSONDecodeError:
+        print("Error: --ids must be a JSON array of integers")
+        sys.exit(1)
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 500 or
+            not all(isinstance(i, int) and not isinstance(i, bool) and i > 0 for i in ids) or
+            len(set(ids)) != len(ids)):
+        print("Error: --ids must contain 1..500 unique positive integers")
+        sys.exit(1)
+    placeholders = ",".join("?" for _ in ids)
+    db.execute("BEGIN IMMEDIATE")
+    existing = {row["id"] for row in db.execute(
+        f"SELECT id FROM cards WHERE id IN ({placeholders})", ids
+    ).fetchall()}
+    missing = [card_id for card_id in ids if card_id not in existing]
+    if missing:
+        db.rollback()
+        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
+        sys.exit(1)
+    value = 1 if args.participates == "true" else 0
+    db.execute(
+        f"UPDATE cards SET participates = ? WHERE id IN ({placeholders})",
+        [value] + ids,
+    )
+    db.commit()
+    print(json.dumps({
+        "requested": len(ids), "updated": len(existing), "missing": [],
+    }, ensure_ascii=False))
 
 
 def cmd_rename_unit(db, args):
@@ -913,6 +959,10 @@ def main():
     p_edit.add_argument("--example", default=None, help="New example (absent keeps current; empty string clears)")
     p_edit.add_argument("--unit", default=None, help="New unit (absent keeps current; empty string clears)")
 
+    p_participation = subparsers.add_parser("set-participation", help="Set classroom participation for cards")
+    p_participation.add_argument("--ids", required=True, help="JSON array of card IDs")
+    p_participation.add_argument("--participates", choices=("true", "false"), required=True)
+
     # delete-words
     p_delete = subparsers.add_parser("delete-words", help="Delete words by unit or word list (dry-run by default)")
     delete_target = p_delete.add_mutually_exclusive_group(required=True)
@@ -951,6 +1001,7 @@ def main():
         "export": cmd_export,
         "reset": cmd_reset,
         "edit": cmd_edit,
+        "set-participation": cmd_set_participation,
         "rename-unit": cmd_rename_unit,
         "delete-words": cmd_delete_words,
         "merge-units": cmd_merge_units,

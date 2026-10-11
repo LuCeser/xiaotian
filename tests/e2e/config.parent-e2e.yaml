@@ -1,0 +1,53 @@
+# config.parent-e2e.yaml — isolated-instance template for the parent
+# management browser suite (tests/playwright.parent.config.js, Issue #2).
+#
+# Same three isolation primitives as tests/e2e-rt/real/config.e2e.yaml
+# (layer 3 of docs/E2E-ISOLATION-SPEC.md), kept DELIBERATELY SEPARATE from
+# the legacy playwright.config.js (review H-1 precedent): that config boots
+# the dev service via run.ps1 with .env — TTS/Mimo dependent student
+# smoke tests stay there. This template serves the parent REST surface,
+# which needs real Python + real SQLite but NO voice providers, NO TTS keys
+# and NO .env (MIMO_API_KEY absent → /rt answers voice_unavailable, /api/v1
+# and the static pages are fully functional).
+#
+#   1. Independent ports — 127.0.0.1:18080 (service) / 18081 (health), both
+#      distinct from run.ps1's 8080/8081, the TLS pair 8443, and the L3
+#      real-instance pair 8790/8791.
+#   2. Independent state — the launcher overrides python.vocabDBPath and
+#      every python.*Dir via HTA_* env (viper env > file) into a per-run
+#      OS temp dir, removed on exit. The .scratch defaults below only make
+#      the template bootable standalone.
+#   3. No secrets — nothing from .env is loaded or needed.
+#
+# The interpreter is NOT listed as a real path: the launcher resolves the
+# local venv and injects it via HTA_PYTHON_INTERPRETER, so machine paths
+# never enter this committed template.
+#
+# Relative paths resolve against the repo root (the launcher pins CWD
+# there), matching config.yaml's local-dev conventions.
+
+server:
+  # Isolated public listener (REST /api/v1 + static pages + /ws + /rt).
+  addr: "127.0.0.1:18080"
+  readTimeout: 10s
+  writeTimeout: 10s
+  # Isolated health listener — must differ alongside addr.
+  healthAddr: "127.0.0.1:18081"
+  # Static parent/student pages, resolved from the repo root.
+  staticDir: ./pkg/web/static
+  staticRoute: /
+
+python:
+  # Placeholder only — overridden by HTA_PYTHON_INTERPRETER at boot.
+  interpreter: python
+  scriptsDir: third_party/python
+  # Verbatim argv (no scriptsDir join), so the directory prefix is included.
+  vocabScript: third_party/python/vocab_manager.py
+  pregenScript: third_party/python/pregenerate_dictation.py
+  # Standalone defaults; the launcher's HTA_* env points these at a
+  # per-run temp dir instead.
+  vocabDBPath: ./.scratch/parent-e2e/vocab.db
+  dataDir: ./.scratch/parent-e2e
+  cacheDir: ./.scratch/parent-e2e/cache/audio
+  manifestDir: ./.scratch/parent-e2e/cache
+  envFile: ./.scratch/parent-e2e/dictation.env

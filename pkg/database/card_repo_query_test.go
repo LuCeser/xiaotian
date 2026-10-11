@@ -211,6 +211,22 @@ func TestCardRepoList(t *testing.T) {
 			t.Fatalf("List combined = %+v, want exactly under_score", cards)
 		}
 	})
+
+	t.Run("participating only excludes disabled cards", func(t *testing.T) {
+		repo, db := newQueryTestRepo(t)
+		if _, err := db.Exec("UPDATE cards SET participates = 0 WHERE word = 'apple'"); err != nil {
+			t.Fatalf("disable apple: %v", err)
+		}
+		cards, err := repo.List(context.Background(), CardFilter{ParticipatingOnly: true})
+		if err != nil {
+			t.Fatalf("List(participating only) error = %v", err)
+		}
+		for _, card := range cards {
+			if card.Word == "apple" {
+				t.Fatal("disabled apple was returned by participating-only query")
+			}
+		}
+	})
 }
 
 // Expected CountByUnit shapes over newQueryTestRepo's fixtures:

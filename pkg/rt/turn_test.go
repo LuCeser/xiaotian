@@ -4593,20 +4593,36 @@ func TestNextDueDays(t *testing.T) {
 // fakePracticeSource is the scripted PracticeSource: a fixed card pool with
 // call recording (the practice init must List exactly once).
 type fakePracticeSource struct {
-	mu    sync.Mutex
-	cards []database.Card
-	err   error
-	calls int
+	mu      sync.Mutex
+	cards   []database.Card
+	err     error
+	calls   int
+	filters []database.CardFilter
 }
 
-func (f *fakePracticeSource) List(_ context.Context, _ database.CardFilter) ([]database.Card, error) {
+func (f *fakePracticeSource) List(_ context.Context, filter database.CardFilter) ([]database.Card, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.filters = append(f.filters, filter)
 	if f.err != nil {
 		return nil, f.err
 	}
 	return append([]database.Card(nil), f.cards...), nil
+}
+
+func (f *fakePracticeSource) allCallsParticipatingOnly() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.filters) == 0 {
+		return false
+	}
+	for _, filter := range f.filters {
+		if !filter.ParticipatingOnly {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *fakePracticeSource) listCalls() int {
@@ -4707,6 +4723,9 @@ func TestNoDueWordsWording(t *testing.T) {
 		}
 		if got := practice.listCalls(); got != 1 {
 			t.Errorf("Practice.List calls = %d, want 1 (cards listed once)", got)
+		}
+		if !practice.allCallsParticipatingOnly() {
+			t.Error("no-due lookup did not restrict cards to parent-enabled participation")
 		}
 	})
 

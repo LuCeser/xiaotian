@@ -215,6 +215,12 @@
     editWord: function (id, payload) {
       return fetchJSON('PUT', '/api/v1/words/' + encodeURIComponent(id), payload);
     },
+    setParticipation: function (ids, enabled) {
+      return fetchJSON('PUT', '/api/v1/words/participation', {
+        ids: ids,
+        participates: enabled,
+      });
+    },
     renameUnit: function (oldUnit, newUnit, category) {
       return fetchJSON('POST', '/api/v1/units/rename', {
         old_unit: oldUnit,

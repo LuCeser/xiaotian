@@ -34,6 +34,7 @@ type Card struct {
 	FsrsCard         string // opaque JSON — never parsed in Go (Pitfall 5)
 	CreatedAt        string
 	FetchLockedUntil string // nullable; empty string when NULL
+	Participates     bool   // eligible for automatic dictation/practice selection
 }
 
 // CardRepository provides read-only access to the Python-owned cards table.
@@ -96,13 +97,47 @@ func NewCardRepository(db *sql.DB, logger infra.Logger) (CardRepository, error) 
 // fetch_locked_until migration (lines 126-128).
 // NEVER use SELECT * — explicit columns fail loudly on schema drift
 // (RESEARCH Pitfall 4).
-const cardColumns = "id, word, meaning, example, unit, category, fsrs_card, created_at, fetch_locked_until"
+const cardBaseColumns = "id, word, meaning, example, unit, category, fsrs_card, created_at, fetch_locked_until"
+
+// cardColumns resolves the Python-owned schema on each read. Existing
+// installations may be opened before any Python command has run the new
+// migration; those rows participate by default. Rechecking lets the same
+// service process observe the column as soon as Python adds it.
+func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, error) {
+	rows, err := r.db.QueryContext(ctx, "PRAGMA table_info(cards)")
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+	hasParticipation := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return "", false, err
+		}
+		if name == "participates" {
+			hasParticipation = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	if hasParticipation {
+		return cardBaseColumns + ", participates", true, nil
+	}
+	return cardBaseColumns + ", 1 AS participates", false, nil
+}
 
 // CardFilter narrows a CardRepository.List query. Every field is optional —
 // an empty field is omitted from the WHERE clause (empty filter = all
 // cards). Query is a substring match against word OR meaning (LIKE with
 // user-supplied wildcards escaped, RESEARCH Pitfall 6).
 type CardFilter struct {
+	// ParticipatingOnly restricts automatic classroom selection to cards
+	// enabled by the parent. Management views leave this false.
+	ParticipatingOnly bool
 	// Category restricts to one vocabulary category ("english"/"chinese").
 	// Empty means all categories.
 	Category string
@@ -131,6 +166,7 @@ func scanCard(row interface{ Scan(...any) error }) (Card, error) {
 		&c.FsrsCard,
 		&c.CreatedAt,
 		&fetchLocked,
+		&c.Participates,
 	)
 	if err != nil {
 		return Card{}, err
@@ -146,8 +182,12 @@ func scanCard(row interface{ Scan(...any) error }) (Card, error) {
 // GetByID returns the card with the given database ID.
 // Returns ErrCardNotFound when no card exists.
 func (r *sqliteCardRepository) GetByID(ctx context.Context, id int64) (Card, error) {
+	columns, _, err := r.cardColumns(ctx)
+	if err != nil {
+		return Card{}, errors.Wrap(err, "card schema")
+	}
 	c, err := scanCard(r.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT %s FROM cards WHERE id = ?", cardColumns),
+		fmt.Sprintf("SELECT %s FROM cards WHERE id = ?", columns),
 		id,
 	))
 	if err != nil {
@@ -168,7 +208,11 @@ func (r *sqliteCardRepository) GetByID(ctx context.Context, id int64) (Card, err
 // ListByUnit returns cards in the named unit. An empty unit string
 // returns all cards.
 func (r *sqliteCardRepository) ListByUnit(ctx context.Context, unit string) ([]Card, error) {
-	query := fmt.Sprintf("SELECT %s FROM cards", cardColumns)
+	columns, _, err := r.cardColumns(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "card schema")
+	}
+	query := fmt.Sprintf("SELECT %s FROM cards", columns)
 	args := []any{}
 
 	if unit != "" {
@@ -242,31 +286,37 @@ func escapeLike(s string) string {
 // (never string-concatenated user input), and the result is ordered by
 // (unit, id) for a stable browse-list rendering. Empty filter = all cards.
 func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]Card, error) {
-	query := fmt.Sprintf("SELECT %s FROM cards", cardColumns)
+	columns, hasParticipation, err := r.cardColumns(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "card schema")
+	}
+	query := fmt.Sprintf("SELECT %s FROM cards", columns)
 	args := []any{}
-
+	// First predicate needs WHERE, the rest AND — one flag tracks it across
+	// every filter field (participation included).
+	predicateOpen := false
+	addPredicate := func(sql string, values ...any) {
+		if predicateOpen {
+			query += " AND"
+		} else {
+			query += " WHERE"
+			predicateOpen = true
+		}
+		query += sql
+		args = append(args, values...)
+	}
+	if filter.ParticipatingOnly && hasParticipation {
+		addPredicate(" participates = 1")
+	}
 	if filter.Category != "" {
-		query += " WHERE category = ?"
-		args = append(args, filter.Category)
+		addPredicate(" category = ?", filter.Category)
 	}
 	if filter.Unit != "" {
-		if len(args) == 0 {
-			query += " WHERE"
-		} else {
-			query += " AND"
-		}
-		query += " unit = ?"
-		args = append(args, filter.Unit)
+		addPredicate(" unit = ?", filter.Unit)
 	}
 	if filter.Query != "" {
 		pattern := "%" + escapeLike(filter.Query) + "%"
-		if len(args) == 0 {
-			query += " WHERE"
-		} else {
-			query += " AND"
-		}
-		query += " (word LIKE ? ESCAPE '\\' OR meaning LIKE ? ESCAPE '\\')"
-		args = append(args, pattern, pattern)
+		addPredicate(" (word LIKE ? ESCAPE '\\' OR meaning LIKE ? ESCAPE '\\')", pattern, pattern)
 	}
 	query += " ORDER BY unit, id"
 

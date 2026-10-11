@@ -602,6 +602,39 @@ body {
   margin-bottom: 16px;
 }
 
+.participation-bulk {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.selection-count {
+  color: var(--text-muted, #667085);
+  margin-right: auto;
+}
+
+.word-select {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.participation-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  color: var(--text-muted, #667085);
+  font-size: 13px;
+}
+
+.participation-toggle input {
+  width: 18px;
+  height: 18px;
+}
+
 .search-box {
   position: relative;
   display: flex;

@@ -69,6 +69,13 @@ type Executor interface {
 	// COALESCE keeps the current column. Never touches FSRS state (D-07).
 	RunEdit(ctx context.Context, opts EditOpts) (EditResult, error)
 
+	// RunSetParticipation changes classroom eligibility for a batch in one
+	// Python process and one SQLite transaction. All-or-nothing: any id
+	// that no longer exists rolls the whole batch back and surfaces as an
+	// ExitError whose stdout names the missing ids (→ 404 upstream), so a
+	// success result always means every requested card was updated.
+	RunSetParticipation(ctx context.Context, opts SetParticipationOpts) (SetParticipationResult, error)
+
 	// RunRenameUnit invokes the vocab_manager.py `rename-unit` subcommand
 	// (Plan 09-03) and renames every card's unit within one category,
 	// returning the {renamed, from, to} report.
@@ -320,6 +327,23 @@ type EditResult struct {
 		ID   int64  `json:"id"`
 		Word string `json:"word"`
 	} `json:"edited"`
+}
+
+// SetParticipationOpts carries the batch eligibility change: 1..500 unique
+// positive card ids plus the target flag. One opts value = one subprocess
+// = one SQLite transaction (Issue #2's batch contract — the per-card fanout
+// a review killed would have queued one Python process per word).
+type SetParticipationOpts struct {
+	IDs          []int64
+	Participates bool
+}
+
+type SetParticipationResult struct {
+	Requested int `json:"requested"`
+	Updated   int `json:"updated"`
+	// Missing is kept for wire stability; the all-or-nothing script always
+	// reports an empty list on the success path (a missing id is a 404).
+	Missing []int64 `json:"missing"`
 }
 
 // RenameUnitOpts carries the operational flags for the vocab_manager.py

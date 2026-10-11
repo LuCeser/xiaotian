@@ -59,6 +59,16 @@
     return (err && err.message) ? err.message : '未知错误';
   }
 
+  // Participation failures carry the script's English stdout diagnostic on
+  // 404 ("card ids not found: ...") — fine for logs, wrong for the family
+  // UI (AGENTS.md 语言约定), so map the known code to parent-facing copy.
+  function participationErrorMessage(err) {
+    if (err && err.code === 'not_found') {
+      return '部分词条已不存在，本次没有保存';
+    }
+    return errorMessage(err);
+  }
+
   // ------------------------------------------------------------------
   // Collapse state: localStorage parent.units.collapsed — a JSON array
   // of collapsed unit names. Every read is defensive: private-mode
@@ -272,6 +282,9 @@
    *   fetchUnits(category)     → Promise<Array> — GET /api/v1/units
    *       (count badge source; all-categories merges by name — 09-04)
    *   editWord(id, payload)    → Promise — PUT /api/v1/words/{id}
+   *   setParticipation(ids, enabled) → Promise — PUT /api/v1/words/
+   *       participation with {ids: [...], participates} (one request per
+   *       batch; the server caps one batch at 500 unique ids)
    *   renameUnit(old, neu, category) → Promise — POST /api/v1/units/rename
    *       (wired in Plan 09-07 Task 2's rename modal)
    *   deleteWords(payload)     → Promise — DELETE /api/v1/words
@@ -292,6 +305,9 @@
     this.editWord = options.editWord || function () {
       return Promise.reject(new Error('BrowseView: missing editWord handler'));
     };
+    this.setParticipation = options.setParticipation || function () {
+      return Promise.reject(new Error('BrowseView: missing setParticipation handler'));
+    };
     this.renameUnit = options.renameUnit || function () {
       return Promise.reject(new Error('BrowseView: missing renameUnit handler'));
     };
@@ -308,6 +324,8 @@
     this.units = [];
     this.fetchSeq = 0;    // stale-response guard for debounced refetches
     this.debounceTimer = null;
+    this.selectedIds = {};
+    this.bulkInFlight = false; // one batch write at a time; keeps buttons disabled
 
     this.buildToolbar();
   }
@@ -365,6 +383,27 @@
     toolbar.appendChild(searchBox);
     toolbar.appendChild(pills);
 
+    var bulk = document.createElement('div');
+    bulk.className = 'participation-bulk';
+    this.selectionCount = document.createElement('span');
+    this.selectionCount.className = 'selection-count';
+    this.selectionCount.textContent = '未选择';
+    this.bulkEnableBtn = document.createElement('button');
+    this.bulkEnableBtn.type = 'button';
+    this.bulkEnableBtn.className = 'btn btn-secondary';
+    this.bulkEnableBtn.textContent = '加入默写';
+    this.bulkDisableBtn = document.createElement('button');
+    this.bulkDisableBtn.type = 'button';
+    this.bulkDisableBtn.className = 'btn btn-secondary';
+    this.bulkDisableBtn.textContent = '移出默写';
+    this.bulkEnableBtn.disabled = true;
+    this.bulkDisableBtn.disabled = true;
+    this.bulkEnableBtn.addEventListener('click', function () { self.applyBulkParticipation(true); });
+    this.bulkDisableBtn.addEventListener('click', function () { self.applyBulkParticipation(false); });
+    bulk.appendChild(this.selectionCount);
+    bulk.appendChild(this.bulkEnableBtn);
+    bulk.appendChild(this.bulkDisableBtn);
+
     // The browse list region announces polite updates (UI-SPEC
     // Accessibility Contract).
     this.listHost = document.createElement('div');
@@ -372,6 +411,7 @@
     this.listHost.setAttribute('aria-live', 'polite');
 
     this.container.appendChild(toolbar);
+    this.container.appendChild(bulk);
     this.container.appendChild(this.listHost);
 
     // Search: debounced 300ms → re-fetch with q (vanilla setTimeout/
@@ -400,6 +440,40 @@
       self.updateClearVisibility();
       self.refresh();
       self.searchInput.focus();
+    });
+  };
+
+  BrowseView.prototype.updateSelectionControls = function () {
+    var count = Object.keys(this.selectedIds).length;
+    if (count > 500) {
+      // The server rejects batches beyond 500 ids — surface the cap instead
+      // of letting the doomed request fail after the fact.
+      this.selectionCount.textContent = '已选择 ' + count + ' 项（一次最多 500 项）';
+    } else {
+      this.selectionCount.textContent = count ? ('已选择 ' + count + ' 项') : '未选择';
+    }
+    var actionable = count > 0 && count <= 500 && !this.bulkInFlight;
+    this.bulkEnableBtn.disabled = !actionable;
+    this.bulkDisableBtn.disabled = !actionable;
+  };
+
+  BrowseView.prototype.applyBulkParticipation = function (enabled) {
+    if (this.bulkInFlight) { return; }
+    var ids = Object.keys(this.selectedIds);
+    if (!ids.length || ids.length > 500) { return; }
+    var self = this;
+    this.bulkInFlight = true;
+    this.updateSelectionControls();
+    this.setParticipation(ids.map(Number), enabled).then(function () {
+      self.selectedIds = {};
+      toast(enabled ? '已加入默写计划' : '已移出默写计划', 'success');
+      return self.refresh();
+    }).catch(function (err) {
+      toast('批量更新失败：' + participationErrorMessage(err) + '。已重新读取当前状态。', 'error');
+      return self.refresh();
+    }).then(function () {
+      self.bulkInFlight = false;
+      self.updateSelectionControls();
     });
   };
 
@@ -437,6 +511,12 @@
       }
       self.words = Array.isArray(results[0]) ? results[0] : [];
       self.units = Array.isArray(results[1]) ? results[1] : [];
+      var visible = {};
+      self.words.forEach(function (word) { visible[String(word.id)] = true; });
+      Object.keys(self.selectedIds).forEach(function (id) {
+        if (!visible[id]) { delete self.selectedIds[id]; }
+      });
+      self.updateSelectionControls();
       self.render();
     }).catch(function (err) {
       if (seq !== self.fetchSeq) {
@@ -671,6 +751,17 @@
     row.setAttribute('data-word', word.word);
     row.setAttribute('data-id', String(word.id));
 
+    var select = document.createElement('input');
+    select.type = 'checkbox';
+    select.className = 'word-select';
+    select.setAttribute('aria-label', '选择 ' + word.word);
+    select.checked = !!this.selectedIds[String(word.id)];
+    select.addEventListener('change', function () {
+      if (select.checked) { self.selectedIds[String(word.id)] = true; }
+      else { delete self.selectedIds[String(word.id)]; }
+      self.updateSelectionControls();
+    });
+
     var text = document.createElement('span');
     text.className = 'word-text';
     text.textContent = word.word;
@@ -706,11 +797,35 @@
     actions.appendChild(editBtn);
     actions.appendChild(deleteBtn);
 
+    var participationLabel = document.createElement('label');
+    participationLabel.className = 'participation-toggle';
+    var participation = document.createElement('input');
+    participation.type = 'checkbox';
+    participation.checked = word.participates !== false;
+    participation.setAttribute('aria-label', '参与默写 ' + word.word);
+    var participationText = document.createElement('span');
+    participationText.textContent = '参与默写';
+    participation.addEventListener('change', function () {
+      var wanted = participation.checked;
+      participation.disabled = true;
+      self.setParticipation([word.id], wanted).then(function () {
+        toast(wanted ? '已加入默写计划' : '已移出默写计划', 'success');
+      }).catch(function (err) {
+        toast('更新失败：' + participationErrorMessage(err) + '。已重新读取当前状态。', 'error');
+      }).then(function () {
+        self.refresh();
+      });
+    });
+    participationLabel.appendChild(participation);
+    participationLabel.appendChild(participationText);
+
+    row.appendChild(select);
     row.appendChild(text);
     if (word.meaning) {
       row.appendChild(meaning);
     }
     row.appendChild(badge);
+    row.appendChild(participationLabel);
     row.appendChild(actions);
     return row;
   };

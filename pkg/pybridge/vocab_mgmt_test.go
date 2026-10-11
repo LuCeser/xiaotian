@@ -284,7 +284,7 @@ func TestEditArgs(t *testing.T) {
 			name:    "all pointers nil emits the minimal edit --id argv",
 			opts:    EditOpts{ID: 7},
 			present: map[string]string{"--id": "7"},
-			absent:  []string{"--word", "--meaning", "--example", "--unit"},
+			absent:  []string{"--word", "--meaning", "--example", "--unit", "--participates"},
 		},
 		{
 			name: "word only",
@@ -369,6 +369,18 @@ func TestEditArgs(t *testing.T) {
 				t.Errorf("edit argv %v unexpectedly contains --words (flags-only command)", argv)
 			}
 		})
+	}
+}
+
+func TestSetParticipationArgs(t *testing.T) {
+	cfg := infra.PythonConfig{VocabScript: "vocab_manager.py", VocabDBPath: "vocab.db"}
+	argv := setParticipationArgs(cfg, SetParticipationOpts{IDs: []int64{4, 9}, Participates: false})
+	assertDBBeforeSubcommand(t, argv, "set-participation")
+	for flag, want := range map[string]string{"--ids": "[4,9]", "--participates": "false"} {
+		idx := argvFind(argv, flag)
+		if idx < 0 || idx+1 >= len(argv) || argv[idx+1] != want {
+			t.Fatalf("argv %v: %s = %q, want %q", argv, flag, argv[idx+1], want)
+		}
 	}
 }
 

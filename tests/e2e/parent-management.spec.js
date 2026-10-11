@@ -39,6 +39,7 @@ const CAT = 'english';
 const UNIT_TRACER = 'e2e-tracer';
 const UNIT_FULL = 'e2e-full';
 const UNIT_FULL_RENAMED = 'e2e-full-2';
+const UNIT_PARTICIPATION_FAILURE = 'e2e-participation-failure';
 
 /** DELETE one whole unit through the real API. A 404 (already gone) is fine. */
 async function deleteUnit(request, unit, category = CAT) {
@@ -85,6 +86,30 @@ test('tracer: parent adds one word from parent.html and sees it in the browse li
   await expect(
     browseSection.locator(`.word-row[data-word="${word}"] .word-text`),
   ).toHaveText(word);
+});
+
+test('participation failure restores the persisted state', async ({ page, request }) => {
+  await deleteUnit(request, UNIT_PARTICIPATION_FAILURE);
+  const word = `e2e-participation-${Date.now()}`;
+  const seed = await request.post('/api/v1/words', {
+    data: { category: CAT, unit: UNIT_PARTICIPATION_FAILURE, entries: [{ word }] },
+  });
+  expect(seed.ok()).toBeTruthy();
+  try {
+    await page.goto('/parent.html');
+    await page.getByRole('tab', { name: '词库' }).click();
+    const row = page.locator(`.word-row[data-word="${word}"]`);
+    const toggle = row.getByRole('checkbox', { name: `参与默写 ${word}` });
+    await expect(toggle).toBeChecked();
+    await page.route('**/api/v1/words/participation', async (route) => {
+      await route.fulfill({ status: 502, contentType: 'application/json', body: '{"error":{"code":"python_failed","message":"temporary"}}' });
+    }, { times: 1 });
+    await toggle.uncheck();
+    await expect(page.locator('.toast-error')).toContainText('已重新读取当前状态');
+    await expect(toggle).toBeChecked();
+  } finally {
+    await deleteUnit(request, UNIT_PARTICIPATION_FAILURE);
+  }
 });
 
 test('full flow: batch add → browse → search → edit → rename → delete → settings → cleanup', async ({ page, request }) => {
@@ -194,9 +219,39 @@ test('full flow: batch add → browse → search → edit → rename → delete 
     expect(groupsAfter, 'clearing the search restores the full group list').toEqual(groupsBefore);
 
     // ----------------------------------------------------------------
-    // 4. Edit: change 意思 on one row; the row text updates + toast.
+    // 4. Participation: single and bulk changes persist through the real
+    //    service. Bulk restore leaves the following management flow intact.
     // ----------------------------------------------------------------
     const appleRow = browseSection.locator('.word-row[data-word="e2e-apple"]');
+    const appleParticipation = appleRow.getByRole('checkbox', { name: '参与默写 e2e-apple' });
+    await appleParticipation.uncheck();
+    await expect(page.locator('.toast-success')).toHaveText('已移出默写计划');
+    await expect(appleParticipation).not.toBeChecked();
+
+    await appleRow.getByRole('checkbox', { name: '选择 e2e-apple' }).check();
+    const participationBananaRow = browseSection.locator('.word-row[data-word="e2e-banana"]');
+    await participationBananaRow.getByRole('checkbox', { name: '选择 e2e-banana' }).check();
+    await browseSection.getByRole('button', { name: '加入默写' }).click();
+    await expect(page.locator('.toast-success')).toHaveText('已加入默写计划');
+    await expect(appleParticipation).toBeChecked();
+    await expect(participationBananaRow.getByRole('checkbox', { name: '参与默写 e2e-banana' })).toBeChecked();
+
+    const persisted = await (await request.get('/api/v1/words?unit=' + UNIT_FULL)).json();
+    expect(persisted.words.filter((word) => word.word === 'e2e-apple' || word.word === 'e2e-banana')
+      .every((word) => word.participates === true)).toBeTruthy();
+
+    // AC「刷新后仍保持」— a real page reload (not just an API re-read) must
+    // re-render the persisted toggles.
+    await page.reload();
+    await page.getByRole('tab', { name: '词库' }).click();
+    const reloadedApple = browseSection.locator('.word-row[data-word="e2e-apple"]');
+    await expect(reloadedApple.getByRole('checkbox', { name: '参与默写 e2e-apple' })).toBeChecked();
+    await expect(browseSection.locator('.word-row[data-word="e2e-banana"]')
+      .getByRole('checkbox', { name: '参与默写 e2e-banana' })).toBeChecked();
+
+    // ----------------------------------------------------------------
+    // 5. Edit: change 意思 on one row; the row text updates + toast.
+    // ----------------------------------------------------------------
     await appleRow.getByRole('button', { name: '编辑' }).click();
 
     const editDialog = page.getByRole('dialog', { name: '编辑单词' });
@@ -208,7 +263,7 @@ test('full flow: batch add → browse → search → edit → rename → delete 
     await expect(appleRow.locator('.word-meaning')).toHaveText('苹果（已编辑）');
 
     // ----------------------------------------------------------------
-    // 5. Rename the unit e2e-full → e2e-full-2.
+    // 6. Rename the unit e2e-full → e2e-full-2.
     // ----------------------------------------------------------------
     await fullGroup.locator('.unit-action', { hasText: '重命名' }).click();
 

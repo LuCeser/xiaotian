@@ -25,6 +25,7 @@ func seedCardsTable(t *testing.T, db *sql.DB) {
 			unit TEXT NOT NULL DEFAULT '',
 			category TEXT NOT NULL DEFAULT 'english',
 			fsrs_card TEXT NOT NULL DEFAULT '',
+			participates INTEGER NOT NULL DEFAULT 1 CHECK (participates IN (0, 1)),
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			fetch_locked_until TEXT DEFAULT NULL,
 			UNIQUE(word, category)
@@ -66,6 +67,40 @@ func newTestDBWithCards(t *testing.T) *sql.DB {
 }
 
 func TestCardRepository(t *testing.T) {
+	t.Run("legacy cards schema reads as participating until Python migrates it", func(t *testing.T) {
+		db := newTestDB(t)
+		_, err := db.Exec(`CREATE TABLE cards (
+			id INTEGER PRIMARY KEY, word TEXT NOT NULL, meaning TEXT NOT NULL DEFAULT '',
+			example TEXT NOT NULL DEFAULT '', unit TEXT NOT NULL DEFAULT '',
+			category TEXT NOT NULL DEFAULT 'english', fsrs_card TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT '', fetch_locked_until TEXT DEFAULT NULL
+		)`)
+		if err != nil {
+			t.Fatalf("create legacy cards: %v", err)
+		}
+		if _, err = db.Exec("INSERT INTO cards (id, word) VALUES (1, 'legacy')"); err != nil {
+			t.Fatalf("insert legacy card: %v", err)
+		}
+		repo, err := NewCardRepository(db, nil)
+		if err != nil {
+			t.Fatalf("NewCardRepository: %v", err)
+		}
+		cards, err := repo.List(context.Background(), CardFilter{ParticipatingOnly: true})
+		if err != nil || len(cards) != 1 || !cards[0].Participates {
+			t.Fatalf("legacy participating list = %+v, err=%v; want one enabled card", cards, err)
+		}
+		if _, err := db.Exec("ALTER TABLE cards ADD COLUMN participates INTEGER NOT NULL DEFAULT 1"); err != nil {
+			t.Fatalf("migrate legacy cards: %v", err)
+		}
+		if _, err := db.Exec("UPDATE cards SET participates = 0 WHERE id = 1"); err != nil {
+			t.Fatalf("disable migrated card: %v", err)
+		}
+		cards, err = repo.List(context.Background(), CardFilter{ParticipatingOnly: true})
+		if err != nil || len(cards) != 0 {
+			t.Fatalf("same repository after migration = %+v, err=%v; want disabled card excluded", cards, err)
+		}
+	})
+
 	t.Run("NewCardRepository with nil db returns error", func(t *testing.T) {
 		_, err := NewCardRepository(nil, infra.NewNoOpLogger())
 		if err == nil {
@@ -124,6 +159,9 @@ func TestCardRepository(t *testing.T) {
 		}
 		if got.FsrsCard != `{"test":true}` {
 			t.Errorf("FsrsCard = %q, want %q", got.FsrsCard, `{"test":true}`)
+		}
+		if !got.Participates {
+			t.Error("Participates = false, want true for a legacy/default card")
 		}
 	})
 

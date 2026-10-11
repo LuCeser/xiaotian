@@ -177,6 +177,19 @@ func editArgs(cfg infra.PythonConfig, opts EditOpts) []string {
 	return args
 }
 
+// setParticipationArgs builds the argv slice for the vocab_manager.py
+// `set-participation` subcommand. The shape is:
+//
+//	<script> --db <db> set-participation --ids '<json array>' --participates true|false
+//
+// The ids ride as one JSON array argument (never shell-joined), so one
+// batch of any legal size stays one argv.
+func setParticipationArgs(cfg infra.PythonConfig, opts SetParticipationOpts) []string {
+	raw, _ := json.Marshal(opts.IDs)
+	return []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "set-participation",
+		"--ids", string(raw), "--participates", strconv.FormatBool(opts.Participates)}
+}
+
 // renameUnitArgs builds the argv slice for the vocab_manager.py
 // `rename-unit` subcommand (Plan 09-03). The shape is:
 //
@@ -389,6 +402,50 @@ func (b *Bridge) RunEdit(ctx context.Context, opts EditOpts) (EditResult, error)
 	var result EditResult
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return EditResult{}, errors.Wrap(ErrPythonJSONParse, "run edit")
+	}
+	return result, nil
+}
+
+// RunSetParticipation executes the vocab_manager.py `set-participation`
+// subcommand (Issue #2) and returns the {requested, updated, missing}
+// report. Lifecycle mirrors RunEdit:
+//
+//  1. Pre-validate opts (1..500 unique positive ids) BEFORE spawning —
+//     mirrors the script's own guard so a caller bug never wastes a process
+//     (double validation, the repo's established pattern).
+//  2. One subprocess, one SQLite BEGIN IMMEDIATE transaction. The script is
+//     all-or-nothing: any missing id rolls the whole batch back, exits 1,
+//     and prints "card ids not found: ..." to stdout — classifyMgmtRun
+//     captures it into ExitError.Stdout so the API layer maps it to a 404
+//     with the real ids (Pitfall 2). A nil error therefore ALWAYS means
+//     every requested card now carries the requested flag.
+//  3. Learning state is never touched: the script writes only the
+//     participates column (D-07 kin — proven byte-level by the e2e suite).
+func (b *Bridge) RunSetParticipation(ctx context.Context, opts SetParticipationOpts) (SetParticipationResult, error) {
+	if len(opts.IDs) == 0 || len(opts.IDs) > 500 {
+		return SetParticipationResult{}, fmt.Errorf("set participation: ids must contain 1..500 values")
+	}
+	seen := make(map[int64]struct{}, len(opts.IDs))
+	for _, id := range opts.IDs {
+		if id <= 0 {
+			return SetParticipationResult{}, fmt.Errorf("set participation: id must be > 0, got %d", id)
+		}
+		if _, exists := seen[id]; exists {
+			return SetParticipationResult{}, fmt.Errorf("set participation: duplicate id %d", id)
+		}
+		seen[id] = struct{}{}
+	}
+	start := time.Now()
+	args := setParticipationArgs(b.cfg, opts)
+	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.MgmtTimeout, b.cfg.Interpreter, args...)
+	defer b.logResult("set-participation", start, stdout, stderr, exitCode, err)
+	raw, clsErr := classifyMgmtRun("set-participation", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return SetParticipationResult{}, clsErr
+	}
+	var result SetParticipationResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return SetParticipationResult{}, errors.Wrap(ErrPythonJSONParse, "run set-participation")
 	}
 	return result, nil
 }

@@ -51,6 +51,9 @@ func (f *fakeExecutor) RunAdd(_ context.Context, _ pybridge.AddOpts) (pybridge.A
 func (f *fakeExecutor) RunEdit(_ context.Context, _ pybridge.EditOpts) (pybridge.EditResult, error) {
 	return pybridge.EditResult{}, nil
 }
+func (f *fakeExecutor) RunSetParticipation(context.Context, pybridge.SetParticipationOpts) (pybridge.SetParticipationResult, error) {
+	return pybridge.SetParticipationResult{}, nil
+}
 
 func (f *fakeExecutor) RunRenameUnit(_ context.Context, _ pybridge.RenameUnitOpts) (pybridge.RenameUnitResult, error) {
 	return pybridge.RenameUnitResult{}, nil

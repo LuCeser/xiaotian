@@ -83,6 +83,40 @@ type EditRequest struct {
 	Unit    *string `json:"unit"`
 }
 
+// ParticipationRequest is the narrow body for changing classroom
+// eligibility (PUT /words/participation). A pointer distinguishes an
+// explicit false from a missing key (an absent participates is a 400 —
+// the caller must state the intent, never default it).
+type ParticipationRequest struct {
+	IDs          []int64 `json:"ids"`
+	Participates *bool   `json:"participates"`
+}
+
+// validateParticipationRequest mirrors the script-side guard exactly
+// (1..500 unique positive ids): rejecting here keeps a malformed batch out
+// of the subprocess entirely, while the Python re-check stays authoritative
+// for direct CLI callers (double validation, same shape as
+// validateEditRequest vs cmd_edit).
+func validateParticipationRequest(req *ParticipationRequest) string {
+	if req.Participates == nil {
+		return "participates is required"
+	}
+	if len(req.IDs) < 1 || len(req.IDs) > 500 {
+		return "ids must contain between 1 and 500 items"
+	}
+	seen := make(map[int64]struct{}, len(req.IDs))
+	for i, id := range req.IDs {
+		if id <= 0 {
+			return fmt.Sprintf("ids[%d] must be positive", i)
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Sprintf("ids[%d] is duplicated", i)
+		}
+		seen[id] = struct{}{}
+	}
+	return ""
+}
+
 // RenameRequest is the decoded POST /units/rename body shape (Plan 09-05).
 // All three fields are required.
 type RenameRequest struct {

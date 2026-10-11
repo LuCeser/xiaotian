@@ -67,6 +67,9 @@ func (f *fakePyBridge) RunAdd(context.Context, pybridge.AddOpts) (pybridge.AddRe
 func (f *fakePyBridge) RunEdit(context.Context, pybridge.EditOpts) (pybridge.EditResult, error) {
 	panic("PyFSRS must never call RunEdit")
 }
+func (f *fakePyBridge) RunSetParticipation(context.Context, pybridge.SetParticipationOpts) (pybridge.SetParticipationResult, error) {
+	panic("PyFSRS must never call RunSetParticipation")
+}
 func (f *fakePyBridge) RunRenameUnit(context.Context, pybridge.RenameUnitOpts) (pybridge.RenameUnitResult, error) {
 	panic("PyFSRS must never call RunRenameUnit")
 }

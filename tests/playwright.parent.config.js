@@ -1,0 +1,106 @@
+/**
+ * Playwright config for the parent-management browser suite against a
+ * HERMETIC isolated instance (Issue #2's browser link: browser → real
+ * service → real Python → real SQLite).
+ *
+ * DELIBERATELY SEPARATE from playwright.config.js (same rationale as
+ * playwright.rt.config.js, review H-1): the legacy config boots the dev
+ * service via run.ps1 with .env loaded, because the student dictation
+ * smoke hard-depends on TTS pregeneration succeeding. The parent REST
+ * surface needs none of that — real Python + real SQLite, no voice keys,
+ * no .env — so this config boots its own throwaway instance:
+ *
+ *   - ports 127.0.0.1:18080/18081 (no contact with run.ps1's 8080/8081),
+ *   - per-run OS-temp DB/data/cache (deleted on exit — every run a fresh
+ *     database, nothing ever touches ./.hta-data),
+ *   - HTA_PYTHON_INTERPRETER resolved from the repo venvs (same candidate
+ *     order as tests/e2e-rt/real/run-real.ps1; override via env).
+ *
+ * Local run:  npm run e2e:parent
+ *             (or: npx playwright test -c tests/playwright.parent.config.js)
+ * Requires:   npx playwright install chromium (one-time, shared with e2e)
+ */
+// @ts-check
+const { defineConfig } = require('@playwright/test');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const repoRoot = path.resolve(__dirname, '..');
+
+// Loopback traffic must never ride the system proxy (same guard as
+// playwright.rt.config.js — see its comment for the Privoxy failure mode).
+process.env.NO_PROXY = process.env.NO_PROXY
+  ? process.env.NO_PROXY + ',127.0.0.1,localhost'
+  : '127.0.0.1,localhost';
+process.env.no_proxy = process.env.NO_PROXY;
+
+// Resolve the venv interpreter BEFORE anything probes the server: the
+// service aborts at boot without one, and a bare `python` on PATH may be
+// the WindowsApps stub. Candidate order mirrors run-real.ps1.
+function resolvePython() {
+  if (process.env.HTA_PYTHON_INTERPRETER) {
+    return process.env.HTA_PYTHON_INTERPRETER;
+  }
+  const candidates = [
+    path.join(repoRoot, 'venv'),
+    path.join(repoRoot, '.venv'),
+    path.join(repoRoot, 'third_party', 'python', '.venv'),
+  ].flatMap((dir) => [
+    path.join(dir, 'Scripts', 'python.exe'), // Windows venv layout
+    path.join(dir, 'bin', 'python'),         // POSIX venv layout
+  ]);
+  const found = candidates.find((cand) => fs.existsSync(cand));
+  if (!found) {
+    throw new Error(
+      'No venv python found (searched venv/.venv/third_party venvs under the repo root). ' +
+      'Create one (uv venv --python 3.12 + install -r third_party/python/requirements.txt) ' +
+      'or set HTA_PYTHON_INTERPRETER.');
+  }
+  return found;
+}
+
+// Per-run isolated state root, deleted when the Playwright process exits.
+const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-parent-e2e-'));
+// The service expects its data/cache dirs to pre-exist (same contract as
+// run.ps1's .hta-data layout).
+fs.mkdirSync(path.join(isolatedRoot, 'cache', 'audio'), { recursive: true });
+process.on('exit', () => fs.rmSync(isolatedRoot, { recursive: true, force: true }));
+
+module.exports = defineConfig({
+  testDir: './e2e',
+  // Only the parent suite rides this config; the student specs stay on the
+  // legacy config (they need the .env-loaded dev service).
+  testMatch: /parent-management\.spec\.js/,
+  timeout: 120_000,
+  retries: 0,
+  // One isolated instance, one vocabulary DB: serialize like the legacy
+  // suite (two parents mutating the same unit would interleave asserts).
+  workers: 1,
+  maxFailures: process.env.CI ? undefined : 1,
+  reporter: [['list']],
+  use: {
+    baseURL: 'http://127.0.0.1:18080',
+  },
+  webServer: {
+    // Real service, real Python, real SQLite — only the machine-specific
+    // bits (interpreter, DB/data/cache dirs) ride env overrides into the
+    // per-run temp root. Everything else comes from the committed template.
+    cwd: repoRoot,
+    command: 'go run ./cmd/service -config tests/e2e/config.parent-e2e.yaml',
+    url: 'http://127.0.0.1:18080/',
+    reuseExistingServer: false, // never adopt a stray 18080 listener
+    env: {
+      ...process.env,
+      HTA_PYTHON_INTERPRETER: resolvePython(),
+      HTA_PYTHON_VOCABDBPATH: path.join(isolatedRoot, 'vocab.db'),
+      HTA_PYTHON_DATADIR: isolatedRoot,
+      HTA_PYTHON_CACHEDIR: path.join(isolatedRoot, 'cache', 'audio'),
+      HTA_PYTHON_MANIFESTDIR: path.join(isolatedRoot, 'cache'),
+      HTA_PYTHON_ENVFILE: path.join(isolatedRoot, 'dictation.env'),
+      HTA_TTS_SESSIONDIR: path.join(isolatedRoot, 'sessions'),
+    },
+    // First `go run` compiles the whole module; 3 minutes covers a cold cache.
+    timeout: 180_000,
+  },
+});
