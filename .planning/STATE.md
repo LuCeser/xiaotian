@@ -145,6 +145,7 @@ Recent decisions affecting current work:
 - [2026-08-09] [cmd-service] "提取 main.go 重复关闭序列帮助器" — [todo file](.planning/todos/pending/2026-08-09-main-shutdown-duplication.md) — Needs **提取 shutdownAll 帮助器**.
 - [2026-08-09] [session] "折叠 Session.Start 到单一生命周期构造函数" — [todo file](.planning/todos/pending/2026-08-09-session-start-lifecycle-duplication.md) — Needs **统一到单一生命周期构造函数**.
 - [2026-10-11] [planning] "下个里程碑总纲：验收项全量端到端自动化＋本地完整回归" — [todo file](.planning/todos/pending/2026-10-11-next-milestone-uat-e2e-automation-regression.md) — Needs 里程碑规划时的展开路径（作为 /gsd-new-milestone 或下阶段规划的输入）：.
+- [2026-10-11] [ui] "拍照/扫描识别单词，方便家长录入词汇" — [todo file](.planning/todos/pending/2026-10-11-photo-ocr-word-entry.md) — Needs TBD，初步方向（供后续规划参考）：.
 
 ### Blockers/Concerns
 
