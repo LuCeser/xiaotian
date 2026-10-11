@@ -154,9 +154,11 @@ func newLessonTestStores(t *testing.T) (*sql.DB, *lesson.Store, *lesson.Practice
 }
 
 // newTestHandlerWithStores wires a handler around caller-owned stores (the
-// lessons-route tests seed them through the db handle).
+// lessons-route tests seed them through the db handle). The recognizer is
+// nil here — photo-recognition routes have their own harness in
+// photo_recognize_test.go.
 func newTestHandlerWithStores(exec pybridge.Executor, cards database.CardRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore) http.Handler {
-	return NewHandler(exec, cards, lessons, practice, receipts, infra.PythonConfig{}, infra.NewNoOpLogger())
+	return NewHandler(exec, cards, lessons, practice, receipts, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 }
 
 func newTestHandler(t *testing.T, exec pybridge.Executor, cards database.CardRepository) http.Handler {

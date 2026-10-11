@@ -34,6 +34,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
+	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/rt"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
@@ -471,6 +472,11 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		var rtASR rt.ASRProvider
 		var rtLLM rt.LLMProvider
 		var rtTTS rt.TTSSynthesizer
+		// Issue #3: the parent word-list photo pipeline. Nil when
+		// MIMO_API_KEY is absent — POST /api/v1/words/photo/recognize then
+		// answers 503 recognition_unavailable (same RT-10 degraded
+		// semantics as the rt providers above).
+		var wordlistOCR *ocr.WordlistPipeline
 		// 13.1-03: the check-stage photo OCR reader. Nil when MIMO_API_KEY is
 		// absent — the TurnManager answers photo_chunk with a coded
 		// photo_unavailable error and the check stage keeps working
@@ -563,6 +569,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// consumers sit on separate endpoints; the conversion is the only
 			// difference between ocr.Reader and rt.OCRReader).
 			rtOCR = rt.OCRReader(mimoReader(mimoClient, cfg.Photo.ChatModel))
+			// Issue #3: the parent word-list recognizer rides the same client,
+			// vision model and byte cap as the student photo pipeline (one
+			// deployment shape; the ListReader seam carries the sniffed MIME
+			// type so small PNGs upload verbatim without a canvas re-encode).
+			wordlistOCR = ocr.NewWordlistPipeline(
+				mimoListReader(mimoClient, cfg.Photo.ChatModel), cfg.Photo.MaxImageBytes)
 			logger.Info("voice command pipeline enabled",
 				infra.F("component", "infra.main"),
 				infra.F("chat_model", cfg.Voice.ChatModel),
@@ -701,9 +713,11 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// that package's internal mux, not in main.go. 13.3-02 adds the
 		// three Go-owned lesson stores for the read-only parent achievement
 		// routes (GET /lessons, GET /lessons/{id}) — the read path stays
-		// pure Go against SQLite, zero Python spawns (D-12).
+		// pure Go against SQLite, zero Python spawns (D-12). Issue #3 adds
+		// the word-list photo recognizer (nil without a vision key — the
+		// recognize route then answers 503, keeping the endpoint honest).
 		publicMux.Handle("/api/v1/", http.StripPrefix("/api/v1",
-			api.NewHandler(pyBridge, cardRepo, lessonStore, practiceStore, receiptStore, cfg.Python, logger)))
+			api.NewHandler(pyBridge, cardRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, cfg.Python, logger)))
 		logger.Info("api v1 mounted",
 			infra.F("component", "infra.main"),
 			infra.F("route", "/api/v1/"),

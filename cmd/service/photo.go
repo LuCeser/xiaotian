@@ -71,6 +71,23 @@ func mimoReader(mc mimo.Client, model string) ocr.Reader {
 	}
 }
 
+// mimoListReader adapts the same ChatVision call onto the ocr.ListReader
+// seam (Issue #3): the only difference from mimoReader is the MIME type —
+// the parent word-list upload may be a PNG shipped verbatim, so the sniffed
+// type rides the seam instead of a hardcoded image/jpeg. Same no-MaxTokens
+// rationale: a word-list reply is still a bounded JSON array, and capping
+// a thinking model's output truncates it mid-thought.
+func mimoListReader(mc mimo.Client, model string) ocr.ListReader {
+	return func(ctx context.Context, systemPrompt, userPrompt string, image []byte, mimeType string) (string, error) {
+		resp, err := mc.ChatVision(ctx, systemPrompt, userPrompt, image, mimeType,
+			mimo.WithChatModel(model))
+		if err != nil {
+			return "", err
+		}
+		return resp.Text(), nil
+	}
+}
+
 // handlePhotoChunk buffers one inbound JPEG chunk (MsgTypeImage). Nil
 // receiver (photo disabled) drops the frame — the photo UI is hidden in that
 // mode, so stray frames are silent.
