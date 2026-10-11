@@ -280,7 +280,7 @@ body[data-page="tutor"] {
   font-size: 18px;
   font-weight: 700;
   color: #ffffff;
-  background: #2f6fed;
+  background: #2563eb; /* family accent — same value as home.css/parent.css --accent */
   text-decoration: none;
   cursor: pointer;
   transition: transform 0.08s ease, background 0.2s ease;
