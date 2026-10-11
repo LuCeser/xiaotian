@@ -16,6 +16,22 @@ var (
 	// corrupted or hostile upload.
 	ErrNotJPEG = errors.New("ocr: image is not a JPEG")
 
+	// ErrNotImage is returned by WordlistPipeline.Recognize when the bytes
+	// are neither a PNG nor a JPEG. Unlike the student-answer pipeline
+	// (JPEG-only because the web controller re-encodes), the parent word-list
+	// upload accepts small PNGs verbatim, so both signatures are sniffed.
+	ErrNotImage = errors.New("ocr: bytes are not a PNG or JPEG image")
+
+	// ErrImageTooLarge is returned by WordlistPipeline.Recognize when the
+	// upload exceeds the pipeline's byte cap — before any vision-API round
+	// trip, so an oversize photo costs nothing.
+	ErrImageTooLarge = errors.New("ocr: image exceeds the size limit")
+
+	// ErrTooManyEntries is returned by WordlistPipeline.Recognize when the
+	// model reply carries more entries than the commit path can accept in
+	// one request (Issue #3's single-photo limit mirrors maxEntries).
+	ErrTooManyEntries = errors.New("ocr: too many word-list entries")
+
 	// ErrEmptyText is returned when the model reports no recognizable
 	// handwriting (blank photo, unreadable scrawl) — the client offers the
 	// manual-input fallback without a prefilled guess.
