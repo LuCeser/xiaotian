@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v2.0
 milestone_name: realtime-tutor — ACTIVE
-current_phase: 13
-current_phase_name: R0 本地最小闭环
+current_phase: 14
+current_phase_name: R1 对话接真实课堂
 status: planning
-stopped_at: Phase 13.3 complete, ready to plan Phase 13
-last_updated: "2026-10-11T03:59:59.390Z"
+stopped_at: Phase 13/13.1 完结（2026-10-11 用户决策，验收项单独处理），ready to plan Phase 14
+last_updated: "2026-10-11T04:36:39.000Z"
 last_activity: 2026-10-11
-last_activity_desc: Phase 13.3 complete, transitioned to Phase 13
+last_activity_desc: Completed quick task 261011-h8a — Phase 13/13.1 完结标记（验收项由用户单独处理）
 state_head: a7b12905b9bbdb3fc7d4c48fea68940e01704dc7
 progress:
   total_phases: 7
-  completed_phases: 1
+  completed_phases: 3
   total_plans: 26
   completed_plans: 26
-  percent: 14
+  percent: 43
 ---
 
 # Project State
@@ -29,25 +29,25 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-11)
 
 **Core value:** 学生在浏览器与家教自然实时交流，理解上下文、允许打断、等待纸笔书写，学习结果进入真实记录。
-**Current focus:** Phase 13 — R0 本地最小闭环（本地人工验收收口）
+**Current focus:** Phase 14 — R1 对话接真实课堂
 
 ## Current Position
 
-Phase: 13 — R0 本地最小闭环
+Phase: 14 — R1 对话接真实课堂
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-10-11 — Completed quick task 261011-fw2: 13/13.1 收尾验收 runbook（13-FINAL-ACCEPTANCE-RUNBOOK.md，一次家庭真机课收口＋第三周证据）
-Next: Phase 13/13.1 本地人工验收收口（13.3 已闭环）；Phase 13.2（VPS）已搁置（2026-10-09）；Phase 14 为下一实施阶段
+Last activity: 2026-10-11 — Completed quick task 261011-h8a（Phase 13/13.1 完结标记：阶段关闭，验收项由用户按 13-FINAL-ACCEPTANCE-RUNBOOK 单独处理）
+Next: /gsd-plan-phase 14（Phase 13.2 维持 2026-10-09 搁置；Phase 13/13.1 本地人工验收项由用户按 13-FINAL-ACCEPTANCE-RUNBOOK 单独执行落账）
 
-本地验收未通过项（2026-10-09 14:33 北京时间）：用户报告“再练一组功能测试不通过”。已登记于 [Phase 13.1 UAT](phases/13.1-three-stage-dictation-lesson/13.1-UAT.md) 测试 6 / G-13.1-local-4。**2026-10-10 更新：13.3 真机 UAT-5「再练一组」全链路通过**（完结课总结页→再练一组→家长端「加练」记录＋「不调整复习计划」断言），提示该缺陷可能已被后续修复（13.1-08/13.3 系列改动）——建议重测后按 13.1-UAT 流程关闭 G-13.1-local-4。
+「再练一组」账（G-13.1-local-4）：2026-10-09 用户报告测试不通过，登记于 [Phase 13.1 UAT](phases/13.1-three-stage-dictation-lesson/13.1-UAT.md) 测试 6；2026-10-10 13.3 真机 UAT-5 同链路（完结课总结页→再练一组→家长端「加练」记录＋「不调整复习计划」断言）通过，提示缺陷可能已被后续修复——2026-10-11 完结决策：重测关账留给用户单独处理，不随阶段关闭自动通过。
 
-13-01～13-12 实施已完成；Phase 13 和 13.1 本地人工验收尚未通过。原未执行 13-13 已移出 Phase 13，独立 Phase 13.2 等待本地通过后再规划部署；正式 RT 产品验收按各项证据判定，不因实施完成自动通过。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
+2026-10-11 用户决策：Phase 13（12/12）与 13.1（8/8）标记完结——完成的是阶段关闭，本地人工验收项未执行、不因阶段关闭自动通过，由用户按 [13-FINAL-ACCEPTANCE-RUNBOOK](phases/13-realtime-minimal-loop/13-FINAL-ACCEPTANCE-RUNBOOK.md) 单独执行落账（13-UAT 17 项待确认；13.1-UAT 6 项含 G-13.1-local-4 重测关账）。原未执行 13-13 已移出 Phase 13，独立 Phase 13.2 维持搁置、重启触发不变；正式 RT 产品验收按各项证据判定，不因实施完成自动通过。起算日 2026-09-30（规划计时），第一周/第三周/第六周截止为 2026-10-07/10-21/11-11 北京时间 23:59；不因迁移阶段或供应商重置。
 
 本轮规划检查：7/7 待执行计划结构有效，7/7 阶段需求覆盖；CONTEXT 决策覆盖工具因无可跟踪 ID 跳过，独立检查已核对现行能力与计划的一致性。S-01～S-06、HIGH-1 及评审修正意见已落实。13-07 历史波次的无待执行依赖仅为 INFO；7 条未分类边界探测保留 unresolved，评级优先级及真机证据仍待人工检查。本轮仅修改规划文档，未运行实现测试、部署或真机验收。
 
 ## Performance Metrics
 
-v2.0：6 个活跃阶段；Phase 13 实施 12/12、Phase 13.1 实施 8/8，均待本地人工验收。Phase 13.2 独立负责 VPS 部署与真机正式验收，0 个可执行计划、未部署，本地未通过不得开始。历史统计保留于 milestones/v1.0-STATE.md，不用于新里程碑验收结论。
+v2.0：4 个未完阶段（13.2 搁置、14～16 未启动）；Phase 13 实施 12/12、Phase 13.1 实施 8/8，均已于 2026-10-11 标记完成（用户决策），本地人工验收项由用户单独处理。Phase 13.2 独立负责 VPS 部署与真机正式验收，0 个可执行计划、未部署，本地未通过不得开始。历史统计保留于 milestones/v1.0-STATE.md，不用于新里程碑验收结论。
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
@@ -196,6 +196,7 @@ None yet.
 - Phase 13.2 inserted after Phase 13: 2026-10-09 用户要求：VPS 从 Phase 13 拆出；先完成 Phase 13/13.1 本地人工验收。13.2 未规划、未部署，原 13-13 计划仅保留参考。
 - Phase 13 edited: R0 范围调整为本地开发机真实语音验收，实施 12/12；部署与公网/iPad 正式验收迁至 13.2，本地验收未通过不得开始部署。
 - Phase 13.3 inserted after Phase 13.2: 家长端融合：统一首页+学习成果可读，无门禁（D-04 修订）；纯本地与 VPS 零耦合，13.2 同日搁置（家庭试用期本地即真机） (URGENT)
+- Phase 13/13.1 marked complete 2026-10-11 (user decision; acceptance items deferred to user-run 13-FINAL-ACCEPTANCE-RUNBOOK; week-3 checkpoint discipline unchanged)
 
 ## Deferred Items
 
@@ -211,5 +212,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-10-11
-Stopped at: Phase 13.3 complete（真机 UAT 10/10、VERIFICATION 7/7、SECURITY 0 open、UI 审计 20/24、VALIDATION 0 gaps）；下一步 Phase 13/13.1 本地验收收口
+Stopped at: Phase 13/13.1 完结（2026-10-11 用户决策，验收项由用户按 13-FINAL-ACCEPTANCE-RUNBOOK 单独处理）；下一步 /gsd-plan-phase 14
 Resume file: None
