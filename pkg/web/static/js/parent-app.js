@@ -148,6 +148,53 @@
     }
   }
 
+  /**
+   * postImage — binary-body variant of fetchJSON for the word-list photo
+   * recognize call (Issue #3). The image bytes go as the raw request body
+   * with their own Content-Type; the response keeps the shared
+   * {"error":{code,message}} envelope normalization. The timeout is its own
+   * (60s): a vision model thinking over an image legitimately outruns
+   * fetchJSON's 15s JSON budget (the server side allows 20s).
+   */
+  function postImage(url, blob, timeoutMs) {
+    var controller = new AbortController();
+    var timer = setTimeout(function () {
+      controller.abort();
+    }, timeoutMs || 60000);
+
+    return fetch(url, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': blob.type || 'application/octet-stream' },
+      body: blob,
+    })
+      .then(function (response) {
+        return response.text().then(function (text) {
+          var data = null;
+          if (text) {
+            try {
+              data = JSON.parse(text);
+            } catch (e) {
+              data = null;
+            }
+          }
+          if (!response.ok) {
+            var message = (data && data.error && data.error.message)
+              ? data.error.message
+              : ('HTTP ' + response.status);
+            var error = new Error(message);
+            error.status = response.status;
+            error.code = (data && data.error) ? data.error.code : undefined;
+            throw error;
+          }
+          return data;
+        });
+      })
+      .finally(function () {
+        clearTimeout(timer);
+      });
+  }
+
   // ------------------------------------------------------------------
   // Shared 单元 datalist: GET /api/v1/units?category=<selected> on init
   // (all categories — both forms start with no selection, D-06), on
@@ -250,6 +297,11 @@
         .then(function (data) {
           return (data && Array.isArray(data.words)) ? data.words : [];
         });
+    },
+    // Issue #3 照片导入: the recognize call rides postImage (60s budget —
+    // a vision model over an image outruns the 15s JSON timeout).
+    recognizePhoto: function (blob) {
+      return postImage('/api/v1/words/photo/recognize', blob);
     },
     onCommitted: function () {
       browse.refresh();

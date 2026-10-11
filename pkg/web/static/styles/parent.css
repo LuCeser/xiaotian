@@ -561,6 +561,96 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/* 照片导入 (Issue #3): picker row, thumbnail, editable review table    */
+/* and status chips. Reuses the preview-table / result-banner families */
+/* above; only the photo-specific surfaces live here.                  */
+/* ------------------------------------------------------------------ */
+
+.photo-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Visually-hidden-but-functional file input: the styled button clicks it. */
+.photo-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.photo-file-meta {
+  font-size: 14px;
+  color: var(--text-secondary, #64748b);
+  overflow-wrap: anywhere;
+}
+
+.photo-thumb {
+  display: block;
+  max-width: 100%;
+  max-height: 180px;
+  margin-top: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #e2e8f0);
+}
+
+.photo-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.photo-preview-table td {
+  vertical-align: top;
+}
+
+/* In-cell inputs: same field styling, tighter box for the table rows. */
+.photo-cell-input {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 8px;
+  box-sizing: border-box;
+}
+
+.photo-row-check {
+  width: 18px;
+  height: 18px;
+}
+
+.photo-status-note {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary, #64748b);
+  overflow-wrap: anywhere;
+}
+
+/* Status chips reuse the preview-status colors; conflict earns the
+   warning tone because the original meaning is being kept silently
+   unless the parent notices it. */
+.photo-status-conflict {
+  color: var(--warning, #b45309);
+}
+
+.photo-status-invalid {
+  color: var(--danger, #b91c1c);
+}
+
+.photo-row-conflict .photo-cell-input,
+.photo-row-exists .photo-cell-input,
+.photo-row-invalid .photo-cell-input {
+  background: #f8fafc;
+}
+
+/* ------------------------------------------------------------------ */
 /* Button loading state (UI-SPEC: disabled + inline spinner, label     */
 /* kept). Pure-CSS spinner — no glyph dependency.                      */
 /* ------------------------------------------------------------------ */

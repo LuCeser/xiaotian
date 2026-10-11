@@ -696,6 +696,10 @@
    *   fetchWords(category)     → Promise<Array> — batch snapshot source
    *   onCommitted(result)      — fired after ANY successful add
    *   onCategoryChange(value)  — fired when either form's radio changes
+   *   recognizePhoto(blob)     → Promise<{entries}> — POST
+   *       /api/v1/words/photo/recognize (Issue #3). Present ⇒ the third tab
+   *       照片导入 mounts (PhotoAddForm from parent-photo.js); absent ⇒ the
+   *       card stays two-tab so older embeds degrade instead of breaking.
    */
   function AddCard(container, options) {
     options = options || {};
@@ -707,6 +711,7 @@
     };
     var onCommitted = options.onCommitted || function () {};
     var onCategoryChange = options.onCategoryChange || function () {};
+    var recognizePhoto = options.recognizePhoto || null;
 
     var tablist = document.createElement('div');
     tablist.className = 'add-tabs';
@@ -726,11 +731,29 @@
     panelBatch.setAttribute('aria-labelledby', 'add-tab-batch');
     panelBatch.hidden = true;
 
-    var tabPairs = [];
-    [
+    var tabDefs = [
       { id: 'add-tab-single', text: '单个添加', panel: panelSingle },
       { id: 'add-tab-batch', text: '批量添加', panel: panelBatch },
-    ].forEach(function (def, index) {
+    ];
+
+    // Issue #3: the 照片导入 tab mounts only when both the handler wiring
+    // (parent-app.js) and the component (parent-photo.js) are present — a
+    // missing script degrades to the two-tab card, never a dead tab.
+    var panelPhoto = null;
+    if (recognizePhoto && typeof global.PhotoAddForm === 'function') {
+      panelPhoto = document.createElement('div');
+      panelPhoto.className = 'add-panel';
+      panelPhoto.id = 'add-panel-photo';
+      panelPhoto.setAttribute('role', 'tabpanel');
+      panelPhoto.setAttribute('aria-labelledby', 'add-tab-photo');
+      panelPhoto.hidden = true;
+      tabDefs.push({ id: 'add-tab-photo', text: '照片导入', panel: panelPhoto });
+    } else if (recognizePhoto) {
+      console.error('[parent-modes] PhotoAddForm unavailable — 照片导入 tab not mounted.');
+    }
+
+    var tabPairs = [];
+    tabDefs.forEach(function (def, index) {
       var btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'add-tab' + (index === 0 ? ' active' : '');
@@ -762,10 +785,22 @@
       onCommitted: onCommitted,
       onCategoryChange: onCategoryChange,
     });
+    if (panelPhoto) {
+      this.photo = new global.PhotoAddForm(panelPhoto, {
+        recognizePhoto: recognizePhoto,
+        submitWords: submitWords,
+        fetchWords: fetchWords,
+        onCommitted: onCommitted,
+        onCategoryChange: onCategoryChange,
+      });
+    }
 
     container.appendChild(tablist);
     container.appendChild(panelSingle);
     container.appendChild(panelBatch);
+    if (panelPhoto) {
+      container.appendChild(panelPhoto);
+    }
   }
 
   // ------------------------------------------------------------------
@@ -1026,4 +1061,17 @@
   global.AddCard = AddCard;
   global.SettingsCard = SettingsCard;
   global.__parentToast = showToast;
+  // Shared form builders for sibling components (parent-photo.js mounts in
+  // the same page and reuses the exact category/unit/button/toast builders
+  // so the add forms stay visually and behaviorally one family).
+  global.__parentFormKit = {
+    buildCategoryField: buildCategoryField,
+    buildUnitField: buildUnitField,
+    buildTextField: buildTextField,
+    buildLoadingButton: buildLoadingButton,
+    setLoading: setLoading,
+    showToast: showToast,
+    clearContainer: clearContainer,
+    SELECTION_NOTE_TEXT: SELECTION_NOTE_TEXT,
+  };
 })(typeof window !== 'undefined' ? window : this);

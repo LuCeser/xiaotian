@@ -115,7 +115,11 @@
       js/parent-batch-parser.js → window.parseBatch (pure paste parser, NO DOM)
       js/parent-modes.js        → window.SingleAddForm/BatchAddForm/AddCard
                                   (添加单词 card components; AddCard reads
-                                  window.parseBatch when 解析并预览 is clicked)
+                                  window.parseBatch when 解析并预览 is
+                                  clicked; also exports __parentFormKit)
+      js/parent-photo.js        → window.PhotoAddForm +
+                                  window.classifyPhotoEntries (照片导入 tab,
+                                  Issue #3; consumes __parentFormKit)
       js/parent-browse.js       → window.BrowseView (浏览词库: toolbar +
                                   unit groups + edit/rename/delete modals)
       js/parent-lessons.js      → window.LessonsView (学习记录: recent-
@@ -124,9 +128,10 @@
                                   unit datalist population, page tabs)
   -->
   <script src="js/parent-batch-parser.js?v=20261009a" defer></script>
-  <script src="js/parent-modes.js?v=20261009a" defer></script>
+  <script src="js/parent-modes.js?v=20261011b" defer></script>
+  <script src="js/parent-photo.js?v=20261011a" defer></script>
   <script src="js/parent-browse.js?v=20261011a" defer></script>
   <script src="js/parent-lessons.js?v=20261009a" defer></script>
-  <script src="js/parent-app.js?v=20261011a" defer></script>
+  <script src="js/parent-app.js?v=20261011b" defer></script>
 </body>
 </html>
