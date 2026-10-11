@@ -140,7 +140,7 @@ body {
 
 .parent-tab {
   flex: 1;
-  min-height: 44px;
+  min-height: 60px; /* home doors / .rt-btn-home touch-target parity */
   padding: 8px 4px 10px;
   font-size: 16px;
   font-weight: 600;
