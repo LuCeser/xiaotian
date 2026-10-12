@@ -294,3 +294,15 @@ Plans:
 **Deferred at:** 2026-10-10 during /gsd-verify-work 13.3 session completion
 **Follow-ups:**
 - [ ] Test 1-10: 用户（2026-10-10 会话）：这些验收项都应该做成端到端验证——十项真机用例的可自动化主体并入四层 E2E 体系（L3 隔离实例＋合成客户端为主战场，沿 tests/e2e-rt/real/ 范式资产化），物理项（iPad Safari bfcache/触控/音频体感）保留人工。详见 13.3 deferred-items.md 同日行。 (deferred 2026-10-10)
+
+### Phase 999.3: 稳定分发包与本地便捷启动 (BACKLOG)
+
+**Goal:** 生成稳定的分发包，本地便捷启动；词库能正常导入词汇，走正常更新流程，达到日常可用的地步。
+**Requirements:** TBD
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
+**问题描述：** 用户下一步计划（2026-10-11 会话）。部署策略由「先远端 VPS」改为「先本机 Windows」：本机作为使用服务器来更新和使用——更新便捷性、排查问题便捷性、性能、访问便捷性在本机都更好，也能规避远端部署的相关问题。落地为稳定分发包、本地便捷启动、正常导入词汇、走正常更新流程；使用稳定后再考虑部署到远端 Linux 机器的方案。

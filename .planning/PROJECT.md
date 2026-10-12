@@ -117,6 +117,8 @@ Students receive personalized, real-time dictation practice with immediate feedb
 
 **2026-10-11 — Phase 13.3（家长端融合）complete。** 家庭首页两扇门＋parent.html 三 tab（学习记录默认）＋两个只读成果接口＋诚实保存回执四态全部落地并真机验收（UAT 10/10、VERIFICATION 7/7、SECURITY 22 项威胁全闭环、VALIDATION 0 缺口、UI 审计 20/24）。RT-09 成果可读部分入 Validated。用户方向登记：UAT 验收项应尽量端到端自动化（ROADMAP Backlog 999.2，并入四层 E2E 的 L3 主战场）。G-13.1-local-4（再练一组）在 13.3 真机 UAT-5 中全链路通过，建议重测关闭。下一步：Phase 13/13.1 本地验收收口。
 
+**2026-10-11 — 用户方向登记（使用中问题收集）。** 用户使用中收集到的问题已记录于 [docs/qa-issues-2026-10-11.md](../docs/qa-issues-2026-10-11.md)（学科混默、口语确认不推进、默写推进反应慢），待逐个深入讨论后分类为 bug 或优化点并生成规格/Ticket；下一步计划「先本机 Windows 作为使用服务器（暂缓远端 VPS/Linux）：稳定分发包、本地便捷启动、正常导入词汇、走正常更新流程，使用稳定后再考虑远端 Linux」已登记 ROADMAP Backlog 999.3。
+
 **2026-09-30 — 正式关闭旧方案、启动 v2.0。** v1.0 为 superseded / override_closeout；Phase 10～12 不再等待恢复。Phase 9 两项人工验收未执行，结转 Phase 16。新阶段数字编号 13～16；第一周/第三周/第六周检查分别为 10-07/10-21/11-11，规划时间计入，切换不重置计时。
 
 This document evolves at phase transitions and milestone boundaries.

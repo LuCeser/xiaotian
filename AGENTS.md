@@ -29,3 +29,17 @@
 3. 优先直接表达该工程关系。
 4. 若中文技术社区已普遍接受该术语，则保留。
 5. 不改变技术含义，不增加解释。
+
+## Agent skills
+
+### Issue tracker
+
+规格和实施事项记录在 LuCeser/xiaotian 的 GitHub Issues。见 docs/agents/issue-tracker.md。
+
+### Triage labels
+
+使用五种标准分诊标签。见 docs/agents/triage-labels.md。
+
+### Domain docs
+
+使用根目录 CONTEXT.md 和 docs/adr/ 的单领域布局。见 docs/agents/domain.md。
