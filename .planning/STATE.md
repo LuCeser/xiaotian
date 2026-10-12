@@ -6,9 +6,9 @@ current_phase: 14
 current_phase_name: R1 对话接真实课堂
 status: planning
 stopped_at: Phase 13/13.1 完结（2026-10-11 用户决策，验收项单独处理），ready to plan Phase 14
-last_updated: "2026-10-11T23:33:50.950Z"
-last_activity: 2026-10-11
-last_activity_desc: Completed quick task 261011-h8a — Phase 13/13.1 完结标记（验收项由用户单独处理）
+last_updated: "2026-10-12T14:55:00.000Z"
+last_activity: 2026-10-12
+last_activity_desc: Completed quick task 261012-auz — Issue #4 教材归属与已学进度控制练习范围（前端落库＋三套 e2e＋issue 关闭）
 state_head: f045edfb1bc1e25273c0b97375bc9a866cbf1cc7
 progress:
   total_phases: 7
@@ -36,7 +36,7 @@ See: .planning/PROJECT.md (updated 2026-10-11)
 Phase: 14 — R1 对话接真实课堂
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-10-12 — Completed quick task 261012-aes（Issue #3 英语词表照片识别收尾：半成品盘点采纳、四提交落库、issue 勾选关闭）；前值 2026-10-11 — Completed quick task 261011-h8a（Phase 13/13.1 完结标记）
+Last activity: 2026-10-12 — Completed quick task 261012-auz（Issue #4 教材归属与已学进度控制练习范围：前端半成品落库＋三套 e2e＋issue 勾选关闭）；前值 2026-10-12 — Completed quick task 261012-aes（Issue #3 收尾）
 Next: /gsd-plan-phase 14（Phase 13.2 维持 2026-10-09 搁置；Phase 13/13.1 本地人工验收项由用户按 13-FINAL-ACCEPTANCE-RUNBOOK 单独执行落账）
 
 「再练一组」账（G-13.1-local-4）：2026-10-09 用户报告测试不通过，登记于 [Phase 13.1 UAT](phases/13.1-three-stage-dictation-lesson/13.1-UAT.md) 测试 6；2026-10-10 13.3 真机 UAT-5 同链路（完结课总结页→再练一组→家长端「加练」记录＋「不调整复习计划」断言）通过，提示缺陷可能已被后续修复——2026-10-11 完结决策：重测关账留给用户单独处理，不随阶段关闭自动通过。
@@ -188,6 +188,7 @@ None yet.
 | 261011-fw2 | 准备 Phase 13/13.1 收尾验收清单：13-FINAL-ACCEPTANCE-RUNBOOK.md（一次家庭真机课收口 17+6 项＋第三周证据；含词量预案 A/B/C、P0-P4/E1-E6/S1-S13） | 2026-10-11 | a7b1290 | — | [261011-fw2-phase-13-13-1-runbook-planning-phases-13](./quick/261011-fw2-phase-13-13-1-runbook-planning-phases-13/) |
 | 261011-h8a | 标记 Phase 13/13.1 完结（2026-10-11 用户决策：验收项由用户按 13-FINAL-ACCEPTANCE-RUNBOOK 单独处理）；STATE 转向 Phase 14 | 2026-10-11 | 81881b0 | — | [261011-h8a-phase-13-13-1-2026-10-11-roadmap-progres](./quick/261011-h8a-phase-13-13-1-2026-10-11-roadmap-progres/) |
 | 261012-aes | 完成 Issue #3 英语词表照片识别收尾：半成品盘点采纳、回归验证、原子提交、issue 勾选（含吸收并行会话审查修复 eb5251b） | 2026-10-12 | 0ab9ef6,0141274,7302f8f,f045edf,eb5251b | complete | [261012-aes-issue-3-issue](./quick/261012-aes-issue-3-issue/) |
+| 261012-auz | 完成 Issue #4 教材归属与已学进度控制练习范围：前端半成品盘点落库、三套 e2e（pybridge/rt/浏览器）、修复创建按钮 form 关联 bug、issue 勾选关闭 | 2026-10-12 | ba13300,3d2e52d,a3bbe22,5505fef,8656539,cb20f97,47f1e97,68ca62a,ae51201,8ff8390 | complete | [261012-auz-issue-4-2-e2e](./quick/261012-auz-issue-4-2-e2e/) |
 
 ### Roadmap Evolution
 
