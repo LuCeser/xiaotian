@@ -51,6 +51,22 @@ func (f *fakeExecutor) RunAdd(_ context.Context, _ pybridge.AddOpts) (pybridge.A
 func (f *fakeExecutor) RunEdit(_ context.Context, _ pybridge.EditOpts) (pybridge.EditResult, error) {
 	return pybridge.EditResult{}, nil
 }
+func (f *fakeExecutor) RunTextbookCreate(context.Context, pybridge.TextbookCreateOpts) (pybridge.TextbookMutationResult, error) {
+	return pybridge.TextbookMutationResult{}, nil
+}
+
+func (f *fakeExecutor) RunTextbookUpdate(context.Context, pybridge.TextbookUpdateOpts) (pybridge.TextbookMutationResult, error) {
+	return pybridge.TextbookMutationResult{}, nil
+}
+
+func (f *fakeExecutor) RunAssignWords(context.Context, pybridge.AssignWordsOpts) (pybridge.AssignWordsResult, error) {
+	return pybridge.AssignWordsResult{}, nil
+}
+
+func (f *fakeExecutor) RunUnassignWords(context.Context, pybridge.UnassignWordsOpts) (pybridge.UnassignWordsResult, error) {
+	return pybridge.UnassignWordsResult{}, nil
+}
+
 func (f *fakeExecutor) RunSetParticipation(context.Context, pybridge.SetParticipationOpts) (pybridge.SetParticipationResult, error) {
 	return pybridge.SetParticipationResult{}, nil
 }

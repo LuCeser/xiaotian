@@ -74,6 +74,22 @@ func (f *fakeExecutor) RunDeleteWords(_ context.Context, _ pybridge.DeleteWordsO
 	return pybridge.DeleteWordsResult{}, nil
 }
 
+func (f *fakeExecutor) RunTextbookCreate(_ context.Context, _ pybridge.TextbookCreateOpts) (pybridge.TextbookMutationResult, error) {
+	return pybridge.TextbookMutationResult{}, nil
+}
+
+func (f *fakeExecutor) RunTextbookUpdate(_ context.Context, _ pybridge.TextbookUpdateOpts) (pybridge.TextbookMutationResult, error) {
+	return pybridge.TextbookMutationResult{}, nil
+}
+
+func (f *fakeExecutor) RunAssignWords(_ context.Context, _ pybridge.AssignWordsOpts) (pybridge.AssignWordsResult, error) {
+	return pybridge.AssignWordsResult{}, nil
+}
+
+func (f *fakeExecutor) RunUnassignWords(_ context.Context, _ pybridge.UnassignWordsOpts) (pybridge.UnassignWordsResult, error) {
+	return pybridge.UnassignWordsResult{}, nil
+}
+
 // --- NewFSRSService validation ---
 
 func TestNewFSRSServiceValidation(t *testing.T) {

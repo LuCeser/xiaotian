@@ -77,6 +77,22 @@ func (f *fakePyBridge) RunDeleteWords(context.Context, pybridge.DeleteWordsOpts)
 	panic("PyFSRS must never call RunDeleteWords")
 }
 
+func (f *fakePyBridge) RunTextbookCreate(context.Context, pybridge.TextbookCreateOpts) (pybridge.TextbookMutationResult, error) {
+	panic("PyFSRS must never call RunTextbookCreate")
+}
+
+func (f *fakePyBridge) RunTextbookUpdate(context.Context, pybridge.TextbookUpdateOpts) (pybridge.TextbookMutationResult, error) {
+	panic("PyFSRS must never call RunTextbookUpdate")
+}
+
+func (f *fakePyBridge) RunAssignWords(context.Context, pybridge.AssignWordsOpts) (pybridge.AssignWordsResult, error) {
+	panic("PyFSRS must never call RunAssignWords")
+}
+
+func (f *fakePyBridge) RunUnassignWords(context.Context, pybridge.UnassignWordsOpts) (pybridge.UnassignWordsResult, error) {
+	panic("PyFSRS must never call RunUnassignWords")
+}
+
 // TestPyFSRSNilExecRejected pins the D-47 nil-guard: constructing without a
 // pybridge executor is an error, never a runtime panic later.
 func TestPyFSRSNilExecRejected(t *testing.T) {

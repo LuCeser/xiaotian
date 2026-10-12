@@ -551,3 +551,13 @@ func TestReviewArgsCleanupIdempotent(t *testing.T) {
 	}()
 	cleanup()
 }
+
+// argvValue returns the value following the flag, or "" when absent (a
+// small convenience for the textbook argv tests).
+func argvValue(argv []string, flag string) string {
+	idx := argvFind(argv, flag)
+	if idx < 0 || idx+1 >= len(argv) {
+		return ""
+	}
+	return argv[idx+1]
+}

@@ -657,3 +657,134 @@ func TestClassifyMgmtRun(t *testing.T) {
 		})
 	}
 }
+
+// TestTextbookCreateArgs pins the textbook-create argv contract (Issue #4):
+// --db before the hyphenated subcommand, --name/--category always present,
+// empty metadata flags omitted, --lessons always carried as ONE JSON-array
+// argv element (the --ids precedent — never shell-joined).
+func TestTextbookCreateArgs(t *testing.T) {
+	cfg := infra.PythonConfig{VocabScript: "vocab_manager.py", VocabDBPath: "vocab.db"}
+	argv := textbookCreateArgs(cfg, TextbookCreateOpts{
+		Name: "人教版PEP", Category: "english", Edition: "人教版",
+		Lessons: []string{"第3课", "第1课", "第2课"},
+	})
+	assertDBBeforeSubcommand(t, argv, "textbook-create")
+	for flag, want := range map[string]string{
+		"--name":     "人教版PEP",
+		"--category": "english",
+		"--edition":  "人教版",
+		"--lessons":  `["第3课","第1课","第2课"]`,
+	} {
+		idx := argvFind(argv, flag)
+		if idx < 0 || idx+1 >= len(argv) || argv[idx+1] != want {
+			t.Fatalf("argv %v: %s = %q, want %q", argv, flag, argvValue(argv, flag), want)
+		}
+	}
+	for _, absent := range []string{"--stage", "--grade", "--volume", "--module"} {
+		if argvFind(argv, absent) >= 0 {
+			t.Fatalf("argv %v: %s present for an empty field, want omitted", argv, absent)
+		}
+	}
+	// Nil lessons still carry an explicit empty array (indistinguishable
+	// from "no lessons yet" by design).
+	argv2 := textbookCreateArgs(cfg, TextbookCreateOpts{Name: "X", Category: "chinese"})
+	if got := argvValue(argv2, "--lessons"); got != "[]" {
+		t.Fatalf("nil lessons argv --lessons = %q, want []", got)
+	}
+}
+
+// TestTextbookUpdateArgs pins the gated-field contract: every zero-valued
+// field omits its flag (the script keeps the column), gates force presence.
+func TestTextbookUpdateArgs(t *testing.T) {
+	cfg := infra.PythonConfig{VocabScript: "vocab_manager.py", VocabDBPath: "vocab.db"}
+	argv := textbookUpdateArgs(cfg, TextbookUpdateOpts{ID: 7})
+	assertDBBeforeSubcommand(t, argv, "textbook-update")
+	if got := argvValue(argv, "--id"); got != "7" {
+		t.Fatalf("--id = %q, want 7", got)
+	}
+	for _, absent := range []string{"--name", "--lessons", "--learned-lessons", "--set-primary", "--edition"} {
+		if argvFind(argv, absent) >= 0 {
+			t.Fatalf("argv %v: %s present without a change, want omitted", argv, absent)
+		}
+	}
+
+	argv = textbookUpdateArgs(cfg, TextbookUpdateOpts{
+		ID: 7, HasLearnedLessons: true, LearnedLessons: 2, SetPrimary: true,
+		HasLessons: true, Lessons: []string{"A课", "B课"}, Grade: "三年级",
+	})
+	if got := argvValue(argv, "--learned-lessons"); got != "2" {
+		t.Fatalf("--learned-lessons = %q, want 2", got)
+	}
+	if got := argvValue(argv, "--lessons"); got != `["A课","B课"]` {
+		t.Fatalf("--lessons = %q, want the JSON array", got)
+	}
+	if got := argvValue(argv, "--grade"); got != "三年级" {
+		t.Fatalf("--grade = %q, want 三年级", got)
+	}
+	if argvFind(argv, "--set-primary") < 0 {
+		t.Fatalf("argv %v: --set-primary missing", argv)
+	}
+}
+
+// TestAssignWordsArgs pins the assign/unassign argv contract: --lesson is
+// ALWAYS present (empty string = 待确认), --include-in-scope only when
+// set, ids ride as one JSON argv element.
+func TestAssignWordsArgs(t *testing.T) {
+	cfg := infra.PythonConfig{VocabScript: "vocab_manager.py", VocabDBPath: "vocab.db"}
+	argv := assignWordsArgs(cfg, AssignWordsOpts{TextbookID: 3, IDs: []int64{11, 12}})
+	assertDBBeforeSubcommand(t, argv, "assign-words")
+	for flag, want := range map[string]string{
+		"--textbook-id": "3",
+		"--ids":         "[11,12]",
+		"--lesson":      "",
+	} {
+		idx := argvFind(argv, flag)
+		if idx < 0 || idx+1 >= len(argv) || argv[idx+1] != want {
+			t.Fatalf("argv %v: %s = %q, want %q", argv, flag, argvValue(argv, flag), want)
+		}
+	}
+	if argvFind(argv, "--include-in-scope") >= 0 {
+		t.Fatalf("argv %v: --include-in-scope present without the flag", argv)
+	}
+
+	argv = assignWordsArgs(cfg, AssignWordsOpts{
+		TextbookID: 3, IDs: []int64{11}, Lesson: "第2课", IncludeInScope: true,
+	})
+	if got := argvValue(argv, "--lesson"); got != "第2课" {
+		t.Fatalf("--lesson = %q, want 第2课", got)
+	}
+	if argvFind(argv, "--include-in-scope") < 0 {
+		t.Fatalf("argv %v: --include-in-scope missing", argv)
+	}
+
+	argv = unassignWordsArgs(cfg, UnassignWordsOpts{TextbookID: 3, IDs: []int64{11}})
+	assertDBBeforeSubcommand(t, argv, "unassign-words")
+	if got := argvValue(argv, "--ids"); got != "[11]" {
+		t.Fatalf("--ids = %q, want [11]", got)
+	}
+}
+
+// TestRunTextbookCreateValidation pins the pre-subprocess guards: a blank
+// name or a non-vocabulary category fails without any argv (caller bugs
+// never waste a process — the RunAdd/RunEdit pattern).
+func TestRunTextbookCreateValidation(t *testing.T) {
+	b, err := NewBridge(infra.PythonConfig{Interpreter: "no-such-python", ScriptsDir: "scripts"}, infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	if _, err := b.RunTextbookCreate(context.Background(), TextbookCreateOpts{Name: "  "}); err == nil {
+		t.Fatal("blank name accepted, want rejection")
+	}
+	if _, err := b.RunTextbookCreate(context.Background(), TextbookCreateOpts{Name: "X", Category: "math"}); err == nil {
+		t.Fatal("bad category accepted, want rejection")
+	}
+	if _, err := b.RunTextbookUpdate(context.Background(), TextbookUpdateOpts{ID: 1}); err == nil {
+		t.Fatal("empty update accepted, want at-least-one-change rejection")
+	}
+	if _, err := b.RunAssignWords(context.Background(), AssignWordsOpts{TextbookID: 1, IDs: []int64{2, 2}}); err == nil {
+		t.Fatal("duplicate ids accepted, want rejection")
+	}
+	if _, err := b.RunUnassignWords(context.Background(), UnassignWordsOpts{TextbookID: 0, IDs: []int64{2}}); err == nil {
+		t.Fatal("zero textbook id accepted, want rejection")
+	}
+}

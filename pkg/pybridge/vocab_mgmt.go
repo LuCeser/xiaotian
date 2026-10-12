@@ -529,3 +529,220 @@ func (b *Bridge) RunDeleteWords(ctx context.Context, opts DeleteWordsOpts) (Dele
 	}
 	return result, nil
 }
+
+// textbookCreateArgs builds the argv slice for the vocab_manager.py
+// `textbook-create` subcommand (Issue #4). The shape is:
+//
+//	[script, "--db", db, "textbook-create", "--name", N, "--category", C,
+//	 [--edition E] [--stage S] [--grade G] [--volume V] [--module M],
+//	 "--lessons", '<json array>']
+//
+// --lessons ALWAYS rides as one JSON-array argv element (the --ids
+// precedent) — empty metadata flags are omitted, but the lesson list is
+// always present so the script's default ("") and an explicit empty array
+// are indistinguishable by design (both mean "no lessons yet").
+func textbookCreateArgs(cfg infra.PythonConfig, opts TextbookCreateOpts) []string {
+	args := []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "textbook-create",
+		"--name", opts.Name, "--category", opts.Category}
+	for _, m := range []struct{ flag, value string }{
+		{"edition", opts.Edition}, {"stage", opts.Stage}, {"grade", opts.Grade},
+		{"volume", opts.Volume}, {"module", opts.Module},
+	} {
+		if m.value != "" {
+			args = append(args, "--"+m.flag, m.value)
+		}
+	}
+	lessons := opts.Lessons
+	if lessons == nil {
+		lessons = []string{}
+	}
+	raw, _ := json.Marshal(lessons)
+	return append(args, "--lessons", string(raw))
+}
+
+// textbookUpdateArgs builds the argv slice for `textbook-update` (Issue
+// #4). Gated fields (Has* bool) omit their flags entirely so the script
+// keeps the column — the pointer-free shape of editArgs' nil contract.
+func textbookUpdateArgs(cfg infra.PythonConfig, opts TextbookUpdateOpts) []string {
+	args := []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "textbook-update",
+		"--id", strconv.FormatInt(opts.ID, 10)}
+	if opts.Name != "" {
+		args = append(args, "--name", opts.Name)
+	}
+	for _, m := range []struct{ flag, value string }{
+		{"edition", opts.Edition}, {"stage", opts.Stage}, {"grade", opts.Grade},
+		{"volume", opts.Volume}, {"module", opts.Module},
+	} {
+		if m.value != "" {
+			args = append(args, "--"+m.flag, m.value)
+		}
+	}
+	if opts.HasLessons {
+		lessons := opts.Lessons
+		if lessons == nil {
+			lessons = []string{}
+		}
+		raw, _ := json.Marshal(lessons)
+		args = append(args, "--lessons", string(raw))
+	}
+	if opts.HasLearnedLessons {
+		args = append(args, "--learned-lessons", strconv.Itoa(opts.LearnedLessons))
+	}
+	if opts.SetPrimary {
+		args = append(args, "--set-primary")
+	}
+	return args
+}
+
+// assignWordsArgs builds the argv slice for `assign-words` (Issue #4):
+//
+//	[script, "--db", db, "assign-words", "--textbook-id", T, "--ids", '<json>',
+//	 "--lesson", L, ["--include-in-scope"]]
+//
+// --lesson is ALWAYS present (empty string = 待确认) so a batch never
+// accidentally rides the argparse default.
+func assignWordsArgs(cfg infra.PythonConfig, opts AssignWordsOpts) []string {
+	raw, _ := json.Marshal(opts.IDs)
+	args := []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "assign-words",
+		"--textbook-id", strconv.FormatInt(opts.TextbookID, 10),
+		"--ids", string(raw), "--lesson", opts.Lesson}
+	if opts.IncludeInScope {
+		args = append(args, "--include-in-scope")
+	}
+	return args
+}
+
+// unassignWordsArgs builds the argv slice for `unassign-words` (Issue #4).
+func unassignWordsArgs(cfg infra.PythonConfig, opts UnassignWordsOpts) []string {
+	raw, _ := json.Marshal(opts.IDs)
+	return []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "unassign-words",
+		"--textbook-id", strconv.FormatInt(opts.TextbookID, 10),
+		"--ids", string(raw)}
+}
+
+// validateBatchIDs enforces the shared 1..500-unique-positive ids contract
+// (Issue #2's set-participation shape — assign-words/unassign-words reuse
+// it verbatim so every batch command speaks the same cap).
+func validateBatchIDs(op string, ids []int64) error {
+	if len(ids) == 0 || len(ids) > 500 {
+		return fmt.Errorf("%s: ids must contain 1..500 values", op)
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return fmt.Errorf("%s: id must be > 0, got %d", op, id)
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("%s: duplicate id %d", op, id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+// RunTextbookCreate executes the vocab_manager.py `textbook-create`
+// subcommand (Issue #4). Pre-validation mirrors the script's own guards
+// (name/category) so a caller bug never wastes a subprocess.
+func (b *Bridge) RunTextbookCreate(ctx context.Context, opts TextbookCreateOpts) (TextbookMutationResult, error) {
+	if strings.TrimSpace(opts.Name) == "" {
+		return TextbookMutationResult{}, errors.New("textbook-create: name is required")
+	}
+	if opts.Category != "english" && opts.Category != "chinese" {
+		return TextbookMutationResult{}, fmt.Errorf(
+			"textbook-create: category must be english or chinese, got %q", opts.Category)
+	}
+
+	start := time.Now()
+	args := textbookCreateArgs(b.cfg, opts)
+	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.MgmtTimeout, b.cfg.Interpreter, args...)
+	defer b.logResult("textbook-create", start, stdout, stderr, exitCode, err)
+	raw, clsErr := classifyMgmtRun("textbook-create", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return TextbookMutationResult{}, clsErr
+	}
+	var result TextbookMutationResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return TextbookMutationResult{}, errors.Wrap(ErrPythonJSONParse, "run textbook-create")
+	}
+	return result, nil
+}
+
+// RunTextbookUpdate executes the vocab_manager.py `textbook-update`
+// subcommand (Issue #4). At least one change must be gated on (the script
+// would no-op otherwise — surfaced here as a caller bug, not a silent
+// round trip).
+func (b *Bridge) RunTextbookUpdate(ctx context.Context, opts TextbookUpdateOpts) (TextbookMutationResult, error) {
+	if opts.ID <= 0 {
+		return TextbookMutationResult{}, fmt.Errorf("textbook-update: id must be > 0, got %d", opts.ID)
+	}
+	if opts.Name == "" && opts.Edition == "" && opts.Stage == "" && opts.Grade == "" &&
+		opts.Volume == "" && opts.Module == "" && !opts.HasLessons &&
+		!opts.HasLearnedLessons && !opts.SetPrimary {
+		return TextbookMutationResult{}, errors.New("textbook-update: at least one change is required")
+	}
+
+	start := time.Now()
+	args := textbookUpdateArgs(b.cfg, opts)
+	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.MgmtTimeout, b.cfg.Interpreter, args...)
+	defer b.logResult("textbook-update", start, stdout, stderr, exitCode, err)
+	raw, clsErr := classifyMgmtRun("textbook-update", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return TextbookMutationResult{}, clsErr
+	}
+	var result TextbookMutationResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return TextbookMutationResult{}, errors.Wrap(ErrPythonJSONParse, "run textbook-update")
+	}
+	return result, nil
+}
+
+// RunAssignWords executes the vocab_manager.py `assign-words` subcommand
+// (Issue #4). All-or-nothing: the script's not-found stdout diagnostic
+// maps to 404 upstream (same Pitfall-2 chain as set-participation).
+func (b *Bridge) RunAssignWords(ctx context.Context, opts AssignWordsOpts) (AssignWordsResult, error) {
+	if opts.TextbookID <= 0 {
+		return AssignWordsResult{}, fmt.Errorf("assign-words: textbook id must be > 0, got %d", opts.TextbookID)
+	}
+	if err := validateBatchIDs("assign-words", opts.IDs); err != nil {
+		return AssignWordsResult{}, err
+	}
+
+	start := time.Now()
+	args := assignWordsArgs(b.cfg, opts)
+	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.MgmtTimeout, b.cfg.Interpreter, args...)
+	defer b.logResult("assign-words", start, stdout, stderr, exitCode, err)
+	raw, clsErr := classifyMgmtRun("assign-words", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return AssignWordsResult{}, clsErr
+	}
+	var result AssignWordsResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return AssignWordsResult{}, errors.Wrap(ErrPythonJSONParse, "run assign-words")
+	}
+	return result, nil
+}
+
+// RunUnassignWords executes the vocab_manager.py `unassign-words`
+// subcommand (Issue #4).
+func (b *Bridge) RunUnassignWords(ctx context.Context, opts UnassignWordsOpts) (UnassignWordsResult, error) {
+	if opts.TextbookID <= 0 {
+		return UnassignWordsResult{}, fmt.Errorf("unassign-words: textbook id must be > 0, got %d", opts.TextbookID)
+	}
+	if err := validateBatchIDs("unassign-words", opts.IDs); err != nil {
+		return UnassignWordsResult{}, err
+	}
+
+	start := time.Now()
+	args := unassignWordsArgs(b.cfg, opts)
+	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.MgmtTimeout, b.cfg.Interpreter, args...)
+	defer b.logResult("unassign-words", start, stdout, stderr, exitCode, err)
+	raw, clsErr := classifyMgmtRun("unassign-words", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return UnassignWordsResult{}, clsErr
+	}
+	var result UnassignWordsResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return UnassignWordsResult{}, errors.Wrap(ErrPythonJSONParse, "run unassign-words")
+	}
+	return result, nil
+}

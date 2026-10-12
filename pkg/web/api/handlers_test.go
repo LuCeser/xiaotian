@@ -47,6 +47,19 @@ type fakeExecutor struct {
 	deleteResult pybridge.DeleteWordsResult
 	deleteErr    error
 	deleteCalls  []pybridge.DeleteWordsOpts
+
+	textbookCreateResult pybridge.TextbookMutationResult
+	textbookCreateErr    error
+	textbookCreateCalls  []pybridge.TextbookCreateOpts
+	textbookUpdateResult pybridge.TextbookMutationResult
+	textbookUpdateErr    error
+	textbookUpdateCalls  []pybridge.TextbookUpdateOpts
+	assignResult         pybridge.AssignWordsResult
+	assignErr            error
+	assignCalls          []pybridge.AssignWordsOpts
+	unassignResult       pybridge.UnassignWordsResult
+	unassignErr          error
+	unassignCalls        []pybridge.UnassignWordsOpts
 }
 
 func (f *fakeExecutor) RunAdd(_ context.Context, opts pybridge.AddOpts) (pybridge.AddResult, error) {
@@ -88,6 +101,26 @@ func (f *fakeExecutor) RunRenameUnit(_ context.Context, opts pybridge.RenameUnit
 func (f *fakeExecutor) RunDeleteWords(_ context.Context, opts pybridge.DeleteWordsOpts) (pybridge.DeleteWordsResult, error) {
 	f.deleteCalls = append(f.deleteCalls, opts)
 	return f.deleteResult, f.deleteErr
+}
+
+func (f *fakeExecutor) RunTextbookCreate(_ context.Context, opts pybridge.TextbookCreateOpts) (pybridge.TextbookMutationResult, error) {
+	f.textbookCreateCalls = append(f.textbookCreateCalls, opts)
+	return f.textbookCreateResult, f.textbookCreateErr
+}
+
+func (f *fakeExecutor) RunTextbookUpdate(_ context.Context, opts pybridge.TextbookUpdateOpts) (pybridge.TextbookMutationResult, error) {
+	f.textbookUpdateCalls = append(f.textbookUpdateCalls, opts)
+	return f.textbookUpdateResult, f.textbookUpdateErr
+}
+
+func (f *fakeExecutor) RunAssignWords(_ context.Context, opts pybridge.AssignWordsOpts) (pybridge.AssignWordsResult, error) {
+	f.assignCalls = append(f.assignCalls, opts)
+	return f.assignResult, f.assignErr
+}
+
+func (f *fakeExecutor) RunUnassignWords(_ context.Context, opts pybridge.UnassignWordsOpts) (pybridge.UnassignWordsResult, error) {
+	f.unassignCalls = append(f.unassignCalls, opts)
+	return f.unassignResult, f.unassignErr
 }
 
 // fakeCardRepo is a manual fake for database.CardRepository that captures

@@ -88,6 +88,30 @@ type Executor interface {
 	// (Pitfall 1: no bridge code path may trigger the script's non-JSON
 	// dry-run preview).
 	RunDeleteWords(ctx context.Context, opts DeleteWordsOpts) (DeleteWordsResult, error)
+
+	// RunTextbookCreate invokes the vocab_manager.py `textbook-create`
+	// subcommand (Issue #4) and returns the {id, name} of the created
+	// textbook. Reads of textbooks never spawn Python (the Go repository
+	// reads SQLite directly, D-12 kin) — these methods are the WRITE side.
+	RunTextbookCreate(ctx context.Context, opts TextbookCreateOpts) (TextbookMutationResult, error)
+
+	// RunTextbookUpdate invokes the vocab_manager.py `textbook-update`
+	// subcommand (Issue #4): any subset of name/metadata/lesson list/
+	// learned progress/primary flag in one transaction. A zero-valued
+	// optional field omits the flag so the script keeps the column.
+	RunTextbookUpdate(ctx context.Context, opts TextbookUpdateOpts) (TextbookMutationResult, error)
+
+	// RunAssignWords invokes the vocab_manager.py `assign-words` subcommand
+	// (Issue #4): batch-assign cards to one textbook's lesson (empty
+	// lesson = 待确认, never learned). All-or-nothing with the
+	// set-participation transaction shape; missing ids surface as 404
+	// upstream via the stdout not-found mapping.
+	RunAssignWords(ctx context.Context, opts AssignWordsOpts) (AssignWordsResult, error)
+
+	// RunUnassignWords invokes the vocab_manager.py `unassign-words`
+	// subcommand (Issue #4): remove cards' assignments to one textbook —
+	// the words return to supplementary vocabulary (eligible by default).
+	RunUnassignWords(ctx context.Context, opts UnassignWordsOpts) (UnassignWordsResult, error)
 }
 
 // DueOpts carries the operational flags for the vocab_manager.py due
@@ -395,6 +419,97 @@ type DeleteWordsOpts struct {
 // is the only field Plan 09-05's endpoints surface).
 type DeleteWordsResult struct {
 	Deleted int `json:"deleted"`
+}
+
+// TextbookCreateOpts carries the vocab_manager.py textbook-create flags
+// (Issue #4). Name and Category are required; the five descriptive
+// metadata strings are optional (US-7: a textbook need not fill every
+// level); Lessons is the EXPLICIT teaching order (JSON array argv) and
+// may be empty (filled in later via textbook-update, US-8).
+type TextbookCreateOpts struct {
+	Name     string
+	Category string
+	Edition  string
+	Stage    string
+	Grade    string
+	Volume   string
+	Module   string
+	Lessons  []string
+}
+
+// TextbookUpdateOpts carries the vocab_manager.py textbook-update flags
+// (Issue #4). Every field except ID is optional; the zero value omits the
+// flag so the script keeps the column (the EditOpts nil-pointer contract
+// expressed with empty strings, since no field needs a clear-to-empty
+// distinction here).
+type TextbookUpdateOpts struct {
+	ID int64
+	// Name, when non-empty, renames the textbook.
+	Name string
+	// Edition/Stage/Grade/Volume/Module, when non-empty, replace the
+	// corresponding descriptive column.
+	Edition string
+	Stage   string
+	Grade   string
+	Volume  string
+	Module  string
+	// HasLessons gates Lessons (an empty lesson list is a legal update —
+	// the pointer-free version of EditOpts' nil contract).
+	HasLessons bool
+	Lessons    []string
+	// HasLearnedLessons gates LearnedLessons (progress 0 is a legal value).
+	HasLearnedLessons bool
+	LearnedLessons    int
+	// SetPrimary makes this textbook the category's primary, demoting the
+	// others in the same script transaction.
+	SetPrimary bool
+}
+
+// TextbookMutationResult is the {id, ...} payload the textbook write
+// commands print. Updated carries textbook-update's confirmation echo.
+type TextbookMutationResult struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name,omitempty"`
+	Updated bool   `json:"updated,omitempty"`
+}
+
+// AssignWordsOpts carries the vocab_manager.py assign-words flags
+// (Issue #4): 1..500 unique card ids, one textbook, and either a lesson
+// name from that textbook's list or the empty string (待确认 — never
+// learned). IncludeInScope is the parent's explicit override admitting
+// the words regardless of lesson progress.
+type AssignWordsOpts struct {
+	TextbookID    int64
+	IDs           []int64
+	Lesson        string
+	IncludeInScope bool
+}
+
+// AssignWordsResult mirrors the script's success payload: on a nil error
+// every requested card carries the assignment.
+type AssignWordsResult struct {
+	Requested     int    `json:"requested"`
+	Updated       int    `json:"updated"`
+	Missing       []int64 `json:"missing"`
+	TextbookID    int64  `json:"textbook_id"`
+	Lesson        string `json:"lesson"`
+	IncludeInScope bool   `json:"include_in_scope"`
+}
+
+// UnassignWordsOpts carries the vocab_manager.py unassign-words flags
+// (Issue #4): the textbook whose assignments are removed for 1..500
+// unique card ids.
+type UnassignWordsOpts struct {
+	TextbookID int64
+	IDs        []int64
+}
+
+// UnassignWordsResult mirrors the script's {requested, removed} payload.
+type UnassignWordsResult struct {
+	Requested  int    `json:"requested"`
+	Removed    int    `json:"removed"`
+	Missing    []int64 `json:"missing"`
+	TextbookID int64  `json:"textbook_id"`
 }
 
 // Sentinel errors returned by the pybridge layer. Callers MUST detect
