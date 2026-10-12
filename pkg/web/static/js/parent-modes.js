@@ -696,10 +696,14 @@
    *   fetchWords(category)     → Promise<Array> — batch snapshot source
    *   onCommitted(result)      — fired after ANY successful add
    *   onCategoryChange(value)  — fired when either form's radio changes
-   *   recognizePhoto(blob)     → Promise<{entries}> — POST
+   *   recognizePhoto(blob)     → Promise<{textbook, entries}> — POST
    *       /api/v1/words/photo/recognize (Issue #3). Present ⇒ the third tab
    *       照片导入 mounts (PhotoAddForm from parent-photo.js); absent ⇒ the
    *       card stays two-tab so older embeds degrade instead of breaking.
+   *   fetchTextbooks / createTextbook / updateTextbook / assignWords —
+   *       the Issue #4 textbook surfaces, passed through to PhotoAddForm's
+   *       Issue #5 attribution panel. All-or-nothing: absent ⇒ the panel
+   *       degrades to the plain supplementary flow.
    */
   function AddCard(container, options) {
     options = options || {};
@@ -712,6 +716,12 @@
     var onCommitted = options.onCommitted || function () {};
     var onCategoryChange = options.onCategoryChange || function () {};
     var recognizePhoto = options.recognizePhoto || null;
+    var textbookDeps = {
+      fetchTextbooks: options.fetchTextbooks || null,
+      createTextbook: options.createTextbook || null,
+      updateTextbook: options.updateTextbook || null,
+      assignWords: options.assignWords || null,
+    };
 
     var tablist = document.createElement('div');
     tablist.className = 'add-tabs';
@@ -790,6 +800,10 @@
         recognizePhoto: recognizePhoto,
         submitWords: submitWords,
         fetchWords: fetchWords,
+        fetchTextbooks: textbookDeps.fetchTextbooks,
+        createTextbook: textbookDeps.createTextbook,
+        updateTextbook: textbookDeps.updateTextbook,
+        assignWords: textbookDeps.assignWords,
         onCommitted: onCommitted,
         onCategoryChange: onCategoryChange,
       });

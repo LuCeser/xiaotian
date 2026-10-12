@@ -301,6 +301,25 @@
     recognizePhoto: function (blob) {
       return postImage('/api/v1/words/photo/recognize', blob);
     },
+    // Issue #5 教材归属: the same textbook surfaces TextbookUI uses,
+    // passed through AddCard into PhotoAddForm's attribution panel.
+    fetchTextbooks: function (category) {
+      var url = '/api/v1/textbooks' +
+        (category ? ('?category=' + encodeURIComponent(category)) : '');
+      return fetchJSON('GET', url).then(function (data) {
+        return (data && Array.isArray(data.textbooks)) ? data.textbooks : [];
+      });
+    },
+    createTextbook: function (payload) {
+      return fetchJSON('POST', '/api/v1/textbooks', payload);
+    },
+    updateTextbook: function (id, payload) {
+      return fetchJSON('PUT', '/api/v1/textbooks/' + encodeURIComponent(id), payload);
+    },
+    assignWords: function (textbookId, payload) {
+      return fetchJSON('POST',
+        '/api/v1/textbooks/' + encodeURIComponent(textbookId) + '/assign', payload);
+    },
     onCommitted: function () {
       browse.refresh();
       refreshUnitOptions(selectedCategory);

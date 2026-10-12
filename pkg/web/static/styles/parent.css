@@ -651,6 +651,78 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/* 照片导入教材归属 (Issue #5): the attribution panel between the picker  */
+/* and the review table — read-off-the-photo meta line, textbook select, */
+/* create-form fields, batch lesson toolbar and per-row lesson selects. */
+/* ------------------------------------------------------------------ */
+
+.photo-textbook-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.photo-textbook-title {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+
+.photo-meta-line {
+  margin: 4px 0;
+  font-size: 13px;
+  color: var(--text-secondary, #64748b);
+  overflow-wrap: anywhere;
+}
+
+.photo-meta-warn {
+  color: var(--warning, #b45309);
+}
+
+.photo-book-field {
+  margin-top: 8px;
+}
+
+.photo-book-select {
+  max-width: 100%;
+}
+
+.photo-book-detail .form-field {
+  margin: 8px 0 0;
+}
+
+.photo-lesson-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.photo-lesson-select {
+  max-width: 220px;
+  min-height: 36px;
+}
+
+.photo-include-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text-secondary, #64748b);
+}
+
+.photo-lesson-cell {
+  min-width: 120px;
+}
+
+.photo-lesson-cell .photo-lesson-select {
+  width: 100%;
+}
+
+/* ------------------------------------------------------------------ */
 /* Button loading state (UI-SPEC: disabled + inline spinner, label     */
 /* kept). Pure-CSS spinner — no glyph dependency.                      */
 /* ------------------------------------------------------------------ */

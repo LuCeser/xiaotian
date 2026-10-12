@@ -84,12 +84,13 @@ const { classifyPhotoEntries } = require('../pkg/web/static/js/parent-photo.js')
   ]);
 }
 
-// 6. Guard clauses: null-ish inputs behave as empty (no throw).
+// 6. Guard clauses: null-ish inputs behave as empty (no throw). Rows carry
+//    the Issue #5 lesson field (absent entry lesson → '').
 {
   assert.deepStrictEqual(classifyPhotoEntries(null, null), []);
   assert.deepStrictEqual(classifyPhotoEntries([null, undefined]), [
-    { index: 0, word: '', meaning: '', status: 'invalid', reason: 'empty-word', existingMeaning: '' },
-    { index: 1, word: '', meaning: '', status: 'invalid', reason: 'empty-word', existingMeaning: '' },
+    { index: 0, word: '', meaning: '', lesson: '', status: 'invalid', reason: 'empty-word', existingMeaning: '' },
+    { index: 1, word: '', meaning: '', lesson: '', status: 'invalid', reason: 'empty-word', existingMeaning: '' },
   ]);
 }
 
