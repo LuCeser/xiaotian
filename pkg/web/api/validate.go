@@ -320,3 +320,173 @@ func validateAddRequest(req *AddRequest) string {
 	}
 	return ""
 }
+
+// Textbook route caps (Issue #4): the textbook name and each descriptive
+// metadata field cap at maxTextbookFieldRunes; a lesson list carries at
+// most maxTextbookLessons names (a real semester is ~100; 200 leaves
+// headroom). The batch cap reuses the participation shape (1..500 unique
+// ids — one subprocess, one transaction).
+const (
+	maxTextbookFieldRunes  = 100
+	maxTextbookLessons     = 200
+	maxTextbookLessonRunes = 100
+)
+
+// TextbookCreateRequest is the decoded POST /textbooks body. Name and
+// category are required; the five descriptive fields are optional
+// free-form text (US-7: 不要求填满所有层级); lessons is the EXPLICIT
+// teaching order and may be absent (filled in later, US-8).
+type TextbookCreateRequest struct {
+	Name     string   `json:"name"`
+	Category string   `json:"category"`
+	Edition  string   `json:"edition"`
+	Stage    string   `json:"stage"`
+	Grade    string   `json:"grade"`
+	Volume   string   `json:"volume"`
+	Module   string   `json:"module"`
+	Lessons  []string `json:"lessons"`
+}
+
+// TextbookUpdateRequest is the decoded PUT /textbooks/{id} body. Every
+// field is a pointer (or Lessons nil-vs-empty) so absent keeps the
+// column; LearnedLessons is a pointer because 0 is a legal progress.
+type TextbookUpdateRequest struct {
+	Name           *string   `json:"name"`
+	Edition        *string   `json:"edition"`
+	Stage          *string   `json:"stage"`
+	Grade          *string   `json:"grade"`
+	Volume         *string   `json:"volume"`
+	Module         *string   `json:"module"`
+	Lessons        []string  `json:"lessons"`
+	LearnedLessons *int      `json:"learnedLessons"`
+	SetPrimary     bool      `json:"setPrimary"`
+}
+
+// TextbookAssignRequest is the decoded POST /textbooks/{id}/assign and
+// /textbooks/{id}/unassign body. Lesson is the empty-string-legal lesson
+// name (待确认); IncludeInScope is the parent's explicit override.
+type TextbookAssignRequest struct {
+	CardIDs        []int64 `json:"cardIds"`
+	Lesson         string  `json:"lesson"`
+	IncludeInScope bool    `json:"includeInScope"`
+}
+
+// validateTextbookName checks one name-shaped field.
+func validateTextbookName(field, value string) string {
+	if value == "" {
+		return field + " must not be empty"
+	}
+	if n := len([]rune(value)); n > maxTextbookFieldRunes {
+		return fmt.Sprintf("%s exceeds %d characters", field, maxTextbookFieldRunes)
+	}
+	return ""
+}
+
+// validateTextbookLessons checks the explicit lesson list: unique,
+// non-empty, individually capped (dictionary order is irrelevant — the
+// slice IS the order).
+func validateTextbookLessons(lessons []string) string {
+	if len(lessons) > maxTextbookLessons {
+		return fmt.Sprintf("lessons must contain at most %d items, got %d", maxTextbookLessons, len(lessons))
+	}
+	seen := make(map[string]struct{}, len(lessons))
+	for i, name := range lessons {
+		if name == "" {
+			return fmt.Sprintf("lessons[%d] must not be empty", i)
+		}
+		if n := len([]rune(name)); n > maxTextbookLessonRunes {
+			return fmt.Sprintf("lessons[%d] exceeds %d characters", i, maxTextbookLessonRunes)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Sprintf("lessons[%d] %q is duplicated", i, name)
+		}
+		seen[name] = struct{}{}
+	}
+	return ""
+}
+
+// validateTextbookCreateRequest validates POST /textbooks. Returns "" on
+// success or the invalid_request message.
+func validateTextbookCreateRequest(req *TextbookCreateRequest) string {
+	if req.Category == "" {
+		req.Category = CategoryEnglish
+	}
+	if err := ValidateCategory(req.Category); err != nil {
+		return "category must be \"english\" or \"chinese\""
+	}
+	if msg := validateTextbookName("name", req.Name); msg != "" {
+		return msg
+	}
+	for _, field := range []struct {
+		name, value string
+	}{
+		{"edition", req.Edition}, {"stage", req.Stage}, {"grade", req.Grade},
+		{"volume", req.Volume}, {"module", req.Module},
+	} {
+		if n := len([]rune(field.value)); n > maxTextbookFieldRunes {
+			return fmt.Sprintf("%s exceeds %d characters", field.name, maxTextbookFieldRunes)
+		}
+	}
+	return validateTextbookLessons(req.Lessons)
+}
+
+// validateTextbookUpdateRequest validates PUT /textbooks/{id}: the
+// pointer/nil-keeps shape plus the same field rules, and at least one
+// change must be requested (a fully-absent body is a caller bug).
+func validateTextbookUpdateRequest(req *TextbookUpdateRequest) string {
+	if req.Name != nil {
+		if msg := validateTextbookName("name", *req.Name); msg != "" {
+			return msg
+		}
+	}
+	for _, field := range []struct {
+		name  string
+		value *string
+	}{
+		{"edition", req.Edition}, {"stage", req.Stage}, {"grade", req.Grade},
+		{"volume", req.Volume}, {"module", req.Module},
+	} {
+		if field.value != nil && len([]rune(*field.value)) > maxTextbookFieldRunes {
+			return fmt.Sprintf("%s exceeds %d characters", field.name, maxTextbookFieldRunes)
+		}
+	}
+	if req.Lessons != nil {
+		if msg := validateTextbookLessons(req.Lessons); msg != "" {
+			return msg
+		}
+	}
+	if req.LearnedLessons != nil && (*req.LearnedLessons < 0 || *req.LearnedLessons > maxTextbookLessons) {
+		return fmt.Sprintf("learnedLessons must be 0..%d", maxTextbookLessons)
+	}
+	changed := req.Name != nil || req.Edition != nil || req.Stage != nil ||
+		req.Grade != nil || req.Volume != nil || req.Module != nil ||
+		req.Lessons != nil || req.LearnedLessons != nil || req.SetPrimary
+	if !changed {
+		return "at least one change is required"
+	}
+	return ""
+}
+
+// validateTextbookAssignRequest mirrors validateParticipationRequest's
+// batch guard (1..500 unique positive ids) plus the lesson name cap. The
+// lesson's MEMBERSHIP in the textbook's list is checked by the handler
+// against the repository row (it needs the textbook, not just the body).
+func validateTextbookAssignRequest(req *TextbookAssignRequest) string {
+	if len(req.CardIDs) < 1 || len(req.CardIDs) > 500 {
+		return "cardIds must contain between 1 and 500 items"
+	}
+	seen := make(map[int64]struct{}, len(req.CardIDs))
+	for i, id := range req.CardIDs {
+		if id <= 0 {
+			return fmt.Sprintf("cardIds[%d] must be positive", i)
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Sprintf("cardIds[%d] is duplicated", i)
+		}
+		seen[id] = struct{}{}
+	}
+	if n := len([]rune(req.Lesson)); n > maxTextbookLessonRunes {
+		return fmt.Sprintf("lesson exceeds %d characters", maxTextbookLessonRunes)
+	}
+	return ""
+}

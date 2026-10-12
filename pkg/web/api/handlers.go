@@ -65,6 +65,7 @@ const maxStdoutDiagnosticRunes = 300
 type handler struct {
 	exec       pybridge.Executor
 	cards      database.CardRepository
+	textbooks  database.TextbookRepository
 	lessons    *lesson.Store
 	practice   *lesson.PracticeStore
 	receipts   *lesson.ReceiptStore
@@ -77,11 +78,11 @@ type handler struct {
 // ServeMux. Logger may be nil (NewNoOpLogger is substituted, D-47) so
 // tests can construct the handler cheaply. recognizer may be nil (photo
 // recognition unavailable — see the handler struct comment).
-func NewHandler(exec pybridge.Executor, cards database.CardRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
+func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}
-	h := &handler{exec: exec, cards: cards, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, cfg: cfg, logger: logger}
+	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, cfg: cfg, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /words", h.listWords)
@@ -90,6 +91,14 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, lessons *
 	mux.HandleFunc("GET /units", h.listUnits)
 	mux.HandleFunc("PUT /words/{id}", h.editWord)
 	mux.HandleFunc("PUT /words/participation", h.setWordParticipation)
+	// Issue #4: textbook attribution + learned progress. Reads are pure
+	// Go (the repo); writes go through pybridge (Python stays the sole
+	// writer of textbooks/card_assignments).
+	mux.HandleFunc("GET /textbooks", h.listTextbooks)
+	mux.HandleFunc("POST /textbooks", h.createTextbook)
+	mux.HandleFunc("PUT /textbooks/{id}", h.updateTextbook)
+	mux.HandleFunc("POST /textbooks/{id}/assign", h.assignTextbookWords)
+	mux.HandleFunc("POST /textbooks/{id}/unassign", h.unassignTextbookWords)
 	mux.HandleFunc("POST /units/rename", h.renameUnit)
 	mux.HandleFunc("DELETE /words", h.deleteWords)
 	mux.HandleFunc("GET /settings/fsrs", h.getFSRS)
@@ -292,13 +301,14 @@ func (h *handler) deleteWords(w http.ResponseWriter, r *http.Request) {
 // wordJSON is one element of the GET /words response array. Field tags
 // are snake_case per the shared response convention (health.go:18-26).
 type wordJSON struct {
-	ID           int64  `json:"id"`
-	Word         string `json:"word"`
-	Meaning      string `json:"meaning"`
-	Example      string `json:"example"`
-	Unit         string `json:"unit"`
-	Category     string `json:"category"`
-	Participates bool   `json:"participates"`
+	ID           int64                          `json:"id"`
+	Word         string                         `json:"word"`
+	Meaning      string                         `json:"meaning"`
+	Example      string                         `json:"example"`
+	Unit         string                         `json:"unit"`
+	Category     string                         `json:"category"`
+	Participates bool                           `json:"participates"`
+	Textbooks    []database.TextbookAssignment  `json:"textbooks"`
 }
 
 // wordsResponse is the GET /words response envelope.
@@ -374,9 +384,29 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Issue #4: the textbook attribution projection rides along so the
+	// browse chips (教材·课次 / 待确认) need no second request. A repo
+	// failure degrades to empty attribution (the words still render) —
+	// assignment data is presentational here, never load-bearing.
+	attribution := make(map[int64][]database.TextbookAssignment, len(cards))
+	if h.textbooks != nil && len(cards) > 0 {
+		ids := make([]int64, 0, len(cards))
+		for _, c := range cards {
+			ids = append(ids, c.ID)
+		}
+		if byCard, err := h.textbooks.AssignmentsByCardIDs(r.Context(), ids); err == nil {
+			attribution = byCard
+		} else {
+			h.logger.Warn("word attribution projection failed",
+				infra.F("component", "web/api"),
+				infra.ErrField(err),
+			)
+		}
+	}
+
 	words := make([]wordJSON, 0, len(cards))
 	for _, c := range cards {
-		words = append(words, wordJSON{
+		row := wordJSON{
 			ID:           c.ID,
 			Word:         c.Word,
 			Meaning:      c.Meaning,
@@ -384,7 +414,12 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 			Unit:         c.Unit,
 			Category:     c.Category,
 			Participates: c.Participates,
-		})
+			Textbooks:    []database.TextbookAssignment{},
+		}
+		if rows, ok := attribution[c.ID]; ok {
+			row.Textbooks = rows
+		}
+		words = append(words, row)
 	}
 	writeJSON(w, wordsResponse{Words: words})
 }

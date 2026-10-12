@@ -175,14 +175,16 @@ func beijingDay(now time.Time) string {
 // noDueWordsTextForNow picks the no-due ending copy (D-13): the days variant
 // when the Practice source lists the vocabulary once and a presentable
 // future due exists; the day-free fallback on any degradation (nil source,
-// List error, no future due). Never a fabricated count.
+// List error, no future due). Never a fabricated count. The listing rides
+// the same eligibility switches as selection (participating AND textbook
+// scope, Issue #4) so "next due in N days" never counts out-of-scope words.
 func (tm *TurnManager) noDueWordsTextForNow() string {
 	if tm.cfg.Practice == nil {
 		return noDueWordsText()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), practiceListTimeout)
 	defer cancel()
-	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{ParticipatingOnly: true})
+	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{ParticipatingOnly: true, ScopeEligibleOnly: true})
 	if err != nil {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeProviderFailed),
@@ -250,9 +252,11 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 		exclude[w] = true
 	}
 
-	// Random pick over the FULL vocabulary (read-only direct List — never
-	// RunDue's lock, T-13.1-12 accepts the single-family scan scale).
-	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{ParticipatingOnly: true})
+	// Random pick over the full eligible vocabulary — participating AND
+	// inside the Issue #4 textbook scope (加练 must not bypass progress;
+	// read-only direct List, never RunDue's lock, T-13.1-12 accepts the
+	// single-family scan scale).
+	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{ParticipatingOnly: true, ScopeEligibleOnly: true})
 	if err != nil {
 		tm.failLessonInit(s)
 		return

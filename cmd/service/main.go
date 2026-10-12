@@ -340,6 +340,17 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
+	// Issue #4: the textbook read repository — pure-Go reads over the
+	// Python-owned textbooks/card_assignments tables (writes stay in
+	// pybridge). Degrades to empty reads before the first migration.
+	textbookRepo, err := database.NewTextbookRepository(db, logger)
+	if err != nil {
+		logger.Error("textbook repository construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
 	sessionRepo, err := database.NewSessionRepository(db, logger)
 	if err != nil {
 		logger.Error("session repository construction failed",
@@ -717,7 +728,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// the word-list photo recognizer (nil without a vision key — the
 		// recognize route then answers 503, keeping the endpoint honest).
 		publicMux.Handle("/api/v1/", http.StripPrefix("/api/v1",
-			api.NewHandler(pyBridge, cardRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, cfg.Python, logger)))
+			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, cfg.Python, logger)))
 		logger.Info("api v1 mounted",
 			infra.F("component", "infra.main"),
 			infra.F("route", "/api/v1/"),

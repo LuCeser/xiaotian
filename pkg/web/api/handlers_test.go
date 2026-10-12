@@ -191,7 +191,7 @@ func newLessonTestStores(t *testing.T) (*sql.DB, *lesson.Store, *lesson.Practice
 // nil here — photo-recognition routes have their own harness in
 // photo_recognize_test.go.
 func newTestHandlerWithStores(exec pybridge.Executor, cards database.CardRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore) http.Handler {
-	return NewHandler(exec, cards, lessons, practice, receipts, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+	return NewHandler(exec, cards, nil, lessons, practice, receipts, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 }
 
 func newTestHandler(t *testing.T, exec pybridge.Executor, cards database.CardRepository) http.Handler {

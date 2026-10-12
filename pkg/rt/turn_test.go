@@ -4618,7 +4618,9 @@ func (f *fakePracticeSource) allCallsParticipatingOnly() bool {
 		return false
 	}
 	for _, filter := range f.filters {
-		if !filter.ParticipatingOnly {
+		// Issue #4: practice selection must carry BOTH switches —
+		// participation AND textbook scope (never one without the other).
+		if !filter.ParticipatingOnly || !filter.ScopeEligibleOnly {
 			return false
 		}
 	}
