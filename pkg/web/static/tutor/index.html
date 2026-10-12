@@ -105,8 +105,8 @@
     (registerProcessor scope has no AudioWorkletProcessor under a plain
     script tag; loading it here would throw and break the page).
   -->
-  <script src="js/rt-client.js?v=20261008a"></script>
-  <script src="js/rt-capture.js?v=20261008a"></script>
+  <script src="js/rt-client.js?v=20261012capture-fix"></script>
+  <script src="js/rt-capture.js?v=20261012capture-fix"></script>
   <script src="js/rt-playback.js?v=20261008a"></script>
   <script src="js/rt-photo.js?v=20261008a"></script>
   <script>
@@ -831,7 +831,8 @@
         // iOS 3-condition unlock inside this handler, then awaits
         // getUserMedia; the stream and AudioContext are held for the whole
         // session — no per-utterance hold-to-talk, no re-authorization.
-        capture.start().then(function () {
+        capture.start().then(function (active) {
+          if (!active || !started || courseEnded) return;
           timing.push(RT_EVENTS.AUTH_COMPLETE);
           playback.setAudioContext(capture.audioCtx);
         })['catch'](function (errType) {

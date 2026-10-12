@@ -147,6 +147,11 @@
     this._onError = null;
     this._usingWorklet = false;
     this.isCapturing = false;
+    // A lesson can end while mic permission/module loading is pending.
+    // Fence old completions and callbacks so restarting cannot leave both
+    // the fallback processor and a new worklet uploading the same audio.
+    this._generation = 0;
+    this._startPromise = null;
   }
 
   /** Register the Int16Array uplink sink (one call per emitted block). */
@@ -167,13 +172,15 @@
    * AudioContext is born inside the gesture stack (iPad Safari keeps
    * contexts created outside a gesture suspended).
    *
-   * @returns {Promise} resolves when the stream is live and the graph is
-   *          wired; rejects with the error type string
+   * @returns {Promise} resolves true when live, false if stopped during
+   *          startup; rejects with the error type string
    *          ('mic-denied' | 'mic-unavailable').
    */
   RTCapture.prototype.start = function () {
     var self = this;
     if (this.isCapturing) return Promise.resolve(true);
+    if (this._startPromise) return this._startPromise;
+    var generation = ++this._generation;
 
     var AudioCtx = global.AudioContext || global.webkitAudioContext;
     if (!AudioCtx) {
@@ -200,25 +207,40 @@
 
     // --- permission + stream (async; gesture already banked) -------------
     var nav = global.navigator;
-    return nav.mediaDevices.getUserMedia({
+    var starting = nav.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,   // teacher TTS leaks into the mic
         noiseSuppression: true,   // classroom environment
         autoGainControl: true     // children's voices vary in level
       }
     }).then(function (stream) {
+      // A short/finished lesson can stop while permission is still pending.
+      // The late stream belongs to that cancelled start, never the next one.
+      if (generation !== self._generation) {
+        stream.getTracks().forEach(function (track) { track.stop(); });
+        return false;
+      }
       self._stream = stream;
-      return self._wireGraph();
-    }).then(function () {
+      return self._wireGraph(generation);
+    }).then(function (active) {
+      if (generation !== self._generation || active === false) return false;
       self.isCapturing = true;
       return true;
     })['catch'](function (micErr) {
+      // A cancelled start must not tear down or report errors into a new one.
+      if (generation !== self._generation) return false;
       var type = (micErr && micErr.name === 'NotAllowedError') ||
         micErr === 'mic-denied' ? 'mic-denied' : 'mic-unavailable';
       self._teardownGraph();
       self._fail(type);
       throw type;
     });
+    this._startPromise = starting;
+    var clearStarting = function () {
+      if (generation === self._generation) self._startPromise = null;
+    };
+    starting.then(clearStarting, clearStarting);
+    return starting;
   };
 
   /**
@@ -226,8 +248,9 @@
    * fallback otherwise. Both end in _handleFrame.
    * @private
    */
-  RTCapture.prototype._wireGraph = function () {
+  RTCapture.prototype._wireGraph = function (generation) {
     var self = this;
+    if (generation === undefined) generation = this._generation;
     var ctx = this.audioCtx;
     this._source = ctx.createMediaStreamSource(this._stream);
     this._mute = ctx.createGain();
@@ -237,17 +260,29 @@
     if (!useWorklet) {
       return Promise.resolve(self._wireScriptProcessor());
     }
-    return ctx.audioWorklet.addModule('js/rt-pcm-worklet.js').then(function () {
+    return ctx.audioWorklet.addModule('js/rt-pcm-worklet.js?v=20261012capture-fix').then(function () {
+      if (generation !== self._generation) return false;
       self._usingWorklet = true;
       self._workletNode = new global.AudioWorkletNode(ctx, 'rt-pcm');
       self._workletNode.port.onmessage = function (ev) {
+        if (generation !== self._generation) return;
         self._handleFrame(ev.data);
       };
       self._source.connect(self._workletNode);
       self._workletNode.connect(self._mute);
       self._mute.connect(ctx.destination); // worklet is pulled only when connected
+      return true;
     })['catch'](function (workletErr) {
+      if (generation !== self._generation) return false;
       console.warn('[rt-capture] AudioWorklet unavailable, falling back to ScriptProcessor:', workletErr);
+      // A partially connected worklet must be detached before fallback.
+      if (self._workletNode) {
+        self._workletNode.port.onmessage = null;
+        try { self._workletNode.disconnect(); } catch (_) { /* detached */ }
+        self._workletNode = null;
+      }
+      try { self._source.disconnect(); } catch (_) { /* detached */ }
+      try { self._mute.disconnect(); } catch (_) { /* detached */ }
       self._usingWorklet = false;
       return self._wireScriptProcessor();
     });
@@ -261,8 +296,10 @@
    */
   RTCapture.prototype._wireScriptProcessor = function () {
     var self = this;
+    var generation = this._generation;
     this._processor = this.audioCtx.createScriptProcessor(4096, 1, 1);
     this._processor.onaudioprocess = function (event) {
+      if (generation !== self._generation) return;
       self._handleFrame(event.inputBuffer.getChannelData(0));
     };
     this._source.connect(this._processor);
@@ -277,7 +314,7 @@
    * @private
    */
   RTCapture.prototype._handleFrame = function (frame) {
-    if (!this.isCapturing && !frame) return;
+    if (!this.isCapturing || !frame) return;
     if (typeof this._onFrame === 'function') {
       this._onFrame(frame);
     }
@@ -296,12 +333,16 @@
    * (child-audio privacy boundary).
    */
   RTCapture.prototype.stop = function () {
+    this._generation++;
+    this._startPromise = null;
     this.isCapturing = false;
     this._teardownGraph();
   };
 
   /** @private */
   RTCapture.prototype._teardownGraph = function () {
+    if (this._workletNode) this._workletNode.port.onmessage = null;
+    if (this._processor) this._processor.onaudioprocess = null;
     if (this._stream) {
       var tracks = this._stream.getTracks ? this._stream.getTracks() : [];
       for (var i = 0; i < tracks.length; i++) {
