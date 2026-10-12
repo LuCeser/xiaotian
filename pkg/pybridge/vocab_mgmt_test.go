@@ -768,7 +768,9 @@ func TestAssignWordsArgs(t *testing.T) {
 // name or a non-vocabulary category fails without any argv (caller bugs
 // never waste a process — the RunAdd/RunEdit pattern).
 func TestRunTextbookCreateValidation(t *testing.T) {
-	b, err := NewBridge(infra.PythonConfig{Interpreter: "no-such-python", ScriptsDir: "scripts"}, infra.NewNoOpLogger())
+	b, err := NewBridge(infra.PythonConfig{
+		Interpreter: "no-such-python", ScriptsDir: "scripts", VocabScript: "vocab_manager.py",
+	}, infra.NewNoOpLogger())
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
