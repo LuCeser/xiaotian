@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
@@ -769,7 +770,10 @@ func TestAssignWordsArgs(t *testing.T) {
 // never waste a process — the RunAdd/RunEdit pattern).
 func TestRunTextbookCreateValidation(t *testing.T) {
 	b, err := NewBridge(infra.PythonConfig{
-		Interpreter: "no-such-python", ScriptsDir: "scripts", VocabScript: "vocab_manager.py",
+		Interpreter: "no-such-python", ScriptsDir: "scripts",
+		VocabScript: "vocab_manager.py", PregenScript: "pregenerate_dictation.py",
+		MaxConcurrent: 1, DueTimeout: time.Second, ReviewTimeout: time.Second,
+		PregenTimeout: time.Second, MgmtTimeout: time.Second,
 	}, infra.NewNoOpLogger())
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
