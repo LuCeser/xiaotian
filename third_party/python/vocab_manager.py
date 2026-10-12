@@ -169,6 +169,43 @@ def init_db(db):
         CREATE INDEX IF NOT EXISTS idx_cards_unit ON cards(unit);
         CREATE INDEX IF NOT EXISTS idx_cards_category ON cards(category);
         CREATE INDEX IF NOT EXISTS idx_logs_card ON review_logs(card_id);
+        -- Issue #4: textbook attribution + learned progress. lessons is a
+        -- JSON array of lesson names in EXPLICIT teaching order (never
+        -- dictionary order); learned_lessons N means 已学完第 N 课 (lesson
+        -- N included, N+1 excluded). Descriptive metadata (edition/stage/
+        -- grade/volume/module) is all optional — a textbook need not fill
+        -- every level.
+        CREATE TABLE IF NOT EXISTS textbooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'english',
+            edition TEXT NOT NULL DEFAULT '',
+            stage TEXT NOT NULL DEFAULT '',
+            grade TEXT NOT NULL DEFAULT '',
+            volume TEXT NOT NULL DEFAULT '',
+            module TEXT NOT NULL DEFAULT '',
+            lessons TEXT NOT NULL DEFAULT '[]',
+            learned_lessons INTEGER NOT NULL DEFAULT 0 CHECK (learned_lessons >= 0),
+            is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(name, category)
+        );
+        -- One lesson per (card, textbook) for now — multi-source
+        -- attribution is issue #6's US-32, not built ahead of need.
+        -- lesson = '' means 待确认 (lesson unknown): never counts as
+        -- learned. include_in_scope = 1 is the parent's explicit
+        -- "include regardless of lesson progress" override.
+        CREATE TABLE IF NOT EXISTS card_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER NOT NULL,
+            textbook_id INTEGER NOT NULL,
+            lesson TEXT NOT NULL DEFAULT '',
+            include_in_scope INTEGER NOT NULL DEFAULT 0 CHECK (include_in_scope IN (0, 1)),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(card_id, textbook_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_assignments_card ON card_assignments(card_id);
+        CREATE INDEX IF NOT EXISTS idx_assignments_textbook ON card_assignments(textbook_id);
     """)
     # Migration: add fetch_locked_until column if missing
     cols = [row[1] for row in db.execute("PRAGMA table_info(cards)").fetchall()]
@@ -181,6 +218,57 @@ def init_db(db):
         db.execute("ALTER TABLE cards ADD COLUMN participates INTEGER NOT NULL DEFAULT 1 CHECK (participates IN (0, 1))")
     db.execute("CREATE INDEX IF NOT EXISTS idx_cards_participates ON cards(category, participates)")
     db.commit()
+
+
+def has_textbook_tables(db):
+    """True once the Issue #4 tables exist. Pre-migration databases (opened
+    by an older binary before any Python command ran) simply have no scope
+    state: every card stays supplementary and eligible, matching the
+    participates-column degraded-read precedent on the Go side."""
+    return db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'card_assignments'"
+    ).fetchone() is not None
+
+
+def scope_predicate(db):
+    """(sql, params) implementing the Issue #4 textbook-scope eligibility.
+
+    A card is IN scope iff it has NO textbook assignment (supplementary
+    vocabulary — issue #2's participation switch alone governs it), or one
+    of its assignments carries include_in_scope=1, or one of its
+    assignments names a lesson inside its textbook's FIRST
+    learned_lessons lessons (已学完第 N 课 includes lesson N). 未知课次
+    (lesson = '') is never learned. Allowed lesson sets are computed here
+    in Python — no SQLite JSON1 dependency — mirroring the Go side in
+    pkg/database/card_repo.go so both selection choke points stay the
+    same shape.
+    """
+    branches = []
+    params = []
+    rows = db.execute(
+        "SELECT id, lessons, learned_lessons FROM textbooks WHERE learned_lessons > 0"
+    ).fetchall()
+    for row in rows:
+        try:
+            lessons = json.loads(row["lessons"])
+        except (TypeError, ValueError):
+            lessons = []
+        allowed = [n for n in lessons[: row["learned_lessons"]] if isinstance(n, str) and n]
+        if not allowed:
+            continue
+        placeholders = ",".join("?" for _ in allowed)
+        branches.append(f"(la.textbook_id = ? AND la.lesson IN ({placeholders}))")
+        params.append(row["id"])
+        params.extend(allowed)
+    learned_sql = " OR ".join(branches) if branches else "0"
+    sql = (
+        " AND (\n"
+        "  NOT EXISTS (SELECT 1 FROM card_assignments na WHERE na.card_id = c.id)\n"
+        "  OR EXISTS (SELECT 1 FROM card_assignments ia WHERE ia.card_id = c.id AND ia.include_in_scope = 1)\n"
+        f"  OR EXISTS (SELECT 1 FROM card_assignments la WHERE la.card_id = c.id AND ({learned_sql}))\n"
+        " )"
+    )
+    return sql, params
 
 
 def cmd_add(db, args):
@@ -273,6 +361,13 @@ def cmd_due(db, args):
         WHERE c.category = ? AND c.participates = 1
     """
     params = [args.category or "english"]
+
+    # Issue #4: textbook scope rides WITH participation (AND, never OR) —
+    # a word enters automatic selection only when both switches admit it.
+    if has_textbook_tables(db):
+        scope_sql, scope_params = scope_predicate(db)
+        query += scope_sql
+        params.extend(scope_params)
 
     if args.unit:
         query += " AND c.unit = ?"
@@ -394,6 +489,13 @@ def cmd_new(db, args):
         WHERE c.category = ? AND c.participates = 1
     """
     params = [args.category or "english"]
+
+    # Issue #4: new-word selection obeys the textbook scope exactly like
+    # cmd_due (US-23: 自动安排的内容排除尚未学过的课次).
+    if has_textbook_tables(db):
+        scope_sql, scope_params = scope_predicate(db)
+        query += scope_sql
+        params.extend(scope_params)
 
     if args.unit:
         query += " AND c.unit = ?"
@@ -554,8 +656,15 @@ def cmd_stats(db, args):
     ).fetchone()[0]
 
     now = datetime.now(timezone.utc)
+    # Issue #4: stats describes the practice-eligible pool (same 口径 as
+    # #2's participates-only stats), so the textbook scope applies to both
+    # participating queries below.
+    scope_sql, scope_params = ("", [])
+    if has_textbook_tables(db):
+        scope_sql, scope_params = scope_predicate(db)
     rows = db.execute(
-        "SELECT id, fsrs_card FROM cards WHERE category = ? AND participates = 1", (category,)
+        "SELECT id, fsrs_card FROM cards c WHERE c.category = ? AND c.participates = 1" + scope_sql,
+        [category] + scope_params,
     ).fetchall()
 
     due_count = 0
@@ -568,8 +677,8 @@ def cmd_stats(db, args):
 
     # Preload fetch_locked_until for all rows to avoid N+1 queries
     lock_rows = db.execute(
-        "SELECT id, fetch_locked_until FROM cards WHERE category = ? AND participates = 1",
-        (category,),
+        "SELECT id, fetch_locked_until FROM cards c WHERE c.category = ? AND c.participates = 1" + scope_sql,
+        [category] + scope_params,
     ).fetchall()
     lock_map = {r["id"]: r["fetch_locked_until"] for r in lock_rows}
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -764,6 +873,239 @@ def cmd_set_participation(db, args):
     }, ensure_ascii=False))
 
 
+def _validate_lessons(raw):
+    """Parse/validate --lessons: a JSON array of lesson names in EXPLICIT
+    teaching order (Issue #4: never inferred from dictionary order). Empty
+    is legal (a textbook may be created name-only and given its lesson
+    list later, US-8). Returns the cleaned list."""
+    try:
+        lessons = json.loads(raw)
+    except (TypeError, ValueError):
+        print("Error: --lessons must be a JSON array of lesson names")
+        sys.exit(1)
+    if not isinstance(lessons, list) or len(lessons) > 200:
+        print("Error: --lessons must contain at most 200 lesson names")
+        sys.exit(1)
+    cleaned = []
+    for i, name in enumerate(lessons):
+        if not isinstance(name, str):
+            print(f"Error: lesson {i} must be a string, got: {type(name).__name__}")
+            sys.exit(1)
+        name = name.strip()
+        if not name or len(name) > 100:
+            print(f"Error: lesson {i} must be 1..100 non-space characters")
+            sys.exit(1)
+        cleaned.append(name)
+    if len(set(cleaned)) != len(cleaned):
+        print("Error: lesson names must be unique within a textbook")
+        sys.exit(1)
+    return cleaned
+
+
+def _parse_card_ids(raw):
+    """Parse/validate --ids: 1..500 unique positive integers (same shape as
+    cmd_set_participation — the batch cap the Go layer also enforces)."""
+    try:
+        ids = json.loads(raw)
+    except (TypeError, ValueError):
+        print("Error: --ids must be a JSON array of integers")
+        sys.exit(1)
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 500 or
+            not all(isinstance(i, int) and not isinstance(i, bool) and i > 0 for i in ids) or
+            len(set(ids)) != len(ids)):
+        print("Error: --ids must contain 1..500 unique positive integers")
+        sys.exit(1)
+    return ids
+
+
+def cmd_textbook_create(db, args):
+    """Create a textbook. Only the name is required; edition/stage/grade/
+    volume/module are free-form descriptions and the lesson list may be
+    filled in later via textbook-update (US-7/US-8: 不要求填满所有层级)."""
+    name = args.name.strip()
+    if not name or len(name) > 100:
+        print("Error: --name must be 1..100 non-space characters")
+        sys.exit(1)
+    if args.category not in ("english", "chinese"):
+        print("Error: --category must be english or chinese")
+        sys.exit(1)
+    lessons = _validate_lessons(args.lessons) if args.lessons else []
+    try:
+        cur = db.execute(
+            """INSERT INTO textbooks
+               (name, category, edition, stage, grade, volume, module, lessons, learned_lessons)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+            (name, args.category, args.edition.strip(), args.stage.strip(),
+             args.grade.strip(), args.volume.strip(), args.module.strip(),
+             json.dumps(lessons, ensure_ascii=False)),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        print(f"Error: textbook name already exists in category '{args.category}': {name}")
+        sys.exit(1)
+    print(json.dumps({"id": cur.lastrowid, "name": name}, ensure_ascii=False))
+
+
+def cmd_textbook_update(db, args):
+    """Update a textbook: any subset of name/metadata/lesson list/progress/
+    primary in one transaction. --learned-lessons is validated against the
+    FINAL lesson list (the new one when --lessons is also given). Setting
+    --set-primary demotes every other primary in the same category (主教材
+    per category is unique). Renaming lessons does NOT rewrite assignments:
+    an assignment naming a lesson that left the list keeps its name but no
+    longer counts as learned (课表外), the same honest rule as 待确认."""
+    row = db.execute("SELECT * FROM textbooks WHERE id = ?", (args.id,)).fetchone()
+    if row is None:
+        print(f"Error: textbook id not found: {args.id}")
+        sys.exit(1)
+
+    sets, params = [], []
+    if args.name is not None:
+        name = args.name.strip()
+        if not name or len(name) > 100:
+            print("Error: --name must be 1..100 non-space characters")
+            sys.exit(1)
+        sets.append("name = ?")
+        params.append(name)
+    for field in ("edition", "stage", "grade", "volume", "module"):
+        value = getattr(args, field)
+        if value is not None:
+            value = value.strip()
+            if len(value) > 100:
+                print(f"Error: --{field} must be at most 100 characters")
+                sys.exit(1)
+            sets.append(f"{field} = ?")
+            params.append(value)
+    lessons = None
+    if args.lessons is not None:
+        lessons = _validate_lessons(args.lessons)
+        sets.append("lessons = ?")
+        params.append(json.dumps(lessons, ensure_ascii=False))
+    if args.learned_lessons is not None:
+        try:
+            current = json.loads(row["lessons"])
+        except (TypeError, ValueError):
+            current = []
+        total = len(lessons) if lessons is not None else len(current)
+        if not 0 <= args.learned_lessons <= total:
+            print(f"Error: --learned-lessons must be 0..{total} for this textbook's lesson list")
+            sys.exit(1)
+        sets.append("learned_lessons = ?")
+        params.append(args.learned_lessons)
+
+    db.execute("BEGIN IMMEDIATE")
+    if args.set_primary:
+        db.execute(
+            "UPDATE textbooks SET is_primary = 0 WHERE category = ? AND id != ?",
+            (row["category"], args.id),
+        )
+        sets.append("is_primary = 1")
+    if sets:
+        params.append(args.id)
+        try:
+            db.execute(f"UPDATE textbooks SET {', '.join(sets)} WHERE id = ?", params)
+        except sqlite3.IntegrityError:
+            db.rollback()
+            print(f"Error: textbook name already exists in category '{row['category']}'")
+            sys.exit(1)
+    db.commit()
+    print(json.dumps({"id": args.id, "updated": True}, ensure_ascii=False))
+
+
+def cmd_assign_words(db, args):
+    """Batch-assign cards to one textbook's lesson (or 待确认 when --lesson
+    is empty). All-or-nothing with the #2 transaction shape: a missing card
+    id rolls the whole batch back with a not-found diagnostic; the lesson
+    must be '' or belong to the textbook's lesson list; every card's
+    category must match the textbook's. Re-assigning replaces the previous
+    lesson/include choice for that (card, textbook)."""
+    ids = _parse_card_ids(args.ids)
+    textbook = db.execute(
+        "SELECT id, name, category, lessons FROM textbooks WHERE id = ?",
+        (args.textbook_id,),
+    ).fetchone()
+    if textbook is None:
+        print(f"Error: textbook id not found: {args.textbook_id}")
+        sys.exit(1)
+    lesson = args.lesson or ""
+    try:
+        lessons = json.loads(textbook["lessons"])
+    except (TypeError, ValueError):
+        lessons = []
+    if lesson and lesson not in lessons:
+        print(f"Error: lesson {lesson!r} is not in textbook {textbook['name']!r}'s lesson list")
+        sys.exit(1)
+    include = 1 if args.include_in_scope else 0
+
+    db.execute("BEGIN IMMEDIATE")
+    placeholders = ",".join("?" for _ in ids)
+    rows = db.execute(
+        f"SELECT id, category FROM cards WHERE id IN ({placeholders})", ids
+    ).fetchall()
+    existing = {r["id"] for r in rows}
+    missing = [i for i in ids if i not in existing]
+    if missing:
+        db.rollback()
+        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
+        sys.exit(1)
+    mismatched = [str(r["id"]) for r in rows if r["category"] != textbook["category"]]
+    if mismatched:
+        db.rollback()
+        print(
+            f"Error: card category does not match textbook category "
+            f"'{textbook['category']}': " + ", ".join(mismatched)
+        )
+        sys.exit(1)
+    for card_id in ids:
+        db.execute(
+            """INSERT INTO card_assignments (card_id, textbook_id, lesson, include_in_scope)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(card_id, textbook_id)
+               DO UPDATE SET lesson = excluded.lesson, include_in_scope = excluded.include_in_scope""",
+            (card_id, args.textbook_id, lesson, include),
+        )
+    db.commit()
+    print(json.dumps({
+        "requested": len(ids), "updated": len(ids), "missing": [],
+        "textbook_id": args.textbook_id, "lesson": lesson,
+        "include_in_scope": bool(include),
+    }, ensure_ascii=False))
+
+
+def cmd_unassign_words(db, args):
+    """Remove cards' assignments to one textbook (the word returns to
+    supplementary vocabulary: eligible by default, participation switch
+    alone governs it). Missing ids still roll the batch back for
+    symmetry with assign-words."""
+    ids = _parse_card_ids(args.ids)
+    textbook = db.execute(
+        "SELECT id FROM textbooks WHERE id = ?", (args.textbook_id,)
+    ).fetchone()
+    if textbook is None:
+        print(f"Error: textbook id not found: {args.textbook_id}")
+        sys.exit(1)
+    db.execute("BEGIN IMMEDIATE")
+    placeholders = ",".join("?" for _ in ids)
+    existing = {row["id"] for row in db.execute(
+        f"SELECT id FROM cards WHERE id IN ({placeholders})", ids
+    ).fetchall()}
+    missing = [i for i in ids if i not in existing]
+    if missing:
+        db.rollback()
+        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
+        sys.exit(1)
+    cur = db.execute(
+        f"DELETE FROM card_assignments WHERE textbook_id = ? AND card_id IN ({placeholders})",
+        [args.textbook_id] + ids,
+    )
+    db.commit()
+    print(json.dumps({
+        "requested": len(ids), "removed": cur.rowcount, "missing": [],
+        "textbook_id": args.textbook_id,
+    }, ensure_ascii=False))
+
+
 def cmd_rename_unit(db, args):
     """Rename a unit across all cards in a category."""
     old_name = args.old_unit.strip()
@@ -817,9 +1159,10 @@ def cmd_delete_words(db, args):
                 print(f"  [{r['id']}] {r['word']} (unit: {r['unit'] or '(none)'})")
             sys.exit(0)
 
-        # Delete review_logs first, then cards
+        # Delete review_logs and textbook assignments first, then cards
         placeholders = ",".join("?" for _ in card_ids)
         db.execute(f"DELETE FROM review_logs WHERE card_id IN ({placeholders})", card_ids)
+        db.execute(f"DELETE FROM card_assignments WHERE card_id IN ({placeholders})", card_ids)
         cur = db.execute(
             "DELETE FROM cards WHERE category = ? AND unit = ?",
             (args.category, args.unit),
@@ -852,9 +1195,10 @@ def cmd_delete_words(db, args):
                 print(f"  [{r['id']}] {r['word']} (unit: {r['unit'] or '(none)'})")
             sys.exit(0)
 
-        # Delete review_logs first, then cards
+        # Delete review_logs and textbook assignments first, then cards
         id_placeholders = ",".join("?" for _ in card_ids)
         db.execute(f"DELETE FROM review_logs WHERE card_id IN ({id_placeholders})", card_ids)
+        db.execute(f"DELETE FROM card_assignments WHERE card_id IN ({id_placeholders})", card_ids)
         cur = db.execute(
             f"DELETE FROM cards WHERE category = ? AND word IN ({placeholders})",
             [args.category] + word_list,
@@ -963,6 +1307,37 @@ def main():
     p_participation.add_argument("--ids", required=True, help="JSON array of card IDs")
     p_participation.add_argument("--participates", choices=("true", "false"), required=True)
 
+    # textbook-create / textbook-update / assign-words / unassign-words
+    # (Issue #4: textbook attribution + learned progress)
+    p_tb_create = subparsers.add_parser("textbook-create", help="Create a textbook")
+    p_tb_create.add_argument("--name", required=True, help="Textbook name (unique per category)")
+    p_tb_create.add_argument("--category", default="english", help="Category (english|chinese)")
+    for meta in ("edition", "stage", "grade", "volume", "module"):
+        p_tb_create.add_argument(f"--{meta}", default="", help=f"Optional {meta} description")
+    p_tb_create.add_argument("--lessons", default="", help="JSON array of lesson names in explicit teaching order")
+
+    p_tb_update = subparsers.add_parser("textbook-update", help="Update textbook fields, lesson list, progress or primary flag")
+    p_tb_update.add_argument("--id", type=int, required=True, help="Textbook ID")
+    p_tb_update.add_argument("--name", default=None, help="New name (absent keeps current)")
+    for meta in ("edition", "stage", "grade", "volume", "module"):
+        p_tb_update.add_argument(f"--{meta}", default=None, help=f"New {meta} (absent keeps current)")
+    p_tb_update.add_argument("--lessons", default=None, help="New JSON lesson array (absent keeps current)")
+    p_tb_update.add_argument("--learned-lessons", type=int, default=None,
+                             help="已学完第 N 课 (0..len(lessons); includes lesson N)")
+    p_tb_update.add_argument("--set-primary", action="store_true",
+                             help="Make this the category's primary textbook (demotes others)")
+
+    p_assign = subparsers.add_parser("assign-words", help="Batch-assign cards to a textbook lesson (empty lesson = 待确认)")
+    p_assign.add_argument("--textbook-id", type=int, required=True)
+    p_assign.add_argument("--ids", required=True, help="JSON array of card IDs (1..500 unique)")
+    p_assign.add_argument("--lesson", default="", help="Lesson name from the textbook's list; empty = 待确认")
+    p_assign.add_argument("--include-in-scope", action="store_true",
+                          help="Parent's explicit include-in-scope override (regardless of lesson progress)")
+
+    p_unassign = subparsers.add_parser("unassign-words", help="Remove cards' assignments to a textbook")
+    p_unassign.add_argument("--textbook-id", type=int, required=True)
+    p_unassign.add_argument("--ids", required=True, help="JSON array of card IDs (1..500 unique)")
+
     # delete-words
     p_delete = subparsers.add_parser("delete-words", help="Delete words by unit or word list (dry-run by default)")
     delete_target = p_delete.add_mutually_exclusive_group(required=True)
@@ -1002,6 +1377,10 @@ def main():
         "reset": cmd_reset,
         "edit": cmd_edit,
         "set-participation": cmd_set_participation,
+        "textbook-create": cmd_textbook_create,
+        "textbook-update": cmd_textbook_update,
+        "assign-words": cmd_assign_words,
+        "unassign-words": cmd_unassign_words,
         "rename-unit": cmd_rename_unit,
         "delete-words": cmd_delete_words,
         "merge-units": cmd_merge_units,
