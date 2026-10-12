@@ -102,7 +102,7 @@ func TestWordlistLive_RealVision(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	entries, err := pipeline.Recognize(ctx, image)
+	res, err := pipeline.Recognize(ctx, image)
 	if err != nil {
 		t.Fatalf("live recognize: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestWordlistLive_RealVision(t *testing.T) {
 		"river":         "河流",
 	}
 	got := map[string]string{}
-	for _, e := range entries {
+	for _, e := range res.Entries {
 		got[strings.ToLower(e.Word)] = e.Meaning
 	}
 	hits := 0
@@ -135,21 +135,21 @@ func TestWordlistLive_RealVision(t *testing.T) {
 		}
 	}
 	if hits < 4 {
-		t.Fatalf("live recognition found only %d/5 expected entries (got %v)", hits, formatEntries(entries))
+		t.Fatalf("live recognition found only %d/5 expected entries (got %v)", hits, formatEntries(res.Entries))
 	}
 
 	// Noise must not become entries (Issue #3 acceptance: 普通正文词和练习题
 	// 不自动作为词条). Phrase integrity is pinned by the ice-cream check
 	// above ("ice cream" as ONE entry with spaces).
-	for _, e := range entries {
+	for _, e := range res.Entries {
 		lower := strings.ToLower(e.Word)
 		for _, noise := range []string{"read", "exercise", "fill", "copy", "unit", "word list"} {
 			if strings.Contains(lower, noise) {
-				t.Errorf("noise became an entry: %q (all entries: %v)", e.Word, formatEntries(entries))
+				t.Errorf("noise became an entry: %q (all entries: %v)", e.Word, formatEntries(res.Entries))
 			}
 		}
 	}
-	t.Logf("live wordlist recognition: %d entries, %d/5 expected hits", len(entries), hits)
+	t.Logf("live wordlist recognition: meta=%+v, %d entries, %d/5 expected hits", res.Textbook, len(res.Entries), hits)
 }
 
 func formatEntries(entries []WordlistEntry) string {

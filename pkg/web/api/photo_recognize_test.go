@@ -158,6 +158,57 @@ func TestRecognizeWordPhoto(t *testing.T) {
 		}
 	})
 
+	t.Run("object reply returns 200 with the textbook header and per-entry lessons", func(t *testing.T) {
+		h := newRecognizeHandler(t,
+			`{"textbook":{"edition":"人教版PEP","grade":"三年级","volume":"上册","lesson":"第5课"},`+
+				`"entries":[{"word":"ice cream","meaning":"冰激凌"},{"word":"apple","meaning":"苹果","lesson":"第6课"}]}`,
+			nil, 1<<20)
+		req := httptest.NewRequest(http.MethodPost, "/words/photo/recognize",
+			strings.NewReader(string(jpegPrefix)+"x"))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		var resp ocr.WordlistResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+		}
+		if resp.Textbook == nil || resp.Textbook.Edition != "人教版PEP" || resp.Textbook.Lesson != "第5课" {
+			t.Errorf("textbook = %+v, want the readable header", resp.Textbook)
+		}
+		if len(resp.Entries) != 2 {
+			t.Fatalf("entries = %+v, want 2", resp.Entries)
+		}
+		// Page-level lesson inheritance happens in the pipeline; the route
+		// passes it through untouched.
+		if resp.Entries[0].Lesson != "第5课" || resp.Entries[1].Lesson != "第6课" {
+			t.Errorf("lessons = %q/%q, want inherited 第5课 and own 第6课",
+				resp.Entries[0].Lesson, resp.Entries[1].Lesson)
+		}
+	})
+
+	t.Run("legacy array reply returns 200 with a null textbook", func(t *testing.T) {
+		h := newRecognizeHandler(t, reply, nil, 1<<20)
+		req := httptest.NewRequest(http.MethodPost, "/words/photo/recognize",
+			strings.NewReader(string(jpegPrefix)+"x"))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		var resp ocr.WordlistResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response %q: %v", rec.Body.String(), err)
+		}
+		if resp.Textbook != nil {
+			t.Errorf("textbook = %+v, want nil for a legacy reply", resp.Textbook)
+		}
+		if len(resp.Entries) != 1 {
+			t.Errorf("entries = %+v, want the one draft entry", resp.Entries)
+		}
+	})
+
 	t.Run("nil recognizer returns 503 recognition_unavailable", func(t *testing.T) {
 		_, lessons, practice, receipts := newLessonTestStores(t)
 		h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,

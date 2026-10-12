@@ -1,17 +1,21 @@
 // photo_recognize.go implements the parent word-list photo draft endpoint
-// (Issue #3): POST /words/photo/recognize.
+// (Issue #3 + #5): POST /words/photo/recognize.
 //
 // Contract:
 //   - Request: the raw PNG or JPEG bytes as the body (the declared
 //     Content-Type is ignored; the pipeline sniffs the magic bytes and is
 //     authoritative). One image per request — the single-photo limit Issue #3
 //     settles for this flow (multi-page PDF is a later task).
-//   - Response 200: {"entries":[{"word","meaning","confidence"}]} — a
-//     RECOGNITION DRAFT ONLY. Nothing is written to any database by this
-//     route; the parent reviews/edits the draft in the preview and commits
-//     through the ordinary POST /words path (Python stays the sole writer).
-//     An empty entries array is a legal outcome (no word list found in the
-//     photo) — the UI says so, it is not an error.
+//   - Response 200: {"textbook":{"edition","stage","grade","volume",
+//     "module","lesson"}|null,"entries":[{"word","meaning","lesson",
+//     "confidence"}]} — a RECOGNITION DRAFT ONLY. The textbook header is
+//     what the model could actually READ off the photo (Issue #5); null /
+//     empty fields stay 待确认 for the parent to confirm — never fabricated.
+//     Nothing is written to any database by this route; the parent
+//     reviews/edits the draft in the preview and commits through the
+//     ordinary POST /words + textbook assign paths (Python stays the sole
+//     writer). An empty entries array is a legal outcome (no word list
+//     found in the photo) — the UI says so, it is not an error.
 //   - Errors use the locked {"error":{"code","message"}} envelope with three
 //     route-specific codes: image_too_large (413, the photo config's byte
 //     cap), recognition_failed (502, the vision call failed or its reply was
@@ -64,7 +68,7 @@ func (h *handler) recognizeWordsPhoto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := h.recognizer.Recognize(r.Context(), image)
+	res, err := h.recognizer.Recognize(r.Context(), image)
 	if err != nil {
 		switch {
 		case errors.Is(err, ocr.ErrEmptyImage), errors.Is(err, ocr.ErrNotImage):
@@ -89,15 +93,10 @@ func (h *handler) recognizeWordsPhoto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// entries is never nil-typed here on the happy path, but the wire shape
+	// res is never nil-typed here on the happy path, but the wire shape
 	// must be an array even when the pipeline returns an empty slice.
-	if entries == nil {
-		entries = []ocr.WordlistEntry{}
+	if res.Entries == nil {
+		res.Entries = []ocr.WordlistEntry{}
 	}
-	writeJSON(w, wordlistResponse{Entries: entries})
-}
-
-// wordlistResponse is the POST /words/photo/recognize 200 body.
-type wordlistResponse struct {
-	Entries []ocr.WordlistEntry `json:"entries"`
+	writeJSON(w, res)
 }

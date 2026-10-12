@@ -182,7 +182,7 @@ func TestWordlistPipeline_Recognize(t *testing.T) {
 			}
 			p := NewWordlistPipeline(fr.read, maxBytes)
 
-			entries, err := p.Recognize(context.Background(), tt.image)
+			res, err := p.Recognize(context.Background(), tt.image)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("Recognize error = %v, want %v", err, tt.wantErr)
@@ -195,6 +195,7 @@ func TestWordlistPipeline_Recognize(t *testing.T) {
 			if tt.checkMime != "" && fr.gotMime != tt.checkMime {
 				t.Errorf("reader mime = %q, want %q", fr.gotMime, tt.checkMime)
 			}
+			entries := res.Entries
 			if len(entries) != len(tt.wantWords) {
 				t.Fatalf("entries = %d (%+v), want %d", len(entries), entries, len(tt.wantWords))
 			}
@@ -208,6 +209,115 @@ func TestWordlistPipeline_Recognize(t *testing.T) {
 				if e.Confidence != tt.wantConfs[i] {
 					t.Errorf("entries[%d].Confidence = %v, want %v", i, e.Confidence, tt.wantConfs[i])
 				}
+			}
+		})
+	}
+}
+
+// TestWordlistPipeline_RecognizeTextbookMeta pins the Issue #5 recognition
+// contract: the model reply is ONE object carrying the textbook header it
+// could actually read (version/stage/grade/volume/module/lesson) plus the
+// entries; unrecognized fields are null and must surface as empty strings
+// (待确认) — never fabricated. Entries inherit the page-level lesson unless
+// they carry their own. Legacy bare-array replies keep parsing with no meta.
+func TestWordlistPipeline_RecognizeTextbookMeta(t *testing.T) {
+	tests := []struct {
+		name        string
+		reply       string
+		wantMeta    *WordlistTextbook
+		wantLessons []string
+		wantWords   []string
+	}{
+		{
+			name: "object reply carries the readable textbook header",
+			reply: `{"textbook":{"edition":"人教版PEP","stage":null,"grade":"三年级","volume":"上册","module":"Unit 3","lesson":"第5课"},` +
+				`"entries":[{"word":"ice cream","meaning":"冰激凌","confidence":0.9},{"word":"apple","meaning":"苹果","confidence":0.85}]}`,
+			wantMeta:    &WordlistTextbook{Edition: "人教版PEP", Grade: "三年级", Volume: "上册", Module: "Unit 3", Lesson: "第5课"},
+			wantLessons: []string{"第5课", "第5课"},
+			wantWords:   []string{"ice cream", "apple"},
+		},
+		{
+			name: "entries without lesson inherit the page lesson, own lesson wins",
+			reply: `{"textbook":{"edition":"外研版","lesson":"第2课"},"entries":[` +
+				`{"word":"river","meaning":"河流","lesson":"第3课"},{"word":"house","meaning":"房子"}]}`,
+			wantMeta:    &WordlistTextbook{Edition: "外研版", Lesson: "第2课"},
+			wantLessons: []string{"第3课", "第2课"},
+			wantWords:   []string{"river", "house"},
+		},
+		{
+			name:        "textbook null keeps every field 待确认",
+			reply:       `{"textbook":null,"entries":[{"word":"sun","meaning":"太阳"}]}`,
+			wantMeta:    nil,
+			wantLessons: []string{""},
+			wantWords:   []string{"sun"},
+		},
+		{
+			name:        "partial meta decodes with empty strings for the unread fields",
+			reply:       `{"textbook":{"grade":"四年级"},"entries":[{"word":"moon","meaning":"月亮"}]}`,
+			wantMeta:    &WordlistTextbook{Grade: "四年级"},
+			wantLessons: []string{""},
+			wantWords:   []string{"moon"},
+		},
+		{
+			name:        "meta and lessons are trimmed",
+			reply:       `{"textbook":{"edition":" 人教版 ","lesson":" 第7课 "},"entries":[{"word":"cat","meaning":"猫","lesson":" 第7课 "}]}`,
+			wantMeta:    &WordlistTextbook{Edition: "人教版", Lesson: "第7课"},
+			wantLessons: []string{"第7课"},
+			wantWords:   []string{"cat"},
+		},
+		{
+			name:        "thinking-model prose around the object still parses",
+			reply:       "我看了下这页……{\"textbook\":{\"edition\":\"人教版\"},\"entries\":[{\"word\":\"dog\",\"meaning\":\"狗\"}]} 以上。",
+			wantMeta:    &WordlistTextbook{Edition: "人教版"},
+			wantLessons: []string{""},
+			wantWords:   []string{"dog"},
+		},
+		{
+			name:        "legacy bare-array reply parses with no meta",
+			reply:       `[{"word":"apple","meaning":"苹果","confidence":0.9}]`,
+			wantMeta:    nil,
+			wantLessons: []string{""},
+			wantWords:   []string{"apple"},
+		},
+		{
+			name:        "all-empty meta object is reported as no meta",
+			reply:       `{"textbook":{"edition":"","stage":null},"entries":[{"word":"pig","meaning":"猪"}]}`,
+			wantMeta:    nil,
+			wantLessons: []string{""},
+			wantWords:   []string{"pig"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fr := &fakeListReader{reply: tt.reply}
+			p := NewWordlistPipeline(fr.read, 1<<20)
+			res, err := p.Recognize(context.Background(), jpegSoi)
+			if err != nil {
+				t.Fatalf("Recognize: %v", err)
+			}
+			if len(res.Entries) != len(tt.wantWords) {
+				t.Fatalf("entries = %d (%+v), want %d", len(res.Entries), res.Entries, len(tt.wantWords))
+			}
+			for i, e := range res.Entries {
+				if e.Word != tt.wantWords[i] {
+					t.Errorf("entries[%d].Word = %q, want %q", i, e.Word, tt.wantWords[i])
+				}
+				if e.Lesson != tt.wantLessons[i] {
+					t.Errorf("entries[%d].Lesson = %q, want %q", i, e.Lesson, tt.wantLessons[i])
+				}
+			}
+			if tt.wantMeta == nil {
+				if res.Textbook != nil {
+					t.Fatalf("textbook meta = %+v, want nil", res.Textbook)
+				}
+				return
+			}
+			if res.Textbook == nil {
+				t.Fatalf("textbook meta = nil, want %+v", tt.wantMeta)
+			}
+			if *res.Textbook != *tt.wantMeta {
+				t.Errorf("textbook meta = %+v, want %+v", *res.Textbook, *tt.wantMeta)
 			}
 		})
 	}
@@ -240,8 +350,9 @@ func TestWordlistPipeline_ReaderNeverCalledOnRejection(t *testing.T) {
 }
 
 // TestWordlistPromptsCarryTheContract pins the prompt's behavioral clauses
-// (Issue #3 acceptance): word-list-only extraction, phrase integrity,
-// verbatim meanings, strict JSON output. A prompt edit that drops one of
+// (Issue #3 + #5 acceptance): word-list-only extraction, phrase integrity,
+// verbatim meanings, strict JSON output, textbook-header reading with the
+// no-fabrication rule (unread → null). A prompt edit that drops one of
 // these clauses should fail the matching assertion.
 func TestWordlistPromptsCarryTheContract(t *testing.T) {
 	fr := &fakeListReader{reply: `[]`}
@@ -249,7 +360,7 @@ func TestWordlistPromptsCarryTheContract(t *testing.T) {
 	if _, err := p.Recognize(context.Background(), jpegSoi); err != nil {
 		t.Fatalf("Recognize: %v", err)
 	}
-	for _, want := range []string{"词表", "短语", "原文", "JSON"} {
+	for _, want := range []string{"词表", "短语", "原文", "JSON", "教材", "课次", "null"} {
 		if !strings.Contains(fr.gotSystem, want) {
 			t.Errorf("system prompt lost clause %q:\n%s", want, fr.gotSystem)
 		}
