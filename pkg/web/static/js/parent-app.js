@@ -271,6 +271,19 @@
     onUnitSuggestions: function (category) {
       refreshUnitOptions(category);
     },
+    // Issue #4: the textbook surfaces (parent-textbook.js modals). The
+    // browse list refreshes after every textbook mutation so the
+    // attribution chips and progress effects are always current.
+    onManageTextbooks: function (category) {
+      if (window.TextbookUI) {
+        window.TextbookUI.openManager(category);
+      }
+    },
+    onAssignTextbook: function (ids, words) {
+      if (window.TextbookUI) {
+        window.TextbookUI.openAssign(ids, words);
+      }
+    },
   });
 
   var addCard = new window.AddCard(addContainer, {
@@ -306,6 +319,37 @@
       return fetchJSON('PUT', '/api/v1/settings/fsrs', settings);
     },
   });
+
+  // ------------------------------------------------------------------
+  // 教材管理 (Issue #4): the textbook modals' API wiring. Reads are plain
+  // GETs; writes go POST/PUT through the shared envelope. After every
+  // textbook mutation the browse list refreshes — attribution chips and
+  // progress effects must never go stale on screen.
+  // ------------------------------------------------------------------
+  if (window.TextbookUI) {
+    window.TextbookUI.init({
+      fetchTextbooks: function (category) {
+        var url = '/api/v1/textbooks' +
+          (category ? ('?category=' + encodeURIComponent(category)) : '');
+        return fetchJSON('GET', url).then(function (data) {
+          return (data && Array.isArray(data.textbooks)) ? data.textbooks : [];
+        });
+      },
+      createTextbook: function (payload) {
+        return fetchJSON('POST', '/api/v1/textbooks', payload);
+      },
+      updateTextbook: function (id, payload) {
+        return fetchJSON('PUT', '/api/v1/textbooks/' + encodeURIComponent(id), payload);
+      },
+      assignWords: function (textbookId, payload) {
+        return fetchJSON('POST',
+          '/api/v1/textbooks/' + encodeURIComponent(textbookId) + '/assign', payload);
+      },
+      onMutated: function () {
+        browse.refresh();
+      },
+    });
+  }
 
   // ------------------------------------------------------------------
   // 学习记录 view (13.3-03): GET /api/v1/lessons renders the list,

@@ -121,7 +121,11 @@
                                   window.classifyPhotoEntries (照片导入 tab,
                                   Issue #3; consumes __parentFormKit)
       js/parent-browse.js       → window.BrowseView (浏览词库: toolbar +
-                                  unit groups + edit/rename/delete modals)
+                                  unit groups + edit/rename/delete modals;
+                                  also exports __parentModalKit)
+      js/parent-textbook.js     → window.TextbookUI + pure helpers
+                                  (教材管理/批量指定 modals, Issue #4;
+                                  consumes __parentModalKit)
       js/parent-lessons.js      → window.LessonsView (学习记录: recent-
                                   lessons list + vertical per-word detail)
       js/parent-app.js          → wires them together (entry, fetchJSON,
@@ -130,8 +134,9 @@
   <script src="js/parent-batch-parser.js?v=20261009a" defer></script>
   <script src="js/parent-modes.js?v=20261011b" defer></script>
   <script src="js/parent-photo.js?v=20261011a" defer></script>
-  <script src="js/parent-browse.js?v=20261011a" defer></script>
+  <script src="js/parent-browse.js?v=20261012a" defer></script>
+  <script src="js/parent-textbook.js?v=20261012a" defer></script>
   <script src="js/parent-lessons.js?v=20261009a" defer></script>
-  <script src="js/parent-app.js?v=20261011b" defer></script>
+  <script src="js/parent-app.js?v=20261012a" defer></script>
 </body>
 </html>

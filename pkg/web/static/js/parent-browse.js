@@ -152,7 +152,7 @@
     overlay.className = 'modal-overlay';
 
     var dialog = document.createElement('div');
-    dialog.className = 'modal' + (spec.danger ? ' modal-danger' : '');
+    dialog.className = 'modal' + (spec.danger ? ' modal-danger' : '') + (spec.wide ? ' modal-wide' : '');
     dialog.setAttribute('role', 'dialog');
     dialog.setAttribute('aria-modal', 'true');
     dialog.setAttribute('aria-labelledby', titleId);
@@ -316,6 +316,10 @@
     };
     this.onMutated = options.onMutated || function () {};
     this.onUnitSuggestions = options.onUnitSuggestions || function () {};
+    // Issue #4 hooks (parent-textbook.js surfaces): open the 教材管理
+    // modal from the toolbar and the 批量指定 modal from the bulk bar.
+    this.onManageTextbooks = options.onManageTextbooks || null;
+    this.onAssignTextbook = options.onAssignTextbook || null;
 
     this.container = container;
     this.category = '';   // '' = 全部 | 'english' | 'chinese'
@@ -383,6 +387,20 @@
     toolbar.appendChild(searchBox);
     toolbar.appendChild(pills);
 
+    // Issue #4: the 教材管理 entry rides the toolbar (textbook entities,
+    // lesson order and learned progress all live behind it).
+    if (typeof this.onManageTextbooks === 'function') {
+      var textbookBtn = document.createElement('button');
+      textbookBtn.type = 'button';
+      textbookBtn.className = 'btn btn-secondary textbook-manage-btn';
+      textbookBtn.id = 'textbook-manage-btn';
+      textbookBtn.textContent = '教材管理';
+      textbookBtn.addEventListener('click', function () {
+        self.onManageTextbooks(self.category);
+      });
+      toolbar.appendChild(textbookBtn);
+    }
+
     var bulk = document.createElement('div');
     bulk.className = 'participation-bulk';
     this.selectionCount = document.createElement('span');
@@ -403,6 +421,28 @@
     bulk.appendChild(this.selectionCount);
     bulk.appendChild(this.bulkEnableBtn);
     bulk.appendChild(this.bulkDisableBtn);
+
+    // Issue #4: batch textbook/lesson attribution for the selection.
+    if (typeof this.onAssignTextbook === 'function') {
+      this.bulkAssignBtn = document.createElement('button');
+      this.bulkAssignBtn.type = 'button';
+      this.bulkAssignBtn.className = 'btn btn-secondary';
+      this.bulkAssignBtn.id = 'bulk-assign-textbook-btn';
+      this.bulkAssignBtn.textContent = '指定教材课次';
+      this.bulkAssignBtn.disabled = true;
+      this.bulkAssignBtn.addEventListener('click', function () {
+        var ids = self.selectedIds;
+        var idList = Object.keys(ids).map(function (k) { return parseInt(k, 10); });
+        var words = [];
+        (self.words || []).forEach(function (w) {
+          if (ids[String(w.id)]) {
+            words.push(w);
+          }
+        });
+        self.onAssignTextbook(idList, words);
+      });
+      bulk.appendChild(this.bulkAssignBtn);
+    }
 
     // The browse list region announces polite updates (UI-SPEC
     // Accessibility Contract).
@@ -455,6 +495,9 @@
     var actionable = count > 0 && count <= 500 && !this.bulkInFlight;
     this.bulkEnableBtn.disabled = !actionable;
     this.bulkDisableBtn.disabled = !actionable;
+    if (this.bulkAssignBtn) {
+      this.bulkAssignBtn.disabled = !actionable;
+    }
   };
 
   BrowseView.prototype.applyBulkParticipation = function (enabled) {
@@ -775,6 +818,23 @@
     badge.setAttribute('data-coding', word.category);
     badge.textContent = word.category === 'chinese' ? '中文' : '英语';
 
+    // Issue #4 attribution chips: 教材名·课次 / 教材名·待确认 per
+    // assignment (parent-textbook.js's assignLabel; guarded so browse
+    // still renders if that script is absent). Collected here, appended
+    // after the category badge below.
+    var chips = [];
+    (word.textbooks || []).forEach(function (entry) {
+      var chip = document.createElement('span');
+      chip.className = 'textbook-chip' + (entry.lesson ? '' : ' textbook-chip-pending');
+      chip.textContent = typeof global.assignLabel === 'function'
+        ? global.assignLabel(entry)
+        : (entry.name + (entry.lesson ? '·' + entry.lesson : '·待确认'));
+      chip.title = entry.lesson
+        ? '教材课次归属：' + entry.name
+        : '课次待确认：不参与自动默写，确认课次或加入范围后生效';
+      chips.push(chip);
+    });
+
     var actions = document.createElement('span');
     actions.className = 'row-actions';
 
@@ -825,6 +885,9 @@
       row.appendChild(meaning);
     }
     row.appendChild(badge);
+    chips.forEach(function (chip) {
+      row.appendChild(chip);
+    });
     row.appendChild(participationLabel);
     row.appendChild(actions);
     return row;
@@ -1160,4 +1223,11 @@
   // Window-or-module-global tail (state-manager.js convention) so Node
   // tests can require this file later.
   global.BrowseView = BrowseView;
+  // Shared modal builders for sibling components (parent-textbook.js
+  // mounts its modals through the same focus-trapped host — the
+  // __parentFormKit precedent).
+  global.__parentModalKit = {
+    openModal: openModal,
+    buildModalField: buildModalField,
+  };
 })(typeof window !== 'undefined' ? window : this);

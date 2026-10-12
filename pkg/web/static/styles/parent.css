@@ -1400,3 +1400,101 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* 教材管理 (Issue #4): attribution chips + textbook modals            */
+/* ------------------------------------------------------------------ */
+
+.textbook-chip {
+  display: inline-block;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-secondary, #f1f5f9);
+  color: var(--text-secondary, #64748b);
+  border: 1px solid var(--border, #e2e8f0);
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.textbook-chip-pending {
+  color: var(--warning, #b45309);
+  border-color: var(--warning, #b45309);
+  background: transparent;
+}
+
+.modal-wide .modal-body {
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
+}
+
+.textbook-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.textbook-row {
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.textbook-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.textbook-name {
+  font-size: 15px;
+}
+
+.textbook-primary-badge {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--primary, #2563eb);
+  color: #fff;
+}
+
+.textbook-meta {
+  font-size: 13px;
+  color: var(--text-secondary, #64748b);
+}
+
+.textbook-progress {
+  margin: 6px 0;
+  font-size: 13px;
+  color: var(--text, inherit);
+}
+
+.textbook-controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.textbook-progress-select {
+  width: auto;
+  min-width: 180px;
+}
+
+.textbook-create-form h4 {
+  margin: 12px 0 8px;
+  font-size: 14px;
+}
+
+.textbook-include-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 14px;
+}
