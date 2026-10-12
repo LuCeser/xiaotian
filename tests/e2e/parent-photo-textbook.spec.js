@@ -1,0 +1,288 @@
+/**
+ * Parent photo-import textbook E2E (Issue #5): 照片导入自动识别教材与课次
+ * 并批量校正, proven against the ISOLATED real service — real browser →
+ * real Go service → real Python bridge → real SQLite (per-run temp DB,
+ * SHARED by every test in the run). Only the external recognition service
+ * is stubbed (fixture-matched canned replies, the Issue #3 boundary).
+ *
+ * Test-data isolation: the per-run DB keeps textbooks across tests (no
+ * DELETE route exists — by design), and the attribution preselect matches
+ * EXISTING books by meta. Each test therefore works on its OWN meta
+ * family (PEP / 冀教版 / 译林版) so a book another test created can never
+ * hijack a preselect. The PEP book is shared by tests 1 and 2 ON PURPOSE
+ * (test 2 exercises the existing-book path of a photo import); test 2
+ * still passes standalone because its pep recognize would create the book
+ * itself when test 1 did not run.
+ *
+ * Acceptance link (issue #5 AC-6), one test per observable scenario:
+ *   1. 错误课次识别被批量修正 — the stub MISREADS the printed lesson
+ *      (第2课 for 第1课); the parent batch-corrects (plus one per-row
+ *      override), and the CONFIRMED result — not the recognition —
+ *      decides the stored attribution (AC-3), with the 待确认 honesty for
+ *      the unread 学段 (AC-2) and the create-form prefill (AC-1).
+ *   2. 两本教材不串进度 — photos build two textbooks; advancing ONE
+ *      book's progress unlocks only that book's words (AC-4 half).
+ *   3. 确认后课堂排除未学词 — a second photo into the EXISTING book
+ *      (honestly preselected by meta match, AC-1) adds 第2课 words that
+ *      stay OUT of real classroom selection until the progress moves
+ *      (AC-4); the receipt says so.
+ *
+ * Classroom probes: raw /rt practice session_init (mode=test full-reveal;
+ * ≥1.1s apart — r0x lesson ids are second-granular, same-second probes
+ * replay the first's frozen row).
+ */
+// @ts-check
+const { test, expect } = require('@playwright/test');
+const path = require('node:path');
+const WebSocket = require('ws');
+
+const CAT = 'english';
+const UNIT = 'e2e-photo-textbook';
+
+const FIXTURES = path.resolve(__dirname, 'fixtures');
+const FIXTURE_PEP = path.join(FIXTURES, 'photo-textbook-pep.png');
+const FIXTURE_JIJIANG = path.join(FIXTURES, 'photo-textbook-jijiang.png');
+const FIXTURE_LEXIN = path.join(FIXTURES, 'photo-textbook-lexin.png');
+const FIXTURE_LEXIN2 = path.join(FIXTURES, 'photo-textbook-lexin2.png');
+
+const BOOK_PEP = '人教版PEP·三年级·上册·Unit 3';
+const BOOK_JIJIANG = '冀教版·五年级·上册·Unit 1';
+const BOOK_LEXIN = '译林版·六年级·下册·Unit 5';
+
+/** DELETE the whole unit through the real API (404 = already gone). */
+async function deleteUnit(request) {
+  await request.delete('/api/v1/words', { data: { category: CAT, unit: UNIT } }).catch(() => {});
+}
+
+/** Real word→assignments snapshot for the english category. */
+async function wordAssignments(request) {
+  const resp = await request.get('/api/v1/words?category=' + CAT);
+  const data = await resp.json();
+  const map = new Map();
+  for (const w of data.words || []) {
+    map.set(w.word, w.textbooks || []);
+  }
+  return map;
+}
+
+/** Real textbook rows. */
+async function textbooks(request) {
+  const resp = await request.get('/api/v1/textbooks?category=' + CAT);
+  const data = await resp.json();
+  return data.textbooks || [];
+}
+
+/** Open the parent page into the 照片导入 tab and recognize one photo.
+ *  The 单元 field carries this suite's unit so the finally-cleanup can
+ *  delete exactly this suite's words (T-09-12 hygiene). */
+async function recognize(page, file) {
+  await page.goto('/parent.html');
+  await page.getByRole('tab', { name: '词库' }).click();
+  await expect(page.locator('#addSection')).toBeVisible();
+  await page.getByRole('tab', { name: '照片导入' }).click();
+  const panel = page.locator('#add-panel-photo');
+  await expect(panel).toBeVisible();
+  await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT);
+  await page.locator('#parent-photo-file').setInputFiles(file);
+  await page.getByRole('button', { name: '开始识别' }).click();
+  await expect(page.locator('.photo-row').first()).toBeVisible({ timeout: 30_000 });
+  return panel;
+}
+
+/** Batch-apply one lesson to every checked row through the toolbar. */
+async function batchSetLesson(page, lesson) {
+  await page.locator('#parent-photo-lesson').fill(lesson);
+  await page.getByRole('button', { name: '应用到勾选行' }).click();
+}
+
+/** Wait for the commit receipt's summary line to mention the book. */
+async function awaitReceipt(page, bookName, count) {
+  await expect(page.locator('.result-banner .result-summary')).toContainText(
+    '教材「' + bookName + '」指定课次 ' + count + ' 个', { timeout: 30_000 });
+}
+
+/** One real classroom probe: raw /rt practice init (mode=test). */
+function practiceSelection() {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket('ws://127.0.0.1:18080/rt', {
+      origin: 'http://127.0.0.1:18080',
+    });
+    const fail = setTimeout(() => reject(new Error('session_ready timeout')), 30_000);
+    ws.on('error', (err) => { clearTimeout(fail); reject(err); });
+    ws.on('open', () => {
+      ws.send(JSON.stringify({
+        type: 'session_init',
+        practice: true,
+        mode: 'test',
+        audio: { sampleRate: 16000, format: 's16le', channels: 1 },
+      }));
+    });
+    ws.on('message', (data) => {
+      const msg = JSON.parse(String(data));
+      if (msg.type === 'session_ready') {
+        clearTimeout(fail);
+        ws.close();
+        resolve(msg.lesson.words);
+      } else if (msg.type === 'error') {
+        clearTimeout(fail);
+        ws.close();
+        reject(new Error('session error: ' + JSON.stringify(msg)));
+      }
+    });
+  });
+}
+
+test('photo textbook: misread lesson is batch-corrected; the CONFIRMED result governs the attribution', async ({ page, request }) => {
+  await deleteUnit(request);
+  try {
+    await recognize(page, FIXTURE_PEP);
+
+    // AC-2: the read-off-the-photo header shows every field it could read
+    // and 待确认 for the one it could not — nothing fabricated.
+    const meta = page.locator('.photo-textbook-panel .photo-meta-line').first();
+    await expect(meta).toContainText('版本 人教版PEP');
+    await expect(meta).toContainText('学段 待确认');
+    await expect(meta).toContainText('课次 第2课'); // the stub's MISREAD
+
+    // AC-1: no existing book matches → 新建教材 prefilled from the meta.
+    await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
+    await expect(page.locator('#parent-photo-tb-name')).toHaveValue(BOOK_PEP);
+
+    // AC-3: batch-correct the whole page to the lesson actually printed.
+    await batchSetLesson(page, '第1课');
+    await expect(page.locator('input[aria-label="课次 第 1 行"]')).toHaveValue('第1课');
+    // Per-row editing still works: one row moves to another lesson.
+    await page.locator('input[aria-label="课次 第 3 行"]').fill('第2课');
+
+    await page.getByRole('button', { name: '确认添加（3 个）' }).click();
+
+    // Honest receipt: per-group assignment lines + the unlearned note.
+    const banner = page.locator('.result-banner');
+    await awaitReceipt(page, BOOK_PEP, 3);
+    await expect(banner).toContainText('已指定课次「第1课」：tiger、panda');
+    await expect(banner).toContainText('已指定课次「第2课」：grape');
+    await expect(banner).toContainText('尚未学到');
+
+    // The real database carries the CONFIRMED attribution (not the
+    // misread), and the created book's lesson list came from the
+    // confirmed lessons in row order.
+    const books = await textbooks(request);
+    const bookPep = books.find((b) => b.name === BOOK_PEP);
+    expect(bookPep).toBeTruthy();
+    expect(bookPep.lessons).toEqual(['第1课', '第2课']);
+    expect(bookPep.edition).toBe('人教版PEP');
+    expect(bookPep.grade).toBe('三年级');
+    expect(bookPep.volume).toBe('上册');
+
+    const assigns = await wordAssignments(request);
+    const tiger = (assigns.get('tiger') || []).find((t) => t.name === BOOK_PEP);
+    expect(tiger && tiger.lesson).toBe('第1课');
+    const grape = (assigns.get('grape') || []).find((t) => t.name === BOOK_PEP);
+    expect(grape && grape.lesson).toBe('第2课');
+  } finally {
+    await deleteUnit(request);
+  }
+});
+
+test('photo textbook: two books built from photos keep independent progress', async ({ page, request }) => {
+  await deleteUnit(request);
+  try {
+    // Photo 1 → the PEP book (created by test 1 when it ran; when it did
+    // not, THIS recognize creates it — the flow works either way, only
+    // the preselect differs). Photo 2 → the 冀教版 book, freshly created.
+    await recognize(page, FIXTURE_PEP);
+    await batchSetLesson(page, '第1课');
+    await page.getByRole('button', { name: '确认添加（3 个）' }).click();
+    await awaitReceipt(page, BOOK_PEP, 3);
+
+    await recognize(page, FIXTURE_JIJIANG);
+    // 冀教版's header was read correctly — 第1课 stands, no correction.
+    await expect(page.locator('input[aria-label="课次 第 1 行"]')).toHaveValue('第1课');
+    await page.getByRole('button', { name: '确认添加（2 个）' }).click();
+    await awaitReceipt(page, BOOK_JIJIANG, 2);
+
+    // Both books start unlearned: neither book's words are selectable.
+    let picked = await practiceSelection();
+    expect(picked).not.toContain('tiger');
+    expect(picked).not.toContain('horse');
+
+    // Advance ONLY the 冀教版 book: its words unlock, PEP's stay out.
+    const books = await textbooks(request);
+    const bookJijiang = books.find((b) => b.name === BOOK_JIJIANG);
+    const put = await request.put('/api/v1/textbooks/' + bookJijiang.id, { data: { learnedLessons: 1 } });
+    expect(put.ok()).toBeTruthy();
+
+    await page.waitForTimeout(1100); // r0x ids are second-granular
+    picked = await practiceSelection();
+    expect(picked).toContain('horse');
+    expect(picked).toContain('sheep');
+    expect(picked).not.toContain('tiger');
+    expect(picked).not.toContain('panda');
+    expect(picked).not.toContain('grape');
+
+    // Advance the PEP book too: everything unlocks — still independently.
+    const bookPep = books.find((b) => b.name === BOOK_PEP);
+    const putPep = await request.put('/api/v1/textbooks/' + bookPep.id, { data: { learnedLessons: 1 } });
+    expect(putPep.ok()).toBeTruthy();
+
+    await page.waitForTimeout(1100);
+    picked = await practiceSelection();
+    for (const w of ['tiger', 'panda', 'grape', 'horse', 'sheep']) {
+      expect(picked).toContain(w);
+    }
+  } finally {
+    await deleteUnit(request);
+  }
+});
+
+test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom until progress moves; a re-photo honestly preselects the existing book', async ({ page, request }) => {
+  await deleteUnit(request);
+  try {
+    // Photo 1 → the 译林版 book with 第1课, then mark 第1课 learned.
+    await recognize(page, FIXTURE_LEXIN);
+    await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
+    await page.getByRole('button', { name: '确认添加（2 个）' }).click();
+    await awaitReceipt(page, BOOK_LEXIN, 2);
+    const books1 = await textbooks(request);
+    const bookLexin = books1.find((b) => b.name === BOOK_LEXIN);
+    const put = await request.put('/api/v1/textbooks/' + bookLexin.id, { data: { learnedLessons: 1 } });
+    expect(put.ok()).toBeTruthy();
+
+    // Photo 2 (same book, next lesson): the meta HONESTLY matches the
+    // existing book — it is preselected, no re-asking of the background
+    // (AC-2's 只按教材确认一次).
+    await recognize(page, FIXTURE_LEXIN2);
+    const select = page.locator('#parent-photo-textbook');
+    await expect(select).not.toHaveValue('new');
+    await expect(select).not.toHaveValue('none');
+    // The confirmed lesson is not in the book's list yet: the panel says
+    // it will append at the end (order editable in 教材管理 later).
+    await expect(page.locator('.photo-book-detail')).toContainText('第2课」不在教材课次表里');
+
+    await page.getByRole('button', { name: '确认添加（2 个）' }).click();
+    await awaitReceipt(page, BOOK_LEXIN, 2);
+    // The unlearned-lesson honesty note names exactly 第2课.
+    await expect(page.locator('.result-banner')).toContainText('课次「第2课」尚未学到');
+
+    // AC-4: the classroom keeps excluding the unlearned lesson's words…
+    let picked = await practiceSelection();
+    expect(picked).toContain('cow');
+    expect(picked).toContain('pig');
+    expect(picked).not.toContain('bird');
+    expect(picked).not.toContain('frog');
+
+    // …and the appended lesson joined the book's list in order.
+    const books2 = await textbooks(request);
+    expect(books2.find((b) => b.name === BOOK_LEXIN).lessons).toEqual(['第1课', '第2课']);
+
+    // Progress moves → the very next classroom serves them.
+    const put2 = await request.put('/api/v1/textbooks/' + bookLexin.id, { data: { learnedLessons: 2 } });
+    expect(put2.ok()).toBeTruthy();
+    await page.waitForTimeout(1100);
+    picked = await practiceSelection();
+    expect(picked).toContain('bird');
+    expect(picked).toContain('frog');
+  } finally {
+    await deleteUnit(request);
+  }
+});
