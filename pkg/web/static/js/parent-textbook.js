@@ -180,6 +180,7 @@
 
         var form = document.createElement('form');
         form.className = 'textbook-create-form';
+        form.id = 'textbook-create-form';
         form.noValidate = true;
 
         var title = document.createElement('h4');
@@ -237,6 +238,10 @@
 
         var submit = document.createElement('button');
         submit.type = 'submit';
+        // The button lives in the modal's actions row, OUTSIDE the form
+        // element — the form attribute is what makes type=submit actually
+        // submit that form (without it the click is a silent no-op).
+        submit.setAttribute('form', 'textbook-create-form');
         submit.className = 'btn btn-primary';
         submit.textContent = '创建教材';
         actions.appendChild(submit);
