@@ -138,6 +138,14 @@ type CardFilter struct {
 	// ParticipatingOnly restricts automatic classroom selection to cards
 	// enabled by the parent. Management views leave this false.
 	ParticipatingOnly bool
+	// ScopeEligibleOnly restricts automatic classroom selection to cards
+	// inside the Issue #4 textbook scope: unassigned (supplementary)
+	// cards pass; assigned cards need an include_in_scope override or a
+	// lesson inside their textbook's learned progress. Composes with
+	// ParticipatingOnly via AND (both switches must admit the word).
+	// Management views leave this false — the browse list must show
+	// out-of-scope words so the parent can manage them.
+	ScopeEligibleOnly bool
 	// Category restricts to one vocabulary category ("english"/"chinese").
 	// Empty means all categories.
 	Category string
@@ -290,7 +298,10 @@ func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]C
 	if err != nil {
 		return nil, errors.Wrap(err, "card schema")
 	}
-	query := fmt.Sprintf("SELECT %s FROM cards", columns)
+	// The "c" alias anchors the Issue #4 scope predicate's correlated
+	// subqueries (card_assignments na/ia/la reference c.id); unqualified
+	// filter columns keep resolving against the same single table.
+	query := fmt.Sprintf("SELECT %s FROM cards c", columns)
 	args := []any{}
 	// First predicate needs WHERE, the rest AND — one flag tracks it across
 	// every filter field (participation included).
@@ -307,6 +318,23 @@ func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]C
 	}
 	if filter.ParticipatingOnly && hasParticipation {
 		addPredicate(" participates = 1")
+	}
+	if filter.ScopeEligibleOnly {
+		scopeSQL, scopeArgs, err := textbookScopePredicate(ctx, r.db)
+		if err != nil {
+			r.logger.Error("textbook scope predicate failed",
+				infra.F("component", "database/card_repo"),
+				infra.ErrField(err),
+			)
+			return nil, errors.Wrap(err, "card list: scope")
+		}
+		if scopeSQL != "" {
+			// Bare parenthesized expression — addPredicate handles the
+			// WHERE/AND alternation; every parameter rides scopeArgs.
+			addPredicate(" "+scopeSQL, scopeArgs...)
+		}
+		// An empty fragment = no scope tables yet: every card is
+		// supplementary and eligible (pre-migration degraded read).
 	}
 	if filter.Category != "" {
 		addPredicate(" category = ?", filter.Category)
