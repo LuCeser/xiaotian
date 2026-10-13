@@ -33,7 +33,9 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
-const WebSocket = require('ws');
+const {
+  recognize, deleteUnit, wordRows, textbooks, awaitReceipt, practiceSelection,
+} = require('./helpers/photo-flow');
 
 const CAT = 'english';
 const UNIT = 'e2e-photo-reimport';
@@ -45,90 +47,11 @@ const FIXTURE_RENJIAO = path.join(FIXTURES, 'photo-textbook-renjiao.png');
 const BOOK_KEPU = '科普版·小学·三年级·上册·Unit 2';
 const BOOK_RENJIAO = '仁爱版·小学·三年级·上册·Unit 1';
 
-/** DELETE the whole unit through the real API (404 = already gone). */
-async function deleteUnit(request) {
-  await request.delete('/api/v1/words', { data: { category: CAT, unit: UNIT } }).catch(() => {});
-}
-
-/** Real word rows for the english category keyed by word surface. */
-async function wordRows(request) {
-  const resp = await request.get('/api/v1/words?category=' + CAT);
-  const data = await resp.json();
-  const map = new Map();
-  for (const w of data.words || []) {
-    map.set(w.word, w);
-  }
-  return map;
-}
-
-/** Real textbook rows. */
-async function textbooks(request) {
-  const resp = await request.get('/api/v1/textbooks?category=' + CAT);
-  const data = await resp.json();
-  return data.textbooks || [];
-}
-
-/** Open the parent page into the 照片导入 tab and recognize one photo
- *  (the 单元 field carries this suite's unit for the finally-cleanup). */
-async function recognize(page, file) {
-  await page.goto('/parent.html');
-  await page.getByRole('tab', { name: '词库' }).click();
-  await expect(page.locator('#addSection')).toBeVisible();
-  await page.getByRole('tab', { name: '照片导入' }).click();
-  const panel = page.locator('#add-panel-photo');
-  await expect(panel).toBeVisible();
-  await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT);
-  await page.locator('#parent-photo-file').setInputFiles(file);
-  await page.getByRole('button', { name: '开始识别' }).click();
-  await expect(page.locator('.photo-row').first()).toBeVisible({ timeout: 30_000 });
-  return panel;
-}
-
-/** Wait for the commit receipt's per-category summary (Issue #6 shape). */
-async function awaitReceipt(page, bookName, categories) {
-  const text = Object.entries(categories)
-    .map(([label, n]) => label + ' ' + n + ' 个')
-    .join('，');
-  await expect(page.locator('.result-banner .result-summary')).toContainText(
-    '教材「' + bookName + '」：' + text, { timeout: 30_000 });
-}
-
-/** One real classroom probe: raw /rt practice init (mode=test). */
-function practiceSelection() {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket('ws://127.0.0.1:18080/rt', {
-      origin: 'http://127.0.0.1:18080',
-    });
-    const fail = setTimeout(() => reject(new Error('session_ready timeout')), 30_000);
-    ws.on('error', (err) => { clearTimeout(fail); reject(err); });
-    ws.on('open', () => {
-      ws.send(JSON.stringify({
-        type: 'session_init',
-        practice: true,
-        mode: 'test',
-        audio: { sampleRate: 16000, format: 's16le', channels: 1 },
-      }));
-    });
-    ws.on('message', (data) => {
-      const msg = JSON.parse(String(data));
-      if (msg.type === 'session_ready') {
-        clearTimeout(fail);
-        ws.close();
-        resolve(msg.lesson.words);
-      } else if (msg.type === 'error') {
-        clearTimeout(fail);
-        ws.close();
-        reject(new Error('session error: ' + JSON.stringify(msg)));
-      }
-    });
-  });
-}
-
 test('re-upload: the same page committed twice creates each word once — ids stable, sources not duplicated, receipt says 合并', async ({ page, request }) => {
-  await deleteUnit(request);
+  await deleteUnit(request, UNIT);
   try {
     // First commit: three 新增 into the freshly created 科普版 book.
-    await recognize(page, FIXTURE_KEPU);
+    await recognize(page, FIXTURE_KEPU, UNIT);
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
     await awaitReceipt(page, BOOK_KEPU, { 新增: 3 });
     await expect(page.locator('.result-banner')).toContainText(
@@ -145,7 +68,7 @@ test('re-upload: the same page committed twice creates each word once — ids st
 
     // Re-upload the very SAME page: every row reads 已有; the commit merges
     // sources only (AC-1: 重复导入不创建新的练习内容).
-    await recognize(page, FIXTURE_KEPU);
+    await recognize(page, FIXTURE_KEPU, UNIT);
     await expect(page.locator('.photo-row-exists')).toHaveCount(3);
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
     await awaitReceipt(page, BOOK_KEPU, { 合并: 3 });
@@ -162,15 +85,15 @@ test('re-upload: the same page committed twice creates each word once — ids st
       expect(mine[0].lesson).toBe('第1课');
     }
   } finally {
-    await deleteUnit(request);
+    await deleteUnit(request, UNIT);
   }
 });
 
 test('one word, two books: a learned source admits it, an unlearned one never blocks; 移出 and explicit include survive re-import', async ({ page, request }) => {
-  await deleteUnit(request);
+  await deleteUnit(request, UNIT);
   try {
     // 科普版 第1课 (eagle/deer/camel), then marked learned.
-    await recognize(page, FIXTURE_KEPU);
+    await recognize(page, FIXTURE_KEPU, UNIT);
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
     await awaitReceipt(page, BOOK_KEPU, { 新增: 3 });
     const books1 = await textbooks(request);
@@ -179,7 +102,7 @@ test('one word, two books: a learned source admits it, an unlearned one never bl
     expect(put.ok()).toBeTruthy();
 
     // 仁爱版 re-imports eagle (the multi-source word) and adds whale.
-    await recognize(page, FIXTURE_RENJIAO);
+    await recognize(page, FIXTURE_RENJIAO, UNIT);
     await expect(page.locator('.photo-row-exists')).toHaveCount(1);
     await expect(page.locator('.photo-row-new')).toHaveCount(1);
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
@@ -207,7 +130,7 @@ test('one word, two books: a learned source admits it, an unlearned one never bl
     expect(off.ok()).toBeTruthy();
 
     // … survives a re-import of the page that contains the word.
-    await recognize(page, FIXTURE_KEPU);
+    await recognize(page, FIXTURE_KEPU, UNIT);
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
     await awaitReceipt(page, BOOK_KEPU, { 合并: 3 });
     rows = await wordRows(request);
@@ -226,7 +149,7 @@ test('one word, two books: a learned source admits it, an unlearned one never bl
       data: { cardIds: [eagleId], lesson: '第1课', includeInScope: true },
     });
     expect(include.ok()).toBeTruthy();
-    await recognize(page, FIXTURE_KEPU);
+    await recognize(page, FIXTURE_KEPU, UNIT);
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
     await awaitReceipt(page, BOOK_KEPU, { 合并: 3 });
     rows = await wordRows(request);
@@ -237,12 +160,12 @@ test('one word, two books: a learned source admits it, an unlearned one never bl
     picked = await practiceSelection();
     expect(picked).not.toContain('eagle'); // include ≠ 绕过移出
   } finally {
-    await deleteUnit(request);
+    await deleteUnit(request, UNIT);
   }
 });
 
 test('definition diff: unresolved stays 待处理差异 with the original kept; 采用照片释义 confirms, merges the source, and the classroom serves the word', async ({ page, request }) => {
-  await deleteUnit(request);
+  await deleteUnit(request, UNIT);
   try {
     // Pre-seed camel with a DIFFERENT meaning (an earlier batch add).
     const post = await request.post('/api/v1/words', {
@@ -252,7 +175,7 @@ test('definition diff: unresolved stays 待处理差异 with the original kept; 
 
     // The photo brings camel with 骆驼 — the conflict shows BOTH readings
     // BEFORE any submit (AC-3: 提交前展示差异).
-    await recognize(page, FIXTURE_KEPU);
+    await recognize(page, FIXTURE_KEPU, UNIT);
     const conflict = page.locator('.photo-row-conflict');
     await expect(conflict).toHaveCount(1);
     await expect(conflict).toContainText('词库释义：沙漠之舟');
@@ -269,7 +192,7 @@ test('definition diff: unresolved stays 待处理差异 with the original kept; 
 
     // Re-upload: this time the parent confirms 采用照片释义 — the row
     // joins the commit (button count 2 → 3).
-    await recognize(page, FIXTURE_KEPU);
+    await recognize(page, FIXTURE_KEPU, UNIT);
     const conflict2 = page.locator('.photo-row-conflict');
     await expect(conflict2).toHaveCount(1);
     await conflict2.locator('input[value="adopt"]').check();
@@ -294,6 +217,6 @@ test('definition diff: unresolved stays 待处理差异 with the original kept; 
     const picked = await practiceSelection();
     expect(picked).toContain('camel');
   } finally {
-    await deleteUnit(request);
+    await deleteUnit(request, UNIT);
   }
 });

@@ -230,13 +230,25 @@
     }));
   }
 
+  /** The two parent confirmations a 释义差异 row can carry (Issue #6). */
+  var RESOLUTIONS = ['keep', 'adopt'];
+
+  /** isResolved — the ONE home for "this conflict row carries a parent
+   * confirmation" (the literal validity rule every consumer asks). */
+  function isResolved(row) {
+    return !!row && row.status === 'conflict' &&
+      RESOLUTIONS.indexOf(row.resolution) >= 0;
+  }
+
   /**
    * isCommittable — one home for the textbook-mode rule: a row takes part
    * in the commit when it is new, or already in the library and only
    * needs its lesson assigned (exists + textbook mode); a conflict joins
    * ONLY after the parent resolved it (Issue #6 AC-3: 家长确认后处理 —
-   * unresolved conflicts stay 待处理差异, never silently merged); invalid
-   * never does.
+   * unresolved conflicts stay 待处理差异, never silently merged; the
+   * resolution choice is deliberately textbook-mode-only — supplementary
+   * imports have no source to merge, so their conflicts stay dead ends);
+   * invalid never does.
    */
   function isCommittable(row, textbookMode) {
     if (!row) {
@@ -248,8 +260,7 @@
     if (!textbookMode) {
       return false;
     }
-    return row.status === 'exists' ||
-      (row.status === 'conflict' && (row.resolution === 'keep' || row.resolution === 'adopt'));
+    return row.status === 'exists' || isResolved(row);
   }
 
   /** Clear one element through the shared kit (fallback: textContent). */
@@ -1854,7 +1865,7 @@
       if (row.status === 'invalid') {
         item.category = 'excluded';
         item.note = describeInvalidReason(row.reason);
-      } else if (row.status === 'conflict' && row.resolution !== 'keep' && row.resolution !== 'adopt') {
+      } else if (row.status === 'conflict' && !isResolved(row)) {
         item.category = 'pendingDiff';
         item.note = '词库释义「' + (row.existingMeaning || '（空）') + '」与照片释义「' +
           meaning + '」不同，未确认——已保留原释义，仅报告差异';
@@ -2182,6 +2193,7 @@
   global.distinctLessons = distinctLessons;
   global.distinctRowLessons = distinctRowLessons;
   global.isCommittable = isCommittable;
+  global.isResolved = isResolved;
   global.planAssignments = planAssignments;
   global.buildTextbookReceipt = buildTextbookReceipt;
 })(typeof window !== 'undefined' ? window : this);

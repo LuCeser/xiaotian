@@ -119,11 +119,12 @@ func TestE2E_ReimportIsIdempotent(t *testing.T) {
 		}
 	}
 
-	if got := reimportCardIDs(t, cfg.VocabDBPath); len(got) != len(idsBefore) {
-		t.Fatalf("cards after re-import = %d, want %d (no duplicate content)", len(got), len(idsBefore))
+	after := reimportCardIDs(t, cfg.VocabDBPath)
+	if len(after) != len(idsBefore) {
+		t.Fatalf("cards after re-import = %d, want %d (no duplicate content)", len(after), len(idsBefore))
 	}
 	for word, id := range idsBefore {
-		if got := reimportCardIDs(t, cfg.VocabDBPath)[word]; got != id {
+		if got := after[word]; got != id {
 			t.Fatalf("card %q id changed by re-import: %d → %d (identity must be stable)", word, id, got)
 		}
 	}

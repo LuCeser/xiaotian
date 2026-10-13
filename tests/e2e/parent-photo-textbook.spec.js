@@ -34,7 +34,9 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
-const WebSocket = require('ws');
+const {
+  recognize, deleteUnit, textbooks, awaitReceipt, practiceSelection,
+} = require('./helpers/photo-flow');
 
 const CAT = 'english';
 const UNIT = 'e2e-photo-textbook';
@@ -49,12 +51,8 @@ const BOOK_PEP = '人教版PEP·三年级·上册·Unit 3';
 const BOOK_JIJIANG = '冀教版·五年级·上册·Unit 1';
 const BOOK_LEXIN = '译林版·六年级·下册·Unit 5';
 
-/** DELETE the whole unit through the real API (404 = already gone). */
-async function deleteUnit(request) {
-  await request.delete('/api/v1/words', { data: { category: CAT, unit: UNIT } }).catch(() => {});
-}
-
-/** Real word→assignments snapshot for the english category. */
+/** Real word→assignments snapshot for the english category (the shared
+ *  wordRows helper returns whole rows; this suite only reads textbooks). */
 async function wordAssignments(request) {
   const resp = await request.get('/api/v1/words?category=' + CAT);
   const data = await resp.json();
@@ -65,81 +63,16 @@ async function wordAssignments(request) {
   return map;
 }
 
-/** Real textbook rows. */
-async function textbooks(request) {
-  const resp = await request.get('/api/v1/textbooks?category=' + CAT);
-  const data = await resp.json();
-  return data.textbooks || [];
-}
-
-/** Open the parent page into the 照片导入 tab and recognize one photo.
- *  The 单元 field carries this suite's unit so the finally-cleanup can
- *  delete exactly this suite's words (T-09-12 hygiene). */
-async function recognize(page, file) {
-  await page.goto('/parent.html');
-  await page.getByRole('tab', { name: '词库' }).click();
-  await expect(page.locator('#addSection')).toBeVisible();
-  await page.getByRole('tab', { name: '照片导入' }).click();
-  const panel = page.locator('#add-panel-photo');
-  await expect(panel).toBeVisible();
-  await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT);
-  await page.locator('#parent-photo-file').setInputFiles(file);
-  await page.getByRole('button', { name: '开始识别' }).click();
-  await expect(page.locator('.photo-row').first()).toBeVisible({ timeout: 30_000 });
-  return panel;
-}
-
 /** Batch-apply one lesson to every checked row through the toolbar. */
 async function batchSetLesson(page, lesson) {
   await page.locator('#parent-photo-lesson').fill(lesson);
   await page.getByRole('button', { name: '应用到勾选行' }).click();
 }
 
-/** Wait for the commit receipt's summary line to reach the book + its
- *  per-category tally (Issue #6 receipt shape: 教材「…」：新增 N 个 …). */
-async function awaitReceipt(page, bookName, categories) {
-  const text = Object.entries(categories)
-    .map(([label, n]) => label + ' ' + n + ' 个')
-    .join('，');
-  await expect(page.locator('.result-banner .result-summary')).toContainText(
-    '教材「' + bookName + '」：' + text, { timeout: 30_000 });
-}
-
-/** One real classroom probe: raw /rt practice init (mode=test). */
-function practiceSelection() {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket('ws://127.0.0.1:18080/rt', {
-      origin: 'http://127.0.0.1:18080',
-    });
-    const fail = setTimeout(() => reject(new Error('session_ready timeout')), 30_000);
-    ws.on('error', (err) => { clearTimeout(fail); reject(err); });
-    ws.on('open', () => {
-      ws.send(JSON.stringify({
-        type: 'session_init',
-        practice: true,
-        mode: 'test',
-        audio: { sampleRate: 16000, format: 's16le', channels: 1 },
-      }));
-    });
-    ws.on('message', (data) => {
-      const msg = JSON.parse(String(data));
-      if (msg.type === 'session_ready') {
-        clearTimeout(fail);
-        ws.close();
-        resolve(msg.lesson.words);
-      } else if (msg.type === 'error') {
-        clearTimeout(fail);
-        ws.close();
-        reject(new Error('session error: ' + JSON.stringify(msg)));
-      }
-    });
-  });
-}
-
 test('photo textbook: misread lesson is batch-corrected; the CONFIRMED result governs the attribution', async ({ page, request }) => {
-  await deleteUnit(request);
+  await deleteUnit(request, UNIT);
   try {
-    await recognize(page, FIXTURE_PEP);
+    await recognize(page, FIXTURE_PEP, UNIT);
 
     // AC-2: the read-off-the-photo header shows every field it could read
     // and 待确认 for the one it could not — nothing fabricated.
@@ -184,22 +117,22 @@ test('photo textbook: misread lesson is batch-corrected; the CONFIRMED result go
     const grape = (assigns.get('grape') || []).find((t) => t.name === BOOK_PEP);
     expect(grape && grape.lesson).toBe('第2课');
   } finally {
-    await deleteUnit(request);
+    await deleteUnit(request, UNIT);
   }
 });
 
 test('photo textbook: two books built from photos keep independent progress', async ({ page, request }) => {
-  await deleteUnit(request);
+  await deleteUnit(request, UNIT);
   try {
     // Photo 1 → the PEP book (created by test 1 when it ran; when it did
     // not, THIS recognize creates it — the flow works either way, only
     // the preselect differs). Photo 2 → the 冀教版 book, freshly created.
-    await recognize(page, FIXTURE_PEP);
+    await recognize(page, FIXTURE_PEP, UNIT);
     await batchSetLesson(page, '第1课');
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
     await awaitReceipt(page, BOOK_PEP, { 新增: 3 });
 
-    await recognize(page, FIXTURE_JIJIANG);
+    await recognize(page, FIXTURE_JIJIANG, UNIT);
     // 冀教版's header was read correctly — 第1课 stands, no correction.
     await expect(page.locator('input[aria-label="课次 第 1 行"]')).toHaveValue('第1课');
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
@@ -235,15 +168,15 @@ test('photo textbook: two books built from photos keep independent progress', as
       expect(picked).toContain(w);
     }
   } finally {
-    await deleteUnit(request);
+    await deleteUnit(request, UNIT);
   }
 });
 
 test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom until progress moves; a re-photo honestly preselects the existing book', async ({ page, request }) => {
-  await deleteUnit(request);
+  await deleteUnit(request, UNIT);
   try {
     // Photo 1 → the 译林版 book with 第1课, then mark 第1课 learned.
-    await recognize(page, FIXTURE_LEXIN);
+    await recognize(page, FIXTURE_LEXIN, UNIT);
     await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
     await awaitReceipt(page, BOOK_LEXIN, { 新增: 2 });
@@ -255,7 +188,7 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
     // Photo 2 (same book, next lesson): the meta HONESTLY matches the
     // existing book — it is preselected, no re-asking of the background
     // (AC-2's 只按教材确认一次).
-    await recognize(page, FIXTURE_LEXIN2);
+    await recognize(page, FIXTURE_LEXIN2, UNIT);
     const select = page.locator('#parent-photo-textbook');
     await expect(select).not.toHaveValue('new');
     await expect(select).not.toHaveValue('none');
@@ -287,6 +220,6 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
     expect(picked).toContain('bird');
     expect(picked).toContain('frog');
   } finally {
-    await deleteUnit(request);
+    await deleteUnit(request, UNIT);
   }
 });
