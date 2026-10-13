@@ -181,12 +181,76 @@
   // (tests/test-parent-photo-textbook.js).
   // ------------------------------------------------------------------
 
-  /** The meta fields that identify a textbook (lesson excluded — it is
-   *  per-page/per-word, not part of the book's identity). */
-  var META_KEYS = ['edition', 'stage', 'grade', 'volume', 'module'];
+  /**
+   * The meta fields that identify a textbook (lesson excluded — it is
+   * per-page/per-word, not part of the book's identity). ONE encoding of
+   * the key/label/placeholder clump serves the meta line, the create form
+   * and the backfill patch.
+   */
+  var META_FIELDS = [
+    { key: 'edition', label: '版本', ph: '如 人教版PEP' },
+    { key: 'stage', label: '学段', ph: '如 小学' },
+    { key: 'grade', label: '年级', ph: '如 三年级' },
+    { key: 'volume', label: '上下册', ph: '如 上册' },
+    { key: 'module', label: '模块', ph: '如 Unit 1-3' },
+  ];
+  var META_KEYS = META_FIELDS.map(function (f) { return f.key; });
 
+  /** Trim to a string ('' for null-ish) — the meta/lesson value shape. */
   function metaField(v) {
     return v == null ? '' : String(v).trim();
+  }
+
+  /**
+   * distinctLessons — the distinct non-empty trimmed lesson NAMES, keeping
+   * first-appearance order (teaching order is explicit; never sorted).
+   * For plain string lists (a book's lesson list, the append candidates).
+   */
+  function distinctLessons(names) {
+    var seen = {};
+    var lessons = [];
+    (names || []).forEach(function (name) {
+      var value = metaField(name);
+      if (value && !seen[value]) {
+        seen[value] = true;
+        lessons.push(value);
+      }
+    });
+    return lessons;
+  }
+
+  /**
+   * distinctRowLessons — the distinct non-empty lessons among preview ROWS
+   * ({lesson} objects), in row order. Shared by the datalist options, the
+   * append-note and the final lesson list.
+   */
+  function distinctRowLessons(rows) {
+    return distinctLessons((rows || []).map(function (row) {
+      return row && row.lesson ? row.lesson : '';
+    }));
+  }
+
+  /**
+   * isCommittable — one home for the textbook-mode rule: a row takes part
+   * in the commit when it is new, or already in the library and only
+   * needs its lesson assigned (exists + textbook mode); conflict/invalid
+   * never do.
+   */
+  function isCommittable(row, textbookMode) {
+    if (!row) {
+      return false;
+    }
+    return row.status === 'new' || (textbookMode && row.status === 'exists');
+  }
+
+  /** Clear one element through the shared kit (fallback: textContent). */
+  function clearEl(el) {
+    var kit = global.__parentFormKit || {};
+    if (kit.clearContainer) {
+      kit.clearContainer(el);
+    } else {
+      el.textContent = '';
+    }
   }
 
   /**
@@ -312,13 +376,11 @@
    *       (the classification snapshot; ALSO re-fetched after commit to
    *       reconcile raced duplicates honestly AND to resolve card ids for
    *       the textbook assignments)
-   *   fetchTextbooks(category) → Promise<Array> — GET /api/v1/textbooks
-   *   createTextbook(payload) → Promise<book> — POST /api/v1/textbooks
-   *   updateTextbook(id, payload) → Promise<book> — PUT /api/v1/textbooks/{id}
-   *   assignWords(textbookId, payload) → Promise<result> — POST
-   *       /api/v1/textbooks/{id}/assign (all four are the Issue #4
-   *       surfaces reused as-is; absent ⇒ the textbook panel degrades to
-   *       the plain Issue #3 supplementary flow)
+   *   textbookDeps — {fetchTextbooks, createTextbook, updateTextbook,
+   *       assignWords}, the Issue #4 surfaces reused as-is and travelling
+   *       as ONE all-or-nothing set (parent-app wires them together;
+   *       absent or partial ⇒ the textbook panel degrades to the plain
+   *       Issue #3 supplementary flow)
    *   onCommitted(result) — fired after a successful commit (refresh hook)
    *   onCategoryChange(v) — fired once at mount with 'english' so the
    *       shared 单元 datalist populates for this flow's fixed category
@@ -334,10 +396,11 @@
     this.fetchWords = options.fetchWords || function () {
       return Promise.reject(new Error('PhotoAddForm: missing fetchWords handler'));
     };
-    this.fetchTextbooks = options.fetchTextbooks || null;
-    this.createTextbook = options.createTextbook || null;
-    this.updateTextbook = options.updateTextbook || null;
-    this.assignWords = options.assignWords || null;
+    var td = options.textbookDeps || {};
+    this.fetchTextbooks = td.fetchTextbooks || null;
+    this.createTextbook = td.createTextbook || null;
+    this.updateTextbook = td.updateTextbook || null;
+    this.assignWords = td.assignWords || null;
     this.onCommitted = options.onCommitted || function () {};
     this.onCategoryChange = options.onCategoryChange || function () {};
 
@@ -662,12 +725,7 @@
   };
 
   PhotoAddForm.prototype.renderPreviewHint = function (text) {
-    var kit = global.__parentFormKit || {};
-    if (kit.clearContainer) {
-      kit.clearContainer(this.preview);
-    } else {
-      this.preview.textContent = '';
-    }
+    clearEl(this.preview);
     var note = document.createElement('p');
     note.className = 'preview-empty';
     note.textContent = text;
@@ -700,7 +758,7 @@
   };
 
   /**
-   * The lesson options shared by the toolbar and every row select:
+   * The lesson options shared by the toolbar datalist and the rows:
    * 待确认 first, then the chosen book's lesson list (teaching order),
    * then any row lesson the list does not carry yet, in row order. For a
    * new book the prospective list is just the rows' distinct lessons.
@@ -715,9 +773,8 @@
         options.push(name);
       }
     });
-    this.rows.forEach(function (row) {
-      var name = row && row.lesson ? String(row.lesson).trim() : '';
-      if (name && !seen[name]) {
+    distinctRowLessons(this.rows).forEach(function (name) {
+      if (!seen[name]) {
         seen[name] = true;
         options.push(name);
       }
@@ -728,12 +785,7 @@
   /** Hide the panel (no recognition yet / reset). */
   PhotoAddForm.prototype.renderTextbookPanelReset = function () {
     this.textbookPanel.hidden = true;
-    var kit = global.__parentFormKit || {};
-    if (kit.clearContainer) {
-      kit.clearContainer(this.textbookPanel);
-    } else {
-      this.textbookPanel.textContent = '';
-    }
+    clearEl(this.textbookPanel);
   };
 
   /**
@@ -745,13 +797,8 @@
    */
   PhotoAddForm.prototype.renderTextbookPanel = function (loadError) {
     var self = this;
-    var kit = global.__parentFormKit || {};
     this.textbookPanel.hidden = false;
-    if (kit.clearContainer) {
-      kit.clearContainer(this.textbookPanel);
-    } else {
-      this.textbookPanel.textContent = '';
-    }
+    clearEl(this.textbookPanel);
     if (!this.textbookDepsReady()) {
       // Degraded mount (wiring incomplete): the plain #3 supplementary
       // flow stays fully usable; the panel says why it is absent.
@@ -770,12 +817,7 @@
     // The read-off-the-photo header, 待确认 for every unread field (AC2).
     var metaLine = document.createElement('p');
     metaLine.className = 'photo-meta-line';
-    var fields = [
-      { key: 'edition', label: '版本' }, { key: 'stage', label: '学段' },
-      { key: 'grade', label: '年级' }, { key: 'volume', label: '上下册' },
-      { key: 'module', label: '模块' }, { key: 'lesson', label: '课次' },
-    ];
-    var metaParts = fields.map(function (f) {
+    var metaParts = META_FIELDS.concat([{ key: 'lesson', label: '课次' }]).map(function (f) {
       var value = self.detectedMeta ? metaField(self.detectedMeta[f.key]) : '';
       return f.label + ' ' + (value || '待确认');
     });
@@ -831,6 +873,7 @@
     var detailHost = document.createElement('div');
     detailHost.className = 'photo-book-detail';
     this.textbookPanel.appendChild(detailHost);
+    this.bookDetailHost = detailHost;
 
     bookSelect.addEventListener('change', function () {
       self.bookChoice = bookSelect.value === 'new' ? 'new'
@@ -851,12 +894,7 @@
    */
   PhotoAddForm.prototype.renderTextbookDetail = function (host) {
     var self = this;
-    var kit = global.__parentFormKit || {};
-    if (kit.clearContainer) {
-      kit.clearContainer(host);
-    } else {
-      host.textContent = '';
-    }
+    clearEl(host);
     if (this.bookChoice === 'none') {
       var noneNote = document.createElement('p');
       noneNote.className = 'photo-meta-line';
@@ -886,13 +924,7 @@
       nameField.appendChild(nameInput);
       host.appendChild(nameField);
 
-      [
-        { key: 'edition', label: '版本', ph: '如 人教版PEP' },
-        { key: 'stage', label: '学段', ph: '如 小学' },
-        { key: 'grade', label: '年级', ph: '如 三年级' },
-        { key: 'volume', label: '上下册', ph: '如 上册' },
-        { key: 'module', label: '模块', ph: '如 Unit 1-3' },
-      ].forEach(function (meta) {
+      META_FIELDS.forEach(function (meta) {
         var field = document.createElement('div');
         field.className = 'form-field';
         var label = document.createElement('span');
@@ -931,12 +963,8 @@
       (book.lessons || []).forEach(function (name) {
         inList[name] = true;
       });
-      var missing = [];
-      this.rows.forEach(function (row) {
-        var name = row && row.lesson ? String(row.lesson).trim() : '';
-        if (name && !inList[name] && missing.indexOf(name) < 0) {
-          missing.push(name);
-        }
+      var missing = distinctRowLessons(this.rows).filter(function (name) {
+        return !inList[name];
       });
       if (missing.length) {
         var appendNote = document.createElement('p');
@@ -969,12 +997,14 @@
     applyBtn.addEventListener('click', function () {
       var lesson = lessonInput.value.trim();
       self.rows.forEach(function (row) {
-        if ((row.status === 'new' || row.status === 'exists') && row.checked !== false) {
+        if (isCommittable(row, true) && row.checked !== false) {
           row.lesson = lesson;
         }
       });
-      // Re-render rows so the per-row inputs reflect the batch value.
+      // Re-render rows so the per-row inputs reflect the batch value, and
+      // the detail host so the append-note matches the corrected lessons.
       self.renderPreview();
+      self.renderTextbookDetail(host);
     });
     toolbar.appendChild(toolLabel);
     toolbar.appendChild(lessonInput);
@@ -1005,9 +1035,9 @@
     if (nameInput) {
       values.name = nameInput.value.trim();
     }
-    META_KEYS.forEach(function (key) {
-      var input = document.getElementById('parent-photo-tb-' + key);
-      values[key] = input ? input.value.trim() : '';
+    META_FIELDS.forEach(function (meta) {
+      var input = document.getElementById('parent-photo-tb-' + meta.key);
+      values[meta.key] = input ? input.value.trim() : '';
     });
     return values;
   };
@@ -1022,9 +1052,7 @@
     // Carry over the checked flag and the lesson the parent set (new rows
     // default on; in textbook mode exists rows are committable too).
     for (var i = 0; i < next.length; i++) {
-      var committable = next[i].status === 'new' ||
-        (textbookMode && next[i].status === 'exists');
-      next[i].checked = this.rows[i].checked !== false && committable;
+      next[i].checked = this.rows[i].checked !== false && isCommittable(next[i], textbookMode);
       next[i].lesson = this.rows[i].lesson || '';
       if (this.rows[i].status === next[i].status) {
         next[i].existingMeaning = next[i].existingMeaning || this.rows[i].existingMeaning;
@@ -1036,12 +1064,7 @@
   /** Render the editable review table from this.rows. */
   PhotoAddForm.prototype.renderPreview = function () {
     var self = this;
-    var kit = global.__parentFormKit || {};
-    if (kit.clearContainer) {
-      kit.clearContainer(this.preview);
-    } else {
-      this.preview.textContent = '';
-    }
+    clearEl(this.preview);
     if (!this.rows.length) {
       this.renderPreviewHint('选择照片后点「开始识别」');
       this.updateCommitButton();
@@ -1101,7 +1124,7 @@
     // In textbook mode an 已有 row is committable too — checking it does
     // NOT re-add the word (the server skips it anyway); it assigns the
     // card to the chosen textbook's lesson (US-32's multi-source).
-    var committable = row.status === 'new' || (textbookMode && row.status === 'exists');
+    var committable = isCommittable(row, textbookMode);
 
     var checkCell = document.createElement('td');
     checkCell.className = 'preview-index';
@@ -1232,7 +1255,7 @@
       var tr = rowEls[i];
       tr.className = 'photo-row photo-row-' + row.status;
 
-      var committable = row.status === 'new' || (textbookMode && row.status === 'exists');
+      var committable = isCommittable(row, textbookMode);
       var check = tr.querySelector('.photo-row-check');
       if (check) {
         check.disabled = !committable;
@@ -1373,7 +1396,6 @@
    */
   PhotoAddForm.prototype.handleTextbookCommit = function () {
     var self = this;
-    var kit = global.__parentFormKit || {};
 
     var committed = this.committedRows();
     if (!committed.length) {
@@ -1395,15 +1417,20 @@
     }
 
     this.setCommitBusy(true);
+    // established tracks the step-1 result so a LATER step's failure can
+    // still name what already persisted (per-step honesty: a partial
+    // commit never renders as a plain failure with unreported writes).
+    var established = null;
     this.resolveTargetBook(committed, createValues)
       .then(function (book) {
+        established = book;
         return self.addAndAssign(book, committed);
       })
       .then(function (receipt) {
         self.renderTextbookCommitResult(receipt);
         self.onCommitted(receipt.addOutcome || {});
-        // The textbook list changed (created/appended lessons) — reload it
-        // for the next recognition, then reset the flow.
+        // The textbook list changed (created/appended lessons/backfilled
+        // meta) — reload it for the next recognition, then reset the flow.
         if (self.fetchTextbooks) {
           self.fetchTextbooks('english').catch(function () { return null; }).then(function (books) {
             if (books) {
@@ -1417,36 +1444,61 @@
       })
       .catch(function (err) {
         var message = (err && err.message) ? err.message : '未知错误';
-        if (kit.showToast) {
-          kit.showToast('保存失败：' + message + '。请检查后重试。', 'error');
-        } else {
-          self.showFormError('保存失败：' + message + '。请检查后重试。');
+        if (!established) {
+          self.reportCommitError('保存失败：' + message + '。请检查后重试。');
+          return;
         }
+        // The book (and possibly its lesson list) DID land; the retry must
+        // REUSE it, not create a same-named duplicate — re-point the panel
+        // at the established book and say what persisted.
+        var reloaded = self.fetchTextbooks
+          ? self.fetchTextbooks('english').catch(function () { return null; })
+          : Promise.resolve(null);
+        reloaded.then(function (books) {
+          if (books) {
+            self.books = books;
+            self.renderTextbookPanel('');
+            self.bookChoice = established.id;
+            if (self.bookDetailHost) {
+              self.renderTextbookDetail(self.bookDetailHost);
+            }
+            self.renderPreview();
+          }
+          self.reportCommitError('教材「' + established.name +
+            '」已建立（课次表已更新），但 ' + message +
+            '。已保存的部分不会丢失；请直接重试。');
+        });
       })
       .then(function () {
         self.setCommitBusy(false);
       });
   };
 
+  /** The commit-failure surface: toast when the kit has one, else the
+   *  inline form error. */
+  PhotoAddForm.prototype.reportCommitError = function (message) {
+    var kit = global.__parentFormKit || {};
+    if (kit.showToast) {
+      kit.showToast(message, 'error');
+    } else {
+      this.showFormError(message);
+    }
+  };
+
   /**
    * Step 1 — establish the attribution target BEFORE any word is written.
    * 'new' creates the textbook with the CONFIRMED lesson set (distinct
-   * non-empty row lessons, row order); an existing book gets its missing
-   * confirmed lessons appended (order fixable in 教材管理 later). Both
-   * paths fail the whole commit on error — a supplementary add would
-   * silently change what selection can reach.
+   * non-empty row lessons, row order). An existing book gets two kinds of
+   * recognized-but-missing detail written back in ONE update: its missing
+   * confirmed lessons append (order fixable in 教材管理 later), and header
+   * fields the photo DID read but the book never had backfill (AC2's
+   * 自动填写 — existing values are never overwritten). Both paths fail the
+   * whole commit on error — a supplementary add would silently change
+   * what selection can reach.
    */
   PhotoAddForm.prototype.resolveTargetBook = function (committed, createValues) {
     var self = this;
-    var finalLessons = [];
-    var seen = {};
-    committed.forEach(function (row) {
-      var name = row.lesson ? String(row.lesson).trim() : '';
-      if (name && !seen[name]) {
-        seen[name] = true;
-        finalLessons.push(name);
-      }
-    });
+    var finalLessons = distinctRowLessons(committed);
 
     if (this.bookChoice === 'new') {
       var payload = {
@@ -1454,9 +1506,9 @@
         category: 'english',
         lessons: finalLessons,
       };
-      META_KEYS.forEach(function (key) {
-        if (createValues[key]) {
-          payload[key] = createValues[key];
+      META_FIELDS.forEach(function (meta) {
+        if (createValues[meta.key]) {
+          payload[meta.key] = createValues[meta.key];
         }
       });
       return this.createTextbook(payload).catch(function (err) {
@@ -1469,27 +1521,45 @@
     if (!book) {
       return Promise.reject(new Error('所选教材不存在，请重新选择'));
     }
-    var missing = finalLessons.filter(function (name) {
-      return (book.lessons || []).indexOf(name) < 0;
+    var inList = {};
+    (book.lessons || []).forEach(function (name) {
+      inList[name] = true;
     });
-    if (!missing.length) {
+    var missing = finalLessons.filter(function (name) {
+      return !inList[name];
+    });
+    // Backfill ONLY the fields the photo read and the book lacks.
+    var patch = {};
+    META_FIELDS.forEach(function (meta) {
+      var recognized = self.detectedMeta ? metaField(self.detectedMeta[meta.key]) : '';
+      if (recognized && !metaField(book[meta.key])) {
+        patch[meta.key] = recognized;
+      }
+    });
+    if (!missing.length && !META_KEYS.some(function (key) {
+      return Object.prototype.hasOwnProperty.call(patch, key);
+    })) {
       return Promise.resolve(book);
     }
-    var next = nextLessonList(book.lessons, null);
-    missing.forEach(function (name) {
-      next = nextLessonList(next, name);
-    });
-    return this.updateTextbook(book.id, { lessons: next }).then(function (updated) {
+    if (missing.length) {
+      patch.lessons = distinctLessons((book.lessons || []).concat(missing));
+    }
+    return this.updateTextbook(book.id, patch).then(function (updated) {
       // Keep the in-memory book current for the receipt's progress hint.
       if (updated && updated.lessons) {
         book.lessons = updated.lessons;
         book.learnedLessons = updated.learnedLessons;
-      } else {
-        book.lessons = next;
+      } else if (patch.lessons) {
+        book.lessons = patch.lessons;
       }
+      META_KEYS.forEach(function (key) {
+        if (patch[key]) {
+          book[key] = patch[key];
+        }
+      });
       return book;
     }).catch(function (err) {
-      err.message = '课次表更新失败：' + (err.message || '未知错误');
+      err.message = '教材信息更新失败：' + (err.message || '未知错误');
       throw err;
     });
   };
@@ -1629,7 +1699,7 @@
         failed.push(r.word);
       }
     });
-    return { added: added, existed: existed, failed: failed, unverified: unverified, raced: raced, byWord: byWord };
+    return { added: added, existed: existed, failed: failed, unverified: unverified, raced: raced };
   }
 
   /**
@@ -1638,12 +1708,8 @@
    * outcome.
    */
   PhotoAddForm.prototype.renderCommitResult = function (outcome, submittedRows, fresh) {
+    clearEl(this.banner);
     var kit = global.__parentFormKit || {};
-    if (kit.clearContainer) {
-      kit.clearContainer(this.banner);
-    } else {
-      this.banner.textContent = '';
-    }
 
     var lists = buildAddOutcomeLists(outcome, submittedRows, fresh);
     var added = lists.added;
@@ -1732,12 +1798,8 @@
    * A partial success is never a plain success.
    */
   PhotoAddForm.prototype.renderTextbookCommitResult = function (receipt) {
+    clearEl(this.banner);
     var kit = global.__parentFormKit || {};
-    if (kit.clearContainer) {
-      kit.clearContainer(this.banner);
-    } else {
-      this.banner.textContent = '';
-    }
     var book = receipt.book;
     var lists = buildAddOutcomeLists(receipt.addOutcome, receipt.submittedRows, receipt.fresh);
     var addedCount = lists.raced && !receipt.fresh
@@ -1926,5 +1988,7 @@
   global.matchTextbookForMeta = matchTextbookForMeta;
   global.suggestTextbookName = suggestTextbookName;
   global.nextLessonList = nextLessonList;
+  global.distinctLessons = distinctLessons;
+  global.distinctRowLessons = distinctRowLessons;
   global.planAssignments = planAssignments;
 })(typeof window !== 'undefined' ? window : this);

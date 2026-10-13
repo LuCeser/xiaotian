@@ -800,10 +800,7 @@
         recognizePhoto: recognizePhoto,
         submitWords: submitWords,
         fetchWords: fetchWords,
-        fetchTextbooks: textbookDeps.fetchTextbooks,
-        createTextbook: textbookDeps.createTextbook,
-        updateTextbook: textbookDeps.updateTextbook,
-        assignWords: textbookDeps.assignWords,
+        textbookDeps: textbookDeps,
         onCommitted: onCommitted,
         onCategoryChange: onCategoryChange,
       });

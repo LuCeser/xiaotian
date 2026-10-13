@@ -30,6 +30,8 @@ const {
   matchTextbookForMeta,
   suggestTextbookName,
   nextLessonList,
+  distinctLessons,
+  distinctRowLessons,
   planAssignments,
 } = global.window;
 
@@ -126,6 +128,29 @@ const BOOKS = [
     'an existing lesson is a no-op — order untouched');
   eq(nextLessonList([], '第5课'), ['第5课'], 'an empty list gains the lesson');
   eq(nextLessonList(['第1课'], ''), ['第1课'], 'an empty lesson never enters the list');
+})();
+
+// ----------------------------------------------------------------------
+// distinctLessons / distinctRowLessons — the two SHAPES must never be
+// confused (a regression here once emptied a textbook's lesson list).
+// ----------------------------------------------------------------------
+
+(function () {
+  // Plain string list: the book's lessons + append candidates.
+  eq(distinctLessons(['第1课', ' 第2课 ', '第1课', '', '第3课', undefined]),
+    ['第1课', '第2课', '第3课'], 'distinctLessons trims, drops empties, keeps order');
+  eq(distinctLessons(['第1课'].concat(['第2课'])), ['第1课', '第2课'],
+    'distinctLessons over a book-list + missing concat keeps both');
+
+  // Row list: preview rows carry {lesson}.
+  eq(distinctRowLessons([
+    { lesson: '第1课' }, { lesson: '第1课' }, { lesson: '' }, { lesson: ' 第2课 ' }, {},
+  ]), ['第1课', '第2课'], 'distinctRowLessons reads row.lesson, dedupes in order');
+
+  // The shapes must never cross-wire: strings into the row variant come
+  // back EMPTY (no .lesson to read) — pinned so the mistake is loud.
+  eq(distinctRowLessons(['第1课', '第2课']), [],
+    'distinctRowLessons over bare strings is empty (shape guard)');
 })();
 
 // ----------------------------------------------------------------------
