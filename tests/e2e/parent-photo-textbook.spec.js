@@ -95,10 +95,14 @@ async function batchSetLesson(page, lesson) {
   await page.getByRole('button', { name: '应用到勾选行' }).click();
 }
 
-/** Wait for the commit receipt's summary line to mention the book. */
-async function awaitReceipt(page, bookName, count) {
+/** Wait for the commit receipt's summary line to reach the book + its
+ *  per-category tally (Issue #6 receipt shape: 教材「…」：新增 N 个 …). */
+async function awaitReceipt(page, bookName, categories) {
+  const text = Object.entries(categories)
+    .map(([label, n]) => label + ' ' + n + ' 个')
+    .join('，');
   await expect(page.locator('.result-banner .result-summary')).toContainText(
-    '教材「' + bookName + '」指定课次 ' + count + ' 个', { timeout: 30_000 });
+    '教材「' + bookName + '」：' + text, { timeout: 30_000 });
 }
 
 /** One real classroom probe: raw /rt practice init (mode=test). */
@@ -158,7 +162,7 @@ test('photo textbook: misread lesson is batch-corrected; the CONFIRMED result go
 
     // Honest receipt: per-group assignment lines + the unlearned note.
     const banner = page.locator('.result-banner');
-    await awaitReceipt(page, BOOK_PEP, 3);
+    await awaitReceipt(page, BOOK_PEP, { 新增: 3 });
     await expect(banner).toContainText('已指定课次「第1课」：tiger、panda');
     await expect(banner).toContainText('已指定课次「第2课」：grape');
     await expect(banner).toContainText('尚未学到');
@@ -193,13 +197,13 @@ test('photo textbook: two books built from photos keep independent progress', as
     await recognize(page, FIXTURE_PEP);
     await batchSetLesson(page, '第1课');
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
-    await awaitReceipt(page, BOOK_PEP, 3);
+    await awaitReceipt(page, BOOK_PEP, { 新增: 3 });
 
     await recognize(page, FIXTURE_JIJIANG);
     // 冀教版's header was read correctly — 第1课 stands, no correction.
     await expect(page.locator('input[aria-label="课次 第 1 行"]')).toHaveValue('第1课');
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
-    await awaitReceipt(page, BOOK_JIJIANG, 2);
+    await awaitReceipt(page, BOOK_JIJIANG, { 新增: 2 });
 
     // Both books start unlearned: neither book's words are selectable.
     let picked = await practiceSelection();
@@ -242,7 +246,7 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
     await recognize(page, FIXTURE_LEXIN);
     await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
-    await awaitReceipt(page, BOOK_LEXIN, 2);
+    await awaitReceipt(page, BOOK_LEXIN, { 新增: 2 });
     const books1 = await textbooks(request);
     const bookLexin = books1.find((b) => b.name === BOOK_LEXIN);
     const put = await request.put('/api/v1/textbooks/' + bookLexin.id, { data: { learnedLessons: 1 } });
@@ -260,7 +264,7 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
     await expect(page.locator('.photo-book-detail')).toContainText('第2课」不在教材课次表里');
 
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
-    await awaitReceipt(page, BOOK_LEXIN, 2);
+    await awaitReceipt(page, BOOK_LEXIN, { 新增: 2 });
     // The unlearned-lesson honesty note names exactly 第2课.
     await expect(page.locator('.result-banner')).toContainText('课次「第2课」尚未学到');
 

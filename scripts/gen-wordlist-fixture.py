@@ -111,6 +111,24 @@ def main() -> None:
         [("bird", "鸟"), ("frog", "青蛙")],
         ["Copy twice."],
     )
+    # Issue #6 fixtures: two MORE meta families for the re-import suite.
+    # 科普版 and 仁爱版 share the word "eagle" on purpose — importing both
+    # pages is the 多来源 scenario (one word, two textbooks); the 科普版
+    # page re-appears across tests as the 重传/re-resolve vehicle, and its
+    # "camel" row is the 释义差异 candidate (the conflict test seeds a
+    # different library meaning first).
+    render(
+        OUT / "photo-textbook-kepu.png",
+        "科普版 三年级上册 Unit 2 第1课 单词表",
+        [("eagle", "鹰"), ("deer", "鹿"), ("camel", "骆驼")],
+        ["Read and copy once."],
+    )
+    render(
+        OUT / "photo-textbook-renjiao.png",
+        "仁爱版 三年级上册 Unit 1 第1课 单词表",
+        [("eagle", "鹰"), ("whale", "鲸")],
+        ["Listen and read."],
+    )
 
 
 if __name__ == "__main__":

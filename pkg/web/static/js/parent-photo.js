@@ -1048,16 +1048,19 @@
     });
     var next = classifyPhotoEntries(entries, this.existingWords);
     // Carry over the checked flag and the lesson the parent set (new rows
-    // default on; in textbook mode exists rows are committable too).
+    // default on; in textbook mode exists rows are committable too). The
+    // resolution carry MUST precede the checked computation — isCommittable
+    // reads it (a fresh conflict row would otherwise drop its parent-
+    // confirmed state and uncheck itself).
     for (var i = 0; i < next.length; i++) {
-      next[i].checked = this.rows[i].checked !== false && isCommittable(next[i], textbookMode);
-      next[i].lesson = this.rows[i].lesson || '';
       if (this.rows[i].status === next[i].status) {
         next[i].existingMeaning = next[i].existingMeaning || this.rows[i].existingMeaning;
         // A resolution survives edits that keep the row a conflict (adopt
         // then means "use what's in the box"); a status change drops it.
         next[i].resolution = this.rows[i].resolution || '';
       }
+      next[i].checked = this.rows[i].checked !== false && isCommittable(next[i], textbookMode);
+      next[i].lesson = this.rows[i].lesson || '';
     }
     this.rows = next;
   };
@@ -1299,6 +1302,13 @@
       if (check) {
         check.disabled = !committable;
         check.checked = committable && row.checked !== false;
+      }
+      // The lesson input's enablement must follow the SAME committable
+      // verdict — a resolved conflict becomes lesson-editable without a
+      // full re-render (the caret-preserving reason this sync exists).
+      var lessonEl = tr.querySelector('.photo-lesson-cell input');
+      if (lessonEl) {
+        lessonEl.disabled = !committable;
       }
 
       var statusCell = tr.querySelector('.photo-status');
@@ -1691,7 +1701,7 @@
           results.push({ word: row.word, ok: false, error: '编辑接口不可用' });
           return null;
         }
-        return self.editWord(id, { meaning: row.meaning }).then(function () {
+        return self.editWord(id, { word: row.word, meaning: row.meaning }).then(function () {
           results.push({ word: row.word, ok: true });
         }).catch(function (err) {
           results.push({ word: row.word, ok: false, error: (err && err.message) || '未知错误' });
