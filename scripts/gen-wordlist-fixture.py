@@ -84,6 +84,9 @@ def main() -> None:
     # stub replies claim to have read (photo-textbook-*.reply.json). The
     # PEP page's reply deliberately MISREADS the lesson (第2课 for 第1课) —
     # the e2e proves the batch correction governs the final attribution.
+    # Each test works on its OWN meta family (PEP shared by two tests on
+    # purpose; 冀教版 and the 译林版 re-photo pair) because the per-run DB
+    # keeps textbooks and the preselect matches by meta.
     render(
         OUT / "photo-textbook-pep.png",
         "人教版PEP 三年级上册 Unit 3 第1课 单词表",
@@ -91,28 +94,11 @@ def main() -> None:
         ["Read the words aloud twice."],
     )
     render(
-        OUT / "photo-textbook-pep2.png",
-        "人教版PEP 三年级上册 Unit 3 第2课 单词表",
-        [("monkey", "猴子"), ("duck", "鸭子")],
-        ["Copy each word twice."],
-    )
-    render(
-        OUT / "photo-textbook-wai.png",
-        "外研版 四年级下册 Module 2 第1课 单词表",
-        [("lake", "湖"), ("boat", "小船")],
-        ["Fill in the blanks."],
-    )
-    # Independence-fixture: a THIRD meta family so the two-book test never
-    # collides with the PEP book another test in the same run created (the
-    # per-run DB is shared; the preselect is meta-matched).
-    render(
         OUT / "photo-textbook-jijiang.png",
         "冀教版 五年级上册 Unit 1 第1课 单词表",
         [("horse", "马"), ("sheep", "羊")],
         ["Read and copy."],
     )
-    # Re-photo pair on a fourth family: same meta, next lesson — the
-    # existing-book preselect + lesson-append path.
     render(
         OUT / "photo-textbook-lexin.png",
         "译林版 六年级下册 Unit 5 第1课 单词表",
