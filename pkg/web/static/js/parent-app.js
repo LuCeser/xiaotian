@@ -223,6 +223,13 @@
   // refresh hooks so a successful add or mutation updates the page
   // without a reload.
   // ------------------------------------------------------------------
+  // Shared word-edit call (PUT /words/{id}): the browse list's edit modal
+  // and the photo form's 采用照片释义 resolution (Issue #6) are one
+  // surface — text edits never touch FSRS state server-side.
+  var editWord = function (id, payload) {
+    return fetchJSON('PUT', '/api/v1/words/' + encodeURIComponent(id), payload);
+  };
+
   var browse = new window.BrowseView(browseContainer, {
     fetchWords: function (category, q) {
       var params = [];
@@ -244,9 +251,7 @@
         return (data && Array.isArray(data.units)) ? data.units : [];
       });
     },
-    editWord: function (id, payload) {
-      return fetchJSON('PUT', '/api/v1/words/' + encodeURIComponent(id), payload);
-    },
+    editWord: editWord,
     setParticipation: function (ids, enabled) {
       return fetchJSON('PUT', '/api/v1/words/participation', {
         ids: ids,
@@ -326,10 +331,13 @@
     },
     // Issue #5 教材归属: the same textbook surfaces TextbookUI uses,
     // passed through AddCard into PhotoAddForm's attribution panel.
+    // Issue #6 adds editWord — the 采用照片释义 conflict resolution rides
+    // the same word-edit surface the browse list already uses.
     fetchTextbooks: textbookDeps.fetchTextbooks,
     createTextbook: textbookDeps.createTextbook,
     updateTextbook: textbookDeps.updateTextbook,
     assignWords: textbookDeps.assignWords,
+    editWord: editWord,
     onCommitted: function () {
       browse.refresh();
       refreshUnitOptions(selectedCategory);

@@ -721,6 +721,9 @@
       createTextbook: options.createTextbook || null,
       updateTextbook: options.updateTextbook || null,
       assignWords: options.assignWords || null,
+      // Issue #6: the photo form's 采用照片释义 resolution rides the
+      // ordinary edit path (passed through to PhotoAddForm).
+      editWord: options.editWord || null,
     };
 
     var tablist = document.createElement('div');

@@ -114,7 +114,7 @@
       var word = (e && e.word ? String(e.word) : '').trim();
       var meaning = (e && e.meaning != null ? String(e.meaning) : '').trim();
       var lesson = (e && e.lesson != null ? String(e.lesson) : '').trim();
-      var row = { index: i, word: word, meaning: meaning, lesson: lesson, status: 'new', reason: '', existingMeaning: '' };
+      var row = { index: i, word: word, meaning: meaning, lesson: lesson, status: 'new', reason: '', existingMeaning: '', resolution: '' };
 
       if (!word) {
         row.status = 'invalid';
@@ -233,14 +233,23 @@
   /**
    * isCommittable — one home for the textbook-mode rule: a row takes part
    * in the commit when it is new, or already in the library and only
-   * needs its lesson assigned (exists + textbook mode); conflict/invalid
-   * never do.
+   * needs its lesson assigned (exists + textbook mode); a conflict joins
+   * ONLY after the parent resolved it (Issue #6 AC-3: 家长确认后处理 —
+   * unresolved conflicts stay 待处理差异, never silently merged); invalid
+   * never does.
    */
   function isCommittable(row, textbookMode) {
     if (!row) {
       return false;
     }
-    return row.status === 'new' || (textbookMode && row.status === 'exists');
+    if (row.status === 'new') {
+      return true;
+    }
+    if (!textbookMode) {
+      return false;
+    }
+    return row.status === 'exists' ||
+      (row.status === 'conflict' && (row.resolution === 'keep' || row.resolution === 'adopt'));
   }
 
   /** Clear one element through the shared kit (fallback: textContent). */
@@ -293,35 +302,53 @@
   /**
    * planAssignments — group the committable rows into textbook-assign
    * calls (POST /textbooks/{id}/assign takes ONE lesson + one
-   * includeInScope per batch). Committable = checked rows with status
-   * 'new' or 'exists' AND a card id resolved from the post-commit library
-   * snapshot (conflict rows keep the library's meaning — their merge is
-   * Issue #6's work; invalid rows have no card). Groups keep
+   * includeInScope per batch). Committable = checked new/exists rows and
+   * conflicts the parent RESOLVED (Issue #6), each with a card id
+   * resolved from the post-commit library snapshot (unresolved conflicts
+   * and invalid rows never reach a textbook). Groups keep
    * first-appearance order. includePending=true (the page-level 「待确认
    * 课次的词直接加入默写范围」checkbox) lifts ONLY the lesson-less group
    * into scope — rows with a real lesson always ride the textbook's
-   * progress. Pure.
+   * progress.
+   *
+   * Sticky include (Issue #6 AC-4): snapshotRows is the GET /words shape
+   * ({id, word, textbooks:[{id, lesson, includeInScope}]}); when the word
+   * ALREADY carries include_in_scope=1 on the TARGET textbook, the assign
+   * call re-sends include=true — a re-import must never silently clear a
+   * parent's explicit include (the assign upsert is last-write-wins, so
+   * the preservation has to ride the payload). Pure.
    */
-  function planAssignments(rows, idByWord, includePending) {
+  function planAssignments(rows, snapshotRows, bookId, includePending) {
+    var byWord = {};
+    (snapshotRows || []).forEach(function (w) {
+      if (w && w.word) {
+        byWord[String(w.word).trim()] = w;
+      }
+    });
     var groups = [];
     var byKey = {};
     (rows || []).forEach(function (row) {
-      if (!row || (row.status !== 'new' && row.status !== 'exists') || row.checked === false) {
+      if (!row || !isCommittable(row, true) || row.checked === false) {
         return;
       }
-      var id = idByWord && Object.prototype.hasOwnProperty.call(idByWord, row.word)
-        ? idByWord[row.word] : null;
-      if (!id) {
+      var snap = Object.prototype.hasOwnProperty.call(byWord, row.word) ? byWord[row.word] : null;
+      if (!snap || !snap.id) {
         return; // no resolved card → no honest assignment (receipt says so)
       }
       var lesson = metaField(row.lesson);
-      var include = includePending && !lesson;
+      var sticky = false;
+      (snap.textbooks || []).forEach(function (a) {
+        if (a && a.id === bookId && a.includeInScope) {
+          sticky = true;
+        }
+      });
+      var include = sticky || (includePending && !lesson);
       var key = lesson + '\u0000' + (include ? '1' : '0');
       if (!Object.prototype.hasOwnProperty.call(byKey, key)) {
         byKey[key] = { lesson: lesson, includeInScope: include, cardIds: [], words: [] };
         groups.push(byKey[key]);
       }
-      byKey[key].cardIds.push(id);
+      byKey[key].cardIds.push(snap.id);
       byKey[key].words.push(row.word);
     });
     return groups;
@@ -366,6 +393,9 @@
     this.createTextbook = td.createTextbook || null;
     this.updateTextbook = td.updateTextbook || null;
     this.assignWords = td.assignWords || null;
+    // Issue #6: the 采用照片释义 resolution rides the ordinary edit path
+    // (PUT /words/{id} — text changes never touch FSRS state).
+    this.editWord = td.editWord || null;
     this.onCommitted = options.onCommitted || function () {};
     this.onCategoryChange = options.onCategoryChange || function () {};
 
@@ -1024,6 +1054,9 @@
       next[i].lesson = this.rows[i].lesson || '';
       if (this.rows[i].status === next[i].status) {
         next[i].existingMeaning = next[i].existingMeaning || this.rows[i].existingMeaning;
+        // A resolution survives edits that keep the row a conflict (adopt
+        // then means "use what's in the box"); a status change drops it.
+        next[i].resolution = this.rows[i].resolution || '';
       }
     }
     this.rows = next;
@@ -1159,7 +1192,7 @@
 
     var statusCell = document.createElement('td');
     statusCell.className = 'preview-status photo-status photo-status-' + row.status;
-    renderStatusCell(statusCell, row, textbookMode);
+    renderStatusCell(statusCell, row, textbookMode, this);
     tr.appendChild(statusCell);
 
     return tr;
@@ -1169,9 +1202,11 @@
    * (Re)build one row's status cell content — the single writer for the
    * chip + note markup, used by both the initial render (buildReviewRow)
    * and the caret-preserving edit sync (onRowEdited). textContent only
-   * (Pitfall 10).
+   * (Pitfall 10) — except the Issue #6 conflict radios, the one control
+   * that lives here (form is passed in so the change handler always
+   * addresses the CURRENT row object, never a reclassify-stale one).
    */
-  function renderStatusCell(statusCell, row, textbookMode) {
+  function renderStatusCell(statusCell, row, textbookMode, form) {
     while (statusCell.firstChild) {
       statusCell.removeChild(statusCell.firstChild);
     }
@@ -1182,7 +1217,7 @@
       var note = document.createElement('p');
       note.className = 'photo-status-note';
       note.textContent = row.status === 'conflict'
-        ? '词库释义：' + (row.existingMeaning || '（空）') + '，将保留原释义'
+        ? '词库释义：' + (row.existingMeaning || '（空）') + (row.resolution ? '' : '，未确认前不提交')
         : (textbookMode ? '词库已有相同词条；勾选后仅指定课次，不重复添加' : '词库已有相同词条');
       statusCell.appendChild(note);
     }
@@ -1191,6 +1226,42 @@
       why.className = 'photo-status-note';
       why.textContent = describeInvalidReason(row.reason);
       statusCell.appendChild(why);
+    }
+    if (row.status === 'conflict' && textbookMode && form) {
+      // Issue #6 AC-3: the difference is already on display; the parent
+      // confirms ONE reading, and only then does the row join the commit.
+      var wrap = document.createElement('div');
+      wrap.className = 'photo-conflict-choice';
+      [
+        { value: 'keep', label: '保留词库释义' },
+        { value: 'adopt', label: '采用照片释义' },
+      ].forEach(function (opt) {
+        var lab = document.createElement('label');
+        lab.className = 'photo-conflict-option';
+        var input = document.createElement('input');
+        input.type = 'radio';
+        input.name = 'photo-conflict-' + row.index;
+        input.value = opt.value;
+        input.checked = row.resolution === opt.value;
+        input.addEventListener('change', function () {
+          if (!input.checked || !form || !form.rows) {
+            return;
+          }
+          var current = form.rows[row.index];
+          if (!current || current.status !== 'conflict') {
+            return;
+          }
+          current.resolution = opt.value;
+          current.checked = true;
+          form.onRowEdited();
+        });
+        var span = document.createElement('span');
+        span.textContent = opt.label;
+        lab.appendChild(input);
+        lab.appendChild(span);
+        wrap.appendChild(lab);
+      });
+      statusCell.appendChild(wrap);
     }
   }
 
@@ -1232,7 +1303,7 @@
 
       var statusCell = tr.querySelector('.photo-status');
       if (statusCell) {
-        renderStatusCell(statusCell, row, textbookMode);
+        renderStatusCell(statusCell, row, textbookMode, this);
       }
     }
     this.updateCommitButton();
@@ -1253,11 +1324,13 @@
     });
   };
 
-  /** Rows that take part in a textbook-mode commit: added (new) or
-   *  lesson-assigned (exists); conflict/invalid/unchecked never do. */
+  /** Rows that take part in a textbook-mode commit: added (new),
+   *  lesson-assigned (exists) and parent-RESOLVED conflicts (Issue #6);
+   *  unresolved conflicts, invalid and unchecked rows never do. */
   PhotoAddForm.prototype.committedRows = function () {
+    var textbookMode = this.bookChoice !== 'none';
     return this.rows.filter(function (r) {
-      return (r.status === 'new' || r.status === 'exists') && r.checked !== false;
+      return isCommittable(r, textbookMode) && r.checked !== false;
     });
   };
 
@@ -1530,13 +1603,17 @@
   };
 
   /**
-   * Steps 2–4 — add the new rows, snapshot the truth, assign the groups.
-   * Returns the receipt pieces for renderTextbookCommitResult.
+   * Steps 2–5 — add the new rows, snapshot the truth, apply the parent's
+   * 采用照片释义 edits, assign the groups. Returns the receipt pieces for
+   * renderTextbookCommitResult.
    */
   PhotoAddForm.prototype.addAndAssign = function (book, committed) {
     var self = this;
     var addRows = committed.filter(function (r) {
       return r.status === 'new';
+    });
+    var adoptRows = committed.filter(function (r) {
+      return r.status === 'conflict' && r.resolution === 'adopt';
     });
 
     var addPromise = addRows.length
@@ -1555,7 +1632,8 @@
     return addPromise.then(function (outcome) {
       outcome = outcome || { added: 0, skipped: 0 };
       // The snapshot serves reconciliation (raced duplicates) AND card-id
-      // resolution for the assignments — one fetch, two honest uses.
+      // resolution for the edits and assignments — one fetch, three
+      // honest uses (and the sticky-include lookup rides it too).
       return self.fetchWords('english').catch(function () { return null; })
         .then(function (fresh) {
           if (fresh) {
@@ -1567,24 +1645,60 @@
               idByWord[String(w.word).trim()] = w.id;
             }
           });
-          var groups = planAssignments(committed, idByWord, self.includePending);
-          var unassigned = committed.filter(function (r) {
-            return !Object.prototype.hasOwnProperty.call(idByWord, r.word);
-          }).map(function (r) { return r.word; });
+          return self.runAdoptEdits(adoptRows, idByWord).then(function (editResults) {
+            var groups = planAssignments(committed, fresh || [], book.id, self.includePending);
+            var unassigned = committed.filter(function (r) {
+              return !Object.prototype.hasOwnProperty.call(idByWord, r.word);
+            }).map(function (r) { return r.word; });
 
-          return self.runAssignments(book, groups).then(function (results) {
-            return {
-              book: book,
-              addOutcome: outcome,
-              submittedRows: addRows,
-              fresh: fresh,
-              groups: groups,
-              groupResults: results,
-              unassigned: unassigned,
-            };
+            return self.runAssignments(book, groups).then(function (results) {
+              return {
+                book: book,
+                addOutcome: outcome,
+                submittedRows: addRows,
+                adoptRows: adoptRows,
+                editResults: editResults,
+                fresh: fresh,
+                groups: groups,
+                groupResults: results,
+                unassigned: unassigned,
+              };
+            });
           });
         });
     });
+  };
+
+  /**
+   * 采用照片释义 edits — sequential meaning-only PUT /words/{id} calls
+   * (the D-07 edit path: text changes never touch FSRS state, so the
+   * confirmed reading replaces the meaning while the learning history
+   * stays). One row's failure fails only itself — the receipt says so.
+   */
+  PhotoAddForm.prototype.runAdoptEdits = function (adoptRows, idByWord) {
+    var self = this;
+    var results = [];
+    var chain = Promise.resolve();
+    adoptRows.forEach(function (row) {
+      chain = chain.then(function () {
+        var id = Object.prototype.hasOwnProperty.call(idByWord, row.word)
+          ? idByWord[row.word] : null;
+        if (!id) {
+          results.push({ word: row.word, ok: false, error: '词库读取失败，未能更新释义' });
+          return null;
+        }
+        if (!self.editWord) {
+          results.push({ word: row.word, ok: false, error: '编辑接口不可用' });
+          return null;
+        }
+        return self.editWord(id, { meaning: row.meaning }).then(function () {
+          results.push({ word: row.word, ok: true });
+        }).catch(function (err) {
+          results.push({ word: row.word, ok: false, error: (err && err.message) || '未知错误' });
+        });
+      });
+    });
+    return chain.then(function () { return results; });
   };
 
   /** Step 4 — run the assign calls sequentially, keeping each outcome. */
@@ -1665,6 +1779,138 @@
       }
     });
     return { added: added, existed: existed, failed: failed, unverified: unverified, raced: raced };
+  }
+
+  /**
+   * buildTextbookReceipt — the Issue #6 per-item commit receipt. Buckets
+   * every preview row into exactly one category:
+   *   'added'       新增 — the word entered the library (verified or
+   *                  server-confirmed) and its source merged
+   *   'merged'      合并 — an already-present word whose source merged
+   *                  (exists, 保留/采用 resolution, raced-to-different)
+   *   'pendingDiff' 待处理差异 — a conflict the parent did NOT resolve
+   *   'failed'      失败 — something the parent must fix (add/edit/assign
+   *                  step failed, or the card could not be resolved); the
+   *                  note always admits what DID persist
+   *   'unverified'  未核对 — a raced add the (unavailable) snapshot could
+   *                  not verify — never guessed up or down
+   *   'excluded'    未提交 — invalid or unchecked rows (never failures)
+   * summary is BY CONSTRUCTION the tally of items (AC-6: 汇总与实际结果
+   * 一致). Pure — the caller supplies only server-truth pieces.
+   */
+  function buildTextbookReceipt(input) {
+    var edited = {};
+    (input.editResults || []).forEach(function (e) {
+      if (e && e.word) {
+        edited[e.word] = e;
+      }
+    });
+    var assignFailed = {};
+    (input.groupResults || []).forEach(function (r) {
+      if (r && !r.ok && r.group) {
+        (r.group.words || []).forEach(function (w) {
+          assignFailed[w] = { lesson: r.group.lesson || '', error: r.error || '未知错误' };
+        });
+      }
+    });
+    var snapMeaning = {};
+    (input.fresh || []).forEach(function (w) {
+      if (w && w.word) {
+        snapMeaning[String(w.word).trim()] = w.meaning == null ? '' : String(w.meaning).trim();
+      }
+    });
+    var raced = !!(input.addOutcome && input.addOutcome.skipped);
+    var submitted = {};
+    (input.addRows || []).forEach(function (r) {
+      if (r && r.word) {
+        submitted[r.word] = true;
+      }
+    });
+    var unassigned = {};
+    (input.unassigned || []).forEach(function (w) {
+      unassigned[w] = true;
+    });
+
+    var assignFailNote = function (word, prefix) {
+      var f = assignFailed[word] || {};
+      return (prefix || '') + '课次' + (f.lesson ? '「' + f.lesson + '」' : '') +
+        '指定失败：' + (f.error || '未知错误') + '——可在词库中重试';
+    };
+
+    var items = [];
+    (input.rows || []).forEach(function (row) {
+      var item = { word: row.word, category: '', note: '' };
+      var meaning = String(row.meaning == null ? '' : row.meaning).trim();
+      if (row.status === 'invalid') {
+        item.category = 'excluded';
+        item.note = describeInvalidReason(row.reason);
+      } else if (row.status === 'conflict' && row.resolution !== 'keep' && row.resolution !== 'adopt') {
+        item.category = 'pendingDiff';
+        item.note = '词库释义「' + (row.existingMeaning || '（空）') + '」与照片释义「' +
+          meaning + '」不同，未确认——已保留原释义，仅报告差异';
+      } else if (row.checked === false) {
+        item.category = 'excluded';
+        item.note = '未勾选';
+      } else if (row.status === 'new') {
+        if (raced && !input.fresh) {
+          item.category = 'unverified';
+          item.note = '已提交，但词库读取失败，未能核对实际结果';
+        } else if (raced && !Object.prototype.hasOwnProperty.call(snapMeaning, row.word)) {
+          item.category = 'failed';
+          item.note = '未添加成功，请重试';
+        } else if (raced && snapMeaning[row.word] !== meaning) {
+          if (assignFailed[row.word]) {
+            item.category = 'failed';
+            item.note = assignFailNote(row.word, '并发已存在不同释义，保留原释义；');
+          } else {
+            item.category = 'merged';
+            item.note = '并发已存在不同释义，保留原释义，仅合并来源';
+          }
+        } else if (assignFailed[row.word]) {
+          item.category = 'failed';
+          item.note = assignFailNote(row.word, '词条已保存；');
+        } else if (unassigned[row.word]) {
+          item.category = 'failed';
+          item.note = '词条已保存，但词库读取失败，未能指定课次——可在词库中补指定';
+        } else {
+          item.category = 'added';
+          item.note = '已添加并指定课次';
+        }
+      } else if (row.status === 'conflict' && row.resolution === 'adopt') {
+        var edit = edited[row.word];
+        if (edit && !edit.ok) {
+          item.category = 'failed';
+          item.note = '释义更新失败：' + (edit.error || '未知错误');
+        } else if (assignFailed[row.word]) {
+          item.category = 'failed';
+          item.note = assignFailNote(row.word, '释义已按照片更新；');
+        } else {
+          item.category = 'merged';
+          item.note = '采用照片释义更新，已合并来源';
+        }
+      } else if (unassigned[row.word]) {
+        item.category = 'failed';
+        item.note = '词库读取失败，未能指定课次——可在词库中补指定';
+      } else if (assignFailed[row.word]) {
+        item.category = 'failed';
+        item.note = assignFailNote(row.word);
+      } else if (row.status === 'conflict') {
+        item.category = 'merged';
+        item.note = '保留词库释义，仅合并来源';
+      } else {
+        item.category = 'merged';
+        item.note = '词库已有，仅指定课次';
+      }
+      items.push(item);
+    });
+
+    var summary = { added: 0, merged: 0, pendingDiff: 0, failed: 0, unverified: 0, excluded: 0 };
+    items.forEach(function (item) {
+      if (Object.prototype.hasOwnProperty.call(summary, item.category)) {
+        summary[item.category] += 1;
+      }
+    });
+    return { items: items, summary: summary };
   }
 
   /**
@@ -1762,13 +2008,30 @@
    * stored fine, out of automatic selection until the progress moves).
    * A partial success is never a plain success.
    */
+  /** The Issue #6 per-category receipt labels (buildTextbookReceipt kin). */
+  var RECEIPT_CATEGORIES = [
+    { key: 'added', label: '新增' },
+    { key: 'merged', label: '合并' },
+    { key: 'pendingDiff', label: '待处理差异' },
+    { key: 'failed', label: '失败' },
+    { key: 'unverified', label: '未核对' },
+    { key: 'excluded', label: '未提交' },
+  ];
+
   PhotoAddForm.prototype.renderTextbookCommitResult = function (receipt) {
     clearEl(this.banner);
     var kit = global.__parentFormKit || {};
     var book = receipt.book;
-    var lists = buildAddOutcomeLists(receipt.addOutcome, receipt.submittedRows, receipt.fresh);
-    var addedCount = lists.raced && !receipt.fresh
-      ? (receipt.addOutcome.added || 0) : lists.added.length;
+    var built = buildTextbookReceipt({
+      rows: this.rows,
+      addRows: receipt.submittedRows,
+      addOutcome: receipt.addOutcome,
+      fresh: receipt.fresh,
+      editResults: receipt.editResults,
+      groups: receipt.groups,
+      groupResults: receipt.groupResults,
+      unassigned: receipt.unassigned,
+    });
 
     // Which assigned lessons sit beyond the book's learned progress?
     var learned = book && book.learnedLessons ? book.learnedLessons : 0;
@@ -1782,99 +2045,59 @@
       }
     });
 
-    var notSubmitted = this.rows.filter(function (r) {
-      return (r.status !== 'new' && r.status !== 'exists') || r.checked === false;
-    });
-    var assignFailed = receipt.groupResults.filter(function (r) { return !r.ok; });
-    var assignOkWords = [];
-    receipt.groupResults.forEach(function (r) {
-      if (r.ok) {
-        assignOkWords = assignOkWords.concat(r.group.words);
-      }
-    });
-
     var box = document.createElement('div');
-    var partial = lists.existed.length > 0 || lists.failed.length > 0 ||
-      lists.unverified.length > 0 || assignFailed.length > 0 ||
-      receipt.unassigned.length > 0 || notSubmitted.length > 0;
+    var partial = built.summary.failed > 0 || built.summary.pendingDiff > 0 ||
+      built.summary.unverified > 0 || built.summary.excluded > 0;
     box.className = 'result-banner ' +
       (partial ? 'result-banner-warning' : 'result-banner-success');
     box.setAttribute('role', 'status');
     box.setAttribute('aria-live', 'polite');
 
+    // AC-6: the summary names the four result kinds (plus the honesty
+    // buckets when non-zero) and is the tally of the per-item list below.
     var summary = document.createElement('p');
     summary.className = 'result-summary';
-    var parts = [];
-    if (receipt.submittedRows.length) {
-      parts.push('已添加 ' + addedCount + ' 个' +
-        (lists.existed.length ? '，已有 ' + lists.existed.length + ' 个' : '') +
-        (lists.failed.length ? '，未添加 ' + lists.failed.length + ' 个' : '') +
-        (lists.unverified.length ? '，未核对 ' + lists.unverified.length + ' 个' : ''));
-    }
-    parts.push('教材「' + (book ? book.name : '？') + '」指定课次 ' + assignOkWords.length + ' 个' +
-      (assignFailed.length ? '，指定失败 ' + assignFailed.length + ' 组' : '') +
-      (receipt.unassigned.length ? '，未指定 ' + receipt.unassigned.length + ' 个' : '') +
-      (notSubmitted.length ? '，未提交 ' + notSubmitted.length + ' 个' : ''));
-    summary.textContent = parts.join('；');
+    var parts = RECEIPT_CATEGORIES.filter(function (c) {
+      return built.summary[c.key] > 0;
+    }).map(function (c) {
+      return c.label + ' ' + built.summary[c.key] + ' 个';
+    });
+    summary.textContent = '教材「' + (book ? book.name : '？') + '」：' +
+      (parts.length ? parts.join('，') : '没有可提交的词');
     box.appendChild(summary);
 
+    // Per-item lines, one per category in the fixed order.
     var detail = document.createElement('p');
     detail.className = 'result-detail';
     var lines = [];
-    if (lists.raced && !receipt.fresh && addedCount > 0) {
-      lines.push('已添加 ' + addedCount + ' 个（服务器确认）');
-    } else if (lists.added.length) {
-      lines.push('已添加：' + lists.added.join('、'));
-    }
-    if (lists.existed.length) {
-      lines.push('已有（保留词库原释义，仅指定课次）：' + lists.existed.join('、'));
-    }
-    if (lists.failed.length) {
-      lines.push('未添加成功（请重试）：' + lists.failed.join('、'));
-    }
-    if (lists.unverified.length) {
-      lines.push('未核对（词库读取失败，请刷新词库查看）：' + lists.unverified.join('、'));
-    }
-    receipt.groupResults.forEach(function (r) {
-      var label = r.group.lesson
-        ? '课次「' + r.group.lesson + '」'
-        : (r.group.includeInScope ? '默写范围（课次待确认）' : '课次待确认');
-      if (r.ok) {
-        var missingIds = (r.result && r.result.missing) || [];
-        var missingWords = [];
-        missingIds.forEach(function (id) {
-          var idx = r.group.cardIds.indexOf(id);
-          if (idx >= 0) {
-            missingWords.push(r.group.words[idx]);
-          }
-        });
-        lines.push('已指定' + label + '：' + r.group.words.join('、') +
-          (missingWords.length ? '（其中未找到词条：' + missingWords.join('、') + '）' : ''));
-      } else {
-        lines.push('指定失败（' + label + '）：' + r.group.words.join('、') + ' — ' + r.error +
-          '。可在词库勾选后用「指定教材课次」重试');
+    RECEIPT_CATEGORIES.forEach(function (c) {
+      var words = built.items.filter(function (i) { return i.category === c.key; });
+      if (!words.length) {
+        return;
       }
+      lines.push(c.label + '：' + words.map(function (i) {
+        return i.note ? i.word + '（' + i.note + '）' : i.word;
+      }).join('、'));
     });
-    if (receipt.unassigned.length) {
-      lines.push('未指定（词库读取失败，无法解析词条）：' + receipt.unassigned.join('、') +
-        '。词汇已保存，可在词库中补指定课次');
-    }
     detail.textContent = lines.join('；');
     if (lines.length) {
       box.appendChild(detail);
     }
 
-    if (notSubmitted.length) {
-      var skippedNote = document.createElement('p');
-      skippedNote.className = 'result-detail';
-      var skippedWords = notSubmitted.map(function (r) {
-        var why = r.status === 'invalid'
-          ? describeInvalidReason(r.reason)
-          : (r.status === 'conflict' ? '释义不同' : (r.status === 'exists' ? '已有' : '未勾选'));
-        return r.word + '（' + why + '）';
-      });
-      skippedNote.textContent = '未提交：' + skippedWords.join('、');
-      box.appendChild(skippedNote);
+    // The group view stays: which lesson each batch landed in.
+    var groupLines = [];
+    receipt.groupResults.forEach(function (r) {
+      var label = r.group.lesson
+        ? '课次「' + r.group.lesson + '」'
+        : (r.group.includeInScope ? '默写范围（课次待确认）' : '课次待确认');
+      groupLines.push((r.ok ? '已指定' : '指定失败') + label + '：' + r.group.words.join('、') +
+        (r.ok ? '' : ' — ' + r.error));
+    });
+    if (groupLines.length) {
+      var groupNote = document.createElement('p');
+      groupNote.className = 'result-note';
+      groupNote.textContent = groupLines.join('；');
+      box.appendChild(groupNote);
     }
 
     if (unlearnedNames.length) {
@@ -1948,5 +2171,7 @@
   global.matchTextbookForMeta = matchTextbookForMeta;
   global.distinctLessons = distinctLessons;
   global.distinctRowLessons = distinctRowLessons;
+  global.isCommittable = isCommittable;
   global.planAssignments = planAssignments;
+  global.buildTextbookReceipt = buildTextbookReceipt;
 })(typeof window !== 'undefined' ? window : this);

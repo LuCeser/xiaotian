@@ -644,6 +644,29 @@ body {
   color: var(--danger, #b91c1c);
 }
 
+/* 释义差异确认 (Issue #6): the two-choice resolution under a conflict
+   row's note — stacked radios, iPad-tap sized. */
+.photo-conflict-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.photo-conflict-option {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary, #64748b);
+  cursor: pointer;
+}
+
+.photo-conflict-option input[type='radio'] {
+  margin: 0;
+}
+
 .photo-row-conflict .photo-cell-input,
 .photo-row-exists .photo-cell-input,
 .photo-row-invalid .photo-cell-input {
