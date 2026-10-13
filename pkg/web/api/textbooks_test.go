@@ -184,8 +184,9 @@ func TestTextbookRoutes(t *testing.T) {
 			t.Fatalf("legal update: status = %d (%s)", rec.Code, rec.Body.String())
 		}
 		calls := exec.textbookUpdateCalls
-		if len(calls) != 1 || !calls[0].HasLearnedLessons || calls[0].LearnedLessons != 2 ||
-			!calls[0].SetPrimary || calls[0].Grade != "三年级" || calls[0].HasLessons {
+		if len(calls) != 1 || calls[0].LearnedLessons == nil || *calls[0].LearnedLessons != 2 ||
+			!calls[0].SetPrimary || calls[0].Grade == nil || *calls[0].Grade != "三年级" ||
+			calls[0].Lessons != nil {
 			t.Fatalf("update opts = %+v", calls[0])
 		}
 	})

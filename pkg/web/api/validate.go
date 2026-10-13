@@ -92,29 +92,37 @@ type ParticipationRequest struct {
 	Participates *bool   `json:"participates"`
 }
 
+// validateIDBatch is the shared 1..500-unique-positive ids guard (the
+// batch contract set-participation introduced; assign/unassign reuse it
+// verbatim). field names the JSON array in the messages ("ids",
+// "cardIds"). Returns "" on success.
+func validateIDBatch(field string, ids []int64) string {
+	if len(ids) < 1 || len(ids) > 500 {
+		return fmt.Sprintf("%s must contain between 1 and 500 items", field)
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	for i, id := range ids {
+		if id <= 0 {
+			return fmt.Sprintf("%s[%d] must be positive", field, i)
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Sprintf("%s[%d] is duplicated", field, i)
+		}
+		seen[id] = struct{}{}
+	}
+	return ""
+}
+
 // validateParticipationRequest mirrors the script-side guard exactly
-// (1..500 unique positive ids): rejecting here keeps a malformed batch out
-// of the subprocess entirely, while the Python re-check stays authoritative
-// for direct CLI callers (double validation, same shape as
+// (validateIDBatch): rejecting here keeps a malformed batch out of the
+// subprocess entirely, while the Python re-check stays authoritative for
+// direct CLI callers (double validation, same shape as
 // validateEditRequest vs cmd_edit).
 func validateParticipationRequest(req *ParticipationRequest) string {
 	if req.Participates == nil {
 		return "participates is required"
 	}
-	if len(req.IDs) < 1 || len(req.IDs) > 500 {
-		return "ids must contain between 1 and 500 items"
-	}
-	seen := make(map[int64]struct{}, len(req.IDs))
-	for i, id := range req.IDs {
-		if id <= 0 {
-			return fmt.Sprintf("ids[%d] must be positive", i)
-		}
-		if _, exists := seen[id]; exists {
-			return fmt.Sprintf("ids[%d] is duplicated", i)
-		}
-		seen[id] = struct{}{}
-	}
-	return ""
+	return validateIDBatch("ids", req.IDs)
 }
 
 // RenameRequest is the decoded POST /units/rename body shape (Plan 09-05).
@@ -467,23 +475,13 @@ func validateTextbookUpdateRequest(req *TextbookUpdateRequest) string {
 	return ""
 }
 
-// validateTextbookAssignRequest mirrors validateParticipationRequest's
-// batch guard (1..500 unique positive ids) plus the lesson name cap. The
-// lesson's MEMBERSHIP in the textbook's list is checked by the handler
-// against the repository row (it needs the textbook, not just the body).
+// validateTextbookAssignRequest applies the shared batch guard
+// (validateIDBatch, "cardIds") plus the lesson name cap. The lesson's
+// MEMBERSHIP in the textbook's list is checked by the handler against the
+// repository row (it needs the textbook, not just the body).
 func validateTextbookAssignRequest(req *TextbookAssignRequest) string {
-	if len(req.CardIDs) < 1 || len(req.CardIDs) > 500 {
-		return "cardIds must contain between 1 and 500 items"
-	}
-	seen := make(map[int64]struct{}, len(req.CardIDs))
-	for i, id := range req.CardIDs {
-		if id <= 0 {
-			return fmt.Sprintf("cardIds[%d] must be positive", i)
-		}
-		if _, exists := seen[id]; exists {
-			return fmt.Sprintf("cardIds[%d] is duplicated", i)
-		}
-		seen[id] = struct{}{}
+	if msg := validateIDBatch("cardIds", req.CardIDs); msg != "" {
+		return msg
 	}
 	if n := len([]rune(req.Lesson)); n > maxTextbookLessonRunes {
 		return fmt.Sprintf("lesson exceeds %d characters", maxTextbookLessonRunes)

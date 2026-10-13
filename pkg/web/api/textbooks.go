@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
@@ -150,34 +151,20 @@ func (h *handler) updateTextbook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts := pybridge.TextbookUpdateOpts{ID: id}
-	if req.Name != nil {
-		opts.Name = *req.Name
+	// The nil-keeps wire contract passes straight through — pybridge's
+	// TextbookUpdateOpts shares the pointer shape.
+	opts := pybridge.TextbookUpdateOpts{
+		ID:             id,
+		Name:           req.Name,
+		Edition:        req.Edition,
+		Stage:          req.Stage,
+		Grade:          req.Grade,
+		Volume:         req.Volume,
+		Module:         req.Module,
+		Lessons:        req.Lessons,
+		LearnedLessons: req.LearnedLessons,
+		SetPrimary:     req.SetPrimary,
 	}
-	if req.Edition != nil {
-		opts.Edition = *req.Edition
-	}
-	if req.Stage != nil {
-		opts.Stage = *req.Stage
-	}
-	if req.Grade != nil {
-		opts.Grade = *req.Grade
-	}
-	if req.Volume != nil {
-		opts.Volume = *req.Volume
-	}
-	if req.Module != nil {
-		opts.Module = *req.Module
-	}
-	if req.Lessons != nil {
-		opts.HasLessons = true
-		opts.Lessons = req.Lessons
-	}
-	if req.LearnedLessons != nil {
-		opts.HasLearnedLessons = true
-		opts.LearnedLessons = *req.LearnedLessons
-	}
-	opts.SetPrimary = req.SetPrimary
 
 	if _, err := h.exec.RunTextbookUpdate(r.Context(), opts); err != nil {
 		h.mapBridgeError(w, "update textbook", err)
@@ -236,7 +223,7 @@ func (h *handler) mutateAssignments(w http.ResponseWriter, r *http.Request, assi
 	}
 
 	if assign {
-		if req.Lesson != "" && !lessonInList(req.Lesson, book.Lessons) {
+		if req.Lesson != "" && !slices.Contains(book.Lessons, req.Lesson) {
 			writeError(w, http.StatusBadRequest, codeInvalidRequest,
 				fmt.Sprintf("lesson %q is not in textbook %q's lesson list", req.Lesson, book.Name))
 			return
@@ -265,30 +252,17 @@ func (h *handler) mutateAssignments(w http.ResponseWriter, r *http.Request, assi
 	writeJSON(w, result)
 }
 
-// lessonInList is the exact-match membership check for a lesson name.
-func lessonInList(lesson string, lessons []string) bool {
-	for _, name := range lessons {
-		if name == lesson {
-			return true
-		}
-	}
-	return false
-}
-
-// cardsMatchCategory resolves the batch through the card repository and
-// writes the error response itself: missing ids answer 404 with the real
-// ids, category mismatches answer 400 naming the offenders. False means
-// the response is written and the caller must return; a repository read
-// failure defers to the Python side's atomic check (its diagnostic maps
-// through the standard bridge-error path).
+// cardsMatchCategory resolves the batch through the card repository's
+// targeted id→category projection and writes the error response itself:
+// missing ids answer 404 with the real ids, category mismatches answer 400
+// naming the offenders. False means the response is written and the caller
+// must return; a repository read failure defers to the Python side's
+// atomic check (its diagnostic maps through the standard bridge-error
+// path).
 func (h *handler) cardsMatchCategory(w http.ResponseWriter, r *http.Request, ids []int64, category string) bool {
-	cards, err := h.cards.List(r.Context(), database.CardFilter{})
+	cats, err := h.cards.CategoriesByIDs(r.Context(), ids)
 	if err != nil {
 		return true
-	}
-	byID := make(map[int64]database.Card, len(cards))
-	for _, c := range cards {
-		byID[c.ID] = c
 	}
 	var missing, mismatched []int64
 	seen := make(map[int64]struct{}, len(ids))
@@ -297,12 +271,12 @@ func (h *handler) cardsMatchCategory(w http.ResponseWriter, r *http.Request, ids
 			continue
 		}
 		seen[id] = struct{}{}
-		card, ok := byID[id]
+		cat, ok := cats[id]
 		if !ok {
 			missing = append(missing, id)
 			continue
 		}
-		if card.Category != category {
+		if cat != category {
 			mismatched = append(mismatched, id)
 		}
 	}

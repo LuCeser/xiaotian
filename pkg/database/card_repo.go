@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
@@ -59,6 +60,12 @@ type CardRepository interface {
 	// Empty filter fields are omitted from the WHERE clause; the result
 	// is ordered by (unit, id) for stable rendering (Phase 9, D-12).
 	List(ctx context.Context, filter CardFilter) ([]Card, error)
+
+	// CategoriesByIDs returns the {id → category} projection for exactly
+	// the given ids (an absent id has no key) — the targeted existence/
+	// category pre-check for batch operations, proportional to the batch
+	// rather than the library.
+	CategoriesByIDs(ctx context.Context, ids []int64) (map[int64]string, error)
 
 	// CountByUnit returns one UnitCount row per distinct unit, ordered by
 	// unit name ascending (port of vocab_manager.py:605). A non-empty
@@ -211,6 +218,43 @@ func (r *sqliteCardRepository) GetByID(ctx context.Context, id int64) (Card, err
 	}
 
 	return c, nil
+}
+
+// CategoriesByIDs implements CardRepository.CategoriesByIDs — a two-column
+// targeted read (≤500 ids per the batch cap), never a full-library List.
+func (r *sqliteCardRepository) CategoriesByIDs(ctx context.Context, ids []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := r.db.QueryContext(ctx,
+		"SELECT id, category FROM cards WHERE id IN ("+placeholders+")", args...)
+	if err != nil {
+		r.logger.Error("card categories by ids failed",
+			infra.F("component", "database/card_repo"),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "card categories by ids")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var category string
+		if err := rows.Scan(&id, &category); err != nil {
+			return nil, errors.Wrap(err, "card categories by ids: scan")
+		}
+		out[id] = category
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.Wrap(err, "card categories by ids: iteration")
+	}
+	return out, nil
 }
 
 // ListByUnit returns cards in the named unit. An empty unit string

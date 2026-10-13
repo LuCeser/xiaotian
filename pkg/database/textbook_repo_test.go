@@ -115,8 +115,9 @@ func TestTextbookRepository(t *testing.T) {
 		if err != nil || len(byCard) != 0 {
 			t.Fatalf("AssignmentsByCardIDs on bare db = %v, %v; want empty", byCard, err)
 		}
-		if n, err := repo.CountAssignments(ctx, 1); err != nil || n != 0 {
-			t.Fatalf("CountAssignments on bare db = %d, %v; want 0", n, err)
+		all, err := repo.AllAssignments(ctx)
+		if err != nil || len(all) != 0 {
+			t.Fatalf("AllAssignments on bare db = %v, %v; want empty", all, err)
 		}
 	})
 
@@ -174,6 +175,20 @@ func TestTextbookRepository(t *testing.T) {
 		}
 		if len(byCard[9]) != 2 { // US-33 shape: one card, two textbooks
 			t.Fatalf("card 9 attribution = %+v; want two entries", byCard[9])
+		}
+
+		// The unfiltered variant returns the same rows (GET /words shape):
+		// 9 assigned cards, 10 rows, card 9 double-attributed.
+		all, err := repo.AllAssignments(ctx)
+		if err != nil {
+			t.Fatalf("AllAssignments: %v", err)
+		}
+		rows := 0
+		for _, entries := range all {
+			rows += len(entries)
+		}
+		if len(all) != 9 || rows != 10 || len(all[3]) != 1 || len(all[9]) != 2 {
+			t.Fatalf("AllAssignments = %d cards / %d rows; want 9 / 10, card 3 single, card 9 double", len(all), rows)
 		}
 	})
 }

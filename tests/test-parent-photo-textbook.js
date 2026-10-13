@@ -8,10 +8,6 @@
  *   - matchTextbookForMeta preselects an existing textbook only when the
  *     recognized meta ACTUALLY matches it — never a guess (AC2's
  *     不编造 rule starts at the preselect).
- *   - suggestTextbookName builds the create-form name from the readable
- *     fields only.
- *   - nextLessonList appends a missing lesson at the END (teaching order
- *     is explicit; never sorted) and is a no-op for an existing one.
  *   - planAssignments groups the committable rows into assign calls by
  *     (lesson, includeInScope): checked new/exists rows only — conflict
  *     and invalid rows never reach a textbook.
@@ -28,8 +24,6 @@ require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-phot
 const {
   classifyPhotoEntries,
   matchTextbookForMeta,
-  suggestTextbookName,
-  nextLessonList,
   distinctLessons,
   distinctRowLessons,
   planAssignments,
@@ -106,33 +100,10 @@ const BOOKS = [
 })();
 
 // ----------------------------------------------------------------------
-// suggestTextbookName
-// ----------------------------------------------------------------------
-
-(function () {
-  eq(suggestTextbookName({ edition: '人教版PEP', stage: '', grade: '三年级', volume: '上册', module: '', lesson: '第5课' }),
-    '人教版PEP·三年级·上册', 'name joins the readable fields with ·');
-  eq(suggestTextbookName(null), '', 'no meta → empty suggestion');
-  eq(suggestTextbookName({ edition: '', stage: '', grade: '', volume: '', module: '', lesson: '第9课' }),
-    '', 'a lesson alone suggests nothing');
-})();
-
-// ----------------------------------------------------------------------
-// nextLessonList
-// ----------------------------------------------------------------------
-
-(function () {
-  eq(nextLessonList(['第1课', '第2课'], '第3课'), ['第1课', '第2课', '第3课'],
-    'a missing lesson appends at the end (never sorted)');
-  eq(nextLessonList(['第2课', '第1课'], '第1课'), ['第2课', '第1课'],
-    'an existing lesson is a no-op — order untouched');
-  eq(nextLessonList([], '第5课'), ['第5课'], 'an empty list gains the lesson');
-  eq(nextLessonList(['第1课'], ''), ['第1课'], 'an empty lesson never enters the list');
-})();
-
-// ----------------------------------------------------------------------
-// distinctLessons / distinctRowLessons — the two SHAPES must never be
-// confused (a regression here once emptied a textbook's lesson list).
+// distinctLessons / distinctRowLessons — the append-shape the commit path
+// builds a book's next lesson list from, and the preview-row shape. The
+// two SHAPES must never be confused (a regression here once emptied a
+// textbook's lesson list).
 // ----------------------------------------------------------------------
 
 (function () {

@@ -663,7 +663,8 @@ def cmd_stats(db, args):
     if has_textbook_tables(db):
         scope_sql, scope_params = scope_predicate(db)
     rows = db.execute(
-        "SELECT id, fsrs_card FROM cards c WHERE c.category = ? AND c.participates = 1" + scope_sql,
+        "SELECT id, fsrs_card, fetch_locked_until FROM cards c "
+        "WHERE c.category = ? AND c.participates = 1" + scope_sql,
         [category] + scope_params,
     ).fetchall()
 
@@ -675,12 +676,9 @@ def cmd_stats(db, args):
     fetch_locked_count = 0  # total locked (any due status)
     due_locked_count = 0    # locked AND due (same scope as due_count)
 
-    # Preload fetch_locked_until for all rows to avoid N+1 queries
-    lock_rows = db.execute(
-        "SELECT id, fetch_locked_until FROM cards c WHERE c.category = ? AND c.participates = 1" + scope_sql,
-        [category] + scope_params,
-    ).fetchall()
-    lock_map = {r["id"]: r["fetch_locked_until"] for r in lock_rows}
+    # fetch_locked_until rides the SAME scan (one pass over the scoped
+    # pool — the scope predicate's EXISTS subqueries run once per card).
+    lock_map = {r["id"]: r["fetch_locked_until"] for r in rows}
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
     for row in rows:
@@ -842,26 +840,10 @@ def cmd_set_participation(db, args):
     wording so the Go handler's stdout not-found mapping (Pitfall 2)
     surfaces it as an honest 404 instead of a partial success.
     """
-    try:
-        ids = json.loads(args.ids)
-    except json.JSONDecodeError:
-        print("Error: --ids must be a JSON array of integers")
-        sys.exit(1)
-    if (not isinstance(ids, list) or not 1 <= len(ids) <= 500 or
-            not all(isinstance(i, int) and not isinstance(i, bool) and i > 0 for i in ids) or
-            len(set(ids)) != len(ids)):
-        print("Error: --ids must contain 1..500 unique positive integers")
-        sys.exit(1)
-    placeholders = ",".join("?" for _ in ids)
+    ids = _parse_card_ids(args.ids)
     db.execute("BEGIN IMMEDIATE")
-    existing = {row["id"] for row in db.execute(
-        f"SELECT id FROM cards WHERE id IN ({placeholders})", ids
-    ).fetchall()}
-    missing = [card_id for card_id in ids if card_id not in existing]
-    if missing:
-        db.rollback()
-        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
-        sys.exit(1)
+    existing = {row["id"] for row in _require_cards(db, ids)}
+    placeholders = ",".join("?" for _ in ids)
     value = 1 if args.participates == "true" else 0
     db.execute(
         f"UPDATE cards SET participates = ? WHERE id IN ({placeholders})",
@@ -916,6 +898,22 @@ def _parse_card_ids(raw):
         print("Error: --ids must contain 1..500 unique positive integers")
         sys.exit(1)
     return ids
+
+
+def _require_cards(db, ids, cols="id"):
+    """Resolve a batch's card rows inside an OPEN BEGIN IMMEDIATE
+    transaction; a missing id rolls back with the shared not-found
+    diagnostic (the wording the Go handler maps to 404, Pitfall 2)."""
+    placeholders = ",".join("?" for _ in ids)
+    rows = db.execute(
+        f"SELECT {cols} FROM cards WHERE id IN ({placeholders})", ids
+    ).fetchall()
+    missing = [i for i in ids if i not in {r["id"] for r in rows}]
+    if missing:
+        db.rollback()
+        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
+        sys.exit(1)
+    return rows
 
 
 def cmd_textbook_create(db, args):
@@ -1039,16 +1037,7 @@ def cmd_assign_words(db, args):
     include = 1 if args.include_in_scope else 0
 
     db.execute("BEGIN IMMEDIATE")
-    placeholders = ",".join("?" for _ in ids)
-    rows = db.execute(
-        f"SELECT id, category FROM cards WHERE id IN ({placeholders})", ids
-    ).fetchall()
-    existing = {r["id"] for r in rows}
-    missing = [i for i in ids if i not in existing]
-    if missing:
-        db.rollback()
-        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
-        sys.exit(1)
+    rows = _require_cards(db, ids, cols="id, category")
     mismatched = [str(r["id"]) for r in rows if r["category"] != textbook["category"]]
     if mismatched:
         db.rollback()
@@ -1087,14 +1076,7 @@ def cmd_unassign_words(db, args):
         sys.exit(1)
     db.execute("BEGIN IMMEDIATE")
     placeholders = ",".join("?" for _ in ids)
-    existing = {row["id"] for row in db.execute(
-        f"SELECT id FROM cards WHERE id IN ({placeholders})", ids
-    ).fetchall()}
-    missing = [i for i in ids if i not in existing]
-    if missing:
-        db.rollback()
-        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
-        sys.exit(1)
+    _require_cards(db, ids)
     cur = db.execute(
         f"DELETE FROM card_assignments WHERE textbook_id = ? AND card_id IN ({placeholders})",
         [args.textbook_id] + ids,

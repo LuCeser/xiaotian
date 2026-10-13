@@ -149,6 +149,38 @@
     return kit.buildModalField(labelText, id, isTextarea);
   }
 
+  /**
+   * A labeled <select> field on the same .form-field/.form-label scaffold
+   * modalField produces (the kit only builds text inputs/textarea — the
+   * assign modal needs two selects without a create-then-replaceChild swap).
+   */
+  function selectField(labelText, id) {
+    var field = document.createElement('div');
+    field.className = 'form-field';
+    var label = document.createElement('span');
+    label.className = 'form-label';
+    label.textContent = labelText;
+    var select = document.createElement('select');
+    select.className = 'form-input';
+    select.id = id;
+    select.setAttribute('aria-label', labelText);
+    field.appendChild(label);
+    field.appendChild(select);
+    return { field: field, select: select };
+  }
+
+  /** Clear one element through the shared kit (fallback: firstChild loop). */
+  function clearEl(el) {
+    var kit = global.__parentFormKit;
+    if (kit && kit.clearContainer) {
+      kit.clearContainer(el);
+    } else {
+      while (el.firstChild) {
+        el.removeChild(el.firstChild);
+      }
+    }
+  }
+
   // ------------------------------------------------------------------
   // 教材管理 modal
   // ------------------------------------------------------------------
@@ -296,18 +328,14 @@
 
   /** The textbook list inside the manager modal. */
   function renderManagerList(host, close) {
-    while (host.firstChild) {
-      host.removeChild(host.firstChild);
-    }
+    clearEl(host);
     var note = document.createElement('p');
     note.className = 'form-hint';
     note.textContent = '读取中…';
     host.appendChild(note);
 
     deps.fetchTextbooks().then(function (books) {
-      while (host.firstChild) {
-        host.removeChild(host.firstChild);
-      }
+      clearEl(host);
       if (!books || !books.length) {
         var empty = document.createElement('p');
         empty.className = 'form-hint';
@@ -533,23 +561,12 @@
         booksNote.textContent = category ? '读取教材中…' : '';
         body.appendChild(booksNote);
 
-        var bookField = modalField('教材', 'assign-textbook');
-        var bookSelect = bookField.input;
-        // buildModalField returns a text input; swap it for a select.
-        var bookSelectEl = document.createElement('select');
-        bookSelectEl.className = 'form-input';
-        bookSelectEl.id = 'assign-textbook';
-        bookSelectEl.setAttribute('aria-label', '教材');
-        bookField.field.replaceChild(bookSelectEl, bookSelect);
+        var bookField = selectField('教材', 'assign-textbook');
+        var bookSelectEl = bookField.select;
         body.appendChild(bookField.field);
 
-        var lessonField = modalField('课次', 'assign-lesson');
-        var lessonInput = lessonField.input;
-        var lessonSelect = document.createElement('select');
-        lessonSelect.className = 'form-input';
-        lessonSelect.id = 'assign-lesson';
-        lessonSelect.setAttribute('aria-label', '课次');
-        lessonField.field.replaceChild(lessonSelect, lessonInput);
+        var lessonField = selectField('课次', 'assign-lesson');
+        var lessonSelect = lessonField.select;
         body.appendChild(lessonField.field);
 
         var includeLabel = document.createElement('label');
@@ -641,9 +658,7 @@
 
   /** Lesson options for the assign modal: 待确认 first, then the list. */
   function fillLessonOptions(select, book) {
-    while (select.firstChild) {
-      select.removeChild(select.firstChild);
-    }
+    clearEl(select);
     var pending = document.createElement('option');
     pending.value = '';
     pending.textContent = '待确认（课次不确定）';

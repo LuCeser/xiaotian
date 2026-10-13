@@ -286,23 +286,10 @@
     },
   });
 
-  var addCard = new window.AddCard(addContainer, {
-    submitWords: function (payload) {
-      return fetchJSON('POST', '/api/v1/words', payload);
-    },
-    fetchWords: function (category) {
-      return fetchJSON('GET', '/api/v1/words?category=' + encodeURIComponent(category))
-        .then(function (data) {
-          return (data && Array.isArray(data.words)) ? data.words : [];
-        });
-    },
-    // Issue #3 照片导入: the recognize call rides postImage (60s budget —
-    // a vision model over an image outruns the 15s JSON timeout).
-    recognizePhoto: function (blob) {
-      return postImage('/api/v1/words/photo/recognize', blob);
-    },
-    // Issue #5 教材归属: the same textbook surfaces TextbookUI uses,
-    // passed through AddCard into PhotoAddForm's attribution panel.
+  // Issue #4/#5 教材 API wiring — ONE implementation feeds both consumers
+  // (the AddCard options below and TextbookUI.init further down); only the
+  // post-mutation refresh differs per consumer.
+  var textbookDeps = {
     fetchTextbooks: function (category) {
       var url = '/api/v1/textbooks' +
         (category ? ('?category=' + encodeURIComponent(category)) : '');
@@ -320,6 +307,29 @@
       return fetchJSON('POST',
         '/api/v1/textbooks/' + encodeURIComponent(textbookId) + '/assign', payload);
     },
+  };
+
+  var addCard = new window.AddCard(addContainer, {
+    submitWords: function (payload) {
+      return fetchJSON('POST', '/api/v1/words', payload);
+    },
+    fetchWords: function (category) {
+      return fetchJSON('GET', '/api/v1/words?category=' + encodeURIComponent(category))
+        .then(function (data) {
+          return (data && Array.isArray(data.words)) ? data.words : [];
+        });
+    },
+    // Issue #3 照片导入: the recognize call rides postImage (60s budget —
+    // a vision model over an image outruns the 15s JSON timeout).
+    recognizePhoto: function (blob) {
+      return postImage('/api/v1/words/photo/recognize', blob);
+    },
+    // Issue #5 教材归属: the same textbook surfaces TextbookUI uses,
+    // passed through AddCard into PhotoAddForm's attribution panel.
+    fetchTextbooks: textbookDeps.fetchTextbooks,
+    createTextbook: textbookDeps.createTextbook,
+    updateTextbook: textbookDeps.updateTextbook,
+    assignWords: textbookDeps.assignWords,
     onCommitted: function () {
       browse.refresh();
       refreshUnitOptions(selectedCategory);
@@ -347,23 +357,10 @@
   // ------------------------------------------------------------------
   if (window.TextbookUI) {
     window.TextbookUI.init({
-      fetchTextbooks: function (category) {
-        var url = '/api/v1/textbooks' +
-          (category ? ('?category=' + encodeURIComponent(category)) : '');
-        return fetchJSON('GET', url).then(function (data) {
-          return (data && Array.isArray(data.textbooks)) ? data.textbooks : [];
-        });
-      },
-      createTextbook: function (payload) {
-        return fetchJSON('POST', '/api/v1/textbooks', payload);
-      },
-      updateTextbook: function (id, payload) {
-        return fetchJSON('PUT', '/api/v1/textbooks/' + encodeURIComponent(id), payload);
-      },
-      assignWords: function (textbookId, payload) {
-        return fetchJSON('POST',
-          '/api/v1/textbooks/' + encodeURIComponent(textbookId) + '/assign', payload);
-      },
+      fetchTextbooks: textbookDeps.fetchTextbooks,
+      createTextbook: textbookDeps.createTextbook,
+      updateTextbook: textbookDeps.updateTextbook,
+      assignWords: textbookDeps.assignWords,
       onMutated: function () {
         browse.refresh();
       },

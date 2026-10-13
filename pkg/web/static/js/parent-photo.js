@@ -44,8 +44,8 @@
  *     classification never requires inventing a lesson (AC5).
  *   - 不指定教材 keeps the exact Issue #3 supplementary flow.
  *
- * classifyPhotoEntries / matchTextbookForMeta / suggestTextbookName /
- * nextLessonList / planAssignments are PURE functions exposed on the
+ * classifyPhotoEntries / matchTextbookForMeta / distinctLessons /
+ * distinctRowLessons / planAssignments are PURE functions exposed on the
  * window for the Node unit tests (tests/test-parent-photo-classify.js,
  * tests/test-parent-photo-textbook.js — window.parseBatch precedent);
  * everything DOM-ish lives in PhotoAddForm.
@@ -291,41 +291,6 @@
   }
 
   /**
-   * suggestTextbookName — the create-form's name prefill from the readable
-   * meta fields, joined with ·. A lesson alone suggests nothing (it is not
-   * the book's identity). Pure.
-   */
-  function suggestTextbookName(meta) {
-    if (!meta) {
-      return '';
-    }
-    var parts = [];
-    META_KEYS.forEach(function (key) {
-      var value = metaField(meta[key]);
-      if (value) {
-        parts.push(value);
-      }
-    });
-    return parts.join('·');
-  }
-
-  /**
-   * nextLessonList — the confirmed lesson list after this import: an
-   * existing lesson is a no-op, a missing one appends at the END (teaching
-   * order is explicit and never sorted; the parent can reorder in 教材管理).
-   * Pure, non-mutating.
-   */
-  function nextLessonList(lessons, lesson) {
-    var list = (lessons || []).slice();
-    var name = metaField(lesson);
-    if (!name || list.indexOf(name) >= 0) {
-      return list;
-    }
-    list.push(name);
-    return list;
-  }
-
-  /**
    * planAssignments — group the committable rows into textbook-assign
    * calls (POST /textbooks/{id}/assign takes ONE lesson + one
    * includeInScope per batch). Committable = checked rows with status
@@ -566,23 +531,25 @@
     this.formError.hidden = !message;
   };
 
+  /** Clear the picked-file UI (meta line, thumbnail, button state). */
+  PhotoAddForm.prototype.clearPickUI = function () {
+    this.fileMeta.textContent = '';
+    this.thumb.hidden = true;
+    this.thumb.removeAttribute('src');
+    this.recognizeBtn.disabled = true;
+  };
+
   PhotoAddForm.prototype.handleFilePicked = function () {
     var file = this.fileInput.files && this.fileInput.files[0];
     this.showFormError('');
     this.currentFile = file || null;
     if (!file) {
-      this.fileMeta.textContent = '';
-      this.thumb.hidden = true;
-      this.thumb.removeAttribute('src');
-      this.recognizeBtn.disabled = true;
+      this.clearPickUI();
       return;
     }
     if (file.type !== 'image/png' && file.type !== 'image/jpeg') {
       this.currentFile = null;
-      this.fileMeta.textContent = '';
-      this.thumb.hidden = true;
-      this.thumb.removeAttribute('src');
-      this.recognizeBtn.disabled = true;
+      this.clearPickUI();
       this.showFormError('只支持 PNG 或 JPEG 照片，请换一张');
       return;
     }
@@ -605,8 +572,7 @@
     if (file.size <= MAX_UPLOAD_BYTES) {
       return Promise.resolve(file);
     }
-    return readAsDataURL(file)
-      .then(loadImage)
+    return loadImageFromFile(file)
       .then(function (img) {
         var canvas = document.createElement('canvas');
         var ladderPromise = Promise.resolve(null);
@@ -918,7 +884,9 @@
       nameInput.type = 'text';
       nameInput.className = 'form-input';
       nameInput.id = 'parent-photo-tb-name';
-      nameInput.value = suggestTextbookName(this.detectedMeta);
+      // parent-textbook.js's summary join IS the prefill (one encoder for
+      // 版本·学段·年级·上下册·模块; a missing script degrades to no prefill).
+      nameInput.value = global.textbookMetaSummary ? global.textbookMetaSummary(this.detectedMeta) : '';
       nameInput.setAttribute('aria-label', '教材名称');
       nameField.appendChild(nameLabel);
       nameField.appendChild(nameInput);
@@ -1371,10 +1339,7 @@
   PhotoAddForm.prototype.resetAfterCommit = function () {
     this.currentFile = null;
     this.fileInput.value = '';
-    this.fileMeta.textContent = '';
-    this.thumb.hidden = true;
-    this.thumb.removeAttribute('src');
-    this.recognizeBtn.disabled = true;
+    this.clearPickUI();
     this.resetEntries();
   };
 
@@ -1948,29 +1913,24 @@
   // the one-shot REST upload — no chunking, no WS).
   // ------------------------------------------------------------------
 
-  function readAsDataURL(file) {
+  /**
+   * Decode the file into an <img> via an object URL (revoked after load) —
+   * no base64 round trip, so a multi-MB photo never doubles into a data
+   * URL string first (the thumbnail path uses the same mechanism).
+   */
+  function loadImageFromFile(file) {
     return new Promise(function (resolve, reject) {
-      var reader = new FileReader();
-      reader.onload = function () {
-        resolve(reader.result);
-      };
-      reader.onerror = function () {
-        reject(reader.error || new Error('read failed'));
-      };
-      reader.readAsDataURL(file);
-    });
-  }
-
-  function loadImage(dataURL) {
-    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file);
       var img = new Image();
       img.onload = function () {
+        URL.revokeObjectURL(url);
         resolve(img);
       };
       img.onerror = function () {
+        URL.revokeObjectURL(url);
         reject(new Error('无法读取这张照片，请换一张'));
       };
-      img.src = dataURL;
+      img.src = url;
     });
   }
 
@@ -1986,8 +1946,6 @@
   global.PhotoAddForm = PhotoAddForm;
   global.classifyPhotoEntries = classifyPhotoEntries;
   global.matchTextbookForMeta = matchTextbookForMeta;
-  global.suggestTextbookName = suggestTextbookName;
-  global.nextLessonList = nextLessonList;
   global.distinctLessons = distinctLessons;
   global.distinctRowLessons = distinctRowLessons;
   global.planAssignments = planAssignments;

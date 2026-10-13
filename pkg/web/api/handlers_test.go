@@ -152,6 +152,20 @@ func (f *fakeCardRepo) List(_ context.Context, filter database.CardFilter) ([]da
 	return f.cards, f.listErr
 }
 
+func (f *fakeCardRepo) CategoriesByIDs(_ context.Context, ids []int64) (map[int64]string, error) {
+	byID := make(map[int64]database.Card, len(f.cards))
+	for _, c := range f.cards {
+		byID[c.ID] = c
+	}
+	cats := make(map[int64]string, len(ids))
+	for _, id := range ids {
+		if c, ok := byID[id]; ok {
+			cats[id] = c.Category
+		}
+	}
+	return cats, nil
+}
+
 func (f *fakeCardRepo) CountByUnit(_ context.Context, category string) ([]database.UnitCount, error) {
 	f.countsSeen = append(f.countsSeen, category)
 	return f.unitCounts, f.countErr

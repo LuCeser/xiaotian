@@ -438,28 +438,25 @@ type TextbookCreateOpts struct {
 }
 
 // TextbookUpdateOpts carries the vocab_manager.py textbook-update flags
-// (Issue #4). Every field except ID is optional; the zero value omits the
-// flag so the script keeps the column (the EditOpts nil-pointer contract
-// expressed with empty strings, since no field needs a clear-to-empty
-// distinction here).
+// (Issue #4). Every field except ID and SetPrimary is optional with a
+// nil-keeps contract — EditOpts' pointer shape (a provided-but-empty
+// string clears the column; progress 0 is a legal value; an empty non-nil
+// lesson list clears the list).
 type TextbookUpdateOpts struct {
 	ID int64
-	// Name, when non-empty, renames the textbook.
-	Name string
-	// Edition/Stage/Grade/Volume/Module, when non-empty, replace the
+	// Name, when non-nil, renames the textbook.
+	Name *string
+	// Edition/Stage/Grade/Volume/Module, when non-nil, replace the
 	// corresponding descriptive column.
-	Edition string
-	Stage   string
-	Grade   string
-	Volume  string
-	Module  string
-	// HasLessons gates Lessons (an empty lesson list is a legal update —
-	// the pointer-free version of EditOpts' nil contract).
-	HasLessons bool
-	Lessons    []string
-	// HasLearnedLessons gates LearnedLessons (progress 0 is a legal value).
-	HasLearnedLessons bool
-	LearnedLessons    int
+	Edition *string
+	Stage   *string
+	Grade   *string
+	Volume  *string
+	Module  *string
+	// Lessons, when non-nil, replaces the explicit lesson list.
+	Lessons []string
+	// LearnedLessons, when non-nil, sets the progress (0 is a legal value).
+	LearnedLessons *int
 	// SetPrimary makes this textbook the category's primary, demoting the
 	// others in the same script transaction.
 	SetPrimary bool

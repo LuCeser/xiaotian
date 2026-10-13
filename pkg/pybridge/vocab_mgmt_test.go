@@ -245,6 +245,8 @@ func TestAddArgs(t *testing.T) {
 // EditOpts's optional *string fields.
 func strPtr(s string) *string { return &s }
 
+func intPtr(i int) *int { return &i }
+
 // assertNoInlinePayload is the Plan 09-03 inline-payload absence check: none
 // of the edit / rename-unit / delete-words commands carry JSON payloads --
 // they are flags-only commands (delete-words' --words is a plain
@@ -710,8 +712,8 @@ func TestTextbookUpdateArgs(t *testing.T) {
 	}
 
 	argv = textbookUpdateArgs(cfg, TextbookUpdateOpts{
-		ID: 7, HasLearnedLessons: true, LearnedLessons: 2, SetPrimary: true,
-		HasLessons: true, Lessons: []string{"A课", "B课"}, Grade: "三年级",
+		ID: 7, LearnedLessons: intPtr(2), SetPrimary: true,
+		Lessons: []string{"A课", "B课"}, Grade: strPtr("三年级"),
 	})
 	if got := argvValue(argv, "--learned-lessons"); got != "2" {
 		t.Fatalf("--learned-lessons = %q, want 2", got)

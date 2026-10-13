@@ -385,16 +385,25 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Issue #4: the textbook attribution projection rides along so the
-	// browse chips (教材·课次 / 待确认) need no second request. A repo
-	// failure degrades to empty attribution (the words still render) —
-	// assignment data is presentational here, never load-bearing.
+	// browse chips (教材·课次 / 待确认) need no second request. An
+	// UNFILTERED browse asks for the whole projection directly — building
+	// a whole-library IN-list for it would only re-parse N placeholders. A
+	// repo failure degrades to empty attribution (the words still render)
+	// — assignment data is presentational here, never load-bearing.
 	attribution := make(map[int64][]database.TextbookAssignment, len(cards))
 	if h.textbooks != nil && len(cards) > 0 {
-		ids := make([]int64, 0, len(cards))
-		for _, c := range cards {
-			ids = append(ids, c.ID)
+		var byCard map[int64][]database.TextbookAssignment
+		var err error
+		if category == "" && unit == "" && q == "" {
+			byCard, err = h.textbooks.AllAssignments(r.Context())
+		} else {
+			ids := make([]int64, 0, len(cards))
+			for _, c := range cards {
+				ids = append(ids, c.ID)
+			}
+			byCard, err = h.textbooks.AssignmentsByCardIDs(r.Context(), ids)
 		}
-		if byCard, err := h.textbooks.AssignmentsByCardIDs(r.Context(), ids); err == nil {
+		if err == nil {
 			attribution = byCard
 		} else {
 			h.logger.Warn("word attribution projection failed",
