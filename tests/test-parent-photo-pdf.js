@@ -1,11 +1,11 @@
 // tests/test-parent-photo-pdf.js — headless verification of the scanned-PDF
 // import pure functions (Issue #7): validatePdfFile / createPagePlan /
 // applyPageEvent / retryPage / planSummary (the per-page status machine),
-// mergePageRows / flattenPageRows (ordered per-page result merge),
-// rowsByPage / applyLessonToPage (per-page batch lesson) and chunkBatch
-// (commit slicing). The DOM/pdf.js runtime lives in parent-pdf.js and is
-// covered by the browser e2e; everything here is pure, per the
-// 前端纯函数 convention (window.parseBatch precedent).
+// mergePageRows (ordered per-page segment replace) / rowsByPage /
+// applyLessonToPage (per-page batch lesson) and chunkBatch (commit
+// slicing). The DOM/pdf.js runtime lives in parent-pdf.js and is covered
+// by the browser e2e; everything here is pure, per the 前端纯函数
+// convention (window.parseBatch precedent).
 // `node tests/test-parent-photo-pdf.js`
 'use strict';
 

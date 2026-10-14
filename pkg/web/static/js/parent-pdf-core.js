@@ -151,6 +151,18 @@
     return s;
   }
 
+  /** A one-level row copy (rows are flat; the page tag rides every copy). */
+  function shallowCopyRow(row, page) {
+    var copy = {};
+    Object.keys(row || {}).forEach(function (key) {
+      copy[key] = row[key];
+    });
+    if (page !== undefined) {
+      copy.page = page;
+    }
+    return copy;
+  }
+
   /**
    * mergePageRows — replace ONE page's segment in the row array. this.rows
    * stays the single source of truth (edits the parent already made to
@@ -169,12 +181,7 @@
       return !row || (row.page || 0) !== pageNo;
     });
     var tagged = (pageRows || []).map(function (row) {
-      var copy = {};
-      Object.keys(row || {}).forEach(function (key) {
-        copy[key] = row[key];
-      });
-      copy.page = pageNo;
-      return copy;
+      return shallowCopyRow(row, pageNo);
     });
     var merged = [];
     var inserted = false;
@@ -230,12 +237,10 @@
       if (!row || (row.page || 0) !== pageNo) {
         return row;
       }
-      var textbookMode = true;
-      if (isCommittable(row, textbookMode) && row.checked !== false) {
-        var copy = {};
-        Object.keys(row).forEach(function (key) {
-          copy[key] = row[key];
-        });
+      // textbookMode is always true here: the per-page toolbar exists only
+      // in textbook mode (the page head renders the input).
+      if (isCommittable(row, true) && row.checked !== false) {
+        var copy = shallowCopyRow(row);
         copy.lesson = value;
         return copy;
       }

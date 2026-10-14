@@ -29,9 +29,6 @@
 (function (global) {
   'use strict';
 
-  /** The vendored build this runner expects (workerSrc cache-buster). */
-  var PDF_VENDOR_VERSION = '3.11.174';
-
   /** Longest render edge — the photo ladder's first rung (1600px). */
   var PDF_RENDER_EDGE = 1600;
 
@@ -46,6 +43,17 @@
   };
 
   /**
+   * The vendored build's version, read from the pdf.min.js script tag's
+   * own ?v= — parent.html is the ONE place the version is written; the
+   * worker fetch stays cache-coherent with it without a second literal.
+   */
+  function vendoredVersion() {
+    var tag = document.querySelector('script[src*="vendor/pdfjs/pdf.min.js"]');
+    var match = tag && tag.src ? tag.src.match(/[?&]v=([^&]+)/) : null;
+    return match ? match[1] : '';
+  }
+
+  /**
    * open — read the file and hand it to pdf.js. Rejects with friendly
    * Chinese messages: unreadable file, damaged/encrypted PDF. The buffer
    * is transferred to the worker (single use — retry re-opens nothing,
@@ -55,9 +63,11 @@
     if (!PdfPageRunner.isAvailable()) {
       return Promise.reject(new Error('PDF 支持未加载，请刷新页面或改用照片导入'));
     }
-    // workerSrc once, version-stamped with the vendored build.
+    // workerSrc once, stamped with the main script's own ?v= (cache
+    // coherence with the tag that loaded pdfjsLib).
     global.pdfjsLib.GlobalWorkerOptions.workerSrc =
-      '/vendor/pdfjs/pdf.worker.min.js?v=' + PDF_VENDOR_VERSION;
+      '/vendor/pdfjs/pdf.worker.min.js' +
+      (vendoredVersion() ? '?v=' + vendoredVersion() : '');
     return file.arrayBuffer().then(function (buffer) {
       return global.pdfjsLib.getDocument({ data: buffer }).promise;
     }).then(function (doc) {

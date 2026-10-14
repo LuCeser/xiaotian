@@ -71,7 +71,7 @@ def main() -> None:
     ])
 
     # Retry fixture (test B: page 2 fails first, 重试该页 succeeds; the
-    # .failonce marker rides the captured page image, not this PDF).
+    # .failcount marker rides the captured page image, not this PDF).
     save_pdf(OUT / "pdf-retry.pdf", [
         render_page("北师大版 五年级上册 Unit 2 第1课 单词表",
                     [("goat", "山羊"), ("frog", "青蛙")]),
