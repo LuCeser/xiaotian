@@ -65,13 +65,16 @@ const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-parent-e2e-
 // The service expects its data/cache dirs to pre-exist (same contract as
 // run.ps1's .hta-data layout).
 fs.mkdirSync(path.join(isolatedRoot, 'cache', 'audio'), { recursive: true });
+// family-journey.spec.js seeds Go-owned tables through this isolated path only.
+process.env.PARENT_E2E_DB = path.join(isolatedRoot, 'vocab.db');
+process.env.PARENT_E2E_ROOT = isolatedRoot;
 process.on('exit', () => fs.rmSync(isolatedRoot, { recursive: true, force: true }));
 
 module.exports = defineConfig({
   testDir: './e2e',
   // Only the parent suites ride this config; the student specs stay on the
   // legacy config (they need the .env-loaded dev service).
-  testMatch: /parent-(management|photo-import|pdf-import|photo-reimport|photo-textbook|textbook-scope|meaning-supplement)\.spec\.js|pdf-capture\.spec\.js/,
+  testMatch: /(?:parent-(management|photo-import|pdf-import|photo-reimport|photo-textbook|textbook-scope|meaning-supplement)|family-journey)\.spec\.js|pdf-capture\.spec\.js/,
   timeout: 120_000,
   retries: 0,
   // One isolated instance, one vocabulary DB: serialize like the legacy
