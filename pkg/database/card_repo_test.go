@@ -101,6 +101,45 @@ func TestCardRepository(t *testing.T) {
 		}
 	})
 
+	t.Run("meaning_source degraded-reads as material until Python migrates it", func(t *testing.T) {
+		// Issue #8 / ADR-0005: the provenance column follows the
+		// participates degraded-read precedent — pre-migration rows read
+		// "material" (legacy meanings predate supplementation by
+		// construction), and the same repository observes real values the
+		// moment the column lands.
+		db := newTestDBWithCards(t)
+		repo, err := NewCardRepository(db, infra.NewNoOpLogger())
+		if err != nil {
+			t.Fatalf("NewCardRepository: %v", err)
+		}
+		cards, err := repo.List(context.Background(), CardFilter{})
+		if err != nil {
+			t.Fatalf("pre-migration list: %v", err)
+		}
+		for _, c := range cards {
+			if c.MeaningSource != "material" {
+				t.Fatalf("pre-migration MeaningSource = %q, want \"material\"", c.MeaningSource)
+			}
+		}
+		if _, err := db.Exec("ALTER TABLE cards ADD COLUMN meaning_source TEXT NOT NULL DEFAULT 'material'"); err != nil {
+			t.Fatalf("migrate meaning_source: %v", err)
+		}
+		if _, err := db.Exec("UPDATE cards SET meaning_source = 'generated' WHERE word = 'apple'"); err != nil {
+			t.Fatalf("mark apple generated: %v", err)
+		}
+		cards, err = repo.List(context.Background(), CardFilter{})
+		if err != nil {
+			t.Fatalf("post-migration list: %v", err)
+		}
+		byWord := map[string]string{}
+		for _, c := range cards {
+			byWord[c.Word] = c.MeaningSource
+		}
+		if byWord["apple"] != "generated" || byWord["banana"] != "material" {
+			t.Fatalf("post-migration sources = %v, want apple=generated banana=material", byWord)
+		}
+	})
+
 	t.Run("NewCardRepository with nil db returns error", func(t *testing.T) {
 		_, err := NewCardRepository(nil, infra.NewNoOpLogger())
 		if err == nil {

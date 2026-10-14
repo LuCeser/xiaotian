@@ -66,6 +66,12 @@ type AddRequest struct {
 		Word    string `json:"word"`
 		Meaning string `json:"meaning"`
 		Example string `json:"example"`
+		// MeaningSource is the Issue #8 provenance flag: "generated" for a
+		// system-supplemented meaning, "material"/absent for everything
+		// else. Validated here; an empty meaning always stores "material"
+		// regardless (Python-side normalize — an empty gloss never carries
+		// a marker).
+		MeaningSource string `json:"meaning_source"`
 	} `json:"entries"`
 }
 
@@ -322,6 +328,12 @@ func validateAddRequest(req *AddRequest) string {
 		if n := len([]rune(e.Example)); n > maxExampleRunes {
 			return fmt.Sprintf("entries[%d].example exceeds %d characters", i, maxExampleRunes)
 		}
+		// Issue #8: the provenance enum is validated at the gate so a
+		// malformed flag fails as 400 invalid_request, never leaking into
+		// the stored column (Python re-normalizes the empty-meaning case).
+		if e.MeaningSource != "" && e.MeaningSource != "material" && e.MeaningSource != "generated" {
+			return fmt.Sprintf("entries[%d].meaning_source must be \"material\" or \"generated\"", i)
+		}
 	}
 	if n := len([]rune(req.Unit)); n > maxUnitRunes {
 		return fmt.Sprintf("unit exceeds %d characters", maxUnitRunes)
@@ -359,15 +371,15 @@ type TextbookCreateRequest struct {
 // field is a pointer (or Lessons nil-vs-empty) so absent keeps the
 // column; LearnedLessons is a pointer because 0 is a legal progress.
 type TextbookUpdateRequest struct {
-	Name           *string   `json:"name"`
-	Edition        *string   `json:"edition"`
-	Stage          *string   `json:"stage"`
-	Grade          *string   `json:"grade"`
-	Volume         *string   `json:"volume"`
-	Module         *string   `json:"module"`
-	Lessons        []string  `json:"lessons"`
-	LearnedLessons *int      `json:"learnedLessons"`
-	SetPrimary     bool      `json:"setPrimary"`
+	Name           *string  `json:"name"`
+	Edition        *string  `json:"edition"`
+	Stage          *string  `json:"stage"`
+	Grade          *string  `json:"grade"`
+	Volume         *string  `json:"volume"`
+	Module         *string  `json:"module"`
+	Lessons        []string `json:"lessons"`
+	LearnedLessons *int     `json:"learnedLessons"`
+	SetPrimary     bool     `json:"setPrimary"`
 }
 
 // TextbookAssignRequest is the decoded POST /textbooks/{id}/assign and

@@ -261,6 +261,40 @@ func TestAddWords(t *testing.T) {
 		}
 	})
 
+	t.Run("meaning_source forwarded to the bridge, enum validated at the gate", func(t *testing.T) {
+		// Issue #8: generated provenance rides the add path untouched;
+		// a malformed flag is a 400 (invalid_request), never stored.
+		exec := &fakeExecutor{}
+		h := newTestHandler(t, exec, &fakeCardRepo{})
+
+		body := `{"category":"english","entries":[{"word":"apple","meaning":"n. 苹果","meaning_source":"generated"},{"word":"banana","meaning":"香蕉"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/words", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if len(exec.addCalls) != 1 {
+			t.Fatalf("RunAdd calls = %d, want 1", len(exec.addCalls))
+		}
+		entries := exec.addCalls[0].Entries
+		if entries[0].MeaningSource != "generated" || entries[1].MeaningSource != "" {
+			t.Errorf("forwarded MeaningSource = [%q,%q], want [generated,\"\"]",
+				entries[0].MeaningSource, entries[1].MeaningSource)
+		}
+
+		bad := `{"category":"english","entries":[{"word":"apple","meaning":"x","meaning_source":"textbook"}]}`
+		req = httptest.NewRequest(http.MethodPost, "/words", strings.NewReader(bad))
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "meaning_source") {
+			t.Errorf("body = %s, want the offending field named", rec.Body.String())
+		}
+	})
+
 	t.Run("missing category returns 400 invalid_request", func(t *testing.T) {
 		h := newTestHandler(t, &fakeExecutor{}, &fakeCardRepo{})
 		req := httptest.NewRequest(http.MethodPost, "/words",

@@ -301,14 +301,19 @@ func (h *handler) deleteWords(w http.ResponseWriter, r *http.Request) {
 // wordJSON is one element of the GET /words response array. Field tags
 // are snake_case per the shared response convention (health.go:18-26).
 type wordJSON struct {
-	ID           int64                          `json:"id"`
-	Word         string                         `json:"word"`
-	Meaning      string                         `json:"meaning"`
-	Example      string                         `json:"example"`
-	Unit         string                         `json:"unit"`
-	Category     string                         `json:"category"`
-	Participates bool                           `json:"participates"`
-	Textbooks    []database.TextbookAssignment  `json:"textbooks"`
+	ID       int64  `json:"id"`
+	Word     string `json:"word"`
+	Meaning  string `json:"meaning"`
+	Example  string `json:"example"`
+	Unit     string `json:"unit"`
+	Category string `json:"category"`
+	// MeaningSource rides along for the browse view's 系统 supplement
+	// marker (Issue #8): the display rule is meaning non-empty AND
+	// meaning_source == "generated" — the client applies it, the wire
+	// just carries the provenance.
+	MeaningSource string                        `json:"meaning_source"`
+	Participates  bool                          `json:"participates"`
+	Textbooks     []database.TextbookAssignment `json:"textbooks"`
 }
 
 // wordsResponse is the GET /words response envelope.
@@ -416,14 +421,15 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 	words := make([]wordJSON, 0, len(cards))
 	for _, c := range cards {
 		row := wordJSON{
-			ID:           c.ID,
-			Word:         c.Word,
-			Meaning:      c.Meaning,
-			Example:      c.Example,
-			Unit:         c.Unit,
-			Category:     c.Category,
-			Participates: c.Participates,
-			Textbooks:    []database.TextbookAssignment{},
+			ID:            c.ID,
+			Word:          c.Word,
+			Meaning:       c.Meaning,
+			Example:       c.Example,
+			Unit:          c.Unit,
+			Category:      c.Category,
+			MeaningSource: c.MeaningSource,
+			Participates:  c.Participates,
+			Textbooks:     []database.TextbookAssignment{},
 		}
 		if rows, ok := attribution[c.ID]; ok {
 			row.Textbooks = rows
@@ -452,9 +458,10 @@ func (h *handler) addWords(w http.ResponseWriter, r *http.Request) {
 	opts := pybridge.AddOpts{Category: req.Category, Unit: req.Unit}
 	for _, e := range req.Entries {
 		opts.Entries = append(opts.Entries, pybridge.AddEntry{
-			Word:    e.Word,
-			Meaning: e.Meaning,
-			Example: e.Example,
+			Word:          e.Word,
+			Meaning:       e.Meaning,
+			Example:       e.Example,
+			MeaningSource: e.MeaningSource,
 		})
 	}
 

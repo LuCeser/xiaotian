@@ -26,13 +26,17 @@ var (
 // Write-separation contract (D-03-a): Python owns writes to the cards table
 // via pybridge.Executor.RunReview. Go only reads.
 type Card struct {
-	ID               int64
-	Word             string
-	Meaning          string
-	Example          string
-	Unit             string
-	Category         string
-	FsrsCard         string // opaque JSON — never parsed in Go (Pitfall 5)
+	ID       int64
+	Word     string
+	Meaning  string
+	Example  string
+	Unit     string
+	Category string
+	FsrsCard string // opaque JSON — never parsed in Go (Pitfall 5)
+	// MeaningSource is the Issue #8 provenance flag: "generated" marks a
+	// system-supplemented meaning (ADR-0005); "material" covers everything
+	// else (material original, library legacy, hand-filled).
+	MeaningSource    string
 	CreatedAt        string
 	FetchLockedUntil string // nullable; empty string when NULL
 	Participates     bool   // eligible for automatic dictation/practice selection
@@ -109,7 +113,10 @@ const cardBaseColumns = "id, word, meaning, example, unit, category, fsrs_card, 
 // cardColumns resolves the Python-owned schema on each read. Existing
 // installations may be opened before any Python command has run the new
 // migration; those rows participate by default. Rechecking lets the same
-// service process observe the column as soon as Python adds it.
+// service process observe the column as soon as Python adds it. The same
+// degraded-read applies to meaning_source (Issue #8): a pre-migration
+// schema reads 'material' for every row — legacy meanings all predate
+// supplementation by construction (ADR-0005).
 func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, error) {
 	rows, err := r.db.QueryContext(ctx, "PRAGMA table_info(cards)")
 	if err != nil {
@@ -117,6 +124,7 @@ func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, e
 	}
 	defer rows.Close()
 	hasParticipation := false
+	hasMeaningSource := false
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, columnType string
@@ -127,14 +135,25 @@ func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, e
 		if name == "participates" {
 			hasParticipation = true
 		}
+		if name == "meaning_source" {
+			hasMeaningSource = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return "", false, err
 	}
+	cols := cardBaseColumns
 	if hasParticipation {
-		return cardBaseColumns + ", participates", true, nil
+		cols += ", participates"
+	} else {
+		cols += ", 1 AS participates"
 	}
-	return cardBaseColumns + ", 1 AS participates", false, nil
+	if hasMeaningSource {
+		cols += ", meaning_source"
+	} else {
+		cols += ", 'material' AS meaning_source"
+	}
+	return cols, hasParticipation, nil
 }
 
 // CardFilter narrows a CardRepository.List query. Every field is optional —
@@ -182,6 +201,7 @@ func scanCard(row interface{ Scan(...any) error }) (Card, error) {
 		&c.CreatedAt,
 		&fetchLocked,
 		&c.Participates,
+		&c.MeaningSource,
 	)
 	if err != nil {
 		return Card{}, err

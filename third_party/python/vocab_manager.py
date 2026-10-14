@@ -217,6 +217,15 @@ def init_db(db):
     if "participates" not in cols:
         db.execute("ALTER TABLE cards ADD COLUMN participates INTEGER NOT NULL DEFAULT 1 CHECK (participates IN (0, 1))")
     db.execute("CREATE INDEX IF NOT EXISTS idx_cards_participates ON cards(category, participates)")
+    # Issue #8 / ADR-0005: meaning provenance. 'material' = 材料原文或词库
+    # 既有释义（历史数据一律如此）; 'generated' = 系统按教材语境补充（家长
+    # 可能已改写，仍非教材原文）。展示规则 = meaning 非空且 source=
+    # 'generated'; 编辑（cmd_edit）不改来源。
+    if "meaning_source" not in cols:
+        db.execute(
+            "ALTER TABLE cards ADD COLUMN meaning_source TEXT NOT NULL DEFAULT 'material' "
+            "CHECK (meaning_source IN ('material', 'generated'))"
+        )
     db.commit()
 
 
@@ -271,6 +280,16 @@ def scope_predicate(db):
     return sql, params
 
 
+def normalize_meaning_source(source, meaning):
+    """Issue #8 / ADR-0005: collapse a wire meaning_source onto the stored
+    enum. Only 'generated' is distinguishable, and only with a non-empty
+    meaning — an empty gloss never carries a marker (cancelled supplements
+    and untouched missing rows both store 'material')."""
+    if not meaning:
+        return "material"
+    return "generated" if source == "generated" else "material"
+
+
 def cmd_add(db, args):
     """Add words to the vocabulary database."""
     if args.file:
@@ -315,6 +334,7 @@ def cmd_add(db, args):
                 "word": word.strip(),
                 "meaning": str(item.get("meaning", "")) if item.get("meaning") else "",
                 "example": str(item.get("example", "")) if item.get("example") else "",
+                "meaning_source": normalize_meaning_source(item.get("meaning_source"), item.get("meaning")),
             })
     else:
         print("Error: data must be a JSON object or array")
@@ -327,7 +347,7 @@ def cmd_add(db, args):
         fsrs_card = Card()
         try:
             db.execute(
-                "INSERT INTO cards (word, meaning, example, unit, category, fsrs_card) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO cards (word, meaning, example, unit, category, fsrs_card, meaning_source) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry["word"],
                     entry.get("meaning", ""),
@@ -335,6 +355,7 @@ def cmd_add(db, args):
                     args.unit or "",
                     args.category or "english",
                     fsrs_card.to_json(),
+                    entry.get("meaning_source", "material"),
                 ),
             )
             added += 1

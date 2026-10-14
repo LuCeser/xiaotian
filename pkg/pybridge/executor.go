@@ -288,6 +288,13 @@ type AddEntry struct {
 	Word    string `json:"word"`
 	Meaning string `json:"meaning"`
 	Example string `json:"example"`
+	// MeaningSource rides the same list-mode JSON (Issue #8 / ADR-0005):
+	// "generated" marks a meaning the system supplemented from the
+	// confirmed textbook context (possibly parent-edited since — still not
+	// textbook original); every other value (including empty, the manual
+	// add forms) stays "material" on the Python side. The api layer
+	// validates the enum before the bridge.
+	MeaningSource string `json:"meaning_source,omitempty"`
 }
 
 // AddOpts carries the operational flags for the vocab_manager.py add
@@ -476,21 +483,21 @@ type TextbookMutationResult struct {
 // learned). IncludeInScope is the parent's explicit override admitting
 // the words regardless of lesson progress.
 type AssignWordsOpts struct {
-	TextbookID    int64
-	IDs           []int64
-	Lesson        string
+	TextbookID     int64
+	IDs            []int64
+	Lesson         string
 	IncludeInScope bool
 }
 
 // AssignWordsResult mirrors the script's success payload: on a nil error
 // every requested card carries the assignment.
 type AssignWordsResult struct {
-	Requested     int    `json:"requested"`
-	Updated       int    `json:"updated"`
-	Missing       []int64 `json:"missing"`
-	TextbookID    int64  `json:"textbook_id"`
-	Lesson        string `json:"lesson"`
-	IncludeInScope bool   `json:"include_in_scope"`
+	Requested      int     `json:"requested"`
+	Updated        int     `json:"updated"`
+	Missing        []int64 `json:"missing"`
+	TextbookID     int64   `json:"textbook_id"`
+	Lesson         string  `json:"lesson"`
+	IncludeInScope bool    `json:"include_in_scope"`
 }
 
 // UnassignWordsOpts carries the vocab_manager.py unassign-words flags
@@ -503,10 +510,10 @@ type UnassignWordsOpts struct {
 
 // UnassignWordsResult mirrors the script's {requested, removed} payload.
 type UnassignWordsResult struct {
-	Requested  int    `json:"requested"`
-	Removed    int    `json:"removed"`
+	Requested  int     `json:"requested"`
+	Removed    int     `json:"removed"`
 	Missing    []int64 `json:"missing"`
-	TextbookID int64  `json:"textbook_id"`
+	TextbookID int64   `json:"textbook_id"`
 }
 
 // Sentinel errors returned by the pybridge layer. Callers MUST detect
