@@ -2449,8 +2449,10 @@
 
     var applied = 0;
     var failed = 0;
+    var slices = global.chunkBatch(words, MAX_BATCH_ENTRIES);
+    var appliedSlices = 0;
     var chain = Promise.resolve();
-    global.chunkBatch(words, MAX_BATCH_ENTRIES).forEach(function (part) {
+    slices.forEach(function (part) {
       chain = chain.then(function () {
         return self.generateMeanings({
           words: part,
@@ -2460,6 +2462,7 @@
           self.rows = global.applyGeneratedMeanings(self.rows, reply || {});
           applied += Object.keys((reply && reply.meanings) || {}).length;
           failed += ((reply && reply.missing) || []).length;
+          appliedSlices++;
           // Fold each slice in as it lands so a later failure never
           // discards earlier answers.
           self.renderPreview();
@@ -2474,6 +2477,14 @@
         self.showFormError('有 ' + failed + ' 个词未生成释义（已保留缺失，可重试或提交）');
       }
     }).catch(function (err) {
+      // Words whose slices never got a reply carry the same honest
+      // per-row failure flag a reply.missing word does — the affordance
+      // switches to 重试生成 and the rows stay submittable (ADR-0005 #5).
+      var unanswered = [];
+      for (var i = appliedSlices; i < slices.length; i++) {
+        unanswered = unanswered.concat(slices[i]);
+      }
+      self.rows = global.markGenerationFailed(self.rows, unanswered);
       self.meaningBusy = false;
       self.renderPreview();
       var partial = applied ? '（已补充 ' + applied + ' 个，不会丢失）' : '';

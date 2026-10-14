@@ -27,8 +27,15 @@
 //         count must cover the service's own vision retries (mimo client
 //         defaults to 4 attempts total, so the marker says 4).
 //   POST */chat/completions without an image (LLM/ASR/TTS-shaped calls):
-//     a generic text completion — good enough for incidental classroom
-//     traffic after the assertions the tests care about.
+//     Issue #8 text-generation fixtures FIRST: every text-*.reply.json in
+//     --fixtures carrying {"match": "<substring>", "content": "<reply>"}
+//     is checked against the request's concatenated prompt text; the FIRST
+//     fixture whose match substring appears answers with its content
+//     (optional sibling text-*.failcount = leading 500s, same semantics
+//     as the vision marker — cover the client's 4 total attempts).
+//     Unmatched text calls still get the generic completion — good enough
+//     for incidental classroom traffic after the assertions the tests
+//     care about.
 //   GET /healthz: 200 (the Playwright webServer readiness probe).
 //
 // Run: node tests/e2e/helpers/mimo-stub.js --port 18180 --fixtures tests/e2e/fixtures
@@ -73,6 +80,50 @@ for (const name of fs.readdirSync(fixturesDir)) {
   });
 }
 let unregSeq = 0;
+
+// Text-generation fixtures (Issue #8): text-*.reply.json files carrying
+// {match, content} (+ optional failcount sibling). Registered eagerly like
+// the image fixtures; the FIRST substring match on the request's prompt
+// text wins, so each e2e scenario keys its fixture on a word unique to
+// that scenario's supplement request.
+const textRegistered = [];
+for (const name of fs.readdirSync(fixturesDir)) {
+  if (!/^text-.*\.reply\.json$/i.test(name)) continue;
+  let def;
+  try {
+    def = JSON.parse(fs.readFileSync(path.join(fixturesDir, name), 'utf8'));
+  } catch (e) {
+    console.error('[mimo-stub] skipping unparsable %s: %s', name, e.message);
+    continue;
+  }
+  if (!def || typeof def.match !== 'string' || typeof def.content !== 'string') {
+    console.error('[mimo-stub] skipping %s (need string match+content)', name);
+    continue;
+  }
+  const failcountFile = path.join(fixturesDir, name.replace(/\.reply\.json$/i, '.failcount'));
+  let failcount = 0;
+  if (fs.existsSync(failcountFile)) {
+    failcount = Number(fs.readFileSync(failcountFile, 'utf8').trim()) || 0;
+  }
+  textRegistered.push({ name, match: def.match, content: def.content, failcount, hits: 0 });
+}
+
+// promptText flattens a chat-completions body's message contents into one
+// comparable string (string contents verbatim; content parts keep their
+// .text fields — the generate call's user turn is plain text).
+function promptText(body) {
+  return (body.messages || [])
+    .map((msg) => {
+      if (typeof msg.content === 'string') return msg.content;
+      if (Array.isArray(msg.content)) {
+        return msg.content
+          .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
+          .join('\n');
+      }
+      return '';
+    })
+    .join('\n');
+}
 
 // findImagePart walks a chat-completions body for the first image_url data
 // part and returns its decoded bytes (null when the request has no image).
@@ -122,6 +173,23 @@ const server = http.createServer((req, res) => {
     }
     const image = findImagePart(body);
     if (!image) {
+      const hit = textRegistered.find((r) => promptText(body).includes(r.match));
+      if (hit) {
+        hit.hits += 1;
+        if (hit.failcount && hit.hits <= hit.failcount) {
+          // The Issue #8 generation-retry fixture: lead with 500s covering
+          // the client's own retries, then answer — the UI-level 重试 then
+          // succeeds.
+          console.error('[mimo-stub] text failcount %d/%d: %s', hit.hits, hit.failcount, hit.name);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'stub: text failcount ' + hit.hits } }));
+          return;
+        }
+        console.error('[mimo-stub] text reply: %s', hit.name);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(completion(hit.content)));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(completion('好了')));
       return;
@@ -160,6 +228,6 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(port, '127.0.0.1', () => {
-  console.log('[mimo-stub] listening on 127.0.0.1:%d, %d fixture reply(ies) from %s',
-    port, registered.length, fixturesDir);
+  console.log('[mimo-stub] listening on 127.0.0.1:%d, %d image + %d text fixture reply(ies) from %s',
+    port, registered.length, textRegistered.length, fixturesDir);
 });

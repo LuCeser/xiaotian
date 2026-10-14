@@ -13,6 +13,7 @@ const {
   isSupplementTarget,
   supplementWords,
   applyGeneratedMeanings,
+  markGenerationFailed,
   cancelGeneratedMeaning,
   meaningMarkerVisible,
   genFailedVisible,
@@ -87,6 +88,21 @@ const raced = applyGeneratedMeanings(
   { meanings: { apple: 'n. 苹果' }, missing: [] }
 );
 eq(raced[0].meaning, '家长刚填', 'parent text typed during the call wins');
+
+// --- markGenerationFailed: call-level failure = same honest flags -------
+const callFailed = markGenerationFailed(rows, ['banana', 'cat']);
+eq(callFailed[1].genFailed, true, 'call-failure marks the unanswered word');
+eq(callFailed[1].meaning, '', 'call-failure keeps the meaning missing');
+eq(callFailed[0].genFailed === true, false, 'word outside the failed set not flagged');
+eq(callFailed[2].genFailed === true, false, 'non-target row (has meaning) not flagged');
+eq(rows[1].genFailed === true, false, 'pure: input rows not mutated (call-failure)');
+// A meaning typed during the call resolves the row — never flagged.
+const typedDuring = markGenerationFailed(
+  [row({ word: 'banana', meaning: '家长刚填' })],
+  ['banana']
+);
+eq(typedDuring[0].genFailed, undefined, 'typed-during-call row not flagged');
+eq(meaningGenSummary(callFailed).failed, 1, 'call-failure drives the 重试 label');
 
 // --- cancelGeneratedMeaning --------------------------------------------
 const cancelled = cancelGeneratedMeaning(after, 0);

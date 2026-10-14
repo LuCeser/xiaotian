@@ -85,6 +85,35 @@
   }
 
   /**
+   * markGenerationFailed — the call-level failure counterpart of
+   * reply.missing: words whose slice never got a reply (transport error,
+   * unparseable) get the same honest per-row failure flag, so the
+   * affordance switches to 重试生成 and the rows show 生成失败 while
+   * staying submittable (ADR-0005 #5). Only still-eligible rows are
+   * marked — a meaning typed during the call resolves the row. Returns a
+   * NEW rows array.
+   */
+  function markGenerationFailed(rows, words) {
+    var set = {};
+    (words || []).forEach(function (w) {
+      set[String(w || '').trim()] = true;
+    });
+    return (rows || []).map(function (row) {
+      if (!isSupplementTarget(row) || !set[String(row.word || '').trim()]) {
+        return row;
+      }
+      var next = {};
+      for (var key in row) {
+        if (Object.prototype.hasOwnProperty.call(row, key)) {
+          next[key] = row[key];
+        }
+      }
+      next.genFailed = true;
+      return next;
+    });
+  }
+
+  /**
    * cancelGeneratedMeaning — the parent's 取消 for one supplemented row
    * (AC-4): back to missing-meaning, source 'material', failure flag
    * cleared. Returns a NEW rows array.
@@ -150,6 +179,7 @@
   global.isSupplementTarget = isSupplementTarget;
   global.supplementWords = supplementWords;
   global.applyGeneratedMeanings = applyGeneratedMeanings;
+  global.markGenerationFailed = markGenerationFailed;
   global.cancelGeneratedMeaning = cancelGeneratedMeaning;
   global.meaningMarkerVisible = meaningMarkerVisible;
   global.genFailedVisible = genFailedVisible;
