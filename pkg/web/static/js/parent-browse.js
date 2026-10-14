@@ -817,6 +817,20 @@
     meaning.className = 'word-meaning';
     meaning.textContent = word.meaning || '';
 
+    // Issue #8 AC-2 (后续查看保留来源区别): the 系统 badge marks a meaning
+    // the import supplemented from the confirmed textbook context — the
+    // same display rule as the preview (non-empty + generated). A SIBLING
+    // of the meaning span so .word-meaning stays pure text. Edits in the
+    // modal never flip the source (ADR-0005: a corrected supplement stays
+    // a supplement, never masquerading as textbook original).
+    var srcBadge = null;
+    if (word.meaning && word.meaning_source === 'generated') {
+      srcBadge = document.createElement('span');
+      srcBadge.className = 'word-src-badge';
+      srcBadge.textContent = '系统';
+      srcBadge.title = '释义由系统按教材语境补充，家长可能已修改；编辑不会当作教材原文';
+    }
+
     var badge = document.createElement('span');
     badge.className = 'badge badge-' + (word.category === 'chinese' ? 'chinese' : 'english');
     badge.setAttribute('data-coding', word.category);
@@ -887,6 +901,9 @@
     row.appendChild(text);
     if (word.meaning) {
       row.appendChild(meaning);
+    }
+    if (srcBadge) {
+      row.appendChild(srcBadge);
     }
     row.appendChild(badge);
     chips.forEach(function (chip) {

@@ -1802,3 +1802,91 @@ body {
   margin: 8px 0;
   font-size: 14px;
 }
+
+/* ------------------------------------------------------------------ */
+/* Issue #8 — 缺失英语释义按教材语境补充（ADR-0005）                     */
+/* ------------------------------------------------------------------ */
+
+/* The supplement strip: one row under the textbook panel (生成按钮 + 说明). */
+.photo-meaning-bar {
+  margin-top: 8px;
+}
+
+.photo-meaning-bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+}
+
+.photo-meaning-hint {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* The meaning cell stacks the input with its provenance affordances. */
+.photo-meaning-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.photo-meaning-cell .photo-cell-input {
+  flex: 1 1 120px;
+  width: auto;
+}
+
+/* 系统补充 marker: the neutral-info register (a provenance fact, not a
+   warning) — outlined pill so it never reads as a status chip. */
+.meaning-source-badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--badge-en-bg);
+  background: var(--badge-en-bg);
+  color: var(--badge-en-text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 取消补充: a quiet text button next to the badge (44px touch floor via
+   padding on the row's nested-control scale). */
+.meaning-cancel-btn {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 4px 10px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.meaning-cancel-btn:hover {
+  color: var(--warning-strong);
+}
+
+/* 生成失败 note rides the existing status-note rhythm; the warning tone
+   flags an unanswered attempt without blocking submission. */
+.photo-gen-failed-note {
+  color: var(--warning-strong);
+}
+
+/* Browse-side 系统 badge (后续查看保留来源区别): smaller sibling of the
+   preview marker, same outlined-pill register. */
+.word-src-badge {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--badge-en-bg);
+  background: var(--badge-en-bg);
+  color: var(--badge-en-text);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}

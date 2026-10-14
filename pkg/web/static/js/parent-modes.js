@@ -804,6 +804,9 @@
         submitWords: submitWords,
         fetchWords: fetchWords,
         textbookDeps: textbookDeps,
+        // Issue #8: the missing-meaning supplement call (absent ⇒ the
+        // affordance never mounts; the import flow is unchanged).
+        generateMeanings: options.generateMeanings || null,
         onCommitted: onCommitted,
         onCategoryChange: onCategoryChange,
       });

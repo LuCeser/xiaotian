@@ -329,6 +329,12 @@
     recognizePhoto: function (blob) {
       return postImage('/api/v1/words/photo/recognize', blob);
     },
+    // Issue #8 缺失释义补充: one batched text-LLM call per click; the 15s
+    // JSON timeout covers it (a text completion is not a vision round
+    // trip; a slow service surfaces as an honest generation_failed).
+    generateMeanings: function (payload) {
+      return fetchJSON('POST', '/api/v1/words/meaning/generate', payload);
+    },
     // Issue #5 教材归属: the same textbook surfaces TextbookUI uses,
     // passed through AddCard into PhotoAddForm's attribution panel.
     // Issue #6 adds editWord — the 采用照片释义 conflict resolution rides

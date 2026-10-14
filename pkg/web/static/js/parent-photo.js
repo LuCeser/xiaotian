@@ -326,7 +326,16 @@
           category: 'english',
           unit: unit,
           entries: part.map(function (r) {
-            return { word: r.word, meaning: r.meaning, example: '' };
+            return {
+              word: r.word,
+              meaning: r.meaning,
+              example: '',
+              // Issue #8: the provenance rides the add path (ADR-0005 #3);
+              // the only distinguishable value is 'generated' — everything
+              // else (material original, hand-typed, cancelled-missing)
+              // stores 'material'.
+              meaning_source: r.meaningSource === 'generated' ? 'generated' : 'material',
+            };
           }),
         }).then(function (result) {
           outcome.added += (result && result.added) || 0;
@@ -486,6 +495,9 @@
     // Issue #6: the 采用照片释义 resolution rides the ordinary edit path
     // (PUT /words/{id} — text changes never touch FSRS state).
     this.editWord = td.editWord || null;
+    // Issue #8: POST /api/v1/words/meaning/generate — absent ⇒ the
+    // supplement affordance never mounts (the preview flow is unchanged).
+    this.generateMeanings = options.generateMeanings || null;
     this.onCommitted = options.onCommitted || function () {};
     this.onCategoryChange = options.onCategoryChange || function () {};
 
@@ -584,6 +596,15 @@
     this.textbookPanel.hidden = true;
     this.form.appendChild(this.textbookPanel);
 
+    // Supplement affordance (Issue #8): one strip under the textbook panel
+    // — 补充缺失释义（N 词）/ 重试生成（N 词） plus the honesty note when
+    // words went unanswered. Rendered by renderMeaningBar; hidden until a
+    // recognition with a confirmed textbook context exists.
+    this.meaningBar = document.createElement('div');
+    this.meaningBar.className = 'photo-meaning-bar';
+    this.meaningBar.hidden = true;
+    this.form.appendChild(this.meaningBar);
+
     // Review table: rendered after recognition; every row editable.
     this.preview = document.createElement('div');
     this.preview.className = 'preview-scroll';
@@ -625,6 +646,9 @@
     // panelRendered }. doc stays open for page retries until discard /
     // commit reset / a new file; rows themselves live in this.rows.
     this.pdfState = null;
+    // Issue #8: a supplement run is in flight (the affordance disables
+    // and says 生成中 rather than queueing a second overlapping call).
+    this.meaningBusy = false;
 
     var self = this;
     this.pickBtn.addEventListener('click', function () {
@@ -1511,6 +1535,11 @@
       // Issue #7: the page tag rides every re-classification — the
       // preview's page grouping and mergePageRows' segment replace read it.
       next[i].page = this.rows[i].page || 0;
+      // Issue #8: provenance and the unanswered-attempt flag ride too —
+      // editing a word never silently drops the 系统补充 marker or the
+      // 生成失败 note (ADR-0005: edits do not change the source).
+      next[i].meaningSource = this.rows[i].meaningSource || '';
+      next[i].genFailed = !!this.rows[i].genFailed;
     }
     this.rows = next;
   };
@@ -1522,6 +1551,7 @@
     if (!this.rows.length) {
       this.renderPreviewHint('选择照片或 PDF 后点「开始识别」');
       this.updateCommitButton();
+      this.renderMeaningBar();
       return;
     }
     var textbookMode = this.bookChoice !== 'none';
@@ -1581,6 +1611,7 @@
       this.preview.appendChild(datalist);
     }
     this.updateCommitButton();
+    this.renderMeaningBar();
   };
 
   /**
@@ -1669,16 +1700,47 @@
     tr.appendChild(wordCell);
 
     var meaningCell = document.createElement('td');
+    var meaningWrap = document.createElement('div');
+    meaningWrap.className = 'photo-meaning-cell';
     var meaningInput = document.createElement('input');
     meaningInput.type = 'text';
     meaningInput.className = 'form-input photo-cell-input';
     meaningInput.value = row.meaning;
     meaningInput.setAttribute('aria-label', '释义 第 ' + (i + 1) + ' 行');
-    meaningInput.addEventListener('input', function () {
-      self.rows[i].meaning = meaningInput.value;
+    // Issue #8: the 系统补充 marker rides the meaning cell (AC-2). The
+    // display rule is meaningMarkerVisible's alone — a parent clearing
+    // the text by keyboard hides the badge live (the source resets at
+    // submit anyway: an empty gloss never stores 'generated').
+    var meaningBadge = document.createElement('span');
+    meaningBadge.className = 'meaning-source-badge';
+    meaningBadge.textContent = '系统补充';
+    meaningBadge.title = '释义由系统按教材语境补充，可编辑或取消；不会当作教材原文';
+    meaningBadge.hidden = !global.meaningMarkerVisible(row);
+    // AC-4 取消: clear the supplement, back to missing (retryable).
+    var meaningCancel = document.createElement('button');
+    meaningCancel.type = 'button';
+    meaningCancel.className = 'meaning-cancel-btn';
+    meaningCancel.textContent = '取消补充';
+    meaningCancel.setAttribute('aria-label', '取消第 ' + (i + 1) + ' 行的系统补充释义');
+    meaningCancel.title = '清空这条系统补充的释义，保留缺失（可再次补充）';
+    meaningCancel.hidden = !global.meaningMarkerVisible(row);
+    meaningCancel.addEventListener('click', function () {
+      self.rows = global.cancelGeneratedMeaning(self.rows, i);
+      meaningInput.value = '';
+      meaningBadge.hidden = true;
+      meaningCancel.hidden = true;
       self.onRowEdited();
     });
-    meaningCell.appendChild(meaningInput);
+    meaningInput.addEventListener('input', function () {
+      self.rows[i].meaning = meaningInput.value;
+      meaningBadge.hidden = !global.meaningMarkerVisible(self.rows[i]);
+      meaningCancel.hidden = meaningBadge.hidden;
+      self.onRowEdited();
+    });
+    meaningWrap.appendChild(meaningInput);
+    meaningWrap.appendChild(meaningBadge);
+    meaningWrap.appendChild(meaningCancel);
+    meaningCell.appendChild(meaningWrap);
     tr.appendChild(meaningCell);
 
     if (textbookMode) {
@@ -1738,6 +1800,15 @@
       why.className = 'photo-status-note';
       why.textContent = describeInvalidReason(row.reason);
       statusCell.appendChild(why);
+    }
+    // Issue #8 AC-5: an unanswered supplement attempt is shown honestly —
+    // the row stays submittable with its missing meaning (保留缺失), and
+    // the affordance offers 重试. Manual text resolves the note.
+    if (global.genFailedVisible && global.genFailedVisible(row)) {
+      var genNote = document.createElement('p');
+      genNote.className = 'photo-status-note photo-gen-failed-note';
+      genNote.textContent = '释义生成失败，可重试或保留缺失';
+      statusCell.appendChild(genNote);
     }
     if (row.status === 'conflict' && textbookMode && form) {
       // Issue #6 AC-3: the difference is already on display; the parent
@@ -1826,6 +1897,10 @@
       }
     }
     this.updateCommitButton();
+    // Issue #8: edits change the eligible/failed counts — the affordance
+    // label follows without a full re-render (same caret-preserving reason
+    // this sync exists).
+    this.updateMeaningBar();
   };
 
   PhotoAddForm.prototype.updateCommitButton = function () {
@@ -2236,6 +2311,174 @@
       });
     });
     return chain.then(function () { return results; });
+  };
+
+  // ------------------------------------------------------------------
+  // Issue #8 — 缺失英语释义按教材语境补充（ADR-0005）
+  // ------------------------------------------------------------------
+
+  /**
+   * The CONFIRMED context one supplement call carries (AC-3): an existing
+   * book's stored meta + its 已学进度 gauge; the 新建教材 mini-form's
+   * confirmed values with NO progress (尚未登记 — never faked as 0).
+   * 'none' (补充词汇) has no textbook context to ground on → null, and
+   * the affordance never mounts for it (ADR-0005 option E).
+   */
+  PhotoAddForm.prototype.meaningContext = function () {
+    if (this.bookChoice === 'none') {
+      return null;
+    }
+    if (this.bookChoice === 'new') {
+      var values = this.readCreateForm();
+      var textbook = {};
+      META_FIELDS.forEach(function (meta) {
+        if (values[meta.key]) {
+          textbook[meta.key] = values[meta.key];
+        }
+      });
+      return { textbook: textbook, learnedLessons: null };
+    }
+    var book = this.chosenBook();
+    if (!book) {
+      return null;
+    }
+    return {
+      textbook: {
+        edition: book.edition || '',
+        stage: book.stage || '',
+        grade: book.grade || '',
+        volume: book.volume || '',
+        module: book.module || '',
+      },
+      learnedLessons: typeof book.learnedLessons === 'number' ? book.learnedLessons : null,
+    };
+  };
+
+  /**
+   * Render the supplement strip. Hidden unless: the wiring exists, a
+   * recognition is on display, a textbook context is confirmed and
+   * eligible (still-missing) words exist. The label switches to
+   * 重试生成 once any previous attempt went unanswered; the note names
+   * the unanswered count honestly (AC-5).
+   */
+  PhotoAddForm.prototype.renderMeaningBar = function () {
+    var self = this;
+    this.meaningBar.hidden = true;
+    clearEl(this.meaningBar);
+    this.meaningGenBtn = null;
+    this.meaningGenLabel = null;
+    if (!this.generateMeanings || !global.supplementWords || !this.rows.length) {
+      return;
+    }
+    var context = this.meaningContext();
+    if (!context) {
+      return;
+    }
+    var summary = global.meaningGenSummary(this.rows);
+    if (!summary.target) {
+      // Nothing to send — every previously-unanswered row either got its
+      // meaning (from a later slice or by hand) or was resolved; the
+      // per-row 生成失败 notes have already cleared with the meanings.
+      return;
+    }
+
+    var bar = document.createElement('div');
+    bar.className = 'photo-meaning-bar-inner';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-secondary photo-meaning-gen-btn';
+    var label = document.createElement('span');
+    label.className = 'btn-label';
+    this.meaningGenBtn = btn;
+    this.meaningGenLabel = label;
+    btn.appendChild(label);
+    btn.addEventListener('click', function () {
+      self.handleGenerateMeanings();
+    });
+    bar.appendChild(btn);
+
+    var hint = document.createElement('span');
+    hint.className = 'photo-meaning-hint';
+    hint.textContent = summary.failed
+      ? '按已确认教材与进度补充缺失释义；上次有 ' + summary.failed + ' 词未答出'
+      : '按已确认教材与已学进度补充缺失释义，标明「系统补充」，可编辑或取消';
+    bar.appendChild(hint);
+
+    this.meaningBar.appendChild(bar);
+    this.meaningBar.hidden = false;
+    this.updateMeaningBar();
+  };
+
+  /**
+   * In-place affordance sync (the updateCommitButton kin): label count,
+   * busy state. Called from onRowEdited so keystrokes keep the count live
+   * without rebuilding the strip.
+   */
+  PhotoAddForm.prototype.updateMeaningBar = function () {
+    if (!this.meaningGenBtn || !this.meaningGenLabel) {
+      return;
+    }
+    var summary = global.meaningGenSummary(this.rows);
+    this.meaningGenLabel.textContent = this.meaningBusy
+      ? '生成中…'
+      : (summary.failed ? '重试生成（' + summary.target + ' 词）' : '补充缺失释义（' + summary.target + ' 词）');
+    this.meaningGenBtn.disabled = this.meaningBusy || !summary.target;
+  };
+
+  /**
+   * One supplement run: the still-missing eligible words go out in
+   * MAX_BATCH_ENTRIES-sized sequential slices (ADR-0005 #6 — a whole
+   * textbook supplements without the parent splitting it), each reply
+   * folds in as it lands, and an HTTP failure stops the run honestly
+   * naming what already applied (the submitChunked partialOutcome kin).
+   */
+  PhotoAddForm.prototype.handleGenerateMeanings = function () {
+    var self = this;
+    if (this.meaningBusy || !this.generateMeanings || !global.chunkBatch) {
+      return;
+    }
+    var context = this.meaningContext();
+    var words = global.supplementWords(this.rows);
+    if (!context || !words.length) {
+      return;
+    }
+
+    this.meaningBusy = true;
+    this.updateMeaningBar();
+    this.showFormError('');
+
+    var applied = 0;
+    var failed = 0;
+    var chain = Promise.resolve();
+    global.chunkBatch(words, MAX_BATCH_ENTRIES).forEach(function (part) {
+      chain = chain.then(function () {
+        return self.generateMeanings({
+          words: part,
+          textbook: context.textbook,
+          learnedLessons: context.learnedLessons,
+        }).then(function (reply) {
+          self.rows = global.applyGeneratedMeanings(self.rows, reply || {});
+          applied += Object.keys((reply && reply.meanings) || {}).length;
+          failed += ((reply && reply.missing) || []).length;
+          // Fold each slice in as it lands so a later failure never
+          // discards earlier answers.
+          self.renderPreview();
+        });
+      });
+    });
+
+    chain.then(function () {
+      self.meaningBusy = false;
+      self.renderPreview();
+      if (failed) {
+        self.showFormError('有 ' + failed + ' 个词未生成释义（已保留缺失，可重试或提交）');
+      }
+    }).catch(function (err) {
+      self.meaningBusy = false;
+      self.renderPreview();
+      var partial = applied ? '（已补充 ' + applied + ' 个，不会丢失）' : '';
+      self.showFormError('释义生成失败：' + ((err && err.message) || '未知错误') + partial + '。可重试，或保留缺失直接提交。');
+    });
   };
 
   /**

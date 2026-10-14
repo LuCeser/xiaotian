@@ -123,9 +123,12 @@
       js/parent-pdf-core.js     → the scanned-PDF pure functions (page plan
                                   status machine, per-page merge, commit
                                   slicing — Issue #7, Node-tested)
+      js/parent-meaning-core.js → the supplement pure functions (eligibility,
+                                  reply folding, marker display rules —
+                                  Issue #8, Node-tested)
       js/parent-photo.js        → window.PhotoAddForm +
                                   window.classifyPhotoEntries (照片导入 tab,
-                                  Issue #3/#5/#7; consumes __parentFormKit)
+                                  Issue #3/#5/#7/#8; consumes __parentFormKit)
       js/parent-pdf.js          → window.PdfPageRunner (pdf.js loader +
                                   per-page renderer, Issue #7)
       js/parent-browse.js       → window.BrowseView (浏览词库: toolbar +
@@ -143,7 +146,8 @@
   <script src="js/parent-batch-parser.js?v=20261009a" defer></script>
   <script src="js/parent-modes.js?v=20261013b" defer></script>
   <script src="js/parent-pdf-core.js?v=20261014a" defer></script>
-  <script src="js/parent-photo.js?v=20261014a" defer></script>
+  <script src="js/parent-meaning-core.js?v=20261014a" defer></script>
+  <script src="js/parent-photo.js?v=20261014b" defer></script>
   <script src="js/parent-pdf.js?v=20261014a" defer></script>
   <script src="js/parent-browse.js?v=20261012a" defer></script>
   <script src="js/parent-textbook.js?v=20261012b" defer></script>
