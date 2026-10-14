@@ -5,12 +5,14 @@
     "e2e:parent": "playwright test -c tests/playwright.parent.config.js",
     "e2e:rt": "playwright test -c tests/playwright.rt.config.js",
     "e2e:rt-real": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/e2e-rt/real/run-real.ps1",
-    "rt-report": "node scripts/rt-timing-report.js"
+    "rt-report": "node scripts/rt-timing-report.js",
+    "vendor:pdfjs": "node scripts/vendor-pdfjs.js"
   },
   "dependencies": {
     "ws": "^8.21.3"
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0"
+    "@playwright/test": "^1.63.0",
+    "pdfjs-dist": "3.11.174"
   }
 }

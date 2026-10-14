@@ -737,6 +737,78 @@ body {
   color: var(--text-secondary, #64748b);
 }
 
+/* Issue #7 — scanned-PDF import: per-page status bar + page header rows */
+.pdf-status-bar {
+  margin: 10px 0;
+}
+
+.pdf-summary-line {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text-secondary, #64748b);
+}
+
+.pdf-page-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pdf-page-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: var(--bg-secondary, #e2e8f0);
+  color: var(--text-secondary, #64748b);
+}
+
+.pdf-chip-running {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.pdf-chip-done {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.pdf-chip-failed {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.pdf-retry-btn {
+  padding: 1px 8px;
+  font-size: 12px;
+  min-height: 22px;
+}
+
+.pdf-stop-btn {
+  margin-top: 8px;
+}
+
+.pdf-page-head td {
+  background: var(--bg-secondary, #f1f5f9);
+  font-size: 13px;
+  padding: 6px 10px;
+}
+
+.pdf-page-label {
+  font-weight: 600;
+  margin-right: 10px;
+}
+
+.pdf-page-lesson {
+  max-width: 200px;
+  min-height: 32px;
+  margin: 0 6px 0 12px;
+}
+
+
 .photo-lesson-cell {
   min-width: 120px;
 }

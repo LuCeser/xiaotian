@@ -44,11 +44,30 @@
  *     classification never requires inventing a lesson (AC5).
  *   - 不指定教材 keeps the exact Issue #3 supplementary flow.
  *
+ * Contract (Issue #7 acceptance criteria, on top):
+ *   - A scanned PDF picked here splits INTO PAGES IN THE BROWSER
+ *     (PdfPageRunner, parent-pdf.js; ADR-0004): pages run sequentially
+ *     through the SAME recognize call as a photo, one page in memory at a
+ *     time. The draft stays client-side only — nothing is written until
+ *     确认添加, exactly like a photo.
+ *   - Page attribution is preview-level metadata: rows carry page, the
+ *     preview groups by page (页头 = 页码 + 状态 + 本页批量课次), and
+ *     re-recognizing a page REPLACES its segment (mergePageRows) so a
+ *     retry can never duplicate or disorder results. The cross-page
+ *     same-word dedup rides classifyPhotoEntries over the merged array.
+ *   - Page-level failures land on that page's status entry with the
+ *     reason and a 重试该页 button; completed pages keep their results
+ *     (AC-4). A run with any failed page is NEVER a whole-file success
+ *     (AC-3's 不伪称).
+ *   - 文件 40MiB／100 页上限在加载前拒绝（ADR-0004 拍板）；整本教材的
+ *     提交自动按 100/批新增、500/批课次指定分片，聚合真实响应出回执。
+ *
  * classifyPhotoEntries / matchTextbookForMeta / distinctLessons /
  * distinctRowLessons / planAssignments are PURE functions exposed on the
  * window for the Node unit tests (tests/test-parent-photo-classify.js,
- * tests/test-parent-photo-textbook.js — window.parseBatch precedent);
- * everything DOM-ish lives in PhotoAddForm.
+ * tests/test-parent-photo-textbook.js, tests/test-parent-photo-pdf.js —
+ * window.parseBatch precedent); the PDF pure functions live in
+ * parent-pdf-core.js; everything DOM-ish lives in PhotoAddForm.
  *
  * Security (Pitfall 10): all rendering goes through document.createElement
  * + Node.textContent — no raw-markup setters anywhere in this file.
@@ -70,6 +89,13 @@
 
   /** Field caps — mirror pkg/web/api validate.go (runes, not bytes). */
   var MAX_WORD_RUNES = 200;
+
+  /**
+   * Assign-batch cap — mirrors pkg/web/api validate.go's batch-ids cap;
+   * one (lesson, includeInScope) group larger than this is sliced into
+   * sequential assign calls (ADR-0004 #6).
+   */
+  var MAX_ASSIGN_IDS = 500;
   var MAX_MEANING_RUNES = 1000;
 
   /**
@@ -263,6 +289,18 @@
     return row.status === 'exists' || isResolved(row);
   }
 
+  /**
+   * Slice helper — parent-pdf-core.js's chunkBatch. A missing core script
+   * (degraded page) falls back to the pre-#7 single-call commit shape, so
+   * the PHOTO flow keeps working exactly as before.
+   */
+  function chunkRows(items, size) {
+    if (global.chunkBatch) {
+      return global.chunkBatch(items, size);
+    }
+    return items && items.length ? [items] : [];
+  }
+
   /** Clear one element through the shared kit (fallback: textContent). */
   function clearEl(el) {
     var kit = global.__parentFormKit || {};
@@ -437,21 +475,23 @@
       this.form.appendChild(unit.field);
     }
 
-    // Photo picker row: one file at a time (Issue #3 settles the
-    // single-photo limit; multi-page PDF is a later task).
+    // Photo/PDF picker row: one file at a time (Issue #3 settles the
+    // single-file limit; Issue #7 adds the scanned PDF — pages split in
+    // the browser, ADR-0004). The .pdf extension rides accept because
+    // iPad Safari sometimes hands a PDF an empty MIME type.
     var pickField = document.createElement('div');
     pickField.className = 'form-field';
     var pickLabel = document.createElement('label');
     pickLabel.className = 'form-label';
-    pickLabel.textContent = '词表照片';
+    pickLabel.textContent = '词表照片／扫描 PDF';
     var pickHint = document.createElement('p');
     pickHint.className = 'form-hint';
-    pickHint.textContent = '拍摄或选择一张英语单词表照片（PNG / JPEG），无需裁图。';
+    pickHint.textContent = '拍摄或选择一张英语单词表照片（PNG / JPEG），或整本扫描 PDF（最多 100 页），无需裁图。';
     var pickRow = document.createElement('div');
     pickRow.className = 'photo-pick-row';
     this.fileInput = document.createElement('input');
     this.fileInput.type = 'file';
-    this.fileInput.accept = 'image/png,image/jpeg';
+    this.fileInput.accept = 'image/png,image/jpeg,application/pdf,.pdf';
     this.fileInput.className = 'photo-file-input';
     this.fileInput.id = 'parent-photo-file';
     this.pickBtn = document.createElement('button');
@@ -488,6 +528,14 @@
     this.formError.hidden = true;
     this.form.appendChild(this.formError);
 
+    // Per-page status bar (Issue #7): one chip per PDF page (页码 + 状态，
+    // failed pages carry a 重试该页 button) plus the whole-file summary
+    // and a 停止 button while a run is in flight. Hidden for photos.
+    this.pdfBar = document.createElement('div');
+    this.pdfBar.className = 'pdf-status-bar';
+    this.pdfBar.hidden = true;
+    this.form.appendChild(this.pdfBar);
+
     // Textbook attribution panel (Issue #5): rendered between the picker
     // and the review table after each recognition; hidden until then.
     this.textbookPanel = document.createElement('div');
@@ -500,7 +548,7 @@
     this.preview.className = 'preview-scroll';
     this.previewHint = document.createElement('p');
     this.previewHint.className = 'preview-empty';
-    this.previewHint.textContent = '选择照片后点「开始识别」';
+    this.previewHint.textContent = '选择照片或 PDF 后点「开始识别」';
     this.preview.appendChild(this.previewHint);
     this.form.appendChild(this.preview);
 
@@ -532,6 +580,10 @@
     this.books = []; // existing english textbooks (textbook panel list)
     this.bookChoice = 'none'; // 'none' | 'new' | a textbook id (number)
     this.includePending = false; // 待确认课次的词直接加入默写范围
+    // Issue #7: while a PDF is in play — { doc, plan, aborted, metaDone,
+    // panelRendered }. doc stays open for page retries until discard /
+    // commit reset / a new file; rows themselves live in this.rows.
+    this.pdfState = null;
 
     var self = this;
     this.pickBtn.addEventListener('click', function () {
@@ -586,12 +638,40 @@
     this.currentFile = file || null;
     if (!file) {
       this.clearPickUI();
+      this.releasePdf();
+      return;
+    }
+    var verdict = (global.validatePdfFile || function () {
+      return { ok: false, code: 'not-pdf' };
+    })(file);
+    if (verdict.ok) {
+      // Issue #7: a scanned PDF. No thumbnail (a PDF is not an <img>); the
+      // page plan replaces it once 开始识别 runs. A new file always
+      // releases the previous run's doc — page retries never outlive it.
+      this.releasePdf();
+      this.fileMeta.textContent = file.name + '（' +
+        Math.max(1, Math.round(file.size / (1024 * 1024))) + ' MB）';
+      this.thumb.hidden = true;
+      this.thumb.removeAttribute('src');
+      if (!(global.PdfPageRunner && global.PdfPageRunner.isAvailable())) {
+        this.recognizeBtn.disabled = true;
+        this.showFormError('PDF 支持未加载，请刷新页面或改用照片导入');
+        return;
+      }
+      this.recognizeBtn.disabled = false;
+      return;
+    }
+    if (verdict.code !== 'not-pdf') {
+      // pdf-too-large: refuse BEFORE loading, nothing is processed (AC-3).
+      this.currentFile = null;
+      this.clearPickUI();
+      this.showFormError(verdict.message);
       return;
     }
     if (file.type !== 'image/png' && file.type !== 'image/jpeg') {
       this.currentFile = null;
       this.clearPickUI();
-      this.showFormError('只支持 PNG 或 JPEG 照片，请换一张');
+      this.showFormError('只支持 PNG / JPEG 照片或 PDF 扫描件，请换一个文件');
       return;
     }
     this.fileMeta.textContent = file.name + '（' + Math.max(1, Math.round(file.size / 1024)) + ' KB）';
@@ -601,6 +681,20 @@
     this.thumb.src = URL.createObjectURL(file);
     this.thumb.hidden = false;
     this.recognizeBtn.disabled = false;
+  };
+
+  /**
+   * releasePdf — drop the current PDF run: destroy the pdf.js document
+   * (frees the worker-side page data), clear the plan/bar. The ROWS stay
+   * (a freshly picked file keeps the old preview on screen exactly like
+   * the photo flow does — 开始识别 replaces it).
+   */
+  PhotoAddForm.prototype.releasePdf = function () {
+    if (this.pdfState && this.pdfState.doc && global.PdfPageRunner) {
+      global.PdfPageRunner.close(this.pdfState.doc);
+    }
+    this.pdfState = null;
+    this.renderPdfBar();
   };
 
   /**
@@ -640,6 +734,10 @@
 
   PhotoAddForm.prototype.handleRecognize = function () {
     if (this.recognizeBtn.disabled || !this.currentFile) {
+      return;
+    }
+    if (this.isPickedPdf()) {
+      this.handlePdfRecognize();
       return;
     }
     var self = this;
@@ -704,6 +802,278 @@
       .then(function () {
         self.setBusy(false);
       });
+  };
+
+  // ------------------------------------------------------------------
+  // Issue #7 — the scanned-PDF run: open → per-page plan → sequential
+  // page loop (render → recognize → merge) → per-page status bar.
+  // ------------------------------------------------------------------
+
+  /** The picked file is a PDF (validatePdfFile's predicate, one home). */
+  PhotoAddForm.prototype.isPickedPdf = function () {
+    if (!this.currentFile || !global.validatePdfFile) {
+      return false;
+    }
+    return global.validatePdfFile(this.currentFile).ok;
+  };
+
+  /**
+   * handlePdfRecognize — open the PDF, plan the pages, run them
+   * sequentially. Failures NEVER throw past this method's catch: a page
+   * that fails lands on its plan entry and the run continues (AC-4); only
+   * open/plan failures (unreadable file, over-cap pages) surface as form
+   * errors with nothing processed.
+   */
+  PhotoAddForm.prototype.handlePdfRecognize = function () {
+    var self = this;
+    var kit = global.__parentFormKit || {};
+    this.showFormError('');
+    this.setBusy(true);
+    this.releasePdf();
+
+    global.PdfPageRunner.open(this.currentFile)
+      .then(function (opened) {
+        var plan = global.createPagePlan(opened.pageCount);
+        if (!plan.ok) {
+          global.PdfPageRunner.close(opened.doc);
+          throw new Error(plan.message);
+        }
+        self.pdfState = {
+          doc: opened.doc,
+          plan: plan,
+          aborted: false,
+          metaDone: false,
+          panelRendered: false,
+        };
+        self.renderPdfBar();
+        // ONE library snapshot classifies every page as it lands (the run
+        // can take minutes; raced duplicates stay honest through the
+        // server's UNIQUE + the post-commit reconciliation — the photo
+        // flow's precedent, just stretched over pages).
+        var booksLoad = self.fetchTextbooks
+          ? self.fetchTextbooks('english').catch(function () { return null; })
+          : Promise.resolve(null);
+        return Promise.all([
+          self.fetchWords('english').catch(function () { return []; }),
+          booksLoad,
+        ]).then(function (loaded) {
+          self.existingWords = loaded[0] || [];
+          self.books = loaded[1] || [];
+          return self.runPdfPages();
+        });
+      })
+      .then(function (summary) {
+        self.setBusy(false);
+        self.finishPdfRun(summary);
+      })
+      .catch(function (err) {
+        self.setBusy(false);
+        var message = (err && err.message) ? err.message : '未知错误';
+        self.showFormError('PDF 处理失败：' + message + '。可以重试或换一个文件。');
+        if (kit.showToast) {
+          kit.showToast('PDF 处理失败：' + message, 'error');
+        }
+      });
+  };
+
+  /**
+   * runPdfPages — run every PENDING page of the plan sequentially
+   * (onlyPageNo: the single-page retry path). The chain never rejects:
+   * per-page failures are recorded on the plan; the loop keeps going.
+   */
+  PhotoAddForm.prototype.runPdfPages = function (onlyPageNo) {
+    var self = this;
+    var state = this.pdfState;
+    var chain = Promise.resolve();
+    state.plan.pages.forEach(function (page) {
+      if (onlyPageNo && page.no !== onlyPageNo) {
+        return;
+      }
+      chain = chain.then(function () {
+        if (state.aborted || page.status !== 'pending') {
+          return null;
+        }
+        return self.runOnePdfPage(page.no);
+      });
+    });
+    return chain.then(function () {
+      return global.planSummary(state.plan);
+    });
+  };
+
+  /**
+   * runOnePdfPage — render → recognize → merge ONE page. The page's
+   * classified rows replace its segment in this.rows (mergePageRows), so
+   * retries replace instead of duplicating and other pages' edits survive
+   * (AC-2). The textbook meta is taken from the FIRST page that yields
+   * one (AC-6: the book background is confirmed once, never re-entered
+   * per page).
+   */
+  PhotoAddForm.prototype.runOnePdfPage = function (pageNo) {
+    var self = this;
+    var state = this.pdfState;
+    state.plan = global.applyPageEvent(state.plan, pageNo, 'start');
+    this.renderPdfBar();
+    return global.PdfPageRunner.renderPage(state.doc, pageNo)
+      .then(function (blob) {
+        if (!blob) {
+          throw new Error('这页压缩后仍然太大');
+        }
+        return self.recognizePhoto(blob);
+      })
+      .then(function (data) {
+        var entries = data && Array.isArray(data.entries) ? data.entries : [];
+        var meta = data && data.textbook && typeof data.textbook === 'object'
+          ? data.textbook : null;
+        if (!state.metaDone && meta && META_KEYS.concat(['lesson']).some(function (key) {
+          return metaField(meta[key]);
+        })) {
+          self.detectedMeta = meta;
+          state.metaDone = true;
+        }
+        var classified = global.classifyPhotoEntries(entries, self.existingWords);
+        self.rows = global.mergePageRows(self.rows, pageNo, classified);
+        state.plan = global.applyPageEvent(state.plan, pageNo, 'done');
+        // The textbook panel renders with the FIRST rows that land: its
+        // preselect fixes bookChoice, so the reclassify below (and any
+        // mid-run edit) sees the real textbook mode — the ordering the
+        // photo flow gets for free by rendering the panel right after its
+        // single recognition. A retry never rebuilds it.
+        if (!state.panelRendered && self.rows.length) {
+          self.renderTextbookPanel('');
+          state.panelRendered = true;
+        }
+        // Settle cross-page duplicates NOW — the 与第 N 行重复 verdicts
+        // come from classifyPhotoEntries over the whole merged array, and
+        // the preview should show them the moment the page lands.
+        self.reclassify();
+        if (self.rows.length) {
+          self.renderPreview();
+        }
+        self.renderPdfBar();
+      })
+      .catch(function (err) {
+        state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
+          (err && err.message) || '识别失败');
+        self.renderPdfBar();
+      });
+  };
+
+  /**
+   * finishPdfRun — the after-run surface. A run with failed pages says so
+   * (never a whole-file success); an all-failed run leaves the honest
+   * empty preview; otherwise the textbook panel renders ONCE (a retry
+   * must not rebuild it out from under the parent's choices).
+   */
+  PhotoAddForm.prototype.finishPdfRun = function (summary) {
+    var kit = global.__parentFormKit || {};
+    if (!this.pdfState) {
+      return;
+    }
+    if (!this.rows.length) {
+      this.resetEntries();
+      this.renderPreviewHint(summary && summary.failed > 0
+        ? '这一轮没有一页识别成功，请检查文件后重试'
+        : '这次处理没有识别到词表内容');
+      return;
+    }
+    if (!this.pdfState.panelRendered) {
+      this.renderTextbookPanel('');
+      this.pdfState.panelRendered = true;
+    }
+    this.renderPreview();
+    this.discardBtn.hidden = false;
+    if (summary && summary.failed > 0) {
+      this.showFormError('有 ' + summary.failed + ' 页识别失败（在上方状态条可重试失败页）；已完成页的结果不受影响。');
+      if (kit.showToast) {
+        kit.showToast('有 ' + summary.failed + ' 页识别失败，可单独重试', 'error');
+      }
+    }
+  };
+
+  /**
+   * handlePdfRetryPage — one failed page again: pending → run → finish.
+   * Completed pages' rows are untouched (the merge replaces only the
+   * retried page's segment).
+   */
+  PhotoAddForm.prototype.handlePdfRetryPage = function (pageNo) {
+    var self = this;
+    var state = this.pdfState;
+    if (!state || this.recognizeBtn.disabled) {
+      return;
+    }
+    state.aborted = false;
+    state.plan = global.retryPage(state.plan, pageNo);
+    this.showFormError('');
+    this.setBusy(true);
+    this.runPdfPages(pageNo).then(function (summary) {
+      self.setBusy(false);
+      self.finishPdfRun(summary);
+    });
+  };
+
+  /**
+   * renderPdfBar — the per-page status surface: one chip per page (页码 +
+   * 状态， title carries the failure reason), a 重试该页 button on failed
+   * chips, the whole-file summary line, and a 停止 button while running
+   * (AC-3 处理过程显示状态). textContent-only (Pitfall 10).
+   */
+  PhotoAddForm.prototype.renderPdfBar = function () {
+    var self = this;
+    var state = this.pdfState;
+    if (!state) {
+      this.pdfBar.hidden = true;
+      clearEl(this.pdfBar);
+      return;
+    }
+    this.pdfBar.hidden = false;
+    clearEl(this.pdfBar);
+
+    var summary = global.planSummary(state.plan);
+    var line = document.createElement('p');
+    line.className = 'pdf-summary-line';
+    line.textContent = '共 ' + summary.total + ' 页：成功 ' + summary.done +
+      '，失败 ' + summary.failed +
+      (summary.pending ? '，待处理 ' + summary.pending : '') +
+      (summary.running ? '，识别中 ' + summary.running : '');
+    this.pdfBar.appendChild(line);
+
+    var chips = document.createElement('div');
+    chips.className = 'pdf-page-chips';
+    state.plan.pages.forEach(function (page) {
+      var chip = document.createElement('span');
+      chip.className = 'pdf-page-chip pdf-chip-' + page.status;
+      chip.setAttribute('data-page', String(page.no));
+      chip.setAttribute('data-status', page.status);
+      if (page.error) {
+        chip.title = '第 ' + page.no + ' 页：' + page.error;
+      }
+      chip.textContent = '第 ' + page.no + ' 页';
+      if (page.status === 'failed') {
+        var retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'btn btn-secondary pdf-retry-btn';
+        retry.textContent = '重试';
+        retry.setAttribute('aria-label', '重试第 ' + page.no + ' 页');
+        retry.addEventListener('click', function () {
+          self.handlePdfRetryPage(page.no);
+        });
+        chip.appendChild(retry);
+      }
+      chips.appendChild(chip);
+    });
+    this.pdfBar.appendChild(chips);
+
+    if (summary.processing) {
+      var stop = document.createElement('button');
+      stop.type = 'button';
+      stop.className = 'btn btn-secondary pdf-stop-btn';
+      stop.textContent = '停止（保留已完成页）';
+      stop.addEventListener('click', function () {
+        state.aborted = true;
+      });
+      this.pdfBar.appendChild(stop);
+    }
   };
 
   PhotoAddForm.prototype.setBusy = function (busy) {
@@ -1072,6 +1442,9 @@
       }
       next[i].checked = this.rows[i].checked !== false && isCommittable(next[i], textbookMode);
       next[i].lesson = this.rows[i].lesson || '';
+      // Issue #7: the page tag rides every re-classification — the
+      // preview's page grouping and mergePageRows' segment replace read it.
+      next[i].page = this.rows[i].page || 0;
     }
     this.rows = next;
   };
@@ -1081,7 +1454,7 @@
     var self = this;
     clearEl(this.preview);
     if (!this.rows.length) {
-      this.renderPreviewHint('选择照片后点「开始识别」');
+      this.renderPreviewHint('选择照片或 PDF 后点「开始识别」');
       this.updateCommitButton();
       return;
     }
@@ -1105,9 +1478,24 @@
     table.appendChild(thead);
 
     var tbody = document.createElement('tbody');
-    this.rows.forEach(function (row, i) {
-      tbody.appendChild(self.buildReviewRow(row, i, textbookMode));
-    });
+    // Issue #7: PDF rows group under per-page header rows (页码 + that
+    // page's status + a 本页批量课次 mini-toolbar). Photo rows (no page
+    // tag) render flat, exactly as before.
+    var hasPages = this.pdfState && this.rows.some(function (r) { return r.page; });
+    if (hasPages) {
+      global.rowsByPage(this.rows).forEach(function (group) {
+        if (group.no) {
+          tbody.appendChild(self.buildPageHeadRow(group, textbookMode));
+        }
+        group.rows.forEach(function (row) {
+          tbody.appendChild(self.buildReviewRow(row, row.index, textbookMode));
+        });
+      });
+    } else {
+      this.rows.forEach(function (row, i) {
+        tbody.appendChild(self.buildReviewRow(row, i, textbookMode));
+      });
+    }
     table.appendChild(tbody);
     this.preview.appendChild(table);
 
@@ -1127,6 +1515,57 @@
       this.preview.appendChild(datalist);
     }
     this.updateCommitButton();
+  };
+
+  /**
+   * One page's header row (Issue #7): 页码 + the page's row count + the
+   * 本页批量课次 mini-toolbar (US-13/AC-6 — setting one lesson onto a
+   * whole page without touching other pages; the global toolbar stays
+   * available for cross-page selections). The lesson input shares the
+   * page-level datalist rendered right after the table.
+   */
+  PhotoAddForm.prototype.buildPageHeadRow = function (group, textbookMode) {
+    var self = this;
+    var tr = document.createElement('tr');
+    tr.className = 'pdf-page-head';
+    var td = document.createElement('td');
+    td.colSpan = textbookMode ? 5 : 4;
+
+    var state = this.pdfState;
+    var entry = state
+      ? state.plan.pages.filter(function (p) { return p.no === group.no; })[0]
+      : null;
+
+    var label = document.createElement('span');
+    label.className = 'pdf-page-label';
+    label.textContent = '第 ' + group.no + ' 页（' + group.rows.length + ' 条' +
+      (entry && entry.status === 'failed' ? '，本页识别失败' : '') + '）';
+    td.appendChild(label);
+
+    if (textbookMode) {
+      var lessonInput = document.createElement('input');
+      lessonInput.type = 'text';
+      lessonInput.className = 'form-input pdf-page-lesson';
+      lessonInput.setAttribute('list', 'parent-photo-lesson-options');
+      lessonInput.setAttribute('aria-label', '第 ' + group.no + ' 页课次');
+      lessonInput.placeholder = '本页课次（如 第5课）';
+      var apply = document.createElement('button');
+      apply.type = 'button';
+      apply.className = 'btn btn-secondary pdf-page-lesson-apply';
+      apply.textContent = '应用到本页';
+      apply.addEventListener('click', function () {
+        self.rows = global.applyLessonToPage(self.rows, group.no, lessonInput.value.trim());
+        self.renderPreview();
+        if (self.bookDetailHost) {
+          self.renderTextbookDetail(self.bookDetailHost);
+        }
+      });
+      td.appendChild(lessonInput);
+      td.appendChild(apply);
+    }
+
+    tr.appendChild(td);
+    return tr;
   };
 
   /** One editable review row. textContent-only rendering (Pitfall 10). */
@@ -1385,25 +1824,48 @@
       this.updateCommitButton();
       return;
     }
-    if (rows.length > MAX_BATCH_ENTRIES) {
-      this.showFormError('一次最多添加 ' + MAX_BATCH_ENTRIES + ' 个单词，请取消部分勾选后分两次提交');
-      return;
-    }
 
     var unit = this.unitInput ? this.unitInput.value.trim() : '';
-    var entries = rows.map(function (r) {
-      return { word: r.word, meaning: r.meaning, example: '' };
-    });
 
     this.setCommitBusy(true);
-    this.submitWords({ category: 'english', unit: unit, entries: entries })
-      .then(function (result) {
-        var outcome = result || { added: 0, skipped: 0 };
-        // Reconcile ONLY when the server reports skips (a raced duplicate).
-        // A failed snapshot fetch resolves null — "unavailable", NOT an
-        // empty library — so a network blip can never reclassify the
-        // server-confirmed adds as failures (honesty cuts both ways).
-        var reconcile = (outcome.skipped || 0) > 0
+    // Issue #7: a whole textbook can far exceed one add call's entry cap —
+    // the rows go out in MAX_BATCH_ENTRIES-sized slices, sequentially,
+    // with the outcomes aggregated (ADR-0004 #6). A mid-run slice failure
+    // keeps the already-added slices: the receipt reconciles per word from
+    // the real snapshot, and the rows stay for a plain re-confirm (the
+    // server skips what a retry finds already present).
+    var outcome = { added: 0, skipped: 0 };
+    var failedWith = null;
+    var chain = Promise.resolve();
+    chunkRows(rows, MAX_BATCH_ENTRIES).forEach(function (part) {
+      chain = chain.then(function () {
+        if (failedWith) {
+          return null;
+        }
+        return self.submitWords({
+          category: 'english',
+          unit: unit,
+          entries: part.map(function (r) {
+            return { word: r.word, meaning: r.meaning, example: '' };
+          }),
+        }).then(function (result) {
+          outcome.added += (result && result.added) || 0;
+          outcome.skipped += (result && result.skipped) || 0;
+        });
+      });
+    });
+    chain
+      .catch(function (err) {
+        failedWith = err;
+        return null;
+      })
+      .then(function () {
+        // Reconcile on skips (a raced duplicate) OR a mid-run slice
+        // failure (what actually landed matters). A failed snapshot fetch
+        // resolves null — "unavailable", NOT an empty library — so a
+        // network blip can never reclassify server-confirmed adds as
+        // failures (honesty cuts both ways).
+        var reconcile = (outcome.skipped || 0) > 0 || failedWith
           ? self.fetchWords('english').catch(function () { return null; })
           : Promise.resolve(null);
         return reconcile.then(function (fresh) {
@@ -1411,18 +1873,25 @@
             self.existingWords = fresh;
           }
           self.renderCommitResult(outcome, rows, fresh);
+          if (failedWith) {
+            var message = (failedWith && failedWith.message) ? failedWith.message : '未知错误';
+            if (kit.showToast) {
+              kit.showToast('部分提交失败：' + message + '。已添加的部分不会丢失，请重试未完成的部分。', 'error');
+            } else {
+              self.showFormError('部分提交失败：' + message + '。已添加的部分不会丢失，请重试未完成的部分。');
+            }
+            return null;
+          }
           self.onCommitted(outcome);
           // Reset for the next photo; category note and unit retained.
           self.resetAfterCommit();
         });
       })
       .catch(function (err) {
+        // The unexpected (render/parse) path — the submit failures were
+        // already handled above; this never masks them.
         var message = (err && err.message) ? err.message : '未知错误';
-        if (kit.showToast) {
-          kit.showToast('保存失败：' + message + '。内容没有保存，请检查后重试。', 'error');
-        } else {
-          self.showFormError('保存失败：' + message + '。内容没有保存，请检查后重试。');
-        }
+        self.showFormError('保存失败：' + message + '。请检查后重试。');
       })
       .then(function () {
         self.setCommitBusy(false);
@@ -1433,6 +1902,7 @@
   PhotoAddForm.prototype.resetAfterCommit = function () {
     this.currentFile = null;
     this.fileInput.value = '';
+    this.releasePdf();
     this.clearPickUI();
     this.resetEntries();
   };
@@ -1462,10 +1932,9 @@
       this.updateCommitButton();
       return;
     }
-    if (committed.length > MAX_BATCH_ENTRIES) {
-      this.showFormError('一次最多提交 ' + MAX_BATCH_ENTRIES + ' 个单词，请取消部分勾选后分两次提交');
-      return;
-    }
+    // Issue #7: a whole textbook exceeds one call's caps — the add and
+    // assign steps slice themselves (ADR-0004 #6); the parent confirms
+    // ONCE, the slices run sequentially inside the commit.
     var createValues = null;
     if (this.bookChoice === 'new') {
       createValues = this.readCreateForm();
@@ -1503,8 +1972,12 @@
       })
       .catch(function (err) {
         var message = (err && err.message) ? err.message : '未知错误';
+        // Issue #7: a mid-slice add failure leaves earlier slices added —
+        // say so instead of a flat 保存失败.
+        var partial = err && err.partialOutcome && err.partialOutcome.added
+          ? '（已添加 ' + err.partialOutcome.added + ' 个，不会丢失）' : '';
         if (!established) {
-          self.reportCommitError('保存失败：' + message + '。请检查后重试。');
+          self.reportCommitError('保存失败：' + message + partial + '。请检查后重试。');
           return;
         }
         // The book (and possibly its lesson list) DID land; the retry must
@@ -1524,7 +1997,7 @@
             self.renderPreview();
           }
           self.reportCommitError('教材「' + established.name +
-            '」已建立（课次表已更新），但 ' + message +
+            '」已建立（课次表已更新），但 ' + message + partial +
             '。已保存的部分不会丢失；请直接重试。');
         });
       })
@@ -1637,18 +2110,34 @@
       return r.status === 'conflict' && r.resolution === 'adopt';
     });
 
-    var addPromise = addRows.length
-      ? self.submitWords({
-        category: 'english',
-        unit: self.unitInput ? self.unitInput.value.trim() : '',
-        entries: addRows.map(function (r) {
-          return { word: r.word, meaning: r.meaning, example: '' };
-        }),
-      }).catch(function (err) {
-        err.message = '词汇添加失败：' + (err.message || '未知错误');
-        throw err;
-      })
-      : Promise.resolve({ added: 0, skipped: 0 });
+    // Issue #7: the new rows go out in MAX_BATCH_ENTRIES-sized slices,
+    // sequentially, outcomes aggregated (a whole textbook in one confirm).
+    var unit = self.unitInput ? self.unitInput.value.trim() : '';
+    var outcome = { added: 0, skipped: 0 };
+    var addPromise = Promise.resolve();
+    chunkRows(addRows, MAX_BATCH_ENTRIES).forEach(function (part) {
+      addPromise = addPromise.then(function () {
+        return self.submitWords({
+          category: 'english',
+          unit: unit,
+          entries: part.map(function (r) {
+            return { word: r.word, meaning: r.meaning, example: '' };
+          }),
+        }).then(function (result) {
+          outcome.added += (result && result.added) || 0;
+          outcome.skipped += (result && result.skipped) || 0;
+        });
+      });
+    });
+    addPromise = addPromise.then(function () {
+      return outcome;
+    }).catch(function (err) {
+      // What already landed stays landed — thread the partial outcome so
+      // the catch path can say so instead of a flat 保存失败.
+      err.partialOutcome = outcome;
+      err.message = '词汇添加失败：' + (err.message || '未知错误');
+      throw err;
+    });
 
     return addPromise.then(function (outcome) {
       outcome = outcome || { added: 0, skipped: 0 };
@@ -1722,21 +2211,48 @@
     return chain.then(function () { return results; });
   };
 
-  /** Step 4 — run the assign calls sequentially, keeping each outcome. */
+  /**
+   * Step 4 — run the assign calls sequentially, keeping each outcome.
+   * Issue #7: a group can carry a whole textbook's cards, so each
+   * (lesson, includeInScope) group is further sliced into
+   * MAX_ASSIGN_IDS-sized calls (the server's batch-ids cap) — the receipt
+   * keeps one outcome per slice with the slice's own words.
+   */
   PhotoAddForm.prototype.runAssignments = function (book, groups) {
     var self = this;
     var results = [];
     var chain = Promise.resolve();
     groups.forEach(function (group) {
-      chain = chain.then(function () {
-        return self.assignWords(book.id, {
-          cardIds: group.cardIds,
-          lesson: group.lesson,
-          includeInScope: group.includeInScope,
-        }).then(function (result) {
-          results.push({ group: group, ok: true, result: result });
-        }).catch(function (err) {
-          results.push({ group: group, ok: false, error: (err && err.message) || '未知错误' });
+      var pairs = (group.cardIds || []).map(function (id, i) {
+        return { id: id, word: (group.words || [])[i] || '' };
+      });
+      chunkRows(pairs, MAX_ASSIGN_IDS).forEach(function (part) {
+        chain = chain.then(function () {
+          return self.assignWords(book.id, {
+            cardIds: part.map(function (p) { return p.id; }),
+            lesson: group.lesson,
+            includeInScope: group.includeInScope,
+          }).then(function (result) {
+            results.push({
+              group: {
+                lesson: group.lesson,
+                includeInScope: group.includeInScope,
+                words: part.map(function (p) { return p.word; }),
+              },
+              ok: true,
+              result: result,
+            });
+          }).catch(function (err) {
+            results.push({
+              group: {
+                lesson: group.lesson,
+                includeInScope: group.includeInScope,
+                words: part.map(function (p) { return p.word; }),
+              },
+              ok: false,
+              error: (err && err.message) || '未知错误',
+            });
+          });
         });
       });
     });
@@ -2140,9 +2656,12 @@
   /**
    * 放弃识别结果: the draft is client-side only — dropping it provably
    * leaves the library untouched (nothing was written at recognition).
+   * A PDF draft also releases the pdf.js document (page retries end with
+   * the draft — Issue #7).
    */
   PhotoAddForm.prototype.handleDiscard = function () {
     var kit = global.__parentFormKit || {};
+    this.releasePdf();
     this.resetEntries();
     this.showFormError('');
     if (kit.clearContainer) {
@@ -2196,4 +2715,8 @@
   global.isResolved = isResolved;
   global.planAssignments = planAssignments;
   global.buildTextbookReceipt = buildTextbookReceipt;
+  // Issue #7: the upload budget's ONE encoder — parent-pdf.js's page
+  // renderer walks the same ladder and cap the photo path uses.
+  global.PHOTO_QUALITY_LADDER = QUALITY_LADDER;
+  global.PHOTO_MAX_UPLOAD_BYTES = MAX_UPLOAD_BYTES;
 })(typeof window !== 'undefined' ? window : this);

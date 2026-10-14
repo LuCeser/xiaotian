@@ -40,7 +40,7 @@ Issue #7 明确「无需拆文件」（US-2）。
 ## Consequences
 
 - 浏览器新增约 2MB 静态资源（pdf.js 主文件＋worker，`?v=` 缓存破坏，一次加载）；iPad Safari 实机检查（AC-7）为人工验收项。
-- e2e 桩按页图字节注册固定响应：页图由浏览器 canvas 生成，字节确定性依赖固定的 Playwright／Chromium 版本；版本升级若致漂移，用捕获流程重录（mimo-stub 新增 `--save-unregistered` 落盘未注册图片）。mimo-stub 同时新增「先失败一次」夹具标记（`<name>.failonce`），支撑页级失败→重试成功的回归。
+- e2e 桩按页图字节注册固定响应：页图由浏览器 canvas 生成，字节确定性依赖固定的 Playwright／Chromium 版本；版本升级若致漂移，用捕获流程重录（mimo-stub 新增 `--save-unregistered` 落盘未注册图片）。mimo-stub 同时新增「先失败 N 次」夹具标记（`<name>.failcount`，N 覆盖服务端视觉调用自身的重试次数），支撑页级失败→重试成功的回归。
 - 超限文件在客户端即被拒绝并说明原因；服务端单图上限继续作为每页请求的兜底。
 - 100 页 × 每页一次视觉调用是「受控批量」的预期成本；进度 UI 承载家长等待体验。
 - pdfjs-dist 以 devDependency 固定版本，构建产物复制进 `pkg/web/static/vendor/pdfjs/`（附带许可证文件），有同步脚本可重放。

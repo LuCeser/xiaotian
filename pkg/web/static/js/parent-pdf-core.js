@@ -17,11 +17,12 @@
  *     status machine (AC-3 处理过程显示状态, AC-4 失败页可单独重试).
  *     applyPageEvent/retryPage return a NEW plan — the old one is never
  *     mutated, so re-render diffing stays honest.
- *   - mergePageRows/flattenPageRows keep multi-page results IN PAGE ORDER
- *     regardless of completion order, and re-recognizing a page REPLACES
- *     that page's rows (AC-2 不乱序、不重复; the cross-page same-word dedup
- *     itself rides classifyPhotoEntries over the flattened array — the
- *     single-photo duplicate semantics extended to the whole book).
+ *   - mergePageRows keeps multi-page results IN PAGE ORDER regardless of
+ *     completion order, and re-recognizing a page REPLACES that page's
+ *     segment (AC-2 不乱序、不重复; edits to other pages' rows survive;
+ *     the cross-page same-word dedup itself rides classifyPhotoEntries
+ *     over the merged array — the single-photo duplicate semantics
+ *     extended to the whole book).
  *   - rowsByPage/applyLessonToPage back the per-page lesson batch (AC-6 可
  *     批量调整课次); chunkBatch slices the commit into the server's batch
  *     caps (100 entries per add call, 500 ids per assign call) so a whole
@@ -151,18 +152,23 @@
   }
 
   /**
-   * mergePageRows — fold ONE page's classified rows into the page map.
-   * Merging the SAME page again REPLACES its rows (the retry contract:
-   * re-recognition can never duplicate what it already produced). The rows
-   * are tagged page=no here — the one place the page attribution lands on
-   * a row (AC-1 保留结果所属页面; preview-level metadata, ADR-0004 #3).
+   * mergePageRows — replace ONE page's segment in the row array. this.rows
+   * stays the single source of truth (edits the parent already made to
+   * OTHER pages' rows survive every merge by reference); the page's old
+   * rows are dropped and the freshly classified ones inserted at the
+   * page's position (after smaller page numbers, before larger ones), so
+   * out-of-order completion (a retried page) can never disorder the array.
+   * New rows are tagged page=no here — the one place the page attribution
+   * lands on a row (AC-1 保留结果所属页面; preview-level metadata,
+   * ADR-0004 #3) — and every row is re-indexed to its global position:
+   * index === position-in-array is the invariant the conflict radios and
+   * cell edit handlers rely on (form.rows[index]).
    */
-  function mergePageRows(pageRows, pageNo, rows) {
-    var next = {};
-    Object.keys(pageRows || {}).forEach(function (no) {
-      next[no] = pageRows[no];
+  function mergePageRows(rows, pageNo, pageRows) {
+    var kept = (rows || []).filter(function (row) {
+      return !row || (row.page || 0) !== pageNo;
     });
-    next[pageNo] = (rows || []).map(function (row) {
+    var tagged = (pageRows || []).map(function (row) {
       var copy = {};
       Object.keys(row || {}).forEach(function (key) {
         copy[key] = row[key];
@@ -170,27 +176,22 @@
       copy.page = pageNo;
       return copy;
     });
-    return next;
-  }
-
-  /**
-   * flattenPageRows — the page map as ONE row array in page order (holes
-   * for pending/failed pages simply absent), each row re-indexed to its
-   * global position. index === position-in-array is the invariant the
-   * conflict radios and cell edit handlers rely on (form.rows[index]).
-   */
-  function flattenPageRows(pageRows) {
-    var rows = [];
-    Object.keys(pageRows || {})
-      .map(Number)
-      .sort(function (a, b) { return a - b; })
-      .forEach(function (no) {
-        (pageRows[no] || []).forEach(function (row) {
-          row.index = rows.length;
-          rows.push(row);
-        });
-      });
-    return rows;
+    var merged = [];
+    var inserted = false;
+    kept.forEach(function (row) {
+      if (!inserted && (row.page || 0) > pageNo) {
+        merged = merged.concat(tagged);
+        inserted = true;
+      }
+      merged.push(row);
+    });
+    if (!inserted) {
+      merged = merged.concat(tagged);
+    }
+    merged.forEach(function (row, i) {
+      row.index = i;
+    });
+    return merged;
   }
 
   /**
@@ -266,7 +267,6 @@
   global.retryPage = retryPage;
   global.planSummary = planSummary;
   global.mergePageRows = mergePageRows;
-  global.flattenPageRows = flattenPageRows;
   global.rowsByPage = rowsByPage;
   global.applyLessonToPage = applyLessonToPage;
   global.chunkBatch = chunkBatch;
