@@ -77,6 +77,8 @@ module.exports = defineConfig({
       reuseExistingServer: false,
       env: {
         ...process.env,
+        HTA_SERVER_ADDR: '127.0.0.1:18280',
+        HTA_SERVER_HEALTHADDR: '127.0.0.1:18281',
         HTA_PYTHON_INTERPRETER: resolvePython(),
         HTA_PYTHON_VOCABDBPATH: path.join(isolatedRoot, 'vocab.db'),
         HTA_PYTHON_DATADIR: isolatedRoot,

@@ -64,7 +64,7 @@ test('UAT-1/2: completed lesson visible as 已保存; browsing is read-zero-writ
 });
 
 test('UAT-3: in-progress lesson API/UI hide word surfaces', async ({ page, request }) => {
-  const id = 'e2e-family-progress';
+  const id = 'r0-20261014-progress';
   seedLesson({
     lessonId: id,
     stage: 'checking',
@@ -103,7 +103,7 @@ test('UAT-3: in-progress lesson API/UI hide word surfaces', async ({ page, reque
 });
 
 test('UAT-4: unchecked close shows 未核对 + 已保存兜底', async ({ page }) => {
-  const id = 'e2e-family-unchecked';
+  const id = 'r0-20261014-unchecked';
   seedLesson({
     lessonId: id,
     stage: 'submitted',
@@ -153,7 +153,7 @@ test('UAT-5: practice row is 加练 and never implies FSRS', async ({ page }) =>
 });
 
 test('UAT-6: pending receipt surfaces as 待核实', async ({ page }) => {
-  const id = 'e2e-family-pending';
+  const id = 'r0-20261014-pending';
   seedLesson({
     lessonId: id,
     stage: 'submitted',

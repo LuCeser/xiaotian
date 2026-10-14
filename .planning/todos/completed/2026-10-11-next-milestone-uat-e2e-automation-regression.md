@@ -30,3 +30,11 @@ files:
 2. **沿 tests/e2e-rt/real/ 范式资产化扩展 L3**：隔离实例（独立端口＋独立 db＋钉死 `rt.lessonId=e2e-*`）＋播种固定词表＋净零生命周期（finally 清理、幂等）＋断言矩阵固化＋driver/fixtures/配置模板入库。
 3. **目标形态**：本地一条命令（Windows 可跑）执行全量回归（现 `npm run e2e:rt`、`e2e:rt-real` 的超集），「新修改后完整回归」成为常规动作。
 4. **合并 ROADMAP.md:294 deferred 项**（13.3 十项）作为其中子集。
+
+
+## Completion
+
+- status: done
+- completed: 2026-10-14
+- delivery: docs/E2E-COVERAGE-MATRIX.md, npm run regress, family-journey / e2e:family / family-nav / rt-observables, L3 driver f_* assertions
+- gate: browser E2E first; iPad/device residual L4 optional

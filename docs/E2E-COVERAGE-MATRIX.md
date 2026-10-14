@@ -79,12 +79,14 @@ Layer legend: see [E2E-ISOLATION-SPEC.md](E2E-ISOLATION-SPEC.md).
 
 `npm run regress` runs (fail-fast):
 
-1. `go test ./... -count=1 -short` (L1)
+1. `go test ./... -count=1 -short` (L1; skips env-sensitive `TestRunProcessGroupKill` / `TestE2E_Story_*`)
 2. `npm test` (Node unit)
-3. `npm run e2e:parent` (L3b hermetic parent + family)
-4. `npm run e2e:rt` (L2 mock tutor + family-nav)
-5. `npm run e2e` when PowerShell launcher available (L3b student vs dev server)
-6. `npm run e2e:family` (L3b force-mode + nav extras on hermetic stack)
-7. `npm run e2e:rt-real` when `.env` + venv present (L3s); otherwise prints a hard prerequisite error if `--require-real` is set
+3. `npm run e2e:parent` (L3b hermetic parent + family-journey)
+4. `npm run e2e:rt` (L2 mock tutor + family-nav + rt-observables)
+5. `npm run e2e:family` (L3b forceStudentMode)
+6. `npm run e2e` when PowerShell launcher available (L3b student vs dev server)
+7. `npm run e2e:rt-real` when `.env` present (L3s); `--require-real` makes it mandatory
+
+Cloud/Linux subset verified 2026-10-14: steps 1–5 green (`--skip-real --skip-student`).
 
 Isolation iron rule unchanged: no suite may default to a production port or production vocab DB.

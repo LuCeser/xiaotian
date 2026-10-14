@@ -1,14 +1,15 @@
 /**
  * Seed Go-owned lesson / receipt / practice rows into the hermetic parent
- * e2e SQLite DB (PARENT_E2E_DB). Used by family-journey browser specs so
- * parent.html assertions do not depend on a full realtime voice lesson.
- *
- * Iron rule: only the isolated temp DB from playwright.parent.config.js —
- * never .hta-data or any production path.
+ * e2e SQLite DB (PARENT_E2E_DB). Uses the repo venv Python + sqlite3 so WAL
+ * access matches the service (node:sqlite readOnly struggled against the
+ * live writer). Never touches .hta-data / production paths.
  */
 // @ts-check
 const fs = require('node:fs');
-const { DatabaseSync } = require('node:sqlite');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+const ROOT = path.resolve(__dirname, '..', '..', '..');
 
 function dbPath() {
   const p = process.env.PARENT_E2E_DB;
@@ -21,67 +22,91 @@ function dbPath() {
   return p;
 }
 
-function sleepMs(ms) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    /* spin — keep helper free of Atomics/SharedArrayBuffer requirements */
+function resolvePython() {
+  if (process.env.HTA_PYTHON_INTERPRETER && fs.existsSync(process.env.HTA_PYTHON_INTERPRETER)) {
+    return process.env.HTA_PYTHON_INTERPRETER;
   }
+  const candidates = [
+    path.join(ROOT, 'third_party', 'python', '.venv', 'bin', 'python'),
+    path.join(ROOT, 'third_party', 'python', '.venv', 'Scripts', 'python.exe'),
+    path.join(ROOT, '.venv', 'bin', 'python'),
+    path.join(ROOT, 'venv', 'bin', 'python'),
+  ];
+  const found = candidates.find((c) => fs.existsSync(c));
+  if (!found) {
+    throw new Error('no venv python for seed-lessons helper');
+  }
+  return found;
+}
+
+function py(script, args = [], timeoutMs = 90_000) {
+  return execFileSync(resolvePython(), ['-c', script, ...args], {
+    encoding: 'utf8',
+    cwd: ROOT,
+    timeout: timeoutMs,
+  });
 }
 
 /** Wait until the service has created/migrated the DB file. */
 function waitForDb(timeoutMs = 60_000) {
   const p = dbPath();
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (fs.existsSync(p)) {
-      try {
-        const db = new DatabaseSync(p, { readOnly: true });
-        const row = db.prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name='lessons'",
-        ).get();
-        db.close();
-        if (row) return p;
-      } catch {
-        // migrate in progress
-      }
+  const script = `
+import sqlite3, sys, time
+db = sys.argv[1]
+deadline = time.time() + float(sys.argv[2])
+last = ''
+while time.time() < deadline:
+    try:
+        con = sqlite3.connect(db, timeout=5)
+        row = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='lessons'"
+        ).fetchone()
+        con.close()
+        if row:
+            print('ok')
+            raise SystemExit(0)
+        last = 'no lessons table yet'
+    except Exception as e:
+        last = str(e)
+    time.sleep(0.1)
+print('timeout: ' + last)
+raise SystemExit(2)
+`;
+  try {
+    const out = py(script, [p, String(timeoutMs / 1000)], timeoutMs + 5_000);
+    if (!out.includes('ok')) {
+      throw new Error(out.trim() || 'waitForDb failed');
     }
-    sleepMs(100);
+    return p;
+  } catch (err) {
+    const msg = (err && err.stdout) ? String(err.stdout)
+      : (err && err.message) ? String(err.message) : String(err);
+    throw new Error(`timed out waiting for migrated lessons table at ${p}: ${msg}`);
   }
-  throw new Error(`timed out waiting for migrated lessons table at ${p}`);
 }
 
-function openRw() {
+function execSQL(sql, paramsJson) {
   waitForDb();
-  // Service holds WAL; retry briefly on SQLITE_BUSY.
-  let lastErr;
-  for (let i = 0; i < 40; i++) {
-    try {
-      const db = new DatabaseSync(dbPath());
-      db.exec('PRAGMA busy_timeout=5000');
-      return db;
-    } catch (err) {
-      lastErr = err;
-      sleepMs(50);
-    }
-  }
-  throw lastErr || new Error('openRw failed');
-}
-
-function withRetry(fn) {
-  let lastErr;
-  for (let i = 0; i < 40; i++) {
-    const db = openRw();
-    try {
-      fn(db);
-      db.close();
-      return;
-    } catch (err) {
-      try { db.close(); } catch { /* ignore */ }
-      lastErr = err;
-      sleepMs(50);
-    }
-  }
-  throw lastErr || new Error('withRetry failed');
+  const script = `
+import sqlite3, sys, json
+db, sql, params = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+con = sqlite3.connect(db, timeout=30)
+con.execute('PRAGMA busy_timeout=5000')
+for attempt in range(40):
+    try:
+        con.execute(sql, params)
+        con.commit()
+        print('ok')
+        break
+    except sqlite3.OperationalError as e:
+        if 'locked' in str(e).lower() and attempt < 39:
+            import time; time.sleep(0.05)
+            continue
+        raise
+con.close()
+`;
+  py(script, [dbPath(), sql, JSON.stringify(paramsJson)]);
 }
 
 const CARDS_THREE = JSON.stringify([
@@ -117,12 +142,11 @@ function seedLesson(opts) {
     outcomesJson = '{}',
     createdAt = '2026-10-14 12:00:00',
   } = opts;
-  withRetry((db) => {
-    db.prepare(
-      `INSERT OR REPLACE INTO lessons
-        (lesson_id, words, cards, current_index, version, stage, outcomes, verdicts, unchecked, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?)`,
-    ).run(
+  execSQL(
+    `INSERT OR REPLACE INTO lessons
+      (lesson_id, words, cards, current_index, version, stage, outcomes, verdicts, unchecked, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?)`,
+    [
       lessonId,
       '["alpha","bravo","charlie"]',
       cardsJson,
@@ -133,8 +157,8 @@ function seedLesson(opts) {
       unchecked,
       createdAt,
       createdAt,
-    );
-  });
+    ],
+  );
 }
 
 /**
@@ -144,18 +168,18 @@ function seedLesson(opts) {
  *   kind: string,
  *   status: 'pending'|'saved'|'failed',
  *   requested?: string[],
+ *   createdAt?: string,
  * }} opts
  */
 function seedReceipt(opts) {
   const requested = JSON.stringify(opts.requested || ['alpha', 'bravo', 'charlie']);
   const updated = opts.status === 'saved' ? requested : '[]';
   const completedAt = opts.status === 'pending' ? '' : opts.createdAt || '2026-10-14 12:01:00';
-  withRetry((db) => {
-    db.prepare(
-      `INSERT INTO lesson_save_receipts
-        (lesson_id, request_id, kind, requested, updated, missing, status, created_at, completed_at)
-       VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?)`,
-    ).run(
+  execSQL(
+    `INSERT INTO lesson_save_receipts
+      (lesson_id, request_id, kind, requested, updated, missing, status, created_at, completed_at)
+     VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?)`,
+    [
       opts.lessonId,
       opts.requestId,
       opts.kind,
@@ -164,40 +188,43 @@ function seedReceipt(opts) {
       opts.status,
       opts.createdAt || '2026-10-14 12:00:00',
       completedAt,
-    );
-  });
+    ],
+  );
 }
 
 /**
  * @param {{ lessonId: string, word: string, rating?: string, correct?: number, day?: string }} opts
  */
 function seedPracticeWord(opts) {
-  withRetry((db) => {
-    db.prepare(
-      `INSERT INTO practice_logs
-        (lesson_id, word, rating, correct, hints, reviewed_at, reviewed_day)
-       VALUES (?, ?, ?, ?, 0, datetime('now'), ?)`,
-    ).run(
+  execSQL(
+    `INSERT INTO practice_logs
+      (lesson_id, word, rating, correct, hints, reviewed_at, reviewed_day)
+     VALUES (?, ?, ?, ?, 0, datetime('now'), ?)`,
+    [
       opts.lessonId,
       opts.word,
       opts.rating || 'good',
       opts.correct == null ? 1 : opts.correct,
       opts.day || '2026-10-14',
-    );
-  });
+    ],
+  );
 }
 
 /** @returns {number} */
 function countReviewLogs() {
-  const db = openRw();
-  try {
-    const row = db.prepare('SELECT COUNT(*) AS c FROM review_logs').get();
-    db.close();
-    return row ? Number(row.c) : 0;
-  } catch {
-    db.close();
-    return 0;
-  }
+  waitForDb();
+  const script = `
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1], timeout=30)
+try:
+    n = con.execute('SELECT COUNT(*) FROM review_logs').fetchone()[0]
+except Exception:
+    n = 0
+print(n)
+con.close()
+`;
+  const out = py(script, [dbPath()]);
+  return parseInt(out.trim(), 10) || 0;
 }
 
 module.exports = {
