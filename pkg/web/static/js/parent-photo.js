@@ -1918,9 +1918,9 @@
           if (failedWith) {
             var message = (failedWith && failedWith.message) ? failedWith.message : '未知错误';
             if (kit.showToast) {
-              kit.showToast('部分提交失败：' + message + '。已添加的部分不会丢失，请重试未完成的部分。', 'error');
+              kit.showToast('部分添加失败：' + message + '。已添加的部分不会丢失，请重试未完成的部分。', 'error');
             } else {
-              self.showFormError('部分提交失败：' + message + '。已添加的部分不会丢失，请重试未完成的部分。');
+              self.showFormError('部分添加失败：' + message + '。已添加的部分不会丢失，请重试未完成的部分。');
             }
             return null;
           }

@@ -131,6 +131,8 @@
     var kit = global.__parentFormKit;
     if (kit && kit.showToast) {
       kit.showToast(message, kind);
+    } else if (global.console && global.console.warn) {
+      global.console.warn('[parent-textbook] toast(' + kind + '): ' + message);
     }
   }
 
@@ -143,10 +145,42 @@
     }
   }
 
-  /** Field builder on top of the modal kit (null-checks the kit). */
+  /**
+   * Field builder on top of the modal kit (null-checks the kit). Falls
+   * back to a bare field scaffold when the kit is unavailable so callers
+   * can always read .field/.input/.error without a TypeError.
+   */
   function modalField(labelText, id, isTextarea) {
     var kit = modalKit();
-    return kit.buildModalField(labelText, id, isTextarea);
+    if (kit && typeof kit.buildModalField === 'function') {
+      return kit.buildModalField(labelText, id, isTextarea);
+    }
+    var field = document.createElement('div');
+    field.className = 'form-field';
+    var label = document.createElement('label');
+    label.className = 'form-label';
+    label.setAttribute('for', id);
+    label.textContent = labelText;
+    var input;
+    if (isTextarea) {
+      input = document.createElement('textarea');
+      input.rows = 3;
+      input.className = 'form-textarea';
+    } else {
+      input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'form-input';
+    }
+    input.id = id;
+    input.name = id;
+    input.setAttribute('autocomplete', 'off');
+    var error = document.createElement('p');
+    error.className = 'form-error';
+    error.setAttribute('aria-live', 'polite');
+    field.appendChild(label);
+    field.appendChild(input);
+    field.appendChild(error);
+    return { field: field, input: input, error: error };
   }
 
   /**
@@ -205,7 +239,7 @@
 
         var hint = document.createElement('p');
         hint.className = 'form-hint';
-        hint.textContent = '每本教材单独记录已学进度；已学完第 N 课包含第 N 课，之后的课次不会自动选入默写。进入默写范围表示可以被安排，不代表下一课练全部内容。';
+        hint.textContent = '每本教材单独记录已学进度；已学完第 N 课包含第 N 课，之后的课次不会自动选入默写范围。进入默写范围表示可以被安排，不代表下一课练全部内容。';
         body.appendChild(hint);
 
         renderManagerList(listHost, close);
@@ -281,7 +315,7 @@
         var cancel = document.createElement('button');
         cancel.type = 'button';
         cancel.className = 'btn btn-secondary';
-        cancel.textContent = '关闭';
+        cancel.textContent = '取消';
         cancel.addEventListener('click', close);
         actions.appendChild(cancel);
 
@@ -349,7 +383,7 @@
         }));
       });
     }).catch(function () {
-      note.textContent = '教材读取失败，请重试';
+      note.textContent = '教材信息读取失败，请重试';
     });
   }
 
@@ -582,13 +616,13 @@
 
         var scopeHint = document.createElement('p');
         scopeHint.className = 'form-hint';
-        scopeHint.textContent = '选「待确认」的词先不参与自动默写，等确认课次或勾选加入范围。';
+        scopeHint.textContent = '选「待确认」的词先不自动加入默写范围，确认课次或勾选后即可加入。';
         body.appendChild(scopeHint);
 
         var submit = document.createElement('button');
         submit.type = 'button';
         submit.className = 'btn btn-primary';
-        submit.textContent = '确定指定';
+        submit.textContent = '确认指定';
         submit.disabled = true;
         submit.addEventListener('click', function () {
           var bookId = parseInt(bookSelectEl.value, 10);
@@ -650,7 +684,7 @@
             fillLessonOptions(lessonSelect, found);
           });
         }).catch(function () {
-          booksNote.textContent = '教材读取失败，请关闭后重试';
+          booksNote.textContent = '教材信息读取失败，请关闭后重试';
         });
       },
     });

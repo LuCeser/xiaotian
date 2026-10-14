@@ -52,6 +52,10 @@
   function toast(message, variant) {
     if (typeof global.__parentToast === 'function') {
       global.__parentToast(message, variant);
+    } else if (global.console && typeof global.console.warn === 'function') {
+      // No toast host registered: log so the feedback is not silently lost
+      // (no new UI element is introduced here).
+      global.console.warn('[parent-browse] toast(' + (variant || 'info') + '): ' + message);
     }
   }
 
@@ -409,11 +413,11 @@
     this.bulkEnableBtn = document.createElement('button');
     this.bulkEnableBtn.type = 'button';
     this.bulkEnableBtn.className = 'btn btn-secondary';
-    this.bulkEnableBtn.textContent = '加入默写';
+    this.bulkEnableBtn.textContent = '加入默写范围';
     this.bulkDisableBtn = document.createElement('button');
     this.bulkDisableBtn.type = 'button';
     this.bulkDisableBtn.className = 'btn btn-secondary';
-    this.bulkDisableBtn.textContent = '移出默写';
+    this.bulkDisableBtn.textContent = '移出默写范围';
     this.bulkEnableBtn.disabled = true;
     this.bulkDisableBtn.disabled = true;
     this.bulkEnableBtn.addEventListener('click', function () { self.applyBulkParticipation(true); });
@@ -509,10 +513,10 @@
     this.updateSelectionControls();
     this.setParticipation(ids.map(Number), enabled).then(function () {
       self.selectedIds = {};
-      toast(enabled ? '已加入默写计划' : '已移出默写计划', 'success');
+      toast(enabled ? '已加入默写范围' : '已移出默写范围', 'success');
       return self.refresh();
     }).catch(function (err) {
-      toast('批量更新失败：' + participationErrorMessage(err) + '。已重新读取当前状态。', 'error');
+      toast((enabled ? '加入默写范围失败：' : '移出默写范围失败：') + participationErrorMessage(err) + '。已重新读取当前状态。', 'error');
       return self.refresh();
     }).then(function () {
       self.bulkInFlight = false;
@@ -831,7 +835,7 @@
         : (entry.name + (entry.lesson ? '·' + entry.lesson : '·待确认'));
       chip.title = entry.lesson
         ? '教材课次归属：' + entry.name
-        : '课次待确认：不参与自动默写，确认课次或加入范围后生效';
+        : '课次待确认：暂不自动加入默写范围，确认课次或手动加入后生效';
       chips.push(chip);
     });
 
@@ -862,16 +866,16 @@
     var participation = document.createElement('input');
     participation.type = 'checkbox';
     participation.checked = word.participates !== false;
-    participation.setAttribute('aria-label', '参与默写 ' + word.word);
+    participation.setAttribute('aria-label', '加入默写范围 ' + word.word);
     var participationText = document.createElement('span');
-    participationText.textContent = '参与默写';
+    participationText.textContent = '加入默写范围';
     participation.addEventListener('change', function () {
       var wanted = participation.checked;
       participation.disabled = true;
       self.setParticipation([word.id], wanted).then(function () {
-        toast(wanted ? '已加入默写计划' : '已移出默写计划', 'success');
+        toast(wanted ? '已加入默写范围' : '已移出默写范围', 'success');
       }).catch(function (err) {
-        toast('更新失败：' + participationErrorMessage(err) + '。已重新读取当前状态。', 'error');
+        toast((wanted ? '加入默写范围失败：' : '移出默写范围失败：') + participationErrorMessage(err) + '。已重新读取当前状态。', 'error');
       }).then(function () {
         self.refresh();
       });
