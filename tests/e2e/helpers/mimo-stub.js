@@ -16,6 +16,16 @@
 //     <name>.reply.json's content as a plain chat completion; an image with
 //     NO registered reply answers 500 (the "recognition service failed"
 //     path the UI must surface and allow retrying).
+//     Issue #7 additions:
+//       --save-unregistered <dir> — an unmatched image's bytes are written
+//         to <dir>/unreg-<seq>.jpg BEFORE the 500, so the browser-rendered
+//         PDF page images (whose bytes only the real Chromium canvas can
+//         produce) can be captured once and registered as fixtures.
+//       <name>.failcount marker — a sibling file whose TEXT is the number
+//         of LEADING 500s to serve before the canned reply takes over,
+//         exercising the page-level fail → 重试该页 → succeed path. The
+//         count must cover the service's own vision retries (mimo client
+//         defaults to 4 attempts total, so the marker says 4).
 //   POST */chat/completions without an image (LLM/ASR/TTS-shaped calls):
 //     a generic text completion — good enough for incidental classroom
 //     traffic after the assertions the tests care about.
@@ -36,20 +46,33 @@ function argValue(name, fallback) {
 const port = Number(argValue('--port', '18180'));
 const fixturesDir = path.resolve(
   argValue('--root', process.cwd()), argValue('--fixtures', 'tests/e2e/fixtures'));
+const saveUnregistered = argValue('--save-unregistered', '');
+if (saveUnregistered) {
+  fs.mkdirSync(saveUnregistered, { recursive: true });
+}
 
 // One entry per registered fixture: exact image bytes + the canned
-// assistant content from the sibling .reply.json.
+// assistant content from the sibling .reply.json (+ the failcount marker).
 const registered = [];
 for (const name of fs.readdirSync(fixturesDir)) {
   if (!/\.(png|jpe?g)$/i.test(name)) continue;
   const replyFile = path.join(fixturesDir, name.replace(/\.(png|jpe?g)$/i, '.reply.json'));
   if (!fs.existsSync(replyFile)) continue;
+  const failcountFile = path.join(
+    fixturesDir, name.replace(/\.(png|jpe?g)$/i, '.failcount'));
+  let failcount = 0;
+  if (fs.existsSync(failcountFile)) {
+    failcount = Number(fs.readFileSync(failcountFile, 'utf8').trim()) || 0;
+  }
   registered.push({
     name,
     bytes: fs.readFileSync(path.join(fixturesDir, name)),
     content: JSON.parse(fs.readFileSync(replyFile, 'utf8')).content,
+    failcount: failcount,
+    hits: 0,
   });
 }
+let unregSeq = 0;
 
 // findImagePart walks a chat-completions body for the first image_url data
 // part and returns its decoded bytes (null when the request has no image).
@@ -106,10 +129,28 @@ const server = http.createServer((req, res) => {
     const hit = registered.find((r) => r.bytes.equals(image));
     if (!hit) {
       // An unregistered upload: the external service "failed" — the UI
-      // must show the reason and allow retry (Issue #3 acceptance).
+      // must show the reason and allow retry (Issue #3 acceptance). With
+      // --save-unregistered the bytes land on disk first, so browser-
+      // rendered page images can be captured and registered (Issue #7).
+      if (saveUnregistered) {
+        unregSeq += 1;
+        const out = path.join(saveUnregistered, 'unreg-' + String(unregSeq).padStart(3, '0') + '.jpg');
+        fs.writeFileSync(out, image);
+        console.error('[mimo-stub] saved unregistered image: %s', out);
+      }
       console.error('[mimo-stub] no registered reply for a %d-byte image', image.length);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'stub: image not recognized' } }));
+      return;
+    }
+    hit.hits += 1;
+    if (hit.failcount && hit.hits <= hit.failcount) {
+      // The Issue #7 page-retry fixture: lead with the configured number
+      // of 500s (covering the service's own vision retries), then answer
+      // the canned reply — the UI-level 重试该页 then succeeds.
+      console.error('[mimo-stub] failcount %d/%d: %s', hit.hits, hit.failcount, hit.name);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'stub: failcount ' + hit.hits } }));
       return;
     }
     console.error('[mimo-stub] vision reply: %s', hit.name);

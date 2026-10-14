@@ -71,7 +71,7 @@ module.exports = defineConfig({
   testDir: './e2e',
   // Only the parent suites ride this config; the student specs stay on the
   // legacy config (they need the .env-loaded dev service).
-  testMatch: /parent-(management|photo-import|photo-reimport|photo-textbook|textbook-scope)\.spec\.js/,
+  testMatch: /parent-(management|photo-import|pdf-import|photo-reimport|photo-textbook|textbook-scope)\.spec\.js|pdf-capture\.spec\.js/,
   timeout: 120_000,
   retries: 0,
   // One isolated instance, one vocabulary DB: serialize like the legacy
@@ -88,8 +88,14 @@ module.exports = defineConfig({
       // OpenAI-compatible stub the service's mimo client is pointed at
       // (voice.baseUrl + the dummy MIMO_API_KEY below). Everything behind
       // the service — Python bridge, SQLite, the static pages — stays real.
+      // HTA_CAPTURE_PDF_DIR (Issue #7 regen tool) additionally saves every
+      // UNREGISTERED image to that dir before failing it — the pdf-capture
+      // spec turns those saved bytes into new page-image fixtures.
       cwd: repoRoot,
-      command: 'node tests/e2e/helpers/mimo-stub.js --port 18180 --fixtures tests/e2e/fixtures',
+      command: 'node tests/e2e/helpers/mimo-stub.js --port 18180 --fixtures tests/e2e/fixtures' +
+        (process.env.HTA_CAPTURE_PDF_DIR
+          ? ' --save-unregistered ' + process.env.HTA_CAPTURE_PDF_DIR
+          : ''),
       url: 'http://127.0.0.1:18180/healthz',
       reuseExistingServer: false,
       timeout: 20_000,

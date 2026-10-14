@@ -159,69 +159,67 @@ const { classifyPhotoEntries } = photo;
 }
 
 // ----------------------------------------------------------------------
-// C. mergePageRows / flattenPageRows — the ordered per-page merge (AC-2
-//    多页结果不乱序、不重复; pages may COMPLETE out of order when failed
-//    pages are retried, but rows always land in page order).
+// C. mergePageRows — the ordered per-page segment replace (AC-2 多页结果
+//    不乱序、不重复; pages may COMPLETE out of order when failed pages are
+//    retried, but rows always land in page order). this.rows is the single
+//    source of truth: edits to OTHER pages' rows must survive every merge.
 // ----------------------------------------------------------------------
 
-// 11. Pages merged out of completion order still flatten in PAGE order,
-//     every row tagged with its page and re-indexed globally (index must
-//     equal the position in the flattened array — the conflict-radio and
-//     edit handlers address form.rows[index] with it).
+// 11. Pages merged out of completion order still land in PAGE order, every
+//     row tagged with its page and re-indexed globally (index must equal
+//     the position in the array — the conflict-radio and edit handlers
+//     address form.rows[index] with it).
 {
-  let pageRows = {};
-  pageRows = pdf.mergePageRows(pageRows, 2, [
+  let rows = pdf.mergePageRows([], 2, [
     { word: 'sun', meaning: '太阳' },
     { word: 'moon', meaning: '月亮' },
   ]);
-  pageRows = pdf.mergePageRows(pageRows, 1, [
+  rows = pdf.mergePageRows(rows, 1, [
     { word: 'apple', meaning: '苹果' },
   ]);
-  const rows = pdf.flattenPageRows(pageRows);
   assert.deepStrictEqual(rows.map((r) => [r.index, r.page, r.word]), [
     [0, 1, 'apple'],
     [1, 2, 'sun'],
     [2, 2, 'moon'],
   ]);
-  assert.deepStrictEqual(pdf.flattenPageRows({}), []);
+  assert.deepStrictEqual(pdf.mergePageRows(null, 1, []), []);
 }
 
-// 12. Re-recognizing a page REPLACES that page's rows — the retry can never
-//     duplicate what it already produced (AC-2 不重复; AC-4 保留已完成页).
+// 12. Re-recognizing a page REPLACES that page's segment in place — the
+//     retry can never duplicate what it already produced, and the OTHER
+//     pages' row OBJECTS survive untouched (parent edits persist).
 {
-  let pageRows = {};
-  pageRows = pdf.mergePageRows(pageRows, 1, [{ word: 'old', meaning: '' }]);
-  pageRows = pdf.mergePageRows(pageRows, 2, [{ word: 'keep', meaning: '' }]);
-  pageRows = pdf.mergePageRows(pageRows, 1, [
+  let rows = pdf.mergePageRows([], 1, [{ word: 'old', meaning: '' }]);
+  rows = pdf.mergePageRows(rows, 2, [{ word: 'keep', meaning: '原义' }]);
+  const page2Row = rows[1];
+  page2Row.meaning = '家长改过的释义'; // an edit made mid-run
+  rows = pdf.mergePageRows(rows, 1, [
     { word: 'new-a', meaning: '' },
     { word: 'new-b', meaning: '' },
   ]);
-  const rows = pdf.flattenPageRows(pageRows);
-  assert.deepStrictEqual(rows.map((r) => [r.page, r.word]), [
-    [1, 'new-a'],
-    [1, 'new-b'],
-    [2, 'keep'],
+  assert.deepStrictEqual(rows.map((r) => [r.page, r.word, r.meaning]), [
+    [1, 'new-a', ''],
+    [1, 'new-b', ''],
+    [2, 'keep', '家长改过的释义'],
   ]);
+  assert.strictEqual(rows[2], page2Row, 'the surviving row is the SAME object');
 }
 
-// 13. Cross-page same-word dedup rides the EXISTING classifier: flatten
-//     feeds classifyPhotoEntries over the whole array (exactly what
-//     reclassify does on every edit), so a review-unit repeat of page 1's
-//     word on page 4 is an invalid 与第 N 行重复 row — never a second
-//     submittable copy (AC-2).
+// 13. Cross-page same-word dedup rides the EXISTING classifier: reclassify
+//     runs classifyPhotoEntries over the whole merged array, so a
+//     review-unit repeat of page 1's word on page 4 is an invalid 与第 N
+//     行重复 row — never a second submittable copy (AC-2).
 {
-  let pageRows = {};
-  pageRows = pdf.mergePageRows(pageRows, 1, [
+  let rows = pdf.mergePageRows([], 1, [
     { word: 'apple', meaning: '苹果', lesson: '第1课' },
     { word: 'river', meaning: '河流', lesson: '第1课' },
   ]);
-  pageRows = pdf.mergePageRows(pageRows, 4, [
+  rows = pdf.mergePageRows(rows, 4, [
     { word: 'apple', meaning: '苹果', lesson: '第4课' }, // review-unit repeat
     { word: 'goat', meaning: '山羊', lesson: '第4课' },
   ]);
-  const flat = pdf.flattenPageRows(pageRows);
   const reclassified = classifyPhotoEntries(
-    flat.map((r) => ({ word: r.word, meaning: r.meaning, lesson: r.lesson })), []);
+    rows.map((r) => ({ word: r.word, meaning: r.meaning, lesson: r.lesson })), []);
   assert.deepStrictEqual(reclassified.map((r) => [r.word, r.status, r.reason]), [
     ['apple', 'new', ''],
     ['river', 'new', ''],
