@@ -37,7 +37,7 @@ func newRecognizeHandler(t *testing.T, reply string, readErr error, maxBytes int
 			return reply, nil
 		}, maxBytes)
 	return NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-		pipeline, infra.PythonConfig{}, infra.NewNoOpLogger())
+		pipeline, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 }
 
 func TestRecognizeWordPhoto(t *testing.T) {
@@ -212,7 +212,7 @@ func TestRecognizeWordPhoto(t *testing.T) {
 	t.Run("nil recognizer returns 503 recognition_unavailable", func(t *testing.T) {
 		_, lessons, practice, receipts := newLessonTestStores(t)
 		h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-			nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+			nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 		req := httptest.NewRequest(http.MethodPost, "/words/photo/recognize",
 			strings.NewReader(string(jpegPrefix)+"x"))
 		rec := httptest.NewRecorder()

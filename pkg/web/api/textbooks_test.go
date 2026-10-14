@@ -30,7 +30,7 @@ func newTextbookTestHandler(t *testing.T, exec *fakeExecutor, cards *fakeCardRep
 		t.Fatalf("NewTextbookRepository: %v", err)
 	}
 	h := NewHandler(exec, cards, textbooks, lessons, practice, receipts,
-		nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+		nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 	return h, db
 }
 

@@ -61,7 +61,10 @@ const maxStdoutDiagnosticRunes = 300
 // the receipt store for the honest save status (submitted ≠ written-to-FSRS).
 // Since Issue #3, recognizer carries the word-list photo pipeline (nil when
 // the service boots without a vision key — POST /words/photo/recognize then
-// answers 503 recognition_unavailable instead of 404ing).
+// answers 503 recognition_unavailable instead of 404ing). Since Issue #8,
+// generator carries the missing-meaning supplement pipeline (nil without
+// an LLM key — POST /words/meaning/generate answers 503
+// generation_unavailable instead of 404ing).
 type handler struct {
 	exec       pybridge.Executor
 	cards      database.CardRepository
@@ -70,24 +73,27 @@ type handler struct {
 	practice   *lesson.PracticeStore
 	receipts   *lesson.ReceiptStore
 	recognizer *ocr.WordlistPipeline
+	generator  *ocr.MeaningGenerator
 	cfg        infra.PythonConfig
 	logger     infra.Logger
 }
 
 // NewHandler builds the /api/v1 handler with its internal method-pattern
 // ServeMux. Logger may be nil (NewNoOpLogger is substituted, D-47) so
-// tests can construct the handler cheaply. recognizer may be nil (photo
-// recognition unavailable — see the handler struct comment).
-func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
+// tests can construct the handler cheaply. recognizer and generator may
+// be nil (photo recognition / meaning supplement unavailable — see the
+// handler struct comment).
+func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, generator *ocr.MeaningGenerator, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}
-	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, cfg: cfg, logger: logger}
+	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, generator: generator, cfg: cfg, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /words", h.listWords)
 	mux.HandleFunc("POST /words", h.addWords)
 	mux.HandleFunc("POST /words/photo/recognize", h.recognizeWordsPhoto)
+	mux.HandleFunc("POST /words/meaning/generate", h.generateWordMeanings)
 	mux.HandleFunc("GET /units", h.listUnits)
 	mux.HandleFunc("PUT /words/{id}", h.editWord)
 	mux.HandleFunc("PUT /words/participation", h.setWordParticipation)

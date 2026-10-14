@@ -488,6 +488,11 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// answers 503 recognition_unavailable (same RT-10 degraded
 		// semantics as the rt providers above).
 		var wordlistOCR *ocr.WordlistPipeline
+		// Issue #8: the parent missing-meaning supplement pipeline. Nil
+		// when MIMO_API_KEY is absent — POST /words/meaning/generate then
+		// answers 503 generation_unavailable (same RT-10 degraded
+		// semantics as the recognizer above).
+		var meaningGen *ocr.MeaningGenerator
 		// 13.1-03: the check-stage photo OCR reader. Nil when MIMO_API_KEY is
 		// absent — the TurnManager answers photo_chunk with a coded
 		// photo_unavailable error and the check stage keeps working
@@ -586,6 +591,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// type so small PNGs upload verbatim without a canvas re-encode).
 			wordlistOCR = ocr.NewWordlistPipeline(
 				mimoListReader(mimoClient, cfg.Photo.ChatModel), cfg.Photo.MaxImageBytes)
+			// Issue #8: the missing-meaning supplement rides the TEXT chat
+			// model — the mimoChatter adapter the voice intent classifier
+			// uses, type-converted onto the ocr.ChatReader seam (no image
+			// part is involved).
+			meaningGen = ocr.NewMeaningGenerator(
+				ocr.ChatReader(mimoChatter(mimoClient, cfg.Voice.ChatModel)))
 			logger.Info("voice command pipeline enabled",
 				infra.F("component", "infra.main"),
 				infra.F("chat_model", cfg.Voice.ChatModel),
@@ -728,7 +739,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// the word-list photo recognizer (nil without a vision key — the
 		// recognize route then answers 503, keeping the endpoint honest).
 		publicMux.Handle("/api/v1/", http.StripPrefix("/api/v1",
-			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, cfg.Python, logger)))
+			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, meaningGen, cfg.Python, logger)))
 		logger.Info("api v1 mounted",
 			infra.F("component", "infra.main"),
 			infra.F("route", "/api/v1/"),
