@@ -29,7 +29,7 @@
  *      classroom honors the browser-made progress change (≥1.1s apart:
  *      r0x ids are second-granular, two probes in one second would replay
  *      the first's frozen row);
- *   8. orthogonality with #2: 参与默写 unchecked on one eligible word →
+ *   8. orthogonality with #2: 加入默写范围 unchecked on one eligible word →
  *      classroom probe 3 drops exactly that word.
  */
 // @ts-check
@@ -129,7 +129,7 @@ async function assignThroughUI(page, words, textbookLabel, lessonLabel, include)
   if (include) {
     await dialog.locator('#assign-include').check();
   }
-  await dialog.getByRole('button', { name: '确定指定' }).click();
+  await dialog.getByRole('button', { name: '确认指定' }).click();
   await expect(dialog).toBeHidden({ timeout: 15_000 });
 }
 
@@ -146,7 +146,7 @@ async function createTextbook(page, name, lessonsText, edition) {
   await mgr.locator('#tb-lessons').fill(lessonsText);
   await mgr.getByRole('button', { name: '创建教材' }).click();
   await expect(mgr.locator('.textbook-row', { hasText: name })).toBeVisible({ timeout: 15_000 });
-  await mgr.getByRole('button', { name: '关闭' }).click();
+  await mgr.getByRole('button', { name: '取消' }).click();
   await expect(mgr).toBeHidden();
 }
 
@@ -159,7 +159,7 @@ async function setProgress(page, bookName, optionLabel) {
   await row.locator(`select[aria-label="已学进度 ${bookName}"]`)
     .selectOption({ label: optionLabel });
   await expect(row.locator('.textbook-progress')).toContainText(optionLabel, { timeout: 15_000 });
-  await mgr.getByRole('button', { name: '关闭' }).click();
+  await mgr.getByRole('button', { name: '取消' }).click();
   await expect(mgr).toBeHidden();
 }
 
@@ -227,9 +227,9 @@ test('textbook scope: browser-built scope shapes real classroom selection, progr
     // Orthogonal with #2: the participation switch removes one eligible
     // word from selection while every scope rule keeps holding.
     await page.locator(`.word-row[data-word="${WORDS.S2}"]`)
-      .getByRole('checkbox', { name: `参与默写 ${WORDS.S2}` }).uncheck();
+      .getByRole('checkbox', { name: `加入默写范围 ${WORDS.S2}` }).uncheck();
     await expect(page.locator(`.word-row[data-word="${WORDS.S2}"]`)
-      .getByRole('checkbox', { name: `参与默写 ${WORDS.S2}` })).not.toBeChecked();
+      .getByRole('checkbox', { name: `加入默写范围 ${WORDS.S2}` })).not.toBeChecked();
 
     await page.waitForTimeout(1100);
     picked = sorted(await practiceSelection());
