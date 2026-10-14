@@ -131,6 +131,12 @@ type TurnManagerConfig struct {
 	// pages already use. Nil Practice degrades practice_init to a coded
 	// honest error — never a silent fallback into a due lesson.
 	Practice PracticeSource
+	// Examples is the on-demand example-sentence context seam (Issue #9,
+	// ADR-0006): meaning/example intents in the dictation stage resolve the
+	// word's textbook background and learned-word sample through it before
+	// the one generation call. Nil disables generation — the classification
+	// fallback replies still speak honestly (degraded wiring, tests).
+	Examples ExampleSource
 	// PracticeStore is the Go-owned practice-record write seam (13.1-05,
 	// D-12): practice results land HERE and only here — never review_logs,
 	// never the FSRS schedule. A practice session without it answers the
@@ -1133,13 +1139,15 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 }
 
 // dispatchTurn routes a whitelisted intent into the FSM. The switch covers
-// the eight-value intent vocabulary EXHAUSTIVELY — there is no
+// the nine-value dictation intent vocabulary EXHAUSTIVELY — there is no
 // fall-through-to-chat branch left (13-09 Task 1 source contract): confirm
 // drives pacing, pause/resume own the classroom pause bit, repeat/slow
-// re-read the current word from templates, hint/meaning/chat speak the
-// classification reply. Every non-confirm/non-pause reply re-arms the
-// per-word countdown after ITS valid final ack (the 13-09 timer's
-// arm-after-reply-ack rule); pause stops it instead.
+// re-read the current word from templates, hint/meaning/example/chat speak
+// the classification reply — meaning/example first augment it with the
+// on-demand example sentence (Issue #9, example.go). Every
+// non-confirm/non-pause reply re-arms the per-word countdown after ITS
+// valid final ack (the 13-09 timer's arm-after-reply-ack rule); pause stops
+// it instead.
 func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, intent, reply string, target TurnTarget) {
 	switch intent {
 	case intentConfirm:
@@ -1182,7 +1190,19 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		// LLM replies mask on screen in student mode (a leaking hint is still
 		// masked); TTS speaks the reply as generated (D-10).
 		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
-	case intentMeaning:
+	case intentMeaning, intentExample:
+		// Issue #9 (ADR-0006): in the DICTATION stage these two intents
+		// may augment the classification reply with one on-demand example
+		// sentence. The check stage reaches this same case through
+		// checkDispatch with WordIndex=-1 — the guard keeps check-stage
+		// asks on the stored-information path (no generation there).
+		if target.WordIndex >= 0 {
+			augmented, proceed := tm.exampleReply(ctx, epoch, intent, target, reply)
+			if !proceed {
+				return // interrupted mid-generation: abort silently
+			}
+			reply = augmented
+		}
 		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	case intentPause:
 		tm.mu.Lock()

@@ -663,6 +663,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// practice_logs store, never the FSRS schedule.
 			Practice:      cardRepo,
 			PracticeStore: practiceStore,
+			// Issue #9 (ADR-0006): the on-demand example-sentence context
+			// resolver — the same read-only repos the parent pages use
+			// (English card resolution + textbook background + learned-word
+			// sample). Nil would honestly degrade generation to fallback
+			// replies; the live service always wires it.
+			Examples: &rt.ExampleResolver{Cards: cardRepo, Textbooks: textbookRepo},
 			// 13.3-01: the save-receipt store rides the same DI block — the
 			// constructor's fail-fast above guarantees a live store here
 			// (a nil would silently disable receipts).
