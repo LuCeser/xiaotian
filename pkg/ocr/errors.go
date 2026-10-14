@@ -32,6 +32,12 @@ var (
 	// one request (Issue #3's single-photo limit mirrors maxEntries).
 	ErrTooManyEntries = errors.New("ocr: too many word-list entries")
 
+	// ErrEmptyWords is returned by MeaningGenerator.Generate when the
+	// supplement request carries no usable words after trim/dedup — the
+	// HTTP layer maps it to a 400 rather than spending an LLM round trip
+	// on nothing (Issue #8).
+	ErrEmptyWords = errors.New("ocr: no words to supplement")
+
 	// ErrEmptyText is returned when the model reports no recognizable
 	// handwriting (blank photo, unreadable scrawl) — the client offers the
 	// manual-input fallback without a prefilled guess.
