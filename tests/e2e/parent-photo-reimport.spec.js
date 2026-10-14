@@ -47,6 +47,7 @@ const FIXTURE_RENJIAO = path.join(FIXTURES, 'photo-textbook-renjiao.png');
 const BOOK_KEPU = '科普版·小学·三年级·上册·Unit 2';
 const BOOK_RENJIAO = '仁爱版·小学·三年级·上册·Unit 1';
 
+test.describe('Issue #6 acceptance', () => {
 test('re-upload: the same page committed twice creates each word once — ids stable, sources not duplicated, receipt says 合并', async ({ page, request }) => {
   await deleteUnit(request, UNIT);
   try {
@@ -219,4 +220,5 @@ test('definition diff: unresolved stays 待处理差异 with the original kept; 
   } finally {
     await deleteUnit(request, UNIT);
   }
+});
 });

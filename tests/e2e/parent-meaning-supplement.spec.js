@@ -55,6 +55,7 @@ function genButton(page) {
   return page.locator('.photo-meaning-gen-btn');
 }
 
+test.describe('Issue #8 acceptance', () => {
 test('meaning supplement: fills only the blanks, marks them, and the real write keeps the source', async ({ page, request }) => {
   await deleteUnit(request, UNIT);
   try {
@@ -175,4 +176,5 @@ test('meaning supplement: a failed generation is reported honestly and the retry
   } finally {
     await deleteUnit(request, UNIT);
   }
+});
 });

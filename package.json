@@ -5,6 +5,10 @@
     "e2e:parent": "playwright test -c tests/playwright.parent.config.js",
     "e2e:rt": "playwright test -c tests/playwright.rt.config.js",
     "e2e:rt-real": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/e2e-rt/real/run-real.ps1",
+    "e2e:accept": "node scripts/acceptance/run-issue.js",
+    "e2e:accept:6": "node scripts/acceptance/run-issue.js 6",
+    "e2e:accept:7": "node scripts/acceptance/run-issue.js 7",
+    "e2e:accept:8": "node scripts/acceptance/run-issue.js 8",
     "rt-report": "node scripts/rt-timing-report.js",
     "vendor:pdfjs": "node scripts/vendor-pdfjs.js"
   },

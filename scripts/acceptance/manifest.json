@@ -1,0 +1,190 @@
+{
+  "6": {
+    "title": "重复导入保留多来源并确认释义差异",
+    "adr": "docs/adr/0003-content-identity-multi-source.md",
+    "browser": {
+      "config": "tests/playwright.parent.config.js",
+      "grep": "parent-photo-reimport"
+    },
+    "go": {
+      "packages": ["./pkg/pybridge/"],
+      "run": "TestE2E_ReimportIsIdempotent|TestE2E_MultiSourceAtLeastOneLearned|TestE2E_ConfirmedMeaningRidesSelection"
+    },
+    "acceptance": [
+      {
+        "id": "AC-1",
+        "text": "同一词条和释义的重复导入不创建新的学习历史，重复提交不会重复写入。",
+        "evidence": [
+          "browser: re-upload: the same page committed twice…",
+          "go: TestE2E_ReimportIsIdempotent"
+        ]
+      },
+      {
+        "id": "AC-2",
+        "text": "同一词保留多个材料和课次来源；至少一个所属课次已学完即可参与，不被其他未学来源阻止。",
+        "evidence": [
+          "browser: one word, two books…",
+          "go: TestE2E_MultiSourceAtLeastOneLearned"
+        ]
+      },
+      {
+        "id": "AC-3",
+        "text": "相同词面但释义不同的候选在提交前展示差异，家长确认后处理；未解决差异不静默覆盖原释义。",
+        "evidence": [
+          "browser: definition diff…",
+          "go: TestE2E_ConfirmedMeaningRidesSelection"
+        ]
+      },
+      {
+        "id": "AC-4",
+        "text": "保留家长明确的移出选择，不能通过重复导入补充词汇静默重新开启；课程归属与补充参与的组合规则在本任务实现时明确记录并测试。",
+        "evidence": [
+          "browser: one word, two books…（移出／加入范围粘性）",
+          "go: TestE2E_MultiSourceAtLeastOneLearned"
+        ]
+      },
+      {
+        "id": "AC-5",
+        "text": "先定义稳定内容身份、来源关系和释义差异的兼容处理方式，再实施迁移；已有词条标识与学习记录可继续读取。",
+        "evidence": ["docs: ADR-0003 Accepted", "go: 上述 e2e 均在迁移后真实库上读取"]
+      },
+      {
+        "id": "AC-6",
+        "text": "逐项结果区分新增、合并、待处理差异和失败，汇总与实际结果一致。",
+        "evidence": ["browser: 三类场景的 awaitReceipt／result-banner 断言"]
+      },
+      {
+        "id": "AC-7",
+        "text": "隔离真实服务验证重传、重提、不同来源、不同释义及已有学习历史；课堂选词和后续解释使用确认后的正确教材释义。",
+        "evidence": [
+          "browser: practiceSelection 课堂选题探针",
+          "go: TestE2E_ConfirmedMeaningRidesSelection"
+        ]
+      }
+    ],
+    "human_remaining": [],
+    "close": true
+  },
+  "7": {
+    "title": "多页扫描 PDF 导入与逐页结果确认",
+    "adr": "docs/adr/0004-pdf-client-side-page-split.md",
+    "browser": {
+      "config": "tests/playwright.parent.config.js",
+      "grep": "parent-pdf-import"
+    },
+    "go": null,
+    "acceptance": [
+      {
+        "id": "AC-1",
+        "text": "扫描 PDF 可按页识别并复用既有预览、编辑和确认流程，保留结果所属页面及课次。",
+        "evidence": ["browser: whole textbook, cross-lesson…"]
+      },
+      {
+        "id": "AC-2",
+        "text": "多页结果不乱序、不重复；重复提交沿用既有保护，未来来源合并能力通过统一提交入口生效。",
+        "evidence": ["browser: whole textbook…（页序／跨页重复）"]
+      },
+      {
+        "id": "AC-3",
+        "text": "处理过程显示状态；页级识别失败、文件无法读取和大小／页数超限给出明确反馈，不伪称全文件成功。",
+        "evidence": [
+          "browser: partial failure…",
+          "browser: limits…"
+        ]
+      },
+      {
+        "id": "AC-4",
+        "text": "可在保留已完成结果的情况下处理失败页；任何未经家长确认的结果不正式入库。",
+        "evidence": ["browser: partial failure…（重试该页）"]
+      },
+      {
+        "id": "AC-5",
+        "text": "适用于整本教材的受控批量处理；本任务依据现有资源约束落实页数、文件限制和任务执行方式，不引入无界内存处理。",
+        "evidence": ["browser: whole textbook… + limits…", "docs: ADR-0004"]
+      },
+      {
+        "id": "AC-6",
+        "text": "家长不必为每页重复填写同一本教材的背景信息，可批量调整课次。",
+        "evidence": ["browser: whole textbook…（新建教材一次／按页批量课次）"]
+      },
+      {
+        "id": "AC-7",
+        "text": "使用扫描 PDF、部分页失败和跨课次样例验证入库及实际课堂范围，并在 iPad Safari 检查选文件和长预览操作。",
+        "evidence": [
+          "browser: whole textbook…（入库＋课堂范围自动化半段）",
+          "human: iPad Safari 选文件／长预览",
+          "human: 真实 MiMo 视觉服务样例"
+        ]
+      }
+    ],
+    "human_remaining": [
+      "iPad Safari：选文件、长列表预览、本页批量课次、提交（材料 tests/e2e/fixtures/pdf-textbook.pdf）",
+      "真实识别服务：同一 PDF 走真实 MiMo（需 MIMO_API_KEY），核对漏识别、释义、页归属"
+    ],
+    "close": false
+  },
+  "8": {
+    "title": "缺失英语释义按教材语境补充并标明来源",
+    "adr": "docs/adr/0005-generated-meaning-source.md",
+    "browser": {
+      "config": "tests/playwright.parent.config.js",
+      "grep": "parent-meaning-supplement"
+    },
+    "go": {
+      "packages": ["./pkg/pybridge/"],
+      "run": "TestE2E_GeneratedMeaningStoredAndRidesSelection|TestE2E_EditKeepsSource|TestE2E_EmptyMeaningNeverMarked|TestE2E_LegacyDBMigratesMeaningSource"
+    },
+    "unit": {
+      "npm": ["test-parent-photo-meaning.js"]
+    },
+    "acceptance": [
+      {
+        "id": "AC-1",
+        "text": "材料已有释义优先保留，不因模型生成覆盖原文。",
+        "evidence": ["browser: meaning supplement: fills only the blanks…"]
+      },
+      {
+        "id": "AC-2",
+        "text": "仅对缺失英语释义进行补充，显示系统补充标记；词条存储和后续查看保留来源区别。",
+        "evidence": [
+          "browser: fills only the blanks…",
+          "go: TestE2E_GeneratedMeaningStoredAndRidesSelection"
+        ]
+      },
+      {
+        "id": "AC-3",
+        "text": "根据已确认的教材版本、年级／学期和学习进度生成，不单凭地区或年级猜水平。",
+        "evidence": [
+          "unit: npm test → test-parent-photo-meaning.js（提示词背景纯函数）",
+          "docs: ADR-0005"
+        ]
+      },
+      {
+        "id": "AC-4",
+        "text": "家长可编辑或取消该结果，提交后课堂解释读取最终确认释义。",
+        "evidence": [
+          "browser: parent edit keeps the marker…",
+          "go: TestE2E_EditKeepsSource"
+        ]
+      },
+      {
+        "id": "AC-5",
+        "text": "生成失败如实显示，允许保留缺失待处理或重试；不把猜测伪装成教材原文，也不生成古诗／课文原文来填空。",
+        "evidence": [
+          "browser: a failed generation…",
+          "go: TestE2E_EmptyMeaningNeverMarked"
+        ]
+      },
+      {
+        "id": "AC-6",
+        "text": "自动测试验证提示所用背景、来源标记和真实写入；真实样例检查释义正确性和难度，首次流程不要求能力测评。",
+        "evidence": [
+          "unit + browser + go 全套",
+          "human: 真实样例难度抽查（可选，不挡关单）"
+        ]
+      }
+    ],
+    "human_remaining": [],
+    "close": true
+  }
+}
