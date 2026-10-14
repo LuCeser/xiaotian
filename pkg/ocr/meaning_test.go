@@ -182,6 +182,11 @@ func TestMeaningGenerator_Guards(t *testing.T) {
 	if strings.Join(res.Missing, ",") != "banana" {
 		t.Fatalf("Missing = %v, want [banana]", res.Missing)
 	}
+	// The seam prompt carries the SAME normalized list (each word once,
+	// trimmed) — prompt and Missing can never disagree.
+	if strings.Contains(fake.gotUser, " apple ") || strings.Count(fake.gotUser, "apple") != 1 {
+		t.Fatalf("seam prompt not built from the normalized list:\n%s", fake.gotUser)
+	}
 
 	var nilGen = NewMeaningGenerator(nil)
 	if _, err := nilGen.Generate(context.Background(), MeaningRequest{Words: []string{"apple"}}); !errors.Is(err, errNilSeam) {

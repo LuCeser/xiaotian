@@ -65,12 +65,7 @@ for (const name of fs.readdirSync(fixturesDir)) {
   if (!/\.(png|jpe?g)$/i.test(name)) continue;
   const replyFile = path.join(fixturesDir, name.replace(/\.(png|jpe?g)$/i, '.reply.json'));
   if (!fs.existsSync(replyFile)) continue;
-  const failcountFile = path.join(
-    fixturesDir, name.replace(/\.(png|jpe?g)$/i, '.failcount'));
-  let failcount = 0;
-  if (fs.existsSync(failcountFile)) {
-    failcount = Number(fs.readFileSync(failcountFile, 'utf8').trim()) || 0;
-  }
+  const failcount = readFailcount(name);
   registered.push({
     name,
     bytes: fs.readFileSync(path.join(fixturesDir, name)),
@@ -80,6 +75,15 @@ for (const name of fs.readdirSync(fixturesDir)) {
   });
 }
 let unregSeq = 0;
+
+// readFailcount reads a <name>.failcount sibling's leading-500 count
+// (0 when absent/unparsable) — shared by the image and text fixture
+// registrations (one shape, two users).
+function readFailcount(fixtureName) {
+  const file = path.join(fixturesDir, fixtureName.replace(/\.(png|jpe?g|reply\.json)$/i, '.failcount'));
+  if (!fs.existsSync(file)) return 0;
+  return Number(fs.readFileSync(file, 'utf8').trim()) || 0;
+}
 
 // Text-generation fixtures (Issue #8): text-*.reply.json files carrying
 // {match, content} (+ optional failcount sibling). Registered eagerly like
@@ -100,12 +104,7 @@ for (const name of fs.readdirSync(fixturesDir)) {
     console.error('[mimo-stub] skipping %s (need string match+content)', name);
     continue;
   }
-  const failcountFile = path.join(fixturesDir, name.replace(/\.reply\.json$/i, '.failcount'));
-  let failcount = 0;
-  if (fs.existsSync(failcountFile)) {
-    failcount = Number(fs.readFileSync(failcountFile, 'utf8').trim()) || 0;
-  }
-  textRegistered.push({ name, match: def.match, content: def.content, failcount, hits: 0 });
+  textRegistered.push({ name, match: def.match, content: def.content, failcount: readFailcount(name), hits: 0 });
 }
 
 // promptText flattens a chat-completions body's message contents into one

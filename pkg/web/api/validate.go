@@ -45,6 +45,16 @@ const (
 	CategoryChinese = "chinese"
 )
 
+// Meaning-source values (Issue #8 / ADR-0005): the only distinguishable
+// provenance is a system-supplemented meaning; everything else — material
+// original, library legacy, hand-typed — is "material". The Python column
+// and the JS display rule use the same literals (cross-language, one
+// enum, documented here).
+const (
+	MeaningSourceMaterial  = "material"
+	MeaningSourceGenerated = "generated"
+)
+
 // errBadCategory is the internal marker for a category enum violation.
 var errBadCategory = errors.New("category must be english or chinese")
 
@@ -331,8 +341,10 @@ func validateAddRequest(req *AddRequest) string {
 		// Issue #8: the provenance enum is validated at the gate so a
 		// malformed flag fails as 400 invalid_request, never leaking into
 		// the stored column (Python re-normalizes the empty-meaning case).
-		if e.MeaningSource != "" && e.MeaningSource != "material" && e.MeaningSource != "generated" {
-			return fmt.Sprintf("entries[%d].meaning_source must be \"material\" or \"generated\"", i)
+		if e.MeaningSource != "" && e.MeaningSource != MeaningSourceMaterial &&
+			e.MeaningSource != MeaningSourceGenerated {
+			return fmt.Sprintf("entries[%d].meaning_source must be %q or %q",
+				i, MeaningSourceMaterial, MeaningSourceGenerated)
 		}
 	}
 	if n := len([]rune(req.Unit)); n > maxUnitRunes {

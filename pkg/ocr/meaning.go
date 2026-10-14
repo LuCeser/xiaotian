@@ -142,7 +142,7 @@ func NewMeaningGenerator(chat ChatReader) *MeaningGenerator {
 // that answers none of the requested words is NOT an error — every word
 // lands in Missing (the caller shows 生成失败 per row, retryable).
 func (g *MeaningGenerator) Generate(ctx context.Context, req MeaningRequest) (*MeaningResult, error) {
-	words := normalizeMeaningWords(req.Words)
+	words := NormalizeMeaningWords(req.Words)
 	if len(words) == 0 {
 		return nil, ErrEmptyWords
 	}
@@ -153,6 +153,10 @@ func (g *MeaningGenerator) Generate(ctx context.Context, req MeaningRequest) (*M
 		return nil, errNilSeam
 	}
 
+	// The prompt lists the SAME normalized words the reply is filtered
+	// against — a caller passing untrimmed/duplicate words must never see
+	// the prompt and Missing disagree.
+	req.Words = words
 	reply, err := g.chat(ctx, meaningSystemPrompt, BuildMeaningUserPrompt(req))
 	if err != nil {
 		// Double-%w keeps both the sentinel and the upstream cause reachable
@@ -179,9 +183,11 @@ func (g *MeaningGenerator) Generate(ctx context.Context, req MeaningRequest) (*M
 	return out, nil
 }
 
-// normalizeMeaningWords trims, drops empties and de-duplicates (request
-// order preserved) — the words the reply is filtered against.
-func normalizeMeaningWords(words []string) []string {
+// NormalizeMeaningWords trims, drops empties and de-duplicates (request
+// order preserved) — the words a supplement reply is filtered against.
+// Exported so the HTTP gate judges its caps on the SAME effective list
+// (one definition, no twin to drift — the code-review finding).
+func NormalizeMeaningWords(words []string) []string {
 	seen := make(map[string]bool, len(words))
 	out := make([]string, 0, len(words))
 	for _, w := range words {

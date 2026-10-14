@@ -27,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
@@ -50,30 +49,15 @@ type MeaningGenerateRequest struct {
 	LearnedLessons *int `json:"learnedLessons"`
 }
 
-// normalizeMeaningWords trims, drops empties and de-duplicates (request
-// order preserved) — the same normalization the generator applies, run at
-// the gate so the caps judge the EFFECTIVE word list.
-func normalizeMeaningWords(words []string) []string {
-	seen := make(map[string]bool, len(words))
-	out := make([]string, 0, len(words))
-	for _, w := range words {
-		v := strings.TrimSpace(w)
-		if v == "" || seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-	}
-	return out
-}
-
 // validateMeaningGenerateRequest enforces the supplement caps: an
 // effective list of 1..maxEntries words (the add path's batch ceiling —
 // a longer list could never be committed in one request anyway), each
-// within maxWordRunes, and a non-negative learned-lessons gauge. Returns
-// "" on success or the error message on failure.
+// within maxWordRunes, per-field textbook caps (the api habit — a giant
+// string must not ride into the prompt), and a non-negative
+// learned-lessons gauge. Returns "" on success or the error message on
+// failure.
 func validateMeaningGenerateRequest(req *MeaningGenerateRequest) string {
-	words := normalizeMeaningWords(req.Words)
+	words := ocr.NormalizeMeaningWords(req.Words)
 	if len(words) < 1 {
 		return "words must contain at least one non-empty word"
 	}
@@ -83,6 +67,14 @@ func validateMeaningGenerateRequest(req *MeaningGenerateRequest) string {
 	for _, w := range words {
 		if n := len([]rune(w)); n > maxWordRunes {
 			return fmt.Sprintf("a word exceeds %d characters", maxWordRunes)
+		}
+	}
+	for _, v := range []string{
+		req.Textbook.Edition, req.Textbook.Stage, req.Textbook.Grade,
+		req.Textbook.Volume, req.Textbook.Module,
+	} {
+		if n := len([]rune(v)); n > maxTextbookFieldRunes {
+			return fmt.Sprintf("textbook fields must not exceed %d characters", maxTextbookFieldRunes)
 		}
 	}
 	if req.LearnedLessons != nil && *req.LearnedLessons < 0 {
@@ -112,7 +104,7 @@ func (h *handler) generateWordMeanings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := h.generator.Generate(r.Context(), ocr.MeaningRequest{
-		Words:          normalizeMeaningWords(req.Words),
+		Words:          ocr.NormalizeMeaningWords(req.Words),
 		Textbook:       req.Textbook,
 		LearnedLessons: req.LearnedLessons,
 	})

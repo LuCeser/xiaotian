@@ -2454,10 +2454,21 @@
     var chain = Promise.resolve();
     slices.forEach(function (part) {
       chain = chain.then(function () {
+        // Re-read the confirmed context PER SLICE: the textbook select
+        // stays live during a multi-slice run, and each slice's prompt
+        // must be truthful about its own inputs — never a context the
+        // parent already switched away from (code-review finding).
+        var sliceContext = self.meaningContext();
+        if (!sliceContext) {
+          // The parent switched to 不指定教材 mid-run: no confirmed
+          // context grounds further slices — stop honestly (the catch
+          // marks the un-run slices and names what already applied).
+          throw new Error('教材归属已改为不指定，已停止补充');
+        }
         return self.generateMeanings({
           words: part,
-          textbook: context.textbook,
-          learnedLessons: context.learnedLessons,
+          textbook: sliceContext.textbook,
+          learnedLessons: sliceContext.learnedLessons,
         }).then(function (reply) {
           self.rows = global.applyGeneratedMeanings(self.rows, reply || {});
           applied += Object.keys((reply && reply.meanings) || {}).length;

@@ -22,6 +22,18 @@
     return !!row && row.status === 'new' && !row.meaning && row.checked !== false;
   }
 
+  /** shallowCopyRow — the ES5 own-fields copy every row-mutating helper
+   *  below starts from (one shape, three users). */
+  function shallowCopyRow(row) {
+    var next = {};
+    for (var key in row) {
+      if (Object.prototype.hasOwnProperty.call(row, key)) {
+        next[key] = row[key];
+      }
+    }
+    return next;
+  }
+
   /**
    * supplementWords — the distinct words of the eligible rows, row order
    * (the request payload's word list; classifyPhotoEntries already keeps
@@ -67,12 +79,7 @@
         return row;
       }
       var word = String(row.word || '').trim();
-      var next = {};
-      for (var key in row) {
-        if (Object.prototype.hasOwnProperty.call(row, key)) {
-          next[key] = row[key];
-        }
-      }
+      var next = shallowCopyRow(row);
       if (Object.prototype.hasOwnProperty.call(meanings, word)) {
         next.meaning = meanings[word];
         next.meaningSource = 'generated';
@@ -102,12 +109,7 @@
       if (!isSupplementTarget(row) || !set[String(row.word || '').trim()]) {
         return row;
       }
-      var next = {};
-      for (var key in row) {
-        if (Object.prototype.hasOwnProperty.call(row, key)) {
-          next[key] = row[key];
-        }
-      }
+      var next = shallowCopyRow(row);
       next.genFailed = true;
       return next;
     });
@@ -123,12 +125,7 @@
       if (i !== index || !row || row.meaningSource !== 'generated') {
         return row;
       }
-      var next = {};
-      for (var key in row) {
-        if (Object.prototype.hasOwnProperty.call(row, key)) {
-          next[key] = row[key];
-        }
-      }
+      var next = shallowCopyRow(row);
       next.meaning = '';
       next.meaningSource = 'material';
       next.genFailed = false;
