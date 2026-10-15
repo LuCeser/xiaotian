@@ -518,11 +518,11 @@ func TestExit_NoRatingCommit(t *testing.T) {
 // test. Without that "ignore the cancellation" behavior the race cannot be
 // made deterministic.
 type gatedStreamer struct {
-	mu       sync.Mutex
 	words    []string        // wordID of each StreamWord call, in call order
 	gates    []chan struct{} // gate[i] blocks call i until closed
 	returned []chan struct{} // returned[i] is closed when call i returns
 	released []bool          // makes release idempotent (cleanup re-releases)
+	mu       sync.Mutex
 }
 
 func (g *gatedStreamer) StreamWord(ctx context.Context, client tts.Sender, sessionID string, wordID string, startSeq uint32) error {

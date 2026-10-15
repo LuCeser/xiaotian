@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
@@ -14,18 +15,18 @@ import (
 // PCM bytes from SessionCache, slices them into frames, encodes them as WS
 // binary messages, and streams them to clients via Sender.Send with frame pacing.
 type Streamer struct {
-	// cache is the PCM file storage (Plan 06-01)
-	cache *SessionCache
 	// logger is the structured logger
 	logger infra.Logger
-	// cfg holds TTS configuration (timeouts)
-	cfg infra.TTSConfig
+	// cache is the PCM file storage (Plan 06-01)
+	cache *SessionCache
 	// seqCounters holds per-session monotonic audio frame sequence counters
 	// (D-11 fix). Each entry is incremented on every frame send for that
 	// session, replacing the old per-StreamWord reset (currentSeq = i+1).
 	// Entries are deleted on session exit via ClearSeqCounter to bound memory
 	// under the 100-concurrent budget (RESEARCH Pitfall 5).
-	seqCounters   map[string]uint32
+	seqCounters map[string]uint32
+	// cfg holds TTS configuration (timeouts)
+	cfg           infra.TTSConfig
 	seqCountersMu sync.Mutex
 }
 
@@ -110,12 +111,11 @@ func (s *Streamer) StreamWord(ctx context.Context, client Sender, sessionID stri
 		// 4b. Build the WS frame header
 		currentSeq := s.nextSeq(sessionID) // D-11: session-level monotonic seq (cross-word)
 		header := ws.FrameHeader{
-			Version:    ws.ProtocolVersion,
-			MsgType:    ws.MsgTypeAudio,
-			Sequence:   currentSeq,
-			Timestamp:  uint32(time.Now().UnixMicro()),
-			PayloadLen: uint16(len(frames[i])),
-			Reserved:   0,
+			Version:   ws.ProtocolVersion,
+			MsgType:   ws.MsgTypeAudio,
+			Sequence:  currentSeq,
+			Timestamp: uint32(time.Now().UnixMicro()), //nolint:gosec // G115: protocol timestamp keeps the low 32 bits of Unix microseconds
+			Reserved:  0,
 		}
 
 		// 4c. Encode frame and send

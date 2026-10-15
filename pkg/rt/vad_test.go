@@ -30,7 +30,7 @@ func vadSine(amplitude float64, ms int) []byte {
 	buf := make([]byte, samples*2)
 	for i := 0; i < samples; i++ {
 		s := math.Sin(2*math.Pi*float64(i)/vadSinePeriod) * amplitude
-		binary.LittleEndian.PutUint16(buf[i*2:], uint16(int16(math.Round(s))))
+		binary.LittleEndian.PutUint16(buf[i*2:], uint16(int16(math.Round(s)))) //nolint:gosec // G115: s16le PCM bit pattern, not a secret range check
 	}
 	return buf
 }

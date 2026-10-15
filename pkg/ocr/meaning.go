@@ -47,9 +47,9 @@ type MeaningTextbook struct {
 // prompt then says 尚未登记学习进度 instead of pretending zero lessons
 // were learned.
 type MeaningRequest struct {
-	Words          []string        `json:"words"`
-	Textbook       MeaningTextbook `json:"textbook"`
 	LearnedLessons *int            `json:"learnedLessons"`
+	Textbook       MeaningTextbook `json:"textbook"`
+	Words          []string        `json:"words"`
 }
 
 // MeaningResult is the supplement draft: one meaning per answered word
@@ -110,13 +110,13 @@ func BuildMeaningUserPrompt(req MeaningRequest) string {
 	}
 	b.WriteString("。\n已学进度：")
 	if req.LearnedLessons != nil {
-		b.WriteString(fmt.Sprintf("已学完第 %d 课（含第 %d 课）", *req.LearnedLessons, *req.LearnedLessons))
+		fmt.Fprintf(&b, "已学完第 %d 课（含第 %d 课）", *req.LearnedLessons, *req.LearnedLessons)
 	} else {
 		b.WriteString("尚未登记学习进度")
 	}
 	b.WriteString("。\n待补释义的英语单词：\n")
 	for i, w := range req.Words {
-		b.WriteString(fmt.Sprintf("%d. %s\n", i+1, w))
+		fmt.Fprintf(&b, "%d. %s\n", i+1, w)
 	}
 	return b.String()
 }

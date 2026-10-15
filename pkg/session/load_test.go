@@ -15,13 +15,14 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
-	"go.uber.org/zap"
 )
 
 // loadFSRS hands every session two distinct words (IDs unique per session so
@@ -69,9 +70,9 @@ func (s *countingStreamer) clearedCount() int {
 
 // recordingLoadRepo records distinct connIDs of Create calls.
 type recordingLoadRepo struct {
-	fakeSessionRepository
-
 	createdConns map[string]bool
+
+	fakeSessionRepository
 }
 
 func (r *recordingLoadRepo) Create(_ context.Context, s database.Session) (int64, error) {
@@ -122,7 +123,11 @@ func TestLoad_50ConcurrentSessions(t *testing.T) {
 	svcCtx, svcCancel := context.WithCancel(context.Background())
 	t.Cleanup(svcCancel)
 	go hub.Run(svcCtx)
-	go manager.Start(svcCtx)
+	go func() {
+		if startErr := manager.Start(svcCtx); startErr != nil {
+			logger.Error("session manager start failed", infra.ErrField(startErr))
+		}
+	}()
 
 	var wg sync.WaitGroup
 	start := time.Now()

@@ -89,9 +89,9 @@ func itDial(t *testing.T, srv *httptest.Server) *websocket.Conn {
 // itMsg is one received websocket message; typ is the control type for text
 // frames ("" for binary).
 type itMsg struct {
-	mt  int
 	typ string
 	raw []byte
+	mt  int
 }
 
 // itProbe types a received message (typ is "" for binary frames).
@@ -741,9 +741,9 @@ func itSeedCheckRow(t *testing.T, exec *fakeExecutor, outcomes map[string]lesson
 	}
 	version := l.Version
 	for i := range itCards {
-		res, err := exec.AdvanceWord(ctx, "it-lesson", version, fmt.Sprintf("it-seed-adv-%d", i))
-		if err != nil {
-			t.Fatalf("AdvanceWord seed %d: %v", i, err)
+		res, advErr := exec.AdvanceWord(ctx, "it-lesson", version, fmt.Sprintf("it-seed-adv-%d", i))
+		if advErr != nil {
+			t.Fatalf("AdvanceWord seed %d: %v", i, advErr)
 		}
 		version = res.NewVersion
 	}
@@ -1176,8 +1176,8 @@ func checkIntentScript(intent string, index int, text string) llmScript {
 	payload, _ := json.Marshal(struct {
 		Intent string `json:"intent"`
 		Reply  string `json:"reply"`
-		Index  int    `json:"index,omitempty"`
 		Text   string `json:"text,omitempty"`
+		Index  int    `json:"index,omitempty"`
 	}{Intent: intent, Index: index, Text: text})
 	wire := `{"choices":[{"index":0,"message":{"role":"assistant","content":` + strconv.Quote(string(payload)) + `}}]}`
 	return llmScript{wire: wire}
@@ -1704,8 +1704,8 @@ func TestCrossConnectionCorrectionStraggler(t *testing.T) {
 func TestCheckVoiceInvalidIndex(t *testing.T) {
 	exec := newFakeExecutorNoRow("it-lesson")
 	asr := newFakeASR(
-		asrScript{text: "那个词对了"},    // check_right with NO index
-		asrScript{text: "第五个词错了"},   // check_wrong index 5 (out of range)
+		asrScript{text: "那个词对了"},   // check_right with NO index
+		asrScript{text: "第五个词错了"},  // check_wrong index 5 (out of range)
 		asrScript{text: "第一个词写的是"}, // check_spelling with NO text
 	)
 	llm := newFakeLLM(

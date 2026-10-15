@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
@@ -88,10 +89,10 @@ func TestSendControlFrame_MonotonicSeq(t *testing.T) {
 		seqs[i] = header.Sequence
 	}
 
-	if !(seqs[1] > seqs[0]) {
+	if seqs[1] <= seqs[0] {
 		t.Errorf("D-12 violated: second sequence (%d) must be > first (%d)", seqs[1], seqs[0])
 	}
-	if !(seqs[2] > seqs[1]) {
+	if seqs[2] <= seqs[1] {
 		t.Errorf("D-12 violated: third sequence (%d) must be > second (%d)", seqs[2], seqs[1])
 	}
 }

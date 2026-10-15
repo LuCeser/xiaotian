@@ -36,7 +36,7 @@ See: .planning/PROJECT.md (updated 2026-10-11)
 Phase: 14 — R1 对话接真实课堂
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-10-12 — Completed quick task 261012-auz（Issue #4 教材归属与已学进度控制练习范围：前端半成品落库＋三套 e2e＋issue 勾选关闭）；前值 2026-10-12 — Completed quick task 261012-aes（Issue #3 收尾）
+Last activity: 2026-10-15 — Quick task 261015-ecc（CI lint v2 升级）规划完成但让位未执行：与并行会话 PR #23/#24 完全重复，用户拍板让位并转入核查那两个 PR；前值 2026-10-12 — Completed quick task 261012-auz（Issue #4 教材归属与已学进度控制练习范围：前端半成品落库＋三套 e2e＋issue 勾选关闭）
 Next: /gsd-plan-phase 14（Phase 13.2 维持 2026-10-09 搁置；Phase 13/13.1 本地人工验收项由用户按 13-FINAL-ACCEPTANCE-RUNBOOK 单独执行落账）
 
 「再练一组」账（G-13.1-local-4）：2026-10-09 用户报告测试不通过，登记于 [Phase 13.1 UAT](phases/13.1-three-stage-dictation-lesson/13.1-UAT.md) 测试 6；2026-10-10 13.3 真机 UAT-5 同链路（完结课总结页→再练一组→家长端「加练」记录＋「不调整复习计划」断言）通过，提示缺陷可能已被后续修复——2026-10-11 完结决策：重测关账留给用户单独处理，不随阶段关闭自动通过。

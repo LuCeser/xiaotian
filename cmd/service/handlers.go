@@ -45,8 +45,8 @@ type controlFramePayload struct {
 
 // startSessionParams are the parameters for starting a TTS session.
 type startSessionParams struct {
-	Limit    int    `json:"limit"`
 	Category string `json:"category"`
+	Limit    int    `json:"limit"`
 }
 
 // playWordParams are the parameters for playing a word's audio.
@@ -57,9 +57,9 @@ type playWordParams struct {
 
 // selectDueCardsParams are the parameters for FSRS due word queries.
 type selectDueCardsParams struct {
-	Limit          int    `json:"limit"`
 	Category       string `json:"category"`
 	Units          string `json:"units"`
+	Limit          int    `json:"limit"`
 	FetchLockHours int    `json:"fetch_lock_hours"`
 }
 
@@ -73,8 +73,8 @@ type unlockCardsParams struct {
 type sessionReadyResponse struct {
 	Type      string   `json:"type"`
 	SessionID string   `json:"session_id"`
-	Words     []string `json:"words"`
 	Category  string   `json:"category"`
+	Words     []string `json:"words"`
 }
 
 // selectDueCardsResultResponse is the control frame response for FSRS queries.
@@ -122,9 +122,9 @@ type submitAnswersParams struct {
 type batchWordResult struct {
 	Word     string           `json:"word"`
 	Heard    string           `json:"heard"` // "" when the word was left unanswered
+	Diff     []grading.CharOp `json:"diff,omitempty"`
 	Correct  bool             `json:"correct"`
 	NearMiss bool             `json:"near_miss"`
-	Diff     []grading.CharOp `json:"diff,omitempty"`
 }
 
 // batchResultResponse is the control frame reply to a submit_answers trigger
@@ -141,12 +141,12 @@ type batchResultResponse struct {
 type answerResultResponse struct {
 	Type     string           `json:"type"`
 	WordID   string           `json:"word_id"`
-	Correct  bool             `json:"correct"`
 	Expected string           `json:"expected"`
 	Heard    string           `json:"heard"`
 	Rating   string           `json:"rating"`         // "good" | "hard" | "again"
-	NearMiss bool             `json:"near_miss"`      // Ticket 06: one-edit-away wrong answer
 	Diff     []grading.CharOp `json:"diff,omitempty"` // Ticket 06: char-level alignment
+	Correct  bool             `json:"correct"`
+	NearMiss bool             `json:"near_miss"` // Ticket 06: one-edit-away wrong answer
 }
 
 // submitReviewResultResponse wraps the FSRS ReviewResult for the client.
@@ -618,10 +618,10 @@ func handleSubmitAnswer(ctx context.Context, client *ws.Client, params json.RawM
 type answerJudgement struct {
 	Expected string
 	Lang     string // "en" | "zh" (informational)
+	Rating   string // FSRS rating verb ("good"/"hard"/"again")
+	Diff     []grading.CharOp
 	Correct  bool
 	NearMiss bool
-	Diff     []grading.CharOp
-	Rating   string // FSRS rating verb ("good"/"hard"/"again")
 }
 
 // answerJudger judges a transcript against the connection's current word.
@@ -795,7 +795,7 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 		logger.Warn("failed to send analysis_result", infra.ErrField(err))
 	}
 	if payload, err := marshalStoredResult(s.Category(), inputs, report); err == nil {
-		if err := s.RecordGradedResult(ctx, payload); err != nil {
+		if err = s.RecordGradedResult(ctx, payload); err != nil {
 			logger.Warn("graded result not persisted",
 				infra.F("conn_id", connID),
 				infra.ErrField(err),
@@ -851,10 +851,9 @@ func sendControlFrame(client *ws.Client, msgType ws.MessageType, payload interfa
 	}
 
 	header := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    msgType,
-		Sequence:   nextControlSeq(),
-		PayloadLen: uint16(len(jsonBytes)),
+		Version:  ws.ProtocolVersion,
+		MsgType:  msgType,
+		Sequence: nextControlSeq(),
 	}
 
 	frame := ws.EncodeFrame(header, jsonBytes)

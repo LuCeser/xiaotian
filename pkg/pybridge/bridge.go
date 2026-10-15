@@ -80,9 +80,6 @@ var pythonSecretEnvKeys = []string{
 //   - sem is the internal D-02 semaphore constructed from cfg.MaxConcurrent.
 //     Acquired before every subprocess Start and released after Wait.
 type Bridge struct {
-	// cfg is the operational PythonConfig captured at construction. Read-only
-	// after NewBridge returns.
-	cfg infra.PythonConfig
 
 	// logger is the structured event sink (D-25, D-47). Substituted with
 	// NewNoOpLogger() when the caller passes nil so the bridge is always
@@ -105,6 +102,9 @@ type Bridge struct {
 	// specific to pregenerate. Acquired in RunPregenerate BEFORE b.run so
 	// queueing happens outside the general-sem slot too.
 	pregenSem semaphore
+	// cfg is the operational PythonConfig captured at construction. Read-only
+	// after NewBridge returns.
+	cfg infra.PythonConfig
 }
 
 // NewBridge is the Bridge constructor (D-42 constructor DI). It validates
@@ -308,8 +308,12 @@ func (b *Bridge) run(ctx context.Context, timeout time.Duration, name string, ar
 	// On Linux the Cancel hook SIGKILLs the process group. Go 1.26's
 	// exec.Wait then prefers the child's "signal: killed" ExitError over
 	// cctx.Err(), so a deadline kill would not classify as a timeout.
-	// Put the context error back in the chain before logResult and before
-	// the caller maps DeadlineExceeded to ErrPythonTimeout.
+	// cmd.Cancel's group SIGKILL can reap the process before os/exec's
+	// ctx-watch reports the deadline — Wait then surfaces the raw ExitError.
+	// Put the context error back in the chain (keeping the ExitError) before
+	// logResult and before the caller maps DeadlineExceeded to
+	// ErrPythonTimeout; the timeout contract is run()'s own, so classify it
+	// here instead of trusting that race.
 	err = normalizeRunErr(cctx, err)
 
 	exitCode := 0

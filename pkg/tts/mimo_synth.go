@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 )
@@ -121,15 +122,15 @@ func downsample24kTo16k(pcm []byte) []byte {
 		var v int16
 		if num%2 == 0 {
 			// Integer position: copy the sample verbatim.
-			v = int16(binary.LittleEndian.Uint16(pcm[base*2:]))
+			v = int16(binary.LittleEndian.Uint16(pcm[base*2:])) //nolint:gosec // G115: s16le PCM sample; the high bit is the sign
 		} else {
 			// Half position: average the two neighbouring samples. int32
 			// arithmetic avoids int16 overflow (e.g. 32767 + 32767).
-			a := int32(int16(binary.LittleEndian.Uint16(pcm[base*2:])))
-			b := int32(int16(binary.LittleEndian.Uint16(pcm[(base+1)*2:])))
-			v = int16((a + b) / 2)
+			a := int32(int16(binary.LittleEndian.Uint16(pcm[base*2:])))     //nolint:gosec // G115: s16le PCM sample; the high bit is the sign
+			b := int32(int16(binary.LittleEndian.Uint16(pcm[(base+1)*2:]))) //nolint:gosec // G115: s16le PCM sample; the high bit is the sign
+			v = int16((a + b) / 2)                                          //nolint:gosec // G115: average of two int16 samples fits in int16
 		}
-		binary.LittleEndian.PutUint16(out[j*2:], uint16(v))
+		binary.LittleEndian.PutUint16(out[j*2:], uint16(v)) //nolint:gosec // G115: s16le PCM bit pattern, not a numeric range check
 	}
 	return out
 }

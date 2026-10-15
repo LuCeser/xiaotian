@@ -107,7 +107,7 @@ func TestE2E_TextbookScopeShapesDueSelection(t *testing.T) {
 	assign([]int64{1, 2}, "第3课", false) // scopeC1/scopeC2
 	assign([]int64{3, 4}, "第1课", false) // scopeA1/scopeA2
 	assign([]int64{5}, "第2课", true)     // scopeB1, parent's explicit include
-	assign([]int64{6}, "", false)        // scopePend1 待确认
+	assign([]int64{6}, "", false)       // scopePend1 待确认
 
 	// Progress 0: only the include override and the two supplementary
 	// words are due — 待确认 is NOT learned, unlearned lessons stay out.

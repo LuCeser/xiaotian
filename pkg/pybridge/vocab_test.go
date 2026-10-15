@@ -76,8 +76,8 @@ func TestDueArgs(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		opts      DueOpts
 		extraArgs []string // flags we expect to see appended (in order)
+		opts      DueOpts
 	}{
 		{
 			name:      "minimal",
@@ -631,7 +631,7 @@ func TestVocabManagerRejectsUnboundedLimitAndLock(t *testing.T) {
 	}
 	for _, tc := range reject {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(py, append([]string{script, "--db", filepath.Join(t.TempDir(), "v.db")}, tc.args...)...)
+			cmd := exec.Command(py, append([]string{script, "--db", filepath.Join(t.TempDir(), "v.db")}, tc.args...)...) //nolint:gosec // G204: py and tc.args are this test's own table literals, not untrusted input
 			out, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatalf("expected argparse rejection, got success:\n%s", out)

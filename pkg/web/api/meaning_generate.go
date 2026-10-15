@@ -43,10 +43,10 @@ const (
 // confirmed-context shape across the seam (the prompt builder consumes the
 // same struct).
 type MeaningGenerateRequest struct {
-	Words    []string            `json:"words"`
-	Textbook ocr.MeaningTextbook `json:"textbook"`
 	// LearnedLessons is nil when no progress is registered (a new book).
-	LearnedLessons *int `json:"learnedLessons"`
+	LearnedLessons *int                `json:"learnedLessons"`
+	Textbook       ocr.MeaningTextbook `json:"textbook"`
+	Words          []string            `json:"words"`
 }
 
 // validateMeaningGenerateRequest enforces the supplement caps: an

@@ -3,12 +3,14 @@ package tts
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -52,8 +54,8 @@ func cacheKey(wordID string) (string, error) {
 // SessionCache manages PCM file storage per D-02/D-08. Each session gets a
 // subdirectory under baseDir, and words are stored as {wordID}.pcm files.
 type SessionCache struct {
-	baseDir string
 	logger  infra.Logger
+	baseDir string
 }
 
 // NewSessionCache creates a new SessionCache with the given base directory.
@@ -96,7 +98,7 @@ func (c *SessionCache) Store(sessionID string, wordID string, pcm []byte) error 
 	}
 
 	// Write the PCM data
-	if err := os.WriteFile(filePath, pcm, 0644); err != nil {
+	if err := os.WriteFile(filePath, pcm, 0o600); err != nil {
 		return errors.Wrap(err, "failed to write PCM file")
 	}
 
@@ -160,14 +162,24 @@ func (c *SessionCache) Cleanup(sessionID string) error {
 }
 
 // CleanupStale walks baseDir and removes session subdirectories whose
-// modification time is older than maxAge. Uses filepath.WalkDir for efficiency.
-// Errors removing individual directories are logged but do not stop the walk
+// modification time is older than maxAge. The walk is rooted at baseDir so a
+// symlink cannot redirect deletion. Errors removing individual directories
+// are logged but do not stop the walk
 // (best-effort cleanup per D discretion: "session directory cleanup 30 minutes
 // after session ends").
 func (c *SessionCache) CleanupStale(maxAge time.Duration) error {
 	cutoffTime := time.Now().Add(-maxAge)
 
-	err := filepath.WalkDir(c.baseDir, func(path string, d os.DirEntry, err error) error {
+	// Root-scoped removal: gosec G122 flags filepath.WalkDir + os.RemoveAll
+	// because a symlink in the cache could redirect deletion. OpenRoot keeps
+	// removal inside baseDir.
+	root, err := os.OpenRoot(c.baseDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
+	return fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Log error but continue walking
 			c.logger.Warn("failed to walk path during cleanup", infra.F("path", path), infra.F("error", err))
@@ -175,7 +187,7 @@ func (c *SessionCache) CleanupStale(maxAge time.Duration) error {
 		}
 
 		// Skip the base directory itself
-		if path == c.baseDir {
+		if path == "." {
 			return nil
 		}
 
@@ -193,15 +205,13 @@ func (c *SessionCache) CleanupStale(maxAge time.Duration) error {
 
 		if info.ModTime().Before(cutoffTime) {
 			// Directory is stale, remove it
-			if err := os.RemoveAll(path); err != nil {
+			if err := root.RemoveAll(path); err != nil {
 				c.logger.Warn("failed to remove stale session directory", infra.F("path", path), infra.F("error", err))
 			} else {
 				c.logger.Info("removed stale session directory", infra.F("path", path), infra.F("age", time.Since(info.ModTime())))
 			}
 		}
 
-		return filepath.SkipDir // Don't recurse into session directories
+		return fs.SkipDir // Don't recurse into session directories
 	})
-
-	return err
 }

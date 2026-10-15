@@ -94,15 +94,15 @@ func (f *fakeExecutor) RunUnassignWords(_ context.Context, _ pybridge.UnassignWo
 
 func TestNewFSRSServiceValidation(t *testing.T) {
 	cases := []struct {
-		name    string
 		exec    pybridge.Executor
-		cfg     infra.FSRSConfig
 		wantErr error
+		name    string
+		cfg     infra.FSRSConfig
 	}{
-		{"nil executor", nil, validCfg(), ErrFSRSInvalid},
-		{"invalid defaultWordCount", &fakeExecutor{}, infra.FSRSConfig{DefaultWordCount: 0, FetchLockHours: 24.0, DefaultCategory: "english"}, ErrFSRSInvalid},
-		{"invalid fetchLockHours", &fakeExecutor{}, infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 0, DefaultCategory: "english"}, ErrFSRSInvalid},
-		{"empty defaultCategory", &fakeExecutor{}, infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: ""}, ErrFSRSInvalid},
+		{exec: nil, wantErr: ErrFSRSInvalid, cfg: validCfg(), name: "nil executor"},
+		{exec: &fakeExecutor{}, wantErr: ErrFSRSInvalid, cfg: infra.FSRSConfig{DefaultWordCount: 0, FetchLockHours: 24.0, DefaultCategory: "english"}, name: "invalid defaultWordCount"},
+		{exec: &fakeExecutor{}, wantErr: ErrFSRSInvalid, cfg: infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 0, DefaultCategory: "english"}, name: "invalid fetchLockHours"},
+		{exec: &fakeExecutor{}, wantErr: ErrFSRSInvalid, cfg: infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: ""}, name: "empty defaultCategory"},
 	}
 
 	for _, tc := range cases {
@@ -152,36 +152,40 @@ func TestSelectDueCards(t *testing.T) {
 
 func TestSelectDueCardsConfigDefaults(t *testing.T) {
 	cases := []struct {
-		name      string
 		cfg       infra.FSRSConfig
+		name      string
+		wantCat   string
 		opts      SelectOpts
 		wantLimit int
-		wantCat   string
 		wantLock  float64
 	}{
 		{
+			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: "english"},
 			"config defaults when opts zero",
-			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: "english"},
+			"english",
 			SelectOpts{},
-			25, "english", 24.0,
+			25, 24.0,
 		},
 		{
+			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: "english"},
 			"in-range limit passes through; client lock hours ignored",
-			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: "english"},
+			"chinese",
 			SelectOpts{Limit: 10, Category: "chinese", FetchLockHours: 48.0},
-			10, "chinese", 24.0,
+			10, 24.0,
 		},
 		{
-			"limit above the default-word-count ceiling is clamped",
 			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: "english"},
+			"limit above the default-word-count ceiling is clamped",
+			"english",
 			SelectOpts{Limit: 10000, FetchLockHours: 1},
-			100, "english", 24.0,
+			100, 24.0,
 		},
 		{
-			"fractional server lock hours become whole hours",
 			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 12.5, DefaultCategory: "english"},
+			"fractional server lock hours become whole hours",
+			"english",
 			SelectOpts{FetchLockHours: 3},
-			25, "english", 12.0,
+			25, 12.0,
 		},
 	}
 

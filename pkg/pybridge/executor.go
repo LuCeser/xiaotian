@@ -122,10 +122,6 @@ type DueOpts struct {
 	// Category filters by vocabulary category. Forwarded as --category.
 	Category string
 
-	// Limit caps the number of cards returned. Forwarded as --limit.
-	// <= 0 means omit the flag (no limit).
-	Limit int
-
 	// Units restricts the result to the named units. Forwarded as
 	// --units (repeatable). nil/empty means all units.
 	Units []string
@@ -134,10 +130,9 @@ type DueOpts struct {
 	// --exclude (repeatable).
 	Exclude []string
 
-	// Peek selects the no-side-effects mode (--peek): the script returns
-	// the due set WITHOUT updating fetch_locked_until. Useful for
-	// previews.
-	Peek bool
+	// Limit caps the number of cards returned. Forwarded as --limit.
+	// <= 0 means omit the flag (no limit).
+	Limit int
 
 	// FetchLockHours sets the fetch-lock window (--fetch-lock-hours).
 	// The bridge emits a whole number of hours: vocab_manager.py's
@@ -145,6 +140,11 @@ type DueOpts struct {
 	// MaxFetchLockHours are clamped. <= 0 means omit the flag and use
 	// the script default.
 	FetchLockHours float64
+
+	// Peek selects the no-side-effects mode (--peek): the script returns
+	// the due set WITHOUT updating fetch_locked_until. Useful for
+	// previews.
+	Peek bool
 }
 
 // DueCard mirrors the JSON object vocab_manager.py's due subcommand emits
@@ -153,13 +153,13 @@ type DueOpts struct {
 // unit/state/due/stability/difficulty). There is intentionally no
 // "translation" or "pronunciation" field: the script does not emit them.
 type DueCard struct {
-	ID         int     `json:"id"`
 	Word       string  `json:"word"`
 	Meaning    string  `json:"meaning"`
 	Example    string  `json:"example"`
 	Unit       string  `json:"unit"`
 	State      string  `json:"state"`
 	Due        string  `json:"due"`
+	ID         int     `json:"id"`
 	Stability  float64 `json:"stability"`
 	Difficulty float64 `json:"difficulty"`
 }
@@ -220,18 +220,10 @@ type ReviewResult struct {
 // PregenOpts carries the operational flags for the
 // pregenerate_dictation.py generate subcommand (PY-04).
 type PregenOpts struct {
-	// Words is the word list to synthesize. Forwarded to the script as
-	// the --words JSON array (required).
-	Words []string
 
 	// Language selects the TTS language profile. Forwarded as --language
 	// (english|chinese).
 	Language string
-
-	// WordsPerSegment controls how many words are concatenated per
-	// output mp3 segment. Forwarded as --words-per-segment. <= 0 means
-	// use the script default. Ignored by the "bare" generation mode.
-	WordsPerSegment int
 
 	// GenerationMode selects the TTS strategy. Forwarded as
 	// --generation-mode (contextual-segment|fragments|bare). Empty means
@@ -250,6 +242,14 @@ type PregenOpts struct {
 
 	// Voice overrides the default TTS voice. Forwarded as --voice.
 	Voice string
+	// Words is the word list to synthesize. Forwarded to the script as
+	// the --words JSON array (required).
+	Words []string
+
+	// WordsPerSegment controls how many words are concatenated per
+	// output mp3 segment. Forwarded as --words-per-segment. <= 0 means
+	// use the script default. Ignored by the "bare" generation mode.
+	WordsPerSegment int
 }
 
 // PregenResult is the typed payload the pregenerate path returns. Paths
@@ -333,9 +333,6 @@ type AddResult struct {
 // string CLEARS the column via cmd_edit's COALESCE update. FSRS learning
 // state is never touched either way (D-07).
 type EditOpts struct {
-	// ID is the card id to edit. Forwarded as --id (decimal). Validated
-	// > 0 by Bridge.RunEdit before any subprocess spawn.
-	ID int64
 
 	// Word replaces the word text when non-nil. Forwarded as --word.
 	Word *string
@@ -349,6 +346,9 @@ type EditOpts struct {
 	// Unit moves the card to another unit when non-nil. Forwarded as
 	// --unit.
 	Unit *string
+	// ID is the card id to edit. Forwarded as --id (decimal). Validated
+	// > 0 by Bridge.RunEdit before any subprocess spawn.
+	ID int64
 }
 
 // EditResult is the typed payload the edit path returns. Edited mirrors
@@ -357,8 +357,8 @@ type EditOpts struct {
 // word from a fresh SELECT — Plan 09-02 contract).
 type EditResult struct {
 	Edited struct {
-		ID   int64  `json:"id"`
 		Word string `json:"word"`
+		ID   int64  `json:"id"`
 	} `json:"edited"`
 }
 
@@ -372,11 +372,11 @@ type SetParticipationOpts struct {
 }
 
 type SetParticipationResult struct {
-	Requested int `json:"requested"`
-	Updated   int `json:"updated"`
 	// Missing is kept for wire stability; the all-or-nothing script always
 	// reports an empty list on the success path (a missing id is a 404).
-	Missing []int64 `json:"missing"`
+	Missing   []int64 `json:"missing"`
+	Requested int     `json:"requested"`
+	Updated   int     `json:"updated"`
 }
 
 // RenameUnitOpts carries the operational flags for the vocab_manager.py
@@ -398,9 +398,9 @@ type RenameUnitOpts struct {
 // tags align exactly with the script's json keys (verified against
 // vocab_manager.py cmd_rename_unit: {"renamed": N, "from": ..., "to": ...}).
 type RenameUnitResult struct {
-	Renamed int    `json:"renamed"`
 	From    string `json:"from"`
 	To      string `json:"to"`
+	Renamed int    `json:"renamed"`
 }
 
 // DeleteWordsOpts carries the operational flags for the vocab_manager.py
@@ -409,9 +409,6 @@ type RenameUnitResult struct {
 // deleteWordsArgs before any argv is constructed (mirrors the script's
 // mutually-exclusive argparse group).
 type DeleteWordsOpts struct {
-	// Words is the explicit word list to delete. Forwarded as --words
-	// (comma-joined). Mutually exclusive with Unit.
-	Words []string
 
 	// Unit deletes every card in this unit. Forwarded as --unit. Mutually
 	// exclusive with Words.
@@ -419,6 +416,9 @@ type DeleteWordsOpts struct {
 
 	// Category scopes the deletion. Forwarded as --category.
 	Category string
+	// Words is the explicit word list to delete. Forwarded as --words
+	// (comma-joined). Mutually exclusive with Unit.
+	Words []string
 }
 
 // DeleteWordsResult is the typed payload the delete path return. Deleted
@@ -452,7 +452,6 @@ type TextbookCreateOpts struct {
 // string clears the column; progress 0 is a legal value; an empty non-nil
 // lesson list clears the list).
 type TextbookUpdateOpts struct {
-	ID int64
 	// Name, when non-nil, renames the textbook.
 	Name *string
 	// Edition/Stage/Grade/Volume/Module, when non-nil, replace the
@@ -462,10 +461,11 @@ type TextbookUpdateOpts struct {
 	Grade   *string
 	Volume  *string
 	Module  *string
-	// Lessons, when non-nil, replaces the explicit lesson list.
-	Lessons []string
 	// LearnedLessons, when non-nil, sets the progress (0 is a legal value).
 	LearnedLessons *int
+	// Lessons, when non-nil, replaces the explicit lesson list.
+	Lessons []string
+	ID      int64
 	// SetPrimary makes this textbook the category's primary, demoting the
 	// others in the same script transaction.
 	SetPrimary bool
@@ -474,8 +474,8 @@ type TextbookUpdateOpts struct {
 // TextbookMutationResult is the {id, ...} payload the textbook write
 // commands print. Updated carries textbook-update's confirmation echo.
 type TextbookMutationResult struct {
-	ID      int64  `json:"id"`
 	Name    string `json:"name,omitempty"`
+	ID      int64  `json:"id"`
 	Updated bool   `json:"updated,omitempty"`
 }
 
@@ -485,20 +485,20 @@ type TextbookMutationResult struct {
 // learned). IncludeInScope is the parent's explicit override admitting
 // the words regardless of lesson progress.
 type AssignWordsOpts struct {
-	TextbookID     int64
-	IDs            []int64
 	Lesson         string
+	IDs            []int64
+	TextbookID     int64
 	IncludeInScope bool
 }
 
 // AssignWordsResult mirrors the script's success payload: on a nil error
 // every requested card carries the assignment.
 type AssignWordsResult struct {
+	Lesson         string  `json:"lesson"`
+	Missing        []int64 `json:"missing"`
 	Requested      int     `json:"requested"`
 	Updated        int     `json:"updated"`
-	Missing        []int64 `json:"missing"`
 	TextbookID     int64   `json:"textbook_id"`
-	Lesson         string  `json:"lesson"`
 	IncludeInScope bool    `json:"include_in_scope"`
 }
 
@@ -506,15 +506,15 @@ type AssignWordsResult struct {
 // (Issue #4): the textbook whose assignments are removed for 1..500
 // unique card ids.
 type UnassignWordsOpts struct {
-	TextbookID int64
 	IDs        []int64
+	TextbookID int64
 }
 
 // UnassignWordsResult mirrors the script's {requested, removed} payload.
 type UnassignWordsResult struct {
+	Missing    []int64 `json:"missing"`
 	Requested  int     `json:"requested"`
 	Removed    int     `json:"removed"`
-	Missing    []int64 `json:"missing"`
 	TextbookID int64   `json:"textbook_id"`
 }
 
@@ -528,23 +528,23 @@ var (
 	// command, exit code, and stderr text so callers can distinguish
 	// FSRS/user errors (exit 1 + stderr diagnostics) from infrastructure
 	// errors (timeout / parse failure).
-	ErrPythonExit = errors.New("python subprocess exited non-zero.")
+	ErrPythonExit = errors.New("python subprocess exited non-zero")
 
 	// ErrPythonTimeout is returned when the per-call context expires
 	// before the subprocess returns. The bridge kills the entire process
 	// group (RESEARCH Pattern 1) so no orphan ffmpeg survives.
-	ErrPythonTimeout = errors.New("python subprocess timed out.")
+	ErrPythonTimeout = errors.New("python subprocess timed out")
 
 	// ErrPythonJSONParse is returned when extractTrailingJSON cannot
 	// locate a complete JSON object in the subprocess stdout (e.g. the
 	// script crashed mid-print, or stdout was empty/non-JSON).
-	ErrPythonJSONParse = errors.New("python stdout JSON parse failed.")
+	ErrPythonJSONParse = errors.New("python stdout JSON parse failed")
 
 	// ErrPythonEmpty is returned when the subprocess exited 0 but stdout
 	// is empty -- the script's contract is "exit 0 implies printable
 	// payload", so an empty success stdout is treated as a bridge-level
 	// error rather than a silent zero-card / zero-path result.
-	ErrPythonEmpty = errors.New("python stdout empty.")
+	ErrPythonEmpty = errors.New("python stdout empty")
 )
 
 // ExitError is the typed error returned alongside ErrPythonExit (and
@@ -566,17 +566,16 @@ var (
 // log; secret values (VOLCENGINE_TTS_*) never appear in these fields --
 // they ride in the subprocess env per D-05, never on argv or stdout.
 type ExitError struct {
-	Cmd      string
-	ExitCode int
-	Stderr   string
+	Err    error
+	Cmd    string
+	Stderr string
 
 	// Stdout carries the captured subprocess stdout bytes for commands
 	// whose failure diagnostics print to stdout (Pitfall 2). Empty for
 	// failures that emit nothing on stdout; populated only on the
 	// non-zero-exit branch of the management classifier.
-	Stdout string
-
-	Err error
+	Stdout   string
+	ExitCode int
 }
 
 // Error implements the error interface. The format is stable so log

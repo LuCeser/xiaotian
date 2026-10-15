@@ -65,30 +65,26 @@ type SessionHub interface {
 // state/deadline, which DO have cross-goroutine readers via the RLock-taking
 // accessors, these two fields never need a lock on the read side.
 type Session struct {
-	// --- Identity ---
-	id     string // TTS/FSRS session UUID (crypto/rand hex v4)
-	dbID   int64  // audit row id (best-effort, D-06; may lag behind)
-	connID string
-
-	// --- FSM state (protected by mu for cross-goroutine reads) ---
-	mu               sync.RWMutex
-	state            database.SessionState
-	prevState        database.SessionState // Ticket 02: track previous state for resume detection — written ONLY by transition() under mu on the event-loop goroutine; read ONLY by onTransition()'s resume-from-pause check on that same goroutine (D-02 single-writer, same as streamGen) — the unlocked read is race-free by program order, no RLock needed or allowed.
-	wordQueue        []pybridge.DueCard
-	wordIndex        int
-	deadline         time.Time
-	currentWordID    string    // Track current word for progress frames (08-06)
 	sessionStartTime time.Time // Track session start time for duration calculation (08-06)
-	repeatPending    bool      // Ticket 02 DICT-07: flag set by transition, cleared by onTransition — set by transition() under mu (repeat branches), read AND cleared ONLY by onTransition() on the same event-loop goroutine (D-02 single-writer, same as streamGen) — lock-free by program order, no lock needed or allowed.
+	deadline         time.Time
+	runCtx           context.Context
+	logger           infra.Logger
+	hub              SessionHub // *ws.Hub satisfies structurally
+	repo             database.SessionRepository
+	streamer         SessionStreamer     // *tts.Streamer satisfies structurally
+	gen              TTSSessionGenerator // *tts.Generator satisfies structurally
+	fsrsSvc          fsrs.FSRSService
 
-	// --- FSRS lock scope (captured at NewSession, replayed at exit — Pitfall 4) ---
-	lockCategory string
-	lockUnit     string
-	// lockCardIDs are the IDs SelectDueCards actually locked (one per queue
-	// card, Ticket 07). Exit replays them as a SCOPED unlock: a category-wide
-	// release would drop OTHER sessions' in-flight locks — two students
-	// dictating the same category is the supported multi-user posture.
-	lockCardIDs []int64
+	// --- Service dependencies ---
+	client       *ws.Client // frame-send target + hub identity (D-05)
+	pool         *infra.WorkerPool
+	onExit       func()             // set by Manager.NewSession for map cleanup
+	streamCancel context.CancelFunc // cancels in-flight StreamWord (set by spawnStreamWord in the loop goroutine)
+	done         chan struct{}      // closed when run() exits (liveness signal for tests/sweeper)
+	cancel       context.CancelFunc
+
+	// --- Event loop ---
+	events chan SessionEvent
 
 	// --- Word audio source (captured at NewSession — DICT-03) ---
 	// audioSource records which TTS backend generated this session's word
@@ -99,27 +95,33 @@ type Session struct {
 	// return / manager map insertion establishes happens-before, so no lock
 	// is needed (same discipline as wordQueue).
 	audioSource tts.AudioSource
+	connID      string
 
-	// --- Service dependencies ---
-	client   *ws.Client // frame-send target + hub identity (D-05)
-	fsrsSvc  fsrs.FSRSService
-	gen      TTSSessionGenerator // *tts.Generator satisfies structurally
-	streamer SessionStreamer     // *tts.Streamer satisfies structurally
-	repo     database.SessionRepository
-	pool     *infra.WorkerPool
-	hub      SessionHub // *ws.Hub satisfies structurally
-	logger   infra.Logger
-	cfg      infra.Config
+	// --- FSRS lock scope (captured at NewSession, replayed at exit — Pitfall 4) ---
+	lockCategory string
+	prevState    database.SessionState // Ticket 02: track previous state for resume detection — written ONLY by transition() under mu on the event-loop goroutine; read ONLY by onTransition()'s resume-from-pause check on that same goroutine (D-02 single-writer, same as streamGen) — the unlocked read is race-free by program order, no RLock needed or allowed.
+	state        database.SessionState
+	// --- Identity ---
+	id            string // TTS/FSRS session UUID (crypto/rand hex v4)
+	lockUnit      string
+	currentWordID string // Track current word for progress frames (08-06)
+	// lockCardIDs are the IDs SelectDueCards actually locked (one per queue
+	// card, Ticket 07). Exit replays them as a SCOPED unlock: a category-wide
+	// release would drop OTHER sessions' in-flight locks — two students
+	// dictating the same category is the supported multi-user posture.
+	lockCardIDs []int64
+	wordQueue   []pybridge.DueCard
+	cfg         infra.Config
+	wordIndex   int
+	dbID        int64  // audit row id (best-effort, D-06; may lag behind)
+	streamGen   uint64 // spawnStreamWord's monotonically increasing stream generation; read/written ONLY on the event-loop goroutine (D-02 single-writer, same as wordQueue/wordIndex — no lock). Spawned goroutines only ever use the by-value copy captured via the go statement.
+	// droppedEvents counts events Push discarded because the buffer was
+	// full (PR #27: a flood must never block the router worker).
+	droppedEvents atomic.Int64
 
-	// --- Event loop ---
-	events        chan SessionEvent
-	droppedEvents atomic.Int64 // events Push discarded because the buffer was full
-	runCtx        context.Context
-	cancel        context.CancelFunc
-	done          chan struct{}      // closed when run() exits (liveness signal for tests/sweeper)
-	streamCancel  context.CancelFunc // cancels in-flight StreamWord (set by spawnStreamWord in the loop goroutine)
-	streamGen     uint64             // spawnStreamWord's monotonically increasing stream generation; read/written ONLY on the event-loop goroutine (D-02 single-writer, same as wordQueue/wordIndex — no lock). Spawned goroutines only ever use the by-value copy captured via the go statement.
-	onExit        func()             // set by Manager.NewSession for map cleanup
+	// --- FSM state (protected by mu for cross-goroutine reads) ---
+	mu            sync.RWMutex
+	repeatPending bool // Ticket 02 DICT-07: flag set by transition, cleared by onTransition — set by transition() under mu (repeat branches), read AND cleared ONLY by onTransition() on the same event-loop goroutine (D-02 single-writer, same as streamGen) — lock-free by program order, no lock needed or allowed.
 }
 
 // NewSession constructs a Session by acquiring the FSRS fetch-lock, generating
@@ -295,7 +297,7 @@ func NewSession(
 // cancels the session immediately (firing the D-10 defer chain).
 func (s *Session) Start(ctx context.Context) {
 	s.done = make(chan struct{})
-	s.runCtx, s.cancel = context.WithCancel(ctx)
+	s.runCtx, s.cancel = context.WithCancel(ctx) //nolint:gosec // G118: cancel is stored on the session and invoked by the sweeper
 	go s.run(s.runCtx)
 }
 
@@ -960,10 +962,9 @@ func (s *Session) sendProgressFrame() {
 
 	// Send as control frame
 	header := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    ws.MsgTypeControl,
-		Sequence:   0, // TODO: atomic counter for monotonic sequences
-		PayloadLen: uint16(len(jsonBytes)),
+		Version:  ws.ProtocolVersion,
+		MsgType:  ws.MsgTypeControl,
+		Sequence: 0, // TODO: atomic counter for monotonic sequences
 	}
 	frame := ws.EncodeFrame(header, jsonBytes)
 
@@ -1016,10 +1017,9 @@ func (s *Session) sendWordCompleteFrame(wordID string) {
 
 	// Send as control frame
 	header := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    ws.MsgTypeControl,
-		Sequence:   0, // TODO: atomic counter for monotonic sequences
-		PayloadLen: uint16(len(jsonBytes)),
+		Version:  ws.ProtocolVersion,
+		MsgType:  ws.MsgTypeControl,
+		Sequence: 0, // TODO: atomic counter for monotonic sequences
 	}
 	frame := ws.EncodeFrame(header, jsonBytes)
 
@@ -1060,10 +1060,9 @@ func (s *Session) sendSessionCompleteFrame() {
 
 	// Send as control frame
 	header := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    ws.MsgTypeControl,
-		Sequence:   0, // TODO: atomic counter for monotonic sequences
-		PayloadLen: uint16(len(jsonBytes)),
+		Version:  ws.ProtocolVersion,
+		MsgType:  ws.MsgTypeControl,
+		Sequence: 0, // TODO: atomic counter for monotonic sequences
 	}
 	frame := ws.EncodeFrame(header, jsonBytes)
 
@@ -1102,10 +1101,9 @@ func (s *Session) sendPausedFrame() {
 	}
 
 	header := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    ws.MsgTypeControl,
-		Sequence:   0, // TODO: atomic counter for monotonic sequences
-		PayloadLen: uint16(len(jsonBytes)),
+		Version:  ws.ProtocolVersion,
+		MsgType:  ws.MsgTypeControl,
+		Sequence: 0, // TODO: atomic counter for monotonic sequences
 	}
 	frame := ws.EncodeFrame(header, jsonBytes)
 
