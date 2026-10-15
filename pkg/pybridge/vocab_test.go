@@ -21,8 +21,12 @@ package pybridge
 
 import (
 	"encoding/json"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -138,7 +142,22 @@ func TestDueArgs(t *testing.T) {
 				"--units", "L10,L11",
 				"--exclude", "skip",
 				"--peek",
-				"--fetch-lock-hours", "12.5",
+				"--fetch-lock-hours", "12",
+			},
+		},
+		{
+			name: "fractional lock hours below one become one",
+			opts: DueOpts{FetchLockHours: 0.5},
+			extraArgs: []string{
+				"--fetch-lock-hours", "1",
+			},
+		},
+		{
+			name: "limit and lock hours clamp to the script ceilings",
+			opts: DueOpts{Limit: 10000, FetchLockHours: 1e12},
+			extraArgs: []string{
+				"--limit", strconv.Itoa(MaxDueLimit),
+				"--fetch-lock-hours", strconv.Itoa(MaxFetchLockHours),
 			},
 		},
 	}
@@ -560,4 +579,75 @@ func argvValue(argv []string, flag string) string {
 		return ""
 	}
 	return argv[idx+1]
+}
+
+func TestWholeLockHours(t *testing.T) {
+	cases := []struct {
+		in   float64
+		want float64
+	}{
+		{0, 0},
+		{-3, 0},
+		{math.NaN(), 0},
+		{math.Inf(-1), 0},
+		{0.5, 1},
+		{6, 6},
+		{12.5, 12},
+		{24.0, 24},
+		{1e12, float64(MaxFetchLockHours)},
+		{math.Inf(1), float64(MaxFetchLockHours)},
+	}
+	for _, tc := range cases {
+		got := WholeLockHours(tc.in)
+		if got != tc.want && !(math.IsNaN(tc.in) && got == 0) {
+			t.Errorf("WholeLockHours(%v) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestVocabManagerRejectsUnboundedLimitAndLock shells the vendored script
+// so the argparse ceilings are checked against the same constants Go emits.
+// Skipped when the project venv is absent (default CI has no Python deps).
+func TestVocabManagerRejectsUnboundedLimitAndLock(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	root := filepath.Dir(filepath.Dir(filepath.Dir(file)))
+	py := filepath.Join(root, "third_party", "python", ".venv", "bin", "python")
+	script := filepath.Join(root, "third_party", "python", "vocab_manager.py")
+	if _, err := os.Stat(py); err != nil {
+		t.Skip("venv python not present")
+	}
+
+	reject := []struct {
+		name string
+		args []string
+	}{
+		{"due limit above max", []string{"due", "--limit", strconv.Itoa(MaxDueLimit + 1)}},
+		{"new limit above max", []string{"new", "--limit", strconv.Itoa(MaxDueLimit + 1)}},
+		{"lock hours above max", []string{"due", "--fetch-lock-hours", strconv.Itoa(MaxFetchLockHours + 1)}},
+		{"fractional lock hours", []string{"due", "--fetch-lock-hours", "1.5"}},
+	}
+	for _, tc := range reject {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(py, append([]string{script, "--db", filepath.Join(t.TempDir(), "v.db")}, tc.args...)...) //nolint:gosec // G204: py and tc.args are this test's own table literals, not untrusted input
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected argparse rejection, got success:\n%s", out)
+			}
+			if !strings.Contains(strings.ToLower(string(out)), "error") {
+				t.Fatalf("output = %s", out)
+			}
+		})
+	}
+
+	t.Run("in range accepted", func(t *testing.T) {
+		cmd := exec.Command(py, script, "--db", filepath.Join(t.TempDir(), "v.db"),
+			"due", "--limit", "1", "--fetch-lock-hours", "24")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("in-range flags rejected: %v\n%s", err, out)
+		}
+	})
 }

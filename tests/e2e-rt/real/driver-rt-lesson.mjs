@@ -1214,6 +1214,36 @@ async function main() {
     !!lessonsAfter.lesson_id && lessonsAfter.lesson_id === LESSON_ID,
     `isolated DB (${DB}) lesson row: ${lessonsAfter.lesson_id || 'none'} (expect pinned ${LESSON_ID})`);
 
+  // f. family / parent read path (13.3 UAT-1/2) against the isolated REST API
+  const apiBase = ORIGIN.replace(/\/$/, '');
+  let parentListRow = null;
+  let parentDetail = null;
+  try {
+    const listRes = await fetch(`${apiBase}/api/v1/lessons?limit=20`);
+    const listJson = await listRes.json();
+    parentListRow = (listJson.lessons || []).find((l) => l.lesson_id === LESSON_ID) || null;
+    const detailRes = await fetch(`${apiBase}/api/v1/lessons/${encodeURIComponent(LESSON_ID)}`);
+    parentDetail = await detailRes.json();
+    const reviewsBeforeBrowse = reviewLogCount(DB);
+    await fetch(`${apiBase}/api/v1/lessons?limit=20`);
+    await fetch(`${apiBase}/api/v1/lessons/${encodeURIComponent(LESSON_ID)}`);
+    const reviewsAfterBrowse = reviewLogCount(DB);
+    assert('f1_parent_list_has_completed_lesson',
+      !!parentListRow && parentListRow.word_count === S.N && parentListRow.completed === true,
+      `list row word_count=${parentListRow ? parentListRow.word_count : 'missing'}/${S.N} completed=${parentListRow ? parentListRow.completed : 'n/a'}`);
+    assert('f2_parent_save_status_saved',
+      !!parentListRow && parentListRow.save_status === 'saved',
+      `save_status=${parentListRow ? parentListRow.save_status : 'n/a'} (expect saved after unified check submit)`);
+    assert('f3_parent_read_zero_write',
+      reviewsBeforeBrowse === reviewsAfterBrowse,
+      `review_logs ${reviewsBeforeBrowse}→${reviewsAfterBrowse} after parent lessons reads (must be unchanged)`);
+    assert('f4_parent_detail_exposes_words',
+      !!parentDetail && Array.isArray(parentDetail.words) && parentDetail.words.length === S.N,
+      `detail words=${parentDetail && parentDetail.words ? parentDetail.words.length : 'n/a'}/${S.N}`);
+  } catch (e) {
+    assert('f1_parent_list_has_completed_lesson', false, `parent API fetch failed: ${e && e.message}`);
+  }
+
   // extras
   assert('x_transcript_turns_consistent', S.turnStarts === speechStarted,
     `client turn_start=${S.turnStarts} server speech_started=${speechStarted}`);

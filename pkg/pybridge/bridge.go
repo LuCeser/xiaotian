@@ -28,6 +28,7 @@ package pybridge
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"time"
@@ -262,8 +263,11 @@ func (b *Bridge) childEnv(extra ...string) []string {
 //     diagnostics)
 //   - exitCode: ProcessState.ExitCode(), or 0 if ProcessState is nil (e.g.
 //     cancelled before Start)
-//   - err: nil on success; context.DeadlineExceeded on timeout; *exec.ExitError
-//     on non-zero exit; exec.ErrWaitDelay if WaitDelay closes the pipes
+//   - err: nil on success; context.DeadlineExceeded on timeout (including a
+//     Linux process-group SIGKILL, which cmd.Run reports as "signal: killed"
+//     — normalizeRunErr puts the context error back in the chain);
+//     *exec.ExitError on non-zero exit; exec.ErrWaitDelay if WaitDelay
+//     closes the pipes
 //
 // The caller (RunDue/RunReview/RunPregenerate in vocab.go / pregenerate.go)
 // is responsible for wrapping the returned err into the appropriate
@@ -301,13 +305,16 @@ func (b *Bridge) run(ctx context.Context, timeout time.Duration, name string, ar
 
 	start := time.Now()
 	err := cmd.Run()
+	// On Linux the Cancel hook SIGKILLs the process group. Go 1.26's
+	// exec.Wait then prefers the child's "signal: killed" ExitError over
+	// cctx.Err(), so a deadline kill would not classify as a timeout.
 	// cmd.Cancel's group SIGKILL can reap the process before os/exec's
-	// ctx-watch reports the deadline — Wait then surfaces the raw
-	// ExitError (signal: killed). The timeout contract above is run()'s
-	// own, so map it here instead of trusting the race.
-	if err != nil && cctx.Err() != nil {
-		err = cctx.Err()
-	}
+	// ctx-watch reports the deadline — Wait then surfaces the raw ExitError.
+	// Put the context error back in the chain (keeping the ExitError) before
+	// logResult and before the caller maps DeadlineExceeded to
+	// ErrPythonTimeout; the timeout contract is run()'s own, so classify it
+	// here instead of trusting that race.
+	err = normalizeRunErr(cctx, err)
 
 	exitCode := 0
 	if cmd.ProcessState != nil {
@@ -316,6 +323,23 @@ func (b *Bridge) run(ctx context.Context, timeout time.Duration, name string, ar
 
 	b.logResult(name, start, stdout.Bytes(), stderr.Bytes(), exitCode, err)
 	return stdout.Bytes(), stderr.Bytes(), exitCode, err
+}
+
+// normalizeRunErr makes a context deadline or cancellation visible to
+// errors.Is when the subprocess died because of that context. A live
+// context leaves err unchanged, including a normal non-zero exit.
+func normalizeRunErr(ctx context.Context, err error) error {
+	if ctx == nil {
+		return err
+	}
+	cerr := ctx.Err()
+	if cerr == nil || errors.Is(err, cerr) {
+		return err
+	}
+	if err == nil {
+		return cerr
+	}
+	return fmt.Errorf("%w: %w", cerr, err)
 }
 
 // logResult classifies a run() outcome into exactly one structured log entry

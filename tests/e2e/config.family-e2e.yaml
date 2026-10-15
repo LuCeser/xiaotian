@@ -1,0 +1,33 @@
+# config.family-e2e.yaml — hermetic stack for UAT-7 forceStudentMode browser
+# gate (tests/playwright.family.config.js). Same isolation primitives as
+# config.parent-e2e.yaml, distinct ports 18280/18281 (+ mimo stub 18380).
+#
+# forceStudentMode: true is the point of this template — mode=test must NOT
+# full-reveal. Interpreter / DB paths are injected via HTA_* env.
+
+server:
+  addr: "127.0.0.1:18280"
+  readTimeout: 10s
+  writeTimeout: 10s
+  healthAddr: "127.0.0.1:18281"
+  staticDir: ./pkg/web/static
+  staticRoute: /
+
+python:
+  interpreter: python
+  scriptsDir: third_party/python
+  vocabScript: third_party/python/vocab_manager.py
+  pregenScript: third_party/python/pregenerate_dictation.py
+  vocabDBPath: ./.scratch/family-e2e/vocab.db
+  dataDir: ./.scratch/family-e2e
+  cacheDir: ./.scratch/family-e2e/cache/audio
+  manifestDir: ./.scratch/family-e2e/cache
+  envFile: ./.scratch/family-e2e/dictation.env
+
+voice:
+  baseUrl: http://127.0.0.1:18380/v1
+
+rt:
+  lessonId: e2e-family-force
+  forceStudentMode: true
+  allowedOrigins: [localhost, "127.0.0.1", "localhost:18280", "127.0.0.1:18280"]

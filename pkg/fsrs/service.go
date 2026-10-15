@@ -29,9 +29,11 @@ var (
 // reimplements the FSRS algorithm — it only composes parameters, forwards
 // calls, and passes results back verbatim.
 type FSRSService interface {
-	// SelectDueCards retrieves due cards for a dictation session. The opts
-	// fields are merged with FSRSConfig defaults: zero-valued opts fall back
-	// to the configured defaults. When all cards are locked (fetch_lock),
+	// SelectDueCards retrieves due cards for a dictation session. Zero-valued
+	// Limit and Category fall back to FSRSConfig. Limit is clamped to the
+	// same [1, 100] range DefaultWordCount must satisfy. FetchLockHours on
+	// opts is ignored: the lock window is the server configuration, as a
+	// whole number of hours. When all cards are locked (fetch_lock),
 	// returns an empty slice and nil error — NEVER an error (D-02-a).
 	SelectDueCards(ctx context.Context, opts SelectOpts) ([]pybridge.DueCard, error)
 
@@ -61,8 +63,32 @@ type SelectOpts struct {
 	// Limit caps the number of cards returned. <= 0 → cfg.DefaultWordCount.
 	Limit int
 
-	// FetchLockHours overrides the default fetch-lock window. <= 0 → cfg.FetchLockHours.
+	// FetchLockHours is ignored. The lock duration always comes from
+	// FSRSConfig.FetchLockHours (whole hours). The field is retained so
+	// existing callers keep compiling; it is not a client-controlled override.
 	FetchLockHours float64
+}
+
+// maxWordCount is the upper bound FSRSConfig.Validate enforces on
+// DefaultWordCount. Requested limits use the same range so a client cannot
+// pull an unbounded batch.
+const maxWordCount = 100
+
+// clampWordLimit applies the DefaultWordCount bounds to a requested count.
+// A non-positive request uses the configured default; values above
+// maxWordCount are cut down to that ceiling.
+func clampWordLimit(requested, configured int) int {
+	limit := requested
+	if limit <= 0 {
+		limit = configured
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > maxWordCount {
+		limit = maxWordCount
+	}
+	return limit
 }
 
 // UnlockOpts carries the caller's per-request preferences for UnlockCards.
@@ -118,11 +144,10 @@ func NewFSRSService(exec pybridge.Executor, logger infra.Logger, cfg infra.FSRSC
 // and delegates to pybridge.Executor.RunDue. On success, returns the card
 // slice (possibly empty when all cards are locked — D-02-a).
 func (s *fsrsService) SelectDueCards(ctx context.Context, opts SelectOpts) ([]pybridge.DueCard, error) {
-	// Merge: zero-value opts fall back to cfg defaults (Pitfall 4 guard).
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = s.cfg.DefaultWordCount
-	}
+	// Limit: zero means the configured default, then clamp to [1, 100].
+	// A client-supplied count cannot exceed the same ceiling as
+	// DefaultWordCount.
+	limit := clampWordLimit(opts.Limit, s.cfg.DefaultWordCount)
 
 	category := opts.Category
 	if category == "" {
@@ -134,10 +159,9 @@ func (s *fsrsService) SelectDueCards(ctx context.Context, opts SelectOpts) ([]py
 		units = []string{s.cfg.DefaultUnit}
 	}
 
-	fetchLockHours := opts.FetchLockHours
-	if fetchLockHours <= 0 {
-		fetchLockHours = s.cfg.FetchLockHours
-	}
+	// Lock duration is server configuration only, as whole hours.
+	// opts.FetchLockHours is not consulted.
+	fetchLockHours := pybridge.WholeLockHours(s.cfg.FetchLockHours)
 
 	result, err := s.exec.RunDue(ctx, pybridge.DueOpts{
 		Category:       category,
