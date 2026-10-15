@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
@@ -32,7 +34,6 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/tts"
 	"github.com/xiaotian/home-tutor-agent/pkg/voice"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
-	"go.uber.org/zap"
 )
 
 // fsmFSRS feeds two due words and succeeds at everything else.
@@ -77,7 +78,7 @@ type mimoGen struct {
 }
 
 func (g *mimoGen) GenerateForSessionWithSource(_ context.Context, _ string, words []string) (map[string]string, tts.AudioSource, error) {
-	paths, err := g.fsmGen.GenerateForSession(context.Background(), "", words)
+	paths, err := g.GenerateForSession(context.Background(), "", words)
 	return paths, tts.SourceMimo, err
 }
 
@@ -196,7 +197,11 @@ func TestVoiceCommand_PauseReachesRealFSM(t *testing.T) {
 	svcCtx, svcCancel := context.WithCancel(context.Background())
 	defer svcCancel()
 	go hub.Run(svcCtx)
-	go manager.Start(svcCtx)
+	go func() {
+		if startErr := manager.Start(svcCtx); startErr != nil {
+			logger.Error("session manager start failed", infra.ErrField(startErr))
+		}
+	}()
 
 	// Voice pipeline with the REAL manager as the session pusher.
 	tr := &captureTranscriber{transcript: "暂停"}

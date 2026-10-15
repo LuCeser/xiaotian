@@ -526,23 +526,23 @@ var (
 	// command, exit code, and stderr text so callers can distinguish
 	// FSRS/user errors (exit 1 + stderr diagnostics) from infrastructure
 	// errors (timeout / parse failure).
-	ErrPythonExit = errors.New("python subprocess exited non-zero.")
+	ErrPythonExit = errors.New("python subprocess exited non-zero")
 
 	// ErrPythonTimeout is returned when the per-call context expires
 	// before the subprocess returns. The bridge kills the entire process
 	// group (RESEARCH Pattern 1) so no orphan ffmpeg survives.
-	ErrPythonTimeout = errors.New("python subprocess timed out.")
+	ErrPythonTimeout = errors.New("python subprocess timed out")
 
 	// ErrPythonJSONParse is returned when extractTrailingJSON cannot
 	// locate a complete JSON object in the subprocess stdout (e.g. the
 	// script crashed mid-print, or stdout was empty/non-JSON).
-	ErrPythonJSONParse = errors.New("python stdout JSON parse failed.")
+	ErrPythonJSONParse = errors.New("python stdout JSON parse failed")
 
 	// ErrPythonEmpty is returned when the subprocess exited 0 but stdout
 	// is empty -- the script's contract is "exit 0 implies printable
 	// payload", so an empty success stdout is treated as a bridge-level
 	// error rather than a silent zero-card / zero-path result.
-	ErrPythonEmpty = errors.New("python stdout empty.")
+	ErrPythonEmpty = errors.New("python stdout empty")
 )
 
 // ExitError is the typed error returned alongside ErrPythonExit (and

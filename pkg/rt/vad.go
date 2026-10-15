@@ -259,7 +259,7 @@ func FrameRMS(frame []byte) float64 {
 	}
 	var sum float64
 	for i := 0; i+1 < len(frame); i += 2 {
-		s := float64(int16(binary.LittleEndian.Uint16(frame[i:])))
+		s := float64(int16(binary.LittleEndian.Uint16(frame[i:]))) //nolint:gosec // G115: s16le PCM sample; the high bit is the sign
 		sum += s * s
 	}
 	return math.Sqrt(sum/float64(n)) / 32768

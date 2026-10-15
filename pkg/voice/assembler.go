@@ -72,14 +72,14 @@ func (a *Assembler) Assemble() []byte {
 	if len(a.chunks) == 0 {
 		return nil
 	}
-	seqs := make([]int, 0, len(a.chunks))
+	seqs := make([]uint32, 0, len(a.chunks))
 	for seq := range a.chunks {
-		seqs = append(seqs, int(seq))
+		seqs = append(seqs, seq)
 	}
-	sort.Ints(seqs)
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
 	out := make([]byte, 0, a.bytes)
 	for _, seq := range seqs {
-		out = append(out, a.chunks[uint32(seq)]...)
+		out = append(out, a.chunks[seq]...)
 	}
 	return out
 }

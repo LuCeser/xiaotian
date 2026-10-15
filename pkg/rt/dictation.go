@@ -341,11 +341,6 @@ func newDictationTutor(l lesson.Lesson) *DictationTutor {
 	}
 }
 
-// currentWord returns the word card at the cursor.
-func (t *DictationTutor) currentWord() lesson.Word {
-	return t.words[t.currentIndex]
-}
-
 // turnTarget snapshots the immutable advance target for one classification.
 func (t *DictationTutor) turnTarget() TurnTarget {
 	return TurnTarget{

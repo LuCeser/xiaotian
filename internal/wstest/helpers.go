@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
@@ -20,11 +21,10 @@ func MustBuildTestFrame(t *testing.T, msgType ws.MessageType, seq uint32, payloa
 	t.Helper()
 
 	h := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    msgType,
-		Sequence:   seq,
-		Timestamp:  uint32(time.Now().UnixMicro()),
-		PayloadLen: uint16(len(payload)),
+		Version:   ws.ProtocolVersion,
+		MsgType:   msgType,
+		Sequence:  seq,
+		Timestamp: uint32(time.Now().UnixMicro()), //nolint:gosec // G115: protocol timestamp keeps the low 32 bits of Unix microseconds
 	}
 
 	return ws.EncodeFrame(h, payload)

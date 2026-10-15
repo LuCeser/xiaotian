@@ -91,10 +91,10 @@ func TestWordlistLive_RealVision(t *testing.T) {
 	// The production adapter shape (cmd/service mimoListReader): ChatVision
 	// over the sniffed MIME type with the photo chat model.
 	read := ListReader(func(ctx context.Context, systemPrompt, userPrompt string, img []byte, mimeType string) (string, error) {
-		resp, err := client.ChatVision(ctx, systemPrompt, userPrompt, img, mimeType,
+		resp, visionErr := client.ChatVision(ctx, systemPrompt, userPrompt, img, mimeType,
 			mimo.WithChatModel(infra.DefaultConfig().Photo.ChatModel))
-		if err != nil {
-			return "", err
+		if visionErr != nil {
+			return "", visionErr
 		}
 		return resp.Text(), nil
 	})

@@ -29,7 +29,7 @@ func TestPracticeStoreRoundtrip(t *testing.T) {
 		{LessonID: "r0x-20261008-120000", Word: "banana", Rating: "again", Correct: false, Hints: 2, ReviewedDay: "2026-10-08"},
 		{LessonID: "r0x-20261008-120000", Word: "猫", Rating: "hard", Correct: true, Hints: 1, ReviewedDay: "2026-10-08"},
 	}
-	if err := store.RecordPractice(ctx, batch); err != nil {
+	if err = store.RecordPractice(ctx, batch); err != nil {
 		t.Fatalf("RecordPractice: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestListPracticeByLesson(t *testing.T) {
 		{LessonID: "r0x-20261008-120000", Word: "banana", Rating: "again", Correct: false, Hints: 2, ReviewedDay: "2026-10-08"},
 		{LessonID: "r0x-20261009-090000", Word: "猫", Rating: "hard", Correct: true, Hints: 1, ReviewedDay: "2026-10-09"},
 	}
-	if err := store.RecordPractice(ctx, batch); err != nil {
+	if err = store.RecordPractice(ctx, batch); err != nil {
 		t.Fatalf("RecordPractice: %v", err)
 	}
 
@@ -197,19 +197,19 @@ func TestPracticeMigrateIdempotent(t *testing.T) {
     current_index INTEGER NOT NULL DEFAULT 0,
     version INTEGER NOT NULL DEFAULT 1
 )`
-	if _, err := db.ExecContext(ctx, legacyDDL); err != nil {
+	if _, err = db.ExecContext(ctx, legacyDDL); err != nil {
 		t.Fatalf("create legacy lessons: %v", err)
 	}
 
-	if err := Migrate(ctx, db); err != nil {
+	if err = Migrate(ctx, db); err != nil {
 		t.Fatalf("first Migrate on legacy db: %v", err)
 	}
-	if err := Migrate(ctx, db); err != nil {
+	if err = Migrate(ctx, db); err != nil {
 		t.Fatalf("second Migrate on legacy db: %v", err)
 	}
 
 	var count int
-	if err := db.QueryRowContext(ctx,
+	if err = db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='practice_logs'",
 	).Scan(&count); err != nil {
 		t.Fatalf("count practice_logs: %v", err)

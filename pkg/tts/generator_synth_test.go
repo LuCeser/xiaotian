@@ -36,7 +36,7 @@ func (f *fakeWordSynth) SynthesizeWord(_ context.Context, word string) (PCMData,
 	}
 	samples, ok := f.pcmByWord[word]
 	if !ok {
-		samples = []byte{byte(f.calls), 0x42}
+		samples = []byte{byte(f.calls), 0x42} //nolint:gosec // G115: test PCM marker; call counts in these tests fit in a byte
 	}
 	return PCMData{Samples: samples, FrameSize: 640}, nil
 }

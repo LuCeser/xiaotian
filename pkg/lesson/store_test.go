@@ -240,21 +240,21 @@ func TestMigrateAddsCardsColumnToLegacyTable(t *testing.T) {
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 )`
-	if _, err := db.ExecContext(ctx, legacyDDL); err != nil {
+	if _, err = db.ExecContext(ctx, legacyDDL); err != nil {
 		t.Fatalf("create legacy lessons: %v", err)
 	}
-	if _, err := db.ExecContext(ctx,
+	if _, err = db.ExecContext(ctx,
 		"INSERT INTO lessons (lesson_id, words) VALUES ('LEGACY-1', ?)",
 		`["旧词","第二词"]`,
 	); err != nil {
 		t.Fatalf("seed legacy row: %v", err)
 	}
 
-	if err := Migrate(ctx, db); err != nil {
+	if err = Migrate(ctx, db); err != nil {
 		t.Fatalf("Migrate on legacy db: %v", err)
 	}
 	// Second run must stay idempotent (probe finds the column, no ALTER).
-	if err := Migrate(ctx, db); err != nil {
+	if err = Migrate(ctx, db); err != nil {
 		t.Fatalf("second Migrate on legacy db: %v", err)
 	}
 
@@ -296,7 +296,7 @@ func TestEnsureLessonCardsDoesNotReplaceLegacyEmptyCards(t *testing.T) {
 
 	// Seed a row the way a pre-cards writer would have: words only, cards
 	// stays at the DDL default '[]'.
-	if _, err := store.db.ExecContext(ctx,
+	if _, err = store.db.ExecContext(ctx,
 		"INSERT INTO lessons (lesson_id, words) VALUES ('L-EMPTY', ?)",
 		`["旧词"]`,
 	); err != nil {
@@ -327,7 +327,7 @@ func TestGetLessonCorruptedCardsJSON(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if _, err := store.db.ExecContext(ctx,
+	if _, err = store.db.ExecContext(ctx,
 		"INSERT INTO lessons (lesson_id, words, cards) VALUES ('L-BAD', ?, ?)",
 		`["词"]`,
 		`{not valid json`,
@@ -347,7 +347,7 @@ func TestGetLessonCorruptedCardsJSON(t *testing.T) {
 // TestStoreMigrateAddsStageColumns (13.1-01): a lessons table from before the
 // check stage (13-06-era schema: cards exists, the four 13.1 columns do not)
 // gains stage/outcomes/verdicts/unchecked idempotently — historical rows keep
-// their short-circuit defaults (stage=''/outcomes='{}'/verdicts='[]'/unchecked=0,
+// their short-circuit defaults (stage=”/outcomes='{}'/verdicts='[]'/unchecked=0,
 // the values startCompletedSession relies on), two consecutive Migrate runs
 // stay no-ops, and fresh rows through the store default cleanly.
 func TestStoreMigrateAddsStageColumns(t *testing.T) {
@@ -367,29 +367,29 @@ func TestStoreMigrateAddsStageColumns(t *testing.T) {
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 )`
-	if _, err := db.ExecContext(ctx, legacyDDL); err != nil {
+	if _, err = db.ExecContext(ctx, legacyDDL); err != nil {
 		t.Fatalf("create legacy lessons: %v", err)
 	}
 	// A completed historical lesson row (the startCompletedSession case).
-	if _, err := db.ExecContext(ctx,
+	if _, err = db.ExecContext(ctx,
 		"INSERT INTO lessons (lesson_id, words, cards, current_index, version) VALUES ('LEGACY-DONE', ?, '[]', 1, 2)",
 		`["旧词"]`,
 	); err != nil {
 		t.Fatalf("seed legacy row: %v", err)
 	}
 
-	if err := Migrate(ctx, db); err != nil {
+	if err = Migrate(ctx, db); err != nil {
 		t.Fatalf("Migrate on legacy db: %v", err)
 	}
 	// Second run must stay idempotent (probe finds every column, no ALTER).
-	if err := Migrate(ctx, db); err != nil {
+	if err = Migrate(ctx, db); err != nil {
 		t.Fatalf("second Migrate on legacy db: %v", err)
 	}
 
 	for _, col := range []string{"stage", "outcomes", "verdicts", "unchecked"} {
-		has, err := lessonsHasColumn(ctx, db, col)
-		if err != nil {
-			t.Fatalf("probe %s column: %v", col, err)
+		has, colErr := lessonsHasColumn(ctx, db, col)
+		if colErr != nil {
+			t.Fatalf("probe %s column: %v", col, colErr)
 		}
 		if !has {
 			t.Errorf("%s column missing after Migrate on legacy table", col)
@@ -398,7 +398,7 @@ func TestStoreMigrateAddsStageColumns(t *testing.T) {
 
 	var stage, outcomes, verdicts string
 	var unchecked int
-	if err := db.QueryRowContext(ctx,
+	if err = db.QueryRowContext(ctx,
 		"SELECT stage, outcomes, verdicts, unchecked FROM lessons WHERE lesson_id = 'LEGACY-DONE'",
 	).Scan(&stage, &outcomes, &verdicts, &unchecked); err != nil {
 		t.Fatalf("read legacy row defaults: %v", err)
@@ -438,7 +438,7 @@ func TestStoreMigrateAddsStageColumns(t *testing.T) {
 // parent-facing read projection, enumerated branch-by-branch against the
 // authoritative completion branch table (pkg/rt/turn.go lesson-init switch):
 // ONLY stage=submitted (the unified submission migrated the row) or a legacy
-// row (stage='' whose cursor walked past the last card) counts as completed.
+// row (stage=” whose cursor walked past the last card) counts as completed.
 // checking (check panel open — words are on the student's screen), the
 // in-progress default branch, and the empty-cards legacy unavailable row are
 // ALL incomplete. Unchecked is deliberately NOT an input: the fallback also
@@ -482,13 +482,13 @@ func TestListLessons(t *testing.T) {
 	ctx := context.Background()
 
 	seed := []struct {
-		lessonID    string
-		cards       string
-		verdicts    string
-		stage       string
-		currentIdx  int
-		unchecked   int
-		createdAt   string
+		lessonID   string
+		cards      string
+		verdicts   string
+		stage      string
+		currentIdx int
+		unchecked  int
+		createdAt  string
 	}{
 		{"r0-20261010", `[{"word":"苹果","meaning":"apple","example":"s1"},{"word":"香蕉","meaning":"banana","example":"s2"},{"word":"橘子","meaning":"orange","example":"s3"}]`,
 			`[{"word_index":0,"correct":true,"manual":true},{"word_index":1,"correct":false,"manual":true},{"word_index":2,"correct":true,"manual":false}]`,

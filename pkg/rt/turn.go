@@ -1471,7 +1471,7 @@ func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpos
 	fin, ok := tm.pendingPlayback[pendingKey(ref.Epoch, ref.FinalSentenceID)]
 	remaining := 0
 	for _, sid := range ref.SentenceIDs {
-		if p, ok := tm.pendingPlayback[pendingKey(ref.Epoch, sid)]; ok && !p.completed {
+		if p, found := tm.pendingPlayback[pendingKey(ref.Epoch, sid)]; found && !p.completed {
 			remaining += p.pcmSamples
 		}
 	}

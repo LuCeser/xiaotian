@@ -33,12 +33,6 @@ func (m *mockSender) Send(msg []byte) error {
 	return nil
 }
 
-func (m *mockSender) close() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.closed = true
-}
-
 func (m *mockSender) count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -113,6 +107,9 @@ func TestStreamWord_Basic(t *testing.T) {
 		header.Sequence = binary.BigEndian.Uint32(frame[2:6])
 		header.Timestamp = binary.BigEndian.Uint32(frame[6:10])
 		header.PayloadLen = binary.BigEndian.Uint16(frame[10:12])
+		if header.Timestamp != binary.BigEndian.Uint32(frame[6:10]) {
+			t.Errorf("frame %d: timestamp decode mismatch", i)
+		}
 
 		if header.Version != ws.ProtocolVersion {
 			t.Errorf("frame %d: expected version %d, got %d", i, ws.ProtocolVersion, header.Version)
@@ -494,7 +491,9 @@ func TestStreamer_ClearSeqCounter(t *testing.T) {
 	}
 
 	pcm1 := make([]byte, 640)
-	cache.Store("session1", "word1", pcm1)
+	if err = cache.Store("session1", "word1", pcm1); err != nil {
+		t.Fatalf("cache.Store: %v", err)
+	}
 
 	cfg := infra.TTSConfig{
 		SessionDir:        t.TempDir(),

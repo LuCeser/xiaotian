@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -645,7 +646,7 @@ func (c *mimoClient) executeTTSRequest(ctx context.Context, req TTSRequest) (Dec
 
 	// Parse response
 	var ttsResp TTSResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ttsResp); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&ttsResp); err != nil {
 		return DecodedAudioData{}, errors.Wrap(ErrInvalidResponse, "failed to decode TTS response")
 	}
 

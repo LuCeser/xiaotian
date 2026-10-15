@@ -45,7 +45,7 @@ func (f *fakeMimoSynth) snapshot() (int, string, []mimo.TTSOption) {
 func leSamples(vals []int16) []byte {
 	out := make([]byte, len(vals)*2)
 	for i, v := range vals {
-		binary.LittleEndian.PutUint16(out[i*2:], uint16(v))
+		binary.LittleEndian.PutUint16(out[i*2:], uint16(v)) //nolint:gosec // G115: s16le PCM bit pattern, not a numeric range check
 	}
 	return out
 }
@@ -54,7 +54,7 @@ func leSamples(vals []int16) []byte {
 func leUnpack(b []byte) []int16 {
 	vals := make([]int16, len(b)/2)
 	for i := range vals {
-		vals[i] = int16(binary.LittleEndian.Uint16(b[i*2:]))
+		vals[i] = int16(binary.LittleEndian.Uint16(b[i*2:])) //nolint:gosec // G115: s16le PCM sample; the high bit is the sign
 	}
 	return vals
 }

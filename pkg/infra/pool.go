@@ -1,6 +1,7 @@
 package infra
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -151,6 +152,10 @@ func NewAudioBufferPool(cfg BufferConfig, logger Logger) (*AudioBufferPool, erro
 	if cfg.Strategy != StrategyDropOldest {
 		return nil, errors.Wrapf(ErrInvalidBufferConfig,
 			"Strategy must be %q, got %q", StrategyDropOldest, cfg.Strategy)
+	}
+	if cfg.PoolSize > math.MaxInt32 {
+		return nil, errors.Wrapf(ErrInvalidBufferConfig,
+			"PoolSize %d exceeds int32", cfg.PoolSize)
 	}
 	if logger == nil {
 		logger = NewNoOpLogger()

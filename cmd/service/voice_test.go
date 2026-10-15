@@ -17,11 +17,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/voice"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
-	"go.uber.org/zap"
 )
 
 // captureTranscriber records every WAV it received and replies with a fixed

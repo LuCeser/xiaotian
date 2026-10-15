@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -246,7 +247,7 @@ func (s *ReceiptStore) ListByLesson(ctx context.Context, lessonID string) ([]Rec
 			updatedJSON   string
 			missingJSON   string
 		)
-		if err := rows.Scan(&r.ID, &r.LessonID, &r.RequestID, &r.Kind, &requestedJSON, &updatedJSON, &missingJSON, &r.Status, &r.CreatedAt, &r.CompletedAt); err != nil {
+		if err = rows.Scan(&r.ID, &r.LessonID, &r.RequestID, &r.Kind, &requestedJSON, &updatedJSON, &missingJSON, &r.Status, &r.CreatedAt, &r.CompletedAt); err != nil {
 			return nil, errors.Wrap(err, "list receipts: scan")
 		}
 		if r.Requested, err = decodeWordSet(requestedJSON); err != nil {
@@ -302,7 +303,7 @@ func (s *ReceiptStore) LatestByLessonIDs(ctx context.Context, lessonIDs []string
 	// the r. qualifier or lesson_id is ambiguous against the subquery.
 	outerCols := "r." + strings.ReplaceAll(receiptColumns, ", ", ", r.")
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT r.id, "+outerCols+" FROM lesson_save_receipts r JOIN (SELECT lesson_id, MAX(id) AS max_id FROM lesson_save_receipts WHERE lesson_id IN ("+placeholders+") GROUP BY lesson_id) m ON r.id = m.max_id ORDER BY r.id",
+		"SELECT r.id, "+outerCols+" FROM lesson_save_receipts r JOIN (SELECT lesson_id, MAX(id) AS max_id FROM lesson_save_receipts WHERE lesson_id IN ("+placeholders+") GROUP BY lesson_id) m ON r.id = m.max_id ORDER BY r.id", //nolint:gosec // G202: columns are the receiptColumns constant and placeholders are '?'; lesson ids are bound parameters
 		args...,
 	)
 	if err != nil {
@@ -323,7 +324,7 @@ func (s *ReceiptStore) LatestByLessonIDs(ctx context.Context, lessonIDs []string
 			updatedJSON   string
 			missingJSON   string
 		)
-		if err := rows.Scan(&r.ID, &r.LessonID, &r.RequestID, &r.Kind, &requestedJSON, &updatedJSON, &missingJSON, &r.Status, &r.CreatedAt, &r.CompletedAt); err != nil {
+		if err = rows.Scan(&r.ID, &r.LessonID, &r.RequestID, &r.Kind, &requestedJSON, &updatedJSON, &missingJSON, &r.Status, &r.CreatedAt, &r.CompletedAt); err != nil {
 			return nil, errors.Wrap(err, "latest receipts: scan")
 		}
 		if r.Requested, err = decodeWordSet(requestedJSON); err != nil {

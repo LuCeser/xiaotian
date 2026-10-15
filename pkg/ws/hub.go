@@ -10,8 +10,9 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
-	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"go.uber.org/zap"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
 // HubConfig holds configuration for creating a Hub (D-44 centralized validation).

@@ -26,13 +26,15 @@ func defaultVisionHandler(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if auth != "Bearer test-api-key" {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]interface{}{
 				"code":    "authentication_failed",
 				"message": "Invalid API key",
 				"type":    "authentication_error",
 			},
-		})
+		}); err != nil {
+			return
+		}
 		return
 	}
 
@@ -48,7 +50,9 @@ func defaultVisionHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		return
+	}
 }
 
 // TestClient_ChatVision exercises the vision chat completion path: happy-path

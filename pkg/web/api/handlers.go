@@ -790,12 +790,12 @@ func (h *handler) getLesson(w http.ResponseWriter, r *http.Request) {
 
 	if lessonKind(id) == "practice" {
 		// Extra-practice results live in practice_logs (never in verdicts).
-		records, err := h.practice.ListPracticeByLesson(r.Context(), id)
-		if err != nil {
+		records, recErr := h.practice.ListPracticeByLesson(r.Context(), id)
+		if recErr != nil {
 			h.logger.Error("get lesson: practice read failed",
 				infra.F("component", "web/api"),
 				infra.F("lesson_id", id),
-				infra.ErrField(err),
+				infra.ErrField(recErr),
 			)
 			writeError(w, http.StatusInternalServerError, codeInternal,
 				"internal error")

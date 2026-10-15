@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
@@ -110,12 +111,11 @@ func (s *Streamer) StreamWord(ctx context.Context, client Sender, sessionID stri
 		// 4b. Build the WS frame header
 		currentSeq := s.nextSeq(sessionID) // D-11: session-level monotonic seq (cross-word)
 		header := ws.FrameHeader{
-			Version:    ws.ProtocolVersion,
-			MsgType:    ws.MsgTypeAudio,
-			Sequence:   currentSeq,
-			Timestamp:  uint32(time.Now().UnixMicro()),
-			PayloadLen: uint16(len(frames[i])),
-			Reserved:   0,
+			Version:   ws.ProtocolVersion,
+			MsgType:   ws.MsgTypeAudio,
+			Sequence:  currentSeq,
+			Timestamp: uint32(time.Now().UnixMicro()), //nolint:gosec // G115: protocol timestamp keeps the low 32 bits of Unix microseconds
+			Reserved:  0,
 		}
 
 		// 4c. Encode frame and send

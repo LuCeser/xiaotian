@@ -346,12 +346,6 @@ func (f *fakeExecutor) ClearUnchecked(_ context.Context, lessonID string, expect
 	return res, nil
 }
 
-func (f *fakeExecutor) checkCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.checkCalls)
-}
-
 func (f *fakeExecutor) setRow(index, version int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -764,7 +758,7 @@ func TestSaveReceiptCheckSubmit(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
-	if err := lesson.Migrate(ctx, db); err != nil {
+	if err = lesson.Migrate(ctx, db); err != nil {
 		t.Fatalf("migrate receipt db: %v", err)
 	}
 	receipts, err := lesson.NewReceiptStore(db, nil)
@@ -1141,7 +1135,7 @@ func TestSaveReceiptPracticeStorageFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open broken practice db: %v", err)
 	}
-	if err := lesson.Migrate(context.Background(), pdb); err != nil {
+	if err = lesson.Migrate(context.Background(), pdb); err != nil {
 		t.Fatalf("migrate broken practice db: %v", err)
 	}
 	ps, err := lesson.NewPracticeStore(pdb, nil)
@@ -1382,13 +1376,6 @@ func TestCheckSubmitDisconnectCancelsAckWait(t *testing.T) {
 	if got := ttEventCount(t, log, EventPlaybackAckTimeout); got != 0 {
 		t.Errorf("playback_ack_timeout events after disconnect = %d, want 0", got)
 	}
-}
-
-// ttDriveTwoConfirmCompletion runs a TWO-word lesson through both confirms
-// into the check stage (13.1-01: the last commit no longer summarizes — it
-// opens the check stage), leaving the classroom waiting on verdicts.
-func ttDriveTwoConfirmCompletion(t *testing.T, words *fakeWordSource) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
-	return ttDriveToCheck(t, ttCards("苹果", "香蕉"), words)
 }
 
 // ttDriveToCheck drives a lesson of len(cards) words through scripted
@@ -2377,17 +2364,6 @@ func ttPaused(t *testing.T, tm *TurnManager) bool {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return tm.tutor != nil && tm.tutor.paused
-}
-
-// ttLastSentence returns the most recent teacher sentence text.
-func ttLastSentence(t *testing.T, s *captureSender) string {
-	t.Helper()
-	sents := s.controlsOf(t, TypeTeacherSentence)
-	if len(sents) == 0 {
-		t.Fatal("no teacher sentence captured")
-	}
-	text, _ := sents[len(sents)-1]["text"].(string)
-	return text
 }
 
 // ttSentencesSince returns every teacher sentence text from the given index
@@ -3787,7 +3763,7 @@ func TestThreeStageManualPath(t *testing.T) {
 		t.Fatalf("open temp db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := lesson.Migrate(context.Background(), db); err != nil {
+	if err = lesson.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate temp db: %v", err)
 	}
 	store, err := lesson.NewStore(db, nil)
@@ -4442,7 +4418,7 @@ func TestPickPracticeWords(t *testing.T) {
 	pool := ptPracticeCards("apple", "banana", "cat", "dog", "egg")
 
 	t.Run("excludes today's words", func(t *testing.T) {
-		picked := pickPracticeWords(pool, map[string]bool{"apple": true, "cat": true}, 10, rand.New(rand.NewSource(1)))
+		picked := pickPracticeWords(pool, map[string]bool{"apple": true, "cat": true}, 10, rand.New(rand.NewSource(1))) //nolint:gosec // G404: test shuffle, not used for secrets
 		got := ptPickedWords(picked)
 		if len(got) != 3 {
 			t.Fatalf("picked = %v, want the 3 non-excluded words", got)
@@ -4461,7 +4437,7 @@ func TestPickPracticeWords(t *testing.T) {
 	})
 
 	t.Run("more available than n returns exactly n", func(t *testing.T) {
-		picked := pickPracticeWords(pool, nil, 3, rand.New(rand.NewSource(1)))
+		picked := pickPracticeWords(pool, nil, 3, rand.New(rand.NewSource(1))) //nolint:gosec // G404: test shuffle, not used for secrets
 		got := ptPickedWords(picked)
 		if len(got) != 3 {
 			t.Fatalf("picked = %v, want exactly 3", got)
@@ -4476,14 +4452,14 @@ func TestPickPracticeWords(t *testing.T) {
 	})
 
 	t.Run("fewer available than n returns all", func(t *testing.T) {
-		picked := pickPracticeWords(pool, nil, 99, rand.New(rand.NewSource(1)))
+		picked := pickPracticeWords(pool, nil, 99, rand.New(rand.NewSource(1))) //nolint:gosec // G404: test shuffle, not used for secrets
 		if len(picked) != len(pool) {
 			t.Errorf("picked = %d words, want all %d (不足全给)", len(picked), len(pool))
 		}
 	})
 
 	t.Run("zero available returns nil", func(t *testing.T) {
-		picked := pickPracticeWords(pool, map[string]bool{"apple": true, "banana": true, "cat": true, "dog": true, "egg": true}, 10, rand.New(rand.NewSource(1)))
+		picked := pickPracticeWords(pool, map[string]bool{"apple": true, "banana": true, "cat": true, "dog": true, "egg": true}, 10, rand.New(rand.NewSource(1))) //nolint:gosec // G404: test shuffle, not used for secrets
 		if len(picked) != 0 {
 			t.Errorf("picked = %v, want nil/empty (honest-notice path)", picked)
 		}
@@ -4492,7 +4468,7 @@ func TestPickPracticeWords(t *testing.T) {
 	t.Run("shuffled across seeds", func(t *testing.T) {
 		signatures := map[string]bool{}
 		for seed := int64(1); seed <= 10; seed++ {
-			picked := pickPracticeWords(pool, nil, 5, rand.New(rand.NewSource(seed)))
+			picked := pickPracticeWords(pool, nil, 5, rand.New(rand.NewSource(seed))) //nolint:gosec // G404: test shuffle, not used for secrets
 			signatures[strings.Join(ptPickedWords(picked), ",")] = true
 		}
 		if len(signatures) < 2 {
@@ -4642,7 +4618,7 @@ func newTestPracticeStore(t *testing.T) *lesson.PracticeStore {
 		t.Fatalf("open practice test db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := lesson.Migrate(context.Background(), db); err != nil {
+	if err = lesson.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate practice test db: %v", err)
 	}
 	ps, err := lesson.NewPracticeStore(db, nil)
@@ -4661,7 +4637,7 @@ func newTestReceiptStore(t *testing.T) *lesson.ReceiptStore {
 		t.Fatalf("open receipt test db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := lesson.Migrate(context.Background(), db); err != nil {
+	if err = lesson.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate receipt test db: %v", err)
 	}
 	rs, err := lesson.NewReceiptStore(db, nil)
@@ -4680,7 +4656,7 @@ func newBrokenReceiptStore(t *testing.T) *lesson.ReceiptStore {
 	if err != nil {
 		t.Fatalf("open broken receipt db: %v", err)
 	}
-	if err := lesson.Migrate(context.Background(), db); err != nil {
+	if err = lesson.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate broken receipt db: %v", err)
 	}
 	rs, err := lesson.NewReceiptStore(db, nil)

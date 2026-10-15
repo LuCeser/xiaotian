@@ -741,9 +741,9 @@ func itSeedCheckRow(t *testing.T, exec *fakeExecutor, outcomes map[string]lesson
 	}
 	version := l.Version
 	for i := range itCards {
-		res, err := exec.AdvanceWord(ctx, "it-lesson", version, fmt.Sprintf("it-seed-adv-%d", i))
-		if err != nil {
-			t.Fatalf("AdvanceWord seed %d: %v", i, err)
+		res, advErr := exec.AdvanceWord(ctx, "it-lesson", version, fmt.Sprintf("it-seed-adv-%d", i))
+		if advErr != nil {
+			t.Fatalf("AdvanceWord seed %d: %v", i, advErr)
 		}
 		version = res.NewVersion
 	}
@@ -1704,8 +1704,8 @@ func TestCrossConnectionCorrectionStraggler(t *testing.T) {
 func TestCheckVoiceInvalidIndex(t *testing.T) {
 	exec := newFakeExecutorNoRow("it-lesson")
 	asr := newFakeASR(
-		asrScript{text: "那个词对了"},    // check_right with NO index
-		asrScript{text: "第五个词错了"},   // check_wrong index 5 (out of range)
+		asrScript{text: "那个词对了"},   // check_right with NO index
+		asrScript{text: "第五个词错了"},  // check_wrong index 5 (out of range)
 		asrScript{text: "第一个词写的是"}, // check_spelling with NO text
 	)
 	llm := newFakeLLM(

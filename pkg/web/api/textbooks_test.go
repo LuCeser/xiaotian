@@ -90,11 +90,11 @@ func TestTextbookRoutes(t *testing.T) {
 		exec := &fakeExecutor{}
 		h, _ := newTextbookTestHandler(t, exec, &fakeCardRepo{})
 		for name, body := range map[string]string{
-			"missing name":        `{"category":"english"}`,
-			"bad category":        `{"name":"X","category":"math"}`,
-			"duplicate lesson":    `{"name":"X","lessons":["第1课","第1课"]}`,
-			"empty lesson":        `{"name":"X","lessons":[""]}`,
-			"oversized lesson":    `{"name":"X","lessons":["` + strings.Repeat("课", 101) + `"]}`,
+			"missing name":     `{"category":"english"}`,
+			"bad category":     `{"name":"X","category":"math"}`,
+			"duplicate lesson": `{"name":"X","lessons":["第1课","第1课"]}`,
+			"empty lesson":     `{"name":"X","lessons":[""]}`,
+			"oversized lesson": `{"name":"X","lessons":["` + strings.Repeat("课", 101) + `"]}`,
 		} {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/textbooks", strings.NewReader(body)))
@@ -274,8 +274,8 @@ func TestTextbookRoutes(t *testing.T) {
 			Words []struct {
 				Word      string `json:"word"`
 				Textbooks []struct {
-					Name    string `json:"name"`
-					Lesson  string `json:"lesson"`
+					Name   string `json:"name"`
+					Lesson string `json:"lesson"`
 				} `json:"textbooks"`
 			} `json:"words"`
 		}

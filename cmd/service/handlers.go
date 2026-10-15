@@ -793,7 +793,7 @@ func handleSubmitAnswers(ctx context.Context, client *ws.Client, params json.Raw
 		logger.Warn("failed to send analysis_result", infra.ErrField(err))
 	}
 	if payload, err := marshalStoredResult(s.Category(), inputs, report); err == nil {
-		if err := s.RecordGradedResult(ctx, payload); err != nil {
+		if err = s.RecordGradedResult(ctx, payload); err != nil {
 			logger.Warn("graded result not persisted",
 				infra.F("conn_id", connID),
 				infra.ErrField(err),
@@ -849,10 +849,9 @@ func sendControlFrame(client *ws.Client, msgType ws.MessageType, payload interfa
 	}
 
 	header := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    msgType,
-		Sequence:   nextControlSeq(),
-		PayloadLen: uint16(len(jsonBytes)),
+		Version:  ws.ProtocolVersion,
+		MsgType:  msgType,
+		Sequence: nextControlSeq(),
 	}
 
 	frame := ws.EncodeFrame(header, jsonBytes)

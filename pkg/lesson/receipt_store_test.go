@@ -42,7 +42,7 @@ func TestReceiptBeginInsertsPendingRow(t *testing.T) {
 	}
 
 	var count int
-	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM lesson_save_receipts").Scan(&count); err != nil {
+	if err = store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM lesson_save_receipts").Scan(&count); err != nil {
 		t.Fatalf("count receipts: %v", err)
 	}
 	if count != 1 {
@@ -50,7 +50,7 @@ func TestReceiptBeginInsertsPendingRow(t *testing.T) {
 	}
 
 	var status, completedAt string
-	if err := store.db.QueryRowContext(ctx,
+	if err = store.db.QueryRowContext(ctx,
 		"SELECT status, completed_at FROM lesson_save_receipts WHERE id = ?", rec.ID,
 	).Scan(&status, &completedAt); err != nil {
 		t.Fatalf("read receipt row: %v", err)
@@ -131,7 +131,7 @@ func TestReceiptCompleteFillsRealOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin saved: %v", err)
 	}
-	if err := store.Complete(ctx, saved.ID, []string{"苹果"}, []string{"香蕉"}, true); err != nil {
+	if err = store.Complete(ctx, saved.ID, []string{"苹果"}, []string{"香蕉"}, true); err != nil {
 		t.Fatalf("Complete saved: %v", err)
 	}
 
@@ -142,7 +142,7 @@ func TestReceiptCompleteFillsRealOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin failed: %v", err)
 	}
-	if err := store.Complete(ctx, failed.ID, nil, []string{"苹果"}, false); err != nil {
+	if err = store.Complete(ctx, failed.ID, nil, []string{"苹果"}, false); err != nil {
 		t.Fatalf("Complete failed: %v", err)
 	}
 
@@ -268,7 +268,7 @@ func TestLatestByLessonIDs(t *testing.T) {
 		{LessonID: "r0-a", RequestID: "req-a2", Kind: ReceiptKindCorrection, Requested: []string{"苹果"}},
 		{LessonID: "r0-b", RequestID: "req-b1", Kind: ReceiptKindPractice, Requested: []string{"香蕉"}},
 	} {
-		if _, err := store.Begin(ctx, in); err != nil {
+		if _, err = store.Begin(ctx, in); err != nil {
 			t.Fatalf("Begin %s: %v", in.RequestID, err)
 		}
 	}
@@ -308,7 +308,7 @@ func TestLatestByLessonIDsEmptySliceZeroSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReceiptStore: %v", err)
 	}
-	if err := db.Close(); err != nil {
+	if err = db.Close(); err != nil {
 		t.Fatalf("close db: %v", err)
 	}
 
@@ -336,7 +336,7 @@ func TestReceiptListByLesson(t *testing.T) {
 		{LessonID: "r0-b", RequestID: "req-b1", Kind: ReceiptKindPractice, Requested: []string{"香蕉"}},
 		{LessonID: "r0-a", RequestID: "req-a2", Kind: ReceiptKindCorrection, Requested: []string{"橘子"}},
 	} {
-		if _, err := store.Begin(ctx, in); err != nil {
+		if _, err = store.Begin(ctx, in); err != nil {
 			t.Fatalf("Begin %s: %v", in.RequestID, err)
 		}
 	}

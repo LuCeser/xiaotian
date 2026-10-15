@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -254,7 +255,7 @@ func (r *sqliteCardRepository) CategoriesByIDs(ctx context.Context, ids []int64)
 		args = append(args, id)
 	}
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT id, category FROM cards WHERE id IN ("+placeholders+")", args...)
+		"SELECT id, category FROM cards WHERE id IN ("+placeholders+")", args...) //nolint:gosec // G202: placeholders are generated '?' markers; ids are bound parameters
 	if err != nil {
 		r.logger.Error("card categories by ids failed",
 			infra.F("component", "database/card_repo"),
@@ -284,7 +285,7 @@ func (r *sqliteCardRepository) ListByUnit(ctx context.Context, unit string) ([]C
 	if err != nil {
 		return nil, errors.Wrap(err, "card schema")
 	}
-	query := fmt.Sprintf("SELECT %s FROM cards", columns)
+	query := fmt.Sprintf("SELECT %s FROM cards", columns) //nolint:gosec // G201: column list is a fixed allowlist from the schema probe, not user input
 	args := []any{}
 
 	if unit != "" {
@@ -365,7 +366,7 @@ func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]C
 	// The "c" alias anchors the Issue #4 scope predicate's correlated
 	// subqueries (card_assignments na/ia/la reference c.id); unqualified
 	// filter columns keep resolving against the same single table.
-	query := fmt.Sprintf("SELECT %s FROM cards c", columns)
+	query := fmt.Sprintf("SELECT %s FROM cards c", columns) //nolint:gosec // G201: column list is a fixed allowlist from the schema probe, not user input
 	args := []any{}
 	// First predicate needs WHERE, the rest AND — one flag tracks it across
 	// every filter field (participation included).
@@ -384,13 +385,13 @@ func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]C
 		addPredicate(" participates = 1")
 	}
 	if filter.ScopeEligibleOnly {
-		scopeSQL, scopeArgs, err := textbookScopePredicate(ctx, r.db)
-		if err != nil {
+		scopeSQL, scopeArgs, scopeErr := textbookScopePredicate(ctx, r.db)
+		if scopeErr != nil {
 			r.logger.Error("textbook scope predicate failed",
 				infra.F("component", "database/card_repo"),
-				infra.ErrField(err),
+				infra.ErrField(scopeErr),
 			)
-			return nil, errors.Wrap(err, "card list: scope")
+			return nil, errors.Wrap(scopeErr, "card list: scope")
 		}
 		if scopeSQL != "" {
 			// Bare parenthesized expression — addPredicate handles the

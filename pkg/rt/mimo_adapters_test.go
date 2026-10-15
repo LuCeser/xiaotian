@@ -174,7 +174,7 @@ type lessonWordCheck struct{ Word, Meaning, Example string }
 // it into the visible lesson_unavailable path, so swallowing it here would
 // fabricate a "no due words" ending.
 func TestPyFSRSFetchDueErrorPropagates(t *testing.T) {
-	sentinel := errors.New("python subprocess timed out.")
+	sentinel := errors.New("python subprocess timed out")
 	fake := &fakePyBridge{dueErrs: []error{sentinel}}
 	ad, _ := NewPyFSRS(fake, infra.NewNoOpLogger())
 	words, err := ad.FetchDueWords(context.Background(), 10)

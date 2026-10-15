@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -60,13 +61,15 @@ func defaultTTSHandler(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if auth != "Bearer test-api-key" {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]interface{}{
 				"code":    "authentication_failed",
 				"message": "Invalid API key",
 				"type":    "authentication_error",
 			},
-		})
+		}); err != nil {
+			return
+		}
 		return
 	}
 
@@ -103,7 +106,9 @@ func defaultTTSHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		return
+	}
 }
 
 // defaultASRHandler provides a successful ASR response
@@ -112,13 +117,15 @@ func defaultASRHandler(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if auth != "Bearer test-api-key" {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]interface{}{
 				"code":    "authentication_failed",
 				"message": "Invalid API key",
 				"type":    "authentication_error",
 			},
-		})
+		}); err != nil {
+			return
+		}
 		return
 	}
 
@@ -142,32 +149,38 @@ func defaultASRHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		return
+	}
 }
 
 // rateLimitHandler simulates rate limiting
 func rateLimitHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Retry-After", "5")
 	w.WriteHeader(http.StatusTooManyRequests)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"error": map[string]interface{}{
 			"code":    "rate_limit_exceeded",
 			"message": "Rate limit exceeded",
 			"type":    "rate_limit_error",
 		},
-	})
+	}); err != nil {
+		return
+	}
 }
 
 // serviceUnavailableHandler simulates service outage
 func serviceUnavailableHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusServiceUnavailable)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"error": map[string]interface{}{
 			"code":    "service_unavailable",
 			"message": "Service temporarily unavailable",
 			"type":    "service_unavailable",
 		},
-	})
+	}); err != nil {
+		return
+	}
 }
 
 // TestNewClient tests client creation
@@ -503,7 +516,9 @@ func TestClient_TranscribeEmptyChoices(t *testing.T) {
 		response := ASRResponse{Choices: []ASRChoice{}}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			return
+		}
 	}
 
 	server, cleanup := mockTTSServer(emptyChoicesHandler)

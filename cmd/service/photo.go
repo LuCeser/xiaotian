@@ -165,8 +165,8 @@ func (ps *photoService) handlePhotoSubmit(ctx context.Context, client *ws.Client
 
 	res, jpegLen, err := ps.ocrPhoto(ctx, connID)
 
-	switch {
-	case err == nil:
+	switch err {
+	case nil:
 		j, reject := ps.judge(connID, res.Text)
 		if reject != "" {
 			ps.logger.Warn("photo answer not judged",
@@ -189,7 +189,7 @@ func (ps *photoService) handlePhotoSubmit(ctx context.Context, client *ws.Client
 			Judged: true, Correct: j.Correct, Expected: j.Expected, Rating: j.Rating,
 		})
 
-	case err == ocr.ErrLowConfidence:
+	case ocr.ErrLowConfidence:
 		// Best guess still ships — the client prefills the manual input.
 		return sendControlFrame(client, ws.MsgTypeControl, photoResultResponse{
 			Type: "photo_result", Text: res.Text, Confidence: res.Confidence,
@@ -225,8 +225,8 @@ func (ps *photoService) handlePhotoOCR(ctx context.Context, client *ws.Client, _
 
 	res, jpegLen, err := ps.ocrPhoto(ctx, connID)
 
-	switch {
-	case err == nil || err == ocr.ErrLowConfidence:
+	switch err {
+	case nil, ocr.ErrLowConfidence:
 		// Success and low confidence both ship the recognized text — the
 		// form prefills either way; LowConfidence flags the guess so the
 		// form asks the student to double-check it.

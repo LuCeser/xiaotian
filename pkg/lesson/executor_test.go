@@ -140,10 +140,10 @@ func TestAdvanceWordStaleRecordAfterLessonReset(t *testing.T) {
 	// tool_requests record survives, carrying stored NewVersion=2 from the
 	// previous lesson generation) and rebuild it — INSERT OR IGNORE creates
 	// a fresh row with version=1, current_index=0.
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM lessons WHERE lesson_id = 'L1'"); err != nil {
+	if _, err = store.db.ExecContext(ctx, "DELETE FROM lessons WHERE lesson_id = 'L1'"); err != nil {
 		t.Fatalf("delete lessons row: %v", err)
 	}
-	if _, err := store.EnsureLesson(ctx, "L1", []string{"鱼", "虫", "花"}); err != nil {
+	if _, err = store.EnsureLesson(ctx, "L1", []string{"鱼", "虫", "花"}); err != nil {
 		t.Fatalf("EnsureLesson rebuild: %v", err)
 	}
 	rebuilt, err := store.GetLesson(ctx, "L1")
@@ -170,7 +170,7 @@ func TestAdvanceWordStaleRecordAfterLessonReset(t *testing.T) {
 
 	// The lessons row must have really advanced.
 	var version, index int
-	if err := store.db.QueryRowContext(ctx,
+	if err = store.db.QueryRowContext(ctx,
 		"SELECT version, current_index FROM lessons WHERE lesson_id = 'L1'",
 	).Scan(&version, &index); err != nil {
 		t.Fatalf("read lessons after re-advance: %v", err)
@@ -422,7 +422,7 @@ func TestApplyVerdictIdempotent(t *testing.T) {
 		t.Errorf("replay verdicts = %+v, want still exactly 1 entry (no double write)", replay.Verdicts)
 	}
 	var version int
-	if err := store.db.QueryRowContext(ctx,
+	if err = store.db.QueryRowContext(ctx,
 		"SELECT version FROM lessons WHERE lesson_id = 'L1'",
 	).Scan(&version); err != nil {
 		t.Fatalf("read lessons.version: %v", err)
@@ -474,7 +474,7 @@ func TestCompleteCheckGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnterCheck: %v", err)
 	}
-	if _, err := ex.ApplyVerdict(ctx, "L1", ec.NewVersion, "req-v-0", CheckVerdict{WordIndex: 0, Correct: true, Manual: true}); err != nil {
+	if _, err = ex.ApplyVerdict(ctx, "L1", ec.NewVersion, "req-v-0", CheckVerdict{WordIndex: 0, Correct: true, Manual: true}); err != nil {
 		t.Fatalf("ApplyVerdict 0: %v", err)
 	}
 	av, err := ex.ApplyVerdict(ctx, "L1", ec.NewVersion+1, "req-v-1", CheckVerdict{WordIndex: 1, Correct: false, Manual: true})
@@ -564,7 +564,7 @@ func TestClearUnchecked(t *testing.T) {
 		t.Fatalf("ClearUnchecked stale version = %v, want ErrVersionConflict", err)
 	}
 	var unchecked int
-	if err := store.db.QueryRowContext(ctx,
+	if err = store.db.QueryRowContext(ctx,
 		"SELECT unchecked FROM lessons WHERE lesson_id = 'L1'",
 	).Scan(&unchecked); err != nil {
 		t.Fatalf("read lessons.unchecked: %v", err)
@@ -583,7 +583,7 @@ func TestClearUnchecked(t *testing.T) {
 		t.Errorf("first ClearUnchecked = %+v, want a fresh write (Idempotent:false, stage submitted)", cu)
 	}
 	var version int
-	if err := store.db.QueryRowContext(ctx,
+	if err = store.db.QueryRowContext(ctx,
 		"SELECT version, unchecked FROM lessons WHERE lesson_id = 'L1'",
 	).Scan(&version, &unchecked); err != nil {
 		t.Fatalf("read lessons row: %v", err)

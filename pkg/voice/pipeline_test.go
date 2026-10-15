@@ -4,9 +4,21 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 )
+
+// wavDataLen converts a payload length to the WAV data-size field.
+func wavDataLen(n int) (uint32, bool) {
+	if n < 0 {
+		return 0, false
+	}
+	if uint64(n) > math.MaxUint32 {
+		return 0, false
+	}
+	return uint32(n), true
+}
 
 // stubClassifier records the transcripts it saw and replies from a table.
 type stubClassifier struct {
@@ -66,7 +78,8 @@ func validWAVHeader(wav []byte, payloadLen int) bool {
 	if binary.LittleEndian.Uint16(wav[34:36]) != 16 { // bits per sample
 		return false
 	}
-	if binary.LittleEndian.Uint32(wav[40:44]) != uint32(payloadLen) {
+	dataLen, ok := wavDataLen(payloadLen)
+	if !ok || binary.LittleEndian.Uint32(wav[40:44]) != dataLen {
 		return false
 	}
 	return true

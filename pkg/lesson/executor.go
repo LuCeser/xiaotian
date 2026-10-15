@@ -7,9 +7,10 @@ import (
 	"fmt"
 
 	"github.com/pkg/errors"
-	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	sqlite "modernc.org/sqlite"
 	lib "modernc.org/sqlite/lib"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
 // ErrVersionConflict is the sentinel behind every optimistic-concurrency
@@ -167,7 +168,7 @@ func (e *Executor) advanceTx(ctx context.Context, lessonID string, expectedVersi
 	// returned *staleRecordError). Delete it by primary key inside THIS
 	// transaction, before the INSERT below re-claims the request_id.
 	if purgeStale {
-		if _, err := tx.ExecContext(ctx,
+		if _, err = tx.ExecContext(ctx,
 			"DELETE FROM tool_requests WHERE request_id = ?",
 			requestID,
 		); err != nil {
@@ -189,7 +190,7 @@ func (e *Executor) advanceTx(ctx context.Context, lessonID string, expectedVersi
 	// SQLITE_CONSTRAINT_PRIMARYKEY (1555); the UNIQUE (2067) and base
 	// CONSTRAINT (19) codes are kept for defense in depth against driver
 	// code-shape changes.
-	if _, err := tx.ExecContext(ctx,
+	if _, err = tx.ExecContext(ctx,
 		"INSERT INTO tool_requests (request_id, lesson_id, tool, result) VALUES (?, ?, 'advance_word', '')",
 		requestID,
 		lessonID,
@@ -262,7 +263,7 @@ func (e *Executor) advanceTx(ctx context.Context, lessonID string, expectedVersi
 		newIndex   int
 		newVersion int
 	)
-	if err := tx.QueryRowContext(ctx,
+	if err = tx.QueryRowContext(ctx,
 		"SELECT current_index, version FROM lessons WHERE lesson_id = ?",
 		lessonID,
 	).Scan(&newIndex, &newVersion); err != nil {
@@ -476,11 +477,11 @@ func (e *Executor) EnterCheck(ctx context.Context, lessonID string, expectedVers
 
 	rb, stored, latch, err := e.checkStageTx(ctx, lessonID, expectedVersion, requestID, "enter_check",
 		func(tx *sql.Tx) (int64, error) {
-			res, err := tx.ExecContext(ctx,
+			res, execErr := tx.ExecContext(ctx,
 				"UPDATE lessons SET stage = ?, outcomes = ?, version = version + 1, updated_at = datetime('now') WHERE lesson_id = ? AND version = ?",
 				StageChecking, string(outJSON), lessonID, expectedVersion)
-			if err != nil {
-				return 0, err
+			if execErr != nil {
+				return 0, execErr
 			}
 			return res.RowsAffected()
 		},
@@ -678,7 +679,7 @@ func (e *Executor) ClearUnchecked(ctx context.Context, lessonID string, expected
 
 	// (a) Claim the request_id (typed constraint detection, review L-2). A
 	// duplicate replays the FIRST stored result, never a second write.
-	if _, err := tx.ExecContext(ctx,
+	if _, err = tx.ExecContext(ctx,
 		"INSERT INTO tool_requests (request_id, lesson_id, tool, result) VALUES (?, ?, 'clear_unchecked', '')",
 		requestID, lessonID,
 	); err != nil {
@@ -839,7 +840,7 @@ func (e *Executor) checkStageTx(
 	defer func() { _ = tx.Rollback() }()
 
 	// (a) Claim the request_id (typed constraint detection, review L-2).
-	if _, err := tx.ExecContext(ctx,
+	if _, err = tx.ExecContext(ctx,
 		"INSERT INTO tool_requests (request_id, lesson_id, tool, result) VALUES (?, ?, ?, '')",
 		requestID, lessonID, tool,
 	); err != nil {

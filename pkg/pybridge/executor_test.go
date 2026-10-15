@@ -84,9 +84,8 @@ func TestExitErrorUnwrap(t *testing.T) {
 }
 
 // TestSentinelErrors verifies each sentinel error's text is non-empty and
-// ends with a period, matching the worker.go naming convention. The
-// period is not load-bearing for detection (callers use errors.Is) -- it
-// is a style invariant that keeps log lines consistent across packages.
+// does not end with punctuation (ST1005). The text is not load-bearing for
+// detection (callers use errors.Is).
 func TestSentinelErrors(t *testing.T) {
 	cases := []struct {
 		name string
@@ -103,9 +102,8 @@ func TestSentinelErrors(t *testing.T) {
 			if msg == "" {
 				t.Errorf("%s.Error(): empty message", tc.name)
 			}
-			if !strings.HasSuffix(msg, ".") {
-				t.Errorf("%s.Error(): %q must end with a period (worker.go convention)",
-					tc.name, msg)
+			if strings.HasSuffix(msg, ".") || strings.HasSuffix(msg, "\n") {
+				t.Errorf("%s.Error(): %q must not end with punctuation", tc.name, msg)
 			}
 			// Each sentinel MUST be distinguishable via errors.Is so
 			// callers can branch on classification without parsing text.

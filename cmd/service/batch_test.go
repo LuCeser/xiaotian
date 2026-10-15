@@ -16,13 +16,14 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
-	"go.uber.org/zap"
 )
 
 // batchFSRS feeds two due words and CAPTURES the ratings UpdateRatings
@@ -90,7 +91,11 @@ func bootBatchSession(t *testing.T, fakeFSRS *batchFSRS, repo database.SessionRe
 	svcCtx, svcCancel := context.WithCancel(context.Background())
 	t.Cleanup(svcCancel)
 	go hub.Run(svcCtx)
-	go manager.Start(svcCtx)
+	go func() {
+		if startErr := manager.Start(svcCtx); startErr != nil {
+			logger.Error("session manager start failed", infra.ErrField(startErr))
+		}
+	}()
 
 	// Capture the server-side *ws.Client through the audio route (the
 	// Manager keys sessions by the client pointer, same as production).

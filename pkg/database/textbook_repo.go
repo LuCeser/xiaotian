@@ -55,10 +55,10 @@ type Textbook struct {
 // each row (the browse chips' data source): the textbook's name rides
 // along so the UI never needs a second join.
 type TextbookAssignment struct {
-	TextbookID    int64  `json:"id"`
-	TextbookName  string `json:"name"`
-	Lesson        string `json:"lesson"`
-	IncludeInScope bool  `json:"includeInScope"`
+	TextbookID     int64  `json:"id"`
+	TextbookName   string `json:"name"`
+	Lesson         string `json:"lesson"`
+	IncludeInScope bool   `json:"includeInScope"`
 }
 
 // TextbookRepository provides read-only access to the Python-owned

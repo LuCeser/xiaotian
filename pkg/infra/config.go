@@ -24,20 +24,11 @@ import (
 // in-package conventions; operators interact with the service through env
 // vars and config-file keys, not through these identifiers.
 const (
-	// componentName is the value used for the structured log field "component"
-	// (D-25). Every log line emitted by this package is tagged with this
-	// value so operators can filter infra logs from websocket / TTS logs.
-	componentName = "infra"
-
 	// envPrefix is the Viper env-var prefix. Combined with the dotted field
 	// path (e.g. "memory.limitBytes") it produces env vars like
 	// HTA_MEMORY_LIMITBYTES. Chosen to be short and unambiguous (Home Tutor
 	// Agent) so it does not collide with other services on the same VPS.
 	envPrefix = "HTA"
-
-	// defaultConfigFile is the file name LoadConfig probes when the caller
-	// passes an empty path. Resolved relative to the process CWD.
-	defaultConfigFile = "config.yaml"
 
 	// StrategyDropOldest is the only buffer backpressure strategy supported
 	// in Phase 1 (D-73). When the audio buffer pool is exhausted the oldest
@@ -1024,7 +1015,7 @@ func DefaultConfig() Config {
 			MaxMessageBytes: 65551,
 			// Buffer sizes stay 0 → rt.NewHandler fills its own defaults
 			// (double validation, WS pattern).
-			ReadBufferSize: 0,
+			ReadBufferSize:  0,
 			WriteBufferSize: 0,
 			// 10s handshake (TLS+upgrade on a slow iPad radio), 30s ping
 			// cadence matching ws.DefaultHeartbeatInterval.

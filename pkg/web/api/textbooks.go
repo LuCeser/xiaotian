@@ -166,7 +166,7 @@ func (h *handler) updateTextbook(w http.ResponseWriter, r *http.Request) {
 		SetPrimary:     req.SetPrimary,
 	}
 
-	if _, err := h.exec.RunTextbookUpdate(r.Context(), opts); err != nil {
+	if _, err = h.exec.RunTextbookUpdate(r.Context(), opts); err != nil {
 		h.mapBridgeError(w, "update textbook", err)
 		return
 	}
@@ -231,11 +231,11 @@ func (h *handler) mutateAssignments(w http.ResponseWriter, r *http.Request, assi
 		if !h.cardsMatchCategory(w, r, req.CardIDs, book.Category) {
 			return
 		}
-		result, err := h.exec.RunAssignWords(r.Context(), pybridge.AssignWordsOpts{
+		result, assignErr := h.exec.RunAssignWords(r.Context(), pybridge.AssignWordsOpts{
 			TextbookID: id, IDs: req.CardIDs, Lesson: req.Lesson, IncludeInScope: req.IncludeInScope,
 		})
-		if err != nil {
-			h.mapBridgeError(w, "assign words", err)
+		if assignErr != nil {
+			h.mapBridgeError(w, "assign words", assignErr)
 			return
 		}
 		writeJSON(w, result)

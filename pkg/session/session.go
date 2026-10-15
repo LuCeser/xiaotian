@@ -293,7 +293,7 @@ func NewSession(
 // cancels the session immediately (firing the D-10 defer chain).
 func (s *Session) Start(ctx context.Context) {
 	s.done = make(chan struct{})
-	s.runCtx, s.cancel = context.WithCancel(ctx)
+	s.runCtx, s.cancel = context.WithCancel(ctx) //nolint:gosec // G118: cancel is stored on the session and invoked by the sweeper
 	go s.run(s.runCtx)
 }
 
@@ -911,10 +911,9 @@ func (s *Session) sendProgressFrame() {
 
 	// Send as control frame
 	header := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    ws.MsgTypeControl,
-		Sequence:   0, // TODO: atomic counter for monotonic sequences
-		PayloadLen: uint16(len(jsonBytes)),
+		Version:  ws.ProtocolVersion,
+		MsgType:  ws.MsgTypeControl,
+		Sequence: 0, // TODO: atomic counter for monotonic sequences
 	}
 	frame := ws.EncodeFrame(header, jsonBytes)
 
@@ -967,10 +966,9 @@ func (s *Session) sendWordCompleteFrame(wordID string) {
 
 	// Send as control frame
 	header := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    ws.MsgTypeControl,
-		Sequence:   0, // TODO: atomic counter for monotonic sequences
-		PayloadLen: uint16(len(jsonBytes)),
+		Version:  ws.ProtocolVersion,
+		MsgType:  ws.MsgTypeControl,
+		Sequence: 0, // TODO: atomic counter for monotonic sequences
 	}
 	frame := ws.EncodeFrame(header, jsonBytes)
 
@@ -1011,10 +1009,9 @@ func (s *Session) sendSessionCompleteFrame() {
 
 	// Send as control frame
 	header := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    ws.MsgTypeControl,
-		Sequence:   0, // TODO: atomic counter for monotonic sequences
-		PayloadLen: uint16(len(jsonBytes)),
+		Version:  ws.ProtocolVersion,
+		MsgType:  ws.MsgTypeControl,
+		Sequence: 0, // TODO: atomic counter for monotonic sequences
 	}
 	frame := ws.EncodeFrame(header, jsonBytes)
 
@@ -1053,10 +1050,9 @@ func (s *Session) sendPausedFrame() {
 	}
 
 	header := &ws.FrameHeader{
-		Version:    ws.ProtocolVersion,
-		MsgType:    ws.MsgTypeControl,
-		Sequence:   0, // TODO: atomic counter for monotonic sequences
-		PayloadLen: uint16(len(jsonBytes)),
+		Version:  ws.ProtocolVersion,
+		MsgType:  ws.MsgTypeControl,
+		Sequence: 0, // TODO: atomic counter for monotonic sequences
 	}
 	frame := ws.EncodeFrame(header, jsonBytes)
 

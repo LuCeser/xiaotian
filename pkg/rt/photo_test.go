@@ -238,7 +238,7 @@ func TestPhotoAssembler(t *testing.T) {
 			t.Fatal("no error for a chunk arriving before seq 1")
 		}
 
-		ttPhotoChunk(t, tm, s, 1, first, false)  // upload A starts
+		ttPhotoChunk(t, tm, s, 1, first, false) // upload A starts
 		ttPhotoChunk(t, tm, s, 2, fakeJPEG(1000), false)
 		ttPhotoChunk(t, tm, s, 2, fakeJPEG(700), false) // duplicate seq 2
 		if got := s.countOf(TypeError); got < 2 {

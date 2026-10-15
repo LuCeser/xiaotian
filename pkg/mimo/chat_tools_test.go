@@ -45,7 +45,9 @@ func writeChatEmptyChoice(w http.ResponseWriter) {
 	})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		return
+	}
 }
 
 // captureChatBody runs call against a mock chat server built on the
@@ -111,7 +113,7 @@ func TestChatToolsRequestBody(t *testing.T) {
 				Strict     bool            `json:"strict"`
 			} `json:"function"`
 		} `json:"tools"`
-		ToolChoice string         `json:"tool_choice"`
+		ToolChoice string          `json:"tool_choice"`
 		Thinking   *ThinkingConfig `json:"thinking"`
 	}
 	if err := json.Unmarshal(captured, &body); err != nil {
@@ -182,7 +184,9 @@ func TestChatToolCallsResponseParse(t *testing.T) {
 	server, cleanup := mockTTSServer(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, toolCallsResponseJSON)
+		if _, err := io.WriteString(w, toolCallsResponseJSON); err != nil {
+			return
+		}
 	})
 	defer cleanup()
 

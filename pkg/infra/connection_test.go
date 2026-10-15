@@ -92,17 +92,6 @@ func requireErrorIs(t *testing.T, err, target error, msgAndArgs ...any) {
 	}
 }
 
-func requireEqual(t *testing.T, want, got any, msgAndArgs ...any) {
-	t.Helper()
-	if want != got {
-		msg := formatMsg(msgAndArgs)
-		if msg == "" {
-			t.Fatalf("want %v, got %v", want, got)
-		}
-		t.Fatalf("%s: want %v, got %v", msg, want, got)
-	}
-}
-
 func requireLen(t *testing.T, x any, n int, msgAndArgs ...any) {
 	t.Helper()
 	l := lengthOf(x)
@@ -165,13 +154,6 @@ func assertErrorIs(t *testing.T, err, target error, msgAndArgs ...any) {
 	}
 }
 
-func assertError(t *testing.T, err error, msgAndArgs ...any) {
-	t.Helper()
-	if err == nil {
-		t.Error(formatMsg(msgAndArgs))
-	}
-}
-
 func assertLen(t *testing.T, x any, n int, msgAndArgs ...any) {
 	t.Helper()
 	l := lengthOf(x)
@@ -218,17 +200,6 @@ func assertGreater[T ordered](t *testing.T, a, b T, msgAndArgs ...any) {
 			t.Errorf("want %v > %v", a, b)
 		}
 		t.Errorf("%s: want %v > %v", msg, a, b)
-	}
-}
-
-func assertGreaterOrEqual[T ordered](t *testing.T, a, b T, msgAndArgs ...any) {
-	t.Helper()
-	if a < b {
-		msg := formatMsg(msgAndArgs)
-		if msg == "" {
-			t.Errorf("want %v >= %v", a, b)
-		}
-		t.Errorf("%s: want %v >= %v", msg, a, b)
 	}
 }
 

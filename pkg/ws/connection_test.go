@@ -33,11 +33,10 @@ func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) 
 func MustBuildTestFrame(t *testing.T, msgType MessageType, seq uint32, payload []byte) []byte {
 	t.Helper()
 	header := &FrameHeader{
-		Version:    ProtocolVersion,
-		MsgType:    msgType,
-		Sequence:   seq,
-		Timestamp:  uint32(time.Now().UnixMicro()),
-		PayloadLen: uint16(len(payload)),
+		Version:   ProtocolVersion,
+		MsgType:   msgType,
+		Sequence:  seq,
+		Timestamp: uint32(time.Now().UnixMicro()), //nolint:gosec // G115: protocol timestamp keeps the low 32 bits of Unix microseconds
 	}
 	frame := EncodeFrame(header, payload)
 	return frame
@@ -112,8 +111,8 @@ func (f *fakeConn) WriteControl(messageType int, data []byte, deadline time.Time
 	if messageType == websocket.CloseMessage {
 		// Extract close code and reason from data (format per WebSocket spec)
 		if len(data) >= 2 {
-			code := int(data[0])<<8 | int(data[1])
-			f.closeCallCode.Store(int32(code))
+			code := int32(data[0])<<8 | int32(data[1])
+			f.closeCallCode.Store(code)
 			if len(data) > 2 {
 				reason := string(data[2:])
 				f.closeCallReason.Store(reason)

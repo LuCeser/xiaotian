@@ -139,6 +139,7 @@ func TestManager_Lifecycle_OnExit(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	s := &Session{
 		id:       "lifecycle",
@@ -207,6 +208,7 @@ func TestSession_NoGoroutineLeak(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	s.runCtx = ctx
 	s.cancel = cancel
 

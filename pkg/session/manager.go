@@ -213,7 +213,7 @@ func (m *Manager) NewSession(
 	// Set up lifecycle fields BEFORE inserting into the map so the sweeper's
 	// RLock establishes happens-before with these writes.
 	s.done = make(chan struct{})
-	s.runCtx, s.cancel = context.WithCancel(ctx)
+	s.runCtx, s.cancel = context.WithCancel(ctx) //nolint:gosec // G118: cancel is stored on the session and invoked by the sweeper
 	s.onExit = func() {
 		m.removeSession(connID, s)
 		// D-11 teardown: clear the streamer's per-session sequence counter on

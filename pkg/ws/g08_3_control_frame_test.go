@@ -10,8 +10,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	ws "github.com/xiaotian/home-tutor-agent/pkg/ws"
 	"go.uber.org/zap"
+
+	ws "github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
 // TestG08_3_ControlFrameBinaryAccepted_TextDropped is the regression guard for

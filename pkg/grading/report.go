@@ -49,7 +49,6 @@ const patternEvidence = 2
 func Analyze(words []WordInput) SessionReport {
 	r := SessionReport{Total: len(words)}
 	var nearMisses, blanks, missingTails int
-	var wrongList []string
 
 	for _, w := range words {
 		if w.Judgment.Correct {
@@ -65,7 +64,6 @@ func Analyze(words []WordInput) SessionReport {
 		}
 		we.Hint = wordHint(we)
 		r.Errors = append(r.Errors, we)
-		wrongList = append(wrongList, w.Word)
 
 		switch {
 		case w.Judgment.Blank:

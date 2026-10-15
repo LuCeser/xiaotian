@@ -182,7 +182,7 @@ func newLessonTestStores(t *testing.T) (*sql.DB, *lesson.Store, *lesson.Practice
 		t.Fatalf("open lessons test db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := lesson.Migrate(context.Background(), db); err != nil {
+	if err = lesson.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate lessons test db: %v", err)
 	}
 	lessons, err := lesson.NewStore(db, infra.NewNoOpLogger())

@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
-	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
@@ -444,7 +444,7 @@ func TestPhotoCancel_DiscardsUpload(t *testing.T) {
 // contract at the type level (the live behavior is covered by the gated live
 // test).
 func TestMimoReader_IsReaderSeam(t *testing.T) {
-	var r ocr.Reader = mimoReader(nil, "mimo-v2.5")
+	r := mimoReader(nil, "mimo-v2.5")
 	if r == nil {
 		t.Fatal("mimoReader returned nil")
 	}
