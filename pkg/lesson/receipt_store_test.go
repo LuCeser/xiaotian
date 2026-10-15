@@ -214,9 +214,9 @@ func TestReceiptCompleteIdempotent(t *testing.T) {
 
 	type rowState struct {
 		Status      string
+		CompletedAt string
 		Updated     []string
 		Missing     []string
-		CompletedAt string
 	}
 	read := func() rowState {
 		t.Helper()

@@ -36,10 +36,10 @@ func fakeJPEG(n int) []byte {
 // fakeOCRReader records every image it receives and replies with a scripted
 // string (the OCRReader seam — same shape as ocr.Reader).
 type fakeOCRReader struct {
-	mu      sync.Mutex
+	err     error
 	images  [][]byte
 	replies []string // consumed per call; the last one repeats
-	err     error
+	mu      sync.Mutex
 }
 
 func (f *fakeOCRReader) read(_ context.Context, systemPrompt, userPrompt string, imageJPEG []byte) (string, error) {

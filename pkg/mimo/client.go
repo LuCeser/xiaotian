@@ -21,9 +21,9 @@ import (
 
 // Client implements the Mimo API client with OpenAI-compatible interface
 type mimoClient struct {
-	config     ClientConfig
-	httpClient *http.Client
 	logger     infra.Logger
+	httpClient *http.Client
+	config     ClientConfig
 	mu         sync.RWMutex
 	closed     bool
 }

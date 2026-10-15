@@ -47,8 +47,8 @@ type capturedLog struct {
 // infra.Logger by recording every entry into a mutex-guarded slice the test
 // can inspect directly.
 type captureLogger struct {
-	mu      sync.Mutex
 	entries []capturedLog
+	mu      sync.Mutex
 }
 
 // record appends one captured entry with a field-slice copy to prevent

@@ -91,39 +91,6 @@ type LessonExecutor interface {
 
 // TurnManagerConfig configures one TurnManager.
 type TurnManagerConfig struct {
-	// LessonID pins the server-owned lesson this session binds to. Empty
-	// means derive "r0-YYYYMMDD" on the Beijing calendar (same-day
-	// reconnects resume the same lesson).
-	LessonID string
-	// Words is the due-word source (WordSource). Nil answers session_init
-	// with lesson_unavailable — the classroom cannot start without it.
-	// The 13-10 PyFSRS adapter injects the production implementation.
-	Words WordSource
-	// WordTimeout bounds how long the FSM waits for a per-word confirm
-	// before auto-advancing (0 → 60s default). 13-08 defines the field;
-	// the timer behavior itself lands in 13-09.
-	WordTimeout time.Duration
-	// VADStartGraceMs is the uplink start-grace window in milliseconds
-	// after session_ready (0 → 1000ms default): mic-open transients must
-	// not cut a phantom turn. A real-device calibration value (13-12).
-	VADStartGraceMs int
-	// VADEchoTailMs is the post-ack echo tail in milliseconds (0 → 500ms
-	// default): ordinary uplink stays gated this long after the VALID
-	// playback-completion ack of a teacher announcement. A real-device
-	// calibration value (13-12).
-	VADEchoTailMs int
-	// OCR is the photo-check vision seam (13.1-03): the raw-model-reply
-	// func the manager wraps in an ocr.Pipeline. Nil disables the photo
-	// check path — the check stage keeps working manual-only (RT-10
-	// degraded semantics; main.go injects cmd/service's mimoReader).
-	OCR OCRReader
-	// PhotoMaxBytes caps one assembled photo's decoded size (0 → 1MiB,
-	// PhotoConfig.MaxImageBytes semantics; T-13.1-06). Over-cap uploads are
-	// rejected AND cleared.
-	PhotoMaxBytes int
-	// PhotoConfidence is the OCR prefill confidence floor (0 → 0.6,
-	// PhotoConfig.ConfidenceThreshold semantics).
-	PhotoConfidence float64
 	// Practice is the vocabulary read seam for 「再练一组」 (13.1-05, D-11):
 	// random practice picks List the FULL vocabulary through it — never the
 	// due fetch (RunDue takes the lock and only returns due words). The
@@ -131,17 +98,16 @@ type TurnManagerConfig struct {
 	// pages already use. Nil Practice degrades practice_init to a coded
 	// honest error — never a silent fallback into a due lesson.
 	Practice PracticeSource
+	// Words is the due-word source (WordSource). Nil answers session_init
+	// with lesson_unavailable — the classroom cannot start without it.
+	// The 13-10 PyFSRS adapter injects the production implementation.
+	Words WordSource
 	// Examples is the on-demand example-sentence context seam (Issue #9,
 	// ADR-0006): meaning/example intents in the dictation stage resolve the
 	// word's textbook background and learned-word sample through it before
 	// the one generation call. Nil disables generation — the classification
 	// fallback replies still speak honestly (degraded wiring, tests).
 	Examples ExampleSource
-	// PracticeStore is the Go-owned practice-record write seam (13.1-05,
-	// D-12): practice results land HERE and only here — never review_logs,
-	// never the FSRS schedule. A practice session without it answers the
-	// same honest degraded error as a nil Practice source.
-	PracticeStore *lesson.PracticeStore
 	// Receipts is the persistent save-receipt store (13.3-01): every real
 	// save attempt (check / correction / unchecked_fallback / practice)
 	// records a two-phase lesson_save_receipts row — pending before the
@@ -151,6 +117,40 @@ type TurnManagerConfig struct {
 	// exactly as before, only unrecorded. A receipt write failure is a
 	// bypass event, never a submission error (S-05).
 	Receipts *lesson.ReceiptStore
+	// PracticeStore is the Go-owned practice-record write seam (13.1-05,
+	// D-12): practice results land HERE and only here — never review_logs,
+	// never the FSRS schedule. A practice session without it answers the
+	// same honest degraded error as a nil Practice source.
+	PracticeStore *lesson.PracticeStore
+	// OCR is the photo-check vision seam (13.1-03): the raw-model-reply
+	// func the manager wraps in an ocr.Pipeline. Nil disables the photo
+	// check path — the check stage keeps working manual-only (RT-10
+	// degraded semantics; main.go injects cmd/service's mimoReader).
+	OCR OCRReader
+	// LessonID pins the server-owned lesson this session binds to. Empty
+	// means derive "r0-YYYYMMDD" on the Beijing calendar (same-day
+	// reconnects resume the same lesson).
+	LessonID string
+	// VADStartGraceMs is the uplink start-grace window in milliseconds
+	// after session_ready (0 → 1000ms default): mic-open transients must
+	// not cut a phantom turn. A real-device calibration value (13-12).
+	VADStartGraceMs int
+	// PhotoConfidence is the OCR prefill confidence floor (0 → 0.6,
+	// PhotoConfig.ConfidenceThreshold semantics).
+	PhotoConfidence float64
+	// PhotoMaxBytes caps one assembled photo's decoded size (0 → 1MiB,
+	// PhotoConfig.MaxImageBytes semantics; T-13.1-06). Over-cap uploads are
+	// rejected AND cleared.
+	PhotoMaxBytes int
+	// VADEchoTailMs is the post-ack echo tail in milliseconds (0 → 500ms
+	// default): ordinary uplink stays gated this long after the VALID
+	// playback-completion ack of a teacher announcement. A real-device
+	// calibration value (13-12).
+	VADEchoTailMs int
+	// WordTimeout bounds how long the FSM waits for a per-word confirm
+	// before auto-advancing (0 → 60s default). 13-08 defines the field;
+	// the timer behavior itself lands in 13-09.
+	WordTimeout time.Duration
 	// ForceStudent is the 13.3-05 production anti-fat-finger switch (ROADMAP
 	// success criterion 6): when true, session_init's client-supplied mode is
 	// IGNORED and the classroom always runs the student projection — the
@@ -223,9 +223,9 @@ type sentenceInfo struct {
 // re-check either way; the sticky completed bit means a final ack that
 // arrives before the await call is never lost).
 type pendingPlayback struct {
+	done       chan struct{}
 	purpose    string
 	pcmSamples int // scheduled PCM sample count (s16le mono: bytes/2)
-	done       chan struct{}
 	completed  bool
 }
 
@@ -255,9 +255,9 @@ func pendingKey(epoch uint64, sentenceID string) string {
 // sentence scheduled in the announcement (their still-unacked PCM samples
 // drive the bounded wait — never the last short sentence alone).
 type PlaybackRef struct {
-	Epoch           uint64
 	FinalSentenceID string
 	SentenceIDs     []string
+	Epoch           uint64
 }
 
 // Playback ack wait bounds: derived from all outstanding scheduled PCM plus
@@ -296,66 +296,9 @@ func playbackAckTimeout(pcmSamples int) time.Duration {
 // interrupt handling — after HandleControl(interrupt) returns, no further
 // chunk or subtitle of the interrupted announcement can be emitted.
 type TurnManager struct {
-	asr      ASRProvider
-	llm      LLMProvider
-	tts      TTSSynthesizer
-	exec     LessonExecutor
-	cfg      TurnManagerConfig
-	recorder *EventRecorder
-	logger   infra.Logger
-	session  string
-
-	mu sync.Mutex
-	// state is one of StateListening/StateProcessing/StateSpeaking, or ""
-	// before session_init / after close.
-	state string
-	// closed suppresses duplicate session_end emissions when the transport
-	// calls Close after an end_session already closed the session.
-	closed bool
-	// epoch is the monotonic cancellation token. In-flight provider work
-	// remembers the epoch it launched under; on mismatch it aborts.
-	epoch uint64
-	// turnCancel cancels the current turn's/announcement's provider context.
-	turnCancel context.CancelFunc
-	// turnID counts turns and announcements (sentence-id namespace).
-	turnID uint64
-	// tutor is the dictation FSM state; nil until a lesson session starts.
-	tutor *DictationTutor
-	// mode is the page-supplied UI mode (13.1 D-08, normalized to
-	// student/test at session_init); plan 02's masking consumes it.
-	mode string
-	// turnSentences are the sentences sent for the current announcement, in
-	// order (the interrupt-trim source).
-	turnSentences []sentenceInfo
-	// acked marks sentence ids the client confirmed playing, for the trim.
-	acked map[string]bool
-	// pendingPlayback maps epoch/sentence_id → the outstanding completion
-	// wait (T-13-15b).
-	pendingPlayback map[string]*pendingPlayback
-	// playbackPending marks an announcement awaiting its final ack; uplink
-	// stays gated while it holds.
-	playbackPending bool
-	// droppedUplink counts audio chunks dropped by half-duplex gating.
-	droppedUplink int
-
-	// --- 13-09 per-word confirm countdown (logic lives in dictation.go) ---
-
-	// sender is the connection's write half, retained at session_init for
-	// announcements that have no request context behind them — the 13-09
-	// timeout auto-advance. It lives exactly as long as the session.
-	sender Sender
-	// timerFactory builds the countdown timers (test seam); nil means
-	// time.AfterFunc.
-	timerFactory func(time.Duration, func()) *time.Timer
-	// timerGen is the monotonic per-word timer generation. EVERY
-	// arm/reset/stop increments it, so a callback already queued before the
-	// reset is dead on arrival even with the same epoch and word index
-	// (T-13-16).
-	timerGen uint64
-	// wordTimer is the live countdown handle; nil when disarmed.
-	wordTimer *time.Timer
-
-	// --- 13-09 uplink gating windows ---
+	// echoTailUntil gates ordinary uplink through the echo tail that starts
+	// at the valid playback ack.
+	echoTailUntil time.Time
 
 	// sessionReadyAt stamps when session_ready went out; ordinary uplink is
 	// dropped until the start grace elapses (mic-open transients).
@@ -364,25 +307,75 @@ type TurnManager struct {
 	// landed. Written ONLY by the ack-driven settle path — never from a
 	// speakTurn return or an audio_end send.
 	lastPlaybackCompletedAt time.Time
-	// echoTailUntil gates ordinary uplink through the echo tail that starts
-	// at the valid playback ack.
-	echoTailUntil time.Time
+	llm                     LLMProvider
+	tts                     TTSSynthesizer
+	exec                    LessonExecutor
+
+	// sender is the connection's write half, retained at session_init for
+	// announcements that have no request context behind them — the 13-09
+	// timeout auto-advance. It lives exactly as long as the session.
+	sender Sender
+	logger infra.Logger
+	asr    ASRProvider
+
+	// ocrPipeline wraps cfg.OCR for the check pass; nil when photo check is
+	// disabled (no MIMO_API_KEY).
+	ocrPipeline *ocr.Pipeline
+	recorder    *EventRecorder
 
 	// vad is fed from the read loop only (see concurrency note).
 	vad *VAD
-
-	// --- 13.1-03 photo-check channel ---
+	// turnCancel cancels the current turn's/announcement's provider context.
+	turnCancel context.CancelFunc
+	// wordTimer is the live countdown handle; nil when disarmed.
+	wordTimer *time.Timer
+	// tutor is the dictation FSM state; nil until a lesson session starts.
+	tutor *DictationTutor
+	// timerFactory builds the countdown timers (test seam); nil means
+	// time.AfterFunc.
+	timerFactory func(time.Duration, func()) *time.Timer
 
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
 	// consumes them; close/cancel/over-cap/new-upload all discard.
-	photo *photoBuffer
-	// ocrPipeline wraps cfg.OCR for the check pass; nil when photo check is
-	// disabled (no MIMO_API_KEY).
-	ocrPipeline *ocr.Pipeline
+	photo           *photoBuffer
+	acked           map[string]bool
+	pendingPlayback map[string]*pendingPlayback
+	session         string
+	// state is one of StateListening/StateProcessing/StateSpeaking, or ""
+	// before session_init / after close.
+	state string
+	// mode is the page-supplied UI mode (13.1 D-08, normalized to
+	// student/test at session_init); plan 02's masking consumes it.
+	mode string
+	// turnSentences are the sentences sent for the current announcement, in
+	// order (the interrupt-trim source).
+	turnSentences []sentenceInfo
+	cfg           TurnManagerConfig
+
+	// timerGen is the monotonic per-word timer generation. EVERY
+	// arm/reset/stop increments it, so a callback already queued before the
+	// reset is dead on arrival even with the same epoch and word index
+	// (T-13-16).
+	timerGen uint64
+	// droppedUplink counts audio chunks dropped by half-duplex gating.
+	droppedUplink int
+	// turnID counts turns and announcements (sentence-id namespace).
+	turnID uint64
+	// epoch is the monotonic cancellation token. In-flight provider work
+	// remembers the epoch it launched under; on mismatch it aborts.
+	epoch uint64
 	// ocrRuns disambiguates prefill idempotency keys across retakes (a
 	// replayed key would pin the FIRST reading and drop the retake's).
 	ocrRuns uint64
+
+	mu sync.Mutex
+	// playbackPending marks an announcement awaiting its final ack; uplink
+	// stays gated while it holds.
+	playbackPending bool
+	// closed suppresses duplicate session_end emissions when the transport
+	// calls Close after an end_session already closed the session.
+	closed bool
 }
 
 // Compile-time check: TurnManager satisfies the transport's SessionManager

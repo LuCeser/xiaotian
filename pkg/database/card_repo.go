@@ -27,7 +27,6 @@ var (
 // Write-separation contract (D-03-a): Python owns writes to the cards table
 // via pybridge.Executor.RunReview. Go only reads.
 type Card struct {
-	ID       int64
 	Word     string
 	Meaning  string
 	Example  string
@@ -40,7 +39,8 @@ type Card struct {
 	MeaningSource    string
 	CreatedAt        string
 	FetchLockedUntil string // nullable; empty string when NULL
-	Participates     bool   // eligible for automatic dictation/practice selection
+	ID               int64
+	Participates     bool // eligible for automatic dictation/practice selection
 }
 
 // CardRepository provides read-only access to the Python-owned cards table.
@@ -162,6 +162,17 @@ func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, e
 // cards). Query is a substring match against word OR meaning (LIKE with
 // user-supplied wildcards escaped, RESEARCH Pitfall 6).
 type CardFilter struct {
+	// Category restricts to one vocabulary category ("english"/"chinese").
+	// Empty means all categories.
+	Category string
+
+	// Unit restricts to one unit (exact match). Empty means all units.
+	Unit string
+
+	// Query is a free-text substring matched against word OR meaning.
+	// Empty means no text filter.
+	Query string
+
 	// ParticipatingOnly restricts automatic classroom selection to cards
 	// enabled by the parent. Management views leave this false.
 	ParticipatingOnly bool
@@ -173,16 +184,6 @@ type CardFilter struct {
 	// Management views leave this false — the browse list must show
 	// out-of-scope words so the parent can manage them.
 	ScopeEligibleOnly bool
-	// Category restricts to one vocabulary category ("english"/"chinese").
-	// Empty means all categories.
-	Category string
-
-	// Unit restricts to one unit (exact match). Empty means all units.
-	Unit string
-
-	// Query is a free-text substring matched against word OR meaning.
-	// Empty means no text filter.
-	Query string
 }
 
 // scanCard scans a single row into a Card struct. Shared by GetByID and

@@ -90,16 +90,16 @@ const (
 // until Complete). CreatedAt/CompletedAt are SQLite datetime('now') strings
 // (UTC) — CompletedAt stays empty while the row is pending.
 type Receipt struct {
-	ID          int64
 	LessonID    string
 	RequestID   string
 	Kind        string
-	Requested   []string
-	Updated     []string
-	Missing     []string
 	Status      string
 	CreatedAt   string
 	CompletedAt string
+	Requested   []string
+	Updated     []string
+	Missing     []string
+	ID          int64
 }
 
 // ReceiptInput is the Begin-side payload: who submitted (RequestID — the

@@ -15,18 +15,18 @@ import (
 // PCM bytes from SessionCache, slices them into frames, encodes them as WS
 // binary messages, and streams them to clients via Sender.Send with frame pacing.
 type Streamer struct {
-	// cache is the PCM file storage (Plan 06-01)
-	cache *SessionCache
 	// logger is the structured logger
 	logger infra.Logger
-	// cfg holds TTS configuration (timeouts)
-	cfg infra.TTSConfig
+	// cache is the PCM file storage (Plan 06-01)
+	cache *SessionCache
 	// seqCounters holds per-session monotonic audio frame sequence counters
 	// (D-11 fix). Each entry is incremented on every frame send for that
 	// session, replacing the old per-StreamWord reset (currentSeq = i+1).
 	// Entries are deleted on session exit via ClearSeqCounter to bound memory
 	// under the 100-concurrent budget (RESEARCH Pitfall 5).
-	seqCounters   map[string]uint32
+	seqCounters map[string]uint32
+	// cfg holds TTS configuration (timeouts)
+	cfg           infra.TTSConfig
 	seqCountersMu sync.Mutex
 }
 

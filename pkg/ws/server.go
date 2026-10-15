@@ -73,11 +73,11 @@ var (
 
 // Server handles WebSocket HTTP upgrades
 type Server struct {
-	upgrader websocket.Upgrader
-	hub      *Hub
 	handler  FrameHandler
-	cfg      ServerConfig
+	hub      *Hub
 	logger   *zap.Logger
+	upgrader websocket.Upgrader
+	cfg      ServerConfig
 }
 
 // NewServer creates a new server instance (D-42 + D-44)

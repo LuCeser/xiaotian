@@ -70,9 +70,9 @@ func (s *countingStreamer) clearedCount() int {
 
 // recordingLoadRepo records distinct connIDs of Create calls.
 type recordingLoadRepo struct {
-	fakeSessionRepository
-
 	createdConns map[string]bool
+
+	fakeSessionRepository
 }
 
 func (r *recordingLoadRepo) Create(_ context.Context, s database.Session) (int64, error) {

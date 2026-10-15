@@ -40,9 +40,9 @@ func defaultVisionHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := ChatResponse{}
 	response.Choices = append(response.Choices, struct {
+		FinishReason string             `json:"finish_reason"`
 		Message      ChatMessageContent `json:"message"`
 		Index        int                `json:"index"`
-		FinishReason string             `json:"finish_reason"`
 	}{
 		Message:      ChatMessageContent{Role: "assistant", Content: `{"text":"apple","confidence":0.9}`},
 		FinishReason: "stop",
@@ -61,15 +61,15 @@ func defaultVisionHandler(w http.ResponseWriter, r *http.Request) {
 // guard, and the transient-retry loop.
 func TestClient_ChatVision(t *testing.T) {
 	tests := []struct {
-		name        string
-		handler     http.HandlerFunc
-		image       []byte
-		mimeType    string
-		opts        []ChatOption
-		key         string
 		wantErr     error
-		wantText    string
+		handler     http.HandlerFunc
 		validateReq func(*testing.T, *capturedVision)
+		name        string
+		mimeType    string
+		key         string
+		wantText    string
+		image       []byte
+		opts        []ChatOption
 	}{
 		{
 			name:     "successful completion with default model and doc wire shape",
@@ -291,12 +291,12 @@ func TestClient_ChatVision_RetriesTransientErrors(t *testing.T) {
 // message content stays raw because it is polymorphic (string for system,
 // parts array for user).
 type capturedVision struct {
-	Model     string `json:"model"`
-	MaxTokens int    `json:"max_tokens"`
-	Messages  []struct {
+	Model    string `json:"model"`
+	Messages []struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	} `json:"messages"`
+	MaxTokens int `json:"max_tokens"`
 }
 
 // decodeCapturedVision decodes a captured request body; returns nil for an

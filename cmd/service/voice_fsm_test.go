@@ -92,10 +92,10 @@ func (g *fsmGen) GenerateText(_ context.Context, _, _, _ string) (string, error)
 // tests assert the encouragement sentence reached GenerateText.
 type recordingGen struct {
 	fsmGen
-
-	mu        sync.Mutex
-	textCalls int
 	lastText  string
+	textCalls int
+
+	mu sync.Mutex
 }
 
 // GenerateText overrides the canned fake to record what the handler asked to

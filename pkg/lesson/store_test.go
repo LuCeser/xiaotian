@@ -486,21 +486,21 @@ func TestListLessons(t *testing.T) {
 		cards      string
 		verdicts   string
 		stage      string
+		createdAt  string
 		currentIdx int
 		unchecked  int
-		createdAt  string
 	}{
 		{"r0-20261010", `[{"word":"苹果","meaning":"apple","example":"s1"},{"word":"香蕉","meaning":"banana","example":"s2"},{"word":"橘子","meaning":"orange","example":"s3"}]`,
 			`[{"word_index":0,"correct":true,"manual":true},{"word_index":1,"correct":false,"manual":true},{"word_index":2,"correct":true,"manual":false}]`,
-			StageSubmitted, 3, 0, "2026-10-10 08:00:00"},
+			StageSubmitted, "2026-10-10 08:00:00", 3, 0},
 		{"r0-20261009", `[{"word":"猫","meaning":"cat","example":"s1"},{"word":"狗","meaning":"dog","example":"s2"},{"word":"鸟","meaning":"bird","example":"s3"}]`,
-			`[]`, StageChecking, 1, 0, "2026-10-09 09:00:00"},
+			`[]`, StageChecking, "2026-10-09 09:00:00", 1, 0},
 		{"r0x-20261008-120000", `[{"word":"apple","meaning":"苹果","example":"s1"},{"word":"banana","meaning":"香蕉","example":"s2"}]`,
-			`[]`, "", 2, 0, "2026-10-08 12:00:00"},
+			`[]`, "", "2026-10-08 12:00:00", 2, 0},
 		{"r0-20261008", `[{"word":"猫","meaning":"cat","example":"s1"},{"word":"狗","meaning":"dog","example":"s2"}]`,
-			`[]`, "", 0, 0, "2026-10-08 10:00:00"},
+			`[]`, "", "2026-10-08 10:00:00", 0, 0},
 		{"r0-20261007", `[{"word":"太阳","meaning":"sun","example":"s1"},{"word":"月亮","meaning":"moon","example":"s2"}]`,
-			`[]`, StageSubmitted, 2, 1, "2026-10-07 10:00:00"},
+			`[]`, StageSubmitted, "2026-10-07 10:00:00", 2, 1},
 	}
 	for _, s := range seed {
 		if _, err := store.db.ExecContext(ctx,

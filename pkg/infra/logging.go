@@ -18,15 +18,15 @@ import (
 //
 // Use the F helper to construct fields; use ErrField for error values.
 type Field struct {
-	// Key is the field name. Convention (D-25): lowercase snake_case, e.g.
-	// "request_id", "component", "operation", "duration_ms".
-	Key string
 
 	// Value is the field payload. Any type is accepted; zap.Any encoding
 	// rules apply (primitives encode natively, structs encode via
 	// reflection). String values are passed through sanitizeString before
 	// emission to defend against log injection (T-01-09).
 	Value any
+	// Key is the field name. Convention (D-25): lowercase snake_case, e.g.
+	// "request_id", "component", "operation", "duration_ms".
+	Key string
 }
 
 // F is the short constructor for a Field. Used everywhere a log call needs a

@@ -22,10 +22,10 @@ import (
 // captureReader records every JPEG it received and replies with a fixed
 // model reply (the fake at the ocr.Reader seam).
 type captureReader struct {
-	mu    sync.Mutex
-	reply string
 	err   error
+	reply string
 	jpegs [][]byte
+	mu    sync.Mutex
 }
 
 func (c *captureReader) read(_ context.Context, _, _ string, jpeg []byte) (string, error) {

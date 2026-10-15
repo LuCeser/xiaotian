@@ -10,8 +10,8 @@ import (
 // captureLogger is an inline fake infra.Logger that records every entry's
 // message and fields so tests can assert the exact rt_event field set.
 type captureLogger struct {
-	mu      sync.Mutex
 	entries []captureEntry
+	mu      sync.Mutex
 }
 
 type captureEntry struct {

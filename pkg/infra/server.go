@@ -89,21 +89,15 @@ type ServerSnapshot struct {
 // service discovery, leader election, or peer coordination. The Server
 // does not know whether it is the only instance — it does not need to.
 type Server struct {
-	cfg    Config
-	logger Logger
-
-	memMonitor *MemoryMonitor
-	pool       *AudioBufferPool
-	registry   *ConnectionRegistry
-	workers    *WorkerPool
 
 	// startedAt is set by Start; read by Snapshot to compute Uptime.
 	startedAt time.Time
+	logger    Logger
+	pool      *AudioBufferPool
+	registry  *ConnectionRegistry
+	workers   *WorkerPool
 
-	// loadShedding is the latch the MemoryMonitor's LoadShedder callback
-	// flips on rising/falling edges. Server.LoadShedding() reads it; the
-	// health endpoint surfaces it as the ok/unhealthy signal (D-27).
-	loadShedding atomic.Bool
+	memMonitor *MemoryMonitor
 
 	// memCancel / regCancel stop the MemoryMonitor polling goroutine and
 	// the ConnectionRegistry cleanup goroutine respectively. WorkerPool
@@ -111,18 +105,24 @@ type Server struct {
 	memCancel context.CancelFunc
 	regCancel context.CancelFunc
 
-	// mu guards the running flag against double-Start / double-Shutdown
-	// races. Held briefly; no I/O while held.
-	mu sync.Mutex
-
-	// running is true between Start and Shutdown. Guarded by mu.
-	running bool
-
 	// connStats is the optional Hub-backed connection-stats provider (D-04
 	// option-a). When set, Snapshot reads live Hub counts instead of the
 	// soft-deprecated registry. Zero-value nil falls back to registry.Stats()
 	// so existing tests that do not call SetConnectionStatsProvider keep working.
 	connStats func() ConnectionStats
+	cfg       Config
+
+	// mu guards the running flag against double-Start / double-Shutdown
+	// races. Held briefly; no I/O while held.
+	mu sync.Mutex
+
+	// loadShedding is the latch the MemoryMonitor's LoadShedder callback
+	// flips on rising/falling edges. Server.LoadShedding() reads it; the
+	// health endpoint surfaces it as the ok/unhealthy signal (D-27).
+	loadShedding atomic.Bool
+
+	// running is true between Start and Shutdown. Guarded by mu.
+	running bool
 }
 
 // NewServer constructs a Server from cfg and logger. It validates cfg

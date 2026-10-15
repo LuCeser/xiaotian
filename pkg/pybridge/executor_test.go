@@ -88,13 +88,13 @@ func TestExitErrorUnwrap(t *testing.T) {
 // detection (callers use errors.Is).
 func TestSentinelErrors(t *testing.T) {
 	cases := []struct {
-		name string
 		err  error
+		name string
 	}{
-		{"ErrPythonExit", ErrPythonExit},
-		{"ErrPythonTimeout", ErrPythonTimeout},
-		{"ErrPythonJSONParse", ErrPythonJSONParse},
-		{"ErrPythonEmpty", ErrPythonEmpty},
+		{ErrPythonExit, "ErrPythonExit"},
+		{ErrPythonTimeout, "ErrPythonTimeout"},
+		{ErrPythonJSONParse, "ErrPythonJSONParse"},
+		{ErrPythonEmpty, "ErrPythonEmpty"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

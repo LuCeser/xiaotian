@@ -111,10 +111,10 @@ type WordOutcome struct {
 // Manual=false), and the recognized handwriting text when an OCR source
 // produced it. Verdicts persist in the lessons row's verdicts JSON column.
 type CheckVerdict struct {
+	OcrText   string `json:"ocr_text,omitempty"`
 	WordIndex int    `json:"word_index"`
 	Correct   bool   `json:"correct"`
 	Manual    bool   `json:"manual"`
-	OcrText   string `json:"ocr_text,omitempty"`
 }
 
 // Lesson-stage stage values stored in the lessons row (13.1-01). Empty means
@@ -215,17 +215,17 @@ func lessonsHasColumn(ctx context.Context, db *sql.DB, name string) (bool, error
 // verdicts in submission order; Unchecked marks a lesson that was closed
 // without finishing its check (the D-03 fallback consumer is 13.1-04).
 type Lesson struct {
-	LessonID     string
-	Words        []string
-	Cards        []Word
-	CurrentIndex int
-	Version      int
-	Stage        string
 	Outcomes     map[string]WordOutcome
-	Verdicts     []CheckVerdict
-	Unchecked    bool
+	LessonID     string
+	Stage        string
 	CreatedAt    string
 	UpdatedAt    string
+	Words        []string
+	Cards        []Word
+	Verdicts     []CheckVerdict
+	CurrentIndex int
+	Version      int
+	Unchecked    bool
 }
 
 // Store is the create-once/read path for lessons rows. Repository pattern
@@ -517,12 +517,12 @@ type LessonSummary struct {
 	LessonID     string
 	CreatedAt    string
 	Stage        string
-	Unchecked    bool
 	CurrentIndex int
 	WordCount    int
 	Correct      int
 	Wrong        int
 	Unconfirmed  int
+	Unchecked    bool
 	Completed    bool
 }
 

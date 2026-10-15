@@ -63,34 +63,66 @@ type Percent int
 // only (D-24) — there is intentionally no field named Token, Secret,
 // Password, or APIKey.
 type Config struct {
-	// Memory budgets the Go process heap (D-13, D-18, RES-01).
-	Memory MemoryConfig `json:"memory" mapstructure:"memory"`
-
-	// Session bounds the active session count (D-56, RES-03).
-	Session SessionConfig `json:"session" mapstructure:"session"`
-
-	// SessionTimeout tunes the per-state FSM timeouts for dictation sessions
-	// (Phase 7, D-08/D-09). Sibling to Session (registry concerns stay separate
-	// from FSM concerns).
-	SessionTimeout SessionTimeoutConfig `json:"sessionTimeout" mapstructure:"sessionTimeout"`
-
-	// Buffer tunes the audio buffer pool (D-69, D-71, D-73).
-	Buffer BufferConfig `json:"buffer" mapstructure:"buffer"`
 
 	// Server tunes the HTTP/WS listener (D-22).
 	Server ServerConfig `json:"server" mapstructure:"server"`
 
+	// FSRS tunes the FSRS orchestration layer (Phase 5, D-03). Holds only
+	// operational fields — default word count, fetch-lock duration, unit and
+	// category scope — and NEVER credentials (D-24 no-secret invariant,
+	// enforced by TestFSRSConfigHasNoSecretFields). These defaults flow into
+	// FSRSService.SelectDueCards when the caller's SelectOpts fields are zero,
+	// so the service boots and serves a sensible session with NO fsrs: block
+	// in config.yaml.
+	FSRS FSRSConfig `json:"fsrs" mapstructure:"fsrs"`
+
 	// Log tunes structured logging output (D-25, D-34).
 	Log LogConfig `json:"log" mapstructure:"log"`
 
-	// Worker tunes the worker pool (D-10).
-	Worker WorkerConfig `json:"worker" mapstructure:"worker"`
+	// Buffer tunes the audio buffer pool (D-69, D-71, D-73).
+	Buffer BufferConfig `json:"buffer" mapstructure:"buffer"`
 
-	// Connection tunes outbound connection throttling (D-22, D-66).
-	Connection ConnectionConfig `json:"connection" mapstructure:"connection"`
+	// Database tunes the SQLite storage layer (Phase 4). Holds only the
+	// operational path; pragmas (WAL, busy_timeout, foreign_keys) are NOT
+	// configurable here — they are correctness-critical and owned by
+	// database.Open (D-09). The value SHOULD match PythonConfig.VocabDBPath
+	// so Go and Python hit the same file (D-03). Empty path defaults to
+	// $HOME/.home-tutor-agent/vocab.db via database.Open.
+	Database DatabaseConfig `json:"database" mapstructure:"database"`
 
-	// Shutdown tunes graceful drain on SIGTERM/SIGINT (D-21).
-	Shutdown ShutdownConfig `json:"shutdown" mapstructure:"shutdown"`
+	// RT tunes the /rt realtime tutor layer (Phase 13, RT-01/RT-10):
+	// the natural-voice WebSocket endpoint's transport governance and the
+	// R0 fixed test lesson. Operational fields only — the MIMO_API_KEY
+	// secret stays environment-only (D-24 no-secret invariant). Defaults
+	// boot the service with NO rt: block in config.yaml; 0-value buffer /
+	// message fields defer to rt.NewHandler's semantic defaults (double
+	// validation, mirroring the WS pattern).
+	RT RTConfig `json:"rt" mapstructure:"rt"`
+	// Memory budgets the Go process heap (D-13, D-18, RES-01).
+	Memory MemoryConfig `json:"memory" mapstructure:"memory"`
+
+	// Voice tunes the voice-command pipeline (Phase 8.2 / Ticket 03): Mimo
+	// ASR + LLM intent analysis over streamed microphone audio. Operational
+	// fields only — the MIMO_API_KEY secret is deliberately absent and read
+	// from the live environment by the consuming code (D-05/D-24, same
+	// invariant TestTTSConfigHasNoSecretFields enforces for TTS).
+	Voice VoiceConfig `json:"voice" mapstructure:"voice"`
+
+	// TTS tunes the TTS audio streaming layer (Phase 6, D-10). Holds only
+	// operational fields — session cache directory, retry counts, timeouts,
+	// and prefetch depth — and NEVER credentials (D-24 no-secret invariant,
+	// enforced by TestTTSConfigHasNoSecretFields). These defaults flow into
+	// tts constructors when the caller's option fields are zero, so the
+	// service boots and serves a sensible session with NO tts: block in
+	// config.yaml.
+	TTS TTSConfig `json:"tts" mapstructure:"tts"`
+
+	// Photo tunes the photo-answer OCR pipeline (Phase 8.2 / Ticket 04):
+	// streamed photo chunks reassembled into one JPEG, read through the Mimo
+	// vision API, judged against the current dictation word. Shares the
+	// voice pipeline's mimo client (voice.baseURL and the env-only
+	// MIMO_API_KEY), so PhotoConfig carries no endpoint or secret of its own.
+	Photo PhotoConfig `json:"photo" mapstructure:"photo"`
 
 	// Python tunes the pkg/pybridge subprocess layer (Phase 3, D-03/D-04/D-05).
 	// Holds only operational configuration: interpreter path, vendored script
@@ -108,54 +140,22 @@ type Config struct {
 	// service boots with NO ws: block in config.yaml.
 	WS WSConfig `json:"ws" mapstructure:"ws"`
 
-	// Database tunes the SQLite storage layer (Phase 4). Holds only the
-	// operational path; pragmas (WAL, busy_timeout, foreign_keys) are NOT
-	// configurable here — they are correctness-critical and owned by
-	// database.Open (D-09). The value SHOULD match PythonConfig.VocabDBPath
-	// so Go and Python hit the same file (D-03). Empty path defaults to
-	// $HOME/.home-tutor-agent/vocab.db via database.Open.
-	Database DatabaseConfig `json:"database" mapstructure:"database"`
+	// SessionTimeout tunes the per-state FSM timeouts for dictation sessions
+	// (Phase 7, D-08/D-09). Sibling to Session (registry concerns stay separate
+	// from FSM concerns).
+	SessionTimeout SessionTimeoutConfig `json:"sessionTimeout" mapstructure:"sessionTimeout"`
 
-	// FSRS tunes the FSRS orchestration layer (Phase 5, D-03). Holds only
-	// operational fields — default word count, fetch-lock duration, unit and
-	// category scope — and NEVER credentials (D-24 no-secret invariant,
-	// enforced by TestFSRSConfigHasNoSecretFields). These defaults flow into
-	// FSRSService.SelectDueCards when the caller's SelectOpts fields are zero,
-	// so the service boots and serves a sensible session with NO fsrs: block
-	// in config.yaml.
-	FSRS FSRSConfig `json:"fsrs" mapstructure:"fsrs"`
+	// Session bounds the active session count (D-56, RES-03).
+	Session SessionConfig `json:"session" mapstructure:"session"`
 
-	// TTS tunes the TTS audio streaming layer (Phase 6, D-10). Holds only
-	// operational fields — session cache directory, retry counts, timeouts,
-	// and prefetch depth — and NEVER credentials (D-24 no-secret invariant,
-	// enforced by TestTTSConfigHasNoSecretFields). These defaults flow into
-	// tts constructors when the caller's option fields are zero, so the
-	// service boots and serves a sensible session with NO tts: block in
-	// config.yaml.
-	TTS TTSConfig `json:"tts" mapstructure:"tts"`
+	// Connection tunes outbound connection throttling (D-22, D-66).
+	Connection ConnectionConfig `json:"connection" mapstructure:"connection"`
 
-	// Voice tunes the voice-command pipeline (Phase 8.2 / Ticket 03): Mimo
-	// ASR + LLM intent analysis over streamed microphone audio. Operational
-	// fields only — the MIMO_API_KEY secret is deliberately absent and read
-	// from the live environment by the consuming code (D-05/D-24, same
-	// invariant TestTTSConfigHasNoSecretFields enforces for TTS).
-	Voice VoiceConfig `json:"voice" mapstructure:"voice"`
+	// Worker tunes the worker pool (D-10).
+	Worker WorkerConfig `json:"worker" mapstructure:"worker"`
 
-	// Photo tunes the photo-answer OCR pipeline (Phase 8.2 / Ticket 04):
-	// streamed photo chunks reassembled into one JPEG, read through the Mimo
-	// vision API, judged against the current dictation word. Shares the
-	// voice pipeline's mimo client (voice.baseURL and the env-only
-	// MIMO_API_KEY), so PhotoConfig carries no endpoint or secret of its own.
-	Photo PhotoConfig `json:"photo" mapstructure:"photo"`
-
-	// RT tunes the /rt realtime tutor layer (Phase 13, RT-01/RT-10):
-	// the natural-voice WebSocket endpoint's transport governance and the
-	// R0 fixed test lesson. Operational fields only — the MIMO_API_KEY
-	// secret stays environment-only (D-24 no-secret invariant). Defaults
-	// boot the service with NO rt: block in config.yaml; 0-value buffer /
-	// message fields defer to rt.NewHandler's semantic defaults (double
-	// validation, mirroring the WS pattern).
-	RT RTConfig `json:"rt" mapstructure:"rt"`
+	// Shutdown tunes graceful drain on SIGTERM/SIGINT (D-21).
+	Shutdown ShutdownConfig `json:"shutdown" mapstructure:"shutdown"`
 }
 
 // TLSConfig configures HTTPS termination on the public listener (Phase 13,
@@ -185,6 +185,13 @@ type TLSConfig struct {
 // Buffer-size and message-cap zeros defer to rt.NewHandler's own semantic
 // defaults when left at 0 (double validation, WS pattern).
 type RTConfig struct {
+
+	// LessonID is the server-side lesson the /rt session binds to. When
+	// non-empty it is used as-is (a dedicated classroom / test lesson);
+	// when empty the server derives the daily lesson id "r0-YYYYMMDD" on
+	// the Beijing calendar, so same-day sessions resume the same lesson.
+	// Default: empty (daily derivation).
+	LessonID string `json:"lessonId" mapstructure:"lessonId"`
 	// AllowedOrigins is the /rt Origin whitelist. Defaults to the localhost
 	// pair ["localhost", "127.0.0.1"]; the wildcard "*" is rejected by
 	// Validate. Production deployments MUST list the certificate's domain
@@ -210,13 +217,6 @@ type RTConfig struct {
 	// HeartbeatInterval is the /rt ping cadence. Default 30s (matching
 	// ws.DefaultHeartbeatInterval). 0 defers to rt.NewHandler's default.
 	HeartbeatInterval time.Duration `json:"heartbeatInterval" mapstructure:"heartbeatInterval"`
-
-	// LessonID is the server-side lesson the /rt session binds to. When
-	// non-empty it is used as-is (a dedicated classroom / test lesson);
-	// when empty the server derives the daily lesson id "r0-YYYYMMDD" on
-	// the Beijing calendar, so same-day sessions resume the same lesson.
-	// Default: empty (daily derivation).
-	LessonID string `json:"lessonId" mapstructure:"lessonId"`
 
 	// WordTimeoutMs is the per-word writing timer in milliseconds: when it
 	// elapses the FSM auto-advances to the next word. Default 60000 (60s);
@@ -562,16 +562,6 @@ type PythonConfig struct {
 // values are the defaults Plan 05-02's NewFSRSService reads when SelectOpts
 // leaves a field at its zero value.
 type FSRSConfig struct {
-	// DefaultWordCount is the number of words a dictation session pulls when
-	// the caller does not specify a count (FSRS-02). Default 25, sitting in
-	// the 20-30 band. MUST be in [1, 100] so a session never returns zero
-	// words nor an unbounded batch on the resource-constrained VPS.
-	DefaultWordCount int `json:"defaultWordCount" mapstructure:"defaultWordCount"`
-
-	// FetchLockHours is how long a single fetch result is considered fresh
-	// before a re-fetch is permitted (FSRS-03). Default 24.0 (hours). MUST be
-	// > 0 so the lock cannot be disabled (which would allow re-fetch storms).
-	FetchLockHours float64 `json:"fetchLockHours" mapstructure:"fetchLockHours"`
 
 	// DefaultUnit is the unit/lesson scope used when the caller does not pin a
 	// unit. The empty string is the valid "all units" default — it is NOT
@@ -582,6 +572,16 @@ type FSRSConfig struct {
 	// Default "english" (Phase 5 scope). MUST be non-empty so SelectDueCards
 	// always narrows to a real category rather than returning an unscoped set.
 	DefaultCategory string `json:"defaultCategory" mapstructure:"defaultCategory"`
+	// DefaultWordCount is the number of words a dictation session pulls when
+	// the caller does not specify a count (FSRS-02). Default 25, sitting in
+	// the 20-30 band. MUST be in [1, 100] so a session never returns zero
+	// words nor an unbounded batch on the resource-constrained VPS.
+	DefaultWordCount int `json:"defaultWordCount" mapstructure:"defaultWordCount"`
+
+	// FetchLockHours is how long a single fetch result is considered fresh
+	// before a re-fetch is permitted (FSRS-03). Default 24.0 (hours). MUST be
+	// > 0 so the lock cannot be disabled (which would allow re-fetch storms).
+	FetchLockHours float64 `json:"fetchLockHours" mapstructure:"fetchLockHours"`
 }
 
 // Validate enforces the FSRSConfig field ranges (D-03/D-04 fail-fast). On any
@@ -710,6 +710,11 @@ func (c TTSConfig) Validate() error {
 // fits the 1C/1G VPS envelope and that Thresholds are ascending and within
 // LoadShedAtPercent.
 type MemoryConfig struct {
+
+	// Thresholds are the percentage-of-budget alert thresholds (D-70).
+	// Default [80, 90, 95] (warn / escalate / critical). MUST be ascending
+	// and every element MUST be in (0, 100]. Units: percent.
+	Thresholds []Percent `json:"thresholds" mapstructure:"thresholds"`
 	// LimitBytes is the maximum bytes the Go service may allocate before
 	// load shedding triggers. Default 150MB on a 1C/1G VPS (RES-01),
 	// leaving headroom for the OS and the Python sidecar. Units: bytes.
@@ -719,11 +724,6 @@ type MemoryConfig struct {
 	// LimitBytes. Units: seconds (parsed from strings like "5s").
 	// Default 5s.
 	MonitorInterval time.Duration `json:"monitorInterval" mapstructure:"monitorInterval"`
-
-	// Thresholds are the percentage-of-budget alert thresholds (D-70).
-	// Default [80, 90, 95] (warn / escalate / critical). MUST be ascending
-	// and every element MUST be in (0, 100]. Units: percent.
-	Thresholds []Percent `json:"thresholds" mapstructure:"thresholds"`
 
 	// LoadShedAtPercent is the percentage at which new sessions are
 	// rejected (D-18). Default 95. MUST be >= max(Thresholds). Units:
@@ -751,6 +751,10 @@ type SessionConfig struct {
 // BufferConfig tunes the audio buffer pool. AudioFrameBytes is non-negotiable
 // (640 = 20ms @ 16kHz PCM); the other fields are tunable.
 type BufferConfig struct {
+
+	// Strategy selects the backpressure strategy when the pool is
+	// exhausted (D-73). Only StrategyDropOldest is supported in Phase 1.
+	Strategy string `json:"strategy" mapstructure:"strategy"`
 	// AudioFrameBytes is the size of one PCM frame. MUST be 640 (20ms of
 	// 16kHz mono PCM) per D-71. Non-negotiable for codec compatibility
 	// with the client. Units: bytes.
@@ -760,26 +764,23 @@ type BufferConfig struct {
 	// (D-69). Default 1000. Larger pools reduce GC pressure at the cost of
 	// resident memory.
 	PoolSize int `json:"poolSize" mapstructure:"poolSize"`
-
-	// Strategy selects the backpressure strategy when the pool is
-	// exhausted (D-73). Only StrategyDropOldest is supported in Phase 1.
-	Strategy string `json:"strategy" mapstructure:"strategy"`
 }
 
 // ServerConfig tunes the HTTP/WS listener and the localhost-only health
 // endpoint. Timeouts are mandatory (D-22) to prevent slowloris-style
 // resource exhaustion on the resource-constrained VPS.
 type ServerConfig struct {
+
+	// TLS opts the public listener into HTTPS termination (Phase 13, RT-01).
+	// nil (the default and the absence of a server.tls block) keeps the
+	// listener on plain HTTP — the localhost dev path. When non-nil BOTH
+	// CertFile and KeyFile must be set (see TLSConfig); a yaml `tls: {}`
+	// empty block is rejected by Validate rather than silently disabling
+	// TLS (L-7: no silent downgrade on the trusted entrance).
+	TLS *TLSConfig `json:"tls" mapstructure:"tls"`
 	// Addr is the public service listen address (host:port). Default
 	// "0.0.0.0:8080".
 	Addr string `json:"addr" mapstructure:"addr"`
-
-	// ReadTimeout caps slowloris-style slow reads. Units: seconds.
-	// Default 10s (D-22).
-	ReadTimeout time.Duration `json:"readTimeout" mapstructure:"readTimeout"`
-
-	// WriteTimeout caps stalled writes. Units: seconds. Default 10s.
-	WriteTimeout time.Duration `json:"writeTimeout" mapstructure:"writeTimeout"`
 
 	// HealthAddr is the localhost-only health/metrics listener, kept
 	// separate from the public Addr so probing traffic does not compete
@@ -803,13 +804,12 @@ type ServerConfig struct {
 	// first. Only consulted when StaticDir is non-empty.
 	StaticRoute string `json:"staticRoute" mapstructure:"staticRoute"`
 
-	// TLS opts the public listener into HTTPS termination (Phase 13, RT-01).
-	// nil (the default and the absence of a server.tls block) keeps the
-	// listener on plain HTTP — the localhost dev path. When non-nil BOTH
-	// CertFile and KeyFile must be set (see TLSConfig); a yaml `tls: {}`
-	// empty block is rejected by Validate rather than silently disabling
-	// TLS (L-7: no silent downgrade on the trusted entrance).
-	TLS *TLSConfig `json:"tls" mapstructure:"tls"`
+	// ReadTimeout caps slowloris-style slow reads. Units: seconds.
+	// Default 10s (D-22).
+	ReadTimeout time.Duration `json:"readTimeout" mapstructure:"readTimeout"`
+
+	// WriteTimeout caps stalled writes. Units: seconds. Default 10s.
+	WriteTimeout time.Duration `json:"writeTimeout" mapstructure:"writeTimeout"`
 }
 
 // LogConfig tunes structured logging output (D-25, D-34). The actual logger

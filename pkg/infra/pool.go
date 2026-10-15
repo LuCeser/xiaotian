@@ -78,9 +78,20 @@ type AudioBufferPool struct {
 	// able to violate the cap invariant silently).
 	pool sync.Pool
 
+	// logger receives Warn events on overflow drops. Required by D-42
+	// (constructor DI); nil is substituted with NoOpLogger at construction
+	// so callers that do not care about drop telemetry pay no overhead.
+	logger Logger
+
 	// frameBytes is the locked buffer capacity (D-71). Cached on the struct
 	// so Get/Put can validate without re-reading the original BufferConfig.
 	frameBytes int
+
+	// totalGets/totalPuts/totalDrops are cumulative counters exposed via
+	// Stats for observability (Plan 08 metrics endpoint).
+	totalGets  atomic.Uint64
+	totalPuts  atomic.Uint64
+	totalDrops atomic.Uint64
 
 	// capacity is the max in-flight count before drop-oldest kicks in.
 	// Stored as int32 to match the width of inFlight's atomic.Int32 —
@@ -91,17 +102,6 @@ type AudioBufferPool struct {
 	// Put. May temporarily exceed capacity under burst load; Put relieves
 	// the overflow by dropping.
 	inFlight atomic.Int32
-
-	// totalGets/totalPuts/totalDrops are cumulative counters exposed via
-	// Stats for observability (Plan 08 metrics endpoint).
-	totalGets  atomic.Uint64
-	totalPuts  atomic.Uint64
-	totalDrops atomic.Uint64
-
-	// logger receives Warn events on overflow drops. Required by D-42
-	// (constructor DI); nil is substituted with NoOpLogger at construction
-	// so callers that do not care about drop telemetry pay no overhead.
-	logger Logger
 }
 
 // Sentinel errors for AudioBufferPool. Callers MUST detect via errors.Is

@@ -25,6 +25,7 @@ import (
 // RunReview records its opts and returns the scripted pair. The remaining
 // Executor methods are never touched by the adapter and panic on use.
 type fakePyBridge struct {
+	reviewErr  error
 	dueResults []pybridge.DueResult
 	dueErrs    []error
 
@@ -32,7 +33,6 @@ type fakePyBridge struct {
 	reviewCalls []pybridge.ReviewOpts
 
 	nextReview pybridge.ReviewResult
-	reviewErr  error
 }
 
 func (f *fakePyBridge) RunDue(_ context.Context, opts pybridge.DueOpts) (pybridge.DueResult, error) {

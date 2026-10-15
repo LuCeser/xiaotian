@@ -485,12 +485,12 @@ func TestDeleteWordsArgs(t *testing.T) {
 	}
 
 	cases := []struct {
-		name        string
-		opts        DeleteWordsOpts
-		wantErr     bool
 		presentKV   map[string]string // flag -> expected value
-		presentFlag []string          // valueless flags (e.g. --confirm)
-		absent      []string          // flags that must NOT appear
+		opts        DeleteWordsOpts
+		name        string
+		presentFlag []string // valueless flags (e.g. --confirm)
+		absent      []string // flags that must NOT appear
+		wantErr     bool
 	}{
 		{
 			name:    "no target at all is a validation error",
@@ -599,15 +599,15 @@ func TestDeleteWordsArgs(t *testing.T) {
 //   - otherwise -> the extracted trailing JSON bytes, nil error
 func TestClassifyMgmtRun(t *testing.T) {
 	cases := []struct {
+		runErr       error
+		wantSentinel error // sentinel the returned error must wrap; nil = success
 		name         string
+		wantStdout   string
+		wantRaw      string
 		stdout       []byte
 		stderr       []byte
 		exitCode     int
-		runErr       error
-		wantSentinel error // sentinel the returned error must wrap; nil = success
-		wantExit     bool  // expect a recoverable *ExitError (errors.As)
-		wantStdout   string
-		wantRaw      string
+		wantExit     bool // expect a recoverable *ExitError (errors.As)
 	}{
 		{
 			name:         "context deadline maps to ErrPythonTimeout",

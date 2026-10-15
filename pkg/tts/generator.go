@@ -39,20 +39,20 @@ const (
 type Generator struct {
 	// exec is the Python bridge executor that runs pregenerate_dictation.py
 	exec pybridge.Executor
-	// cache stores PCM files per session
-	cache *SessionCache
-	// convertFn is the MP3-to-PCM conversion function (injected for testing)
-	convertFn func(string, ConvertOpts) (PCMData, error)
 	// logger is the structured logger
 	logger infra.Logger
-	// cfg holds TTS configuration (retries, timeouts)
-	cfg infra.TTSConfig
 	// synth is the OPTIONAL direct word synthesizer (Mimo). nil = the
 	// generator is Volcengine-only (backward compatible with every existing
 	// constructor call site). Written once during boot wiring via
 	// SetWordSynthesizer, before the first session exists, so it needs no
 	// lock — GenerateForSession calls only happen after wiring completes.
 	synth WordSynthesizer
+	// cache stores PCM files per session
+	cache *SessionCache
+	// convertFn is the MP3-to-PCM conversion function (injected for testing)
+	convertFn func(string, ConvertOpts) (PCMData, error)
+	// cfg holds TTS configuration (retries, timeouts)
+	cfg infra.TTSConfig
 }
 
 // NewGenerator creates a new Generator with the given dependencies.

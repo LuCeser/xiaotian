@@ -15,12 +15,12 @@ import (
 // DecodedAudioData or error, plus capture of the text and options so tests
 // can assert the bare-word contract and the applied preset.
 type fakeMimoSynth struct {
-	mu       sync.Mutex
-	audio    mimo.DecodedAudioData
 	err      error
-	calls    int
 	lastText string
 	lastOpts []mimo.TTSOption
+	audio    mimo.DecodedAudioData
+	calls    int
+	mu       sync.Mutex
 }
 
 func (f *fakeMimoSynth) Synthesize(_ context.Context, text string, opts ...mimo.TTSOption) (mimo.DecodedAudioData, error) {

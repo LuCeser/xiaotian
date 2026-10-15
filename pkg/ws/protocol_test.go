@@ -195,17 +195,17 @@ func TestMessageTypeValues(t *testing.T) {
 // TestMessageTypeString verifies the String() method returns human-readable names.
 func TestMessageTypeString(t *testing.T) {
 	tests := []struct {
-		msgType  MessageType
 		expected string
+		msgType  MessageType
 	}{
-		{MsgTypeAudio, "audio"},
-		{MsgTypeControl, "control"},
-		{MsgTypeError, "error"},
-		{MsgTypeHeartbeat, "heartbeat"},
-		{MsgTypeSession, "session"},
-		{MsgTypeStatus, "status"},
-		{MsgTypeImage, "image"},
-		{0xFF, "unknown(0xff)"}, // Unknown type
+		{"audio", MsgTypeAudio},
+		{"control", MsgTypeControl},
+		{"error", MsgTypeError},
+		{"heartbeat", MsgTypeHeartbeat},
+		{"session", MsgTypeSession},
+		{"status", MsgTypeStatus},
+		{"image", MsgTypeImage},
+		{"unknown(0xff)", 0xFF}, // Unknown type
 	}
 
 	for _, tt := range tests {

@@ -30,11 +30,10 @@ import (
 // multi-user contract: a locked card never goes to a second session) and
 // records every unlock's card IDs for containment assertions.
 type storiesFSRS struct {
-	mu sync.Mutex
-
 	pool     []pybridge.DueCard
 	served   [][]int64 // card IDs handed out, per call
 	unlocked [][]int64 // card IDs released, per unlock call
+	mu       sync.Mutex
 }
 
 func newStoriesFSRS() *storiesFSRS {

@@ -33,10 +33,10 @@ import (
 // captureSender records every control message (as marshaled JSON) and audio
 // chunk a Sender would deliver.
 type captureSender struct {
-	mu         sync.Mutex
 	controls   [][]byte
 	audioN     int
 	audioBytes int
+	mu         sync.Mutex
 }
 
 func (c *captureSender) SendControl(v any) error {
@@ -122,31 +122,31 @@ func (c *captureSender) listeningCount() int {
 // The 13.1 check-stage methods follow the same first-commit/replay/conflict
 // shape on the in-memory row (checkResults holds their stored results).
 type fakeExecutor struct {
-	mu               sync.Mutex
+	requestResults   map[string]lesson.AdvanceResult
+	checkResults     map[string]any
+	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
+	advanceCalls     []fakeAdvanceCall
+	checkCalls       []fakeCheckCall
 	lesson           lesson.Lesson
+	mu               sync.Mutex
 	exists           bool
 	ensureCalls      int
 	ensureCardsCalls int
-	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
 	stateCalls       int
-	advanceCalls     []fakeAdvanceCall
-	checkCalls       []fakeCheckCall
 	conflictVersion  int
-	requestResults   map[string]lesson.AdvanceResult
-	checkResults     map[string]any
 }
 
 type fakeAdvanceCall struct {
 	lessonID        string
-	expectedVersion int
 	requestID       string
+	expectedVersion int
 }
 
 type fakeCheckCall struct {
 	tool            string
 	lessonID        string
-	expectedVersion int
 	requestID       string
+	expectedVersion int
 }
 
 func cardWords(cards []lesson.Word) []string {
@@ -208,7 +208,7 @@ func (f *fakeExecutor) GetLessonState(_ context.Context, _ string) (lesson.Lesso
 func (f *fakeExecutor) AdvanceWord(_ context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.advanceCalls = append(f.advanceCalls, fakeAdvanceCall{lessonID, expectedVersion, requestID})
+	f.advanceCalls = append(f.advanceCalls, fakeAdvanceCall{lessonID: lessonID, expectedVersion: expectedVersion, requestID: requestID})
 	if stored, ok := f.requestResults[requestID]; ok {
 		stored.Idempotent = true
 		return stored, nil
@@ -235,7 +235,7 @@ func (f *fakeExecutor) advanceCount() int {
 func (f *fakeExecutor) EnterCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, outcomes map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.checkCalls = append(f.checkCalls, fakeCheckCall{"enter_check", lessonID, expectedVersion, requestID})
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "enter_check", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.EnterCheckResult)
 		res.Idempotent = true
@@ -258,7 +258,7 @@ func (f *fakeExecutor) EnterCheck(_ context.Context, lessonID string, expectedVe
 func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.checkCalls = append(f.checkCalls, fakeCheckCall{"apply_verdict", lessonID, expectedVersion, requestID})
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "apply_verdict", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.ApplyVerdictResult)
 		res.Idempotent = true
@@ -290,7 +290,7 @@ func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expected
 func (f *fakeExecutor) CompleteCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.checkCalls = append(f.checkCalls, fakeCheckCall{"complete_check", lessonID, expectedVersion, requestID})
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "complete_check", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.CompleteCheckResult)
 		res.Idempotent = true
@@ -323,7 +323,7 @@ func (f *fakeExecutor) CompleteCheck(_ context.Context, lessonID string, expecte
 func (f *fakeExecutor) ClearUnchecked(_ context.Context, lessonID string, expectedVersion int, requestID string) (lesson.ClearUncheckedResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.checkCalls = append(f.checkCalls, fakeCheckCall{"clear_unchecked", lessonID, expectedVersion, requestID})
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "clear_unchecked", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.ClearUncheckedResult)
 		res.Idempotent = true
@@ -2604,16 +2604,16 @@ func TestWordRatingMatrix(t *testing.T) {
 	cases := []struct {
 		name    string
 		outcome string
-		hints   int
 		want    string
+		hints   int
 	}{
-		{"confirmed no hint", outcomeConfirmed, 0, "good"},
-		{"confirmed after hints", outcomeConfirmed, 2, "hard"},
-		{"timeout no hint", outcomeTimeout, 0, "hard"},
-		{"timeout after one hint", outcomeTimeout, 1, "again"},
-		{"hint pre-record one hint", outcomeHint, 1, "again"},
-		{"hint pre-record three hints", outcomeHint, 3, "again"},
-		{"unknown outcome skipped", "bogus", 0, ""},
+		{"confirmed no hint", outcomeConfirmed, "good", 0},
+		{"confirmed after hints", outcomeConfirmed, "hard", 2},
+		{"timeout no hint", outcomeTimeout, "hard", 0},
+		{"timeout after one hint", outcomeTimeout, "again", 1},
+		{"hint pre-record one hint", outcomeHint, "again", 1},
+		{"hint pre-record three hints", outcomeHint, "again", 3},
+		{"unknown outcome skipped", "bogus", "", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2633,14 +2633,14 @@ func TestCheckRatingMatrix(t *testing.T) {
 	cases := []struct {
 		name   string
 		result string
-		hints  int
 		want   string
+		hints  int
 	}{
-		{"correct no hint", checkCorrect, 0, "good"},
-		{"correct after hints", checkCorrect, 2, "hard"},
-		{"wrong no hint", checkWrong, 0, "again"},
-		{"wrong after hints", checkWrong, 3, "again"},
-		{"unknown result skipped", "bogus", 0, ""},
+		{"correct no hint", checkCorrect, "good", 0},
+		{"correct after hints", checkCorrect, "hard", 2},
+		{"wrong no hint", checkWrong, "again", 0},
+		{"wrong after hints", checkWrong, "again", 3},
+		{"unknown result skipped", "bogus", "", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2659,15 +2659,15 @@ func TestUncheckedDowngrade(t *testing.T) {
 	cases := []struct {
 		name    string
 		outcome string
-		hints   int
 		want    string
+		hints   int
 	}{
-		{"confirmed no hint: good→hard", outcomeConfirmed, 0, ratingHard},
-		{"confirmed after hints: hard→again", outcomeConfirmed, 1, ratingAgain},
-		{"timeout no hint: hard→again", outcomeTimeout, 0, ratingAgain},
-		{"timeout after hints: again floors", outcomeTimeout, 2, ratingAgain},
-		{"hint pre-record: again floors", outcomeHint, 0, ratingAgain},
-		{"unknown outcome stays empty", "bogus", 0, ""},
+		{"confirmed no hint: good→hard", outcomeConfirmed, ratingHard, 0},
+		{"confirmed after hints: hard→again", outcomeConfirmed, ratingAgain, 1},
+		{"timeout no hint: hard→again", outcomeTimeout, ratingAgain, 0},
+		{"timeout after hints: again floors", outcomeTimeout, ratingAgain, 2},
+		{"hint pre-record: again floors", outcomeHint, ratingAgain, 0},
+		{"unknown outcome stays empty", "bogus", "", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -4585,11 +4585,11 @@ func TestNextDueDays(t *testing.T) {
 // fakePracticeSource is the scripted PracticeSource: a fixed card pool with
 // call recording (the practice init must List exactly once).
 type fakePracticeSource struct {
-	mu      sync.Mutex
-	cards   []database.Card
 	err     error
-	calls   int
+	cards   []database.Card
 	filters []database.CardFilter
+	calls   int
+	mu      sync.Mutex
 }
 
 func (f *fakePracticeSource) List(_ context.Context, filter database.CardFilter) ([]database.Card, error) {

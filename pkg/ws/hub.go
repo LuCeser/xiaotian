@@ -61,14 +61,21 @@ type Hub struct {
 	// clients holds the active client connections (D-11 protected by mu)
 	clients map[*Client]bool
 
-	// mu protects the clients map (D-11 RWMutex for read-heavy workload)
-	mu sync.RWMutex
+	// logger is the structured logger (D-25)
+	logger *zap.Logger
 
 	// limit is the maximum number of concurrent connections (D-04)
 	limit int
 
-	// logger is the structured logger (D-25)
-	logger *zap.Logger
+	// totalAccepted/totalRejected/totalCleaned track connection lifecycle
+	// events for the /metrics endpoint (D-04 option-a Hub-backed metrics).
+	// Incremented atomically in Run(); read by Stats().
+	totalAccepted atomic.Uint64
+	totalRejected atomic.Uint64
+	totalCleaned  atomic.Uint64
+
+	// mu protects the clients map (D-11 RWMutex for read-heavy workload)
+	mu sync.RWMutex
 
 	// closeMu guards the shutdown flag. Register/Unregister take the read lock to
 	// check closed before a non-blocking send; Close takes the write lock to flip
@@ -79,13 +86,6 @@ type Hub struct {
 	// unregister channels: doing so would make Run receive nil values and busy-loop.
 	closeMu sync.RWMutex
 	closed  bool
-
-	// totalAccepted/totalRejected/totalCleaned track connection lifecycle
-	// events for the /metrics endpoint (D-04 option-a Hub-backed metrics).
-	// Incremented atomically in Run(); read by Stats().
-	totalAccepted atomic.Uint64
-	totalRejected atomic.Uint64
-	totalCleaned  atomic.Uint64
 }
 
 // NewHub creates a new Hub with the given configuration (D-42 constructor DI).

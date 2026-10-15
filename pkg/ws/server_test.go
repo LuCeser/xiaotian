@@ -16,9 +16,9 @@ import (
 // TestNewServerValidatesConfig tests that NewServer validates configuration
 func TestNewServerValidatesConfig(t *testing.T) {
 	tests := []struct {
+		wantErr error
 		name    string
 		cfg     ServerConfig
-		wantErr error
 	}{
 		{
 			name: "empty allowed origins",

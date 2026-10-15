@@ -23,10 +23,10 @@ import (
 // assertions) and a prefilled ListRecentResults (history feeding).
 type recordingRepo struct {
 	fsmRepo
-
-	mu      sync.Mutex
 	events  []database.SessionEvent
 	results []database.SessionResult
+
+	mu sync.Mutex
 }
 
 func (r *recordingRepo) AppendEvent(_ context.Context, e database.SessionEvent) error {

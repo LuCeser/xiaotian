@@ -14,9 +14,9 @@ import (
 
 // mockSender is a test fake for the Sender interface
 type mockSender struct {
-	mu       sync.Mutex
-	messages [][]byte
 	sendErr  error
+	messages [][]byte
+	mu       sync.Mutex
 	closed   bool
 }
 

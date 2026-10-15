@@ -852,10 +852,10 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 
 // correctionInputs carries the diff result into the finishing goroutine.
 type correctionInputs struct {
+	changed   map[string]string
 	requestID string
 	lessonID  string
 	version   int
-	changed   map[string]string
 	total     int
 	correct   int
 }

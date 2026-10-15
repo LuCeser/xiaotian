@@ -24,15 +24,15 @@ type Manager struct {
 	gen      TTSSessionGenerator
 	streamer SessionStreamer
 	repo     database.SessionRepository
-	pool     *infra.WorkerPool
 	logger   infra.Logger
+	pool     *infra.WorkerPool
+	sessions map[string]*Session // keyed by connID
 	cfg      infra.Config
+	reserved int // capacity slots held by in-flight NewSession constructions (Ticket 07: the cap must hold through the seconds-long construction window, not just at the instant of the check)
 
 	// --- Registry ---
-	mu       sync.RWMutex
-	sessions map[string]*Session // keyed by connID
-	reserved int                 // capacity slots held by in-flight NewSession constructions (Ticket 07: the cap must hold through the seconds-long construction window, not just at the instant of the check)
-	running  atomic.Bool         // CompareAndSwap guard for Start (D-08)
+	mu      sync.RWMutex
+	running atomic.Bool // CompareAndSwap guard for Start (D-08)
 }
 
 // NewManager constructs a Manager with nil-guarded dependencies (D-42 DI shape,
@@ -125,8 +125,8 @@ func (m *Manager) sweep(ctx context.Context) {
 // ctx.Done arm, which fires the D-10 defer chain.
 func (m *Manager) cleanupLeaked() {
 	type leakedEntry struct {
-		connID string
 		cancel context.CancelFunc
+		connID string
 	}
 	var leaked []leakedEntry
 

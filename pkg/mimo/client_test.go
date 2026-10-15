@@ -186,10 +186,10 @@ func serviceUnavailableHandler(w http.ResponseWriter, r *http.Request) {
 // TestNewClient tests client creation
 func TestNewClient(t *testing.T) {
 	tests := []struct {
-		name    string
-		config  ClientConfig
 		logger  infra.Logger
 		wantErr error
+		name    string
+		config  ClientConfig
 	}{
 		{
 			name: "valid config",
@@ -273,12 +273,12 @@ func TestNewClient(t *testing.T) {
 // TestClient_Synthesize tests TTS synthesis
 func TestClient_Synthesize(t *testing.T) {
 	tests := []struct {
-		name           string
+		wantErr        error
 		handler        http.HandlerFunc
+		validateResult func(*testing.T, DecodedAudioData)
+		name           string
 		text           string
 		opts           []TTSOption
-		wantErr        error
-		validateResult func(*testing.T, DecodedAudioData)
 	}{
 		{
 			name:    "successful synthesis",
@@ -397,13 +397,13 @@ func TestClient_Synthesize(t *testing.T) {
 // TestClient_Transcribe tests ASR transcription
 func TestClient_Transcribe(t *testing.T) {
 	tests := []struct {
-		name           string
-		handler        http.HandlerFunc
-		audioData      []byte
-		format         string
-		opts           []ASROption
 		wantErr        error
+		handler        http.HandlerFunc
 		validateResult func(*testing.T, ASRResponse)
+		name           string
+		format         string
+		audioData      []byte
+		opts           []ASROption
 	}{
 		{
 			name:      "successful transcription",
@@ -599,9 +599,9 @@ func TestClient_TranscribeInvalidJSON(t *testing.T) {
 // TestClient_HealthCheck tests API health check
 func TestClient_HealthCheck(t *testing.T) {
 	tests := []struct {
-		name    string
-		handler http.HandlerFunc
 		wantErr error
+		handler http.HandlerFunc
+		name    string
 	}{
 		{
 			name:    "healthy service",
@@ -752,17 +752,17 @@ func TestASROptions(t *testing.T) {
 // TestIsRetryable tests retryable error detection
 func TestIsRetryable(t *testing.T) {
 	tests := []struct {
-		name     string
 		err      error
+		name     string
 		expected bool
 	}{
-		{"rate limit error", ErrRateLimit, true},
-		{"service unavailable", ErrServiceUnavailable, true},
-		{"network error", ErrNetworkError, true},
-		{"retryable error wrapper", NewRetryableError(errors.New("temp error"), 5), true},
-		{"authentication error", ErrAuthentication, false},
-		{"invalid request", ErrInvalidRequest, false},
-		{"context cancelled", ErrContextCancelled, false},
+		{ErrRateLimit, "rate limit error", true},
+		{ErrServiceUnavailable, "service unavailable", true},
+		{ErrNetworkError, "network error", true},
+		{NewRetryableError(errors.New("temp error"), 5), "retryable error wrapper", true},
+		{ErrAuthentication, "authentication error", false},
+		{ErrInvalidRequest, "invalid request", false},
+		{ErrContextCancelled, "context cancelled", false},
 	}
 
 	for _, tt := range tests {
@@ -778,13 +778,13 @@ func TestIsRetryable(t *testing.T) {
 // TestGetRetryDelay tests retry delay extraction
 func TestGetRetryDelay(t *testing.T) {
 	tests := []struct {
-		name     string
 		err      error
+		name     string
 		expected int
 	}{
-		{"retryable error with delay", NewRetryableError(errors.New("temp"), 10), 10},
-		{"retryable error with zero delay", NewRetryableError(errors.New("temp"), 0), 0},
-		{"non-retryable error", ErrInvalidRequest, 0},
+		{NewRetryableError(errors.New("temp"), 10), "retryable error with delay", 10},
+		{NewRetryableError(errors.New("temp"), 0), "retryable error with zero delay", 0},
+		{ErrInvalidRequest, "non-retryable error", 0},
 	}
 
 	for _, tt := range tests {

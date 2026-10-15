@@ -1045,14 +1045,14 @@ func TestVoiceConfigValidate(t *testing.T) {
 	valid := DefaultConfig().Voice
 
 	cases := []struct {
-		name string
 		mut  func(c *VoiceConfig)
+		name string
 	}{
-		{"baseUrl empty", func(c *VoiceConfig) { c.BaseURL = "" }},
-		{"chatModel empty", func(c *VoiceConfig) { c.ChatModel = "" }},
-		{"maxRecordingBytes zero", func(c *VoiceConfig) { c.MaxRecordingBytes = 0 }},
-		{"assembleWait zero", func(c *VoiceConfig) { c.AssembleWait = 0 }},
-		{"requestTimeout zero", func(c *VoiceConfig) { c.RequestTimeout = 0 }},
+		{mut: func(c *VoiceConfig) { c.BaseURL = "" }, name: "baseUrl empty"},
+		{mut: func(c *VoiceConfig) { c.ChatModel = "" }, name: "chatModel empty"},
+		{mut: func(c *VoiceConfig) { c.MaxRecordingBytes = 0 }, name: "maxRecordingBytes zero"},
+		{mut: func(c *VoiceConfig) { c.AssembleWait = 0 }, name: "assembleWait zero"},
+		{mut: func(c *VoiceConfig) { c.RequestTimeout = 0 }, name: "requestTimeout zero"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1100,16 +1100,16 @@ func TestPhotoConfigValidate(t *testing.T) {
 	valid := DefaultConfig().Photo
 
 	cases := []struct {
-		name string
 		mut  func(c *PhotoConfig)
+		name string
 	}{
-		{"chatModel empty", func(c *PhotoConfig) { c.ChatModel = "" }},
-		{"maxImageBytes zero", func(c *PhotoConfig) { c.MaxImageBytes = 0 }},
-		{"assembleWait zero", func(c *PhotoConfig) { c.AssembleWait = 0 }},
-		{"requestTimeout zero", func(c *PhotoConfig) { c.RequestTimeout = 0 }},
-		{"confidenceThreshold zero", func(c *PhotoConfig) { c.ConfidenceThreshold = 0 }},
-		{"confidenceThreshold at one", func(c *PhotoConfig) { c.ConfidenceThreshold = 1 }},
-		{"confidenceThreshold above one", func(c *PhotoConfig) { c.ConfidenceThreshold = 1.5 }},
+		{mut: func(c *PhotoConfig) { c.ChatModel = "" }, name: "chatModel empty"},
+		{mut: func(c *PhotoConfig) { c.MaxImageBytes = 0 }, name: "maxImageBytes zero"},
+		{mut: func(c *PhotoConfig) { c.AssembleWait = 0 }, name: "assembleWait zero"},
+		{mut: func(c *PhotoConfig) { c.RequestTimeout = 0 }, name: "requestTimeout zero"},
+		{mut: func(c *PhotoConfig) { c.ConfidenceThreshold = 0 }, name: "confidenceThreshold zero"},
+		{mut: func(c *PhotoConfig) { c.ConfidenceThreshold = 1 }, name: "confidenceThreshold at one"},
+		{mut: func(c *PhotoConfig) { c.ConfidenceThreshold = 1.5 }, name: "confidenceThreshold above one"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1148,34 +1148,34 @@ func validatableDefault(t *testing.T) Config {
 // downgrade).
 func TestTLSThreeStateValidate(t *testing.T) {
 	cases := []struct {
-		name    string
 		mut     func(c *Config)
+		name    string
 		wantErr bool
 	}{
 		{
-			"nil TLS = disabled, valid (no tls block)",
-			func(c *Config) { c.Server.TLS = nil },
-			false,
+			mut:     func(c *Config) { c.Server.TLS = nil },
+			name:    "nil TLS = disabled, valid (no tls block)",
+			wantErr: false,
 		},
 		{
-			"empty pair (tls:{}) rejected — no silent HTTP downgrade",
-			func(c *Config) { c.Server.TLS = &TLSConfig{} },
-			true,
+			mut:     func(c *Config) { c.Server.TLS = &TLSConfig{} },
+			name:    "empty pair (tls:{}) rejected — no silent HTTP downgrade",
+			wantErr: true,
 		},
 		{
-			"certFile without keyFile rejected",
-			func(c *Config) { c.Server.TLS = &TLSConfig{CertFile: "a.pem"} },
-			true,
+			mut:     func(c *Config) { c.Server.TLS = &TLSConfig{CertFile: "a.pem"} },
+			name:    "certFile without keyFile rejected",
+			wantErr: true,
 		},
 		{
-			"keyFile without certFile rejected",
-			func(c *Config) { c.Server.TLS = &TLSConfig{KeyFile: "b.pem"} },
-			true,
+			mut:     func(c *Config) { c.Server.TLS = &TLSConfig{KeyFile: "b.pem"} },
+			name:    "keyFile without certFile rejected",
+			wantErr: true,
 		},
 		{
-			"paired paths valid",
-			func(c *Config) { c.Server.TLS = &TLSConfig{CertFile: "a.pem", KeyFile: "b.pem"} },
-			false,
+			mut:     func(c *Config) { c.Server.TLS = &TLSConfig{CertFile: "a.pem", KeyFile: "b.pem"} },
+			name:    "paired paths valid",
+			wantErr: false,
 		},
 	}
 	for _, tc := range cases {
@@ -1267,20 +1267,20 @@ func TestRTConfigValidate(t *testing.T) {
 	valid := DefaultConfig().RT
 
 	cases := []struct {
-		name string
 		mut  func(c *RTConfig)
+		name string
 	}{
-		{"empty origins rejected", func(c *RTConfig) { c.AllowedOrigins = nil }},
-		{"wildcard origin rejected", func(c *RTConfig) { c.AllowedOrigins = []string{"*"} }},
-		{"wordTimeoutMs negative rejected", func(c *RTConfig) { c.WordTimeoutMs = -1 }},
-		{"wordTimeoutMs above one hour rejected", func(c *RTConfig) { c.WordTimeoutMs = 3600001 }},
-		{"lessonId with whitespace rejected", func(c *RTConfig) { c.LessonID = "r0 test" }},
-		{"lessonId with tab rejected", func(c *RTConfig) { c.LessonID = "r0\ttest" }},
-		{"lessonId over 64 chars rejected", func(c *RTConfig) {
+		{mut: func(c *RTConfig) { c.AllowedOrigins = nil }, name: "empty origins rejected"},
+		{mut: func(c *RTConfig) { c.AllowedOrigins = []string{"*"} }, name: "wildcard origin rejected"},
+		{mut: func(c *RTConfig) { c.WordTimeoutMs = -1 }, name: "wordTimeoutMs negative rejected"},
+		{mut: func(c *RTConfig) { c.WordTimeoutMs = 3600001 }, name: "wordTimeoutMs above one hour rejected"},
+		{mut: func(c *RTConfig) { c.LessonID = "r0 test" }, name: "lessonId with whitespace rejected"},
+		{mut: func(c *RTConfig) { c.LessonID = "r0\ttest" }, name: "lessonId with tab rejected"},
+		{mut: func(c *RTConfig) {
 			c.LessonID = strings.Repeat("a", 65)
-		}},
-		{"lessonId with path separator rejected", func(c *RTConfig) { c.LessonID = "r0/test" }},
-		{"lessonId with backslash rejected", func(c *RTConfig) { c.LessonID = `r0\test` }},
+		}, name: "lessonId over 64 chars rejected"},
+		{mut: func(c *RTConfig) { c.LessonID = "r0/test" }, name: "lessonId with path separator rejected"},
+		{mut: func(c *RTConfig) { c.LessonID = `r0\test` }, name: "lessonId with backslash rejected"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

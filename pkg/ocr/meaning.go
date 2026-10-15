@@ -47,9 +47,9 @@ type MeaningTextbook struct {
 // prompt then says 尚未登记学习进度 instead of pretending zero lessons
 // were learned.
 type MeaningRequest struct {
-	Words          []string        `json:"words"`
-	Textbook       MeaningTextbook `json:"textbook"`
 	LearnedLessons *int            `json:"learnedLessons"`
+	Textbook       MeaningTextbook `json:"textbook"`
+	Words          []string        `json:"words"`
 }
 
 // MeaningResult is the supplement draft: one meaning per answered word

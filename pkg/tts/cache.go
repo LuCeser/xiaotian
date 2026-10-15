@@ -54,8 +54,8 @@ func cacheKey(wordID string) (string, error) {
 // SessionCache manages PCM file storage per D-02/D-08. Each session gets a
 // subdirectory under baseDir, and words are stored as {wordID}.pcm files.
 type SessionCache struct {
-	baseDir string
 	logger  infra.Logger
+	baseDir string
 }
 
 // NewSessionCache creates a new SessionCache with the given base directory.

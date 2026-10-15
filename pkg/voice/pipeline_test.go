@@ -22,9 +22,9 @@ func wavDataLen(n int) (uint32, bool) {
 
 // stubClassifier records the transcripts it saw and replies from a table.
 type stubClassifier struct {
-	calls        []string
 	byTranscript map[string]Intent
 	fallback     Intent
+	calls        []string
 }
 
 func (s *stubClassifier) Classify(_ context.Context, transcript string) (Intent, error) {
@@ -38,9 +38,9 @@ func (s *stubClassifier) Classify(_ context.Context, transcript string) (Intent,
 // captureTranscriber records the WAV bytes it received and replies from a
 // table (empty table entry ⇒ empty transcript).
 type captureTranscriber struct {
-	wavs  [][]byte
-	reply string
 	err   error
+	reply string
+	wavs  [][]byte
 }
 
 func (c *captureTranscriber) transcribe(_ context.Context, wav []byte) (string, error) {

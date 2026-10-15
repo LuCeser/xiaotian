@@ -54,6 +54,15 @@ func getTestAudioPayload() []byte {
 // fakeConn is a manual fake for *websocket.Conn (D-48 - no testify/mock).
 // Records calls to WebSocket methods for verification in tests.
 type fakeConn struct {
+	writeMessageError error             // Error to return from WriteMessage
+	closeCallReason   atomic.Value      // string
+	readMessageError  error             // Error to return from ReadMessage
+	writeControlError error             // Error to return from WriteControl
+	onWriteMessage    func([]byte)      // Optional callback on WriteMessage
+	onWriteControl    func(int, []byte) // Optional callback on WriteControl
+
+	// Test control fields
+	readMessageResult []byte // Return value for ReadMessage
 	// mu guards the non-atomic control fields below (readMessageResult/Error,
 	// writeMessageError, writeControlError, onWriteMessage, onWriteControl), which are
 	// set by the test goroutine and read inside ReadMessage/WriteMessage/WriteControl
@@ -65,15 +74,6 @@ type fakeConn struct {
 	writeControlCallCount atomic.Int32
 	closeCallCount        atomic.Int32
 	closeCallCode         atomic.Int32
-	closeCallReason       atomic.Value // string
-
-	// Test control fields
-	readMessageResult []byte            // Return value for ReadMessage
-	readMessageError  error             // Error to return from ReadMessage
-	writeMessageError error             // Error to return from WriteMessage
-	writeControlError error             // Error to return from WriteControl
-	onWriteMessage    func([]byte)      // Optional callback on WriteMessage
-	onWriteControl    func(int, []byte) // Optional callback on WriteControl
 }
 
 func (f *fakeConn) ReadMessage() (int, []byte, error) {
@@ -147,13 +147,13 @@ func (f *fakeConn) Close() error {
 // fakeFrameHandler is a manual fake for FrameHandler (D-48).
 // Records calls to Route for verification in tests.
 type fakeFrameHandler struct {
-	routeCallCount   atomic.Int32
 	lastRouteCtx     atomic.Value // *context.Context
 	lastRouteClient  atomic.Value // *Client
 	lastRouteHeader  atomic.Value // *FrameHeader
 	lastRoutePayload atomic.Value // []byte
 	routeError       error        // Error to return from Route
 	onRoute          func(ctx context.Context, c *Client, h *FrameHeader, p []byte) error
+	routeCallCount   atomic.Int32
 }
 
 func (f *fakeFrameHandler) Route(ctx context.Context, c *Client, header *FrameHeader, payload []byte) error {

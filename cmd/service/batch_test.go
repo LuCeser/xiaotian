@@ -29,9 +29,9 @@ import (
 // batchFSRS feeds two due words and CAPTURES the ratings UpdateRatings
 // received (the thing the batch handler must submit server-side).
 type batchFSRS struct {
-	mu      sync.Mutex
 	ratings map[string]string
 	calls   int
+	mu      sync.Mutex
 }
 
 func (f *batchFSRS) SelectDueCards(_ context.Context, _ fsrs.SelectOpts) ([]pybridge.DueCard, error) {

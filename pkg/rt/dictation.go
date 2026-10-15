@@ -257,9 +257,9 @@ const playbackAckTimeoutNotice = "老师的话好像没有播放完，我们先�
 // index/version pair — never on a re-read currentIndex — so a delayed
 // confirmation cannot double-advance or target a different word (T-13-15c).
 type TurnTarget struct {
+	Word            string
 	WordIndex       int
 	ExpectedVersion int
-	Word            string
 }
 
 // historyRound is one round of the FSM short-history deque: the student's
@@ -276,14 +276,20 @@ type historyRound struct {
 // TurnManager's mu — the tutor never locks on its own, and every method
 // below assumes the caller already holds that lock.
 type DictationTutor struct {
-	lessonID       string
-	words          []lesson.Word
-	version        int
-	currentIndex   int
-	completed      bool
 	perWordOutcome map[int]string
-	perWordHints   map[int]int    // per-word hint request count (U-9, 2026-10-06)
+	perWordHints   map[int]int // per-word hint request count (U-9, 2026-10-06)
+	lessonID       string
 	shortHistory   []historyRound // capped deque, oldest dropped (last 4 rounds)
+	words          []lesson.Word
+	// checkVerdicts caches the stored verdict list for rendering/announce
+	// purposes — NOT the authority: the lessons row is. Every write goes
+	// through the executor and resyncs this cache from the returned row
+	// state (resyncCheck), so the cache can never drift from the store for
+	// longer than one call.
+	checkVerdicts []lesson.CheckVerdict
+	reviewResult  ReviewResultMsg
+	currentIndex  int
+	version       int
 	// paused is the independent CLASSROOM pause bit (13-09): set by a
 	// recognized pause command, cleared by a recognized resume. It is
 	// deliberately NOT the voice state — the internal state may be
@@ -301,20 +307,14 @@ type DictationTutor struct {
 	// persisted): word pacing is over, verdicts are pending, and the unified
 	// submit has not run. Voice turns are gated off while it holds (the
 	// screen path is this plan's input; voice corrections are 13.1-06).
-	checking bool
-	// checkVerdicts caches the stored verdict list for rendering/announce
-	// purposes — NOT the authority: the lessons row is. Every write goes
-	// through the executor and resyncs this cache from the returned row
-	// state (resyncCheck), so the cache can never drift from the store for
-	// longer than one call.
-	checkVerdicts []lesson.CheckVerdict
+	checking  bool
+	completed bool
 	// reviewSeen marks the unified submit as delivered in this session (the
 	// in-session mirror of stage='submitted'); reviewResult keeps that
 	// delivery's honest sets so a duplicate check_submit can be recognized
 	// and answered with NO second SubmitReview and NO second summary
 	// (Pitfall 6 / T-13.1-01).
-	reviewSeen   bool
-	reviewResult ReviewResultMsg
+	reviewSeen bool
 	// correction marks a session that reopened a SUBMITTED row carrying the
 	// D-03 unchecked marker (13.1-04): the check panel shows the derived
 	// downgraded verdicts as pending hints and check_submit takes the
@@ -1017,8 +1017,8 @@ meaning 的 reply 只能依据上面词表里该词的信息组织；没有信�
 type intentPayload struct {
 	Intent string `json:"intent"`
 	Reply  string `json:"reply"`
-	Index  int    `json:"index"`
 	Text   string `json:"text"`
+	Index  int    `json:"index"`
 }
 
 // extractJSON extracts the first balanced braces block from text (models

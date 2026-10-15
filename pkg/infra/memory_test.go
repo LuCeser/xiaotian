@@ -38,9 +38,9 @@ func (f *fakeMemSource) set(b uint64) {
 // count tracks only active=true (rising-edge) events — the canonical
 // "load-shed activations" metric. Falling edges are ignored.
 type shedCounter struct {
-	mu      sync.Mutex
-	count   int
 	reasons []string
+	count   int
+	mu      sync.Mutex
 }
 
 // fire is the LoadShedder callback closure. It increments count on rising
@@ -69,8 +69,8 @@ func (s *shedCounter) get() int {
 // honest about limit / interval / thresholds without repeating 10 lines of
 // struct literal at every call site.
 type monitorBuilder struct {
-	limit      uint64
 	thresholds []Percent
+	limit      uint64
 	loadShedAt Percent
 	interval   time.Duration
 }

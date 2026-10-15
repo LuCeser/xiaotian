@@ -109,34 +109,34 @@ type MemoryMonitor struct {
 	// construction; MUST be goroutine-safe.
 	source MemSource
 
-	// limit is the memory budget in bytes (from MemoryConfig.LimitBytes).
-	// Immutable after construction. Used as the denominator of the percent
-	// calculation; guaranteed > 0 by NewMemoryMonitor validation.
-	limit uint64
-
-	// thresholds are the percent-of-budget alert thresholds (D-70), stored
-	// as a defensive ascending-sorted copy. Immutable after construction.
-	// Every tick emits one Warn log entry per threshold that pct crosses.
-	thresholds []Percent
-
-	// loadShedAt is the percent-of-budget at which LoadShedder fires.
-	// Guaranteed >= max(thresholds) by NewMemoryMonitor validation so the
-	// shed signal always arrives at or after the most severe alert.
-	loadShedAt Percent
+	// logger receives Warn entries on threshold crossings and Info entries
+	// on lifecycle events (started / stopped / shed cleared). Every entry
+	// is tagged with F("component", "infra.memory") per D-25.
+	logger Logger
 
 	// loadShedder is the callback invoked on threshold crossing. Required
 	// non-nil by NewMemoryMonitor so callers cannot accidentally construct
 	// a monitor that silently swallows the overload signal.
 	loadShedder LoadShedder
 
+	// thresholds are the percent-of-budget alert thresholds (D-70), stored
+	// as a defensive ascending-sorted copy. Immutable after construction.
+	// Every tick emits one Warn log entry per threshold that pct crosses.
+	thresholds []Percent
+
+	// limit is the memory budget in bytes (from MemoryConfig.LimitBytes).
+	// Immutable after construction. Used as the denominator of the percent
+	// calculation; guaranteed > 0 by NewMemoryMonitor validation.
+	limit uint64
+
+	// loadShedAt is the percent-of-budget at which LoadShedder fires.
+	// Guaranteed >= max(thresholds) by NewMemoryMonitor validation so the
+	// shed signal always arrives at or after the most severe alert.
+	loadShedAt Percent
+
 	// interval is the polling cadence. Immutable after construction;
 	// guaranteed > 0 by validation.
 	interval time.Duration
-
-	// logger receives Warn entries on threshold crossings and Info entries
-	// on lifecycle events (started / stopped / shed cleared). Every entry
-	// is tagged with F("component", "infra.memory") per D-25.
-	logger Logger
 
 	// mu guards the two mutable flags below. Held briefly; no I/O while
 	// holding it. The LoadShedder callback is invoked AFTER releasing mu

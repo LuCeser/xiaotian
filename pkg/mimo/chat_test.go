@@ -39,9 +39,9 @@ func defaultChatHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := ChatResponse{}
 	response.Choices = append(response.Choices, struct {
+		FinishReason string             `json:"finish_reason"`
 		Message      ChatMessageContent `json:"message"`
 		Index        int                `json:"index"`
-		FinishReason string             `json:"finish_reason"`
 	}{
 		Message:      ChatMessageContent{Role: "assistant", Content: `{"action":"next_word","confidence":0.9}`},
 		FinishReason: "stop",
@@ -59,13 +59,13 @@ func defaultChatHandler(w http.ResponseWriter, r *http.Request) {
 // and the empty-messages guard.
 func TestClient_Chat(t *testing.T) {
 	tests := []struct {
-		name        string
+		wantErr     error
 		handler     http.HandlerFunc
+		validateReq func(*testing.T, ChatRequest)
+		name        string
+		wantText    string
 		messages    []Message
 		opts        []ChatOption
-		wantErr     error
-		wantText    string
-		validateReq func(*testing.T, ChatRequest)
 	}{
 		{
 			name:    "successful completion with default model",
@@ -117,9 +117,9 @@ func TestClient_Chat(t *testing.T) {
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				response := ChatResponse{}
 				response.Choices = append(response.Choices, struct {
+					FinishReason string             `json:"finish_reason"`
 					Message      ChatMessageContent `json:"message"`
 					Index        int                `json:"index"`
-					FinishReason string             `json:"finish_reason"`
 				}{
 					Message:      ChatMessageContent{Role: "assistant", ReasoningContent: "thinking..."},
 					FinishReason: "stop",

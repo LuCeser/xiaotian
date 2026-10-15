@@ -560,11 +560,14 @@ func textbookUpdateArgs(cfg infra.PythonConfig, opts TextbookUpdateOpts) []strin
 		args = append(args, "--name", *opts.Name)
 	}
 	for _, m := range []struct {
-		flag  string
 		value *string
+		flag  string
 	}{
-		{"edition", opts.Edition}, {"stage", opts.Stage}, {"grade", opts.Grade},
-		{"volume", opts.Volume}, {"module", opts.Module},
+		{value: opts.Edition, flag: "edition"},
+		{value: opts.Stage, flag: "stage"},
+		{value: opts.Grade, flag: "grade"},
+		{value: opts.Volume, flag: "volume"},
+		{value: opts.Module, flag: "module"},
 	} {
 		if m.value != nil {
 			args = append(args, "--"+m.flag, *m.value)

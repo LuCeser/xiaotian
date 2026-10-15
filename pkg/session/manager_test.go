@@ -22,8 +22,8 @@ import (
 // is exercised (via the D-10 defer chain); SelectDueCards is never called
 // because these tests construct *Session via struct literals, not NewSession.
 type testFSRS struct {
-	unlockCalled atomic.Int64
 	unlockCtxErr error
+	unlockCalled atomic.Int64
 }
 
 func (f *testFSRS) SelectDueCards(_ context.Context, _ fsrs.SelectOpts) ([]pybridge.DueCard, error) {

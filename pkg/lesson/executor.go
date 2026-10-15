@@ -407,10 +407,10 @@ func (e *Executor) idempotentHit(ctx context.Context, lessonID, requestID string
 // stage after the write ("checking"), the new version, the stored behavior
 // snapshot and any verdicts already on the row (a replay of a re-entry).
 type EnterCheckResult struct {
-	Stage      string                 `json:"stage"`
-	NewVersion int                    `json:"new_version"`
 	Outcomes   map[string]WordOutcome `json:"outcomes,omitempty"`
+	Stage      string                 `json:"stage"`
 	Verdicts   []CheckVerdict         `json:"verdicts,omitempty"`
+	NewVersion int                    `json:"new_version"`
 	Idempotent bool                   `json:"-"`
 }
 
@@ -418,8 +418,8 @@ type EnterCheckResult struct {
 // stored verdict list (the single render source, RT-07) after the upsert.
 type ApplyVerdictResult struct {
 	Stage      string         `json:"stage"`
-	NewVersion int            `json:"new_version"`
 	Verdicts   []CheckVerdict `json:"verdicts"`
+	NewVersion int            `json:"new_version"`
 	Idempotent bool           `json:"-"`
 }
 
@@ -429,22 +429,22 @@ type ApplyVerdictResult struct {
 // the unified rating from the row's authoritative state — never from an
 // in-memory cache.
 type CompleteCheckResult struct {
+	Outcomes   map[string]WordOutcome `json:"outcomes,omitempty"`
 	Stage      string                 `json:"stage"`
+	Verdicts   []CheckVerdict         `json:"verdicts"`
 	NewVersion int                    `json:"new_version"`
 	Unchecked  bool                   `json:"unchecked"`
-	Verdicts   []CheckVerdict         `json:"verdicts"`
-	Outcomes   map[string]WordOutcome `json:"outcomes,omitempty"`
 	Idempotent bool                   `json:"-"`
 }
 
 // checkStageReadback is the common post-write readback of one check-stage
 // mutation (the row's authoritative state after the guarded UPDATE).
 type checkStageReadback struct {
+	Outcomes   map[string]WordOutcome
 	Stage      string
+	Verdicts   []CheckVerdict
 	NewVersion int
 	Unchecked  bool
-	Outcomes   map[string]WordOutcome
-	Verdicts   []CheckVerdict
 }
 
 // EnterCheck moves the lesson into the check stage (13.1-01, D-01): the last

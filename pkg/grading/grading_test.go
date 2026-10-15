@@ -14,39 +14,39 @@ func TestGradeWord(t *testing.T) {
 		expected string
 		heard    string
 		lang     string
-		wantOK   bool
 		wantRate string
-		wantNear bool
 		wantDist int
+		wantOK   bool
+		wantNear bool
 	}{
 		// Exact matches.
-		{"exact en", "apple", "apple", "en", true, "good", false, 0},
-		{"exact zh", "苹果", "苹果", "zh", true, "good", false, 0},
+		{"exact en", "apple", "apple", "en", "good", 0, true, false},
+		{"exact zh", "苹果", "苹果", "zh", "good", 0, true, false},
 
 		// Normalization: case, whitespace, punctuation.
-		{"case-insensitive", "Apple", "APPLE", "en", true, "good", false, 0},
-		{"en strips punctuation", "don't", "dont", "en", true, "good", false, 0},
-		{"en strips spaces", "ice cream", "ICE  cream!", "en", true, "good", false, 0},
-		{"zh strips punctuation", "你好。", "你好", "zh", true, "good", false, 0},
-		{"zh strips fullwidth punct", "苹果，", "苹果！", "zh", true, "good", false, 0},
-		{"zh preserves CJK", "计算机", "计 算机", "zh", true, "good", false, 0},
+		{"case-insensitive", "Apple", "APPLE", "en", "good", 0, true, false},
+		{"en strips punctuation", "don't", "dont", "en", "good", 0, true, false},
+		{"en strips spaces", "ice cream", "ICE  cream!", "en", "good", 0, true, false},
+		{"zh strips punctuation", "你好。", "你好", "zh", "good", 0, true, false},
+		{"zh strips fullwidth punct", "苹果，", "苹果！", "zh", "good", 0, true, false},
+		{"zh preserves CJK", "计算机", "计 算机", "zh", "good", 0, true, false},
 
 		// Blanks: no answer submitted → wrong/again, never near-miss.
-		{"blank", "apple", "", "en", false, "again", false, 0},
-		{"blank zh", "苹果", "", "zh", false, "again", false, 0},
-		{"whitespace-only blank", "apple", "   ", "en", false, "again", false, 0},
+		{"blank", "apple", "", "en", "again", 0, false, false},
+		{"blank zh", "苹果", "", "zh", "again", 0, false, false},
+		{"whitespace-only blank", "apple", "   ", "en", "again", 0, false, false},
 
 		// Wrong answers.
-		{"totally different", "apple", "orange", "en", false, "again", false, 5},
-		{"zh wrong char", "香蕉", "香焦", "zh", false, "hard", true, 1},
-		{"en one substitution", "word", "ward", "en", false, "hard", true, 1},
-		{"en one deletion", "word", "wor", "en", false, "hard", true, 1},
-		{"en one insertion", "word", "words", "en", false, "hard", true, 1},
-		{"en transposition", "receive", "recieve", "en", false, "hard", true, 1},
-		{"en two edits", "beautiful", "beutifull", "en", false, "again", false, 2},
-		{"zh three subs", "香蕉苹果", "香焦平过", "zh", false, "again", false, 3},
+		{"totally different", "apple", "orange", "en", "again", 5, false, false},
+		{"zh wrong char", "香蕉", "香焦", "zh", "hard", 1, false, true},
+		{"en one substitution", "word", "ward", "en", "hard", 1, false, true},
+		{"en one deletion", "word", "wor", "en", "hard", 1, false, true},
+		{"en one insertion", "word", "words", "en", "hard", 1, false, true},
+		{"en transposition", "receive", "recieve", "en", "hard", 1, false, true}, //nolint:misspell // deliberate typo fixture
+		{"en two edits", "beautiful", "beutifull", "en", "again", 2, false, false},
+		{"zh three subs", "香蕉苹果", "香焦平过", "zh", "again", 3, false, false},
 		// A single-char word that is wrong is a total miss, not a near-miss.
-		{"single-char word wrong", "a", "b", "en", false, "again", false, 1},
+		{"single-char word wrong", "a", "b", "en", "again", 1, false, false},
 	}
 
 	for _, tt := range tests {
@@ -85,7 +85,7 @@ func isBlank(s string) bool {
 // up, and a transposed pair is reported as two swap ops carrying the crossed
 // rune pair.
 func TestGradeWord_DiffAlignment(t *testing.T) {
-	got := GradeWord("receive", "recieve", "en")
+	got := GradeWord("receive", "recieve", "en") //nolint:misspell // deliberate typo fixture
 	want := []CharOp{
 		{Expected: "r", Heard: "r", Kind: OpMatch},
 		{Expected: "e", Heard: "e", Kind: OpMatch},

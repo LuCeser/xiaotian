@@ -122,17 +122,17 @@ func (ps *photoService) handlePhotoChunk(_ context.Context, client *ws.Client, h
 type photoResultResponse struct {
 	Type          string  `json:"type"` // "photo_result"
 	Text          string  `json:"text"`
-	Confidence    float64 `json:"confidence"`
-	LowConfidence bool    `json:"low_confidence"`
 	Error         string  `json:"error,omitempty"`
 	Fallback      string  `json:"fallback,omitempty"` // "manual" | "" (see above)
+	Expected      string  `json:"expected"`
+	Rating        string  `json:"rating"` // "" when not judged
+	Confidence    float64 `json:"confidence"`
+	LowConfidence bool    `json:"low_confidence"`
 
 	// Judged distinguishes "judged incorrect" (Judged=true, Correct=false)
 	// from "not judged at all" (low confidence / failure).
-	Judged   bool   `json:"judged"`
-	Correct  bool   `json:"correct"`
-	Expected string `json:"expected"`
-	Rating   string `json:"rating"` // "" when not judged
+	Judged  bool `json:"judged"`
+	Correct bool `json:"correct"`
 }
 
 // ocrPhoto settles the connection's buffered image chunks and runs the OCR

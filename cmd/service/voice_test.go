@@ -28,9 +28,9 @@ import (
 // captureTranscriber records every WAV it received and replies with a fixed
 // transcript (the fake at the voice.Transcriber seam).
 type captureTranscriber struct {
-	mu         sync.Mutex
 	transcript string
 	wavs       [][]byte
+	mu         sync.Mutex
 }
 
 func (c *captureTranscriber) transcribe(_ context.Context, wav []byte) (string, error) {
@@ -59,8 +59,8 @@ func (c *captureTranscriber) lastWAV() []byte {
 
 // recordingPusher records every pushed session event (fake sessionPusher).
 type recordingPusher struct {
-	events []session.SessionEvent
 	byConn map[string]bool
+	events []session.SessionEvent
 }
 
 func (p *recordingPusher) Push(connID string, ev session.SessionEvent) {

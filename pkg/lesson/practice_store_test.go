@@ -99,12 +99,12 @@ func TestPracticeStoreInvalidArguments(t *testing.T) {
 
 	for _, tc := range []struct {
 		name   string
-		batch  []PracticeRecord
 		reason string
+		batch  []PracticeRecord
 	}{
-		{"empty lesson id", []PracticeRecord{{Word: "apple", Rating: "good", ReviewedDay: "2026-10-08"}}, "empty lesson_id"},
-		{"empty word", []PracticeRecord{{LessonID: "r0x-1", Rating: "good", ReviewedDay: "2026-10-08"}}, "empty word"},
-		{"empty day", []PracticeRecord{{LessonID: "r0x-1", Word: "apple", Rating: "good"}}, "empty reviewed_day"},
+		{name: "empty lesson id", reason: "empty lesson_id", batch: []PracticeRecord{{Word: "apple", Rating: "good", ReviewedDay: "2026-10-08"}}},
+		{name: "empty word", reason: "empty word", batch: []PracticeRecord{{LessonID: "r0x-1", Rating: "good", ReviewedDay: "2026-10-08"}}},
+		{name: "empty day", reason: "empty reviewed_day", batch: []PracticeRecord{{LessonID: "r0x-1", Word: "apple", Rating: "good"}}},
 	} {
 		if err := store.RecordPractice(ctx, tc.batch); err == nil {
 			t.Errorf("%s: RecordPractice error = nil, want ErrInvalidLesson (%s)", tc.name, tc.reason)

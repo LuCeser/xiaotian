@@ -89,9 +89,9 @@ func itDial(t *testing.T, srv *httptest.Server) *websocket.Conn {
 // itMsg is one received websocket message; typ is the control type for text
 // frames ("" for binary).
 type itMsg struct {
-	mt  int
 	typ string
 	raw []byte
+	mt  int
 }
 
 // itProbe types a received message (typ is "" for binary frames).
@@ -1176,8 +1176,8 @@ func checkIntentScript(intent string, index int, text string) llmScript {
 	payload, _ := json.Marshal(struct {
 		Intent string `json:"intent"`
 		Reply  string `json:"reply"`
-		Index  int    `json:"index,omitempty"`
 		Text   string `json:"text,omitempty"`
+		Index  int    `json:"index,omitempty"`
 	}{Intent: intent, Index: index, Text: text})
 	wire := `{"choices":[{"index":0,"message":{"role":"assistant","content":` + strconv.Quote(string(payload)) + `}}]}`
 	return llmScript{wire: wire}

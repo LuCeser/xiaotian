@@ -15,9 +15,9 @@ import (
 // fakeConnForHeartbeat is a specialized fake for Heartbeat testing.
 // Focuses on WriteControl behavior (Ping/Close messages).
 type fakeConnForHeartbeat struct {
+	writeControlError      error
 	writeControlCallCount  atomic.Int32
 	lastControlMessageType atomic.Int32
-	writeControlError      error
 }
 
 func (f *fakeConnForHeartbeat) WriteControl(messageType int, data []byte, deadline time.Time) error {

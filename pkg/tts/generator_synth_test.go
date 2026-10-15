@@ -15,12 +15,12 @@ import (
 // or a configurable failure set, plus call capture. Simulates the Mimo word
 // source (DICT-03) without network I/O.
 type fakeWordSynth struct {
-	mu        sync.Mutex
+	storeErr  error // returned for words in failWords with storeErrFail marker
 	pcmByWord map[string][]byte
 	failWords map[string]bool
-	storeErr  error // returned for words in failWords with storeErrFail marker
-	calls     int
 	lastWords []string
+	calls     int
+	mu        sync.Mutex
 }
 
 func (f *fakeWordSynth) SynthesizeWord(_ context.Context, word string) (PCMData, error) {

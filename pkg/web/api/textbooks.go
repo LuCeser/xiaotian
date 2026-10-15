@@ -109,8 +109,8 @@ func (h *handler) createTextbook(w http.ResponseWriter, r *http.Request) {
 
 // textbookCreatedResponse is the degraded read-back payload.
 type textbookCreatedResponse struct {
-	ID   int64  `json:"id"`
 	Name string `json:"name"`
+	ID   int64  `json:"id"`
 }
 
 // updateTextbook serves PUT /textbooks/{id}. LearnedLessons is a pointer

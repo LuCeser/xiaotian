@@ -61,7 +61,17 @@ func DefaultVADConfig() VADConfig {
 // use — the turn manager owns it on its audio path under its own
 // serialization (one IngestAudio caller at a time per connection).
 type VAD struct {
-	cfg VADConfig
+
+	// pending holds bytes not yet consumed to whole frames: a partial tail
+	// of a Feed call, plus whole frames that arrived after a segment closed
+	// mid-call (the single-segment return contract — see Feed).
+	pending []byte
+
+	// ring holds the most recent preRollFrames frames of audio as copies.
+	ring [][]byte
+	// segment accumulates the open segment's bytes; segmentMs its length.
+	segment []byte
+	cfg     VADConfig
 
 	// frameBytes is one analysis frame in bytes; frameMs the cfg value
 	// normalized to >= 1.
@@ -69,21 +79,11 @@ type VAD struct {
 	frameMs    int
 	// preRollFrames is the ring capacity in frames (>= 0).
 	preRollFrames int
+	consec        int // consecutive StartRMS frames while hunting
+	hangoverMs    int // silence budget left inside an open segment
+	segmentMs     int
 
-	// pending holds bytes not yet consumed to whole frames: a partial tail
-	// of a Feed call, plus whole frames that arrived after a segment closed
-	// mid-call (the single-segment return contract — see Feed).
-	pending []byte
-
-	inSegment  bool
-	consec     int // consecutive StartRMS frames while hunting
-	hangoverMs int // silence budget left inside an open segment
-
-	// ring holds the most recent preRollFrames frames of audio as copies.
-	ring [][]byte
-	// segment accumulates the open segment's bytes; segmentMs its length.
-	segment   []byte
-	segmentMs int
+	inSegment bool
 }
 
 // NewVAD builds a segmenter. Non-positive tuning fields fall back to the

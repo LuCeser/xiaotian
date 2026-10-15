@@ -16,9 +16,9 @@ var _ FrameHandler = (*Router)(nil)
 // TestNewRouterValidatesConfig tests that NewRouter validates configuration
 func TestNewRouterValidatesConfig(t *testing.T) {
 	tests := []struct {
+		wantErr error
 		name    string
 		cfg     RouterConfig
-		wantErr error
 	}{
 		{
 			name: "zero route buffer",

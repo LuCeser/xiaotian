@@ -94,15 +94,15 @@ func (f *fakeExecutor) RunUnassignWords(_ context.Context, _ pybridge.UnassignWo
 
 func TestNewFSRSServiceValidation(t *testing.T) {
 	cases := []struct {
-		name    string
 		exec    pybridge.Executor
-		cfg     infra.FSRSConfig
 		wantErr error
+		name    string
+		cfg     infra.FSRSConfig
 	}{
-		{"nil executor", nil, validCfg(), ErrFSRSInvalid},
-		{"invalid defaultWordCount", &fakeExecutor{}, infra.FSRSConfig{DefaultWordCount: 0, FetchLockHours: 24.0, DefaultCategory: "english"}, ErrFSRSInvalid},
-		{"invalid fetchLockHours", &fakeExecutor{}, infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 0, DefaultCategory: "english"}, ErrFSRSInvalid},
-		{"empty defaultCategory", &fakeExecutor{}, infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: ""}, ErrFSRSInvalid},
+		{exec: nil, wantErr: ErrFSRSInvalid, cfg: validCfg(), name: "nil executor"},
+		{exec: &fakeExecutor{}, wantErr: ErrFSRSInvalid, cfg: infra.FSRSConfig{DefaultWordCount: 0, FetchLockHours: 24.0, DefaultCategory: "english"}, name: "invalid defaultWordCount"},
+		{exec: &fakeExecutor{}, wantErr: ErrFSRSInvalid, cfg: infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 0, DefaultCategory: "english"}, name: "invalid fetchLockHours"},
+		{exec: &fakeExecutor{}, wantErr: ErrFSRSInvalid, cfg: infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: ""}, name: "empty defaultCategory"},
 	}
 
 	for _, tc := range cases {
@@ -152,24 +152,26 @@ func TestSelectDueCards(t *testing.T) {
 
 func TestSelectDueCardsConfigDefaults(t *testing.T) {
 	cases := []struct {
-		name      string
 		cfg       infra.FSRSConfig
+		name      string
+		wantCat   string
 		opts      SelectOpts
 		wantLimit int
-		wantCat   string
 		wantLock  float64
 	}{
 		{
-			"config defaults when opts zero",
 			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: "english"},
+			"config defaults when opts zero",
+			"english",
 			SelectOpts{},
-			25, "english", 24.0,
+			25, 24.0,
 		},
 		{
-			"opts override config",
 			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: "english"},
+			"opts override config",
+			"chinese",
 			SelectOpts{Limit: 10, Category: "chinese", FetchLockHours: 48.0},
-			10, "chinese", 48.0,
+			10, 48.0,
 		},
 	}
 

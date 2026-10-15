@@ -18,17 +18,17 @@ import (
 // Phase 7 plans: configurable canned results + thread-safe call counters
 // (Plan 02 exercises it from the event-loop goroutine).
 type fakeFSRSService struct {
-	mu sync.Mutex
+	selectErr    error
+	unlockCtxErr error // records ctx.Err() of the UnlockCards ctx (Pitfall 1 test)
+	unlockOpts   fsrs.UnlockOpts
 
 	dueCards  []pybridge.DueCard
-	selectErr error
 	selectCnt int
 
-	unlockCnt    int
-	unlockOpts   fsrs.UnlockOpts
-	unlockCtxErr error // records ctx.Err() of the UnlockCards ctx (Pitfall 1 test)
+	unlockCnt int
 
 	updateRatingsCnt int
+	mu               sync.Mutex
 }
 
 func (f *fakeFSRSService) SelectDueCards(ctx context.Context, opts fsrs.SelectOpts) ([]pybridge.DueCard, error) {
@@ -79,16 +79,16 @@ var _ fsrs.FSRSService = (*fakeFSRSService)(nil)
 // fakeSessionRepository implements database.SessionRepository for tests with an
 // in-memory map + thread-safe counters.
 type fakeSessionRepository struct {
-	mu sync.Mutex
+	createErr error
 
 	sessions map[int64]database.Session
-	nextID   int64
 	results  []database.SessionResult
+	nextID   int64
 
 	createCnt      int
 	updateStateCnt int
 	appendEventCnt int
-	createErr      error
+	mu             sync.Mutex
 }
 
 func newFakeSessionRepository() *fakeSessionRepository {
@@ -171,17 +171,17 @@ var _ database.SessionRepository = (*fakeSessionRepository)(nil)
 // source feeds the DICT-03 source annotation (default volcengine when unset);
 // *tts.Generator satisfies the interface structurally in production.
 type fakeTTSGenerator struct {
-	mu           sync.Mutex
-	genErr       error
-	genCalls     int
-	cleanupCalls int
+	genErr error
+
+	textErr      error
 	source       tts.AudioSource
 	lastSource   tts.AudioSource
-
-	textErr   error
-	textCalls int
-	lastText  string
-	lastLang  string
+	lastText     string
+	lastLang     string
+	genCalls     int
+	cleanupCalls int
+	textCalls    int
+	mu           sync.Mutex
 }
 
 func (g *fakeTTSGenerator) GenerateText(ctx context.Context, sessionID, text, language string) (string, error) {
@@ -266,11 +266,11 @@ var _ session.TTSSessionGenerator = (*fakeTTSGenerator)(nil)
 // tests assert the streamed key). *tts.Streamer satisfies the interface
 // structurally in production.
 type fakeStreamer struct {
-	mu            sync.Mutex
-	streamCalls   int
 	streamErr     error
 	lastSessionID string
 	lastWordID    string
+	streamCalls   int
+	mu            sync.Mutex
 }
 
 func (f *fakeStreamer) StreamWord(ctx context.Context, client tts.Sender, sessionID string, wordID string, startSeq uint32) error {
@@ -335,8 +335,8 @@ var _ session.SessionHub = (*fakeHub)(nil)
 // observe the event loop's stale-event drop path, whose debug log is the only
 // synchronous signal that an event was consumed).
 type recordingLogger struct {
-	mu   sync.Mutex
 	msgs []string
+	mu   sync.Mutex
 }
 
 func (l *recordingLogger) Debug(msg string, fields ...infra.Field) { l.record(msg) }
