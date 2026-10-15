@@ -56,6 +56,7 @@ async function wordValues(page) {
   return values;
 }
 
+test.describe('Issue #7 acceptance', () => {
 test('whole textbook, cross-lesson: page-grouped preview, cross-page duplicate flagged, per-page lesson batch, real DB + classroom scope', async ({ page, request }) => {
   await deleteUnit(request, UNIT);
   try {
@@ -217,4 +218,5 @@ test('limits: over-cap size refused at pick, over-cap page count refused at open
   } finally {
     await deleteUnit(request, UNIT);
   }
+});
 });
