@@ -11,6 +11,8 @@ node scripts/acceptance/run-issue.js 8 --dry-matrix
 
 `--dry-matrix` 只展示 AC 与证据对应表，不运行测试或创建报告。定向入口使用独立端口与临时数据库，不修改 GitHub Issues。
 
+与全量回归（main 的 `npm run regress`，见 [E2E-COVERAGE-MATRIX.md](../../docs/E2E-COVERAGE-MATRIX.md)）互补：regress 是全量门禁，本入口只针对单个 Issue 复验其验收条件并落盘证据。
+
 ## 依赖与跨平台使用
 
 需要仓库依赖、Go、已安装的 Playwright Chromium，以及包含 `third_party/python/requirements.txt` 依赖的真实 Python venv。
@@ -47,4 +49,4 @@ Go 使用 JSON 测试事件，Playwright 使用 JSON 报告；清单里的必需
 - #7 等待真实扫描 PDF 的识别质量与 iPad Safari 文件/长预览操作验收。
 - #8 等待真实服务生成释义的准确性、教材适配与难度验收。
 
-人工待验不计为自动测试失败，也不会因自动测试通过而变为已完成。Issue 正文、标签和开闭状态由实际验收记录另行维护。公共 CI/lint 工具链修复由 PR #23 处理。
+人工待验不计为自动测试失败，也不会因自动测试通过而变为已完成。Issue 正文、标签和开闭状态由实际验收记录另行维护。
