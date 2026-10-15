@@ -51,4 +51,4 @@
 - Go 与 Python 共用 `$HOME/.home-tutor-agent/vocab.db`。解释器是 `third_party/python/.venv/bin/python`（`uv` + Python 3.12）。
 - 发行版自带的 Go 1.22 拉不到 `go.mod` 要求的 1.26 工具链。环境使用 `/usr/local/go` 的 Go 1.26.9，`/usr/local/bin/go` 指向它。
 - 未设置 `MIMO_API_KEY` 时，页面和词库 API 可用；语音指令、照片识别和 `/rt` 语音家教会降级。
-- 已验证的检查：`make vet`、`npm test`、`make build`。CI 的 `make test` 暂不带 `-race`（见 issue #26）；需要竞态检测时用 `make cover`。`TestE2E_Story_PerWordVoiceFlow` 偶发读帧超时由 PR #28 处理，不表示工具链没装好。
+- 已验证的检查：`make vet`、`npm test`、`make build`。CI 的 `make test` 暂不带 `-race`（见 issue #26）；需要竞态检测时用 `make cover`。
