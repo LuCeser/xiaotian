@@ -39,11 +39,11 @@ type repeatWord struct {
 // errors with char ops + hints, patterns, suggestions, encouragement) plus
 // the cross-session view (trend list, repeat-miss words).
 type analysisResultResponse struct {
-	Type                  string       `json:"type"` // "analysis_result"
-	SessionID             string       `json:"session_id"`
-	grading.SessionReport              // embedded: total/correct_count/score/errors/patterns/suggestions/encouragement
-	Trends                []trendEntry `json:"trends"`
-	RepeatWords           []repeatWord `json:"repeat_words"`
+	Type        string       `json:"type"`
+	SessionID   string       `json:"session_id"`
+	Trends      []trendEntry `json:"trends"`
+	RepeatWords []repeatWord `json:"repeat_words"`
+	grading.SessionReport
 }
 
 // buildAnalysisResponse wraps a report in the wire shape with the current
@@ -83,9 +83,9 @@ type storedResultWord struct {
 // event: everything a parent review or trend query needs, nothing derivable.
 type storedGradedResult struct {
 	Category     string             `json:"category"`
+	Results      []storedResultWord `json:"results"`
 	CorrectCount int                `json:"correct_count"`
 	Total        int                `json:"total"`
-	Results      []storedResultWord `json:"results"`
 }
 
 // marshalStoredResult renders the persistable record of a grading round.

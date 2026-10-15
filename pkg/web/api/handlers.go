@@ -69,13 +69,13 @@ type handler struct {
 	exec       pybridge.Executor
 	cards      database.CardRepository
 	textbooks  database.TextbookRepository
+	logger     infra.Logger
 	lessons    *lesson.Store
 	practice   *lesson.PracticeStore
 	receipts   *lesson.ReceiptStore
 	recognizer *ocr.WordlistPipeline
 	generator  *ocr.MeaningGenerator
 	cfg        infra.PythonConfig
-	logger     infra.Logger
 }
 
 // NewHandler builds the /api/v1 handler with its internal method-pattern
@@ -307,7 +307,6 @@ func (h *handler) deleteWords(w http.ResponseWriter, r *http.Request) {
 // wordJSON is one element of the GET /words response array. Field tags
 // are snake_case per the shared response convention (health.go:18-26).
 type wordJSON struct {
-	ID       int64  `json:"id"`
 	Word     string `json:"word"`
 	Meaning  string `json:"meaning"`
 	Example  string `json:"example"`
@@ -318,8 +317,9 @@ type wordJSON struct {
 	// meaning_source == "generated" — the client applies it, the wire
 	// just carries the provenance.
 	MeaningSource string                        `json:"meaning_source"`
-	Participates  bool                          `json:"participates"`
 	Textbooks     []database.TextbookAssignment `json:"textbooks"`
+	ID            int64                         `json:"id"`
+	Participates  bool                          `json:"participates"`
 }
 
 // wordsResponse is the GET /words response envelope.
@@ -546,15 +546,15 @@ func (h *handler) listUnits(w http.ResponseWriter, r *http.Request) {
 type lessonListItem struct {
 	LessonID    string `json:"lesson_id"`
 	CreatedAt   string `json:"created_at"`
-	WordCount   int    `json:"word_count"`
 	Stage       string `json:"stage"`
 	Kind        string `json:"kind"`
-	Completed   bool   `json:"completed"`
-	Unchecked   bool   `json:"unchecked"`
 	SaveStatus  string `json:"save_status"`
+	WordCount   int    `json:"word_count"`
 	Correct     int    `json:"correct"`
 	Wrong       int    `json:"wrong"`
 	Unconfirmed int    `json:"unconfirmed"`
+	Completed   bool   `json:"completed"`
+	Unchecked   bool   `json:"unchecked"`
 }
 
 // lessonsResponse is the GET /lessons response envelope.
@@ -575,13 +575,13 @@ type lessonWordJSON struct {
 // always present — nil would hide an OCR prefill); practice rows fill
 // word/correct/hints/rating from the practice_logs record.
 type lessonResultJSON struct {
-	Word    string `json:"word"`
-	Correct bool   `json:"correct"`
 	Manual  *bool  `json:"manual,omitempty"`
-	Hints   int    `json:"hints"`
+	Word    string `json:"word"`
 	Rating  string `json:"rating,omitempty"`
 	Outcome string `json:"outcome,omitempty"`
 	OcrText string `json:"ocr_text,omitempty"`
+	Hints   int    `json:"hints"`
+	Correct bool   `json:"correct"`
 }
 
 // receiptJSON is one element of the detail response's save_receipts array —
@@ -591,12 +591,12 @@ type receiptJSON struct {
 	LessonID    string   `json:"lesson_id"`
 	RequestID   string   `json:"request_id"`
 	Kind        string   `json:"kind"`
-	Requested   []string `json:"requested"`
-	Updated     []string `json:"updated"`
-	Missing     []string `json:"missing"`
 	Status      string   `json:"status"`
 	CreatedAt   string   `json:"created_at"`
 	CompletedAt string   `json:"completed_at"`
+	Requested   []string `json:"requested"`
+	Updated     []string `json:"updated"`
+	Missing     []string `json:"missing"`
 }
 
 // lessonDetailResponse is the completed-lesson GET /lessons/{id} body: the
@@ -604,10 +604,10 @@ type receiptJSON struct {
 // present (empty arrays, never null/absent) so the parent view's emptiness
 // is data-driven, not shape-driven.
 type lessonDetailResponse struct {
-	lessonListItem
 	Words        []lessonWordJSON   `json:"words"`
 	Results      []lessonResultJSON `json:"results"`
 	SaveReceipts []receiptJSON      `json:"save_receipts"`
+	lessonListItem
 }
 
 // lessonKind classifies a lesson id for the parent view's type badge:
@@ -790,12 +790,12 @@ func (h *handler) getLesson(w http.ResponseWriter, r *http.Request) {
 
 	if lessonKind(id) == "practice" {
 		// Extra-practice results live in practice_logs (never in verdicts).
-		records, err := h.practice.ListPracticeByLesson(r.Context(), id)
-		if err != nil {
+		records, recErr := h.practice.ListPracticeByLesson(r.Context(), id)
+		if recErr != nil {
 			h.logger.Error("get lesson: practice read failed",
 				infra.F("component", "web/api"),
 				infra.F("lesson_id", id),
-				infra.ErrField(err),
+				infra.ErrField(recErr),
 			)
 			writeError(w, http.StatusInternalServerError, codeInternal,
 				"internal error")

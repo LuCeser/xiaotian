@@ -93,14 +93,6 @@ func (s ConnectionState) String() string {
 // removes the entry). Lookup returns a copy by value so callers cannot
 // mutate the registry's interior state.
 type Connection struct {
-	// ID is the SessionID assigned at Register time. Unique within the
-	// registry's lifetime (UUID v4 collision probability negligible per
-	// D-58/T-01-23).
-	ID SessionID
-
-	// State is the current lifecycle state (D-60). Always StateActive for
-	// connections returned by Register in Phase 1.
-	State ConnectionState
 
 	// CreatedAt is when the Register call completed. Used by stats and by
 	// downstream observability code to compute session duration.
@@ -116,6 +108,14 @@ type Connection struct {
 	// handler can attach protocol-level context (origin, user-agent, sub-protocol)
 	// at Register time without expanding the registry's own API.
 	Metadata map[string]string
+	// ID is the SessionID assigned at Register time. Unique within the
+	// registry's lifetime (UUID v4 collision probability negligible per
+	// D-58/T-01-23).
+	ID SessionID
+
+	// State is the current lifecycle state (D-60). Always StateActive for
+	// connections returned by Register in Phase 1.
+	State ConnectionState
 }
 
 // LifecycleHooks is the caller-supplied event sink (D-55). Every field is
@@ -189,10 +189,17 @@ type ConnectionStats struct {
 // is cancelled. TestRegistryStopsOnContextCancel asserts this exit happens
 // within 200ms to defend against goroutine leaks (T-01-27 mitigation).
 type ConnectionRegistry struct {
-	// mu guards conns, limit, idleTimeout, cleanupInterval, hooks, and
-	// logger. Held for writes during Register/Unregister/Touch/cleanupStale
-	// and for reads during Lookup/Stats.
-	mu sync.RWMutex
+
+	// hooks is the caller-supplied event sink (D-55). Zero-value (all-nil)
+	// is valid; every invocation is nil-checked.
+	hooks LifecycleHooks
+
+	// logger is the structured event sink (D-25, D-47). Defaults to
+	// NewNoOpLogger() when the caller passes nil so the registry is always
+	// observable. Every Info/Warn entry is tagged with
+	// F("component", "infra.connection") so operators can filter infra
+	// connection logs from websocket / TTS logs.
+	logger Logger
 
 	// conns is the live connection pool. Pointer values so Touch can mutate
 	// LastSeen in place; the registry never hands the pointer to callers
@@ -211,22 +218,15 @@ type ConnectionRegistry struct {
 	// connections (D-57). Equal to cfg.CleanupInterval.
 	cleanupInterval time.Duration
 
-	// hooks is the caller-supplied event sink (D-55). Zero-value (all-nil)
-	// is valid; every invocation is nil-checked.
-	hooks LifecycleHooks
-
-	// logger is the structured event sink (D-25, D-47). Defaults to
-	// NewNoOpLogger() when the caller passes nil so the registry is always
-	// observable. Every Info/Warn entry is tagged with
-	// F("component", "infra.connection") so operators can filter infra
-	// connection logs from websocket / TTS logs.
-	logger Logger
-
 	// Cumulative metric counters. Manipulated only via atomic ops so a hot
 	// Register path does not contend on r.mu for stat updates.
 	totalAccepted atomic.Uint64
 	totalRejected atomic.Uint64
 	totalCleaned  atomic.Uint64
+	// mu guards conns, limit, idleTimeout, cleanupInterval, hooks, and
+	// logger. Held for writes during Register/Unregister/Touch/cleanupStale
+	// and for reads during Lookup/Stats.
+	mu sync.RWMutex
 
 	// running guards Start so a second call returns ErrRegistryAlreadyRunning
 	// instead of spawning a duplicate cleaner. Set via CompareAndSwap in
@@ -526,9 +526,10 @@ func newUUIDv4() (string, error) {
 // section is pure arithmetic (no I/O) so contention is negligible under
 // the Phase 1 concurrency envelope (50-100 sessions, 100 req/sec each).
 type TokenBucket struct {
-	// mu guards tokens, last. Held only inside Allow; never held across an
-	// external call.
-	mu sync.Mutex
+
+	// last is the timestamp of the most recent refill. Updated on every
+	// Allow call.
+	last time.Time
 
 	// tokens is the current floating-point token count. Float (not int) so
 	// partial-token accumulation from sub-millisecond elapsed times is not
@@ -543,10 +544,9 @@ type TokenBucket struct {
 	// discarded (cap), which is what makes the bucket "bursty": a long idle
 	// period cannot stockpile more than `burst` tokens.
 	burst float64
-
-	// last is the timestamp of the most recent refill. Updated on every
-	// Allow call.
-	last time.Time
+	// mu guards tokens, last. Held only inside Allow; never held across an
+	// external call.
+	mu sync.Mutex
 }
 
 // NewTokenBucket constructs a TokenBucket with the given refill rate and

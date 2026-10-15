@@ -16,24 +16,24 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/grading"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
-	"go.uber.org/zap"
 )
 
 // storiesFSRS serves DISJOINT two-word queues per SelectDueCards call (the
 // multi-user contract: a locked card never goes to a second session) and
 // records every unlock's card IDs for containment assertions.
 type storiesFSRS struct {
-	mu sync.Mutex
-
 	pool     []pybridge.DueCard
 	served   [][]int64 // card IDs handed out, per call
 	unlocked [][]int64 // card IDs released, per unlock call
+	mu       sync.Mutex
 }
 
 func newStoriesFSRS() *storiesFSRS {
@@ -127,7 +127,11 @@ func bootStoriesWithGen(t *testing.T, fakeFSRS *storiesFSRS, gen session.TTSSess
 	svcCtx, svcCancel := context.WithCancel(context.Background())
 	t.Cleanup(svcCancel)
 	go hub.Run(svcCtx)
-	go manager.Start(svcCtx)
+	go func() {
+		if startErr := manager.Start(svcCtx); startErr != nil {
+			logger.Error("session manager start failed", infra.ErrField(startErr))
+		}
+	}()
 
 	handlers := ttsHandlers(manager, fakeFSRS, nil, nil, logger)
 	var conns []*websocket.Conn
@@ -198,8 +202,14 @@ func TestE2E_Story_PerWordVoiceFlow(t *testing.T) {
 		t.Errorf("word 2 judgment = %+v, want incorrect near-miss/hard", res2)
 	}
 
-	// Finish dictation → parent review completion.
+	// Finish dictation, then parent review. Control handlers run on a worker
+	// pool, so the two frames are not applied in send order. EventParentReview
+	// is valid only in WAITING_PARENT; if it is pushed while the session is
+	// still DICTATING, the FSM drops it and session_complete is never sent.
+	// Wait for the progress frame that announces WAITING_PARENT — the same
+	// gate the browser uses before submit_review.
 	sendControlJSON(t, conn, `{"type":"next_word","params":{}}`)
+	readControlUntil(t, conn, `"status":"WAITING_PARENT"`)
 	sendControlJSON(t, conn, `{"type":"submit_review","params":{"ratings":{"`+first+`":"good","`+second+`":"hard"},"category":"chinese"}}`)
 	readControlUntil(t, conn, `"type":"submit_review_result"`)
 	readControlUntil(t, conn, "session_complete")

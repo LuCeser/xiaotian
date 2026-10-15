@@ -25,6 +25,7 @@ import (
 // RunReview records its opts and returns the scripted pair. The remaining
 // Executor methods are never touched by the adapter and panic on use.
 type fakePyBridge struct {
+	reviewErr  error
 	dueResults []pybridge.DueResult
 	dueErrs    []error
 
@@ -32,7 +33,6 @@ type fakePyBridge struct {
 	reviewCalls []pybridge.ReviewOpts
 
 	nextReview pybridge.ReviewResult
-	reviewErr  error
 }
 
 func (f *fakePyBridge) RunDue(_ context.Context, opts pybridge.DueOpts) (pybridge.DueResult, error) {
@@ -174,7 +174,7 @@ type lessonWordCheck struct{ Word, Meaning, Example string }
 // it into the visible lesson_unavailable path, so swallowing it here would
 // fabricate a "no due words" ending.
 func TestPyFSRSFetchDueErrorPropagates(t *testing.T) {
-	sentinel := errors.New("python subprocess timed out.")
+	sentinel := errors.New("python subprocess timed out")
 	fake := &fakePyBridge{dueErrs: []error{sentinel}}
 	ad, _ := NewPyFSRS(fake, infra.NewNoOpLogger())
 	words, err := ad.FetchDueWords(context.Background(), 10)

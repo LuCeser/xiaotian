@@ -66,15 +66,17 @@ var (
 //     (close-of-closed-channel). This is the documented one-shot pool
 //     contract; restart requires constructing a new WorkerPool.
 type WorkerPool struct {
-	tasks chan Task
-	size  int
-
 	logger Logger
+	tasks  chan Task
 
 	// wg tracks in-flight worker goroutines. Add happens in Start before
 	// the goroutine is launched; Done happens via defer in worker. wg.
 	// Wait() therefore returns only when every worker has exited.
-	wg sync.WaitGroup
+	wg                sync.WaitGroup
+	size              int
+	totalProcessed    atomic.Uint64
+	totalPanics       atomic.Uint64
+	totalBackpressure atomic.Uint64
 
 	// running guards Start against double-spawn. CAS from false→true
 	// inside Start; Store(false) inside Shutdown's clean-drain path.
@@ -82,10 +84,7 @@ type WorkerPool struct {
 
 	// Counters below use sync/atomic value types so Stats() can read
 	// them without taking a lock.
-	inFlight          atomic.Int32 // tasks currently executing
-	totalProcessed    atomic.Uint64
-	totalPanics       atomic.Uint64
-	totalBackpressure atomic.Uint64
+	inFlight atomic.Int32 // tasks currently executing
 }
 
 // WorkerPoolStats is the point-in-time snapshot returned by Stats. Each

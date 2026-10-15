@@ -73,11 +73,11 @@ var (
 
 // Server handles WebSocket HTTP upgrades
 type Server struct {
-	upgrader websocket.Upgrader
-	hub      *Hub
 	handler  FrameHandler
-	cfg      ServerConfig
+	hub      *Hub
 	logger   *zap.Logger
+	upgrader websocket.Upgrader
+	cfg      ServerConfig
 }
 
 // NewServer creates a new server instance (D-42 + D-44)
@@ -208,10 +208,13 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if readTimeout <= 0 {
 		readTimeout = 60 * time.Second
 	}
-	conn.SetReadDeadline(time.Now().Add(readTimeout))
+	if err = conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+		s.logger.Warn("ws set read deadline failed", zap.Error(err))
+		conn.Close()
+		return
+	}
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(readTimeout))
-		return nil
+		return conn.SetReadDeadline(time.Now().Add(readTimeout))
 	})
 
 	// Extract handshake parameters (D-12)

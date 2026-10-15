@@ -52,14 +52,14 @@ type FSRSService interface {
 // SelectOpts carries the caller's per-request preferences for SelectDueCards.
 // Zero-valued fields are replaced by FSRSConfig defaults (Phase 5 D-02-a).
 type SelectOpts struct {
-	// Limit caps the number of cards returned. <= 0 → cfg.DefaultWordCount.
-	Limit int
 
 	// Category filters by vocabulary category. Empty → cfg.DefaultCategory.
 	Category string
 
 	// Units restricts the result to the named units. nil/empty → cfg.DefaultUnit.
 	Units []string
+	// Limit caps the number of cards returned. <= 0 → cfg.DefaultWordCount.
+	Limit int
 
 	// FetchLockHours overrides the default fetch-lock window. <= 0 → cfg.FetchLockHours.
 	FetchLockHours float64

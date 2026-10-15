@@ -24,16 +24,16 @@ import (
 
 // asrScript is one scripted Transcribe outcome: exactly one of text / err.
 type asrScript struct {
-	text string
 	err  error
+	text string
 }
 
 // fakeASR answers Transcribe calls from a FIFO script queue and records the
 // byte counts it was fed.
 type fakeASR struct {
-	mu       sync.Mutex
 	script   []asrScript
 	fedBytes []int // len(pcm) per call, in call order
+	mu       sync.Mutex
 }
 
 func newFakeASR(script ...asrScript) *fakeASR {
@@ -71,9 +71,9 @@ func (f *fakeASR) Transcribe(_ context.Context, pcm []byte) (string, error) {
 // fully populated ChatResponse the moment 13-02's fields merge — no fake
 // code change, no merge conflict in pkg/mimo.
 type llmScript struct {
-	resp mimo.ChatResponse
-	wire string
 	err  error
+	wire string
+	resp mimo.ChatResponse
 }
 
 // llmCall records one Chat invocation for post-hoc assertion (13-04 asserts
@@ -86,9 +86,9 @@ type llmCall struct {
 // fakeLLM answers Chat calls from a FIFO script queue and records every
 // received messages slice (deep-copied) plus the option count.
 type fakeLLM struct {
-	mu     sync.Mutex
 	script []llmScript
 	calls  []llmCall
+	mu     sync.Mutex
 }
 
 func newFakeLLM(script ...llmScript) *fakeLLM {
@@ -145,7 +145,10 @@ const toolCallsWireSample = `{"choices":[{"index":0,"message":{"role":"assistant
 // text of every call. No base64, no WAV header — AudioChunkFunc's bare-PCM
 // contract is exactly what the fake exercises.
 type fakeTTS struct {
-	mu sync.Mutex
+	// failWith, when non-nil, makes every call return it immediately.
+	failWith error
+
+	texts []string // recorded per call
 
 	// chunkCount is the number of chunks per call (>=1) in normal mode.
 	chunkCount int
@@ -153,14 +156,11 @@ type fakeTTS struct {
 	chunkSize int
 	// delay is injected before every chunk; ctx cancellation aborts.
 	delay time.Duration
+	mu    sync.Mutex
 	// streamUntilCancel switches to open-ended production: chunks keep
 	// flowing until ctx is cancelled or the callback errors (interrupt
 	// semantics — isFinal never arrives on the cancelled path).
 	streamUntilCancel bool
-	// failWith, when non-nil, makes every call return it immediately.
-	failWith error
-
-	texts []string // recorded per call
 }
 
 func newFakeTTS(chunkCount, chunkSize int) *fakeTTS {
@@ -490,13 +490,13 @@ func TestFakesTTSStreamUntilCancel(t *testing.T) {
 // the next due batch (empty batch = the no-due ending); SubmitReview
 // records every submission and answers with the scripted result/error.
 type fakeWordSource struct {
-	mu           sync.Mutex
-	due          [][]lesson.Word
 	fetchErr     error
-	fetchCalls   int
 	reviewErr    error
 	reviewResult ReviewWriteResult
+	due          [][]lesson.Word
 	submitCalls  []map[string]string
+	fetchCalls   int
+	mu           sync.Mutex
 }
 
 func newFakeWords(due ...[]lesson.Word) *fakeWordSource {

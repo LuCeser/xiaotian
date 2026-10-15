@@ -19,13 +19,15 @@ func defaultChatHandler(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if auth != "Bearer test-api-key" {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]interface{}{
 				"code":    "authentication_failed",
 				"message": "Invalid API key",
 				"type":    "authentication_error",
 			},
-		})
+		}); err != nil {
+			return
+		}
 		return
 	}
 
@@ -37,9 +39,9 @@ func defaultChatHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := ChatResponse{}
 	response.Choices = append(response.Choices, struct {
+		FinishReason string             `json:"finish_reason"`
 		Message      ChatMessageContent `json:"message"`
 		Index        int                `json:"index"`
-		FinishReason string             `json:"finish_reason"`
 	}{
 		Message:      ChatMessageContent{Role: "assistant", Content: `{"action":"next_word","confidence":0.9}`},
 		FinishReason: "stop",
@@ -47,7 +49,9 @@ func defaultChatHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		return
+	}
 }
 
 // TestClient_Chat exercises the LLM chat completion path: happy path,
@@ -55,13 +59,13 @@ func defaultChatHandler(w http.ResponseWriter, r *http.Request) {
 // and the empty-messages guard.
 func TestClient_Chat(t *testing.T) {
 	tests := []struct {
-		name        string
+		wantErr     error
 		handler     http.HandlerFunc
+		validateReq func(*testing.T, ChatRequest)
+		name        string
+		wantText    string
 		messages    []Message
 		opts        []ChatOption
-		wantErr     error
-		wantText    string
-		validateReq func(*testing.T, ChatRequest)
 	}{
 		{
 			name:    "successful completion with default model",
@@ -113,15 +117,17 @@ func TestClient_Chat(t *testing.T) {
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				response := ChatResponse{}
 				response.Choices = append(response.Choices, struct {
+					FinishReason string             `json:"finish_reason"`
 					Message      ChatMessageContent `json:"message"`
 					Index        int                `json:"index"`
-					FinishReason string             `json:"finish_reason"`
 				}{
 					Message:      ChatMessageContent{Role: "assistant", ReasoningContent: "thinking..."},
 					FinishReason: "stop",
 				})
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
+				if err := json.NewEncoder(w).Encode(response); err != nil {
+					return
+				}
 			},
 			messages: []Message{{Role: "user", Content: "hi"}},
 			opts:     []ChatOption{},

@@ -13,14 +13,14 @@ import (
 // fakeExecutor is a manual fake for pybridge.Executor per D-48.
 // It returns pre-canned results without spawning a real Python subprocess.
 type fakeExecutor struct {
-	// pregenerateResult is the result to return from RunPregenerate.
-	pregenerateResult pybridge.PregenResult
 	// pregenerateError is the error to return from RunPregenerate.
 	pregenerateError error
-	// calledPregenerate counts how many times RunPregenerate was called.
-	calledPregenerate int
+	// pregenerateResult is the result to return from RunPregenerate.
+	pregenerateResult pybridge.PregenResult
 	// lastOpts captures the last PregenOpts passed to RunPregenerate.
 	lastOpts pybridge.PregenOpts
+	// calledPregenerate counts how many times RunPregenerate was called.
+	calledPregenerate int
 }
 
 func (f *fakeExecutor) RunDue(ctx context.Context, opts pybridge.DueOpts) (pybridge.DueResult, error) {
@@ -81,10 +81,10 @@ func (f *fakeExecutor) RunDeleteWords(_ context.Context, _ pybridge.DeleteWordsO
 
 // mockConvertFn is a mock MP3-to-PCM conversion function for testing.
 type mockConvertFn struct {
-	// pcmData is the PCM data to return on success.
-	pcmData PCMData
 	// err is the error to return. If set, overrides pcmData.
 	err error
+	// pcmData is the PCM data to return on success.
+	pcmData PCMData
 	// calledCount tracks how many times the function was called.
 	calledCount int
 	// failAfterN simulates transient failures by returning err after N successful calls.

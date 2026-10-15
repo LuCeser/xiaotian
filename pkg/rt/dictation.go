@@ -65,6 +65,7 @@ const (
 	intentSlow    = "slow"    // 慢一点读
 	intentHint    = "hint"    // 不会写，求提示
 	intentMeaning = "meaning" // 问词义
+	intentExample = "example" // 求例句 / 问这个词怎么用（Issue #9, ADR-0006）
 	intentPause   = "pause"   // 要休息 / 暂停
 	intentResume  = "resume"  // 要继续
 	intentChat    = "chat"    // 其它对话
@@ -83,8 +84,8 @@ const (
 )
 
 // intentWhitelist is the authoritative intent set; parseIntentJSON rejects
-// everything else (T-13-13: the model output is untrusted input). ELEVEN
-// values: the eight dictation intents plus the three check-stage voice
+// everything else (T-13-13: the model output is untrusted input). TWELVE
+// values: the nine dictation intents plus the three check-stage voice
 // corrections.
 var intentWhitelist = map[string]bool{
 	intentConfirm:       true,
@@ -92,6 +93,7 @@ var intentWhitelist = map[string]bool{
 	intentSlow:          true,
 	intentHint:          true,
 	intentMeaning:       true,
+	intentExample:       true,
 	intentPause:         true,
 	intentResume:        true,
 	intentChat:          true,
@@ -255,9 +257,9 @@ const playbackAckTimeoutNotice = "老师的话好像没有播放完，我们先�
 // index/version pair — never on a re-read currentIndex — so a delayed
 // confirmation cannot double-advance or target a different word (T-13-15c).
 type TurnTarget struct {
+	Word            string
 	WordIndex       int
 	ExpectedVersion int
-	Word            string
 }
 
 // historyRound is one round of the FSM short-history deque: the student's
@@ -274,14 +276,20 @@ type historyRound struct {
 // TurnManager's mu — the tutor never locks on its own, and every method
 // below assumes the caller already holds that lock.
 type DictationTutor struct {
-	lessonID       string
-	words          []lesson.Word
-	version        int
-	currentIndex   int
-	completed      bool
 	perWordOutcome map[int]string
-	perWordHints   map[int]int    // per-word hint request count (U-9, 2026-10-06)
+	perWordHints   map[int]int // per-word hint request count (U-9, 2026-10-06)
+	lessonID       string
 	shortHistory   []historyRound // capped deque, oldest dropped (last 4 rounds)
+	words          []lesson.Word
+	// checkVerdicts caches the stored verdict list for rendering/announce
+	// purposes — NOT the authority: the lessons row is. Every write goes
+	// through the executor and resyncs this cache from the returned row
+	// state (resyncCheck), so the cache can never drift from the store for
+	// longer than one call.
+	checkVerdicts []lesson.CheckVerdict
+	reviewResult  ReviewResultMsg
+	currentIndex  int
+	version       int
 	// paused is the independent CLASSROOM pause bit (13-09): set by a
 	// recognized pause command, cleared by a recognized resume. It is
 	// deliberately NOT the voice state — the internal state may be
@@ -299,20 +307,14 @@ type DictationTutor struct {
 	// persisted): word pacing is over, verdicts are pending, and the unified
 	// submit has not run. Voice turns are gated off while it holds (the
 	// screen path is this plan's input; voice corrections are 13.1-06).
-	checking bool
-	// checkVerdicts caches the stored verdict list for rendering/announce
-	// purposes — NOT the authority: the lessons row is. Every write goes
-	// through the executor and resyncs this cache from the returned row
-	// state (resyncCheck), so the cache can never drift from the store for
-	// longer than one call.
-	checkVerdicts []lesson.CheckVerdict
+	checking  bool
+	completed bool
 	// reviewSeen marks the unified submit as delivered in this session (the
 	// in-session mirror of stage='submitted'); reviewResult keeps that
 	// delivery's honest sets so a duplicate check_submit can be recognized
 	// and answered with NO second SubmitReview and NO second summary
 	// (Pitfall 6 / T-13.1-01).
-	reviewSeen   bool
-	reviewResult ReviewResultMsg
+	reviewSeen bool
 	// correction marks a session that reopened a SUBMITTED row carrying the
 	// D-03 unchecked marker (13.1-04): the check panel shows the derived
 	// downgraded verdicts as pending hints and check_submit takes the
@@ -339,11 +341,6 @@ func newDictationTutor(l lesson.Lesson) *DictationTutor {
 		perWordOutcome: map[int]string{},
 		perWordHints:   map[int]int{},
 	}
-}
-
-// currentWord returns the word card at the cursor.
-func (t *DictationTutor) currentWord() lesson.Word {
-	return t.words[t.currentIndex]
 }
 
 // turnTarget snapshots the immutable advance target for one classification.
@@ -910,7 +907,7 @@ func resolveLessonID(configured string, now time.Time) string {
 // buildClassifySystemPrompt assembles the classification system prompt:
 //   - the tutor persona with the child-safety wording prohibition carried
 //     over VERBATIM from the 13-04 teacherSystemPrompt;
-//   - the eight-value intent vocabulary with one-line definitions;
+//   - the nine-value intent vocabulary with one-line definitions;
 //   - the word ground truth (current word, meaning, example — either may be
 //     absent, and the prompt says so honestly);
 //   - the strict output contract, including the hint (never leak the full
@@ -932,19 +929,21 @@ func buildClassifySystemPrompt(word lesson.Word, index, total int) string {
 	} else {
 		b.WriteString("老师这边暂无这个词的例句。\n")
 	}
-	b.WriteString(`意图词表（intent 只能是以下八个值之一）：
+	b.WriteString(`意图词表（intent 只能是以下九个值之一）：
 confirm：学生表示写完了/可以了/下一个
 repeat：再读一遍
 slow：慢一点读
 hint：不会写，求提示
 meaning：问词义
+example：求例句，或问这个词怎么用
 pause：要休息/暂停
 resume：要继续
 chat：其它对话
 输出契约：只输出一个 JSON 对象，不要输出任何其它内容：{"intent":"<意图>","reply":"<给学生听的回复>"}
-reply 只有 intent 为 hint/meaning/chat 时才需要，其它意图 reply 给空字符串。
+reply 只有 intent 为 hint/meaning/example/chat 时才需要，其它意图 reply 给空字符串。
 hint 的 reply 只能给部分提示（字形、部首、读音或例句线索），严禁给出整词的写法或完整拼音，不能泄题。
-meaning 的 reply 只能依据上面给出的释义与例句组织；两者都没有时，reply 固定原样输出：老师这边没有这个词的释义，你凭印象写吧。`)
+meaning 的 reply 只能依据上面给出的释义与例句组织；两者都没有时，reply 固定原样输出：老师这边没有这个词的释义，你凭印象写吧。
+example 的 reply 只能原样使用上面给出的例句；上面没有例句时，reply 固定原样输出：老师这边还没有这个例句，你先凭印象写吧。`)
 	return b.String()
 }
 
@@ -1018,8 +1017,8 @@ meaning 的 reply 只能依据上面词表里该词的信息组织；没有信�
 type intentPayload struct {
 	Intent string `json:"intent"`
 	Reply  string `json:"reply"`
-	Index  int    `json:"index"`
 	Text   string `json:"text"`
+	Index  int    `json:"index"`
 }
 
 // extractJSON extracts the first balanced braces block from text (models

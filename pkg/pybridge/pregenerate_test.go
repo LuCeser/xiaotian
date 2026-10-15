@@ -372,15 +372,15 @@ func TestClassifyPregenResult(t *testing.T) {
 	happyStdout := []byte("/opt/hta/cache/a.mp3\n/opt/hta/cache/b.mp3\n")
 
 	cases := []struct {
+		runErr     error
+		wantSent   error // nil means: assert NO error returned
 		name       string
+		wantSentIs string // human-readable label for wantSent for failure msgs
 		stdout     []byte
 		stderr     []byte
 		exitCode   int
-		runErr     error
-		wantSent   error  // nil means: assert NO error returned
-		wantExit   bool   // expect *ExitError recoverable via errors.As
-		wantPaths  int    // expected len(result.Paths) on success
-		wantSentIs string // human-readable label for wantSent for failure msgs
+		wantPaths  int  // expected len(result.Paths) on success
+		wantExit   bool // expect *ExitError recoverable via errors.As
 	}{
 		{
 			name:       "happy path with 2 paths",

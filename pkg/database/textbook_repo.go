@@ -34,31 +34,31 @@ var ErrTextbookNotFound = errors.New("textbook not found")
 // parsed EXPLICIT teaching order — the repository never lets callers see
 // the raw JSON string (Issue #4: 课次顺序是显式的，字典顺序不算数).
 type Textbook struct {
-	ID             int64    `json:"id"`
+	Volume         string   `json:"volume"`
 	Name           string   `json:"name"`
 	Category       string   `json:"category"`
 	Edition        string   `json:"edition"`
 	Stage          string   `json:"stage"`
 	Grade          string   `json:"grade"`
-	Volume         string   `json:"volume"`
 	Module         string   `json:"module"`
-	Lessons        []string `json:"lessons"`
-	LearnedLessons int      `json:"learnedLessons"`
-	IsPrimary      bool     `json:"isPrimary"`
 	CreatedAt      string   `json:"createdAt"`
+	Lessons        []string `json:"lessons"`
+	ID             int64    `json:"id"`
+	LearnedLessons int      `json:"learnedLessons"`
 	// AssignmentCount is filled by List — how many cards are assigned to
 	// this textbook (the parent-facing 教材词数). Not a column.
-	AssignmentCount int `json:"assignmentCount"`
+	AssignmentCount int  `json:"assignmentCount"`
+	IsPrimary       bool `json:"isPrimary"`
 }
 
 // TextbookAssignment is the per-word projection GET /words attaches to
 // each row (the browse chips' data source): the textbook's name rides
 // along so the UI never needs a second join.
 type TextbookAssignment struct {
-	TextbookID    int64  `json:"id"`
-	TextbookName  string `json:"name"`
-	Lesson        string `json:"lesson"`
-	IncludeInScope bool  `json:"includeInScope"`
+	TextbookName   string `json:"name"`
+	Lesson         string `json:"lesson"`
+	TextbookID     int64  `json:"id"`
+	IncludeInScope bool   `json:"includeInScope"`
 }
 
 // TextbookRepository provides read-only access to the Python-owned
@@ -329,8 +329,8 @@ func textbookScopePredicate(ctx context.Context, db *sql.DB) (string, []any, err
 	defer rows.Close()
 
 	type allowed struct {
-		textbookID int64
 		lessons    []string
+		textbookID int64
 	}
 	var books []allowed
 	for rows.Next() {

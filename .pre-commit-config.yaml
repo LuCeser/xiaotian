@@ -11,7 +11,7 @@ repos:
         args: [-local=github.com/xiaotian/home-tutor-agent, -w]
       - id: go-mod-tidy-repo
   - repo: https://github.com/golangci/golangci-lint
-    rev: v1.64.8
+    rev: v2.14.0
     hooks:
       - id: golangci-lint
         args: [--config=.golangci.yml]

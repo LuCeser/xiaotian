@@ -92,17 +92,6 @@ func requireErrorIs(t *testing.T, err, target error, msgAndArgs ...any) {
 	}
 }
 
-func requireEqual(t *testing.T, want, got any, msgAndArgs ...any) {
-	t.Helper()
-	if want != got {
-		msg := formatMsg(msgAndArgs)
-		if msg == "" {
-			t.Fatalf("want %v, got %v", want, got)
-		}
-		t.Fatalf("%s: want %v, got %v", msg, want, got)
-	}
-}
-
 func requireLen(t *testing.T, x any, n int, msgAndArgs ...any) {
 	t.Helper()
 	l := lengthOf(x)
@@ -165,13 +154,6 @@ func assertErrorIs(t *testing.T, err, target error, msgAndArgs ...any) {
 	}
 }
 
-func assertError(t *testing.T, err error, msgAndArgs ...any) {
-	t.Helper()
-	if err == nil {
-		t.Error(formatMsg(msgAndArgs))
-	}
-}
-
 func assertLen(t *testing.T, x any, n int, msgAndArgs ...any) {
 	t.Helper()
 	l := lengthOf(x)
@@ -221,17 +203,6 @@ func assertGreater[T ordered](t *testing.T, a, b T, msgAndArgs ...any) {
 	}
 }
 
-func assertGreaterOrEqual[T ordered](t *testing.T, a, b T, msgAndArgs ...any) {
-	t.Helper()
-	if a < b {
-		msg := formatMsg(msgAndArgs)
-		if msg == "" {
-			t.Errorf("want %v >= %v", a, b)
-		}
-		t.Errorf("%s: want %v >= %v", msg, a, b)
-	}
-}
-
 // ordered is the type constraint for the numeric helpers above. Mirrors
 // constraints.Ordered from x/exp but defined locally to avoid adding a
 // dependency.
@@ -248,8 +219,8 @@ func lengthOf(x any) int {
 	case []SessionID:
 		return len(v)
 	case []struct {
-		id  SessionID
 		err error
+		id  SessionID
 	}:
 		return len(v)
 	case nil:
@@ -279,13 +250,14 @@ func newTestRegistry(t *testing.T, maxConcurrent int, idleTimeout, cleanupInterv
 // slices so tests can assert firing order and contents even when hooks fire
 // from multiple goroutines (Register path vs cleanup goroutine vs reject path).
 type hookRecorder struct {
-	mu          sync.Mutex
 	connects    []SessionID
 	disconnects []SessionID
 	errors      []struct {
-		id  SessionID
 		err error
+		id  SessionID
 	}
+
+	mu sync.Mutex
 }
 
 func newHookRecorder() *hookRecorder { return &hookRecorder{} }
@@ -305,9 +277,9 @@ func (h *hookRecorder) hooks() LifecycleHooks {
 		OnError: func(id SessionID, err error) {
 			h.mu.Lock()
 			h.errors = append(h.errors, struct {
-				id  SessionID
 				err error
-			}{id, err})
+				id  SessionID
+			}{err, id})
 			h.mu.Unlock()
 		},
 	}
@@ -785,15 +757,15 @@ func TestTokenBucketRefillsOverTime(t *testing.T) {
 // non-positive ratePerSec or burst.
 func TestNewTokenBucketValidation(t *testing.T) {
 	tests := []struct {
+		wantErrIs  error
 		name       string
 		ratePerSec int
 		burst      int
-		wantErrIs  error
 	}{
-		{"zero rate", 0, 10, ErrInvalidThrottleConfig},
-		{"negative rate", -1, 10, ErrInvalidThrottleConfig},
-		{"zero burst", 10, 0, ErrInvalidThrottleConfig},
-		{"negative burst", 10, -1, ErrInvalidThrottleConfig},
+		{wantErrIs: ErrInvalidThrottleConfig, name: "zero rate", ratePerSec: 0, burst: 10},
+		{wantErrIs: ErrInvalidThrottleConfig, name: "negative rate", ratePerSec: -1, burst: 10},
+		{wantErrIs: ErrInvalidThrottleConfig, name: "zero burst", ratePerSec: 10, burst: 0},
+		{wantErrIs: ErrInvalidThrottleConfig, name: "negative burst", ratePerSec: 10, burst: -1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

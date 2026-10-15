@@ -8,7 +8,7 @@ import (
 
 func TestReadWordSelectionDoesNotAdvance(t *testing.T) {
 	for _, index := range []int{0, 1} {
-		t.Run(string(rune('0'+index)), func(t *testing.T) {
+		t.Run([]string{"0", "1"}[index], func(t *testing.T) {
 			cards := ttCards("苹果", "香蕉", "橘子")
 			exec := newFakeExecutor(ttLessonID, cards)
 			exec.setRow(1, 2)

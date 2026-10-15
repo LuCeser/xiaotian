@@ -80,14 +80,14 @@ func seedTextbookTables(t *testing.T, db *sql.DB) {
 			t.Fatalf("seed assignment card=%d tb=%d: %v", card, textbook, err)
 		}
 	}
-	assign(2, 1, "第1课", false) // learned (explicit slot 2)
-	assign(3, 1, "第2课", false) // unlearned (explicit slot 3 — dict order lies)
-	assign(4, 1, "第3课", false) // learned (explicit slot 1)
-	assign(5, 1, "", false)      // 待确认
-	assign(6, 1, "", true)       // 待确认 + parent include override
+	assign(2, 1, "第1课", false)  // learned (explicit slot 2)
+	assign(3, 1, "第2课", false)  // unlearned (explicit slot 3 — dict order lies)
+	assign(4, 1, "第3课", false)  // learned (explicit slot 1)
+	assign(5, 1, "", false)     // 待确认
+	assign(6, 1, "", true)      // 待确认 + parent include override
 	assign(7, 2, "A课", false)   // T2 unlearned
 	assign(8, 2, "B课", false)   // T2 learned
-	assign(9, 1, "第2课", false) // unlearned in T1 …
+	assign(9, 1, "第2课", false)  // unlearned in T1 …
 	assign(9, 2, "B课", false)   // … but learned in T2 → US-33 admits
 	assign(10, 1, "第1课", false) // learned, but participates=0 (orthogonality)
 }
@@ -108,7 +108,7 @@ func TestTextbookRepository(t *testing.T) {
 		if err != nil || len(books) != 0 {
 			t.Fatalf("List on bare db = %v, %v; want empty, nil", books, err)
 		}
-		if _, err := repo.Get(ctx, 1); !errors.Is(err, ErrTextbookNotFound) {
+		if _, err = repo.Get(ctx, 1); !errors.Is(err, ErrTextbookNotFound) {
 			t.Fatalf("Get on bare db err = %v, want ErrTextbookNotFound", err)
 		}
 		byCard, err := repo.AssignmentsByCardIDs(ctx, []int64{1, 2})
@@ -159,7 +159,7 @@ func TestTextbookRepository(t *testing.T) {
 		if err != nil || book.Name != "课外教材" {
 			t.Fatalf("Get(2) = %+v, %v", book, err)
 		}
-		if _, err := repo.Get(ctx, 99); !errors.Is(err, ErrTextbookNotFound) {
+		if _, err = repo.Get(ctx, 99); !errors.Is(err, ErrTextbookNotFound) {
 			t.Fatalf("Get(99) err = %v, want ErrTextbookNotFound", err)
 		}
 
@@ -273,7 +273,7 @@ func TestCardScopeEligibleOnly(t *testing.T) {
 	}
 
 	// Progress bump has immediate effect: T1 learned 2→3 admits card 3.
-	if _, err := db.Exec("UPDATE textbooks SET learned_lessons = 3 WHERE id = 1"); err != nil {
+	if _, err = db.Exec("UPDATE textbooks SET learned_lessons = 3 WHERE id = 1"); err != nil {
 		t.Fatalf("bump T1 progress: %v", err)
 	}
 	cards, err = repo.List(context.Background(), CardFilter{ScopeEligibleOnly: true})
