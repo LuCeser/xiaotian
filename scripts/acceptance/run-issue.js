@@ -54,29 +54,36 @@ function main() {
   const report = {
     version: 1, issue: id, scope: 'automated', startedAt: new Date().toISOString(),
     commit: null, dirty: null, status: 'running', humanRemaining: issue.human_remaining,
-    steps: [], notExecuted: [], errors: [],
+    plannedSteps: [], steps: [], notExecuted: [], errors: [],
+    counts: { go: { passed: 0, failed: 0, skipped: 0 }, browser: { passed: 0, failed: 0, skipped: 0 }, 'node-script': { passed: 0, failed: 0, skipped: 0 } },
   };
   function save() { fs.writeFileSync(summaryPath, JSON.stringify(report, null, 2) + '\n', 'utf8'); }
   const steps = [];
   try {
-    report.commit = git(['rev-parse', 'HEAD']);
-    report.dirty = git(['status', '--porcelain']).length > 0;
-    // Real-Python suites can otherwise skip with exit 0. Resolve it before
-    // either Go or the isolated browser config starts doing useful work.
-    const env = { ...process.env, HTA_PYTHON_INTERPRETER: resolvePython(root) };
     for (const file of (issue.unit && issue.unit.npm) || []) {
       steps.push({ label: `unit-${path.basename(file, '.js')}`, kind: 'node-script', command: process.execPath, args: [path.join(root, 'tests', file)] });
     }
     if (issue.unit && issue.unit.go) steps.push(goStep('go-unit', issue.unit.go, false));
     if (issue.go) steps.push(goStep('go-e2e', issue.go, true));
     if (issue.browser) {
-      // Resolve the package's exported metadata, then run its declared JS
-      // binary with Node. POSIX .bin shims are not Windows executables.
-      const packagePath = require.resolve('@playwright/test/package.json');
-      const packageInfo = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
-      const cli = path.join(path.dirname(packagePath), packageInfo.bin.playwright);
+      // Use the installed package's JS CLI. POSIX .bin shims are not
+      // Windows executables; the command is known even before npm ci.
+      const cli = path.join(root, 'node_modules', '@playwright', 'test', 'cli.js');
       steps.push({ label: 'browser-e2e', kind: 'browser', command: process.execPath,
         args: [cli, 'test', '-c', issue.browser.config, issue.browser.file, '--reporter=json'], expected: issue.browser.expected });
+    }
+    report.plannedSteps = steps.map((step) => ({ label: step.label, kind: step.kind,
+      command: [step.command, ...step.args], expected: step.expected || [] }));
+    report.notExecuted = steps.map((step) => step.label);
+    save();
+    report.commit = git(['rev-parse', 'HEAD']);
+    report.dirty = git(['status', '--porcelain']).length > 0;
+    // Real-Python suites can otherwise skip with exit 0. Preflight runs
+    // after planning, so every unexecuted command remains in the report.
+    const env = { ...process.env, HTA_PYTHON_INTERPRETER: resolvePython(root) };
+    const browser = steps.find((step) => step.kind === 'browser');
+    if (browser && !fs.existsSync(browser.args[0])) {
+      throw new Error('Playwright CLI missing; install repository dependencies with npm ci');
     }
     save();
     for (let index = 0; index < steps.length; index++) {
@@ -84,10 +91,11 @@ function main() {
       console.log(`RUN ${step.label}`);
       const result = runCommand(step, { root, env, logDir });
       report.steps.push(result);
+      report.notExecuted = steps.slice(index + 1).map((pending) => pending.label);
+      for (const status of ['passed', 'failed', 'skipped']) report.counts[step.kind][status] += result.counts[status];
       console.log(`${result.status}: ${JSON.stringify(result.counts)} (${result.kind}; ${result.log})`);
       save();
       if (result.status !== 'passed') {
-        report.notExecuted = steps.slice(index + 1).map((pending) => pending.label);
         throw new Error(`${step.label}: ${result.errors.join('; ')}`);
       }
     }

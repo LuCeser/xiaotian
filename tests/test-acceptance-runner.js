@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
+const { spawnSync } = require('node:child_process');
 const { parseGo, parseBrowser, resolvePython, runCommand } = require('../scripts/acceptance/evidence');
 
 function temporary(t) {
@@ -106,4 +107,32 @@ test('real child JSON output succeeds only with the required passing tests', (t)
     args: ['-e', `process.stdout.write(${JSON.stringify(report)})`], expected: ['first'] }, { root, env: process.env, logDir: root });
   assert.equal(result.status, 'passed');
   assert.deepEqual(result.counts, { passed: 1, failed: 0, skipped: 0 });
+});
+
+test('CLI missing-Python failure records all planned commands, unexecuted steps and zero counts', (t) => {
+  const root = temporary(t);
+  const result = spawnSync(process.execPath, [path.join(__dirname, '../scripts/acceptance/run-issue.js'), '8'], {
+    env: { ...process.env, HTA_PYTHON_INTERPRETER: path.join(root, 'missing-python'), ACCEPTANCE_LOG_DIR: root }, encoding: 'utf8',
+  });
+  assert.equal(result.status, 1);
+  const report = JSON.parse(fs.readFileSync(path.join(root, 'summary.json'), 'utf8'));
+  assert.equal(report.status, 'failed');
+  assert.deepEqual(report.notExecuted, ['unit-test-parent-photo-meaning', 'go-unit', 'go-e2e', 'browser-e2e']);
+  assert.equal(report.plannedSteps.length, 4);
+  assert.ok(report.plannedSteps.every((step) => step.command.length > 1));
+  assert.deepEqual(report.steps, []);
+  for (const counts of Object.values(report.counts)) assert.deepEqual(counts, { passed: 0, failed: 0, skipped: 0 });
+  assert.match(report.errors.join(' '), /Real Python interpreter missing/);
+  assert.match(report.commit, /^[a-f0-9]{40}$/);
+});
+
+test('dry matrix requires no runtime dependencies and creates no acceptance artifacts', (t) => {
+  const root = temporary(t);
+  const output = path.join(root, 'not-created');
+  const result = spawnSync(process.execPath, [path.join(__dirname, '../scripts/acceptance/run-issue.js'), '8', '--dry-matrix'], {
+    env: { ...process.env, HTA_PYTHON_INTERPRETER: path.join(root, 'missing-python'), ACCEPTANCE_LOG_DIR: output }, encoding: 'utf8',
+  });
+  assert.equal(result.status, 0);
+  assert.equal(fs.existsSync(output), false);
+  assert.match(result.stdout, /真实英语材料与真实生成服务/);
 });
