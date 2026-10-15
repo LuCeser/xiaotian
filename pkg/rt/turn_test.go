@@ -458,7 +458,7 @@ func TestClassifyMessagesCarryVocabGroundTruthAndSafety(t *testing.T) {
 	}
 	system, user := msgs[0].Content, msgs[1].Content
 	for _, want := range []string{
-		"confirm", "repeat", "slow", "hint", "meaning", "pause", "resume", "chat",
+		"confirm", "repeat", "slow", "hint", "meaning", "example", "pause", "resume", "chat",
 		"JSON", "严禁任何羞辱", "苹果", "释义-苹果", "例句-苹果", "第 1 个词",
 		"部分提示", "凭印象写",
 	} {
@@ -540,18 +540,18 @@ func TestClassifyFallsBackToChatAfterSecondFailure(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestCheckClassifyWhitelist: parseIntentJSON accepts the three check-stage
-// intents (the ELEVEN-value whitelist) together with their optional
-// index/text payload, keeps accepting the eight base intents, and still
+// intents (the TWELVE-value whitelist) together with their optional
+// index/text payload, keeps accepting the nine base intents, and still
 // rejects non-whitelisted intents (T-13-13 regression).
 func TestCheckClassifyWhitelist(t *testing.T) {
 	for _, intent := range []string{
 		intentCheckRight, intentCheckWrong, intentCheckSpelling,
 		intentConfirm, intentRepeat, intentSlow, intentHint, intentMeaning,
-		intentPause, intentResume, intentChat,
+		intentExample, intentPause, intentResume, intentChat,
 	} {
 		p, ok := parseIntentJSON(`{"intent":"` + intent + `","reply":"","index":2,"text":"香焦"}`)
 		if !ok {
-			t.Fatalf("parseIntentJSON(%s) rejected, want accepted (11-value whitelist)", intent)
+			t.Fatalf("parseIntentJSON(%s) rejected, want accepted (12-value whitelist)", intent)
 		}
 		switch intent {
 		case intentCheckRight, intentCheckWrong, intentCheckSpelling:
@@ -592,7 +592,7 @@ func TestDictationStageUnaffected(t *testing.T) {
 		t.Fatalf("llm calls = %d, want 1", llm.callCount())
 	}
 	system := llm.calls[0].messages[0].Content
-	for _, want := range []string{"confirm", "repeat", "slow", "hint", "meaning", "pause", "resume", "chat"} {
+	for _, want := range []string{"confirm", "repeat", "slow", "hint", "meaning", "example", "pause", "resume", "chat"} {
 		if !contains(system, want) {
 			t.Errorf("dictation system prompt missing base intent %q", want)
 		}
@@ -2409,8 +2409,10 @@ func ttSentencesSince(t *testing.T, s *captureSender, from int) string {
 }
 
 // TestIntentDispatchSwitchCoversVocabulary: source assertion — the
-// dispatchTurn switch covers the eight-value intent vocabulary exhaustively
-// with NO default/fall-through-to-chat branch left (Task 1 acceptance).
+// dispatchTurn switch covers the nine-value dictation intent vocabulary
+// exhaustively with NO default/fall-through-to-chat branch left (Task 1
+// acceptance; Issue #9 let meaning share its case with example — an ident
+// may ride a multi-value case clause).
 func TestIntentDispatchSwitchCoversVocabulary(t *testing.T) {
 	src, err := os.ReadFile("turn.go")
 	if err != nil {
@@ -2426,11 +2428,25 @@ func TestIntentDispatchSwitchCoversVocabulary(t *testing.T) {
 		t.Fatal("cannot delimit dispatchTurn body")
 	}
 	body := text[start : start+end]
+	var caseLines []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "case ") {
+			caseLines = append(caseLines, line)
+		}
+	}
 	for _, ident := range []string{
 		"intentConfirm", "intentRepeat", "intentSlow", "intentHint",
-		"intentMeaning", "intentPause", "intentResume", "intentChat",
+		"intentMeaning", "intentExample", "intentPause", "intentResume",
+		"intentChat",
 	} {
-		if !strings.Contains(body, "case "+ident+":") {
+		found := false
+		for _, line := range caseLines {
+			if strings.Contains(line, ident+",") || strings.Contains(line, ident+":") {
+				found = true
+				break
+			}
+		}
+		if !found {
 			t.Errorf("dispatchTurn switch missing case %s", ident)
 		}
 	}
