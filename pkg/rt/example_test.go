@@ -282,7 +282,8 @@ func exampleCard(id int64, word string, participates bool) database.Card {
 
 // TestExampleResolverUngrounded: a word with no English card (Chinese
 // content, deleted card) refuses to ground — ErrExampleUngrounded, never a
-// fabricated context.
+// fabricated context. An unwired resolver reports the assembly bug as
+// ErrExampleUnwired — the word is never blamed for a wiring gap.
 func TestExampleResolverUngrounded(t *testing.T) {
 	r := &ExampleResolver{
 		Cards: &fakeExampleCards{list: []database.Card{
@@ -292,6 +293,9 @@ func TestExampleResolverUngrounded(t *testing.T) {
 	}
 	if _, err := r.ExampleContext(context.Background(), lesson.Word{Word: "古诗", Meaning: "课文"}); !errors.Is(err, ErrExampleUngrounded) {
 		t.Errorf("err = %v, want ErrExampleUngrounded", err)
+	}
+	if _, err := (&ExampleResolver{}).ExampleContext(context.Background(), lesson.Word{Word: "apple"}); !errors.Is(err, ErrExampleUnwired) {
+		t.Errorf("unwired err = %v, want ErrExampleUnwired", err)
 	}
 }
 

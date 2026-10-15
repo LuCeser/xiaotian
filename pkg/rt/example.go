@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -131,6 +132,12 @@ type ExampleResolver struct {
 	Textbooks exampleBookSource
 }
 
+// ErrExampleUnwired: the resolver was constructed without its read
+// dependencies — an assembly bug, distinct from ErrExampleUngrounded's
+// domain refusal (a wiring gap must never blame the word). Both land in
+// the caller's honest fallback; the split keeps the failure class honest.
+var ErrExampleUnwired = errors.New("rt/example: resolver constructed without read dependencies")
+
 // ExampleContext resolves the generation context for one classroom word.
 // ErrExampleUngrounded is the structured refusal for words with no English
 // card; any other error is a read failure the caller treats as a fallback
@@ -138,7 +145,7 @@ type ExampleResolver struct {
 func (r *ExampleResolver) ExampleContext(ctx context.Context, w lesson.Word) (ExampleContext, error) {
 	ec := ExampleContext{}
 	if r == nil || r.Cards == nil || r.Textbooks == nil {
-		return ec, ErrExampleUngrounded
+		return ec, ErrExampleUnwired
 	}
 	cards, err := r.Cards.List(ctx, database.CardFilter{Category: exampleCategoryEnglish})
 	if err != nil {
@@ -206,29 +213,22 @@ func (r *ExampleResolver) ExampleContext(ctx context.Context, w lesson.Word) (Ex
 	// Deterministic preference: a source whose lesson is already learned
 	// (that is why the word reached the classroom), the primary book, then
 	// stable id order.
-	for i := 1; i < len(picks); i++ {
-		for j := i; j > 0; j-- {
-			a, b := picks[j-1], picks[j]
-			aScore, bScore := 0, 0
-			if a.learned {
-				aScore += 2
-			}
-			if a.book.IsPrimary {
-				aScore++
-			}
-			if b.learned {
-				bScore += 2
-			}
-			if b.book.IsPrimary {
-				bScore++
-			}
-			if aScore < bScore || (aScore == bScore && a.book.ID >= b.book.ID) {
-				picks[j-1], picks[j] = picks[j], picks[j-1]
-			} else {
-				break
-			}
+	pickScore := func(p pick) int {
+		score := 0
+		if p.learned {
+			score += 2
 		}
+		if p.book.IsPrimary {
+			score++
+		}
+		return score
 	}
+	sort.SliceStable(picks, func(i, j int) bool {
+		if si, sj := pickScore(picks[i]), pickScore(picks[j]); si != sj {
+			return si > sj
+		}
+		return picks[i].book.ID < picks[j].book.ID
+	})
 	if len(picks) == 0 {
 		return ec, nil // honest supplementary: no attribution at all
 	}
@@ -259,7 +259,7 @@ var exampleSystemPrompt = `你是一位亲切、耐心的小学听写家教老�
 例句要短，优先只使用「已学词汇」列表里的词和最基础的常见词；例句必须贴合已确认释义，不得改用别的词义，不要编造教材原文。
 只输出一个 JSON 对象，不要输出任何其它内容：{"reply":"<说给学生听的一句完整回复>"}`
 
-var exampleSystemPromptExampleKind = strings.Replace(exampleSystemPrompt,
+var exampleSystemPromptSentenceFirst = strings.Replace(exampleSystemPrompt,
 	"先用一两句简单中文讲清这个词的意思，再给一个用到该词的简单英语例句。",
 	"直接给一个用到该词的简单英语例句，前面可以带一句极简的中文点题。", 1)
 
@@ -317,7 +317,7 @@ func buildExampleMessages(kind exampleKind, word, meaning string, ec ExampleCont
 
 	system := exampleSystemPrompt
 	if kind == exampleKindExample {
-		system = exampleSystemPromptExampleKind
+		system = exampleSystemPromptSentenceFirst
 	}
 	return []mimo.Message{
 		{Role: "system", Content: system},
