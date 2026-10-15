@@ -84,14 +84,48 @@ Additional guards: origins pinned to the isolated port
    contact: production `lessons`/`review_logs` counts identical before/after,
    zero `e2e-%` rows in production, pinned row present in the isolated DB.
 
-## L4 — Human certification (real device, scripted protocol)
+## L4 — Residual human (optional, not a regress gate)
 
-- Asset: `13-CHECKPOINTS.md` (ten-step channel checklist; the echo
-  two-tier silence observation protocol).
-- Reach: what only a human on real hardware can certify — speaker/mic
-  realism, latency feel, intelligibility.
-- Use when: pre-acceptance gates (13-13). This spec only points at the
-  checklist; the checklist itself is the source of truth.
+- Asset: checklists under `.planning/phases/*/…UAT*.md` for items with
+  **no browser-equivalent proxy** (long soak feel, public HTTPS on a
+  specific device network).
+- Reach: optional certification only. Historical acceptance found nearly
+  all defects via local browser; iPad/iOS-specific failures have not been
+  the norm. **`npm run regress` must not require L4.**
+- Coverage inventory: [E2E-COVERAGE-MATRIX.md](E2E-COVERAGE-MATRIX.md).
+
+## Full local regression (browser-first gate)
+
+One command after each change:
+
+```text
+npm run regress
+```
+
+Orchestrator: `scripts/run-full-regression.mjs` (Windows wrapper:
+`scripts/run-full-regression.ps1` / `npm run regress:win`).
+
+Fail-fast order:
+
+1. `go test ./... -count=1 -short` — L1
+2. `npm test` — Node unit scripts
+3. `npm run e2e:parent` — hermetic parent + `family-journey` (L3 browser)
+4. `npm run e2e:rt` — mock tutor + `family-nav` (L2)
+5. `npm run e2e:family` — forceStudentMode hermetic (L3 browser)
+6. `npm run e2e` — student vs `run.ps1` when PowerShell is available
+7. `npm run e2e:rt-real` — L3 synthetic when `.env` is present
+   (`--require-real` to make mandatory; `--skip-real` to omit)
+
+Evidence lands under `.scratch/regress-<stamp>/` (gitignored). Isolation
+iron rule still applies to every step that boots a real service.
+
+Additional browser facilities (same iron rule):
+
+| Suite | Config | Ports / isolation |
+|-------|--------|-------------------|
+| Parent + family journey | `tests/playwright.parent.config.js` | `:18080` + temp DB |
+| Family force-mode | `tests/playwright.family.config.js` | `:18280` + temp DB + `forceStudentMode` |
+| Mock tutor + family-nav | `tests/playwright.rt.config.js` | `:8099` mock only |
 
 ---
 

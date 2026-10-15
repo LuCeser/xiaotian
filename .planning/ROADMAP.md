@@ -287,13 +287,14 @@ Plans:
 
 历史待办，未经主动提升不阻塞 Phase 13。单独 go build 不运行测试；具体慢点须分别测构建、测试、服务就绪和首个可听响应，不能仅凭测试超时推断构建慢。
 
-### Phase 999.2: Follow-up — Phase 13.3 deferred UAT follow-up: Test 1-10 (BACKLOG)
+### Phase 999.2: Follow-up — Phase 13.3 deferred UAT follow-up: Test 1-10 (DONE 2026-10-14)
 
 **Goal:** Resolve the UAT checkpoint deferred during Phase 13.3 verification
 **Source phase:** 13.3
 **Deferred at:** 2026-10-10 during /gsd-verify-work 13.3 session completion
+**Completed:** 2026-10-14 — browser-first E2E milestone (`npm run regress`, `docs/E2E-COVERAGE-MATRIX.md`)
 **Follow-ups:**
-- [ ] Test 1-10: 用户（2026-10-10 会话）：这些验收项都应该做成端到端验证——十项真机用例的可自动化主体并入四层 E2E 体系（L3 隔离实例＋合成客户端为主战场，沿 tests/e2e-rt/real/ 范式资产化），物理项（iPad Safari bfcache/触控/音频体感）保留人工。详见 13.3 deferred-items.md 同日行。 (deferred 2026-10-10)
+- [x] Test 1-10: 可自动化主体已并入浏览器 E2E 门禁（hermetic `family-journey` / `e2e:family` / mock `family-nav` + L3 driver `f_*`）；原「真机才作数」口径改为浏览器为主、残余人工可选。详见 docs/E2E-COVERAGE-MATRIX.md。 (done 2026-10-14; deferred 2026-10-10)
 
 ### Phase 999.3: 稳定分发包与本地便捷启动 (BACKLOG)
 
