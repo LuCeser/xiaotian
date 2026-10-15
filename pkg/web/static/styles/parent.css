@@ -1469,18 +1469,22 @@ body {
 
 .lesson-row-bottom {
   display: flex;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
-/* Four-state save chips — one color per state, verbatim copy. */
+/* Four-state save chips — one color per state, verbatim copy. Spacing
+   sits on the UI-SPEC 4px scale (sm 8px gaps; 4/12 padding keeps the
+   badge compact like .lesson-kind/.lesson-flag) per issue #19: the old
+   2/10/6 values rode in with the contrast pass and never carried a
+   design rationale. */
 .save-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 14px;
   font-weight: 600;
   line-height: 1.4;
-  padding: 2px 10px;
+  padding: 4px 12px;
   border-radius: 999px;
   white-space: nowrap;
 }
