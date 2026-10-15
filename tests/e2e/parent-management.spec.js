@@ -105,8 +105,25 @@ test('participation failure restores the persisted state', async ({ page, reques
       await route.fulfill({ status: 502, contentType: 'application/json', body: '{"error":{"code":"python_failed","message":"temporary"}}' });
     }, { times: 1 });
     await toggle.uncheck();
+    // The failure copy is per-direction: an uncheck failure says
+    // 移出默写范围失败：… (NOT the UAT doc's 更新失败：), followed by the
+    // honest 已重新读取当前状态。 and a rollback to the persisted state.
+    await expect(page.locator('.toast-error')).toContainText('移出默写范围失败：');
     await expect(page.locator('.toast-error')).toContainText('已重新读取当前状态');
     await expect(toggle).toBeChecked();
+
+    // The symmetric 加入 direction carries its own prefix — prove it too.
+    // Persist a real removal first so the following check actually fires a
+    // change event, then intercept that one request.
+    await toggle.uncheck();
+    await expect(page.locator('.toast-success')).toHaveText('已移出默写范围');
+    await page.route('**/api/v1/words/participation', async (route) => {
+      await route.fulfill({ status: 502, contentType: 'application/json', body: '{"error":{"code":"python_failed","message":"temporary"}}' });
+    }, { times: 1 });
+    await toggle.check();
+    await expect(page.locator('.toast-error')).toContainText('加入默写范围失败：');
+    await expect(page.locator('.toast-error')).toContainText('已重新读取当前状态');
+    await expect(toggle).not.toBeChecked();
   } finally {
     await deleteUnit(request, UNIT_PARTICIPATION_FAILURE);
   }

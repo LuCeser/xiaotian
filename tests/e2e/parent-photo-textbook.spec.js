@@ -76,9 +76,16 @@ test('photo textbook: misread lesson is batch-corrected; the CONFIRMED result go
 
     // AC-2: the read-off-the-photo header shows every field it could read
     // and 待确认 for the one it could not — nothing fabricated.
+    // ALL SIX segments must render (版本/学段/年级/上下册/模块/课次),
+    // behind the 识别到： prefix (parent-photo.js). The stub's PEP reply has
+    // stage=null → 学段 must be 待确认, never invented.
     const meta = page.locator('.photo-textbook-panel .photo-meta-line').first();
+    await expect(meta).toContainText('识别到：');
     await expect(meta).toContainText('版本 人教版PEP');
     await expect(meta).toContainText('学段 待确认');
+    await expect(meta).toContainText('年级 三年级');
+    await expect(meta).toContainText('上下册 上册');
+    await expect(meta).toContainText('模块 Unit 3');
     await expect(meta).toContainText('课次 第2课'); // the stub's MISREAD
 
     // AC-1: no existing book matches → 新建教材 prefilled from the meta.
