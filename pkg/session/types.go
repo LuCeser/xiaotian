@@ -87,11 +87,11 @@ func (e EventType) String() string {
 // the Session's current generation to drop stale WordComplete events pushed by
 // superseded (cancelled but still completing) streams.
 type SessionEvent struct {
-	Type        EventType
 	WordID      string
 	ControlType string
 	Payload     json.RawMessage
 	StreamGen   uint64
+	Type        EventType
 }
 
 // State is a convenience alias for database.SessionState so the FSM and event

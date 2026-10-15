@@ -21,22 +21,22 @@ type WordInput struct {
 type WordError struct {
 	Word     string   `json:"word"`
 	Heard    string   `json:"heard"`
+	Hint     string   `json:"hint"`
+	Ops      []CharOp `json:"ops"`
 	Blank    bool     `json:"blank"`
 	NearMiss bool     `json:"near_miss"`
-	Ops      []CharOp `json:"ops"`
-	Hint     string   `json:"hint"`
 }
 
 // SessionReport is the per-session analysis the client renders on the report
 // screen and the handler persists (Ticket 06).
 type SessionReport struct {
-	Total         int         `json:"total"`
-	CorrectCount  int         `json:"correct_count"`
-	Score         int         `json:"score"` // 0-100, rounded
+	Encouragement string      `json:"encouragement"` // read aloud via TTS
 	Errors        []WordError `json:"errors"`
 	Patterns      []string    `json:"patterns"`
 	Suggestions   []string    `json:"suggestions"`
-	Encouragement string      `json:"encouragement"` // read aloud via TTS
+	Total         int         `json:"total"`
+	CorrectCount  int         `json:"correct_count"`
+	Score         int         `json:"score"` // 0-100, rounded
 }
 
 // patternEvidence is how many words must share a pattern before it is worth
@@ -49,7 +49,6 @@ const patternEvidence = 2
 func Analyze(words []WordInput) SessionReport {
 	r := SessionReport{Total: len(words)}
 	var nearMisses, blanks, missingTails int
-	var wrongList []string
 
 	for _, w := range words {
 		if w.Judgment.Correct {
@@ -65,7 +64,6 @@ func Analyze(words []WordInput) SessionReport {
 		}
 		we.Hint = wordHint(we)
 		r.Errors = append(r.Errors, we)
-		wrongList = append(wrongList, w.Word)
 
 		switch {
 		case w.Judgment.Blank:

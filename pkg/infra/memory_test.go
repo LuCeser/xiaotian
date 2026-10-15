@@ -36,28 +36,24 @@ func (f *fakeMemSource) set(b uint64) {
 // records its reason so tests can assert on both count and the reason code.
 //
 // count tracks only active=true (rising-edge) events — the canonical
-// "load-shed activations" metric. clears tracks active=false (falling-edge)
-// events so tests can additionally assert on the close transition.
+// "load-shed activations" metric. Falling edges are ignored.
 type shedCounter struct {
-	mu      sync.Mutex
-	count   int
-	clears  int
 	reasons []string
+	count   int
+	mu      sync.Mutex
 }
 
-// fire is the LoadShedder callback closure. It increments count (active=true)
-// or clears (active=false) and appends the reason on rising edges; safe to
-// call from the monitor goroutine and read from the test goroutine
-// simultaneously.
+// fire is the LoadShedder callback closure. It increments count on rising
+// edges (active=true) and appends the reason; safe to call from the monitor
+// goroutine and read from the test goroutine simultaneously.
 func (s *shedCounter) fire(reason string, active bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if active {
-		s.count++
-		s.reasons = append(s.reasons, reason)
-	} else {
-		s.clears++
+	if !active {
+		return
 	}
+	s.count++
+	s.reasons = append(s.reasons, reason)
 }
 
 // get returns the current shed count (rising-edge events only) under the
@@ -68,21 +64,13 @@ func (s *shedCounter) get() int {
 	return s.count
 }
 
-// getClears returns the current clear count (falling-edge events) under the
-// lock. Used by tests that assert on the closed → open transition.
-func (s *shedCounter) getClears() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.clears
-}
-
 // newMonitorBuilder is a tiny DSL for assembling a MemoryMonitor with the
 // phase-1 defaults overridden only where a test cares. It keeps every test
 // honest about limit / interval / thresholds without repeating 10 lines of
 // struct literal at every call site.
 type monitorBuilder struct {
-	limit      uint64
 	thresholds []Percent
+	limit      uint64
 	loadShedAt Percent
 	interval   time.Duration
 }
@@ -145,7 +133,6 @@ func TestServiceMemoryBudget(t *testing.T) {
 // TestServiceMemoryBudgetSub16 proves the percent math is well-formed at
 // low usage: 16MB over 150MB == 10% (well under any threshold).
 func TestServiceMemoryBudgetSub16(t *testing.T) {
-	const limit = 150 * 1024 * 1024
 	const used = 16 * 1024 * 1024
 	src := &fakeMemSource{bytes: used}
 	m := newMonitorBuilder().build(t, src, func(string, bool) {}, newFakeLogger())

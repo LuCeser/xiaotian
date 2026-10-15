@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -49,10 +50,10 @@ type PracticeRecord struct {
 	LessonID    string
 	Word        string
 	Rating      string
-	Correct     bool
-	Hints       int
 	ReviewedAt  string
 	ReviewedDay string
+	Hints       int
+	Correct     bool
 }
 
 // PracticeStore is the append-only write + day-query path for practice_logs.

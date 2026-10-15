@@ -36,16 +36,18 @@ func advanceWordToolDef() ToolDef {
 func writeChatEmptyChoice(w http.ResponseWriter) {
 	response := ChatResponse{}
 	response.Choices = append(response.Choices, struct {
+		FinishReason string             `json:"finish_reason"`
 		Message      ChatMessageContent `json:"message"`
 		Index        int                `json:"index"`
-		FinishReason string             `json:"finish_reason"`
 	}{
 		Message:      ChatMessageContent{Role: "assistant", Content: ""},
 		FinishReason: "stop",
 	})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		return
+	}
 }
 
 // captureChatBody runs call against a mock chat server built on the
@@ -103,7 +105,9 @@ func TestChatToolsRequestBody(t *testing.T) {
 	})
 
 	var body struct {
-		Tools []struct {
+		Thinking   *ThinkingConfig `json:"thinking"`
+		ToolChoice string          `json:"tool_choice"`
+		Tools      []struct {
 			Type     string `json:"type"`
 			Function struct {
 				Name       string          `json:"name"`
@@ -111,8 +115,6 @@ func TestChatToolsRequestBody(t *testing.T) {
 				Strict     bool            `json:"strict"`
 			} `json:"function"`
 		} `json:"tools"`
-		ToolChoice string         `json:"tool_choice"`
-		Thinking   *ThinkingConfig `json:"thinking"`
 	}
 	if err := json.Unmarshal(captured, &body); err != nil {
 		t.Fatalf("captured body is not valid JSON: %v\nbody: %s", err, captured)
@@ -182,7 +184,9 @@ func TestChatToolCallsResponseParse(t *testing.T) {
 	server, cleanup := mockTTSServer(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, toolCallsResponseJSON)
+		if _, err := io.WriteString(w, toolCallsResponseJSON); err != nil {
+			return
+		}
 	})
 	defer cleanup()
 

@@ -19,11 +19,11 @@ import (
 
 // fakeManager captures everything the transport hands a session manager.
 type fakeManager struct {
-	mu        sync.Mutex
+	onControl func(s Sender, data []byte)
 	controls  [][]byte
 	audio     [][]byte
+	mu        sync.Mutex
 	closed    bool
-	onControl func(s Sender, data []byte)
 }
 
 func newFakeManager() *fakeManager { return &fakeManager{} }

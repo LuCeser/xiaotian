@@ -79,9 +79,6 @@ var pythonSecretEnvKeys = []string{
 //   - sem is the internal D-02 semaphore constructed from cfg.MaxConcurrent.
 //     Acquired before every subprocess Start and released after Wait.
 type Bridge struct {
-	// cfg is the operational PythonConfig captured at construction. Read-only
-	// after NewBridge returns.
-	cfg infra.PythonConfig
 
 	// logger is the structured event sink (D-25, D-47). Substituted with
 	// NewNoOpLogger() when the caller passes nil so the bridge is always
@@ -104,6 +101,9 @@ type Bridge struct {
 	// specific to pregenerate. Acquired in RunPregenerate BEFORE b.run so
 	// queueing happens outside the general-sem slot too.
 	pregenSem semaphore
+	// cfg is the operational PythonConfig captured at construction. Read-only
+	// after NewBridge returns.
+	cfg infra.PythonConfig
 }
 
 // NewBridge is the Bridge constructor (D-42 constructor DI). It validates
@@ -301,6 +301,13 @@ func (b *Bridge) run(ctx context.Context, timeout time.Duration, name string, ar
 
 	start := time.Now()
 	err := cmd.Run()
+	// cmd.Cancel's group SIGKILL can reap the process before os/exec's
+	// ctx-watch reports the deadline — Wait then surfaces the raw
+	// ExitError (signal: killed). The timeout contract above is run()'s
+	// own, so map it here instead of trusting the race.
+	if err != nil && cctx.Err() != nil {
+		err = cctx.Err()
+	}
 
 	exitCode := 0
 	if cmd.ProcessState != nil {

@@ -284,8 +284,8 @@ func TestDecodeFramePayloadLenMismatch(t *testing.T) {
 
 	// Recompute CRC to make it pass CRC check
 	crc := ComputeCRC16(encoded[0:14])
-	encoded[14] = byte(crc >> 8)
-	encoded[15] = byte(crc)
+	encoded[14] = byte(crc >> 8) //nolint:gosec // G115: shifting a uint16 by 8 yields 0..255
+	encoded[15] = byte(crc)      //nolint:gosec // G115: low byte of the CRC16
 
 	_, _, err := DecodeFrame(encoded)
 	if err != ErrInvalidFrame {

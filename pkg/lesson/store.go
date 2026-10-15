@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -110,10 +111,10 @@ type WordOutcome struct {
 // Manual=false), and the recognized handwriting text when an OCR source
 // produced it. Verdicts persist in the lessons row's verdicts JSON column.
 type CheckVerdict struct {
+	OcrText   string `json:"ocr_text,omitempty"`
 	WordIndex int    `json:"word_index"`
 	Correct   bool   `json:"correct"`
 	Manual    bool   `json:"manual"`
-	OcrText   string `json:"ocr_text,omitempty"`
 }
 
 // Lesson-stage stage values stored in the lessons row (13.1-01). Empty means
@@ -208,23 +209,23 @@ func lessonsHasColumn(ctx context.Context, db *sql.DB, name string) (bool, error
 // concurrency for advance_word writes (Executor.AdvanceWord).
 //
 // The 13.1 check-stage fields (Stage/Outcomes/Verdicts/Unchecked) persist the
-// three-stage classroom across sessions: Stage records '' (no check recorded)
+// three-stage classroom across sessions: Stage records ” (no check recorded)
 // / "checking" / "submitted"; Outcomes snapshots the dictation-stage behavior
 // keyed by word index ("0", "1", …); Verdicts carries the stored check
 // verdicts in submission order; Unchecked marks a lesson that was closed
 // without finishing its check (the D-03 fallback consumer is 13.1-04).
 type Lesson struct {
-	LessonID     string
-	Words        []string
-	Cards        []Word
-	CurrentIndex int
-	Version      int
-	Stage        string
 	Outcomes     map[string]WordOutcome
-	Verdicts     []CheckVerdict
-	Unchecked    bool
+	LessonID     string
+	Stage        string
 	CreatedAt    string
 	UpdatedAt    string
+	Words        []string
+	Cards        []Word
+	Verdicts     []CheckVerdict
+	CurrentIndex int
+	Version      int
+	Unchecked    bool
 }
 
 // Store is the create-once/read path for lessons rows. Repository pattern
@@ -262,7 +263,7 @@ func (s *Store) EnsureLesson(ctx context.Context, lessonID string, words []strin
 		return Lesson{}, errors.Wrap(err, "ensure lesson: marshal words")
 	}
 
-	if _, err := s.db.ExecContext(ctx,
+	if _, err = s.db.ExecContext(ctx,
 		"INSERT OR IGNORE INTO lessons (lesson_id, words) VALUES (?, ?)",
 		lessonID,
 		string(wordsJSON),
@@ -314,7 +315,7 @@ func (s *Store) EnsureLessonCards(ctx context.Context, lessonID string, cards []
 		return Lesson{}, errors.Wrap(err, "ensure lesson cards: marshal words")
 	}
 
-	if _, err := s.db.ExecContext(ctx,
+	if _, err = s.db.ExecContext(ctx,
 		"INSERT OR IGNORE INTO lessons (lesson_id, words, cards) VALUES (?, ?, ?)",
 		lessonID,
 		string(wordsJSON),
@@ -413,7 +414,7 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 		return Lesson{}, errors.Wrap(err, "get lesson")
 	}
 
-	if err := json.Unmarshal([]byte(wordsJSON), &l.Words); err != nil {
+	if err = json.Unmarshal([]byte(wordsJSON), &l.Words); err != nil {
 		s.logger.Error("lesson get: unmarshal words failed",
 			infra.F("component", "lesson/store"),
 			infra.F("lesson_id", lessonID),
@@ -422,7 +423,7 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 		return Lesson{}, errors.Wrap(err, fmt.Sprintf("get lesson %q: unmarshal words", lessonID))
 	}
 
-	if err := json.Unmarshal([]byte(cardsJSON), &l.Cards); err != nil {
+	if err = json.Unmarshal([]byte(cardsJSON), &l.Cards); err != nil {
 		s.logger.Error("lesson get: unmarshal cards failed",
 			infra.F("component", "lesson/store"),
 			infra.F("lesson_id", lessonID),
@@ -497,7 +498,7 @@ func SummarizeLesson(l Lesson) LessonSummary {
 // LessonCompleted reports whether a lessons row counts as completed for the
 // parent-facing read projection (13.3-02): the whitelist follows the
 // authoritative completion branch table (pkg/rt/turn.go lesson-init switch) —
-// ONLY stage=submitted, or a legacy row (stage='') whose cursor walked past
+// ONLY stage=submitted, or a legacy row (stage=”) whose cursor walked past
 // the last card, is completed; checking, in-progress and empty-cards rows are
 // not. Unchecked is deliberately not an input: the D-03 fallback also lands
 // at stage=submitted, so it drives a display marker only.
@@ -516,12 +517,12 @@ type LessonSummary struct {
 	LessonID     string
 	CreatedAt    string
 	Stage        string
-	Unchecked    bool
 	CurrentIndex int
 	WordCount    int
 	Correct      int
 	Wrong        int
 	Unconfirmed  int
+	Unchecked    bool
 	Completed    bool
 }
 

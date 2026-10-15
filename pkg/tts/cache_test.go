@@ -93,7 +93,7 @@ func TestSessionCache_Cleanup_Idempotent(t *testing.T) {
 
 	// Verify directory is gone
 	sessionDir := cache.SessionDir(sessionID)
-	if _, err := os.Stat(sessionDir); !os.IsNotExist(err) {
+	if _, err = os.Stat(sessionDir); !os.IsNotExist(err) {
 		t.Fatalf("Session directory still exists after Cleanup: %v", err)
 	}
 
@@ -118,24 +118,24 @@ func TestSessionCache_CleanupStale_OldDirectoriesRemoved(t *testing.T) {
 	// Create an old session (simulate it was created 2 hours ago)
 	oldSession := "old-session"
 	oldSessionDir := filepath.Join(baseDir, oldSession)
-	if err := os.MkdirAll(oldSessionDir, 0755); err != nil {
+	if err = os.MkdirAll(oldSessionDir, 0755); err != nil {
 		t.Fatalf("Failed to create old session directory: %v", err)
 	}
 	// Set modification time to 2 hours ago
 	oldTime := now.Add(-2 * time.Hour)
-	if err := os.Chtimes(oldSessionDir, oldTime, oldTime); err != nil {
+	if err = os.Chtimes(oldSessionDir, oldTime, oldTime); err != nil {
 		t.Fatalf("Failed to set old session directory time: %v", err)
 	}
 
 	// Create a new session (simulate it was created 10 minutes ago)
 	newSession := "new-session"
 	newSessionDir := filepath.Join(baseDir, newSession)
-	if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+	if err = os.MkdirAll(newSessionDir, 0755); err != nil {
 		t.Fatalf("Failed to create new session directory: %v", err)
 	}
 	// Set modification time to 10 minutes ago
 	newTime := now.Add(-10 * time.Minute)
-	if err := os.Chtimes(newSessionDir, newTime, newTime); err != nil {
+	if err = os.Chtimes(newSessionDir, newTime, newTime); err != nil {
 		t.Fatalf("Failed to set new session directory time: %v", err)
 	}
 

@@ -1,30 +1,49 @@
+version: "2"
 run:
   timeout: 5m
   go: "1.26"
-
+output:
+  formats:
+    text:
+      path: stdout
 linters:
-  disable-all: true
+  default: none
   enable:
+    - errcheck
     - gosec
     - govet
-    - staticcheck
-    - misspell
     - ineffassign
+    - misspell
+    - staticcheck
     - unused
-    - errcheck
-    - gofmt
-    - goimports
-
-linters-settings:
-  govet:
-    enable-all: true
-  goimports:
-    local-prefixes: github.com/xiaotian/home-tutor-agent
-
+  settings:
+    govet:
+      enable-all: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-
-output:
-  formats:
-    - format: colored-line-number
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/xiaotian/home-tutor-agent
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

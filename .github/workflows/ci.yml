@@ -29,9 +29,13 @@ jobs:
 
       - run: make vet
 
-      - uses: golangci/golangci-lint-action@v6
+      # Action v6 treats "latest" as the newest v1 release. That binary is
+      # v1.64.8, built with go1.24, and it refuses a module whose go
+      # directive is 1.26. v9 installs golangci-lint v2; pin a release
+      # whose official binary is built with Go >= 1.26 (v2.14.0: go1.27).
+      - uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.14.0
           args: --config=.golangci.yml
 
       - run: make test

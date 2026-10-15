@@ -15,14 +15,15 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
 // Client implements the Mimo API client with OpenAI-compatible interface
 type mimoClient struct {
-	config     ClientConfig
-	httpClient *http.Client
 	logger     infra.Logger
+	httpClient *http.Client
+	config     ClientConfig
 	mu         sync.RWMutex
 	closed     bool
 }
@@ -645,7 +646,7 @@ func (c *mimoClient) executeTTSRequest(ctx context.Context, req TTSRequest) (Dec
 
 	// Parse response
 	var ttsResp TTSResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ttsResp); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&ttsResp); err != nil {
 		return DecodedAudioData{}, errors.Wrap(ErrInvalidResponse, "failed to decode TTS response")
 	}
 

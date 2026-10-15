@@ -19,10 +19,10 @@ func TestTransition(t *testing.T) {
 	tests := []struct {
 		name      string
 		from      database.SessionState
-		queue     []pybridge.DueCard
-		index     int
-		ev        SessionEvent
 		wantState database.SessionState
+		queue     []pybridge.DueCard
+		ev        SessionEvent
+		index     int
 		wantIndex int
 	}{
 		{
@@ -118,8 +118,8 @@ func TestTransition_Invalid(t *testing.T) {
 	tests := []struct {
 		name  string
 		from  database.SessionState
-		index int
 		ev    SessionEvent
+		index int
 	}{
 		{
 			name: "IDLE plus word_complete",
@@ -416,10 +416,10 @@ func TestTransition_BatchSubmission(t *testing.T) {
 	valid := []struct {
 		name      string
 		from      database.SessionState
-		queue     []pybridge.DueCard
-		index     int
-		ev        SessionEvent
 		wantState database.SessionState
+		queue     []pybridge.DueCard
+		ev        SessionEvent
+		index     int
 		wantIndex int
 	}{
 		{
@@ -469,15 +469,15 @@ func TestTransition_BatchSubmission(t *testing.T) {
 	invalid := []struct {
 		name  string
 		from  database.SessionState
-		index int
 		ev    SessionEvent
+		index int
 	}{
-		{"PAUSED plus submit_answers", database.StatePaused, 2, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
-		{"SUBMISSION plus submit_answers (double submit)", database.StateSubmission, 2, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
-		{"FEEDBACK plus submit_answers", database.StateFeedback, 2, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
-		{"DICTATING early submit (not last word)", database.StateDictating, 0, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}},
-		{"IDLE plus batch_graded", database.StateIdle, 2, SessionEvent{Type: EventBatchGraded}},
-		{"DICTATING plus batch_graded (skipped SUBMISSION)", database.StateDictating, 2, SessionEvent{Type: EventBatchGraded}},
+		{"PAUSED plus submit_answers", database.StatePaused, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}, 2},
+		{"SUBMISSION plus submit_answers (double submit)", database.StateSubmission, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}, 2},
+		{"FEEDBACK plus submit_answers", database.StateFeedback, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}, 2},
+		{"DICTATING early submit (not last word)", database.StateDictating, SessionEvent{Type: EventControlFrame, ControlType: "submit_answers"}, 0},
+		{"IDLE plus batch_graded", database.StateIdle, SessionEvent{Type: EventBatchGraded}, 2},
+		{"DICTATING plus batch_graded (skipped SUBMISSION)", database.StateDictating, SessionEvent{Type: EventBatchGraded}, 2},
 	}
 	for _, tt := range invalid {
 		t.Run(tt.name, func(t *testing.T) {
