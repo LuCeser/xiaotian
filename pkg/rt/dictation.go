@@ -65,6 +65,7 @@ const (
 	intentSlow    = "slow"    // 慢一点读
 	intentHint    = "hint"    // 不会写，求提示
 	intentMeaning = "meaning" // 问词义
+	intentExample = "example" // 求例句 / 问这个词怎么用（Issue #9, ADR-0006）
 	intentPause   = "pause"   // 要休息 / 暂停
 	intentResume  = "resume"  // 要继续
 	intentChat    = "chat"    // 其它对话
@@ -83,8 +84,8 @@ const (
 )
 
 // intentWhitelist is the authoritative intent set; parseIntentJSON rejects
-// everything else (T-13-13: the model output is untrusted input). ELEVEN
-// values: the eight dictation intents plus the three check-stage voice
+// everything else (T-13-13: the model output is untrusted input). TWELVE
+// values: the nine dictation intents plus the three check-stage voice
 // corrections.
 var intentWhitelist = map[string]bool{
 	intentConfirm:       true,
@@ -92,6 +93,7 @@ var intentWhitelist = map[string]bool{
 	intentSlow:          true,
 	intentHint:          true,
 	intentMeaning:       true,
+	intentExample:       true,
 	intentPause:         true,
 	intentResume:        true,
 	intentChat:          true,
@@ -905,7 +907,7 @@ func resolveLessonID(configured string, now time.Time) string {
 // buildClassifySystemPrompt assembles the classification system prompt:
 //   - the tutor persona with the child-safety wording prohibition carried
 //     over VERBATIM from the 13-04 teacherSystemPrompt;
-//   - the eight-value intent vocabulary with one-line definitions;
+//   - the nine-value intent vocabulary with one-line definitions;
 //   - the word ground truth (current word, meaning, example — either may be
 //     absent, and the prompt says so honestly);
 //   - the strict output contract, including the hint (never leak the full
@@ -927,19 +929,21 @@ func buildClassifySystemPrompt(word lesson.Word, index, total int) string {
 	} else {
 		b.WriteString("老师这边暂无这个词的例句。\n")
 	}
-	b.WriteString(`意图词表（intent 只能是以下八个值之一）：
+	b.WriteString(`意图词表（intent 只能是以下九个值之一）：
 confirm：学生表示写完了/可以了/下一个
 repeat：再读一遍
 slow：慢一点读
 hint：不会写，求提示
 meaning：问词义
+example：求例句，或问这个词怎么用
 pause：要休息/暂停
 resume：要继续
 chat：其它对话
 输出契约：只输出一个 JSON 对象，不要输出任何其它内容：{"intent":"<意图>","reply":"<给学生听的回复>"}
-reply 只有 intent 为 hint/meaning/chat 时才需要，其它意图 reply 给空字符串。
+reply 只有 intent 为 hint/meaning/example/chat 时才需要，其它意图 reply 给空字符串。
 hint 的 reply 只能给部分提示（字形、部首、读音或例句线索），严禁给出整词的写法或完整拼音，不能泄题。
-meaning 的 reply 只能依据上面给出的释义与例句组织；两者都没有时，reply 固定原样输出：老师这边没有这个词的释义，你凭印象写吧。`)
+meaning 的 reply 只能依据上面给出的释义与例句组织；两者都没有时，reply 固定原样输出：老师这边没有这个词的释义，你凭印象写吧。
+example 的 reply 只能原样使用上面给出的例句；上面没有例句时，reply 固定原样输出：老师这边还没有这个例句，你先凭印象写吧。`)
 	return b.String()
 }
 
