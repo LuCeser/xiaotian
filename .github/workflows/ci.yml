@@ -38,11 +38,7 @@ jobs:
           version: v2.14.0
           args: --config=.golangci.yml
 
-      # make test runs `go test -race`, which needs cgo; the job-level
-      # CGO_ENABLED=0 (kept for make build's static binary) starves it.
       - run: make test
-        env:
-          CGO_ENABLED: 1
 
       - run: make build
 
