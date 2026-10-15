@@ -89,10 +89,10 @@ func TestCardRepository(t *testing.T) {
 		if err != nil || len(cards) != 1 || !cards[0].Participates {
 			t.Fatalf("legacy participating list = %+v, err=%v; want one enabled card", cards, err)
 		}
-		if _, err := db.Exec("ALTER TABLE cards ADD COLUMN participates INTEGER NOT NULL DEFAULT 1"); err != nil {
+		if _, err = db.Exec("ALTER TABLE cards ADD COLUMN participates INTEGER NOT NULL DEFAULT 1"); err != nil {
 			t.Fatalf("migrate legacy cards: %v", err)
 		}
-		if _, err := db.Exec("UPDATE cards SET participates = 0 WHERE id = 1"); err != nil {
+		if _, err = db.Exec("UPDATE cards SET participates = 0 WHERE id = 1"); err != nil {
 			t.Fatalf("disable migrated card: %v", err)
 		}
 		cards, err = repo.List(context.Background(), CardFilter{ParticipatingOnly: true})
@@ -121,10 +121,10 @@ func TestCardRepository(t *testing.T) {
 				t.Fatalf("pre-migration MeaningSource = %q, want \"material\"", c.MeaningSource)
 			}
 		}
-		if _, err := db.Exec("ALTER TABLE cards ADD COLUMN meaning_source TEXT NOT NULL DEFAULT 'material'"); err != nil {
+		if _, err = db.Exec("ALTER TABLE cards ADD COLUMN meaning_source TEXT NOT NULL DEFAULT 'material'"); err != nil {
 			t.Fatalf("migrate meaning_source: %v", err)
 		}
-		if _, err := db.Exec("UPDATE cards SET meaning_source = 'generated' WHERE word = 'apple'"); err != nil {
+		if _, err = db.Exec("UPDATE cards SET meaning_source = 'generated' WHERE word = 'apple'"); err != nil {
 			t.Fatalf("mark apple generated: %v", err)
 		}
 		cards, err = repo.List(context.Background(), CardFilter{})

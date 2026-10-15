@@ -11,9 +11,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
+
 	"github.com/xiaotian/home-tutor-agent/internal/wstest"
 	ws "github.com/xiaotian/home-tutor-agent/pkg/ws"
-	"go.uber.org/zap"
 )
 
 // setupIntegrationServer creates a complete test server with Hub, Router, and Server.
@@ -266,7 +267,9 @@ func TestIntegration_CRCMismatchDropped(t *testing.T) {
 	}
 
 	// Set read deadline to verify no response (frame should be dropped)
-	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	if err = conn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
 
 	// Attempt to read - should timeout (frame dropped by server)
 	_, _, err = conn.ReadMessage()
@@ -596,7 +599,7 @@ func TestIntegration_BackpressureSignalPath(t *testing.T) {
 
 		// Client-side writes succeed regardless — the drop happens server-side at the
 		// router and that signal never reaches the WebSocket layer (WR-09).
-		if err := conn.WriteMessage(websocket.BinaryMessage, frame); err == nil {
+		if err = conn.WriteMessage(websocket.BinaryMessage, frame); err == nil {
 			sentCount++
 		}
 

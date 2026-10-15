@@ -108,7 +108,7 @@ func TestWorkerPoolBackpressureSignal(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := pool.Start(ctx); err != nil {
+	if err = pool.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -118,7 +118,7 @@ func TestWorkerPoolBackpressureSignal(t *testing.T) {
 	// Sentinel: blocks the single worker. Close workerStarted once
 	// running so the test knows the worker is now in-flight on this
 	// task and the buffer is empty.
-	if err := pool.Submit(func(ctx context.Context) error {
+	if err = pool.Submit(func(ctx context.Context) error {
 		close(workerStarted)
 		<-blockCh
 		return nil
@@ -128,7 +128,7 @@ func TestWorkerPoolBackpressureSignal(t *testing.T) {
 	<-workerStarted
 
 	// Buffer is empty (worker pulled the sentinel). Fill it (cap=1).
-	if err := pool.Submit(func(ctx context.Context) error {
+	if err = pool.Submit(func(ctx context.Context) error {
 		<-blockCh
 		return nil
 	}); err != nil {
@@ -290,13 +290,13 @@ func TestWorkerPoolGracefulDrain(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := pool.Start(ctx); err != nil {
+	if err = pool.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
 	var counter atomic.Int64
 	for i := 0; i < 3; i++ {
-		if err := pool.Submit(func(ctx context.Context) error {
+		if err = pool.Submit(func(ctx context.Context) error {
 			time.Sleep(50 * time.Millisecond)
 			counter.Add(1)
 			return nil
@@ -328,11 +328,11 @@ func TestWorkerPoolShutdownTimeout(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := pool.Start(ctx); err != nil {
+	if err = pool.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if err := pool.Submit(func(taskCtx context.Context) error {
+	if err = pool.Submit(func(taskCtx context.Context) error {
 		select {
 		case <-time.After(500 * time.Millisecond):
 		case <-taskCtx.Done():

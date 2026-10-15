@@ -128,7 +128,7 @@ func generateSelfSignedCert(t *testing.T, dir string) (certPath, keyPath string)
 	}
 	certPath = filepath.Join(dir, "cert.pem")
 	keyPath = filepath.Join(dir, "key.pem")
-	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+	if err = os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
 		t.Fatalf("write cert: %v", err)
 	}
 	keyDER, err := x509.MarshalECPrivateKey(key)
@@ -145,7 +145,7 @@ func generateSelfSignedCert(t *testing.T, dir string) (certPath, keyPath string)
 func insecureClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // G402: test client trusts the throwaway self-signed cert for 127.0.0.1
 		},
 		Timeout: 5 * time.Second,
 	}

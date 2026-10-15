@@ -74,6 +74,8 @@ var (
 
 // APIError represents an error response from the Mimo API
 type APIError struct {
+	// Err is the underlying error
+	Err error
 	// Code is the error code returned by the API
 	Code string
 	// Message is the error message
@@ -82,8 +84,6 @@ type APIError struct {
 	Type string
 	// StatusCode is the HTTP status code
 	StatusCode int
-	// Err is the underlying error
-	Err error
 }
 
 // Error implements the error interface

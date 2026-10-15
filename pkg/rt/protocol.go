@@ -173,10 +173,10 @@ const (
 // names follow the session_init wire example (camelCase inside the audio
 // object).
 type AudioSpec struct {
-	// SampleRate is the sample rate in Hz (uplink R0: 16000).
-	SampleRate int `json:"sampleRate"`
 	// Format is the PCM format ("s16le" — bare little-endian signed 16-bit).
 	Format string `json:"format"`
+	// SampleRate is the sample rate in Hz (uplink R0: 16000).
+	SampleRate int `json:"sampleRate"`
 	// Channels is the channel count (R0: 1, mono).
 	Channels int `json:"channels"`
 }
@@ -197,12 +197,12 @@ type LessonView struct {
 	// LessonID identifies the lesson ("id" on the wire per the
 	// session_ready example).
 	LessonID string `json:"id"`
+	// Words lists the lesson's words in order (R0: 3 fixed words).
+	Words []string `json:"words"`
 	// Version is the lesson state version (optimistic-concurrency counter).
 	Version int `json:"version"`
 	// CurrentIndex is the index of the word the student is currently on.
 	CurrentIndex int `json:"current_index"`
-	// Words lists the lesson's words in order (R0: 3 fixed words).
-	Words []string `json:"words"`
 }
 
 // SessionInitMsg is the first client → server message. The client declares
@@ -218,8 +218,8 @@ type LessonView struct {
 // the Go-owned practice_logs only — never the FSRS schedule (D-12).
 type SessionInitMsg struct {
 	Type     string    `json:"type"`
-	Audio    AudioSpec `json:"audio"`
 	Mode     string    `json:"mode,omitempty"`
+	Audio    AudioSpec `json:"audio"`
 	Practice bool      `json:"practice,omitempty"`
 }
 
@@ -239,8 +239,8 @@ const (
 // the student really heard (Pitfall 9).
 type InterruptMsg struct {
 	Type           string `json:"type"`
-	Epoch          uint64 `json:"epoch"`
 	LastSentenceID string `json:"last_sentence_id"`
+	Epoch          uint64 `json:"epoch"`
 	PlayedUntilMs  int64  `json:"played_until_ms"`
 }
 
@@ -284,8 +284,8 @@ type SessionReadyMsg struct {
 	Type      string     `json:"type"`
 	SessionID string     `json:"session_id"`
 	Audio     AudioSpec  `json:"audio"`
-	TTS       TTSSpec    `json:"tts"`
 	Lesson    LessonView `json:"lesson"`
+	TTS       TTSSpec    `json:"tts"`
 }
 
 // TurnStartMsg announces a new turn (one student utterance → one teacher
@@ -300,36 +300,36 @@ type TurnStartMsg struct {
 // TranscriptMsg relays the recognized student speech back as text.
 type TranscriptMsg struct {
 	Type   string `json:"type"`
-	TurnID uint64 `json:"turn_id"`
 	Text   string `json:"text"`
+	TurnID uint64 `json:"turn_id"`
 }
 
 // TeacherSentenceMsg sends one teacher sentence's text BEFORE its audio
 // chunks (subtitle-first), so captions render ahead of playback.
 type TeacherSentenceMsg struct {
 	Type       string `json:"type"`
-	TurnID     uint64 `json:"turn_id"`
-	Epoch      uint64 `json:"epoch"`
 	SentenceID string `json:"sentence_id"`
 	Text       string `json:"text"`
+	TurnID     uint64 `json:"turn_id"`
+	Epoch      uint64 `json:"epoch"`
 }
 
 // AudioStartMsg announces the first audio chunk of one sentence (subtitles
 // already delivered via TeacherSentenceMsg).
 type AudioStartMsg struct {
 	Type       string `json:"type"`
+	SentenceID string `json:"sentence_id"`
 	TurnID     uint64 `json:"turn_id"`
 	Epoch      uint64 `json:"epoch"`
-	SentenceID string `json:"sentence_id"`
 }
 
 // AudioEndMsg announces the last audio chunk of one sentence. Same shape as
 // AudioStartMsg.
 type AudioEndMsg struct {
 	Type       string `json:"type"`
+	SentenceID string `json:"sentence_id"`
 	TurnID     uint64 `json:"turn_id"`
 	Epoch      uint64 `json:"epoch"`
-	SentenceID string `json:"sentence_id"`
 }
 
 // LessonUpdateMsg reports a committed lesson-state write (after tool
@@ -338,9 +338,9 @@ type AudioEndMsg struct {
 type LessonUpdateMsg struct {
 	Type         string `json:"type"`
 	LessonID     string `json:"lesson_id"`
+	RequestID    string `json:"request_id"`
 	Version      int    `json:"version"`
 	CurrentIndex int    `json:"current_index"`
-	RequestID    string `json:"request_id"`
 }
 
 // InterruptAckMsg confirms an interruption took effect: the invalidated
@@ -348,9 +348,9 @@ type LessonUpdateMsg struct {
 // client's report.
 type InterruptAckMsg struct {
 	Type           string `json:"type"`
+	LastSentenceID string `json:"last_sentence_id"`
 	OldEpoch       uint64 `json:"old_epoch"`
 	NewEpoch       uint64 `json:"new_epoch"`
-	LastSentenceID string `json:"last_sentence_id"`
 	PlayedUntilMs  int64  `json:"played_until_ms"`
 }
 
@@ -467,8 +467,8 @@ const (
 // renders one check row per entry.
 type CheckStartedMsg struct {
 	Type   string   `json:"type"`
-	Words  []string `json:"words"`
 	Reason string   `json:"reason"`
+	Words  []string `json:"words"`
 }
 
 // WireVerdict is one verdict of the authoritative echo list.
@@ -503,8 +503,8 @@ type ReviewResultMsg struct {
 // per-word unmask primitive the student-mode masking of 13.1-02 consumes).
 type WordRevealedMsg struct {
 	Type      string `json:"type"`
-	WordIndex int    `json:"word_index"`
 	Word      string `json:"word"`
+	WordIndex int    `json:"word_index"`
 }
 
 // ---------------------------------------------------------------------------
@@ -521,8 +521,8 @@ type WordRevealedMsg struct {
 // the OCR check pass immediately, there is no separate submit message.
 type PhotoChunkMsg struct {
 	Type  string `json:"type"`
+	Data  string `json:"data"` // base64 of the raw chunk bytes
 	Seq   int    `json:"seq"`
-	Data  string `json:"data"`  // base64 of the raw chunk bytes
 	Final bool   `json:"final"` // last chunk of this upload
 }
 
@@ -539,8 +539,8 @@ type PhotoCancelMsg struct {
 // Correct/NearMiss mirror the GradeWord booleans the prefill used — the
 // verdicts themselves still ride check_verdicts (the single render source).
 type OcrResultEntry struct {
-	WordIndex int    `json:"word_index"`
 	OcrText   string `json:"ocr_text"`
+	WordIndex int    `json:"word_index"`
 	Correct   bool   `json:"correct"`
 	NearMiss  bool   `json:"near_miss"`
 }

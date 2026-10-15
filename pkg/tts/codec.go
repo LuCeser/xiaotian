@@ -44,7 +44,7 @@ func MP3ToPCM(mp3Path string, opts ConvertOpts) (PCMData, error) {
 	}
 
 	// Create command with context timeout
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: argument vector passed to ffmpeg, not a shell; the binary comes from LookPath
 
 	// Pipe stdout to a buffer for PCM data
 	var stdout bytes.Buffer

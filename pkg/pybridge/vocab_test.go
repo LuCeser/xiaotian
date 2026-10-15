@@ -72,8 +72,8 @@ func TestDueArgs(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		opts      DueOpts
 		extraArgs []string // flags we expect to see appended (in order)
+		opts      DueOpts
 	}{
 		{
 			name:      "minimal",

@@ -33,10 +33,10 @@ import (
 // captureSender records every control message (as marshaled JSON) and audio
 // chunk a Sender would deliver.
 type captureSender struct {
-	mu         sync.Mutex
 	controls   [][]byte
 	audioN     int
 	audioBytes int
+	mu         sync.Mutex
 }
 
 func (c *captureSender) SendControl(v any) error {
@@ -122,31 +122,31 @@ func (c *captureSender) listeningCount() int {
 // The 13.1 check-stage methods follow the same first-commit/replay/conflict
 // shape on the in-memory row (checkResults holds their stored results).
 type fakeExecutor struct {
-	mu               sync.Mutex
+	requestResults   map[string]lesson.AdvanceResult
+	checkResults     map[string]any
+	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
+	advanceCalls     []fakeAdvanceCall
+	checkCalls       []fakeCheckCall
 	lesson           lesson.Lesson
+	mu               sync.Mutex
 	exists           bool
 	ensureCalls      int
 	ensureCardsCalls int
-	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
 	stateCalls       int
-	advanceCalls     []fakeAdvanceCall
-	checkCalls       []fakeCheckCall
 	conflictVersion  int
-	requestResults   map[string]lesson.AdvanceResult
-	checkResults     map[string]any
 }
 
 type fakeAdvanceCall struct {
 	lessonID        string
-	expectedVersion int
 	requestID       string
+	expectedVersion int
 }
 
 type fakeCheckCall struct {
 	tool            string
 	lessonID        string
-	expectedVersion int
 	requestID       string
+	expectedVersion int
 }
 
 func cardWords(cards []lesson.Word) []string {
@@ -208,7 +208,7 @@ func (f *fakeExecutor) GetLessonState(_ context.Context, _ string) (lesson.Lesso
 func (f *fakeExecutor) AdvanceWord(_ context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.advanceCalls = append(f.advanceCalls, fakeAdvanceCall{lessonID, expectedVersion, requestID})
+	f.advanceCalls = append(f.advanceCalls, fakeAdvanceCall{lessonID: lessonID, expectedVersion: expectedVersion, requestID: requestID})
 	if stored, ok := f.requestResults[requestID]; ok {
 		stored.Idempotent = true
 		return stored, nil
@@ -235,7 +235,7 @@ func (f *fakeExecutor) advanceCount() int {
 func (f *fakeExecutor) EnterCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, outcomes map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.checkCalls = append(f.checkCalls, fakeCheckCall{"enter_check", lessonID, expectedVersion, requestID})
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "enter_check", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.EnterCheckResult)
 		res.Idempotent = true
@@ -258,7 +258,7 @@ func (f *fakeExecutor) EnterCheck(_ context.Context, lessonID string, expectedVe
 func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.checkCalls = append(f.checkCalls, fakeCheckCall{"apply_verdict", lessonID, expectedVersion, requestID})
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "apply_verdict", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.ApplyVerdictResult)
 		res.Idempotent = true
@@ -290,7 +290,7 @@ func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expected
 func (f *fakeExecutor) CompleteCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.checkCalls = append(f.checkCalls, fakeCheckCall{"complete_check", lessonID, expectedVersion, requestID})
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "complete_check", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.CompleteCheckResult)
 		res.Idempotent = true
@@ -323,7 +323,7 @@ func (f *fakeExecutor) CompleteCheck(_ context.Context, lessonID string, expecte
 func (f *fakeExecutor) ClearUnchecked(_ context.Context, lessonID string, expectedVersion int, requestID string) (lesson.ClearUncheckedResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.checkCalls = append(f.checkCalls, fakeCheckCall{"clear_unchecked", lessonID, expectedVersion, requestID})
+	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "clear_unchecked", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.ClearUncheckedResult)
 		res.Idempotent = true
@@ -344,12 +344,6 @@ func (f *fakeExecutor) ClearUnchecked(_ context.Context, lessonID string, expect
 	res := lesson.ClearUncheckedResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version}
 	f.checkResults[requestID] = res
 	return res, nil
-}
-
-func (f *fakeExecutor) checkCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.checkCalls)
 }
 
 func (f *fakeExecutor) setRow(index, version int) {
@@ -764,7 +758,7 @@ func TestSaveReceiptCheckSubmit(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
-	if err := lesson.Migrate(ctx, db); err != nil {
+	if err = lesson.Migrate(ctx, db); err != nil {
 		t.Fatalf("migrate receipt db: %v", err)
 	}
 	receipts, err := lesson.NewReceiptStore(db, nil)
@@ -1141,7 +1135,7 @@ func TestSaveReceiptPracticeStorageFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open broken practice db: %v", err)
 	}
-	if err := lesson.Migrate(context.Background(), pdb); err != nil {
+	if err = lesson.Migrate(context.Background(), pdb); err != nil {
 		t.Fatalf("migrate broken practice db: %v", err)
 	}
 	ps, err := lesson.NewPracticeStore(pdb, nil)
@@ -1382,13 +1376,6 @@ func TestCheckSubmitDisconnectCancelsAckWait(t *testing.T) {
 	if got := ttEventCount(t, log, EventPlaybackAckTimeout); got != 0 {
 		t.Errorf("playback_ack_timeout events after disconnect = %d, want 0", got)
 	}
-}
-
-// ttDriveTwoConfirmCompletion runs a TWO-word lesson through both confirms
-// into the check stage (13.1-01: the last commit no longer summarizes — it
-// opens the check stage), leaving the classroom waiting on verdicts.
-func ttDriveTwoConfirmCompletion(t *testing.T, words *fakeWordSource) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
-	return ttDriveToCheck(t, ttCards("苹果", "香蕉"), words)
 }
 
 // ttDriveToCheck drives a lesson of len(cards) words through scripted
@@ -2379,17 +2366,6 @@ func ttPaused(t *testing.T, tm *TurnManager) bool {
 	return tm.tutor != nil && tm.tutor.paused
 }
 
-// ttLastSentence returns the most recent teacher sentence text.
-func ttLastSentence(t *testing.T, s *captureSender) string {
-	t.Helper()
-	sents := s.controlsOf(t, TypeTeacherSentence)
-	if len(sents) == 0 {
-		t.Fatal("no teacher sentence captured")
-	}
-	text, _ := sents[len(sents)-1]["text"].(string)
-	return text
-}
-
 // ttSentencesSince returns every teacher sentence text from the given index
 // onward, JOINED — announcements are sentence-streamed, so one template
 // reply arrives as several teacher_sentence messages (字幕先行, per-sentence
@@ -2628,16 +2604,16 @@ func TestWordRatingMatrix(t *testing.T) {
 	cases := []struct {
 		name    string
 		outcome string
-		hints   int
 		want    string
+		hints   int
 	}{
-		{"confirmed no hint", outcomeConfirmed, 0, "good"},
-		{"confirmed after hints", outcomeConfirmed, 2, "hard"},
-		{"timeout no hint", outcomeTimeout, 0, "hard"},
-		{"timeout after one hint", outcomeTimeout, 1, "again"},
-		{"hint pre-record one hint", outcomeHint, 1, "again"},
-		{"hint pre-record three hints", outcomeHint, 3, "again"},
-		{"unknown outcome skipped", "bogus", 0, ""},
+		{"confirmed no hint", outcomeConfirmed, "good", 0},
+		{"confirmed after hints", outcomeConfirmed, "hard", 2},
+		{"timeout no hint", outcomeTimeout, "hard", 0},
+		{"timeout after one hint", outcomeTimeout, "again", 1},
+		{"hint pre-record one hint", outcomeHint, "again", 1},
+		{"hint pre-record three hints", outcomeHint, "again", 3},
+		{"unknown outcome skipped", "bogus", "", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2657,14 +2633,14 @@ func TestCheckRatingMatrix(t *testing.T) {
 	cases := []struct {
 		name   string
 		result string
-		hints  int
 		want   string
+		hints  int
 	}{
-		{"correct no hint", checkCorrect, 0, "good"},
-		{"correct after hints", checkCorrect, 2, "hard"},
-		{"wrong no hint", checkWrong, 0, "again"},
-		{"wrong after hints", checkWrong, 3, "again"},
-		{"unknown result skipped", "bogus", 0, ""},
+		{"correct no hint", checkCorrect, "good", 0},
+		{"correct after hints", checkCorrect, "hard", 2},
+		{"wrong no hint", checkWrong, "again", 0},
+		{"wrong after hints", checkWrong, "again", 3},
+		{"unknown result skipped", "bogus", "", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2683,15 +2659,15 @@ func TestUncheckedDowngrade(t *testing.T) {
 	cases := []struct {
 		name    string
 		outcome string
-		hints   int
 		want    string
+		hints   int
 	}{
-		{"confirmed no hint: good→hard", outcomeConfirmed, 0, ratingHard},
-		{"confirmed after hints: hard→again", outcomeConfirmed, 1, ratingAgain},
-		{"timeout no hint: hard→again", outcomeTimeout, 0, ratingAgain},
-		{"timeout after hints: again floors", outcomeTimeout, 2, ratingAgain},
-		{"hint pre-record: again floors", outcomeHint, 0, ratingAgain},
-		{"unknown outcome stays empty", "bogus", 0, ""},
+		{"confirmed no hint: good→hard", outcomeConfirmed, ratingHard, 0},
+		{"confirmed after hints: hard→again", outcomeConfirmed, ratingAgain, 1},
+		{"timeout no hint: hard→again", outcomeTimeout, ratingAgain, 0},
+		{"timeout after hints: again floors", outcomeTimeout, ratingAgain, 2},
+		{"hint pre-record: again floors", outcomeHint, ratingAgain, 0},
+		{"unknown outcome stays empty", "bogus", "", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3803,7 +3779,7 @@ func TestThreeStageManualPath(t *testing.T) {
 		t.Fatalf("open temp db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := lesson.Migrate(context.Background(), db); err != nil {
+	if err = lesson.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate temp db: %v", err)
 	}
 	store, err := lesson.NewStore(db, nil)
@@ -4458,7 +4434,7 @@ func TestPickPracticeWords(t *testing.T) {
 	pool := ptPracticeCards("apple", "banana", "cat", "dog", "egg")
 
 	t.Run("excludes today's words", func(t *testing.T) {
-		picked := pickPracticeWords(pool, map[string]bool{"apple": true, "cat": true}, 10, rand.New(rand.NewSource(1)))
+		picked := pickPracticeWords(pool, map[string]bool{"apple": true, "cat": true}, 10, rand.New(rand.NewSource(1))) //nolint:gosec // G404: test shuffle, not used for secrets
 		got := ptPickedWords(picked)
 		if len(got) != 3 {
 			t.Fatalf("picked = %v, want the 3 non-excluded words", got)
@@ -4477,7 +4453,7 @@ func TestPickPracticeWords(t *testing.T) {
 	})
 
 	t.Run("more available than n returns exactly n", func(t *testing.T) {
-		picked := pickPracticeWords(pool, nil, 3, rand.New(rand.NewSource(1)))
+		picked := pickPracticeWords(pool, nil, 3, rand.New(rand.NewSource(1))) //nolint:gosec // G404: test shuffle, not used for secrets
 		got := ptPickedWords(picked)
 		if len(got) != 3 {
 			t.Fatalf("picked = %v, want exactly 3", got)
@@ -4492,14 +4468,14 @@ func TestPickPracticeWords(t *testing.T) {
 	})
 
 	t.Run("fewer available than n returns all", func(t *testing.T) {
-		picked := pickPracticeWords(pool, nil, 99, rand.New(rand.NewSource(1)))
+		picked := pickPracticeWords(pool, nil, 99, rand.New(rand.NewSource(1))) //nolint:gosec // G404: test shuffle, not used for secrets
 		if len(picked) != len(pool) {
 			t.Errorf("picked = %d words, want all %d (不足全给)", len(picked), len(pool))
 		}
 	})
 
 	t.Run("zero available returns nil", func(t *testing.T) {
-		picked := pickPracticeWords(pool, map[string]bool{"apple": true, "banana": true, "cat": true, "dog": true, "egg": true}, 10, rand.New(rand.NewSource(1)))
+		picked := pickPracticeWords(pool, map[string]bool{"apple": true, "banana": true, "cat": true, "dog": true, "egg": true}, 10, rand.New(rand.NewSource(1))) //nolint:gosec // G404: test shuffle, not used for secrets
 		if len(picked) != 0 {
 			t.Errorf("picked = %v, want nil/empty (honest-notice path)", picked)
 		}
@@ -4508,7 +4484,7 @@ func TestPickPracticeWords(t *testing.T) {
 	t.Run("shuffled across seeds", func(t *testing.T) {
 		signatures := map[string]bool{}
 		for seed := int64(1); seed <= 10; seed++ {
-			picked := pickPracticeWords(pool, nil, 5, rand.New(rand.NewSource(seed)))
+			picked := pickPracticeWords(pool, nil, 5, rand.New(rand.NewSource(seed))) //nolint:gosec // G404: test shuffle, not used for secrets
 			signatures[strings.Join(ptPickedWords(picked), ",")] = true
 		}
 		if len(signatures) < 2 {
@@ -4609,11 +4585,11 @@ func TestNextDueDays(t *testing.T) {
 // fakePracticeSource is the scripted PracticeSource: a fixed card pool with
 // call recording (the practice init must List exactly once).
 type fakePracticeSource struct {
-	mu      sync.Mutex
-	cards   []database.Card
 	err     error
-	calls   int
+	cards   []database.Card
 	filters []database.CardFilter
+	calls   int
+	mu      sync.Mutex
 }
 
 func (f *fakePracticeSource) List(_ context.Context, filter database.CardFilter) ([]database.Card, error) {
@@ -4658,7 +4634,7 @@ func newTestPracticeStore(t *testing.T) *lesson.PracticeStore {
 		t.Fatalf("open practice test db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := lesson.Migrate(context.Background(), db); err != nil {
+	if err = lesson.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate practice test db: %v", err)
 	}
 	ps, err := lesson.NewPracticeStore(db, nil)
@@ -4677,7 +4653,7 @@ func newTestReceiptStore(t *testing.T) *lesson.ReceiptStore {
 		t.Fatalf("open receipt test db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := lesson.Migrate(context.Background(), db); err != nil {
+	if err = lesson.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate receipt test db: %v", err)
 	}
 	rs, err := lesson.NewReceiptStore(db, nil)
@@ -4696,7 +4672,7 @@ func newBrokenReceiptStore(t *testing.T) *lesson.ReceiptStore {
 	if err != nil {
 		t.Fatalf("open broken receipt db: %v", err)
 	}
-	if err := lesson.Migrate(context.Background(), db); err != nil {
+	if err = lesson.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate broken receipt db: %v", err)
 	}
 	rs, err := lesson.NewReceiptStore(db, nil)

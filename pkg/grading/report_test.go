@@ -58,7 +58,7 @@ func TestAnalyze_WordHints(t *testing.T) {
 		{"sub", "word", "ward", "en", "「o」写成了「a」"},
 		{"missing", "word", "wrd", "en", "漏写了「o」"},
 		{"extra", "word", "world", "en", "多写了「l」"},
-		{"swap", "receive", "recieve", "en", "顺序颠倒了"},
+		{"swap", "receive", "recieve", "en", "顺序颠倒了"}, //nolint:misspell // deliberate typo fixture
 		{"zh sub", "香蕉", "香焦", "zh", "「蕉」写成了「焦」"},
 	}
 	for _, tc := range cases {
@@ -103,7 +103,7 @@ func TestAnalyze_Patterns(t *testing.T) {
 	// Two near-misses.
 	r = Analyze([]WordInput{
 		input("banana", "bandana", "en"),
-		input("receive", "recieve", "en"),
+		input("receive", "recieve", "en"), //nolint:misspell // deliberate typo fixture
 	})
 	if !hasContaining(r.Patterns, "2 个词只差一点点") {
 		t.Errorf("near-miss pattern missing: %v", r.Patterns)

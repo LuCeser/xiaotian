@@ -75,10 +75,10 @@ func ttLastEventField(t *testing.T, log *captureLogger, event, key string) strin
 
 // fakeExampleSource is the canned ExampleSource seam for turn tests.
 type fakeExampleSource struct {
-	mu    sync.Mutex
 	calls []lesson.Word
-	ec    ExampleContext
 	err   error
+	ec    ExampleContext
+	mu    sync.Mutex
 }
 
 func (f *fakeExampleSource) ExampleContext(_ context.Context, w lesson.Word) (ExampleContext, error) {
@@ -229,8 +229,8 @@ func TestParseExampleReplyOverlongRejected(t *testing.T) {
 
 // fakeExampleCards is the narrow card-lister seam.
 type fakeExampleCards struct {
-	list []database.Card
 	err  error
+	list []database.Card
 }
 
 func (f *fakeExampleCards) List(_ context.Context, filter database.CardFilter) ([]database.Card, error) {
@@ -495,8 +495,8 @@ func TestExampleGenerationFailsHonestly(t *testing.T) {
 		name string
 		gen  llmScript
 	}{
-		{"call error", llmScript{err: fmt.Errorf("provider down")}},
-		{"unparseable", llmScript{wire: `{"choices":[{"message":{"content":"我觉得你想说苹果"}}]}`}},
+		{gen: llmScript{err: fmt.Errorf("provider down")}, name: "call error"},
+		{gen: llmScript{wire: `{"choices":[{"message":{"content":"我觉得你想说苹果"}}]}`}, name: "unparseable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cards := ttCardsNoExample("apple", "banana")

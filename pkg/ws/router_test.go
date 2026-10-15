@@ -16,9 +16,9 @@ var _ FrameHandler = (*Router)(nil)
 // TestNewRouterValidatesConfig tests that NewRouter validates configuration
 func TestNewRouterValidatesConfig(t *testing.T) {
 	tests := []struct {
+		wantErr error
 		name    string
 		cfg     RouterConfig
-		wantErr error
 	}{
 		{
 			name: "zero route buffer",
@@ -73,9 +73,6 @@ func TestNewRouterAcceptsValidConfig(t *testing.T) {
 	}
 	if router == nil {
 		t.Fatal("expected non-nil router")
-	}
-	if router == nil {
-		t.Fatal("router is nil, cannot close")
 	}
 	router.Close()
 }
@@ -146,10 +143,13 @@ func TestRouterImplementsFrameHandler(t *testing.T) {
 	}
 	defer router.Close()
 
-	// Verify router can be used as FrameHandler
+	// The assignment is the implementation check. A type assertion reads the
+	// interface value without comparing it to nil (a concrete *Router is
+	// never a nil interface).
 	var handler FrameHandler = router
-	if handler == nil {
-		t.Error("router should implement FrameHandler interface")
+	got, ok := handler.(*Router)
+	if !ok || got != router {
+		t.Fatal("FrameHandler should be the router")
 	}
 }
 

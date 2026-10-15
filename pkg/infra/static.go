@@ -31,9 +31,11 @@ func registerStaticMimeTypes() struct{} {
 	// both text/javascript and application/javascript are in the HTML spec's
 	// "JavaScript MIME type" list, so browsers (including Safari) accept
 	// either. charset=utf-8 matches what Go's own server defaults to.
-	mime.AddExtensionType(".js", "text/javascript; charset=utf-8")
-	mime.AddExtensionType(".mjs", "text/javascript; charset=utf-8")
-	mime.AddExtensionType(".css", "text/css; charset=utf-8")
+	// The extensions and types are fixed constants; a failure here only means
+	// the process mime map rejected a known type, which does not change serving.
+	_ = mime.AddExtensionType(".js", "text/javascript; charset=utf-8")
+	_ = mime.AddExtensionType(".mjs", "text/javascript; charset=utf-8")
+	_ = mime.AddExtensionType(".css", "text/css; charset=utf-8")
 	return struct{}{}
 }
 

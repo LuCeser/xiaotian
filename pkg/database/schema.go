@@ -47,23 +47,23 @@ const (
 // Session represents a dictation session row in the sessions table.
 // The sessions table is Go-owned — Python never writes to it.
 type Session struct {
-	ID           int64
 	ConnectionID string
 	State        SessionState
-	WordCount    int
 	Metadata     string // JSON column for Phase 7 extensibility
 	CreatedAt    string
 	UpdatedAt    string
+	ID           int64
+	WordCount    int
 }
 
 // SessionEvent represents a lifecycle event in the session_events table.
 // Each state transition or significant action produces one row.
 type SessionEvent struct {
-	ID         int64
-	SessionID  int64
 	EventType  string
 	Payload    string
 	OccurredAt string
+	ID         int64
+	SessionID  int64
 }
 
 // Table DDL constants — Go-owned tables only.
