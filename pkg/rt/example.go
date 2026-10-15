@@ -85,20 +85,20 @@ var ErrExampleUngrounded = errors.New("rt/example: word has no english card to g
 // the child's practiceable (已学口径, ADR-0006 #3) English words. NO region
 // field by design — textbook and learned content adapt the level (US-19).
 type ExampleContext struct {
-	// HasTextbook reports whether a textbook background was resolved.
-	HasTextbook bool
 	// Edition/Stage/Grade/Volume/Module are the confirmed textbook
 	// metadata (unregistered fields stay empty and render omitted).
 	Edition, Stage, Grade, Volume, Module string
 	// LessonName is the word's lesson inside that textbook (empty when the
 	// assignment is 待确认).
 	LessonName string
-	// LearnedLessons is that textbook's 已学完第 N 课 scale (0 = none
-	// registered as learned yet).
-	LearnedLessons int
 	// LearnedWords is the capped practiceable-vocabulary sample steering
 	// the sentence's vocabulary (already excludes the current word).
 	LearnedWords []string
+	// LearnedLessons is that textbook's 已学完第 N 课 scale (0 = none
+	// registered as learned yet).
+	LearnedLessons int
+	// HasTextbook reports whether a textbook background was resolved.
+	HasTextbook bool
 }
 
 // ExampleSource is the classroom's example-context seam (Issue #9): given
@@ -165,11 +165,11 @@ func (r *ExampleResolver) ExampleContext(ctx context.Context, w lesson.Word) (Ex
 	// The sample rides whenever it can: a failed sample read degrades the
 	// prompt's vocabulary steering (rendered 暂无) but never blocks the
 	// sentence — the textbook background alone still grounds it.
-	if eligible, err := r.Cards.List(ctx, database.CardFilter{
+	if eligible, listErr := r.Cards.List(ctx, database.CardFilter{
 		Category:          exampleCategoryEnglish,
 		ParticipatingOnly: true,
 		ScopeEligibleOnly: true,
-	}); err == nil {
+	}); listErr == nil {
 		for _, c := range eligible {
 			if c.Word == w.Word {
 				continue
@@ -186,8 +186,8 @@ func (r *ExampleResolver) ExampleContext(ctx context.Context, w lesson.Word) (Ex
 		return ec, errors.Wrap(err, "rt/example: read assignments")
 	}
 	type pick struct {
-		book    database.Textbook
 		lesson  string
+		book    database.Textbook
 		learned bool
 	}
 	picks := make([]pick, 0, len(assignments[card.ID]))

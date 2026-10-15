@@ -261,7 +261,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 		tm.failLessonInit(s)
 		return
 	}
-	picked := pickPracticeWords(cards, exclude, practiceWordsLimit, rand.New(rand.NewSource(now.UnixNano())))
+	picked := pickPracticeWords(cards, exclude, practiceWordsLimit, rand.New(rand.NewSource(now.UnixNano()))) //nolint:gosec // G404: lesson word shuffle, not used for secrets
 	if len(picked) == 0 {
 		// Honest empty answer: ready + spoken notice + ack-gated ending.
 		// No new reason — the client_end-style explicit end (plan).

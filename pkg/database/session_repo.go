@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -27,9 +28,9 @@ var (
 // and counts — so trend queries never re-derive it. The char diff is
 // deliberately absent: it re-derives purely from word+heard.
 type SessionResult struct {
-	SessionID int64
 	CreatedAt string
 	Payload   string
+	SessionID int64
 }
 
 // SessionRepository manages Go-owned session bookkeeping tables

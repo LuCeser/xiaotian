@@ -108,19 +108,19 @@ func envHas(env []string, prefix string) bool {
 // TestLoadConfigInvalid* style.
 func TestNewBridgeValidation(t *testing.T) {
 	cases := []struct {
-		name   string
 		mutate func(*infra.PythonConfig)
+		name   string
 	}{
-		{"empty interpreter", func(c *infra.PythonConfig) { c.Interpreter = "" }},
-		{"empty scriptsDir", func(c *infra.PythonConfig) { c.ScriptsDir = "" }},
-		{"empty vocabScript", func(c *infra.PythonConfig) { c.VocabScript = "" }},
-		{"empty pregenScript", func(c *infra.PythonConfig) { c.PregenScript = "" }},
-		{"maxConcurrent zero", func(c *infra.PythonConfig) { c.MaxConcurrent = 0 }},
-		{"maxConcurrent five", func(c *infra.PythonConfig) { c.MaxConcurrent = 5 }},
-		{"dueTimeout zero", func(c *infra.PythonConfig) { c.DueTimeout = 0 }},
-		{"reviewTimeout zero", func(c *infra.PythonConfig) { c.ReviewTimeout = 0 }},
-		{"pregenTimeout negative", func(c *infra.PythonConfig) { c.PregenTimeout = -1 * time.Second }},
-		{"mgmtTimeout zero", func(c *infra.PythonConfig) { c.MgmtTimeout = 0 }},
+		{mutate: func(c *infra.PythonConfig) { c.Interpreter = "" }, name: "empty interpreter"},
+		{mutate: func(c *infra.PythonConfig) { c.ScriptsDir = "" }, name: "empty scriptsDir"},
+		{mutate: func(c *infra.PythonConfig) { c.VocabScript = "" }, name: "empty vocabScript"},
+		{mutate: func(c *infra.PythonConfig) { c.PregenScript = "" }, name: "empty pregenScript"},
+		{mutate: func(c *infra.PythonConfig) { c.MaxConcurrent = 0 }, name: "maxConcurrent zero"},
+		{mutate: func(c *infra.PythonConfig) { c.MaxConcurrent = 5 }, name: "maxConcurrent five"},
+		{mutate: func(c *infra.PythonConfig) { c.DueTimeout = 0 }, name: "dueTimeout zero"},
+		{mutate: func(c *infra.PythonConfig) { c.ReviewTimeout = 0 }, name: "reviewTimeout zero"},
+		{mutate: func(c *infra.PythonConfig) { c.PregenTimeout = -1 * time.Second }, name: "pregenTimeout negative"},
+		{mutate: func(c *infra.PythonConfig) { c.MgmtTimeout = 0 }, name: "mgmtTimeout zero"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -275,12 +275,12 @@ func TestChildEnvExtraPassthrough(t *testing.T) {
 // acceptance surface: structured error classification + log field whitelist.
 func TestLogResultClassification(t *testing.T) {
 	cases := []struct {
-		name       string
-		exit       int
 		err        error
+		name       string
 		wantLevel  string
 		wantMsg    string
 		wantErrTyp string // "" means: error_type field MUST NOT be present
+		exit       int
 	}{
 		{
 			name:      "success exit 0 nil err",

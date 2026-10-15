@@ -438,7 +438,7 @@ func waitForOK(t *testing.T, url string, timeout time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	for {
-		resp, err := http.Get(url)
+		resp, err := http.Get(url) //nolint:gosec // G107: test helper polls the local health server
 		if err == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()

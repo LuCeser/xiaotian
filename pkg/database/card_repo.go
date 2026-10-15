@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -26,7 +27,6 @@ var (
 // Write-separation contract (D-03-a): Python owns writes to the cards table
 // via pybridge.Executor.RunReview. Go only reads.
 type Card struct {
-	ID       int64
 	Word     string
 	Meaning  string
 	Example  string
@@ -39,7 +39,8 @@ type Card struct {
 	MeaningSource    string
 	CreatedAt        string
 	FetchLockedUntil string // nullable; empty string when NULL
-	Participates     bool   // eligible for automatic dictation/practice selection
+	ID               int64
+	Participates     bool // eligible for automatic dictation/practice selection
 }
 
 // CardRepository provides read-only access to the Python-owned cards table.
@@ -161,6 +162,17 @@ func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, e
 // cards). Query is a substring match against word OR meaning (LIKE with
 // user-supplied wildcards escaped, RESEARCH Pitfall 6).
 type CardFilter struct {
+	// Category restricts to one vocabulary category ("english"/"chinese").
+	// Empty means all categories.
+	Category string
+
+	// Unit restricts to one unit (exact match). Empty means all units.
+	Unit string
+
+	// Query is a free-text substring matched against word OR meaning.
+	// Empty means no text filter.
+	Query string
+
 	// ParticipatingOnly restricts automatic classroom selection to cards
 	// enabled by the parent. Management views leave this false.
 	ParticipatingOnly bool
@@ -172,16 +184,6 @@ type CardFilter struct {
 	// Management views leave this false — the browse list must show
 	// out-of-scope words so the parent can manage them.
 	ScopeEligibleOnly bool
-	// Category restricts to one vocabulary category ("english"/"chinese").
-	// Empty means all categories.
-	Category string
-
-	// Unit restricts to one unit (exact match). Empty means all units.
-	Unit string
-
-	// Query is a free-text substring matched against word OR meaning.
-	// Empty means no text filter.
-	Query string
 }
 
 // scanCard scans a single row into a Card struct. Shared by GetByID and
@@ -254,7 +256,7 @@ func (r *sqliteCardRepository) CategoriesByIDs(ctx context.Context, ids []int64)
 		args = append(args, id)
 	}
 	rows, err := r.db.QueryContext(ctx,
-		"SELECT id, category FROM cards WHERE id IN ("+placeholders+")", args...)
+		"SELECT id, category FROM cards WHERE id IN ("+placeholders+")", args...) //nolint:gosec // G202: placeholders are generated '?' markers; ids are bound parameters
 	if err != nil {
 		r.logger.Error("card categories by ids failed",
 			infra.F("component", "database/card_repo"),
@@ -284,7 +286,7 @@ func (r *sqliteCardRepository) ListByUnit(ctx context.Context, unit string) ([]C
 	if err != nil {
 		return nil, errors.Wrap(err, "card schema")
 	}
-	query := fmt.Sprintf("SELECT %s FROM cards", columns)
+	query := fmt.Sprintf("SELECT %s FROM cards", columns) //nolint:gosec // G201: column list is a fixed allowlist from the schema probe, not user input
 	args := []any{}
 
 	if unit != "" {
@@ -365,7 +367,7 @@ func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]C
 	// The "c" alias anchors the Issue #4 scope predicate's correlated
 	// subqueries (card_assignments na/ia/la reference c.id); unqualified
 	// filter columns keep resolving against the same single table.
-	query := fmt.Sprintf("SELECT %s FROM cards c", columns)
+	query := fmt.Sprintf("SELECT %s FROM cards c", columns) //nolint:gosec // G201: column list is a fixed allowlist from the schema probe, not user input
 	args := []any{}
 	// First predicate needs WHERE, the rest AND — one flag tracks it across
 	// every filter field (participation included).
@@ -384,13 +386,13 @@ func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]C
 		addPredicate(" participates = 1")
 	}
 	if filter.ScopeEligibleOnly {
-		scopeSQL, scopeArgs, err := textbookScopePredicate(ctx, r.db)
-		if err != nil {
+		scopeSQL, scopeArgs, scopeErr := textbookScopePredicate(ctx, r.db)
+		if scopeErr != nil {
 			r.logger.Error("textbook scope predicate failed",
 				infra.F("component", "database/card_repo"),
-				infra.ErrField(err),
+				infra.ErrField(scopeErr),
 			)
-			return nil, errors.Wrap(err, "card list: scope")
+			return nil, errors.Wrap(scopeErr, "card list: scope")
 		}
 		if scopeSQL != "" {
 			// Bare parenthesized expression — addPredicate handles the

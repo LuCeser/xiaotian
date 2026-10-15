@@ -240,8 +240,8 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 
 	tm.mu.Lock()
 	tm.tutor = newDictationTutor(l)
-	tm.tutor.completed = true  // word pacing is over; the countdown stays disarmed
-	tm.tutor.checking = true   // the check panel owns the input surface
+	tm.tutor.completed = true // word pacing is over; the countdown stays disarmed
+	tm.tutor.checking = true  // the check panel owns the input surface
 	tm.tutor.correction = correction
 	tm.tutor.checkVerdicts = panelVerdicts
 	tm.tutor.restoreOutcomes(l.Outcomes)
@@ -292,8 +292,8 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 		return
 	}
 	tm.mu.Lock()
-	tm.tutor.markCompleted()  // word pacing is over; the countdown stays disarmed
-	tm.stopWordTimerLocked()  // no per-word timer in the check stage
+	tm.tutor.markCompleted() // word pacing is over; the countdown stays disarmed
+	tm.stopWordTimerLocked() // no per-word timer in the check stage
 	lessonID := tm.tutor.lessonID
 	expected := tm.tutor.version
 	outcomes := tm.tutor.snapshotCheckOutcomes()
@@ -305,8 +305,8 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	tm.mu.Unlock()
 
 	res, err := tm.exec.EnterCheck(ctx, lessonID, expected, lessonID+"-enter-check", outcomes)
-	switch {
-	case err == nil:
+	switch err {
+	case nil:
 		tm.mu.Lock()
 		tm.tutor.version = res.NewVersion
 		tm.tutor.checking = true
@@ -852,10 +852,10 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 
 // correctionInputs carries the diff result into the finishing goroutine.
 type correctionInputs struct {
+	changed   map[string]string
 	requestID string
 	lessonID  string
 	version   int
-	changed   map[string]string
 	total     int
 	correct   int
 }

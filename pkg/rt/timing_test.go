@@ -10,8 +10,8 @@ import (
 // captureLogger is an inline fake infra.Logger that records every entry's
 // message and fields so tests can assert the exact rt_event field set.
 type captureLogger struct {
-	mu      sync.Mutex
 	entries []captureEntry
+	mu      sync.Mutex
 }
 
 type captureEntry struct {
@@ -146,38 +146,38 @@ func TestTimingNilLoggerDefaultsToNoOp(t *testing.T) {
 // so a rename here is a wire change.
 func TestTimingEventVocabulary(t *testing.T) {
 	want := map[string]string{
-		"EventConnected":             "connected",
-		"EventSpeechStarted":         "speech_started",
-		"EventSpeechEnded":           "speech_ended",
-		"EventFirstAudioReceived":    "first_audio_received",
-		"EventInterruptHandled":      "interrupt",
-		"EventWordAnnounced":         "word_announced",
-		"EventWordAdvanced":          "word_advanced",
-		"EventTimeoutFired":          "timeout_fired",
-		"EventIntentClassified":      "intent_classified",
-		"EventLessonComplete":        "lesson_complete",
-		"EventReviewWritten":         "review_written",
-		"EventPlaybackAckTimeout":    "playback_ack_timeout",
-		"EventSentenceAckRejected":   "sentence_ack_rejected",
-		"EventSessionEnd":            "session_end",
-		"EventError":                 "error",
+		"EventConnected":           "connected",
+		"EventSpeechStarted":       "speech_started",
+		"EventSpeechEnded":         "speech_ended",
+		"EventFirstAudioReceived":  "first_audio_received",
+		"EventInterruptHandled":    "interrupt",
+		"EventWordAnnounced":       "word_announced",
+		"EventWordAdvanced":        "word_advanced",
+		"EventTimeoutFired":        "timeout_fired",
+		"EventIntentClassified":    "intent_classified",
+		"EventLessonComplete":      "lesson_complete",
+		"EventReviewWritten":       "review_written",
+		"EventPlaybackAckTimeout":  "playback_ack_timeout",
+		"EventSentenceAckRejected": "sentence_ack_rejected",
+		"EventSessionEnd":          "session_end",
+		"EventError":               "error",
 	}
 	got := map[string]string{
-		"EventConnected":             EventConnected,
-		"EventSpeechStarted":         EventSpeechStarted,
-		"EventSpeechEnded":           EventSpeechEnded,
-		"EventFirstAudioReceived":    EventFirstAudioReceived,
-		"EventInterruptHandled":      EventInterruptHandled,
-		"EventWordAnnounced":         EventWordAnnounced,
-		"EventWordAdvanced":          EventWordAdvanced,
-		"EventTimeoutFired":          EventTimeoutFired,
-		"EventIntentClassified":      EventIntentClassified,
-		"EventLessonComplete":        EventLessonComplete,
-		"EventReviewWritten":         EventReviewWritten,
-		"EventPlaybackAckTimeout":    EventPlaybackAckTimeout,
-		"EventSentenceAckRejected":   EventSentenceAckRejected,
-		"EventSessionEnd":            EventSessionEnd,
-		"EventError":                 EventError,
+		"EventConnected":           EventConnected,
+		"EventSpeechStarted":       EventSpeechStarted,
+		"EventSpeechEnded":         EventSpeechEnded,
+		"EventFirstAudioReceived":  EventFirstAudioReceived,
+		"EventInterruptHandled":    EventInterruptHandled,
+		"EventWordAnnounced":       EventWordAnnounced,
+		"EventWordAdvanced":        EventWordAdvanced,
+		"EventTimeoutFired":        EventTimeoutFired,
+		"EventIntentClassified":    EventIntentClassified,
+		"EventLessonComplete":      EventLessonComplete,
+		"EventReviewWritten":       EventReviewWritten,
+		"EventPlaybackAckTimeout":  EventPlaybackAckTimeout,
+		"EventSentenceAckRejected": EventSentenceAckRejected,
+		"EventSessionEnd":          EventSessionEnd,
+		"EventError":               EventError,
 	}
 	for name, w := range want {
 		if got[name] != w {

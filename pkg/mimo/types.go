@@ -33,11 +33,11 @@ type TTSRequest struct {
 type Message struct {
 	Role    string `json:"role"`    // "user" or "assistant" (chat: "system"/"tool")
 	Content string `json:"content"` // Message content
+	// ToolCallID identifies which tool call this role:"tool" message answers
+	ToolCallID string `json:"tool_call_id,omitempty"`
 	// ToolCalls replays the assistant's requested tool calls back to the model
 	// (assistant turn of the tool loop)
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	// ToolCallID identifies which tool call this role:"tool" message answers
-	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // AudioConfig configures TTS audio output parameters
@@ -64,9 +64,9 @@ type Choice struct {
 
 // AudioMessage contains the base64-encoded audio data
 type AudioMessage struct {
+	Audio   AudioData `json:"audio,omitempty"`
 	Role    string    `json:"role"`
 	Content string    `json:"content,omitempty"`
-	Audio   AudioData `json:"audio,omitempty"`
 }
 
 // AudioData mirrors the API's audio object verbatim. The service returns only
@@ -74,22 +74,22 @@ type AudioMessage struct {
 // in the response and must be derived client-side from the bytes (see
 // newDecodedAudio).
 type AudioData struct {
-	// ID is the server-side audio identifier
-	ID string `json:"id,omitempty"`
-	// Data contains base64-encoded audio
-	Data string `json:"data"`
 	// ExpiresAt is the optional expiry timestamp (null for TTS)
 	ExpiresAt *int64 `json:"expires_at,omitempty"`
 	// Transcript is the optional text transcript (null for TTS)
 	Transcript *string `json:"transcript,omitempty"`
+	// ID is the server-side audio identifier
+	ID string `json:"id,omitempty"`
+	// Data contains base64-encoded audio
+	Data string `json:"data"`
 }
 
 // DecodedAudioData represents decoded audio data ready for playback (client output)
 type DecodedAudioData struct {
-	// Samples contains raw audio samples
-	Samples []byte
 	// Format is the audio format (e.g., "wav", "pcm16")
 	Format string
+	// Samples contains raw audio samples
+	Samples []byte
 	// SampleRate is the sample rate in Hz
 	SampleRate int
 	// Duration is the audio duration in milliseconds
@@ -107,12 +107,12 @@ type Usage struct {
 type ASRRequest struct {
 	// Model specifies the ASR model (e.g., "mimo-v2.5-asr")
 	Model string `json:"model"`
-	// Messages contains the conversation with audio input
-	Messages []ASRMessage `json:"messages"`
 	// ASROptions carries recognition tuning (top-level "asr_options"; the
 	// official Python SDK's extra_body is flattened to the top level of the
 	// JSON body, so the wire field is "asr_options", NOT "extra_body")
 	ASROptions ASROptions `json:"asr_options,omitempty"`
+	// Messages contains the conversation with audio input
+	Messages []ASRMessage `json:"messages"`
 }
 
 // ASRMessage represents a message in ASR request (OpenAI-compatible format)
@@ -123,8 +123,8 @@ type ASRMessage struct {
 
 // MessageContent represents content within a message (can be text or audio)
 type MessageContent struct {
-	Type       string      `json:"type"` // "input_audio"
 	InputAudio *AudioInput `json:"input_audio,omitempty"`
+	Type       string      `json:"type"` // "input_audio"
 }
 
 // AudioInput represents input audio data with Data URL format
@@ -164,10 +164,10 @@ type DecodedASRText struct {
 	Text       string        `json:"text"`
 	Language   string        `json:"language,omitempty"`
 	Dialect    string        `json:"dialect,omitempty"`
-	Confidence float64       `json:"confidence,omitempty"`
-	Duration   int           `json:"duration,omitempty"`
 	Words      []WordSegment `json:"words,omitempty"`
 	Usage      Usage         `json:"usage,omitempty"`
+	Confidence float64       `json:"confidence,omitempty"`
+	Duration   int           `json:"duration,omitempty"`
 }
 
 // WordSegment represents a recognized word with timing information
@@ -245,19 +245,6 @@ type ToolCallFunction struct {
 // API (OpenAI-compatible /chat/completions, Ticket 03 — voice-command intent
 // analysis).
 type ChatRequest struct {
-	// Model specifies the LLM to use (e.g. "mimo-v2.5", "mimo-v2.5-pro")
-	Model string `json:"model"`
-	// Messages carries the conversation (system prompt + user turns)
-	Messages []Message `json:"messages"`
-	// MaxTokens caps the completion length (0 = server default)
-	MaxTokens int `json:"max_tokens,omitempty"`
-	// Temperature tunes sampling (0 = omitted; mimo-v2.5 thinking mode
-	// ignores it server-side anyway per the official docs)
-	Temperature float64 `json:"temperature,omitempty"`
-	// Tools offers function tools to the model (Phase 13 RT-03 tool loop).
-	// Omitted when unset so legacy chat request bodies stay unchanged on the
-	// wire.
-	Tools []ToolDef `json:"tools,omitempty"`
 	// ToolChoice influences tool usage. MiMo only honors the string "auto" —
 	// structured values are silently stripped server-side and behave as auto
 	// (13-RESEARCH Pitfall 7), so WithToolChoiceAuto is the only meaningful
@@ -267,6 +254,19 @@ type ChatRequest struct {
 	// server-side and must be explicitly disabled for latency-sensitive
 	// realtime turns (Pitfall 1) — see WithThinkingDisabled.
 	Thinking *ThinkingConfig `json:"thinking,omitempty"`
+	// Model specifies the LLM to use (e.g. "mimo-v2.5", "mimo-v2.5-pro")
+	Model string `json:"model"`
+	// Messages carries the conversation (system prompt + user turns)
+	Messages []Message `json:"messages"`
+	// Tools offers function tools to the model (Phase 13 RT-03 tool loop).
+	// Omitted when unset so legacy chat request bodies stay unchanged on the
+	// wire.
+	Tools []ToolDef `json:"tools,omitempty"`
+	// MaxTokens caps the completion length (0 = server default)
+	MaxTokens int `json:"max_tokens,omitempty"`
+	// Temperature tunes sampling (0 = omitted; mimo-v2.5 thinking mode
+	// ignores it server-side anyway per the official docs)
+	Temperature float64 `json:"temperature,omitempty"`
 }
 
 // ChatMessageContent mirrors an assistant message in a chat completion
@@ -283,9 +283,9 @@ type ChatMessageContent struct {
 // ChatResponse represents the response from an LLM chat completion request.
 type ChatResponse struct {
 	Choices []struct {
+		FinishReason string             `json:"finish_reason"`
 		Message      ChatMessageContent `json:"message"`
 		Index        int                `json:"index"`
-		FinishReason string             `json:"finish_reason"`
 	} `json:"choices"`
 	Usage Usage `json:"usage,omitempty"`
 }
@@ -323,14 +323,14 @@ func (r *ChatResponse) FirstToolCalls() []ToolCall {
 // (Ticket 04 — photo OCR). Exactly one payload field is set per Type: Text
 // for "text", ImageURL for "image_url".
 type ChatContentPart struct {
-	// Type is the part kind: "text" or "image_url"
-	Type string `json:"type"`
-	// Text carries the part text when Type == "text"
-	Text string `json:"text,omitempty"`
 	// ImageURL carries the image reference when Type == "image_url". The URL
 	// may be public https or a base64 data URI ("data:image/jpeg;base64,...")
 	// per the official image-understanding docs.
 	ImageURL *ChatContentPartImage `json:"image_url,omitempty"`
+	// Type is the part kind: "text" or "image_url"
+	Type string `json:"type"`
+	// Text carries the part text when Type == "text"
+	Text string `json:"text,omitempty"`
 }
 
 // ChatContentPartImage holds the image reference of an "image_url" content
@@ -359,10 +359,10 @@ type ChatVisionRequest struct {
 // []ChatContentPart array for the vision user turn — so it is typed `any`
 // here. ChatVision constructs both shapes itself; callers never build one.
 type VisionMessage struct {
-	// Role is "system" or "user"
-	Role string `json:"role"`
 	// Content is either string (system) or []ChatContentPart (user vision)
 	Content any `json:"content"`
+	// Role is "system" or "user"
+	Role string `json:"role"`
 }
 
 // StreamChunk represents a chunk of streaming audio data delivered to the
@@ -400,12 +400,12 @@ type StreamCallback func(chunk StreamChunk) error
 
 // StreamResult represents the result of a streaming TTS operation
 type StreamResult struct {
+	// Error contains any error that occurred during streaming
+	Error error
 	// TotalDuration is the total audio duration in milliseconds
 	TotalDuration int
 	// ChunkCount is the number of chunks received
 	ChunkCount int
-	// Error contains any error that occurred during streaming
-	Error error
 }
 
 // Client is the interface for Mimo service operations
@@ -549,13 +549,13 @@ func WithASRLanguage(lang string) ASROption {
 func (s *StreamChunk) UnmarshalJSON(data []byte) error {
 	var wire struct {
 		Choices []struct {
-			Delta struct {
+			FinishReason *string `json:"finish_reason"`
+			Delta        struct {
 				Audio struct {
 					ID   string `json:"id"`
 					Data string `json:"data"`
 				} `json:"audio"`
 			} `json:"delta"`
-			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {

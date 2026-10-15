@@ -13,13 +13,13 @@ var jpegSoi = []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
 
 func TestPipeline_Process(t *testing.T) {
 	tests := []struct {
-		name      string
-		image     []byte
-		reply     string
 		readerErr error
-		minConf   float64
 		wantErr   error
+		name      string
+		reply     string
 		wantText  string
+		image     []byte
+		minConf   float64
 		wantConf  float64
 	}{
 		{
@@ -192,13 +192,13 @@ func TestParseOCRJSON(t *testing.T) {
 
 func TestPipeline_ProcessWords(t *testing.T) {
 	tests := []struct {
-		name      string
-		image     []byte
-		reply     string
 		readerErr error
-		minConf   float64
 		wantErr   error
+		name      string
+		reply     string
+		image     []byte
 		wantTexts []string
+		minConf   float64
 	}{
 		{
 			name:      "strict json array round-trips in order",

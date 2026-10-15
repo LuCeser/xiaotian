@@ -29,7 +29,7 @@ func TestNewSession_AudioSourceRemembered(t *testing.T) {
 
 			s, err := session.NewSession(
 				context.Background(),
-				nil,      // client — not exercised
+				nil, // client — not exercised
 				"conn-src-"+string(tc.source),
 				fsrsSvc,
 				gen,
@@ -80,8 +80,8 @@ func TestWordCompleteAudioPlays(t *testing.T) {
 	}{
 		{tts.SourceMimo, 2},
 		{tts.SourceVolcengine, 1},
-		{"", 1},        // zero value (sessions built by struct literals in old tests)
-		{"weird", 1},   // unknown backend
+		{"", 1},      // zero value (sessions built by struct literals in old tests)
+		{"weird", 1}, // unknown backend
 	}
 	for _, tc := range cases {
 		if got := session.WordCompleteAudioPlays(tc.source); got != tc.want {

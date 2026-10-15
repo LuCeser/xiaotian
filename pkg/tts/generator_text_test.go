@@ -47,7 +47,7 @@ func TestGenerateText_Success_ChineseFeedback(t *testing.T) {
 	}
 
 	// The returned path exists and Load round-trips through the same key.
-	if _, err := os.Stat(path); err != nil {
+	if _, err = os.Stat(path); err != nil {
 		t.Fatalf("returned path not on disk: %v (%q)", err, path)
 	}
 	loaded, err := cache.Load("session-1", text)

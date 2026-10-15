@@ -93,10 +93,10 @@ type AddRequest struct {
 // category field: category is read-only per D-07, and decodeJSON's
 // DisallowUnknownFields turns any attempt to send one into a 400.
 type EditRequest struct {
-	Word    string  `json:"word"`
 	Meaning *string `json:"meaning"`
 	Example *string `json:"example"`
 	Unit    *string `json:"unit"`
+	Word    string  `json:"word"`
 }
 
 // ParticipationRequest is the narrow body for changing classroom
@@ -104,8 +104,8 @@ type EditRequest struct {
 // explicit false from a missing key (an absent participates is a 400 —
 // the caller must state the intent, never default it).
 type ParticipationRequest struct {
-	IDs          []int64 `json:"ids"`
 	Participates *bool   `json:"participates"`
+	IDs          []int64 `json:"ids"`
 }
 
 // validateIDBatch is the shared 1..500-unique-positive ids guard (the
@@ -156,9 +156,9 @@ type RenameRequest struct {
 // (an empty --category would override the script's "english" default and
 // silently match nothing — a misleading success for a destructive op).
 type DeleteRequest struct {
-	Words    []string `json:"words"`
 	Unit     string   `json:"unit"`
 	Category string   `json:"category"`
+	Words    []string `json:"words"`
 }
 
 // validateDeleteRequest enforces the delete-path contract: category
@@ -282,9 +282,10 @@ func ValidateFSRSSettings(s FSRSSettings) error {
 
 // decodeJSON decodes a JSON request body strictly: the body is capped at
 // maxBodyBytes via http.MaxBytesReader (T-09-04) and unknown fields are
-// rejected (RESEARCH Pitfall 12 — a typo like "catagory" must 400, not be
 // silently ignored). On failure it writes the error envelope itself and
 // returns false so the caller can simply return.
+//
+//nolint:misspell // deliberate typo example: rejected (RESEARCH Pitfall 12 — a typo like "catagory" must 400, not be
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	dec := json.NewDecoder(r.Body)
@@ -389,8 +390,8 @@ type TextbookUpdateRequest struct {
 	Grade          *string  `json:"grade"`
 	Volume         *string  `json:"volume"`
 	Module         *string  `json:"module"`
-	Lessons        []string `json:"lessons"`
 	LearnedLessons *int     `json:"learnedLessons"`
+	Lessons        []string `json:"lessons"`
 	SetPrimary     bool     `json:"setPrimary"`
 }
 
@@ -398,8 +399,8 @@ type TextbookUpdateRequest struct {
 // /textbooks/{id}/unassign body. Lesson is the empty-string-legal lesson
 // name (待确认); IncludeInScope is the parent's explicit override.
 type TextbookAssignRequest struct {
-	CardIDs        []int64 `json:"cardIds"`
 	Lesson         string  `json:"lesson"`
+	CardIDs        []int64 `json:"cardIds"`
 	IncludeInScope bool    `json:"includeInScope"`
 }
 
@@ -472,11 +473,14 @@ func validateTextbookUpdateRequest(req *TextbookUpdateRequest) string {
 		}
 	}
 	for _, field := range []struct {
-		name  string
 		value *string
+		name  string
 	}{
-		{"edition", req.Edition}, {"stage", req.Stage}, {"grade", req.Grade},
-		{"volume", req.Volume}, {"module", req.Module},
+		{value: req.Edition, name: "edition"},
+		{value: req.Stage, name: "stage"},
+		{value: req.Grade, name: "grade"},
+		{value: req.Volume, name: "volume"},
+		{value: req.Module, name: "module"},
 	} {
 		if field.value != nil && len([]rune(*field.value)) > maxTextbookFieldRunes {
 			return fmt.Sprintf("%s exceeds %d characters", field.name, maxTextbookFieldRunes)

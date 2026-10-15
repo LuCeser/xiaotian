@@ -8,11 +8,12 @@ import (
 	"context"
 	"testing"
 
+	"go.uber.org/zap"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
-	"go.uber.org/zap"
 )
 
 // TestStartSession_AtCapacityFriendlyError: cap=1; the second connection's
@@ -42,7 +43,11 @@ func TestStartSession_AtCapacityFriendlyError(t *testing.T) {
 	svcCtx, svcCancel := context.WithCancel(context.Background())
 	t.Cleanup(svcCancel)
 	go hub.Run(svcCtx)
-	go manager.Start(svcCtx)
+	go func() {
+		if startErr := manager.Start(svcCtx); startErr != nil {
+			logger.Error("session manager start failed", infra.ErrField(startErr))
+		}
+	}()
 
 	handlers := ttsHandlers(manager, fakeFSRS, nil, nil, logger)
 

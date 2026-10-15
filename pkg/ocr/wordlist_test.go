@@ -35,15 +35,15 @@ func (f *fakeListReader) read(ctx context.Context, systemPrompt, userPrompt stri
 
 func TestWordlistPipeline_Recognize(t *testing.T) {
 	tests := []struct {
-		name       string
-		image      []byte
-		reply      string
 		readerErr  error
 		wantErr    error
+		name       string
+		reply      string
+		checkMime  string
+		image      []byte
 		wantWords  []string
 		wantMeans  []string
 		wantConfs  []float64
-		checkMime  string
 		maxBytes   int
 		skipDetail bool
 	}{

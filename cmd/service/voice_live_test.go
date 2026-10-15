@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/voice"
@@ -128,15 +129,15 @@ func resamplePCM(t *testing.T, in []byte, from, to int) []byte {
 		src := float64(j) * ratio
 		i0 := int(src)
 		frac := src - float64(i0)
-		s0 := int16(binary.LittleEndian.Uint16(in[i0*2:]))
+		s0 := int16(binary.LittleEndian.Uint16(in[i0*2:])) //nolint:gosec // G115: s16le PCM sample; the high bit is the sign
 		var s1 int16
 		if (i0+1)*2+2 <= len(in) {
-			s1 = int16(binary.LittleEndian.Uint16(in[(i0+1)*2:]))
+			s1 = int16(binary.LittleEndian.Uint16(in[(i0+1)*2:])) //nolint:gosec // G115: s16le PCM sample; the high bit is the sign
 		} else {
 			s1 = s0
 		}
 		v := int16(float64(s0) + (float64(s1)-float64(s0))*frac)
-		binary.LittleEndian.PutUint16(out[j*2:], uint16(v))
+		binary.LittleEndian.PutUint16(out[j*2:], uint16(v)) //nolint:gosec // G115: s16le PCM bit pattern, not a numeric range check
 	}
 	return out
 }
