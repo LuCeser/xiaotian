@@ -301,6 +301,13 @@ func (b *Bridge) run(ctx context.Context, timeout time.Duration, name string, ar
 
 	start := time.Now()
 	err := cmd.Run()
+	// cmd.Cancel's group SIGKILL can reap the process before os/exec's
+	// ctx-watch reports the deadline — Wait then surfaces the raw
+	// ExitError (signal: killed). The timeout contract above is run()'s
+	// own, so map it here instead of trusting the race.
+	if err != nil && cctx.Err() != nil {
+		err = cctx.Err()
+	}
 
 	exitCode := 0
 	if cmd.ProcessState != nil {
