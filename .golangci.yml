@@ -19,18 +19,6 @@ linters:
   settings:
     govet:
       enable-all: true
-      # fieldalignment is not a `go vet` analyzer. Its suggested fix
-      # reorders fields, drops end-of-line comments, and breaks unkeyed
-      # composite literals (pkg/grading tests stop compiling). The 234
-      # findings were never enforced: CI exited before analysis.
-      disable:
-        - fieldalignment
-    misspell:
-      # Deliberate misspellings used as fixtures (transposition example,
-      # unknown-JSON-field example). The linter stays enabled.
-      ignore-rules:
-        - recieve
-        - catagory
   exclusions:
     generated: lax
     presets:
