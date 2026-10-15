@@ -250,7 +250,6 @@
    */
   RTCapture.prototype._wireGraph = function (generation) {
     var self = this;
-    if (generation === undefined) generation = this._generation;
     var ctx = this.audioCtx;
     this._source = ctx.createMediaStreamSource(this._stream);
     this._mute = ctx.createGain();

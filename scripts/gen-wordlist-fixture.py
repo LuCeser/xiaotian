@@ -111,6 +111,48 @@ def main() -> None:
         [("bird", "鸟"), ("frog", "青蛙")],
         ["Copy twice."],
     )
+    # Issue #6 fixtures: two MORE meta families for the re-import suite.
+    # 科普版 and 仁爱版 share the word "eagle" on purpose — importing both
+    # pages is the 多来源 scenario (one word, two textbooks); the 科普版
+    # page re-appears across tests as the 重传/re-resolve vehicle, and its
+    # "camel" row is the 释义差异 candidate (the conflict test seeds a
+    # different library meaning first).
+    render(
+        OUT / "photo-textbook-kepu.png",
+        "科普版 三年级上册 Unit 2 第1课 单词表",
+        [("eagle", "鹰"), ("deer", "鹿"), ("camel", "骆驼")],
+        ["Read and copy once."],
+    )
+    render(
+        OUT / "photo-textbook-renjiao.png",
+        "仁爱版 三年级上册 Unit 1 第1课 单词表",
+        [("eagle", "鹰"), ("whale", "鲸")],
+        ["Listen and read."],
+    )
+    # Issue #8 fixtures: word lists whose meaning column is PARTIALLY
+    # blank — the reply fixtures carry meaning "" for those rows, the
+    # supplement-eligible set. Three more meta families (外研版/北师大版/
+    # 陕旅版) so each scenario's book preselect can never hijack another
+    # test's (same isolation rule as the #5/#6 suites; the per-run DB
+    # keeps textbooks).
+    render(
+        OUT / "photo-meaning-waiyan.png",
+        "外研版 四年级上册 Unit 2 第1课 单词表",
+        [("mango", "芒果"), ("peach", "桃子"), ("kiwi", ""), ("melon", "")],
+        ["Read the words aloud."],
+    )
+    render(
+        OUT / "photo-meaning-bsda.png",
+        "北师大版 五年级上册 Unit 1 第1课 单词表",
+        [("camel", "骆驼"), ("deer", ""), ("goat", ""), ("wolf", "")],
+        ["Copy each word twice."],
+    )
+    render(
+        OUT / "photo-meaning-shanlv.png",
+        "陕旅版 三年级上册 Unit 4 第1课 单词表",
+        [("corn", "玉米"), ("beanpod", "")],
+        ["Listen and match."],
+    )
 
 
 if __name__ == "__main__":

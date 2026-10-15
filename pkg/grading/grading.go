@@ -15,8 +15,9 @@
 //     distance 1 on a word of at least 2 characters) is still WRONG for the
 //     score, but grades FSRS "hard" instead of "again": the student almost
 //     knew it. Common minor mistakes (one typo, one dropped/doubled letter,
-//     a transposition like "recieve") land here.
 //   - Everything else is wrong/again.
+//
+//nolint:misspell // deliberate typo example: a transposition like "recieve" lands here.
 package grading
 
 import (
@@ -44,12 +45,12 @@ type CharOp struct {
 
 // WordJudgment is the full outcome of grading one word.
 type WordJudgment struct {
-	Correct  bool     `json:"correct"`
-	Rating   string   `json:"rating"` // FSRS verb: "good" | "hard" | "again"
-	NearMiss bool     `json:"near_miss"`
-	Blank    bool     `json:"blank"`    // no answer was submitted for this word
-	Distance int      `json:"distance"` // Damerau-Levenshtein distance (0 for blanks)
+	Rating   string   `json:"rating"`   // FSRS verb: "good" | "hard" | "again"
 	Diff     []CharOp `json:"diff"`     // full alignment; nil when Blank
+	Distance int      `json:"distance"` // Damerau-Levenshtein distance (0 for blanks)
+	Correct  bool     `json:"correct"`
+	NearMiss bool     `json:"near_miss"`
+	Blank    bool     `json:"blank"` // no answer was submitted for this word
 }
 
 // nearMissDistance is the maximum edit distance that still counts as "the
@@ -127,7 +128,8 @@ func Normalize(word, lang string) string {
 // damerau computes the restricted (optimal string alignment) Damerau-
 // Levenshtein distance between two rune slices — Levenshtein plus adjacent
 // transpositions, which is how spelling mistakes actually happen
-// ("recieve", "香蕉"→"香焦" style single slips aside).
+//
+//nolint:misspell // deliberate typo example ("recieve", "香蕉"→"香焦" style single slips aside).
 func damerau(e, h []rune) int {
 	if len(e) == 0 {
 		return len(h)

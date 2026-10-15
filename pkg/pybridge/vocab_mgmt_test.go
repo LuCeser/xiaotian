@@ -118,6 +118,42 @@ func TestAddArgs(t *testing.T) {
 		}
 	})
 
+	t.Run("meaning_source rides the payload only when generated", func(t *testing.T) {
+		// Issue #8 / ADR-0005: provenance travels in the same list-mode
+		// JSON. "generated" is explicit; every other value is OMITTED
+		// (omitempty) so manual-add payloads stay byte-stable and Python
+		// normalizes the absence to "material".
+		argv, cleanup, err := addArgs(cfg, AddOpts{
+			Category: "english",
+			Entries: []AddEntry{
+				{Word: "apple", Meaning: "n. 苹果", MeaningSource: "generated"},
+				{Word: "banana", Meaning: "香蕉"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("addArgs returned unexpected error: %v", err)
+		}
+		defer cleanup()
+
+		idx := argvFind(argv, "--words")
+		if idx < 0 {
+			t.Fatalf("argv %v missing --words", argv)
+		}
+		var decoded []map[string]any
+		if err := json.Unmarshal([]byte(argv[idx+1]), &decoded); err != nil {
+			t.Fatalf("--words value not valid JSON: %v (val=%q)", err, argv[idx+1])
+		}
+		if len(decoded) != 2 {
+			t.Fatalf("decoded %d entries, want 2", len(decoded))
+		}
+		if got, ok := decoded[0]["meaning_source"].(string); !ok || got != "generated" {
+			t.Errorf("entry[0].meaning_source = %v, want \"generated\"", decoded[0]["meaning_source"])
+		}
+		if _, ok := decoded[1]["meaning_source"]; ok {
+			t.Errorf("entry[1].meaning_source = %v, want omitted (omitempty contract)", decoded[1]["meaning_source"])
+		}
+	})
+
 	t.Run("payload is list-mode JSON with word/meaning/example keys", func(t *testing.T) {
 		// RESEARCH Pitfall 4 acceptance: entries MUST marshal as a JSON
 		// ARRAY of objects so the example field survives (dict mode would
@@ -244,6 +280,8 @@ func TestAddArgs(t *testing.T) {
 // rows can express "field provided" (non-nil) vs "field absent" (nil) for
 // EditOpts's optional *string fields.
 func strPtr(s string) *string { return &s }
+
+func intPtr(i int) *int { return &i }
 
 // assertNoInlinePayload is the Plan 09-03 inline-payload absence check: none
 // of the edit / rename-unit / delete-words commands carry JSON payloads --
@@ -447,12 +485,12 @@ func TestDeleteWordsArgs(t *testing.T) {
 	}
 
 	cases := []struct {
-		name        string
-		opts        DeleteWordsOpts
-		wantErr     bool
 		presentKV   map[string]string // flag -> expected value
-		presentFlag []string          // valueless flags (e.g. --confirm)
-		absent      []string          // flags that must NOT appear
+		opts        DeleteWordsOpts
+		name        string
+		presentFlag []string // valueless flags (e.g. --confirm)
+		absent      []string // flags that must NOT appear
+		wantErr     bool
 	}{
 		{
 			name:    "no target at all is a validation error",
@@ -561,15 +599,15 @@ func TestDeleteWordsArgs(t *testing.T) {
 //   - otherwise -> the extracted trailing JSON bytes, nil error
 func TestClassifyMgmtRun(t *testing.T) {
 	cases := []struct {
+		runErr       error
+		wantSentinel error // sentinel the returned error must wrap; nil = success
 		name         string
+		wantStdout   string
+		wantRaw      string
 		stdout       []byte
 		stderr       []byte
 		exitCode     int
-		runErr       error
-		wantSentinel error // sentinel the returned error must wrap; nil = success
-		wantExit     bool  // expect a recoverable *ExitError (errors.As)
-		wantStdout   string
-		wantRaw      string
+		wantExit     bool // expect a recoverable *ExitError (errors.As)
 	}{
 		{
 			name:         "context deadline maps to ErrPythonTimeout",
@@ -710,8 +748,8 @@ func TestTextbookUpdateArgs(t *testing.T) {
 	}
 
 	argv = textbookUpdateArgs(cfg, TextbookUpdateOpts{
-		ID: 7, HasLearnedLessons: true, LearnedLessons: 2, SetPrimary: true,
-		HasLessons: true, Lessons: []string{"A课", "B课"}, Grade: "三年级",
+		ID: 7, LearnedLessons: intPtr(2), SetPrimary: true,
+		Lessons: []string{"A课", "B课"}, Grade: strPtr("三年级"),
 	})
 	if got := argvValue(argv, "--learned-lessons"); got != "2" {
 		t.Fatalf("--learned-lessons = %q, want 2", got)

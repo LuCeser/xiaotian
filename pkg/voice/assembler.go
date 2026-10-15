@@ -13,10 +13,10 @@ import (
 // assembly time — duplicate sequences are absorbed by the map, and reordering
 // is invisible to the caller.
 type Assembler struct {
-	mu       sync.Mutex
 	chunks   map[uint32][]byte
 	bytes    int
 	maxBytes int
+	mu       sync.Mutex
 }
 
 // NewAssembler builds an assembler capped at maxBytes of PCM (the 1C1G
@@ -72,14 +72,14 @@ func (a *Assembler) Assemble() []byte {
 	if len(a.chunks) == 0 {
 		return nil
 	}
-	seqs := make([]int, 0, len(a.chunks))
+	seqs := make([]uint32, 0, len(a.chunks))
 	for seq := range a.chunks {
-		seqs = append(seqs, int(seq))
+		seqs = append(seqs, seq)
 	}
-	sort.Ints(seqs)
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
 	out := make([]byte, 0, a.bytes)
 	for _, seq := range seqs {
-		out = append(out, a.chunks[uint32(seq)]...)
+		out = append(out, a.chunks[seq]...)
 	}
 	return out
 }
@@ -109,12 +109,12 @@ type bufferEntry struct {
 // hook): an abandoned entry and its capped PCM payload live at most one
 // idleTTL past its last audio frame.
 type Buffers struct {
-	mu        sync.Mutex
+	lastSweep time.Time
 	entries   map[string]*bufferEntry
+	now       func() time.Time
 	maxBytes  int
 	idleTTL   time.Duration
-	lastSweep time.Time
-	now       func() time.Time
+	mu        sync.Mutex
 }
 
 // NewBuffers builds the registry.

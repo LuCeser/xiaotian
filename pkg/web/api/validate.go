@@ -45,6 +45,16 @@ const (
 	CategoryChinese = "chinese"
 )
 
+// Meaning-source values (Issue #8 / ADR-0005): the only distinguishable
+// provenance is a system-supplemented meaning; everything else — material
+// original, library legacy, hand-typed — is "material". The Python column
+// and the JS display rule use the same literals (cross-language, one
+// enum, documented here).
+const (
+	MeaningSourceMaterial  = "material"
+	MeaningSourceGenerated = "generated"
+)
+
 // errBadCategory is the internal marker for a category enum violation.
 var errBadCategory = errors.New("category must be english or chinese")
 
@@ -66,6 +76,12 @@ type AddRequest struct {
 		Word    string `json:"word"`
 		Meaning string `json:"meaning"`
 		Example string `json:"example"`
+		// MeaningSource is the Issue #8 provenance flag: "generated" for a
+		// system-supplemented meaning, "material"/absent for everything
+		// else. Validated here; an empty meaning always stores "material"
+		// regardless (Python-side normalize — an empty gloss never carries
+		// a marker).
+		MeaningSource string `json:"meaning_source"`
 	} `json:"entries"`
 }
 
@@ -77,10 +93,10 @@ type AddRequest struct {
 // category field: category is read-only per D-07, and decodeJSON's
 // DisallowUnknownFields turns any attempt to send one into a 400.
 type EditRequest struct {
-	Word    string  `json:"word"`
 	Meaning *string `json:"meaning"`
 	Example *string `json:"example"`
 	Unit    *string `json:"unit"`
+	Word    string  `json:"word"`
 }
 
 // ParticipationRequest is the narrow body for changing classroom
@@ -88,33 +104,41 @@ type EditRequest struct {
 // explicit false from a missing key (an absent participates is a 400 —
 // the caller must state the intent, never default it).
 type ParticipationRequest struct {
-	IDs          []int64 `json:"ids"`
 	Participates *bool   `json:"participates"`
+	IDs          []int64 `json:"ids"`
+}
+
+// validateIDBatch is the shared 1..500-unique-positive ids guard (the
+// batch contract set-participation introduced; assign/unassign reuse it
+// verbatim). field names the JSON array in the messages ("ids",
+// "cardIds"). Returns "" on success.
+func validateIDBatch(field string, ids []int64) string {
+	if len(ids) < 1 || len(ids) > 500 {
+		return fmt.Sprintf("%s must contain between 1 and 500 items", field)
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	for i, id := range ids {
+		if id <= 0 {
+			return fmt.Sprintf("%s[%d] must be positive", field, i)
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Sprintf("%s[%d] is duplicated", field, i)
+		}
+		seen[id] = struct{}{}
+	}
+	return ""
 }
 
 // validateParticipationRequest mirrors the script-side guard exactly
-// (1..500 unique positive ids): rejecting here keeps a malformed batch out
-// of the subprocess entirely, while the Python re-check stays authoritative
-// for direct CLI callers (double validation, same shape as
+// (validateIDBatch): rejecting here keeps a malformed batch out of the
+// subprocess entirely, while the Python re-check stays authoritative for
+// direct CLI callers (double validation, same shape as
 // validateEditRequest vs cmd_edit).
 func validateParticipationRequest(req *ParticipationRequest) string {
 	if req.Participates == nil {
 		return "participates is required"
 	}
-	if len(req.IDs) < 1 || len(req.IDs) > 500 {
-		return "ids must contain between 1 and 500 items"
-	}
-	seen := make(map[int64]struct{}, len(req.IDs))
-	for i, id := range req.IDs {
-		if id <= 0 {
-			return fmt.Sprintf("ids[%d] must be positive", i)
-		}
-		if _, exists := seen[id]; exists {
-			return fmt.Sprintf("ids[%d] is duplicated", i)
-		}
-		seen[id] = struct{}{}
-	}
-	return ""
+	return validateIDBatch("ids", req.IDs)
 }
 
 // RenameRequest is the decoded POST /units/rename body shape (Plan 09-05).
@@ -132,9 +156,9 @@ type RenameRequest struct {
 // (an empty --category would override the script's "english" default and
 // silently match nothing — a misleading success for a destructive op).
 type DeleteRequest struct {
-	Words    []string `json:"words"`
 	Unit     string   `json:"unit"`
 	Category string   `json:"category"`
+	Words    []string `json:"words"`
 }
 
 // validateDeleteRequest enforces the delete-path contract: category
@@ -258,9 +282,10 @@ func ValidateFSRSSettings(s FSRSSettings) error {
 
 // decodeJSON decodes a JSON request body strictly: the body is capped at
 // maxBodyBytes via http.MaxBytesReader (T-09-04) and unknown fields are
-// rejected (RESEARCH Pitfall 12 — a typo like "catagory" must 400, not be
 // silently ignored). On failure it writes the error envelope itself and
 // returns false so the caller can simply return.
+//
+//nolint:misspell // deliberate typo example: rejected (RESEARCH Pitfall 12 — a typo like "catagory" must 400, not be
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	dec := json.NewDecoder(r.Body)
@@ -314,6 +339,14 @@ func validateAddRequest(req *AddRequest) string {
 		if n := len([]rune(e.Example)); n > maxExampleRunes {
 			return fmt.Sprintf("entries[%d].example exceeds %d characters", i, maxExampleRunes)
 		}
+		// Issue #8: the provenance enum is validated at the gate so a
+		// malformed flag fails as 400 invalid_request, never leaking into
+		// the stored column (Python re-normalizes the empty-meaning case).
+		if e.MeaningSource != "" && e.MeaningSource != MeaningSourceMaterial &&
+			e.MeaningSource != MeaningSourceGenerated {
+			return fmt.Sprintf("entries[%d].meaning_source must be %q or %q",
+				i, MeaningSourceMaterial, MeaningSourceGenerated)
+		}
 	}
 	if n := len([]rune(req.Unit)); n > maxUnitRunes {
 		return fmt.Sprintf("unit exceeds %d characters", maxUnitRunes)
@@ -351,23 +384,23 @@ type TextbookCreateRequest struct {
 // field is a pointer (or Lessons nil-vs-empty) so absent keeps the
 // column; LearnedLessons is a pointer because 0 is a legal progress.
 type TextbookUpdateRequest struct {
-	Name           *string   `json:"name"`
-	Edition        *string   `json:"edition"`
-	Stage          *string   `json:"stage"`
-	Grade          *string   `json:"grade"`
-	Volume         *string   `json:"volume"`
-	Module         *string   `json:"module"`
-	Lessons        []string  `json:"lessons"`
-	LearnedLessons *int      `json:"learnedLessons"`
-	SetPrimary     bool      `json:"setPrimary"`
+	Name           *string  `json:"name"`
+	Edition        *string  `json:"edition"`
+	Stage          *string  `json:"stage"`
+	Grade          *string  `json:"grade"`
+	Volume         *string  `json:"volume"`
+	Module         *string  `json:"module"`
+	LearnedLessons *int     `json:"learnedLessons"`
+	Lessons        []string `json:"lessons"`
+	SetPrimary     bool     `json:"setPrimary"`
 }
 
 // TextbookAssignRequest is the decoded POST /textbooks/{id}/assign and
 // /textbooks/{id}/unassign body. Lesson is the empty-string-legal lesson
 // name (待确认); IncludeInScope is the parent's explicit override.
 type TextbookAssignRequest struct {
-	CardIDs        []int64 `json:"cardIds"`
 	Lesson         string  `json:"lesson"`
+	CardIDs        []int64 `json:"cardIds"`
 	IncludeInScope bool    `json:"includeInScope"`
 }
 
@@ -440,11 +473,14 @@ func validateTextbookUpdateRequest(req *TextbookUpdateRequest) string {
 		}
 	}
 	for _, field := range []struct {
-		name  string
 		value *string
+		name  string
 	}{
-		{"edition", req.Edition}, {"stage", req.Stage}, {"grade", req.Grade},
-		{"volume", req.Volume}, {"module", req.Module},
+		{value: req.Edition, name: "edition"},
+		{value: req.Stage, name: "stage"},
+		{value: req.Grade, name: "grade"},
+		{value: req.Volume, name: "volume"},
+		{value: req.Module, name: "module"},
 	} {
 		if field.value != nil && len([]rune(*field.value)) > maxTextbookFieldRunes {
 			return fmt.Sprintf("%s exceeds %d characters", field.name, maxTextbookFieldRunes)
@@ -467,23 +503,13 @@ func validateTextbookUpdateRequest(req *TextbookUpdateRequest) string {
 	return ""
 }
 
-// validateTextbookAssignRequest mirrors validateParticipationRequest's
-// batch guard (1..500 unique positive ids) plus the lesson name cap. The
-// lesson's MEMBERSHIP in the textbook's list is checked by the handler
-// against the repository row (it needs the textbook, not just the body).
+// validateTextbookAssignRequest applies the shared batch guard
+// (validateIDBatch, "cardIds") plus the lesson name cap. The lesson's
+// MEMBERSHIP in the textbook's list is checked by the handler against the
+// repository row (it needs the textbook, not just the body).
 func validateTextbookAssignRequest(req *TextbookAssignRequest) string {
-	if len(req.CardIDs) < 1 || len(req.CardIDs) > 500 {
-		return "cardIds must contain between 1 and 500 items"
-	}
-	seen := make(map[int64]struct{}, len(req.CardIDs))
-	for i, id := range req.CardIDs {
-		if id <= 0 {
-			return fmt.Sprintf("cardIds[%d] must be positive", i)
-		}
-		if _, exists := seen[id]; exists {
-			return fmt.Sprintf("cardIds[%d] is duplicated", i)
-		}
-		seen[id] = struct{}{}
+	if msg := validateIDBatch("cardIds", req.CardIDs); msg != "" {
+		return msg
 	}
 	if n := len([]rune(req.Lesson)); n > maxTextbookLessonRunes {
 		return fmt.Sprintf("lesson exceeds %d characters", maxTextbookLessonRunes)

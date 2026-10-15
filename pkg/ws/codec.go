@@ -4,9 +4,19 @@ package ws
 
 import (
 	"encoding/binary"
+	"math"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/crc16"
 )
+
+// payloadLenField is the uint16 payload length stored in a frame header.
+// Lengths above 65535 keep the low 16 bits, matching a bare conversion.
+func payloadLenField(n int) uint16 {
+	if n < 0 || n > math.MaxUint16 {
+		return uint16(n) //nolint:gosec // G115: protocol length is uint16; keep the low 16 bits
+	}
+	return uint16(n)
+}
 
 // ComputeCRC16 computes the CRC-16-CCITT checksum of data (RESEARCH.md Don't Hand-Roll).
 // Uses the local pkg/crc16 implementation (stdlib hash/crc16 not available in Go 1.26).
@@ -47,7 +57,7 @@ func ValidateFrame(data []byte) bool {
 func EncodeFrame(h *FrameHeader, payload []byte) []byte {
 	// Work on a local copy so the caller's header is not mutated (WR-04).
 	local := *h
-	local.PayloadLen = uint16(len(payload)) // D-09 auto-fill
+	local.PayloadLen = payloadLenField(len(payload)) // D-09 auto-fill
 
 	// Encode header (computes and sets CRC on the local copy only)
 	header := EncodeHeader(&local)

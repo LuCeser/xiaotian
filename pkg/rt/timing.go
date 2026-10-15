@@ -72,12 +72,12 @@ const (
 // as structured rt_event log entries. All events for a session share one
 // process anchor so their t_mono_ns values are mutually comparable.
 type EventRecorder struct {
-	logger    infra.Logger
-	sessionID string
 	// anchor is the in-process monotonic reference fixed at construction.
 	// time.Since(anchor) is monotonic and immune to wall-clock steps (NTP),
 	// unlike time.Now().UnixNano().
-	anchor time.Time
+	anchor    time.Time
+	logger    infra.Logger
+	sessionID string
 }
 
 // NewEventRecorder builds the session's event recorder. A nil logger is

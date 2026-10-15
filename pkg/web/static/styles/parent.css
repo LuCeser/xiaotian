@@ -6,6 +6,17 @@
  * Mobile-first (min-width media queries, same convention as main.css).
  * Plan 09-07 adds the browse toolbar/unit-groups/modal/skeleton styles
  * and the >=1024px two-column grid (D-03).
+ *
+ * 2026-10-14 convergence pass (Issues #2-#7 + 13.3 UI review): one status
+ * token system (each --*-bg tint pairs with a --*-strong text measured
+ * >=4.5:1 on that tint at 14px/600), two-tier touch targets (60px
+ * page-level controls / 44px floor for nested in-table controls), type
+ * ramp limited to 12/14/16/20/28 at weights 400/600.
+ *
+ * 2026-10-14 follow-up: rules for the JS-emitted classes the convergence
+ * pass left unstyled (photo rows/statuses, pdf pending chip + page lesson
+ * apply, browse list host, toolbar textbook entry, modal forms), 44px hit
+ * areas on the two bare 18px checkboxes, toast-success contrast fix.
  */
 
 :root {
@@ -25,6 +36,30 @@
   --badge-en-text: #1e3a8a;
   --badge-zh-bg: #fef3c7;
   --badge-zh-text: #92400e;
+  /*
+   * Status system (save chips, verdicts, result banners, PDF page chips):
+   * every status pairs a light tint bg with a deep text color. The base
+   * --success/--warning hues are reserved for LARGE solid fills; small
+   * text on a tint (or on white) must use the --*-strong partner —
+   * the base hues measure only 3.0-3.6:1 there (WCAG AA needs 4.5:1).
+   * Even the 16px success toast fails on the base hue (white on
+   * --success is 3.77:1), so .toast-success fills with --success-strong.
+   * --info covers the neutral "processing" state (same hue family as the
+   * english badge, distinct semantic).
+   */
+  --success-bg: #ecfdf5;
+  --success-strong: #047857; /* 5.2:1 on --success-bg; white on it as a solid toast fill: 5.5:1 */
+  --success-border: #a7f3d0;
+  --warning-bg: #fffbeb;
+  --warning-strong: #b45309; /* 4.8:1 on --warning-bg, 5.0:1 on white */
+  --warning-border: #fde68a;
+  --danger-bg: #fef2f2;
+  --danger-strong: #b91c1c; /* 5.9:1 on --danger-bg, 6.5:1 on white */
+  --info-bg: #dbeafe;
+  --info-strong: #1d4ed8; /* 5.5:1 on --info-bg */
+  /* Text/icons sitting ON a saturated fill (accent/destructive buttons,
+     active pill, slider thumb ring, spinner). */
+  --on-fill: #ffffff;
 }
 
 * {
@@ -189,7 +224,7 @@ body {
 .form-input,
 .form-textarea {
   width: 100%;
-  min-height: 44px;
+  min-height: 60px; /* page-level touch-target tier (.btn/.parent-tab) */
   padding: 8px 12px;
   font-size: 16px;
   font-family: inherit;
@@ -209,9 +244,11 @@ body {
   margin-top: 4px;
 }
 
+/* Warning-tinted small text must use --warning-strong: the base --warning
+   hue measures only 3.1:1 on white (AA needs 4.5:1 at 14px). */
 .form-error {
   font-size: 14px;
-  color: var(--warning);
+  color: var(--warning-strong);
   margin-top: 4px;
 }
 
@@ -223,7 +260,7 @@ body {
 
 .category-option {
   flex: 1;
-  min-height: 44px;
+  min-height: 60px; /* page-level touch-target tier */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -252,7 +289,7 @@ body {
 /* ------------------------------------------------------------------ */
 
 .btn {
-  min-height: 44px;
+  min-height: 60px; /* page-level touch-target tier (.parent-tab parity) */
   padding: 8px 20px;
   font-size: 16px;
   font-weight: 600;
@@ -270,7 +307,7 @@ body {
 
 .btn-primary {
   background: var(--accent);
-  color: #ffffff;
+  color: var(--on-fill);
 }
 
 .btn-secondary {
@@ -283,12 +320,20 @@ body {
    actions (UI-SPEC Color roles, Plan 09-07 Task 2). */
 .btn-destructive {
   background: var(--destructive);
-  color: #ffffff;
+  color: var(--on-fill);
 }
 
 /* ------------------------------------------------------------------ */
 /* Word rows / browse list                                             */
 /* ------------------------------------------------------------------ */
+
+/* The aria-live results host (unit groups / skeletons / empty & error
+   states swap inside it). Children own the rhythm; the host keeps a
+   one-row floor so the card never collapses to zero height while the
+   region is between states. */
+.browse-list {
+  min-height: 48px;
+}
 
 .word-row {
   display: flex;
@@ -327,9 +372,18 @@ body {
 
 @media (min-width: 768px) {
   .word-meaning {
-    flex-basis: auto;
     order: 0;
-    flex: 1 1 auto;
+    /* Row-height consistency fix: flex-basis auto (max-content) made a
+       long meaning's hypothetical width push badge / participation-toggle
+       / row-actions onto a second flex line (61px rows vs 89px rows).
+       basis 0 + min-width 0 lets the meaning yield space instead — the
+       controls stay on line 1. The 2-line clamp above stays as the
+       UI-SPEC long-text backstop; line-height 1.25 keeps even a clamped
+       two-line meaning (40px) inside the 44px action floor so every
+       row measures the same. */
+    flex: 1 1 0;
+    min-width: 0;
+    line-height: 1.25;
   }
 }
 
@@ -359,7 +413,7 @@ body {
 }
 
 .list-error {
-  color: var(--warning);
+  color: var(--warning-strong);
   padding: 16px 0;
 }
 
@@ -382,14 +436,17 @@ body {
   z-index: 200;
 }
 
+/* White on the base --success measured 3.77:1 — below AA 4.5:1 at the
+   toast's 16px. Fill with the --success-strong partner instead: white
+   on #047857 measures 5.5:1. */
 .toast-success {
-  background: var(--success);
-  color: #ffffff;
+  background: var(--success-strong);
+  color: var(--on-fill);
 }
 
 .toast-error {
   background: var(--destructive);
-  color: #ffffff;
+  color: var(--on-fill);
 }
 
 /* ------------------------------------------------------------------ */
@@ -405,7 +462,7 @@ body {
 }
 
 .add-tab {
-  min-height: 44px;
+  min-height: 60px; /* tab-family parity with .parent-tab */
   padding: 8px 4px 10px;
   font-size: 16px;
   font-weight: 600;
@@ -525,15 +582,15 @@ body {
 }
 
 .result-banner-success {
-  color: var(--success);
-  background: #ecfdf5;
-  border: 1px solid #a7f3d0;
+  color: var(--success-strong); /* 5.2:1 on the tint; base --success is 3.6:1 */
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
 }
 
 .result-banner-warning {
-  color: var(--warning);
-  background: #fffbeb;
-  border: 1px solid #fde68a;
+  color: var(--warning-strong); /* 4.8:1 on the tint; base --warning is 3.3:1 */
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
 }
 
 .result-banner p {
@@ -566,6 +623,14 @@ body {
 /* above; only the photo-specific surfaces live here.                  */
 /* ------------------------------------------------------------------ */
 
+/* The form is a transparent container (single/batch-add-form family
+   pattern — children own the spacing) with one exception: the 开始识别
+   button is a direct child followed straight by the bordered preview
+   table, so the table carries the 16px rhythm gap. */
+.photo-add-form > .preview-scroll {
+  margin-top: 16px;
+}
+
 .photo-pick-row {
   display: flex;
   align-items: center;
@@ -588,7 +653,7 @@ body {
 
 .photo-file-meta {
   font-size: 14px;
-  color: var(--text-secondary, #64748b);
+  color: var(--muted);
   overflow-wrap: anywhere;
 }
 
@@ -597,8 +662,8 @@ body {
   max-width: 100%;
   max-height: 180px;
   margin-top: 8px;
-  border-radius: 8px;
-  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 12px;
+  border: 1px solid var(--border);
 }
 
 .photo-actions {
@@ -612,10 +677,11 @@ body {
   vertical-align: top;
 }
 
-/* In-cell inputs: same field styling, tighter box for the table rows. */
+/* In-cell inputs: same field styling, tighter box for the table rows.
+   44px is the nested-control touch floor (page-level fields are 60px). */
 .photo-cell-input {
   width: 100%;
-  min-height: 36px;
+  min-height: 44px;
   padding: 6px 8px;
   box-sizing: border-box;
 }
@@ -626,28 +692,81 @@ body {
 }
 
 .photo-status-note {
-  margin: 2px 0 0;
+  margin: 4px 0 0;
   font-size: 12px;
   font-weight: 400;
-  color: var(--text-secondary, #64748b);
+  color: var(--muted);
   overflow-wrap: anywhere;
+}
+
+/* Status text rides the preview-table rhythm (14px); the unmarked states
+   (new/exists) stay muted like the batch table's valid rows, only the
+   two action-needed states carry status color. */
+.photo-status {
+  font-size: 14px;
+  color: var(--muted);
 }
 
 /* Status chips reuse the preview-status colors; conflict earns the
    warning tone because the original meaning is being kept silently
    unless the parent notices it. */
 .photo-status-conflict {
-  color: var(--warning, #b45309);
+  color: var(--warning-strong);
+}
+
+/* new/exists complete the four-state family: both stay muted (normal
+   rows, no action needed) — the same register as .preview-status-valid
+   in the batch table. */
+.photo-status-new,
+.photo-status-exists {
+  color: var(--muted);
 }
 
 .photo-status-invalid {
-  color: var(--danger, #b91c1c);
+  color: var(--danger-strong);
+}
+
+/* 释义差异确认 (Issue #6): the two-choice resolution under a conflict
+   row's note — stacked radios, iPad-tap sized. The option text is the
+   decision itself, so it sits at 14px (Label tier), not chip-note 12px. */
+.photo-conflict-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.photo-conflict-option {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.photo-conflict-option input[type='radio'] {
+  margin: 0;
+}
+
+/* Review rows: one tr per entry, the status variant rides the same
+   element (photo-row-new/-exists/-conflict/-invalid). The base carries
+   the status-flip transition so an edit that reclassifies a row doesn't
+   pop; variants only retint the in-cell inputs — conflict/exists/
+   invalid dim to --background, the new (normal) row stays --surface. */
+.photo-row .photo-cell-input {
+  transition: background-color 150ms ease-out;
+}
+
+.photo-row-new .photo-cell-input {
+  background: var(--surface);
 }
 
 .photo-row-conflict .photo-cell-input,
 .photo-row-exists .photo-cell-input,
 .photo-row-invalid .photo-cell-input {
-  background: #f8fafc;
+  background: var(--background);
 }
 
 /* ------------------------------------------------------------------ */
@@ -659,25 +778,26 @@ body {
 .photo-textbook-panel {
   margin-top: 12px;
   padding: 12px;
-  border: 1px solid var(--border, #e2e8f0);
-  border-radius: 8px;
-  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
 }
 
 .photo-textbook-title {
-  margin: 0 0 6px;
-  font-size: 15px;
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600; /* h4 UA default is 700 — the ramp allows 400/600 only */
 }
 
 .photo-meta-line {
   margin: 4px 0;
-  font-size: 13px;
-  color: var(--text-secondary, #64748b);
+  font-size: 14px;
+  color: var(--muted);
   overflow-wrap: anywhere;
 }
 
 .photo-meta-warn {
-  color: var(--warning, #b45309);
+  color: var(--warning-strong);
 }
 
 .photo-book-field {
@@ -702,17 +822,109 @@ body {
 
 .photo-lesson-select {
   max-width: 220px;
-  min-height: 36px;
+  min-height: 44px; /* nested-control touch floor */
 }
 
 .photo-include-toggle {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 10px;
-  font-size: 13px;
-  color: var(--text-secondary, #64748b);
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 14px;
+  color: var(--muted);
 }
+
+/* Issue #7 — scanned-PDF import: per-page status bar + page header rows.
+   Page chips ride the same status token system as the save chips. */
+.pdf-status-bar {
+  margin: 12px 0;
+}
+
+.pdf-summary-line {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.pdf-page-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pdf-page-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: var(--background);
+  color: var(--muted);
+}
+
+/* pending completes the chip family (not yet run): the neutral waiting
+   state — same token pair as .save-chip-unknown. */
+.pdf-chip-pending {
+  background: var(--background);
+  color: var(--muted);
+}
+
+.pdf-chip-running {
+  background: var(--info-bg);
+  color: var(--info-strong);
+}
+
+.pdf-chip-done {
+  background: var(--success-bg);
+  color: var(--success-strong);
+}
+
+.pdf-chip-failed {
+  background: var(--danger-bg);
+  color: var(--danger-strong);
+}
+
+/* Nested inside a failed page chip: the 44px nested-control floor applies
+   (it is the only tap target for recovering a failed page). */
+.pdf-retry-btn {
+  padding: 8px 12px;
+  font-size: 14px;
+  min-height: 44px;
+}
+
+.pdf-stop-btn {
+  margin-top: 8px;
+}
+
+.pdf-page-head td {
+  background: var(--background);
+  font-size: 14px;
+  padding: 8px 12px;
+}
+
+.pdf-page-label {
+  font-weight: 600;
+  margin-right: 12px;
+}
+
+.pdf-page-lesson {
+  max-width: 200px;
+  min-height: 44px; /* nested-control touch floor */
+  margin: 0 8px 0 12px;
+}
+
+/* 应用到本页 sits inside the page-head td next to the 44px
+   .pdf-page-lesson input — the nested-control floor applies, same
+   sizing as .pdf-retry-btn (the .btn base's 60px would tower over the
+   input it belongs to). */
+.pdf-page-lesson-apply {
+  padding: 8px 12px;
+  font-size: 14px;
+  min-height: 44px;
+}
+
 
 .photo-lesson-cell {
   min-width: 120px;
@@ -732,7 +944,7 @@ body {
   width: 14px;
   height: 14px;
   border: 2px solid rgba(255, 255, 255, 0.4);
-  border-top-color: #ffffff;
+  border-top-color: var(--on-fill);
   border-radius: 50%;
   margin-right: 8px;
   animation: btn-spin 800ms linear infinite;
@@ -764,6 +976,14 @@ body {
   margin-bottom: 16px;
 }
 
+/* 教材管理 entry rides the toolbar (Issue #4): content-width in the
+   stacking toolbar — the flex default (stretch) would make this
+   secondary entry read as a full-width primary action under the search
+   box. */
+.textbook-manage-btn {
+  align-self: flex-start;
+}
+
 .participation-bulk {
   display: flex;
   align-items: center;
@@ -773,7 +993,7 @@ body {
 }
 
 .selection-count {
-  color: var(--text-muted, #667085);
+  color: var(--muted);
   margin-right: auto;
 }
 
@@ -786,10 +1006,10 @@ body {
 .participation-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   white-space: nowrap;
-  color: var(--text-muted, #667085);
-  font-size: 13px;
+  color: var(--muted);
+  font-size: 14px;
 }
 
 .participation-toggle input {
@@ -805,7 +1025,7 @@ body {
 .search-input {
   flex: 1;
   width: 100%;
-  min-height: 48px; /* 44px ✕ button fits inside */
+  min-height: 60px; /* page-level tier; the 44px ✕ button still fits inside */
   padding: 8px 52px 8px 12px;
   font-size: 16px;
   font-family: inherit;
@@ -844,7 +1064,7 @@ body {
 }
 
 .pill {
-  min-height: 44px;
+  min-height: 60px; /* page-level touch-target tier (toolbar parity) */
   padding: 8px 16px;
   font-size: 16px;
   font-family: inherit;
@@ -859,7 +1079,7 @@ body {
 .pill.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #ffffff;
+  color: var(--on-fill);
   font-weight: 600;
 }
 
@@ -989,7 +1209,7 @@ body {
   height: 48px;
   margin: 8px 0;
   border-radius: 12px;
-  background: linear-gradient(90deg, #eef1f5 25%, #e3e8ee 37%, #eef1f5 63%);
+  background: linear-gradient(90deg, var(--background) 25%, var(--border) 37%, var(--background) 63%);
   background-size: 400% 100%;
   animation: skeleton-shimmer 1.2s ease infinite;
 }
@@ -1062,6 +1282,13 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* Edit/rename dialogs wrap their fields AND the actions row in a form
+   (so Enter submits). Pin the form's own margin so the .form-field /
+   .modal-actions rhythm stays the single source of spacing. */
+.modal-form {
+  margin: 0;
+}
+
 .modal-actions {
   display: flex;
   gap: 8px;
@@ -1109,7 +1336,7 @@ body {
   margin-top: -10px;
   border-radius: 50%;
   background: var(--accent);
-  border: 3px solid #ffffff;
+  border: 3px solid var(--on-fill);
   box-shadow: 0 0 0 1px var(--border);
 }
 
@@ -1130,7 +1357,7 @@ body {
   height: 22px;
   border-radius: 50%;
   background: var(--accent);
-  border: 3px solid #ffffff;
+  border: 3px solid var(--on-fill);
   box-shadow: 0 0 0 1px var(--border);
 }
 
@@ -1228,8 +1455,8 @@ body {
 .lesson-flag {
   font-size: 12px;
   font-weight: 600;
-  color: var(--warning);
-  border: 1px solid var(--warning);
+  color: var(--warning-strong); /* 5.0:1 on white; base --warning is 3.1:1 */
+  border: 1px solid var(--warning-strong);
   border-radius: 999px;
   padding: 0 8px;
   white-space: nowrap;
@@ -1258,19 +1485,21 @@ body {
   white-space: nowrap;
 }
 
+/* Chip text uses the --*-strong partners of each tint: measured
+   5.2/5.9/4.8:1 on their backgrounds (AA), where the base hues fail. */
 .save-chip-saved {
-  background: #ecfdf5;
-  color: #047857; /* green-700: 5.21:1 on this tint (AA); --success green-600 is 3.58:1 */
+  background: var(--success-bg);
+  color: var(--success-strong);
 }
 
 .save-chip-failed {
-  background: #fef2f2;
-  color: var(--destructive);
+  background: var(--danger-bg);
+  color: var(--danger-strong);
 }
 
 .save-chip-pending {
-  background: #fffbeb;
-  color: #b45309; /* amber-700: 4.84:1 on this tint (AA); --warning amber-600 is 3.07:1 */
+  background: var(--warning-bg);
+  color: var(--warning-strong);
 }
 
 .save-chip-unknown {
@@ -1356,13 +1585,13 @@ body {
 }
 
 .lesson-verdict-ok {
-  background: #ecfdf5;
-  color: var(--success);
+  background: var(--success-bg);
+  color: var(--success-strong); /* 5.2:1; base --success was 3.6:1 here */
 }
 
 .lesson-verdict-wrong {
-  background: #fef2f2;
-  color: var(--destructive);
+  background: var(--danger-bg);
+  color: var(--danger-strong); /* 5.9:1; --destructive was 4.4:1 here */
 }
 
 .lesson-verdict-unconfirmed {
@@ -1482,9 +1711,9 @@ body {
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--bg-secondary, #f1f5f9);
-  color: var(--text-secondary, #64748b);
-  border: 1px solid var(--border, #e2e8f0);
+  background: var(--background);
+  color: var(--muted);
+  border: 1px solid var(--border);
   white-space: nowrap;
   max-width: 160px;
   overflow: hidden;
@@ -1493,8 +1722,8 @@ body {
 }
 
 .textbook-chip-pending {
-  color: var(--warning, #b45309);
-  border-color: var(--warning, #b45309);
+  color: var(--warning-strong);
+  border-color: var(--warning-strong);
   background: transparent;
 }
 
@@ -1511,9 +1740,9 @@ body {
 }
 
 .textbook-row {
-  border: 1px solid var(--border, #e2e8f0);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
 }
 
 .textbook-row-head {
@@ -1524,26 +1753,28 @@ body {
 }
 
 .textbook-name {
-  font-size: 15px;
+  font-size: 16px;
+  font-weight: 600; /* row title — same register as .word-text */
 }
 
+/* 主教材 badge: the accent fill is reserved for the six UI-SPEC uses, so
+   this rides the english-badge token pair (blue family, 8.5:1). */
 .textbook-primary-badge {
   font-size: 12px;
-  padding: 1px 8px;
+  padding: 2px 8px;
   border-radius: 999px;
-  background: var(--primary, #2563eb);
-  color: #fff;
+  background: var(--badge-en-bg);
+  color: var(--badge-en-text);
 }
 
 .textbook-meta {
-  font-size: 13px;
-  color: var(--text-secondary, #64748b);
+  font-size: 14px;
+  color: var(--muted);
 }
 
 .textbook-progress {
-  margin: 6px 0;
-  font-size: 13px;
-  color: var(--text, inherit);
+  margin: 8px 0;
+  font-size: 14px;
 }
 
 .textbook-controls {
@@ -1561,6 +1792,7 @@ body {
 .textbook-create-form h4 {
   margin: 12px 0 8px;
   font-size: 14px;
+  font-weight: 600; /* h4 UA default is 700 — the ramp allows 400/600 only */
 }
 
 .textbook-include-toggle {
@@ -1569,4 +1801,92 @@ body {
   gap: 8px;
   margin: 8px 0;
   font-size: 14px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Issue #8 — 缺失英语释义按教材语境补充（ADR-0005）                     */
+/* ------------------------------------------------------------------ */
+
+/* The supplement strip: one row under the textbook panel (生成按钮 + 说明). */
+.photo-meaning-bar {
+  margin-top: 8px;
+}
+
+.photo-meaning-bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+}
+
+.photo-meaning-hint {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* The meaning cell stacks the input with its provenance affordances. */
+.photo-meaning-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.photo-meaning-cell .photo-cell-input {
+  flex: 1 1 120px;
+  width: auto;
+}
+
+/* 系统补充 marker: the neutral-info register (a provenance fact, not a
+   warning) — outlined pill so it never reads as a status chip. */
+.meaning-source-badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--badge-en-bg);
+  background: var(--badge-en-bg);
+  color: var(--badge-en-text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 取消补充: a quiet text button next to the badge (44px touch floor via
+   padding on the row's nested-control scale). */
+.meaning-cancel-btn {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 4px 10px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.meaning-cancel-btn:hover {
+  color: var(--warning-strong);
+}
+
+/* 生成失败 note rides the existing status-note rhythm; the warning tone
+   flags an unanswered attempt without blocking submission. */
+.photo-gen-failed-note {
+  color: var(--warning-strong);
+}
+
+/* Browse-side 系统 badge (后续查看保留来源区别): smaller sibling of the
+   preview marker, same outlined-pill register. */
+.word-src-badge {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--badge-en-bg);
+  background: var(--badge-en-bg);
+  color: var(--badge-en-text);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
 }

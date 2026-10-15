@@ -35,7 +35,7 @@ third_party/python/.venv*/
 .DS_Store
 
 # Vendor (use modules)
-vendor/
+/vendor/
 
 # UAT fix cycle hygiene (2026-09-24)
 node_modules/
@@ -74,3 +74,4 @@ nul
 .planning/tmp-*
 /rt-timing-*.jsonl
 .scratch/debug/
+tests/e2e/.pdf-capture/

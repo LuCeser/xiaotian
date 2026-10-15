@@ -30,7 +30,7 @@ func newTextbookTestHandler(t *testing.T, exec *fakeExecutor, cards *fakeCardRep
 		t.Fatalf("NewTextbookRepository: %v", err)
 	}
 	h := NewHandler(exec, cards, textbooks, lessons, practice, receipts,
-		nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+		nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 	return h, db
 }
 
@@ -90,11 +90,11 @@ func TestTextbookRoutes(t *testing.T) {
 		exec := &fakeExecutor{}
 		h, _ := newTextbookTestHandler(t, exec, &fakeCardRepo{})
 		for name, body := range map[string]string{
-			"missing name":        `{"category":"english"}`,
-			"bad category":        `{"name":"X","category":"math"}`,
-			"duplicate lesson":    `{"name":"X","lessons":["第1课","第1课"]}`,
-			"empty lesson":        `{"name":"X","lessons":[""]}`,
-			"oversized lesson":    `{"name":"X","lessons":["` + strings.Repeat("课", 101) + `"]}`,
+			"missing name":     `{"category":"english"}`,
+			"bad category":     `{"name":"X","category":"math"}`,
+			"duplicate lesson": `{"name":"X","lessons":["第1课","第1课"]}`,
+			"empty lesson":     `{"name":"X","lessons":[""]}`,
+			"oversized lesson": `{"name":"X","lessons":["` + strings.Repeat("课", 101) + `"]}`,
 		} {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/textbooks", strings.NewReader(body)))
@@ -184,8 +184,9 @@ func TestTextbookRoutes(t *testing.T) {
 			t.Fatalf("legal update: status = %d (%s)", rec.Code, rec.Body.String())
 		}
 		calls := exec.textbookUpdateCalls
-		if len(calls) != 1 || !calls[0].HasLearnedLessons || calls[0].LearnedLessons != 2 ||
-			!calls[0].SetPrimary || calls[0].Grade != "三年级" || calls[0].HasLessons {
+		if len(calls) != 1 || calls[0].LearnedLessons == nil || *calls[0].LearnedLessons != 2 ||
+			!calls[0].SetPrimary || calls[0].Grade == nil || *calls[0].Grade != "三年级" ||
+			calls[0].Lessons != nil {
 			t.Fatalf("update opts = %+v", calls[0])
 		}
 	})
@@ -273,8 +274,8 @@ func TestTextbookRoutes(t *testing.T) {
 			Words []struct {
 				Word      string `json:"word"`
 				Textbooks []struct {
-					Name    string `json:"name"`
-					Lesson  string `json:"lesson"`
+					Name   string `json:"name"`
+					Lesson string `json:"lesson"`
 				} `json:"textbooks"`
 			} `json:"words"`
 		}

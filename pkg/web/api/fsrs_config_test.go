@@ -40,7 +40,7 @@ const fsrsTestConfigFile = "fsrs_config.json"
 func newFSRSTestHandler(t *testing.T, exec pybridge.Executor, dataDir string) http.Handler {
 	t.Helper()
 	_, lessons, practice, receipts := newLessonTestStores(t)
-	return NewHandler(exec, &fakeCardRepo{}, nil, lessons, practice, receipts, nil, infra.PythonConfig{DataDir: dataDir}, infra.NewNoOpLogger())
+	return NewHandler(exec, &fakeCardRepo{}, nil, lessons, practice, receipts, nil, nil, infra.PythonConfig{DataDir: dataDir}, infra.NewNoOpLogger())
 }
 
 func TestGetFSRSDefaults(t *testing.T) {
@@ -70,7 +70,7 @@ func TestGetFSRSDefaults(t *testing.T) {
 func TestGetFSRSFromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, fsrsTestConfigFile)
-	if err := os.WriteFile(path, []byte(`{"desired_retention":0.9,"maximum_interval":120}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"desired_retention":0.9,"maximum_interval":120}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	h := newFSRSTestHandler(t, &fakeExecutor{}, dir)
@@ -98,7 +98,7 @@ func TestGetFSRSFromFile(t *testing.T) {
 func TestGetFSRSCorruptFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, fsrsTestConfigFile)
-	if err := os.WriteFile(path, []byte(`{not json at all`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{not json at all`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	h := newFSRSTestHandler(t, &fakeExecutor{}, dir)
@@ -142,7 +142,7 @@ func TestGetFSRSOutOfBoundsFile(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, fsrsTestConfigFile)
-			if err := os.WriteFile(path, []byte(tc.raw), 0o644); err != nil {
+			if err := os.WriteFile(path, []byte(tc.raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			h := newFSRSTestHandler(t, &fakeExecutor{}, dir)
@@ -171,7 +171,7 @@ func TestGetFSRSOutOfBoundsFile(t *testing.T) {
 	t.Run("boundary-valid file still returns verbatim", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, fsrsTestConfigFile)
-		if err := os.WriteFile(path, []byte(`{"desired_retention":0.95,"maximum_interval":36500}`), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(`{"desired_retention":0.95,"maximum_interval":36500}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		h := newFSRSTestHandler(t, &fakeExecutor{}, dir)
@@ -313,7 +313,7 @@ func TestPutFSRSWritesAtomically(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, fsrsTestConfigFile)
 		original := `{"desired_retention":0.9,"maximum_interval":120}`
-		if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 			t.Fatal(err)
 		}
 
@@ -326,12 +326,12 @@ func TestPutFSRSWritesAtomically(t *testing.T) {
 		//     MOVEFILE_REPLACE_EXISTING) fails with ACCESS_DENIED.
 		// Either way the handler must return 500 with the ORIGINAL file
 		// byte-identical — never a truncated config (T-09-06).
-		restore := func() {}
+		var restore func()
 		if runtime.GOOS == "windows" {
 			if err := os.Chmod(path, 0o444); err != nil {
 				t.Fatal(err)
 			}
-			restore = func() { _ = os.Chmod(path, 0o644) }
+			restore = func() { _ = os.Chmod(path, 0o600) }
 		} else {
 			if err := os.Chmod(dir, 0o555); err != nil {
 				t.Fatal(err)

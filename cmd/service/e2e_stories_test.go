@@ -16,24 +16,24 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/grading"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/session"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
-	"go.uber.org/zap"
 )
 
 // storiesFSRS serves DISJOINT two-word queues per SelectDueCards call (the
 // multi-user contract: a locked card never goes to a second session) and
 // records every unlock's card IDs for containment assertions.
 type storiesFSRS struct {
-	mu sync.Mutex
-
 	pool     []pybridge.DueCard
 	served   [][]int64 // card IDs handed out, per call
 	unlocked [][]int64 // card IDs released, per unlock call
+	mu       sync.Mutex
 }
 
 func newStoriesFSRS() *storiesFSRS {
@@ -127,7 +127,11 @@ func bootStoriesWithGen(t *testing.T, fakeFSRS *storiesFSRS, gen session.TTSSess
 	svcCtx, svcCancel := context.WithCancel(context.Background())
 	t.Cleanup(svcCancel)
 	go hub.Run(svcCtx)
-	go manager.Start(svcCtx)
+	go func() {
+		if startErr := manager.Start(svcCtx); startErr != nil {
+			logger.Error("session manager start failed", infra.ErrField(startErr))
+		}
+	}()
 
 	handlers := ttsHandlers(manager, fakeFSRS, nil, nil, logger)
 	var conns []*websocket.Conn

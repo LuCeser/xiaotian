@@ -60,13 +60,13 @@ func (mt MessageType) String() string {
 
 // FrameHeader represents the 16-byte fixed header of a WebSocket frame (D-05, D-11)
 type FrameHeader struct {
-	Version    uint8       // Protocol version (D-11)
-	MsgType    MessageType // Message type (D-06)
 	Sequence   uint32      // Sequence number (D-07, 32-bit consecutive)
 	Timestamp  uint32      // Microsecond timestamp (optional)
 	PayloadLen uint16      // Payload length in bytes (D-09, variable-length control messages)
 	Reserved   uint16      // Reserved for future use (D-05)
 	CRC16      uint16      // CRC-16-CCITT checksum (D-08, auto-filled by EncodeHeader)
+	Version    uint8       // Protocol version (D-11)
+	MsgType    MessageType // Message type (D-06)
 }
 
 // Sentinel errors for frame validation (D-44 centralized validation)

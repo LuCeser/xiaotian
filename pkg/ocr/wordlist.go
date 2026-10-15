@@ -101,9 +101,8 @@ const maxWordlistEntries = 100
 // until the parent explicitly commits them through the ordinary add path
 // (nothing here touches any database).
 type WordlistPipeline struct {
-	read      ListReader
-	maxBytes  int
-	maxInputs int
+	read     ListReader
+	maxBytes int
 }
 
 // NewWordlistPipeline builds the pipeline. maxBytes caps one upload (the
@@ -111,7 +110,7 @@ type WordlistPipeline struct {
 // with ErrImageTooLarge before any API round trip. A nil ListReader yields
 // a pipeline whose Recognize fails with the errNilSeam wiring error.
 func NewWordlistPipeline(read ListReader, maxBytes int) *WordlistPipeline {
-	return &WordlistPipeline{read: read, maxBytes: maxBytes, maxInputs: maxWordlistEntries}
+	return &WordlistPipeline{read: read, maxBytes: maxBytes}
 }
 
 // MaxBytes exposes the pipeline's upload byte cap so the HTTP layer can bound
@@ -155,7 +154,7 @@ func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte) (*Wordli
 	if !ok {
 		return nil, errUnparseableReply
 	}
-	if len(parsed.entries) > p.maxInputs {
+	if len(parsed.entries) > maxWordlistEntries {
 		return nil, ErrTooManyEntries
 	}
 
@@ -212,36 +211,16 @@ func sniffImage(b []byte) (string, bool) {
 	return "", false
 }
 
-// wordlistJSONEntry is one array entry's decode shape. Meaning may be absent
-// (a meaning-less list is legal); Lesson is the Issue #5 per-entry lesson
-// (absent/null → the page-level lesson applies); Confidence then defaults
-// to 0.5 via the regex fallback or stays 0 from json.Unmarshal — both
-// display the same way because nothing gates on it.
-type wordlistJSONEntry struct {
-	Word       string  `json:"word"`
-	Meaning    string  `json:"meaning"`
-	Lesson     string  `json:"lesson"`
-	Confidence float64 `json:"confidence"`
-}
-
-// wordlistTextbookJSON is the textbook object's decode shape. A null field
-// and an absent field both decode to "" — the honesty contract treats them
-// identically (待确认), so no pointer fields are needed here.
-type wordlistTextbookJSON struct {
-	Edition string `json:"edition"`
-	Stage   string `json:"stage"`
-	Grade   string `json:"grade"`
-	Volume  string `json:"volume"`
-	Module  string `json:"module"`
-	Lesson  string `json:"lesson"`
-}
-
 // wordlistReplyJSON is the whole Issue #5 object reply's decode shape.
-// Textbook is a pointer so a null textbook stays distinguishable from an
-// all-empty one at parse time (Recognize collapses both to meta == nil).
+// It decodes straight into the exported WordlistTextbook/WordlistEntry —
+// field-for-field the same wire contract, so one struct per concept. A
+// null field and an absent field both decode to "" (the honesty contract
+// treats them identically, 待确认), and Textbook is a pointer so a null
+// textbook stays distinguishable from an all-empty one at parse time
+// (Recognize collapses both to meta == nil).
 type wordlistReplyJSON struct {
-	Textbook *wordlistTextbookJSON `json:"textbook"`
-	Entries  []wordlistJSONEntry   `json:"entries"`
+	Textbook *WordlistTextbook `json:"textbook"`
+	Entries  []WordlistEntry   `json:"entries"`
 }
 
 // wordlistEntryPattern extracts the word field of every array entry when the
@@ -251,8 +230,8 @@ var wordlistEntryPattern = regexp.MustCompile(`"word"\s*:\s*"((?:[^"\\]|\\.)*)"\
 
 // parsedWordlist is parseWordlistReply's output — decoded but untrimmed.
 type parsedWordlist struct {
-	textbook *wordlistTextbookJSON
-	entries  []wordlistJSONEntry
+	textbook *WordlistTextbook
+	entries  []WordlistEntry
 }
 
 // parseWordlistReply leniently extracts the recognition result from a model
@@ -285,14 +264,14 @@ func parseWordlistReply(reply string) (parsedWordlist, bool) {
 		return parsedWordlist{entries: entries}, true
 	}
 	if matches := wordlistEntryPattern.FindAllStringSubmatch(reply, -1); len(matches) > 0 {
-		entries := make([]wordlistJSONEntry, 0, len(matches))
+		entries := make([]WordlistEntry, 0, len(matches))
 		for _, m := range matches {
 			word, werr := strconv.Unquote(`"` + m[1] + `"`)
 			meaning, merr := strconv.Unquote(`"` + m[2] + `"`)
 			if werr != nil || merr != nil {
 				continue
 			}
-			entries = append(entries, wordlistJSONEntry{Word: word, Meaning: meaning, Confidence: 0.5})
+			entries = append(entries, WordlistEntry{Word: word, Meaning: meaning, Confidence: 0.5})
 		}
 		if len(entries) > 0 {
 			return parsedWordlist{entries: entries}, true
@@ -304,11 +283,11 @@ func parseWordlistReply(reply string) (parsedWordlist, bool) {
 // parseWordlistLegacyArray is the Issue #3 contract: a bare [...] array of
 // entries, extracted with the same two-span then scan-from-every-'['
 // strategy the original parseWordlistJSON used.
-func parseWordlistLegacyArray(reply string) ([]wordlistJSONEntry, bool) {
+func parseWordlistLegacyArray(reply string) ([]WordlistEntry, bool) {
 	start := strings.Index(reply, "[")
 	end := strings.LastIndex(reply, "]")
 	if start >= 0 && end > start {
-		var parsed []wordlistJSONEntry
+		var parsed []WordlistEntry
 		if err := json.Unmarshal([]byte(reply[start:end+1]), &parsed); err == nil && parsed != nil {
 			return parsed, true
 		}
@@ -317,7 +296,7 @@ func parseWordlistLegacyArray(reply string) ([]wordlistJSONEntry, bool) {
 		if reply[i] != '[' {
 			continue
 		}
-		var parsed []wordlistJSONEntry
+		var parsed []WordlistEntry
 		if err := json.NewDecoder(strings.NewReader(reply[i:])).Decode(&parsed); err == nil && parsed != nil {
 			return parsed, true
 		}

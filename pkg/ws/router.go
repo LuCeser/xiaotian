@@ -65,12 +65,12 @@ var (
 
 // Router dispatches decoded frames to per-MsgType handlers via Go channels
 type Router struct {
+	ctx      context.Context
 	routes   map[MessageType]chan frameTask
 	handlers map[MessageType]Handler
-	wg       sync.WaitGroup
 	logger   *zap.Logger
-	ctx      context.Context
 	cancel   context.CancelFunc
+	wg       sync.WaitGroup
 
 	// overloaded counts frames dropped because a per-type channel was full
 	// (ErrRouterOverloaded). Observable server-side backpressure signal (WR-09).

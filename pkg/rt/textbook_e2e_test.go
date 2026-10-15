@@ -107,8 +107,9 @@ func TestE2E_TextbookScopeShapesClassroomSelection(t *testing.T) {
 	assign([]int64{3}, "第1课", false)
 	assign([]int64{4}, "第2课", true)
 	assign([]int64{5}, "", false)
+	learned := 1
 	if _, err := b.RunTextbookUpdate(ctx, pybridge.TextbookUpdateOpts{
-		ID: created.ID, HasLearnedLessons: true, LearnedLessons: 1,
+		ID: created.ID, LearnedLessons: &learned,
 	}); err != nil {
 		t.Fatalf("set learned 1: %v", err)
 	}
@@ -162,8 +163,9 @@ func TestE2E_TextbookScopeShapesClassroomSelection(t *testing.T) {
 	// classroom 1 already fetched stay fetch-locked (same-day no-re-dictation,
 	// the 13-10 lock) — so the due fetch returns exactly the newly unlocked
 	// word, never an out-of-scope one.
+	learned = 3
 	if _, err := b.RunTextbookUpdate(ctx, pybridge.TextbookUpdateOpts{
-		ID: created.ID, HasLearnedLessons: true, LearnedLessons: 3,
+		ID: created.ID, LearnedLessons: &learned,
 	}); err != nil {
 		t.Fatalf("set learned 3: %v", err)
 	}

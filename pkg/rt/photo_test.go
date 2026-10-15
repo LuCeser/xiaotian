@@ -36,10 +36,10 @@ func fakeJPEG(n int) []byte {
 // fakeOCRReader records every image it receives and replies with a scripted
 // string (the OCRReader seam — same shape as ocr.Reader).
 type fakeOCRReader struct {
-	mu      sync.Mutex
+	err     error
 	images  [][]byte
 	replies []string // consumed per call; the last one repeats
-	err     error
+	mu      sync.Mutex
 }
 
 func (f *fakeOCRReader) read(_ context.Context, systemPrompt, userPrompt string, imageJPEG []byte) (string, error) {
@@ -238,7 +238,7 @@ func TestPhotoAssembler(t *testing.T) {
 			t.Fatal("no error for a chunk arriving before seq 1")
 		}
 
-		ttPhotoChunk(t, tm, s, 1, first, false)  // upload A starts
+		ttPhotoChunk(t, tm, s, 1, first, false) // upload A starts
 		ttPhotoChunk(t, tm, s, 2, fakeJPEG(1000), false)
 		ttPhotoChunk(t, tm, s, 2, fakeJPEG(700), false) // duplicate seq 2
 		if got := s.countOf(TypeError); got < 2 {

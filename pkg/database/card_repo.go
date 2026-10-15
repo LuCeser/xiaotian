@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/pkg/errors"
+
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -25,16 +27,20 @@ var (
 // Write-separation contract (D-03-a): Python owns writes to the cards table
 // via pybridge.Executor.RunReview. Go only reads.
 type Card struct {
-	ID               int64
-	Word             string
-	Meaning          string
-	Example          string
-	Unit             string
-	Category         string
-	FsrsCard         string // opaque JSON — never parsed in Go (Pitfall 5)
+	Word     string
+	Meaning  string
+	Example  string
+	Unit     string
+	Category string
+	FsrsCard string // opaque JSON — never parsed in Go (Pitfall 5)
+	// MeaningSource is the Issue #8 provenance flag: "generated" marks a
+	// system-supplemented meaning (ADR-0005); "material" covers everything
+	// else (material original, library legacy, hand-filled).
+	MeaningSource    string
 	CreatedAt        string
 	FetchLockedUntil string // nullable; empty string when NULL
-	Participates     bool   // eligible for automatic dictation/practice selection
+	ID               int64
+	Participates     bool // eligible for automatic dictation/practice selection
 }
 
 // CardRepository provides read-only access to the Python-owned cards table.
@@ -59,6 +65,12 @@ type CardRepository interface {
 	// Empty filter fields are omitted from the WHERE clause; the result
 	// is ordered by (unit, id) for stable rendering (Phase 9, D-12).
 	List(ctx context.Context, filter CardFilter) ([]Card, error)
+
+	// CategoriesByIDs returns the {id → category} projection for exactly
+	// the given ids (an absent id has no key) — the targeted existence/
+	// category pre-check for batch operations, proportional to the batch
+	// rather than the library.
+	CategoriesByIDs(ctx context.Context, ids []int64) (map[int64]string, error)
 
 	// CountByUnit returns one UnitCount row per distinct unit, ordered by
 	// unit name ascending (port of vocab_manager.py:605). A non-empty
@@ -102,7 +114,10 @@ const cardBaseColumns = "id, word, meaning, example, unit, category, fsrs_card, 
 // cardColumns resolves the Python-owned schema on each read. Existing
 // installations may be opened before any Python command has run the new
 // migration; those rows participate by default. Rechecking lets the same
-// service process observe the column as soon as Python adds it.
+// service process observe the column as soon as Python adds it. The same
+// degraded-read applies to meaning_source (Issue #8): a pre-migration
+// schema reads 'material' for every row — legacy meanings all predate
+// supplementation by construction (ADR-0005).
 func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, error) {
 	rows, err := r.db.QueryContext(ctx, "PRAGMA table_info(cards)")
 	if err != nil {
@@ -110,6 +125,7 @@ func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, e
 	}
 	defer rows.Close()
 	hasParticipation := false
+	hasMeaningSource := false
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, columnType string
@@ -120,14 +136,25 @@ func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, e
 		if name == "participates" {
 			hasParticipation = true
 		}
+		if name == "meaning_source" {
+			hasMeaningSource = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return "", false, err
 	}
+	cols := cardBaseColumns
 	if hasParticipation {
-		return cardBaseColumns + ", participates", true, nil
+		cols += ", participates"
+	} else {
+		cols += ", 1 AS participates"
 	}
-	return cardBaseColumns + ", 1 AS participates", false, nil
+	if hasMeaningSource {
+		cols += ", meaning_source"
+	} else {
+		cols += ", 'material' AS meaning_source"
+	}
+	return cols, hasParticipation, nil
 }
 
 // CardFilter narrows a CardRepository.List query. Every field is optional —
@@ -135,6 +162,17 @@ func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, e
 // cards). Query is a substring match against word OR meaning (LIKE with
 // user-supplied wildcards escaped, RESEARCH Pitfall 6).
 type CardFilter struct {
+	// Category restricts to one vocabulary category ("english"/"chinese").
+	// Empty means all categories.
+	Category string
+
+	// Unit restricts to one unit (exact match). Empty means all units.
+	Unit string
+
+	// Query is a free-text substring matched against word OR meaning.
+	// Empty means no text filter.
+	Query string
+
 	// ParticipatingOnly restricts automatic classroom selection to cards
 	// enabled by the parent. Management views leave this false.
 	ParticipatingOnly bool
@@ -146,16 +184,6 @@ type CardFilter struct {
 	// Management views leave this false — the browse list must show
 	// out-of-scope words so the parent can manage them.
 	ScopeEligibleOnly bool
-	// Category restricts to one vocabulary category ("english"/"chinese").
-	// Empty means all categories.
-	Category string
-
-	// Unit restricts to one unit (exact match). Empty means all units.
-	Unit string
-
-	// Query is a free-text substring matched against word OR meaning.
-	// Empty means no text filter.
-	Query string
 }
 
 // scanCard scans a single row into a Card struct. Shared by GetByID and
@@ -175,6 +203,7 @@ func scanCard(row interface{ Scan(...any) error }) (Card, error) {
 		&c.CreatedAt,
 		&fetchLocked,
 		&c.Participates,
+		&c.MeaningSource,
 	)
 	if err != nil {
 		return Card{}, err
@@ -213,6 +242,43 @@ func (r *sqliteCardRepository) GetByID(ctx context.Context, id int64) (Card, err
 	return c, nil
 }
 
+// CategoriesByIDs implements CardRepository.CategoriesByIDs — a two-column
+// targeted read (≤500 ids per the batch cap), never a full-library List.
+func (r *sqliteCardRepository) CategoriesByIDs(ctx context.Context, ids []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := r.db.QueryContext(ctx,
+		"SELECT id, category FROM cards WHERE id IN ("+placeholders+")", args...) //nolint:gosec // G202: placeholders are generated '?' markers; ids are bound parameters
+	if err != nil {
+		r.logger.Error("card categories by ids failed",
+			infra.F("component", "database/card_repo"),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "card categories by ids")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var category string
+		if err := rows.Scan(&id, &category); err != nil {
+			return nil, errors.Wrap(err, "card categories by ids: scan")
+		}
+		out[id] = category
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.Wrap(err, "card categories by ids: iteration")
+	}
+	return out, nil
+}
+
 // ListByUnit returns cards in the named unit. An empty unit string
 // returns all cards.
 func (r *sqliteCardRepository) ListByUnit(ctx context.Context, unit string) ([]Card, error) {
@@ -220,7 +286,7 @@ func (r *sqliteCardRepository) ListByUnit(ctx context.Context, unit string) ([]C
 	if err != nil {
 		return nil, errors.Wrap(err, "card schema")
 	}
-	query := fmt.Sprintf("SELECT %s FROM cards", columns)
+	query := fmt.Sprintf("SELECT %s FROM cards", columns) //nolint:gosec // G201: column list is a fixed allowlist from the schema probe, not user input
 	args := []any{}
 
 	if unit != "" {
@@ -301,7 +367,7 @@ func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]C
 	// The "c" alias anchors the Issue #4 scope predicate's correlated
 	// subqueries (card_assignments na/ia/la reference c.id); unqualified
 	// filter columns keep resolving against the same single table.
-	query := fmt.Sprintf("SELECT %s FROM cards c", columns)
+	query := fmt.Sprintf("SELECT %s FROM cards c", columns) //nolint:gosec // G201: column list is a fixed allowlist from the schema probe, not user input
 	args := []any{}
 	// First predicate needs WHERE, the rest AND — one flag tracks it across
 	// every filter field (participation included).
@@ -320,13 +386,13 @@ func (r *sqliteCardRepository) List(ctx context.Context, filter CardFilter) ([]C
 		addPredicate(" participates = 1")
 	}
 	if filter.ScopeEligibleOnly {
-		scopeSQL, scopeArgs, err := textbookScopePredicate(ctx, r.db)
-		if err != nil {
+		scopeSQL, scopeArgs, scopeErr := textbookScopePredicate(ctx, r.db)
+		if scopeErr != nil {
 			r.logger.Error("textbook scope predicate failed",
 				infra.F("component", "database/card_repo"),
-				infra.ErrField(err),
+				infra.ErrField(scopeErr),
 			)
-			return nil, errors.Wrap(err, "card list: scope")
+			return nil, errors.Wrap(scopeErr, "card list: scope")
 		}
 		if scopeSQL != "" {
 			// Bare parenthesized expression — addPredicate handles the

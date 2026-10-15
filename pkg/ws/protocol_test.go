@@ -195,17 +195,17 @@ func TestMessageTypeValues(t *testing.T) {
 // TestMessageTypeString verifies the String() method returns human-readable names.
 func TestMessageTypeString(t *testing.T) {
 	tests := []struct {
-		msgType  MessageType
 		expected string
+		msgType  MessageType
 	}{
-		{MsgTypeAudio, "audio"},
-		{MsgTypeControl, "control"},
-		{MsgTypeError, "error"},
-		{MsgTypeHeartbeat, "heartbeat"},
-		{MsgTypeSession, "session"},
-		{MsgTypeStatus, "status"},
-		{MsgTypeImage, "image"},
-		{0xFF, "unknown(0xff)"}, // Unknown type
+		{"audio", MsgTypeAudio},
+		{"control", MsgTypeControl},
+		{"error", MsgTypeError},
+		{"heartbeat", MsgTypeHeartbeat},
+		{"session", MsgTypeSession},
+		{"status", MsgTypeStatus},
+		{"image", MsgTypeImage},
+		{"unknown(0xff)", 0xFF}, // Unknown type
 	}
 
 	for _, tt := range tests {
@@ -260,8 +260,25 @@ func TestFrameHeaderFields(t *testing.T) {
 	header.Reserved = 0
 	header.CRC16 = 0x1234
 
-	// Verify no panics (struct is valid)
 	if header.Version != 0x01 {
 		t.Error("Version field assignment failed")
+	}
+	if header.MsgType != MsgTypeAudio {
+		t.Error("MsgType field assignment failed")
+	}
+	if header.Sequence != 12345 {
+		t.Error("Sequence field assignment failed")
+	}
+	if header.Timestamp != 1678901234 {
+		t.Error("Timestamp field assignment failed")
+	}
+	if header.PayloadLen != 640 {
+		t.Error("PayloadLen field assignment failed")
+	}
+	if header.Reserved != 0 {
+		t.Error("Reserved field assignment failed")
+	}
+	if header.CRC16 != 0x1234 {
+		t.Error("CRC16 field assignment failed")
 	}
 }

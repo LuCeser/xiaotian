@@ -34,41 +34,31 @@ var ErrTextbookNotFound = errors.New("textbook not found")
 // parsed EXPLICIT teaching order — the repository never lets callers see
 // the raw JSON string (Issue #4: 课次顺序是显式的，字典顺序不算数).
 type Textbook struct {
-	ID             int64    `json:"id"`
+	Volume         string   `json:"volume"`
 	Name           string   `json:"name"`
 	Category       string   `json:"category"`
 	Edition        string   `json:"edition"`
 	Stage          string   `json:"stage"`
 	Grade          string   `json:"grade"`
-	Volume         string   `json:"volume"`
 	Module         string   `json:"module"`
-	Lessons        []string `json:"lessons"`
-	LearnedLessons int      `json:"learnedLessons"`
-	IsPrimary      bool     `json:"isPrimary"`
 	CreatedAt      string   `json:"createdAt"`
+	Lessons        []string `json:"lessons"`
+	ID             int64    `json:"id"`
+	LearnedLessons int      `json:"learnedLessons"`
 	// AssignmentCount is filled by List — how many cards are assigned to
 	// this textbook (the parent-facing 教材词数). Not a column.
-	AssignmentCount int `json:"assignmentCount"`
-}
-
-// Assignment is one (card, textbook) attribution row: the lesson name
-// (empty = 待确认, never learned) and the parent's explicit
-// include-in-scope override.
-type Assignment struct {
-	CardID         int64
-	TextbookID     int64
-	Lesson         string
-	IncludeInScope bool
+	AssignmentCount int  `json:"assignmentCount"`
+	IsPrimary       bool `json:"isPrimary"`
 }
 
 // TextbookAssignment is the per-word projection GET /words attaches to
 // each row (the browse chips' data source): the textbook's name rides
 // along so the UI never needs a second join.
 type TextbookAssignment struct {
-	TextbookID    int64  `json:"id"`
-	TextbookName  string `json:"name"`
-	Lesson        string `json:"lesson"`
-	IncludeInScope bool  `json:"includeInScope"`
+	TextbookName   string `json:"name"`
+	Lesson         string `json:"lesson"`
+	TextbookID     int64  `json:"id"`
+	IncludeInScope bool   `json:"includeInScope"`
 }
 
 // TextbookRepository provides read-only access to the Python-owned
@@ -90,9 +80,10 @@ type TextbookRepository interface {
 	// are resolved in the same query so callers render directly.
 	AssignmentsByCardIDs(ctx context.Context, cardIDs []int64) (map[int64][]TextbookAssignment, error)
 
-	// CountAssignments returns how many cards are assigned to one
-	// textbook (0 on a pre-migration database).
-	CountAssignments(ctx context.Context, textbookID int64) (int, error)
+	// AllAssignments is the unfiltered variant — the projection GET /words
+	// attaches on an unscoped browse (building a whole-library IN-list for
+	// it would only re-parse N placeholders).
+	AllAssignments(ctx context.Context) (map[int64][]TextbookAssignment, error)
 }
 
 // Compile-time interface satisfaction check (D-43).
@@ -240,45 +231,32 @@ func scanTextbook(row interface{ Scan(...any) error }) (Textbook, error) {
 	return t, nil
 }
 
-// AssignmentsByCardIDs implements TextbookRepository.AssignmentsByCardIDs.
-// The returned map only carries keys for cards that HAVE assignments —
-// absence means supplementary (the scope predicate's first branch).
-func (r *sqliteTextbookRepository) AssignmentsByCardIDs(ctx context.Context, cardIDs []int64) (map[int64][]TextbookAssignment, error) {
-	out := make(map[int64][]TextbookAssignment, len(cardIDs))
-	if len(cardIDs) == 0 {
-		return out, nil
-	}
-	exists, err := textbookTablesExist(ctx, r.db)
+// assignmentsProjection is the shared attribution SELECT: the assignment
+// row plus the textbook's name (so callers render directly, no second
+// join client-side).
+const assignmentsProjection = `
+	SELECT a.card_id, a.textbook_id, a.lesson, a.include_in_scope, t.name
+	FROM card_assignments a JOIN textbooks t ON t.id = a.textbook_id`
+
+// scanAssignments runs one attribution query and folds the rows into the
+// per-card map. The map only carries keys for cards that HAVE assignments
+// — absence means supplementary (the scope predicate's first branch).
+func (r *sqliteTextbookRepository) scanAssignments(ctx context.Context, query string, args ...any) (map[int64][]TextbookAssignment, error) {
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, errors.Wrap(err, "textbook tables probe")
-	}
-	if !exists {
-		return out, nil
-	}
-	placeholders := strings.Repeat("?,", len(cardIDs))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, 0, len(cardIDs))
-	for _, id := range cardIDs {
-		args = append(args, id)
-	}
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT a.card_id, a.textbook_id, a.lesson, a.include_in_scope, t.name
-		FROM card_assignments a JOIN textbooks t ON t.id = a.textbook_id
-		WHERE a.card_id IN (`+placeholders+`)
-		ORDER BY a.card_id, a.textbook_id`, args...)
-	if err != nil {
-		r.logger.Error("assignments by card failed",
+		r.logger.Error("assignments query failed",
 			infra.F("component", "database/textbook_repo"),
 			infra.ErrField(err),
 		)
-		return nil, errors.Wrap(err, "assignments by card")
+		return nil, errors.Wrap(err, "assignments query")
 	}
 	defer rows.Close()
+	out := map[int64][]TextbookAssignment{}
 	for rows.Next() {
 		var cardID, textbookID, include int64
 		var lesson, name string
 		if err := rows.Scan(&cardID, &textbookID, &lesson, &include, &name); err != nil {
-			return nil, errors.Wrap(err, "assignments by card: scan")
+			return nil, errors.Wrap(err, "assignments query: scan")
 		}
 		out[cardID] = append(out[cardID], TextbookAssignment{
 			TextbookID: textbookID, TextbookName: name,
@@ -286,27 +264,44 @@ func (r *sqliteTextbookRepository) AssignmentsByCardIDs(ctx context.Context, car
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, errors.Wrap(err, "assignments by card: iteration")
+		return nil, errors.Wrap(err, "assignments query: iteration")
 	}
 	return out, nil
 }
 
-// CountAssignments implements TextbookRepository.CountAssignments.
-func (r *sqliteTextbookRepository) CountAssignments(ctx context.Context, textbookID int64) (int, error) {
+// AssignmentsByCardIDs implements TextbookRepository.AssignmentsByCardIDs.
+func (r *sqliteTextbookRepository) AssignmentsByCardIDs(ctx context.Context, cardIDs []int64) (map[int64][]TextbookAssignment, error) {
+	if len(cardIDs) == 0 {
+		return map[int64][]TextbookAssignment{}, nil
+	}
 	exists, err := textbookTablesExist(ctx, r.db)
 	if err != nil {
-		return 0, errors.Wrap(err, "textbook tables probe")
+		return nil, errors.Wrap(err, "textbook tables probe")
 	}
 	if !exists {
-		return 0, nil
+		return map[int64][]TextbookAssignment{}, nil
 	}
-	var count int
-	if err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM card_assignments WHERE textbook_id = ?", textbookID,
-	).Scan(&count); err != nil {
-		return 0, errors.Wrap(err, "count assignments")
+	placeholders := strings.Repeat("?,", len(cardIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(cardIDs))
+	for _, id := range cardIDs {
+		args = append(args, id)
 	}
-	return count, nil
+	return r.scanAssignments(ctx, assignmentsProjection+
+		" WHERE a.card_id IN ("+placeholders+") ORDER BY a.card_id, a.textbook_id", args...)
+}
+
+// AllAssignments implements TextbookRepository.AllAssignments — the same
+// projection without the IN filter.
+func (r *sqliteTextbookRepository) AllAssignments(ctx context.Context) (map[int64][]TextbookAssignment, error) {
+	exists, err := textbookTablesExist(ctx, r.db)
+	if err != nil {
+		return nil, errors.Wrap(err, "textbook tables probe")
+	}
+	if !exists {
+		return map[int64][]TextbookAssignment{}, nil
+	}
+	return r.scanAssignments(ctx, assignmentsProjection+" ORDER BY a.card_id, a.textbook_id")
 }
 
 // textbookScopePredicate composes the Issue #4 eligibility SQL fragment
@@ -334,8 +329,8 @@ func textbookScopePredicate(ctx context.Context, db *sql.DB) (string, []any, err
 	defer rows.Close()
 
 	type allowed struct {
-		textbookID int64
 		lessons    []string
+		textbookID int64
 	}
 	var books []allowed
 	for rows.Next() {

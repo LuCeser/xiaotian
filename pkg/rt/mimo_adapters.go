@@ -184,13 +184,13 @@ var _ LessonExecutor = (*LessonTools)(nil)
 // signatures drifts, this file stops compiling instead of failing at wiring
 // time.
 var (
-	_ func(*lesson.Store, context.Context, string, []string) (lesson.Lesson, error) = (*lesson.Store).EnsureLesson
-	_ func(*lesson.Store, context.Context, string, []lesson.Word) (lesson.Lesson, error) = (*lesson.Store).EnsureLessonCards
-	_ func(*lesson.Executor, context.Context, string) (lesson.Lesson, error)        = (*lesson.Executor).GetLessonState
-	_ func(*lesson.Executor, context.Context, string, int, string) (lesson.AdvanceResult, error) = (*lesson.Executor).AdvanceWord
+	_ func(*lesson.Store, context.Context, string, []string) (lesson.Lesson, error)                                                = (*lesson.Store).EnsureLesson
+	_ func(*lesson.Store, context.Context, string, []lesson.Word) (lesson.Lesson, error)                                           = (*lesson.Store).EnsureLessonCards
+	_ func(*lesson.Executor, context.Context, string) (lesson.Lesson, error)                                                       = (*lesson.Executor).GetLessonState
+	_ func(*lesson.Executor, context.Context, string, int, string) (lesson.AdvanceResult, error)                                   = (*lesson.Executor).AdvanceWord
 	_ func(*lesson.Executor, context.Context, string, int, string, map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) = (*lesson.Executor).EnterCheck
-	_ func(*lesson.Executor, context.Context, string, int, string, lesson.CheckVerdict) (lesson.ApplyVerdictResult, error)        = (*lesson.Executor).ApplyVerdict
-	_ func(*lesson.Executor, context.Context, string, int, string, bool) (lesson.CompleteCheckResult, error)                      = (*lesson.Executor).CompleteCheck
+	_ func(*lesson.Executor, context.Context, string, int, string, lesson.CheckVerdict) (lesson.ApplyVerdictResult, error)         = (*lesson.Executor).ApplyVerdict
+	_ func(*lesson.Executor, context.Context, string, int, string, bool) (lesson.CompleteCheckResult, error)                       = (*lesson.Executor).CompleteCheck
 	_ func(*lesson.Executor, context.Context, string, int, string) (lesson.ClearUncheckedResult, error)                            = (*lesson.Executor).ClearUnchecked
 )
 

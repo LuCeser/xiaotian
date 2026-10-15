@@ -131,6 +131,8 @@
     var kit = global.__parentFormKit;
     if (kit && kit.showToast) {
       kit.showToast(message, kind);
+    } else if (global.console && global.console.warn) {
+      global.console.warn('[parent-textbook] toast(' + kind + '): ' + message);
     }
   }
 
@@ -143,10 +145,74 @@
     }
   }
 
-  /** Field builder on top of the modal kit (null-checks the kit). */
+  /**
+   * Field builder on top of the modal kit (null-checks the kit). Falls
+   * back to a bare field scaffold when the kit is unavailable so callers
+   * can always read .field/.input/.error without a TypeError.
+   */
   function modalField(labelText, id, isTextarea) {
     var kit = modalKit();
-    return kit.buildModalField(labelText, id, isTextarea);
+    if (kit && typeof kit.buildModalField === 'function') {
+      return kit.buildModalField(labelText, id, isTextarea);
+    }
+    var field = document.createElement('div');
+    field.className = 'form-field';
+    var label = document.createElement('label');
+    label.className = 'form-label';
+    label.setAttribute('for', id);
+    label.textContent = labelText;
+    var input;
+    if (isTextarea) {
+      input = document.createElement('textarea');
+      input.rows = 3;
+      input.className = 'form-textarea';
+    } else {
+      input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'form-input';
+    }
+    input.id = id;
+    input.name = id;
+    input.setAttribute('autocomplete', 'off');
+    var error = document.createElement('p');
+    error.className = 'form-error';
+    error.setAttribute('aria-live', 'polite');
+    field.appendChild(label);
+    field.appendChild(input);
+    field.appendChild(error);
+    return { field: field, input: input, error: error };
+  }
+
+  /**
+   * A labeled <select> field on the same .form-field/.form-label scaffold
+   * modalField produces (the kit only builds text inputs/textarea — the
+   * assign modal needs two selects without a create-then-replaceChild swap).
+   */
+  function selectField(labelText, id) {
+    var field = document.createElement('div');
+    field.className = 'form-field';
+    var label = document.createElement('span');
+    label.className = 'form-label';
+    label.textContent = labelText;
+    var select = document.createElement('select');
+    select.className = 'form-input';
+    select.id = id;
+    select.setAttribute('aria-label', labelText);
+    field.appendChild(label);
+    field.appendChild(select);
+    return { field: field, select: select };
+  }
+
+  /** Clear one element through the shared kit (fallback: firstChild loop). */
+  function clearEl(el) {
+    var kit = global.__parentFormKit;
+    if (kit && kit.clearContainer) {
+      kit.clearContainer(el);
+    } else {
+      while (el.firstChild) {
+        el.removeChild(el.firstChild);
+      }
+    }
   }
 
   // ------------------------------------------------------------------
@@ -173,7 +239,7 @@
 
         var hint = document.createElement('p');
         hint.className = 'form-hint';
-        hint.textContent = '每本教材单独记录已学进度；已学完第 N 课包含第 N 课，之后的课次不会自动选入默写。进入默写范围表示可以被安排，不代表下一课练全部内容。';
+        hint.textContent = '每本教材单独记录已学进度；已学完第 N 课包含第 N 课，之后的课次不会自动选入默写范围。进入默写范围表示可以被安排，不代表下一课练全部内容。';
         body.appendChild(hint);
 
         renderManagerList(listHost, close);
@@ -249,7 +315,7 @@
         var cancel = document.createElement('button');
         cancel.type = 'button';
         cancel.className = 'btn btn-secondary';
-        cancel.textContent = '关闭';
+        cancel.textContent = '取消';
         cancel.addEventListener('click', close);
         actions.appendChild(cancel);
 
@@ -296,18 +362,14 @@
 
   /** The textbook list inside the manager modal. */
   function renderManagerList(host, close) {
-    while (host.firstChild) {
-      host.removeChild(host.firstChild);
-    }
+    clearEl(host);
     var note = document.createElement('p');
     note.className = 'form-hint';
     note.textContent = '读取中…';
     host.appendChild(note);
 
     deps.fetchTextbooks().then(function (books) {
-      while (host.firstChild) {
-        host.removeChild(host.firstChild);
-      }
+      clearEl(host);
       if (!books || !books.length) {
         var empty = document.createElement('p');
         empty.className = 'form-hint';
@@ -321,7 +383,7 @@
         }));
       });
     }).catch(function () {
-      note.textContent = '教材读取失败，请重试';
+      note.textContent = '教材信息读取失败，请重试';
     });
   }
 
@@ -533,23 +595,12 @@
         booksNote.textContent = category ? '读取教材中…' : '';
         body.appendChild(booksNote);
 
-        var bookField = modalField('教材', 'assign-textbook');
-        var bookSelect = bookField.input;
-        // buildModalField returns a text input; swap it for a select.
-        var bookSelectEl = document.createElement('select');
-        bookSelectEl.className = 'form-input';
-        bookSelectEl.id = 'assign-textbook';
-        bookSelectEl.setAttribute('aria-label', '教材');
-        bookField.field.replaceChild(bookSelectEl, bookSelect);
+        var bookField = selectField('教材', 'assign-textbook');
+        var bookSelectEl = bookField.select;
         body.appendChild(bookField.field);
 
-        var lessonField = modalField('课次', 'assign-lesson');
-        var lessonInput = lessonField.input;
-        var lessonSelect = document.createElement('select');
-        lessonSelect.className = 'form-input';
-        lessonSelect.id = 'assign-lesson';
-        lessonSelect.setAttribute('aria-label', '课次');
-        lessonField.field.replaceChild(lessonSelect, lessonInput);
+        var lessonField = selectField('课次', 'assign-lesson');
+        var lessonSelect = lessonField.select;
         body.appendChild(lessonField.field);
 
         var includeLabel = document.createElement('label');
@@ -565,13 +616,13 @@
 
         var scopeHint = document.createElement('p');
         scopeHint.className = 'form-hint';
-        scopeHint.textContent = '选「待确认」的词先不参与自动默写，等确认课次或勾选加入范围。';
+        scopeHint.textContent = '选「待确认」的词先不自动加入默写范围，确认课次或勾选后即可加入。';
         body.appendChild(scopeHint);
 
         var submit = document.createElement('button');
         submit.type = 'button';
         submit.className = 'btn btn-primary';
-        submit.textContent = '确定指定';
+        submit.textContent = '确认指定';
         submit.disabled = true;
         submit.addEventListener('click', function () {
           var bookId = parseInt(bookSelectEl.value, 10);
@@ -633,7 +684,7 @@
             fillLessonOptions(lessonSelect, found);
           });
         }).catch(function () {
-          booksNote.textContent = '教材读取失败，请关闭后重试';
+          booksNote.textContent = '教材信息读取失败，请关闭后重试';
         });
       },
     });
@@ -641,9 +692,7 @@
 
   /** Lesson options for the assign modal: 待确认 first, then the list. */
   function fillLessonOptions(select, book) {
-    while (select.firstChild) {
-      select.removeChild(select.firstChild);
-    }
+    clearEl(select);
     var pending = document.createElement('option');
     pending.value = '';
     pending.textContent = '待确认（课次不确定）';

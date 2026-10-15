@@ -47,8 +47,8 @@ func (a Action) ControlVerb() (verb string, ok bool) {
 type Intent struct {
 	Action     Action
 	Transcript string
-	Confidence float64
 	Source     string
+	Confidence float64
 }
 
 // Classifier maps a student transcript to a command intent.

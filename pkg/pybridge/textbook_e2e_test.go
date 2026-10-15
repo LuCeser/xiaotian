@@ -107,7 +107,7 @@ func TestE2E_TextbookScopeShapesDueSelection(t *testing.T) {
 	assign([]int64{1, 2}, "第3课", false) // scopeC1/scopeC2
 	assign([]int64{3, 4}, "第1课", false) // scopeA1/scopeA2
 	assign([]int64{5}, "第2课", true)     // scopeB1, parent's explicit include
-	assign([]int64{6}, "", false)        // scopePend1 待确认
+	assign([]int64{6}, "", false)       // scopePend1 待确认
 
 	// Progress 0: only the include override and the two supplementary
 	// words are due — 待确认 is NOT learned, unlearned lessons stay out.
@@ -115,14 +115,14 @@ func TestE2E_TextbookScopeShapesDueSelection(t *testing.T) {
 
 	// Progress 1 unlocks 第3课 (the LIST's first lesson — dictionary order
 	// would have unlocked 第1课's scopeA1/scopeA2 instead).
-	if _, err := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{ID: bookID, HasLearnedLessons: true, LearnedLessons: 1}); err != nil {
+	if _, err := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{ID: bookID, LearnedLessons: intPtr(1)}); err != nil {
 		t.Fatalf("set learned 1: %v", err)
 	}
 	tbExpectDue(t, b, "scopeB1", "scopeC1", "scopeC2", "scopeSupp1", "scopeSupp2")
 
 	// Progress 2 adds 第1课 (list position 2). 已学完第 N 课包含第 N 课:
 	// 第2课 (position 3) still stays out for the plain-assigned words.
-	if _, err := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{ID: bookID, HasLearnedLessons: true, LearnedLessons: 2}); err != nil {
+	if _, err := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{ID: bookID, LearnedLessons: intPtr(2)}); err != nil {
 		t.Fatalf("set learned 2: %v", err)
 	}
 	tbExpectDue(t, b, "scopeA1", "scopeA2", "scopeB1", "scopeC1", "scopeC2", "scopeSupp1", "scopeSupp2")
@@ -183,7 +183,7 @@ func TestE2E_TextbookMutationsPreserveFSRS(t *testing.T) {
 		t.Fatalf("assign: %v", err)
 	}
 	if _, err := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{
-		ID: created.ID, HasLearnedLessons: true, LearnedLessons: 1, SetPrimary: true,
+		ID: created.ID, LearnedLessons: intPtr(1), SetPrimary: true,
 	}); err != nil {
 		t.Fatalf("update: %v", err)
 	}

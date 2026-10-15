@@ -29,37 +29,33 @@ import (
 
 // fakeExecutor is a manual fake for pybridge.Executor (D-48).
 type fakeExecutor struct {
-	addResult pybridge.AddResult
-	addErr    error
-	addCalls  []pybridge.AddOpts
-
-	editResult          pybridge.EditResult
-	editErr             error
-	editCalls           []pybridge.EditOpts
-	participationResult pybridge.SetParticipationResult
-	participationErr    error
-	participationCalls  []pybridge.SetParticipationOpts
-
-	renameResult pybridge.RenameUnitResult
-	renameErr    error
-	renameCalls  []pybridge.RenameUnitOpts
-
-	deleteResult pybridge.DeleteWordsResult
-	deleteErr    error
-	deleteCalls  []pybridge.DeleteWordsOpts
-
-	textbookCreateResult pybridge.TextbookMutationResult
-	textbookCreateErr    error
-	textbookCreateCalls  []pybridge.TextbookCreateOpts
-	textbookUpdateResult pybridge.TextbookMutationResult
+	renameErr            error
+	addErr               error
 	textbookUpdateErr    error
-	textbookUpdateCalls  []pybridge.TextbookUpdateOpts
-	assignResult         pybridge.AssignWordsResult
+	textbookCreateErr    error
+	editErr              error
 	assignErr            error
-	assignCalls          []pybridge.AssignWordsOpts
-	unassignResult       pybridge.UnassignWordsResult
+	deleteErr            error
+	participationErr     error
 	unassignErr          error
+	renameResult         pybridge.RenameUnitResult
+	editCalls            []pybridge.EditOpts
+	renameCalls          []pybridge.RenameUnitOpts
+	participationCalls   []pybridge.SetParticipationOpts
 	unassignCalls        []pybridge.UnassignWordsOpts
+	deleteCalls          []pybridge.DeleteWordsOpts
+	editResult           pybridge.EditResult
+	textbookCreateCalls  []pybridge.TextbookCreateOpts
+	addCalls             []pybridge.AddOpts
+	textbookUpdateCalls  []pybridge.TextbookUpdateOpts
+	assignCalls          []pybridge.AssignWordsOpts
+	textbookCreateResult pybridge.TextbookMutationResult
+	textbookUpdateResult pybridge.TextbookMutationResult
+	participationResult  pybridge.SetParticipationResult
+	unassignResult       pybridge.UnassignWordsResult
+	assignResult         pybridge.AssignWordsResult
+	addResult            pybridge.AddResult
+	deleteResult         pybridge.DeleteWordsResult
 }
 
 func (f *fakeExecutor) RunAdd(_ context.Context, opts pybridge.AddOpts) (pybridge.AddResult, error) {
@@ -152,6 +148,20 @@ func (f *fakeCardRepo) List(_ context.Context, filter database.CardFilter) ([]da
 	return f.cards, f.listErr
 }
 
+func (f *fakeCardRepo) CategoriesByIDs(_ context.Context, ids []int64) (map[int64]string, error) {
+	byID := make(map[int64]database.Card, len(f.cards))
+	for _, c := range f.cards {
+		byID[c.ID] = c
+	}
+	cats := make(map[int64]string, len(ids))
+	for _, id := range ids {
+		if c, ok := byID[id]; ok {
+			cats[id] = c.Category
+		}
+	}
+	return cats, nil
+}
+
 func (f *fakeCardRepo) CountByUnit(_ context.Context, category string) ([]database.UnitCount, error) {
 	f.countsSeen = append(f.countsSeen, category)
 	return f.unitCounts, f.countErr
@@ -168,7 +178,7 @@ func newLessonTestStores(t *testing.T) (*sql.DB, *lesson.Store, *lesson.Practice
 		t.Fatalf("open lessons test db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := lesson.Migrate(context.Background(), db); err != nil {
+	if err = lesson.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate lessons test db: %v", err)
 	}
 	lessons, err := lesson.NewStore(db, infra.NewNoOpLogger())
@@ -191,7 +201,7 @@ func newLessonTestStores(t *testing.T) (*sql.DB, *lesson.Store, *lesson.Practice
 // nil here — photo-recognition routes have their own harness in
 // photo_recognize_test.go.
 func newTestHandlerWithStores(exec pybridge.Executor, cards database.CardRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore) http.Handler {
-	return NewHandler(exec, cards, nil, lessons, practice, receipts, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+	return NewHandler(exec, cards, nil, lessons, practice, receipts, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 }
 
 func newTestHandler(t *testing.T, exec pybridge.Executor, cards database.CardRepository) http.Handler {
@@ -244,6 +254,40 @@ func TestAddWords(t *testing.T) {
 		if got.Category != "chinese" || got.Unit != "L1" || len(got.Entries) != 1 ||
 			got.Entries[0].Word != "你好" || got.Entries[0].Meaning != "hello" {
 			t.Errorf("forwarded AddOpts = %+v, want the decoded request fields", got)
+		}
+	})
+
+	t.Run("meaning_source forwarded to the bridge, enum validated at the gate", func(t *testing.T) {
+		// Issue #8: generated provenance rides the add path untouched;
+		// a malformed flag is a 400 (invalid_request), never stored.
+		exec := &fakeExecutor{}
+		h := newTestHandler(t, exec, &fakeCardRepo{})
+
+		body := `{"category":"english","entries":[{"word":"apple","meaning":"n. 苹果","meaning_source":"generated"},{"word":"banana","meaning":"香蕉"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/words", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if len(exec.addCalls) != 1 {
+			t.Fatalf("RunAdd calls = %d, want 1", len(exec.addCalls))
+		}
+		entries := exec.addCalls[0].Entries
+		if entries[0].MeaningSource != "generated" || entries[1].MeaningSource != "" {
+			t.Errorf("forwarded MeaningSource = [%q,%q], want [generated,\"\"]",
+				entries[0].MeaningSource, entries[1].MeaningSource)
+		}
+
+		bad := `{"category":"english","entries":[{"word":"apple","meaning":"x","meaning_source":"textbook"}]}`
+		req = httptest.NewRequest(http.MethodPost, "/words", strings.NewReader(bad))
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "meaning_source") {
+			t.Errorf("body = %s, want the offending field named", rec.Body.String())
 		}
 	})
 
@@ -339,10 +383,10 @@ func TestAddWords(t *testing.T) {
 
 	t.Run("unknown JSON field returns 400", func(t *testing.T) {
 		// RESEARCH Pitfall 12: DisallowUnknownFields must reject a typo like
-		// "catagory" rather than silently ignoring it.
+		//nolint:misspell // deliberate typo example: "catagory" is rejected rather than silently ignored.
 		h := newTestHandler(t, &fakeExecutor{}, &fakeCardRepo{})
 		req := httptest.NewRequest(http.MethodPost, "/words",
-			strings.NewReader(`{"catagory":"english","entries":[{"word":"x"}]}`))
+			strings.NewReader(`{"catagory":"english","entries":[{"word":"x"}]}`)) //nolint:misspell // deliberate typo fixture
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 
@@ -454,12 +498,12 @@ func TestListWords(t *testing.T) {
 
 		var resp struct {
 			Words []struct {
-				ID           int64  `json:"id"`
 				Word         string `json:"word"`
 				Meaning      string `json:"meaning"`
 				Example      string `json:"example"`
 				Unit         string `json:"unit"`
 				Category     string `json:"category"`
+				ID           int64  `json:"id"`
 				Participates bool   `json:"participates"`
 			} `json:"words"`
 		}
@@ -670,8 +714,8 @@ func TestEditWord(t *testing.T) {
 		}
 		var resp struct {
 			Edited struct {
-				ID   int64  `json:"id"`
 				Word string `json:"word"`
+				ID   int64  `json:"id"`
 			} `json:"edited"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -844,9 +888,9 @@ func TestRenameUnit(t *testing.T) {
 			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 		}
 		var resp struct {
-			Renamed int    `json:"renamed"`
 			From    string `json:"from"`
 			To      string `json:"to"`
+			Renamed int    `json:"renamed"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("decode response %q: %v", rec.Body.String(), err)
@@ -1433,32 +1477,32 @@ func TestGetLessonAPI(t *testing.T) {
 			t.Fatalf("status = %d, want 200 (body=%s)", code, body)
 		}
 		var resp struct {
-			LessonID string `json:"lesson_id"`
-			Words    []struct {
+			LessonID   string `json:"lesson_id"`
+			SaveStatus string `json:"save_status"`
+			Words      []struct {
 				Word    string `json:"word"`
 				Meaning string `json:"meaning"`
 				Example string `json:"example"`
 			} `json:"words"`
 			Results []struct {
-				Word    string `json:"word"`
-				Correct bool   `json:"correct"`
 				Manual  *bool  `json:"manual"`
-				Hints   int    `json:"hints"`
+				Word    string `json:"word"`
 				Outcome string `json:"outcome"`
 				OcrText string `json:"ocr_text"`
+				Hints   int    `json:"hints"`
+				Correct bool   `json:"correct"`
 			} `json:"results"`
 			SaveReceipts []struct {
 				LessonID    string   `json:"lesson_id"`
 				RequestID   string   `json:"request_id"`
 				Kind        string   `json:"kind"`
 				Status      string   `json:"status"`
+				CreatedAt   string   `json:"created_at"`
+				CompletedAt string   `json:"completed_at"`
 				Requested   []string `json:"requested"`
 				Updated     []string `json:"updated"`
 				Missing     []string `json:"missing"`
-				CreatedAt   string   `json:"created_at"`
-				CompletedAt string   `json:"completed_at"`
 			} `json:"save_receipts"`
-			SaveStatus string `json:"save_status"`
 		}
 		if err := json.Unmarshal([]byte(body), &resp); err != nil {
 			t.Fatalf("decode detail %q: %v", body, err)
@@ -1562,9 +1606,9 @@ func TestGetLessonAPI(t *testing.T) {
 			} `json:"words"`
 			Results []struct {
 				Word    string `json:"word"`
-				Correct bool   `json:"correct"`
-				Hints   int    `json:"hints"`
 				Rating  string `json:"rating"`
+				Hints   int    `json:"hints"`
+				Correct bool   `json:"correct"`
 			} `json:"results"`
 			SaveReceipts []struct {
 				Kind   string `json:"kind"`

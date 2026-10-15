@@ -156,11 +156,11 @@ type ManagerFactory func() SessionManager
 // Handler is the /rt WebSocket endpoint. Mount with
 // mux.HandleFunc("/rt", h.HandleWebSocket).
 type Handler struct {
-	cfg            ServerConfig
-	factory        ManagerFactory
 	logger         infra.Logger
-	upgrader       websocket.Upgrader
+	factory        ManagerFactory
 	allowedOrigins map[string]bool
+	upgrader       websocket.Upgrader
+	cfg            ServerConfig
 }
 
 // NewHandler validates the configuration, fills defaults for zero fields,

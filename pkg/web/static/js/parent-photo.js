@@ -39,16 +39,35 @@
  *   - Not-yet-learned lessons store fine but stay out of automatic
  *     selection (the #4 scope predicate enforces this server-side; the
  *     receipt says so honestly, AC4).
- *   - Rows without a lesson: the page-level 「待确认课次的词直接加入默写
- *     范围」checkbox is the explicit include-in-scope handling; supplementary
+  *   - Rows without a lesson: the page-level 「待确认课次的词直接加入默写范围」
+  *     checkbox is the explicit include-in-scope handling; supplementary
  *     classification never requires inventing a lesson (AC5).
  *   - 不指定教材 keeps the exact Issue #3 supplementary flow.
  *
- * classifyPhotoEntries / matchTextbookForMeta / suggestTextbookName /
- * nextLessonList / planAssignments are PURE functions exposed on the
+ * Contract (Issue #7 acceptance criteria, on top):
+ *   - A scanned PDF picked here splits INTO PAGES IN THE BROWSER
+ *     (PdfPageRunner, parent-pdf.js; ADR-0004): pages run sequentially
+ *     through the SAME recognize call as a photo, one page in memory at a
+ *     time. The draft stays client-side only — nothing is written until
+ *     确认添加, exactly like a photo.
+ *   - Page attribution is preview-level metadata: rows carry page, the
+ *     preview groups by page (页头 = 页码 + 状态 + 本页批量课次), and
+ *     re-recognizing a page REPLACES its segment (mergePageRows) so a
+ *     retry can never duplicate or disorder results. The cross-page
+ *     same-word dedup rides classifyPhotoEntries over the merged array.
+ *   - Page-level failures land on that page's status entry with the
+ *     reason and a 重试该页 button; completed pages keep their results
+ *     (AC-4). A run with any failed page is NEVER a whole-file success
+ *     (AC-3's 不伪称).
+ *   - 文件 40MiB／100 页上限在加载前拒绝（ADR-0004 拍板）；整本教材的
+ *     提交自动按 100/批新增、500/批课次指定分片，聚合真实响应出回执。
+ *
+ * classifyPhotoEntries / matchTextbookForMeta / distinctLessons /
+ * distinctRowLessons / planAssignments are PURE functions exposed on the
  * window for the Node unit tests (tests/test-parent-photo-classify.js,
- * tests/test-parent-photo-textbook.js — window.parseBatch precedent);
- * everything DOM-ish lives in PhotoAddForm.
+ * tests/test-parent-photo-textbook.js, tests/test-parent-photo-pdf.js —
+ * window.parseBatch precedent); the PDF pure functions live in
+ * parent-pdf-core.js; everything DOM-ish lives in PhotoAddForm.
  *
  * Security (Pitfall 10): all rendering goes through document.createElement
  * + Node.textContent — no raw-markup setters anywhere in this file.
@@ -67,6 +86,13 @@
 
   /** Per-request entry cap — mirrors pkg/web/api maxEntries. */
   var MAX_BATCH_ENTRIES = 100;
+
+  /**
+   * Assign-batch cap — mirrors pkg/web/api validate.go's batch-ids cap;
+   * one (lesson, includeInScope) group larger than this is sliced into
+   * sequential assign calls (ADR-0004 #6).
+   */
+  var MAX_ASSIGN_IDS = 500;
 
   /** Field caps — mirror pkg/web/api validate.go (runes, not bytes). */
   var MAX_WORD_RUNES = 200;
@@ -114,7 +140,7 @@
       var word = (e && e.word ? String(e.word) : '').trim();
       var meaning = (e && e.meaning != null ? String(e.meaning) : '').trim();
       var lesson = (e && e.lesson != null ? String(e.lesson) : '').trim();
-      var row = { index: i, word: word, meaning: meaning, lesson: lesson, status: 'new', reason: '', existingMeaning: '' };
+      var row = { index: i, word: word, meaning: meaning, lesson: lesson, status: 'new', reason: '', existingMeaning: '', resolution: '' };
 
       if (!word) {
         row.status = 'invalid';
@@ -154,6 +180,25 @@
       }
       return row;
     });
+  }
+
+  /**
+   * parseRecognized — one home for the recognize-reply shape shared by the
+   * photo path and every PDF page: the entries array (absent → []) and
+   * the textbook header, with an all-empty header cut to null (honesty
+   * cuts both ways — a reply whose every field is unreadable is no
+   * header, never a 待确认 shell built from nothing).
+   */
+  function parseRecognized(data) {
+    var entries = data && Array.isArray(data.entries) ? data.entries : [];
+    var meta = data && data.textbook && typeof data.textbook === 'object'
+      ? data.textbook : null;
+    if (meta && !META_KEYS.concat(['lesson']).some(function (key) {
+      return metaField(meta[key]);
+    })) {
+      meta = null;
+    }
+    return { entries: entries, meta: meta };
   }
 
   /** Human-readable text for one invalid reason (batch-parser copy kin). */
@@ -230,17 +275,80 @@
     }));
   }
 
+  /** The two parent confirmations a 释义差异 row can carry (Issue #6). */
+  var RESOLUTIONS = ['keep', 'adopt'];
+
+  /** isResolved — the ONE home for "this conflict row carries a parent
+   * confirmation" (the literal validity rule every consumer asks). */
+  function isResolved(row) {
+    return !!row && row.status === 'conflict' &&
+      RESOLUTIONS.indexOf(row.resolution) >= 0;
+  }
+
   /**
    * isCommittable — one home for the textbook-mode rule: a row takes part
    * in the commit when it is new, or already in the library and only
-   * needs its lesson assigned (exists + textbook mode); conflict/invalid
-   * never do.
+   * needs its lesson assigned (exists + textbook mode); a conflict joins
+   * ONLY after the parent resolved it (Issue #6 AC-3: 家长确认后处理 —
+   * unresolved conflicts stay 待处理差异, never silently merged; the
+   * resolution choice is deliberately textbook-mode-only — supplementary
+   * imports have no source to merge, so their conflicts stay dead ends);
+   * invalid never does.
    */
   function isCommittable(row, textbookMode) {
     if (!row) {
       return false;
     }
-    return row.status === 'new' || (textbookMode && row.status === 'exists');
+    if (row.status === 'new') {
+      return true;
+    }
+    if (!textbookMode) {
+      return false;
+    }
+    return row.status === 'exists' || isResolved(row);
+  }
+
+  /**
+   * submitChunked — ONE home for the sliced sequential add loop (both
+   * commit paths): the rows go out in MAX_BATCH_ENTRIES-sized calls, the
+   * outcomes aggregate, and a mid-run slice failure stops the run and
+   * rejects with err.partialOutcome carrying what already landed (Issue
+   * #7, ADR-0004 #6 — a whole textbook commits without the parent
+   * splitting it by hand).
+   */
+  function submitChunked(form, rows) {
+    var unit = form.unitInput ? form.unitInput.value.trim() : '';
+    var outcome = { added: 0, skipped: 0 };
+    var chain = Promise.resolve();
+    global.chunkBatch(rows, MAX_BATCH_ENTRIES).forEach(function (part) {
+      chain = chain.then(function () {
+        return form.submitWords({
+          category: 'english',
+          unit: unit,
+          entries: part.map(function (r) {
+            return {
+              word: r.word,
+              meaning: r.meaning,
+              example: '',
+              // Issue #8: the provenance rides the add path (ADR-0005 #3);
+              // the only distinguishable value is 'generated' — everything
+              // else (material original, hand-typed, cancelled-missing)
+              // stores 'material'.
+              meaning_source: r.meaningSource === 'generated' ? 'generated' : 'material',
+            };
+          }),
+        }).then(function (result) {
+          outcome.added += (result && result.added) || 0;
+          outcome.skipped += (result && result.skipped) || 0;
+        });
+      });
+    });
+    return chain.then(function () {
+      return outcome;
+    }).catch(function (err) {
+      err.partialOutcome = outcome;
+      throw err;
+    });
   }
 
   /** Clear one element through the shared kit (fallback: textContent). */
@@ -291,72 +399,55 @@
   }
 
   /**
-   * suggestTextbookName — the create-form's name prefill from the readable
-   * meta fields, joined with ·. A lesson alone suggests nothing (it is not
-   * the book's identity). Pure.
-   */
-  function suggestTextbookName(meta) {
-    if (!meta) {
-      return '';
-    }
-    var parts = [];
-    META_KEYS.forEach(function (key) {
-      var value = metaField(meta[key]);
-      if (value) {
-        parts.push(value);
-      }
-    });
-    return parts.join('·');
-  }
-
-  /**
-   * nextLessonList — the confirmed lesson list after this import: an
-   * existing lesson is a no-op, a missing one appends at the END (teaching
-   * order is explicit and never sorted; the parent can reorder in 教材管理).
-   * Pure, non-mutating.
-   */
-  function nextLessonList(lessons, lesson) {
-    var list = (lessons || []).slice();
-    var name = metaField(lesson);
-    if (!name || list.indexOf(name) >= 0) {
-      return list;
-    }
-    list.push(name);
-    return list;
-  }
-
-  /**
    * planAssignments — group the committable rows into textbook-assign
    * calls (POST /textbooks/{id}/assign takes ONE lesson + one
-   * includeInScope per batch). Committable = checked rows with status
-   * 'new' or 'exists' AND a card id resolved from the post-commit library
-   * snapshot (conflict rows keep the library's meaning — their merge is
-   * Issue #6's work; invalid rows have no card). Groups keep
+   * includeInScope per batch). Committable = checked new/exists rows and
+   * conflicts the parent RESOLVED (Issue #6), each with a card id
+   * resolved from the post-commit library snapshot (unresolved conflicts
+   * and invalid rows never reach a textbook). Groups keep
    * first-appearance order. includePending=true (the page-level 「待确认
    * 课次的词直接加入默写范围」checkbox) lifts ONLY the lesson-less group
    * into scope — rows with a real lesson always ride the textbook's
-   * progress. Pure.
+   * progress.
+   *
+   * Sticky include (Issue #6 AC-4): snapshotRows is the GET /words shape
+   * ({id, word, textbooks:[{id, lesson, includeInScope}]}); when the word
+   * ALREADY carries include_in_scope=1 on the TARGET textbook, the assign
+   * call re-sends include=true — a re-import must never silently clear a
+   * parent's explicit include (the assign upsert is last-write-wins, so
+   * the preservation has to ride the payload). Pure.
    */
-  function planAssignments(rows, idByWord, includePending) {
+  function planAssignments(rows, snapshotRows, bookId, includePending) {
+    var byWord = {};
+    (snapshotRows || []).forEach(function (w) {
+      if (w && w.word) {
+        byWord[String(w.word).trim()] = w;
+      }
+    });
     var groups = [];
     var byKey = {};
     (rows || []).forEach(function (row) {
-      if (!row || (row.status !== 'new' && row.status !== 'exists') || row.checked === false) {
+      if (!row || !isCommittable(row, true) || row.checked === false) {
         return;
       }
-      var id = idByWord && Object.prototype.hasOwnProperty.call(idByWord, row.word)
-        ? idByWord[row.word] : null;
-      if (!id) {
+      var snap = Object.prototype.hasOwnProperty.call(byWord, row.word) ? byWord[row.word] : null;
+      if (!snap || !snap.id) {
         return; // no resolved card → no honest assignment (receipt says so)
       }
       var lesson = metaField(row.lesson);
-      var include = includePending && !lesson;
+      var sticky = false;
+      (snap.textbooks || []).forEach(function (a) {
+        if (a && a.id === bookId && a.includeInScope) {
+          sticky = true;
+        }
+      });
+      var include = sticky || (includePending && !lesson);
       var key = lesson + '\u0000' + (include ? '1' : '0');
       if (!Object.prototype.hasOwnProperty.call(byKey, key)) {
         byKey[key] = { lesson: lesson, includeInScope: include, cardIds: [], words: [] };
         groups.push(byKey[key]);
       }
-      byKey[key].cardIds.push(id);
+      byKey[key].cardIds.push(snap.id);
       byKey[key].words.push(row.word);
     });
     return groups;
@@ -401,6 +492,12 @@
     this.createTextbook = td.createTextbook || null;
     this.updateTextbook = td.updateTextbook || null;
     this.assignWords = td.assignWords || null;
+    // Issue #6: the 采用照片释义 resolution rides the ordinary edit path
+    // (PUT /words/{id} — text changes never touch FSRS state).
+    this.editWord = td.editWord || null;
+    // Issue #8: POST /api/v1/words/meaning/generate — absent ⇒ the
+    // supplement affordance never mounts (the preview flow is unchanged).
+    this.generateMeanings = options.generateMeanings || null;
     this.onCommitted = options.onCommitted || function () {};
     this.onCategoryChange = options.onCategoryChange || function () {};
 
@@ -431,21 +528,23 @@
       this.form.appendChild(unit.field);
     }
 
-    // Photo picker row: one file at a time (Issue #3 settles the
-    // single-photo limit; multi-page PDF is a later task).
+    // Photo/PDF picker row: one file at a time (Issue #3 settles the
+    // single-file limit; Issue #7 adds the scanned PDF — pages split in
+    // the browser, ADR-0004). The .pdf extension rides accept because
+    // iPad Safari sometimes hands a PDF an empty MIME type.
     var pickField = document.createElement('div');
     pickField.className = 'form-field';
     var pickLabel = document.createElement('label');
     pickLabel.className = 'form-label';
-    pickLabel.textContent = '词表照片';
+    pickLabel.textContent = '词表照片／扫描 PDF';
     var pickHint = document.createElement('p');
     pickHint.className = 'form-hint';
-    pickHint.textContent = '拍摄或选择一张英语单词表照片（PNG / JPEG），无需裁图。';
+    pickHint.textContent = '拍摄或选择一张英语单词表照片（PNG / JPEG），或整本扫描 PDF（最多 100 页），无需裁图。';
     var pickRow = document.createElement('div');
     pickRow.className = 'photo-pick-row';
     this.fileInput = document.createElement('input');
     this.fileInput.type = 'file';
-    this.fileInput.accept = 'image/png,image/jpeg';
+    this.fileInput.accept = 'image/png,image/jpeg,application/pdf,.pdf';
     this.fileInput.className = 'photo-file-input';
     this.fileInput.id = 'parent-photo-file';
     this.pickBtn = document.createElement('button');
@@ -482,6 +581,14 @@
     this.formError.hidden = true;
     this.form.appendChild(this.formError);
 
+    // Per-page status bar (Issue #7): one chip per PDF page (页码 + 状态，
+    // failed pages carry a 重试该页 button) plus the whole-file summary
+    // and a 停止 button while a run is in flight. Hidden for photos.
+    this.pdfBar = document.createElement('div');
+    this.pdfBar.className = 'pdf-status-bar';
+    this.pdfBar.hidden = true;
+    this.form.appendChild(this.pdfBar);
+
     // Textbook attribution panel (Issue #5): rendered between the picker
     // and the review table after each recognition; hidden until then.
     this.textbookPanel = document.createElement('div');
@@ -489,12 +596,21 @@
     this.textbookPanel.hidden = true;
     this.form.appendChild(this.textbookPanel);
 
+    // Supplement affordance (Issue #8): one strip under the textbook panel
+    // — 补充缺失释义（N 词）/ 重试生成（N 词） plus the honesty note when
+    // words went unanswered. Rendered by renderMeaningBar; hidden until a
+    // recognition with a confirmed textbook context exists.
+    this.meaningBar = document.createElement('div');
+    this.meaningBar.className = 'photo-meaning-bar';
+    this.meaningBar.hidden = true;
+    this.form.appendChild(this.meaningBar);
+
     // Review table: rendered after recognition; every row editable.
     this.preview = document.createElement('div');
     this.preview.className = 'preview-scroll';
     this.previewHint = document.createElement('p');
     this.previewHint.className = 'preview-empty';
-    this.previewHint.textContent = '选择照片后点「开始识别」';
+    this.previewHint.textContent = '选择照片或 PDF 后点「开始识别」';
     this.preview.appendChild(this.previewHint);
     this.form.appendChild(this.preview);
 
@@ -526,6 +642,13 @@
     this.books = []; // existing english textbooks (textbook panel list)
     this.bookChoice = 'none'; // 'none' | 'new' | a textbook id (number)
     this.includePending = false; // 待确认课次的词直接加入默写范围
+    // Issue #7: while a PDF is in play — { doc, plan, aborted, metaDone,
+    // panelRendered }. doc stays open for page retries until discard /
+    // commit reset / a new file; rows themselves live in this.rows.
+    this.pdfState = null;
+    // Issue #8: a supplement run is in flight (the affordance disables
+    // and says 生成中 rather than queueing a second overlapping call).
+    this.meaningBusy = false;
 
     var self = this;
     this.pickBtn.addEventListener('click', function () {
@@ -566,24 +689,54 @@
     this.formError.hidden = !message;
   };
 
+  /** Clear the picked-file UI (meta line, thumbnail, button state). */
+  PhotoAddForm.prototype.clearPickUI = function () {
+    this.fileMeta.textContent = '';
+    this.thumb.hidden = true;
+    this.thumb.removeAttribute('src');
+    this.recognizeBtn.disabled = true;
+  };
+
   PhotoAddForm.prototype.handleFilePicked = function () {
     var file = this.fileInput.files && this.fileInput.files[0];
     this.showFormError('');
     this.currentFile = file || null;
     if (!file) {
-      this.fileMeta.textContent = '';
+      this.clearPickUI();
+      this.releasePdf();
+      return;
+    }
+    var verdict = (global.validatePdfFile || function () {
+      return { ok: false, code: 'not-pdf' };
+    })(file);
+    if (verdict.ok) {
+      // Issue #7: a scanned PDF. No thumbnail (a PDF is not an <img>); the
+      // page plan replaces it once 开始识别 runs. A new file always
+      // releases the previous run's doc — page retries never outlive it.
+      this.releasePdf();
+      this.fileMeta.textContent = file.name + '（' +
+        Math.max(1, Math.round(file.size / (1024 * 1024))) + ' MB）';
       this.thumb.hidden = true;
       this.thumb.removeAttribute('src');
-      this.recognizeBtn.disabled = true;
+      if (!(global.PdfPageRunner && global.PdfPageRunner.isAvailable())) {
+        this.recognizeBtn.disabled = true;
+        this.showFormError('PDF 支持未加载，请刷新页面或改用照片导入');
+        return;
+      }
+      this.recognizeBtn.disabled = false;
+      return;
+    }
+    if (verdict.code !== 'not-pdf') {
+      // pdf-too-large: refuse BEFORE loading, nothing is processed (AC-3).
+      this.currentFile = null;
+      this.clearPickUI();
+      this.showFormError(verdict.message);
       return;
     }
     if (file.type !== 'image/png' && file.type !== 'image/jpeg') {
       this.currentFile = null;
-      this.fileMeta.textContent = '';
-      this.thumb.hidden = true;
-      this.thumb.removeAttribute('src');
-      this.recognizeBtn.disabled = true;
-      this.showFormError('只支持 PNG 或 JPEG 照片，请换一张');
+      this.clearPickUI();
+      this.showFormError('只支持 PNG / JPEG 照片或 PDF 扫描件，请换一个文件');
       return;
     }
     this.fileMeta.textContent = file.name + '（' + Math.max(1, Math.round(file.size / 1024)) + ' KB）';
@@ -596,6 +749,20 @@
   };
 
   /**
+   * releasePdf — drop the current PDF run: destroy the pdf.js document
+   * (frees the worker-side page data), clear the plan/bar. The ROWS stay
+   * (a freshly picked file keeps the old preview on screen exactly like
+   * the photo flow does — 开始识别 replaces it).
+   */
+  PhotoAddForm.prototype.releasePdf = function () {
+    if (this.pdfState && this.pdfState.doc && global.PdfPageRunner) {
+      global.PdfPageRunner.close(this.pdfState.doc);
+    }
+    this.pdfState = null;
+    this.renderPdfBar();
+  };
+
+  /**
    * Prepare the upload bytes: a PNG/JPEG already under the cap ships
    * verbatim (preserves PNGs); anything bigger walks the canvas ladder and
    * re-encodes as JPEG. Resolves null when even the last rung stays over
@@ -605,8 +772,7 @@
     if (file.size <= MAX_UPLOAD_BYTES) {
       return Promise.resolve(file);
     }
-    return readAsDataURL(file)
-      .then(loadImage)
+    return loadImageFromFile(file)
       .then(function (img) {
         var canvas = document.createElement('canvas');
         var ladderPromise = Promise.resolve(null);
@@ -635,6 +801,10 @@
     if (this.recognizeBtn.disabled || !this.currentFile) {
       return;
     }
+    if (this.isPickedPdf()) {
+      this.handlePdfRecognize();
+      return;
+    }
     var self = this;
     var kit = global.__parentFormKit || {};
     this.showFormError('');
@@ -650,14 +820,9 @@
         return self.recognizePhoto(bytes);
       })
       .then(function (data) {
-        var entries = data && Array.isArray(data.entries) ? data.entries : [];
-        var meta = data && data.textbook && typeof data.textbook === 'object'
-          ? data.textbook : null;
-        if (meta && !META_KEYS.concat(['lesson']).some(function (key) {
-          return metaField(meta[key]);
-        })) {
-          meta = null; // an all-empty header is no header (honesty cut both ways)
-        }
+        var parsed = parseRecognized(data);
+        var entries = parsed.entries;
+        var meta = parsed.meta;
         if (!entries.length) {
           self.setBusy(false);
           self.renderPreviewHint('这张照片里没有识别到词表，请换一张更清晰的照片');
@@ -680,7 +845,7 @@
           self.existingWords = loaded[0] || [];
           self.books = loaded[1] || [];
           self.rows = classifyPhotoEntries(entries, self.existingWords);
-          self.renderTextbookPanel(loaded[1] === null ? '教材读取失败，可重试或直接确认添加' : '');
+          self.renderTextbookPanel(loaded[1] === null ? '教材信息读取失败，可重试或直接确认添加' : '');
           self.renderPreview();
           self.discardBtn.hidden = false;
         });
@@ -697,6 +862,308 @@
       .then(function () {
         self.setBusy(false);
       });
+  };
+
+  // ------------------------------------------------------------------
+  // Issue #7 — the scanned-PDF run: open → per-page plan → sequential
+  // page loop (render → recognize → merge) → per-page status bar.
+  // ------------------------------------------------------------------
+
+  /** The picked file is a PDF (validatePdfFile's predicate, one home). */
+  PhotoAddForm.prototype.isPickedPdf = function () {
+    if (!this.currentFile || !global.validatePdfFile) {
+      return false;
+    }
+    return global.validatePdfFile(this.currentFile).ok;
+  };
+
+  /**
+   * handlePdfRecognize — open the PDF, plan the pages, run them
+   * sequentially. Failures NEVER throw past this method's catch: a page
+   * that fails lands on its plan entry and the run continues (AC-4); only
+   * open/plan failures (unreadable file, over-cap pages) surface as form
+   * errors with nothing processed.
+   */
+  PhotoAddForm.prototype.handlePdfRecognize = function () {
+    var self = this;
+    var kit = global.__parentFormKit || {};
+    this.showFormError('');
+    this.setBusy(true);
+    this.releasePdf();
+
+    global.PdfPageRunner.open(this.currentFile)
+      .then(function (opened) {
+        var plan = global.createPagePlan(opened.pageCount);
+        if (!plan.ok) {
+          global.PdfPageRunner.close(opened.doc);
+          throw new Error(plan.message);
+        }
+        self.pdfState = {
+          doc: opened.doc,
+          plan: plan,
+          aborted: false,
+          metaDone: false,
+          panelRendered: false,
+        };
+        self.renderPdfBar();
+        // ONE library snapshot classifies every page as it lands (the run
+        // can take minutes; raced duplicates stay honest through the
+        // server's UNIQUE + the post-commit reconciliation — the photo
+        // flow's precedent, just stretched over pages).
+        var booksLoad = self.fetchTextbooks
+          ? self.fetchTextbooks('english').catch(function () { return null; })
+          : Promise.resolve(null);
+        return Promise.all([
+          self.fetchWords('english').catch(function () { return []; }),
+          booksLoad,
+        ]).then(function (loaded) {
+          self.existingWords = loaded[0] || [];
+          self.books = loaded[1] || [];
+          return self.runPdfPages();
+        });
+      })
+      .then(function (summary) {
+        self.setBusy(false);
+        self.finishPdfRun(summary);
+      })
+      .catch(function (err) {
+        self.setBusy(false);
+        var message = (err && err.message) ? err.message : '未知错误';
+        self.showFormError('PDF 处理失败：' + message + '。可以重试或换一个文件。');
+        if (kit.showToast) {
+          kit.showToast('PDF 处理失败：' + message, 'error');
+        }
+      });
+  };
+
+  /**
+   * runPdfPages — run every PENDING page of the plan sequentially
+   * (onlyPageNo: the single-page retry path). The chain never rejects:
+   * per-page failures are recorded on the plan; the loop keeps going.
+   */
+  PhotoAddForm.prototype.runPdfPages = function (onlyPageNo) {
+    var self = this;
+    var state = this.pdfState;
+    var chain = Promise.resolve();
+    state.plan.pages.forEach(function (page) {
+      if (onlyPageNo && page.no !== onlyPageNo) {
+        return;
+      }
+      chain = chain.then(function () {
+        if (state.aborted || page.status !== 'pending') {
+          return null;
+        }
+        return self.runOnePdfPage(page.no);
+      });
+    });
+    return chain.then(function () {
+      return global.planSummary(state.plan);
+    });
+  };
+
+  /**
+   * runOnePdfPage — render → recognize → merge ONE page. The page's
+   * classified rows replace its segment in this.rows (mergePageRows), so
+   * retries replace instead of duplicating and other pages' edits survive
+   * (AC-2). The textbook meta is taken from the FIRST page that yields
+   * one (AC-6: the book background is confirmed once, never re-entered
+   * per page).
+   */
+  PhotoAddForm.prototype.runOnePdfPage = function (pageNo) {
+    var self = this;
+    var state = this.pdfState;
+    state.plan = global.applyPageEvent(state.plan, pageNo, 'start');
+    this.renderPdfBar();
+    return global.PdfPageRunner.renderPage(state.doc, pageNo)
+      .then(function (blob) {
+        if (!blob) {
+          throw new Error('这页压缩后仍然太大');
+        }
+        return self.recognizePhoto(blob);
+      })
+      .then(function (data) {
+        var parsed = parseRecognized(data);
+        if (!state.metaDone && parsed.meta) {
+          self.detectedMeta = parsed.meta;
+          state.metaDone = true;
+        }
+        var classified = global.classifyPhotoEntries(parsed.entries, self.existingWords);
+        self.rows = global.mergePageRows(self.rows, pageNo, classified);
+        state.plan = global.applyPageEvent(state.plan, pageNo, 'done');
+        // The textbook panel renders with the FIRST rows that land: its
+        // preselect fixes bookChoice, so the reclassify below (and any
+        // mid-run edit) sees the real textbook mode — the ordering the
+        // photo flow gets for free by rendering the panel right after its
+        // single recognition. A retry never rebuilds it.
+        if (!state.panelRendered && self.rows.length) {
+          self.renderTextbookPanel('');
+          state.panelRendered = true;
+        }
+        // Settle cross-page duplicates NOW — the 与第 N 行重复 verdicts
+        // come from classifyPhotoEntries over the whole merged array, and
+        // the preview should show them the moment the page lands.
+        self.reclassify();
+        if (self.rows.length) {
+          self.renderPreview();
+        }
+        self.renderPdfBar();
+      })
+      .catch(function (err) {
+        state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
+          (err && err.message) || '识别失败');
+        self.renderPdfBar();
+      });
+  };
+
+  /**
+   * finishPdfRun — the after-run surface. A run with failed pages says so
+   * (never a whole-file success); an all-failed run leaves the honest
+   * empty preview; otherwise the textbook panel renders ONCE (a retry
+   * must not rebuild it out from under the parent's choices).
+   */
+  PhotoAddForm.prototype.finishPdfRun = function (summary) {
+    var kit = global.__parentFormKit || {};
+    if (!this.pdfState) {
+      return;
+    }
+    if (!this.rows.length) {
+      this.resetEntries();
+      this.renderPreviewHint(summary && summary.failed > 0
+        ? '这一轮没有一页识别成功，请检查文件后重试'
+        : '这次处理没有识别到词表内容');
+      return;
+    }
+    if (!this.pdfState.panelRendered) {
+      this.renderTextbookPanel('');
+      this.pdfState.panelRendered = true;
+    }
+    this.renderPreview();
+    this.discardBtn.hidden = false;
+    if (summary && summary.failed > 0) {
+      this.showFormError('有 ' + summary.failed + ' 页识别失败（在上方状态条可重试失败页）；已完成页的结果不受影响。');
+      if (kit.showToast) {
+        kit.showToast('有 ' + summary.failed + ' 页识别失败，可单独重试', 'error');
+      }
+    }
+  };
+
+  /**
+   * handlePdfRetryPage — one failed page again: pending → run → finish.
+   * Completed pages' rows are untouched (the merge replaces only the
+   * retried page's segment).
+   */
+  PhotoAddForm.prototype.handlePdfRetryPage = function (pageNo) {
+    var self = this;
+    var state = this.pdfState;
+    if (!state || this.recognizeBtn.disabled) {
+      return;
+    }
+    state.aborted = false;
+    state.plan = global.retryPage(state.plan, pageNo);
+    this.showFormError('');
+    this.setBusy(true);
+    this.runPdfPages(pageNo).then(function (summary) {
+      self.setBusy(false);
+      self.finishPdfRun(summary);
+    });
+  };
+
+  /**
+   * handlePdfResume — the 继续处理 button's handler: after 停止, run the
+   * still-pending pages only. Completed pages' rows are never re-merged
+   * (their edits survive), and pending pages render fresh — the same
+   * machinery the single-page retry rides.
+   */
+  PhotoAddForm.prototype.handlePdfResume = function () {
+    var self = this;
+    var state = this.pdfState;
+    if (!state || this.recognizeBtn.disabled) {
+      return;
+    }
+    state.aborted = false;
+    this.showFormError('');
+    this.setBusy(true);
+    this.runPdfPages().then(function (summary) {
+      self.setBusy(false);
+      self.finishPdfRun(summary);
+    });
+  };
+
+  /**
+   * renderPdfBar — the per-page status surface: one chip per page (页码 +
+   * 状态， title carries the failure reason), a 重试该页 button on failed
+   * chips, the whole-file summary line, and a 停止 button while running
+   * (AC-3 处理过程显示状态). textContent-only (Pitfall 10).
+   */
+  PhotoAddForm.prototype.renderPdfBar = function () {
+    var self = this;
+    var state = this.pdfState;
+    if (!state) {
+      this.pdfBar.hidden = true;
+      clearEl(this.pdfBar);
+      return;
+    }
+    this.pdfBar.hidden = false;
+    clearEl(this.pdfBar);
+
+    var summary = global.planSummary(state.plan);
+    var line = document.createElement('p');
+    line.className = 'pdf-summary-line';
+    line.textContent = '共 ' + summary.total + ' 页：成功 ' + summary.done +
+      '，失败 ' + summary.failed +
+      (summary.pending ? '，待处理 ' + summary.pending : '') +
+      (summary.running ? '，识别中 ' + summary.running : '');
+    this.pdfBar.appendChild(line);
+
+    var chips = document.createElement('div');
+    chips.className = 'pdf-page-chips';
+    state.plan.pages.forEach(function (page) {
+      var chip = document.createElement('span');
+      chip.className = 'pdf-page-chip pdf-chip-' + page.status;
+      chip.setAttribute('data-page', String(page.no));
+      chip.setAttribute('data-status', page.status);
+      if (page.error) {
+        chip.title = '第 ' + page.no + ' 页：' + page.error;
+      }
+      chip.textContent = '第 ' + page.no + ' 页';
+      if (page.status === 'failed') {
+        var retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'btn btn-secondary pdf-retry-btn';
+        retry.textContent = '重试';
+        retry.setAttribute('aria-label', '重试第 ' + page.no + ' 页');
+        retry.addEventListener('click', function () {
+          self.handlePdfRetryPage(page.no);
+        });
+        chip.appendChild(retry);
+      }
+      chips.appendChild(chip);
+    });
+    this.pdfBar.appendChild(chips);
+
+    if (summary.processing) {
+      var stop = document.createElement('button');
+      stop.type = 'button';
+      stop.className = 'btn btn-secondary pdf-stop-btn';
+      stop.textContent = '停止（保留已完成页）';
+      stop.addEventListener('click', function () {
+        state.aborted = true;
+      });
+      this.pdfBar.appendChild(stop);
+    } else if (summary.pending > 0) {
+      // The 停止 counterpart: resume ONLY the still-pending pages — the
+      // completed pages' rows (and the parent's edits to them) are never
+      // re-run (AC-4's preservation, extended from failed pages to
+      // stopped ones).
+      var resume = document.createElement('button');
+      resume.type = 'button';
+      resume.className = 'btn btn-secondary pdf-resume-btn';
+      resume.textContent = '继续处理（剩 ' + summary.pending + ' 页）';
+      resume.addEventListener('click', function () {
+        self.handlePdfResume();
+      });
+      this.pdfBar.appendChild(resume);
+    }
   };
 
   PhotoAddForm.prototype.setBusy = function (busy) {
@@ -898,7 +1365,7 @@
     if (this.bookChoice === 'none') {
       var noneNote = document.createElement('p');
       noneNote.className = 'photo-meta-line';
-      noneNote.textContent = '这些词将作为补充词汇加入，默认参与默写（补充词汇不要求虚构课次）。';
+      noneNote.textContent = '这些词将作为补充词汇加入，默认加入默写范围（补充词汇不要求虚构课次）。';
       host.appendChild(noneNote);
       return;
     }
@@ -918,7 +1385,9 @@
       nameInput.type = 'text';
       nameInput.className = 'form-input';
       nameInput.id = 'parent-photo-tb-name';
-      nameInput.value = suggestTextbookName(this.detectedMeta);
+      // parent-textbook.js's summary join IS the prefill (one encoder for
+      // 版本·学段·年级·上下册·模块; a missing script degrades to no prefill).
+      nameInput.value = global.textbookMetaSummary ? global.textbookMetaSummary(this.detectedMeta) : '';
       nameInput.setAttribute('aria-label', '教材名称');
       nameField.appendChild(nameLabel);
       nameField.appendChild(nameInput);
@@ -1050,13 +1519,27 @@
     });
     var next = classifyPhotoEntries(entries, this.existingWords);
     // Carry over the checked flag and the lesson the parent set (new rows
-    // default on; in textbook mode exists rows are committable too).
+    // default on; in textbook mode exists rows are committable too). The
+    // resolution carry MUST precede the checked computation — isCommittable
+    // reads it (a fresh conflict row would otherwise drop its parent-
+    // confirmed state and uncheck itself).
     for (var i = 0; i < next.length; i++) {
-      next[i].checked = this.rows[i].checked !== false && isCommittable(next[i], textbookMode);
-      next[i].lesson = this.rows[i].lesson || '';
       if (this.rows[i].status === next[i].status) {
         next[i].existingMeaning = next[i].existingMeaning || this.rows[i].existingMeaning;
+        // A resolution survives edits that keep the row a conflict (adopt
+        // then means "use what's in the box"); a status change drops it.
+        next[i].resolution = this.rows[i].resolution || '';
       }
+      next[i].checked = this.rows[i].checked !== false && isCommittable(next[i], textbookMode);
+      next[i].lesson = this.rows[i].lesson || '';
+      // Issue #7: the page tag rides every re-classification — the
+      // preview's page grouping and mergePageRows' segment replace read it.
+      next[i].page = this.rows[i].page || 0;
+      // Issue #8: provenance and the unanswered-attempt flag ride too —
+      // editing a word never silently drops the 系统补充 marker or the
+      // 生成失败 note (ADR-0005: edits do not change the source).
+      next[i].meaningSource = this.rows[i].meaningSource || '';
+      next[i].genFailed = !!this.rows[i].genFailed;
     }
     this.rows = next;
   };
@@ -1066,8 +1549,9 @@
     var self = this;
     clearEl(this.preview);
     if (!this.rows.length) {
-      this.renderPreviewHint('选择照片后点「开始识别」');
+      this.renderPreviewHint('选择照片或 PDF 后点「开始识别」');
       this.updateCommitButton();
+      this.renderMeaningBar();
       return;
     }
     var textbookMode = this.bookChoice !== 'none';
@@ -1090,9 +1574,24 @@
     table.appendChild(thead);
 
     var tbody = document.createElement('tbody');
-    this.rows.forEach(function (row, i) {
-      tbody.appendChild(self.buildReviewRow(row, i, textbookMode));
-    });
+    // Issue #7: PDF rows group under per-page header rows (页码 + that
+    // page's status + a 本页批量课次 mini-toolbar). Photo rows (no page
+    // tag) render flat, exactly as before.
+    var hasPages = this.pdfState && this.rows.some(function (r) { return r.page; });
+    if (hasPages) {
+      global.rowsByPage(this.rows).forEach(function (group) {
+        if (group.no) {
+          tbody.appendChild(self.buildPageHeadRow(group, headers.length));
+        }
+        group.rows.forEach(function (row) {
+          tbody.appendChild(self.buildReviewRow(row, row.index, textbookMode));
+        });
+      });
+    } else {
+      this.rows.forEach(function (row, i) {
+        tbody.appendChild(self.buildReviewRow(row, i, textbookMode));
+      });
+    }
     table.appendChild(tbody);
     this.preview.appendChild(table);
 
@@ -1112,6 +1611,51 @@
       this.preview.appendChild(datalist);
     }
     this.updateCommitButton();
+    this.renderMeaningBar();
+  };
+
+  /**
+   * One page's header row (Issue #7): 页码 + the page's row count + the
+   * 本页批量课次 mini-toolbar (US-13/AC-6 — setting one lesson onto a
+   * whole page without touching other pages; the global toolbar stays
+   * available for cross-page selections). The lesson input shares the
+   * page-level datalist rendered right after the table. colCount is the
+   * table's live header count (the thead is the one owner of the shape).
+   */
+  PhotoAddForm.prototype.buildPageHeadRow = function (group, colCount) {
+    var self = this;
+    var tr = document.createElement('tr');
+    tr.className = 'pdf-page-head';
+    var td = document.createElement('td');
+    td.colSpan = colCount;
+
+    var label = document.createElement('span');
+    label.className = 'pdf-page-label';
+    label.textContent = '第 ' + group.no + ' 页（' + group.rows.length + ' 条）';
+    td.appendChild(label);
+
+    var lessonInput = document.createElement('input');
+    lessonInput.type = 'text';
+    lessonInput.className = 'form-input pdf-page-lesson';
+    lessonInput.setAttribute('list', 'parent-photo-lesson-options');
+    lessonInput.setAttribute('aria-label', '第 ' + group.no + ' 页课次');
+    lessonInput.placeholder = '本页课次（如 第5课）';
+    var apply = document.createElement('button');
+    apply.type = 'button';
+    apply.className = 'btn btn-secondary pdf-page-lesson-apply';
+    apply.textContent = '应用到本页';
+    apply.addEventListener('click', function () {
+      self.rows = global.applyLessonToPage(self.rows, group.no, lessonInput.value.trim());
+      self.renderPreview();
+      if (self.bookDetailHost) {
+        self.renderTextbookDetail(self.bookDetailHost);
+      }
+    });
+    td.appendChild(lessonInput);
+    td.appendChild(apply);
+
+    tr.appendChild(td);
+    return tr;
   };
 
   /** One editable review row. textContent-only rendering (Pitfall 10). */
@@ -1156,16 +1700,47 @@
     tr.appendChild(wordCell);
 
     var meaningCell = document.createElement('td');
+    var meaningWrap = document.createElement('div');
+    meaningWrap.className = 'photo-meaning-cell';
     var meaningInput = document.createElement('input');
     meaningInput.type = 'text';
     meaningInput.className = 'form-input photo-cell-input';
     meaningInput.value = row.meaning;
     meaningInput.setAttribute('aria-label', '释义 第 ' + (i + 1) + ' 行');
-    meaningInput.addEventListener('input', function () {
-      self.rows[i].meaning = meaningInput.value;
+    // Issue #8: the 系统补充 marker rides the meaning cell (AC-2). The
+    // display rule is meaningMarkerVisible's alone — a parent clearing
+    // the text by keyboard hides the badge live (the source resets at
+    // submit anyway: an empty gloss never stores 'generated').
+    var meaningBadge = document.createElement('span');
+    meaningBadge.className = 'meaning-source-badge';
+    meaningBadge.textContent = '系统补充';
+    meaningBadge.title = '释义由系统按教材语境补充，可编辑或取消；不会当作教材原文';
+    meaningBadge.hidden = !global.meaningMarkerVisible(row);
+    // AC-4 取消: clear the supplement, back to missing (retryable).
+    var meaningCancel = document.createElement('button');
+    meaningCancel.type = 'button';
+    meaningCancel.className = 'meaning-cancel-btn';
+    meaningCancel.textContent = '取消补充';
+    meaningCancel.setAttribute('aria-label', '取消第 ' + (i + 1) + ' 行的系统补充释义');
+    meaningCancel.title = '清空这条系统补充的释义，保留缺失（可再次补充）';
+    meaningCancel.hidden = !global.meaningMarkerVisible(row);
+    meaningCancel.addEventListener('click', function () {
+      self.rows = global.cancelGeneratedMeaning(self.rows, i);
+      meaningInput.value = '';
+      meaningBadge.hidden = true;
+      meaningCancel.hidden = true;
       self.onRowEdited();
     });
-    meaningCell.appendChild(meaningInput);
+    meaningInput.addEventListener('input', function () {
+      self.rows[i].meaning = meaningInput.value;
+      meaningBadge.hidden = !global.meaningMarkerVisible(self.rows[i]);
+      meaningCancel.hidden = meaningBadge.hidden;
+      self.onRowEdited();
+    });
+    meaningWrap.appendChild(meaningInput);
+    meaningWrap.appendChild(meaningBadge);
+    meaningWrap.appendChild(meaningCancel);
+    meaningCell.appendChild(meaningWrap);
     tr.appendChild(meaningCell);
 
     if (textbookMode) {
@@ -1191,7 +1766,7 @@
 
     var statusCell = document.createElement('td');
     statusCell.className = 'preview-status photo-status photo-status-' + row.status;
-    renderStatusCell(statusCell, row, textbookMode);
+    renderStatusCell(statusCell, row, textbookMode, this);
     tr.appendChild(statusCell);
 
     return tr;
@@ -1201,9 +1776,11 @@
    * (Re)build one row's status cell content — the single writer for the
    * chip + note markup, used by both the initial render (buildReviewRow)
    * and the caret-preserving edit sync (onRowEdited). textContent only
-   * (Pitfall 10).
+   * (Pitfall 10) — except the Issue #6 conflict radios, the one control
+   * that lives here (form is passed in so the change handler always
+   * addresses the CURRENT row object, never a reclassify-stale one).
    */
-  function renderStatusCell(statusCell, row, textbookMode) {
+  function renderStatusCell(statusCell, row, textbookMode, form) {
     while (statusCell.firstChild) {
       statusCell.removeChild(statusCell.firstChild);
     }
@@ -1214,7 +1791,7 @@
       var note = document.createElement('p');
       note.className = 'photo-status-note';
       note.textContent = row.status === 'conflict'
-        ? '词库释义：' + (row.existingMeaning || '（空）') + '，将保留原释义'
+        ? '词库释义：' + (row.existingMeaning || '（空）') + (row.resolution ? '' : '，未确认前不提交')
         : (textbookMode ? '词库已有相同词条；勾选后仅指定课次，不重复添加' : '词库已有相同词条');
       statusCell.appendChild(note);
     }
@@ -1223,6 +1800,51 @@
       why.className = 'photo-status-note';
       why.textContent = describeInvalidReason(row.reason);
       statusCell.appendChild(why);
+    }
+    // Issue #8 AC-5: an unanswered supplement attempt is shown honestly —
+    // the row stays submittable with its missing meaning (保留缺失), and
+    // the affordance offers 重试. Manual text resolves the note.
+    if (global.genFailedVisible && global.genFailedVisible(row)) {
+      var genNote = document.createElement('p');
+      genNote.className = 'photo-status-note photo-gen-failed-note';
+      genNote.textContent = '释义生成失败，可重试或保留缺失';
+      statusCell.appendChild(genNote);
+    }
+    if (row.status === 'conflict' && textbookMode && form) {
+      // Issue #6 AC-3: the difference is already on display; the parent
+      // confirms ONE reading, and only then does the row join the commit.
+      var wrap = document.createElement('div');
+      wrap.className = 'photo-conflict-choice';
+      [
+        { value: 'keep', label: '保留词库释义' },
+        { value: 'adopt', label: '采用照片释义' },
+      ].forEach(function (opt) {
+        var lab = document.createElement('label');
+        lab.className = 'photo-conflict-option';
+        var input = document.createElement('input');
+        input.type = 'radio';
+        input.name = 'photo-conflict-' + row.index;
+        input.value = opt.value;
+        input.checked = row.resolution === opt.value;
+        input.addEventListener('change', function () {
+          if (!input.checked || !form || !form.rows) {
+            return;
+          }
+          var current = form.rows[row.index];
+          if (!current || current.status !== 'conflict') {
+            return;
+          }
+          current.resolution = opt.value;
+          current.checked = true;
+          form.onRowEdited();
+        });
+        var span = document.createElement('span');
+        span.textContent = opt.label;
+        lab.appendChild(input);
+        lab.appendChild(span);
+        wrap.appendChild(lab);
+      });
+      statusCell.appendChild(wrap);
     }
   }
 
@@ -1261,13 +1883,24 @@
         check.disabled = !committable;
         check.checked = committable && row.checked !== false;
       }
+      // The lesson input's enablement must follow the SAME committable
+      // verdict — a resolved conflict becomes lesson-editable without a
+      // full re-render (the caret-preserving reason this sync exists).
+      var lessonEl = tr.querySelector('.photo-lesson-cell input');
+      if (lessonEl) {
+        lessonEl.disabled = !committable;
+      }
 
       var statusCell = tr.querySelector('.photo-status');
       if (statusCell) {
-        renderStatusCell(statusCell, row, textbookMode);
+        renderStatusCell(statusCell, row, textbookMode, this);
       }
     }
     this.updateCommitButton();
+    // Issue #8: edits change the eligible/failed counts — the affordance
+    // label follows without a full re-render (same caret-preserving reason
+    // this sync exists).
+    this.updateMeaningBar();
   };
 
   PhotoAddForm.prototype.updateCommitButton = function () {
@@ -1285,11 +1918,13 @@
     });
   };
 
-  /** Rows that take part in a textbook-mode commit: added (new) or
-   *  lesson-assigned (exists); conflict/invalid/unchecked never do. */
+  /** Rows that take part in a textbook-mode commit: added (new),
+   *  lesson-assigned (exists) and parent-RESOLVED conflicts (Issue #6);
+   *  unresolved conflicts, invalid and unchecked rows never do. */
   PhotoAddForm.prototype.committedRows = function () {
+    var textbookMode = this.bookChoice !== 'none';
     return this.rows.filter(function (r) {
-      return (r.status === 'new' || r.status === 'exists') && r.checked !== false;
+      return isCommittable(r, textbookMode) && r.checked !== false;
     });
   };
 
@@ -1323,25 +1958,31 @@
       this.updateCommitButton();
       return;
     }
-    if (rows.length > MAX_BATCH_ENTRIES) {
-      this.showFormError('一次最多添加 ' + MAX_BATCH_ENTRIES + ' 个单词，请取消部分勾选后分两次提交');
+
+    if (!global.chunkBatch) {
+      this.showFormError('页面脚本未完整加载，请刷新后重试');
       return;
     }
 
-    var unit = this.unitInput ? this.unitInput.value.trim() : '';
-    var entries = rows.map(function (r) {
-      return { word: r.word, meaning: r.meaning, example: '' };
-    });
-
     this.setCommitBusy(true);
-    this.submitWords({ category: 'english', unit: unit, entries: entries })
-      .then(function (result) {
-        var outcome = result || { added: 0, skipped: 0 };
-        // Reconcile ONLY when the server reports skips (a raced duplicate).
-        // A failed snapshot fetch resolves null — "unavailable", NOT an
-        // empty library — so a network blip can never reclassify the
-        // server-confirmed adds as failures (honesty cuts both ways).
-        var reconcile = (outcome.skipped || 0) > 0
+    // Issue #7: a whole textbook can far exceed one add call's entry cap —
+    // submitChunked slices sequentially and aggregates. A mid-run slice
+    // failure keeps the already-added slices: the receipt reconciles per
+    // word from the real snapshot, and the rows stay for a plain
+    // re-confirm (the server skips what a retry finds already present).
+    var failedWith = null;
+    submitChunked(this, rows)
+      .catch(function (err) {
+        failedWith = err;
+        return err.partialOutcome || { added: 0, skipped: 0 };
+      })
+      .then(function (outcome) {
+        // Reconcile on skips (a raced duplicate) OR a mid-run slice
+        // failure (what actually landed matters). A failed snapshot fetch
+        // resolves null — "unavailable", NOT an empty library — so a
+        // network blip can never reclassify server-confirmed adds as
+        // failures (honesty cuts both ways).
+        var reconcile = (outcome.skipped || 0) > 0 || failedWith
           ? self.fetchWords('english').catch(function () { return null; })
           : Promise.resolve(null);
         return reconcile.then(function (fresh) {
@@ -1349,18 +1990,25 @@
             self.existingWords = fresh;
           }
           self.renderCommitResult(outcome, rows, fresh);
+          if (failedWith) {
+            var message = (failedWith && failedWith.message) ? failedWith.message : '未知错误';
+            if (kit.showToast) {
+              kit.showToast('部分添加失败：' + message + '。已添加的部分不会丢失，请重试未完成的部分。', 'error');
+            } else {
+              self.showFormError('部分添加失败：' + message + '。已添加的部分不会丢失，请重试未完成的部分。');
+            }
+            return null;
+          }
           self.onCommitted(outcome);
           // Reset for the next photo; category note and unit retained.
           self.resetAfterCommit();
         });
       })
       .catch(function (err) {
+        // The unexpected (render/parse) path — the submit failures were
+        // already handled above; this never masks them.
         var message = (err && err.message) ? err.message : '未知错误';
-        if (kit.showToast) {
-          kit.showToast('保存失败：' + message + '。内容没有保存，请检查后重试。', 'error');
-        } else {
-          self.showFormError('保存失败：' + message + '。内容没有保存，请检查后重试。');
-        }
+        self.showFormError('保存失败：' + message + '。请检查后重试。');
       })
       .then(function () {
         self.setCommitBusy(false);
@@ -1371,10 +2019,8 @@
   PhotoAddForm.prototype.resetAfterCommit = function () {
     this.currentFile = null;
     this.fileInput.value = '';
-    this.fileMeta.textContent = '';
-    this.thumb.hidden = true;
-    this.thumb.removeAttribute('src');
-    this.recognizeBtn.disabled = true;
+    this.releasePdf();
+    this.clearPickUI();
     this.resetEntries();
   };
 
@@ -1403,10 +2049,13 @@
       this.updateCommitButton();
       return;
     }
-    if (committed.length > MAX_BATCH_ENTRIES) {
-      this.showFormError('一次最多提交 ' + MAX_BATCH_ENTRIES + ' 个单词，请取消部分勾选后分两次提交');
+    if (!global.chunkBatch) {
+      this.showFormError('页面脚本未完整加载，请刷新后重试');
       return;
     }
+    // Issue #7: a whole textbook exceeds one call's caps — the add and
+    // assign steps slice themselves (ADR-0004 #6); the parent confirms
+    // ONCE, the slices run sequentially inside the commit.
     var createValues = null;
     if (this.bookChoice === 'new') {
       createValues = this.readCreateForm();
@@ -1444,8 +2093,12 @@
       })
       .catch(function (err) {
         var message = (err && err.message) ? err.message : '未知错误';
+        // Issue #7: a mid-slice add failure leaves earlier slices added —
+        // say so instead of a flat 保存失败.
+        var partial = err && err.partialOutcome && err.partialOutcome.added
+          ? '（已添加 ' + err.partialOutcome.added + ' 个，不会丢失）' : '';
         if (!established) {
-          self.reportCommitError('保存失败：' + message + '。请检查后重试。');
+          self.reportCommitError('保存失败：' + message + partial + '。请检查后重试。');
           return;
         }
         // The book (and possibly its lesson list) DID land; the retry must
@@ -1465,7 +2118,7 @@
             self.renderPreview();
           }
           self.reportCommitError('教材「' + established.name +
-            '」已建立（课次表已更新），但 ' + message +
+            '」已建立（课次表已更新），但 ' + message + partial +
             '。已保存的部分不会丢失；请直接重试。');
         });
       })
@@ -1565,23 +2218,24 @@
   };
 
   /**
-   * Steps 2–4 — add the new rows, snapshot the truth, assign the groups.
-   * Returns the receipt pieces for renderTextbookCommitResult.
+   * Steps 2–5 — add the new rows, snapshot the truth, apply the parent's
+   * 采用照片释义 edits, assign the groups. Returns the receipt pieces for
+   * renderTextbookCommitResult.
    */
   PhotoAddForm.prototype.addAndAssign = function (book, committed) {
     var self = this;
     var addRows = committed.filter(function (r) {
       return r.status === 'new';
     });
+    var adoptRows = committed.filter(function (r) {
+      return r.status === 'conflict' && r.resolution === 'adopt';
+    });
 
+    // Issue #7: the new rows go out sliced and aggregated (a whole
+    // textbook in one confirm); a mid-run failure rejects with
+    // partialOutcome (submitChunked's contract).
     var addPromise = addRows.length
-      ? self.submitWords({
-        category: 'english',
-        unit: self.unitInput ? self.unitInput.value.trim() : '',
-        entries: addRows.map(function (r) {
-          return { word: r.word, meaning: r.meaning, example: '' };
-        }),
-      }).catch(function (err) {
+      ? submitChunked(self, addRows).catch(function (err) {
         err.message = '词汇添加失败：' + (err.message || '未知错误');
         throw err;
       })
@@ -1590,7 +2244,8 @@
     return addPromise.then(function (outcome) {
       outcome = outcome || { added: 0, skipped: 0 };
       // The snapshot serves reconciliation (raced duplicates) AND card-id
-      // resolution for the assignments — one fetch, two honest uses.
+      // resolution for the edits and assignments — one fetch, three
+      // honest uses (and the sticky-include lookup rides it too).
       return self.fetchWords('english').catch(function () { return null; })
         .then(function (fresh) {
           if (fresh) {
@@ -1602,41 +2257,293 @@
               idByWord[String(w.word).trim()] = w.id;
             }
           });
-          var groups = planAssignments(committed, idByWord, self.includePending);
-          var unassigned = committed.filter(function (r) {
-            return !Object.prototype.hasOwnProperty.call(idByWord, r.word);
-          }).map(function (r) { return r.word; });
+          return self.runAdoptEdits(adoptRows, idByWord).then(function (editResults) {
+            var groups = planAssignments(committed, fresh || [], book.id, self.includePending);
+            var unassigned = committed.filter(function (r) {
+              return !Object.prototype.hasOwnProperty.call(idByWord, r.word);
+            }).map(function (r) { return r.word; });
 
-          return self.runAssignments(book, groups).then(function (results) {
-            return {
-              book: book,
-              addOutcome: outcome,
-              submittedRows: addRows,
-              fresh: fresh,
-              groups: groups,
-              groupResults: results,
-              unassigned: unassigned,
-            };
+            return self.runAssignments(book, groups).then(function (results) {
+              return {
+                book: book,
+                addOutcome: outcome,
+                submittedRows: addRows,
+                adoptRows: adoptRows,
+                editResults: editResults,
+                fresh: fresh,
+                groups: groups,
+                groupResults: results,
+                unassigned: unassigned,
+              };
+            });
           });
         });
     });
   };
 
-  /** Step 4 — run the assign calls sequentially, keeping each outcome. */
+  /**
+   * 采用照片释义 edits — sequential meaning-only PUT /words/{id} calls
+   * (the D-07 edit path: text changes never touch FSRS state, so the
+   * confirmed reading replaces the meaning while the learning history
+   * stays). One row's failure fails only itself — the receipt says so.
+   */
+  PhotoAddForm.prototype.runAdoptEdits = function (adoptRows, idByWord) {
+    var self = this;
+    var results = [];
+    var chain = Promise.resolve();
+    adoptRows.forEach(function (row) {
+      chain = chain.then(function () {
+        var id = Object.prototype.hasOwnProperty.call(idByWord, row.word)
+          ? idByWord[row.word] : null;
+        if (!id) {
+          results.push({ word: row.word, ok: false, error: '词库读取失败，未能更新释义' });
+          return null;
+        }
+        if (!self.editWord) {
+          results.push({ word: row.word, ok: false, error: '编辑接口不可用' });
+          return null;
+        }
+        return self.editWord(id, { word: row.word, meaning: row.meaning }).then(function () {
+          results.push({ word: row.word, ok: true });
+        }).catch(function (err) {
+          results.push({ word: row.word, ok: false, error: (err && err.message) || '未知错误' });
+        });
+      });
+    });
+    return chain.then(function () { return results; });
+  };
+
+  // ------------------------------------------------------------------
+  // Issue #8 — 缺失英语释义按教材语境补充（ADR-0005）
+  // ------------------------------------------------------------------
+
+  /**
+   * The CONFIRMED context one supplement call carries (AC-3): an existing
+   * book's stored meta + its 已学进度 gauge; the 新建教材 mini-form's
+   * confirmed values with NO progress (尚未登记 — never faked as 0).
+   * 'none' (补充词汇) has no textbook context to ground on → null, and
+   * the affordance never mounts for it (ADR-0005 option E).
+   */
+  PhotoAddForm.prototype.meaningContext = function () {
+    if (this.bookChoice === 'none') {
+      return null;
+    }
+    if (this.bookChoice === 'new') {
+      var values = this.readCreateForm();
+      var textbook = {};
+      META_FIELDS.forEach(function (meta) {
+        if (values[meta.key]) {
+          textbook[meta.key] = values[meta.key];
+        }
+      });
+      return { textbook: textbook, learnedLessons: null };
+    }
+    var book = this.chosenBook();
+    if (!book) {
+      return null;
+    }
+    return {
+      textbook: {
+        edition: book.edition || '',
+        stage: book.stage || '',
+        grade: book.grade || '',
+        volume: book.volume || '',
+        module: book.module || '',
+      },
+      learnedLessons: typeof book.learnedLessons === 'number' ? book.learnedLessons : null,
+    };
+  };
+
+  /**
+   * Render the supplement strip. Hidden unless: the wiring exists, a
+   * recognition is on display, a textbook context is confirmed and
+   * eligible (still-missing) words exist. The label switches to
+   * 重试生成 once any previous attempt went unanswered; the note names
+   * the unanswered count honestly (AC-5).
+   */
+  PhotoAddForm.prototype.renderMeaningBar = function () {
+    var self = this;
+    this.meaningBar.hidden = true;
+    clearEl(this.meaningBar);
+    this.meaningGenBtn = null;
+    this.meaningGenLabel = null;
+    if (!this.generateMeanings || !global.supplementWords || !this.rows.length) {
+      return;
+    }
+    var context = this.meaningContext();
+    if (!context) {
+      return;
+    }
+    var summary = global.meaningGenSummary(this.rows);
+    if (!summary.target) {
+      // Nothing to send — every previously-unanswered row either got its
+      // meaning (from a later slice or by hand) or was resolved; the
+      // per-row 生成失败 notes have already cleared with the meanings.
+      return;
+    }
+
+    var bar = document.createElement('div');
+    bar.className = 'photo-meaning-bar-inner';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-secondary photo-meaning-gen-btn';
+    var label = document.createElement('span');
+    label.className = 'btn-label';
+    this.meaningGenBtn = btn;
+    this.meaningGenLabel = label;
+    btn.appendChild(label);
+    btn.addEventListener('click', function () {
+      self.handleGenerateMeanings();
+    });
+    bar.appendChild(btn);
+
+    var hint = document.createElement('span');
+    hint.className = 'photo-meaning-hint';
+    hint.textContent = summary.failed
+      ? '按已确认教材与进度补充缺失释义；上次有 ' + summary.failed + ' 词未答出'
+      : '按已确认教材与已学进度补充缺失释义，标明「系统补充」，可编辑或取消';
+    bar.appendChild(hint);
+
+    this.meaningBar.appendChild(bar);
+    this.meaningBar.hidden = false;
+    this.updateMeaningBar();
+  };
+
+  /**
+   * In-place affordance sync (the updateCommitButton kin): label count,
+   * busy state. Called from onRowEdited so keystrokes keep the count live
+   * without rebuilding the strip.
+   */
+  PhotoAddForm.prototype.updateMeaningBar = function () {
+    if (!this.meaningGenBtn || !this.meaningGenLabel) {
+      return;
+    }
+    var summary = global.meaningGenSummary(this.rows);
+    this.meaningGenLabel.textContent = this.meaningBusy
+      ? '生成中…'
+      : (summary.failed ? '重试生成（' + summary.target + ' 词）' : '补充缺失释义（' + summary.target + ' 词）');
+    this.meaningGenBtn.disabled = this.meaningBusy || !summary.target;
+  };
+
+  /**
+   * One supplement run: the still-missing eligible words go out in
+   * MAX_BATCH_ENTRIES-sized sequential slices (ADR-0005 #6 — a whole
+   * textbook supplements without the parent splitting it), each reply
+   * folds in as it lands, and an HTTP failure stops the run honestly
+   * naming what already applied (the submitChunked partialOutcome kin).
+   */
+  PhotoAddForm.prototype.handleGenerateMeanings = function () {
+    var self = this;
+    if (this.meaningBusy || !this.generateMeanings || !global.chunkBatch) {
+      return;
+    }
+    var context = this.meaningContext();
+    var words = global.supplementWords(this.rows);
+    if (!context || !words.length) {
+      return;
+    }
+
+    this.meaningBusy = true;
+    this.updateMeaningBar();
+    this.showFormError('');
+
+    var applied = 0;
+    var failed = 0;
+    var slices = global.chunkBatch(words, MAX_BATCH_ENTRIES);
+    var appliedSlices = 0;
+    var chain = Promise.resolve();
+    slices.forEach(function (part) {
+      chain = chain.then(function () {
+        // Re-read the confirmed context PER SLICE: the textbook select
+        // stays live during a multi-slice run, and each slice's prompt
+        // must be truthful about its own inputs — never a context the
+        // parent already switched away from (code-review finding).
+        var sliceContext = self.meaningContext();
+        if (!sliceContext) {
+          // The parent switched to 不指定教材 mid-run: no confirmed
+          // context grounds further slices — stop honestly (the catch
+          // marks the un-run slices and names what already applied).
+          throw new Error('教材归属已改为不指定，已停止补充');
+        }
+        return self.generateMeanings({
+          words: part,
+          textbook: sliceContext.textbook,
+          learnedLessons: sliceContext.learnedLessons,
+        }).then(function (reply) {
+          self.rows = global.applyGeneratedMeanings(self.rows, reply || {});
+          applied += Object.keys((reply && reply.meanings) || {}).length;
+          failed += ((reply && reply.missing) || []).length;
+          appliedSlices++;
+          // Fold each slice in as it lands so a later failure never
+          // discards earlier answers.
+          self.renderPreview();
+        });
+      });
+    });
+
+    chain.then(function () {
+      self.meaningBusy = false;
+      self.renderPreview();
+      if (failed) {
+        self.showFormError('有 ' + failed + ' 个词未生成释义（已保留缺失，可重试或提交）');
+      }
+    }).catch(function (err) {
+      // Words whose slices never got a reply carry the same honest
+      // per-row failure flag a reply.missing word does — the affordance
+      // switches to 重试生成 and the rows stay submittable (ADR-0005 #5).
+      var unanswered = [];
+      for (var i = appliedSlices; i < slices.length; i++) {
+        unanswered = unanswered.concat(slices[i]);
+      }
+      self.rows = global.markGenerationFailed(self.rows, unanswered);
+      self.meaningBusy = false;
+      self.renderPreview();
+      var partial = applied ? '（已补充 ' + applied + ' 个，不会丢失）' : '';
+      self.showFormError('释义生成失败：' + ((err && err.message) || '未知错误') + partial + '。可重试，或保留缺失直接提交。');
+    });
+  };
+
+  /**
+   * Step 4 — run the assign calls sequentially, keeping each outcome.
+   * Issue #7: a group can carry a whole textbook's cards, so each
+   * (lesson, includeInScope) group is further sliced into
+   * MAX_ASSIGN_IDS-sized calls (the server's batch-ids cap) — the receipt
+   * keeps one outcome per slice with the slice's own words.
+   */
   PhotoAddForm.prototype.runAssignments = function (book, groups) {
     var self = this;
     var results = [];
     var chain = Promise.resolve();
     groups.forEach(function (group) {
-      chain = chain.then(function () {
-        return self.assignWords(book.id, {
-          cardIds: group.cardIds,
-          lesson: group.lesson,
-          includeInScope: group.includeInScope,
-        }).then(function (result) {
-          results.push({ group: group, ok: true, result: result });
-        }).catch(function (err) {
-          results.push({ group: group, ok: false, error: (err && err.message) || '未知错误' });
+      var pairs = (group.cardIds || []).map(function (id, i) {
+        return { id: id, word: (group.words || [])[i] || '' };
+      });
+      global.chunkBatch(pairs, MAX_ASSIGN_IDS).forEach(function (part) {
+        // One receipt entry per slice, carrying the slice's own words.
+        var pushResult = function (ok, extra) {
+          var entry = {
+            group: {
+              lesson: group.lesson,
+              includeInScope: group.includeInScope,
+              words: part.map(function (p) { return p.word; }),
+            },
+            ok: ok,
+          };
+          Object.keys(extra || {}).forEach(function (key) {
+            entry[key] = extra[key];
+          });
+          results.push(entry);
+        };
+        chain = chain.then(function () {
+          return self.assignWords(book.id, {
+            cardIds: part.map(function (p) { return p.id; }),
+            lesson: group.lesson,
+            includeInScope: group.includeInScope,
+          }).then(function (result) {
+            pushResult(true, { result: result });
+          }).catch(function (err) {
+            pushResult(false, { error: (err && err.message) || '未知错误' });
+          });
         });
       });
     });
@@ -1700,6 +2607,138 @@
       }
     });
     return { added: added, existed: existed, failed: failed, unverified: unverified, raced: raced };
+  }
+
+  /**
+   * buildTextbookReceipt — the Issue #6 per-item commit receipt. Buckets
+   * every preview row into exactly one category:
+   *   'added'       新增 — the word entered the library (verified or
+   *                  server-confirmed) and its source merged
+   *   'merged'      合并 — an already-present word whose source merged
+   *                  (exists, 保留/采用 resolution, raced-to-different)
+   *   'pendingDiff' 待处理差异 — a conflict the parent did NOT resolve
+   *   'failed'      失败 — something the parent must fix (add/edit/assign
+   *                  step failed, or the card could not be resolved); the
+   *                  note always admits what DID persist
+   *   'unverified'  未核对 — a raced add the (unavailable) snapshot could
+   *                  not verify — never guessed up or down
+   *   'excluded'    未提交 — invalid or unchecked rows (never failures)
+   * summary is BY CONSTRUCTION the tally of items (AC-6: 汇总与实际结果
+   * 一致). Pure — the caller supplies only server-truth pieces.
+   */
+  function buildTextbookReceipt(input) {
+    var edited = {};
+    (input.editResults || []).forEach(function (e) {
+      if (e && e.word) {
+        edited[e.word] = e;
+      }
+    });
+    var assignFailed = {};
+    (input.groupResults || []).forEach(function (r) {
+      if (r && !r.ok && r.group) {
+        (r.group.words || []).forEach(function (w) {
+          assignFailed[w] = { lesson: r.group.lesson || '', error: r.error || '未知错误' };
+        });
+      }
+    });
+    var snapMeaning = {};
+    (input.fresh || []).forEach(function (w) {
+      if (w && w.word) {
+        snapMeaning[String(w.word).trim()] = w.meaning == null ? '' : String(w.meaning).trim();
+      }
+    });
+    var raced = !!(input.addOutcome && input.addOutcome.skipped);
+    var submitted = {};
+    (input.addRows || []).forEach(function (r) {
+      if (r && r.word) {
+        submitted[r.word] = true;
+      }
+    });
+    var unassigned = {};
+    (input.unassigned || []).forEach(function (w) {
+      unassigned[w] = true;
+    });
+
+    var assignFailNote = function (word, prefix) {
+      var f = assignFailed[word] || {};
+      return (prefix || '') + '课次' + (f.lesson ? '「' + f.lesson + '」' : '') +
+        '指定失败：' + (f.error || '未知错误') + '——可在词库中重试';
+    };
+
+    var items = [];
+    (input.rows || []).forEach(function (row) {
+      var item = { word: row.word, category: '', note: '' };
+      var meaning = String(row.meaning == null ? '' : row.meaning).trim();
+      if (row.status === 'invalid') {
+        item.category = 'excluded';
+        item.note = describeInvalidReason(row.reason);
+      } else if (row.status === 'conflict' && !isResolved(row)) {
+        item.category = 'pendingDiff';
+        item.note = '词库释义「' + (row.existingMeaning || '（空）') + '」与照片释义「' +
+          meaning + '」不同，未确认——已保留原释义，仅报告差异';
+      } else if (row.checked === false) {
+        item.category = 'excluded';
+        item.note = '未勾选';
+      } else if (row.status === 'new') {
+        if (raced && !input.fresh) {
+          item.category = 'unverified';
+          item.note = '已提交，但词库读取失败，未能核对实际结果';
+        } else if (raced && !Object.prototype.hasOwnProperty.call(snapMeaning, row.word)) {
+          item.category = 'failed';
+          item.note = '未添加成功，请重试';
+        } else if (raced && snapMeaning[row.word] !== meaning) {
+          if (assignFailed[row.word]) {
+            item.category = 'failed';
+            item.note = assignFailNote(row.word, '并发已存在不同释义，保留原释义；');
+          } else {
+            item.category = 'merged';
+            item.note = '并发已存在不同释义，保留原释义，仅合并来源';
+          }
+        } else if (assignFailed[row.word]) {
+          item.category = 'failed';
+          item.note = assignFailNote(row.word, '词条已保存；');
+        } else if (unassigned[row.word]) {
+          item.category = 'failed';
+          item.note = '词条已保存，但词库读取失败，未能指定课次——可在词库中补指定';
+        } else {
+          item.category = 'added';
+          item.note = '已添加并指定课次';
+        }
+      } else if (row.status === 'conflict' && row.resolution === 'adopt') {
+        var edit = edited[row.word];
+        if (edit && !edit.ok) {
+          item.category = 'failed';
+          item.note = '释义更新失败：' + (edit.error || '未知错误');
+        } else if (assignFailed[row.word]) {
+          item.category = 'failed';
+          item.note = assignFailNote(row.word, '释义已按照片更新；');
+        } else {
+          item.category = 'merged';
+          item.note = '采用照片释义更新，已合并来源';
+        }
+      } else if (unassigned[row.word]) {
+        item.category = 'failed';
+        item.note = '词库读取失败，未能指定课次——可在词库中补指定';
+      } else if (assignFailed[row.word]) {
+        item.category = 'failed';
+        item.note = assignFailNote(row.word);
+      } else if (row.status === 'conflict') {
+        item.category = 'merged';
+        item.note = '保留词库释义，仅合并来源';
+      } else {
+        item.category = 'merged';
+        item.note = '词库已有，仅指定课次';
+      }
+      items.push(item);
+    });
+
+    var summary = { added: 0, merged: 0, pendingDiff: 0, failed: 0, unverified: 0, excluded: 0 };
+    items.forEach(function (item) {
+      if (Object.prototype.hasOwnProperty.call(summary, item.category)) {
+        summary[item.category] += 1;
+      }
+    });
+    return { items: items, summary: summary };
   }
 
   /**
@@ -1797,13 +2836,30 @@
    * stored fine, out of automatic selection until the progress moves).
    * A partial success is never a plain success.
    */
+  /** The Issue #6 per-category receipt labels (buildTextbookReceipt kin). */
+  var RECEIPT_CATEGORIES = [
+    { key: 'added', label: '新增' },
+    { key: 'merged', label: '合并' },
+    { key: 'pendingDiff', label: '待处理差异' },
+    { key: 'failed', label: '失败' },
+    { key: 'unverified', label: '未核对' },
+    { key: 'excluded', label: '未提交' },
+  ];
+
   PhotoAddForm.prototype.renderTextbookCommitResult = function (receipt) {
     clearEl(this.banner);
     var kit = global.__parentFormKit || {};
     var book = receipt.book;
-    var lists = buildAddOutcomeLists(receipt.addOutcome, receipt.submittedRows, receipt.fresh);
-    var addedCount = lists.raced && !receipt.fresh
-      ? (receipt.addOutcome.added || 0) : lists.added.length;
+    var built = buildTextbookReceipt({
+      rows: this.rows,
+      addRows: receipt.submittedRows,
+      addOutcome: receipt.addOutcome,
+      fresh: receipt.fresh,
+      editResults: receipt.editResults,
+      groups: receipt.groups,
+      groupResults: receipt.groupResults,
+      unassigned: receipt.unassigned,
+    });
 
     // Which assigned lessons sit beyond the book's learned progress?
     var learned = book && book.learnedLessons ? book.learnedLessons : 0;
@@ -1817,106 +2873,66 @@
       }
     });
 
-    var notSubmitted = this.rows.filter(function (r) {
-      return (r.status !== 'new' && r.status !== 'exists') || r.checked === false;
-    });
-    var assignFailed = receipt.groupResults.filter(function (r) { return !r.ok; });
-    var assignOkWords = [];
-    receipt.groupResults.forEach(function (r) {
-      if (r.ok) {
-        assignOkWords = assignOkWords.concat(r.group.words);
-      }
-    });
-
     var box = document.createElement('div');
-    var partial = lists.existed.length > 0 || lists.failed.length > 0 ||
-      lists.unverified.length > 0 || assignFailed.length > 0 ||
-      receipt.unassigned.length > 0 || notSubmitted.length > 0;
+    var partial = built.summary.failed > 0 || built.summary.pendingDiff > 0 ||
+      built.summary.unverified > 0 || built.summary.excluded > 0;
     box.className = 'result-banner ' +
       (partial ? 'result-banner-warning' : 'result-banner-success');
     box.setAttribute('role', 'status');
     box.setAttribute('aria-live', 'polite');
 
+    // AC-6: the summary names the four result kinds (plus the honesty
+    // buckets when non-zero) and is the tally of the per-item list below.
     var summary = document.createElement('p');
     summary.className = 'result-summary';
-    var parts = [];
-    if (receipt.submittedRows.length) {
-      parts.push('已添加 ' + addedCount + ' 个' +
-        (lists.existed.length ? '，已有 ' + lists.existed.length + ' 个' : '') +
-        (lists.failed.length ? '，未添加 ' + lists.failed.length + ' 个' : '') +
-        (lists.unverified.length ? '，未核对 ' + lists.unverified.length + ' 个' : ''));
-    }
-    parts.push('教材「' + (book ? book.name : '？') + '」指定课次 ' + assignOkWords.length + ' 个' +
-      (assignFailed.length ? '，指定失败 ' + assignFailed.length + ' 组' : '') +
-      (receipt.unassigned.length ? '，未指定 ' + receipt.unassigned.length + ' 个' : '') +
-      (notSubmitted.length ? '，未提交 ' + notSubmitted.length + ' 个' : ''));
-    summary.textContent = parts.join('；');
+    var parts = RECEIPT_CATEGORIES.filter(function (c) {
+      return built.summary[c.key] > 0;
+    }).map(function (c) {
+      return c.label + ' ' + built.summary[c.key] + ' 个';
+    });
+    summary.textContent = '教材「' + (book ? book.name : '？') + '」：' +
+      (parts.length ? parts.join('，') : '没有可提交的词');
     box.appendChild(summary);
 
+    // Per-item lines, one per category in the fixed order.
     var detail = document.createElement('p');
     detail.className = 'result-detail';
     var lines = [];
-    if (lists.raced && !receipt.fresh && addedCount > 0) {
-      lines.push('已添加 ' + addedCount + ' 个（服务器确认）');
-    } else if (lists.added.length) {
-      lines.push('已添加：' + lists.added.join('、'));
-    }
-    if (lists.existed.length) {
-      lines.push('已有（保留词库原释义，仅指定课次）：' + lists.existed.join('、'));
-    }
-    if (lists.failed.length) {
-      lines.push('未添加成功（请重试）：' + lists.failed.join('、'));
-    }
-    if (lists.unverified.length) {
-      lines.push('未核对（词库读取失败，请刷新词库查看）：' + lists.unverified.join('、'));
-    }
-    receipt.groupResults.forEach(function (r) {
-      var label = r.group.lesson
-        ? '课次「' + r.group.lesson + '」'
-        : (r.group.includeInScope ? '默写范围（课次待确认）' : '课次待确认');
-      if (r.ok) {
-        var missingIds = (r.result && r.result.missing) || [];
-        var missingWords = [];
-        missingIds.forEach(function (id) {
-          var idx = r.group.cardIds.indexOf(id);
-          if (idx >= 0) {
-            missingWords.push(r.group.words[idx]);
-          }
-        });
-        lines.push('已指定' + label + '：' + r.group.words.join('、') +
-          (missingWords.length ? '（其中未找到词条：' + missingWords.join('、') + '）' : ''));
-      } else {
-        lines.push('指定失败（' + label + '）：' + r.group.words.join('、') + ' — ' + r.error +
-          '。可在词库勾选后用「指定教材课次」重试');
+    RECEIPT_CATEGORIES.forEach(function (c) {
+      var words = built.items.filter(function (i) { return i.category === c.key; });
+      if (!words.length) {
+        return;
       }
+      lines.push(c.label + '：' + words.map(function (i) {
+        return i.note ? i.word + '（' + i.note + '）' : i.word;
+      }).join('、'));
     });
-    if (receipt.unassigned.length) {
-      lines.push('未指定（词库读取失败，无法解析词条）：' + receipt.unassigned.join('、') +
-        '。词汇已保存，可在词库中补指定课次');
-    }
     detail.textContent = lines.join('；');
     if (lines.length) {
       box.appendChild(detail);
     }
 
-    if (notSubmitted.length) {
-      var skippedNote = document.createElement('p');
-      skippedNote.className = 'result-detail';
-      var skippedWords = notSubmitted.map(function (r) {
-        var why = r.status === 'invalid'
-          ? describeInvalidReason(r.reason)
-          : (r.status === 'conflict' ? '释义不同' : (r.status === 'exists' ? '已有' : '未勾选'));
-        return r.word + '（' + why + '）';
-      });
-      skippedNote.textContent = '未提交：' + skippedWords.join('、');
-      box.appendChild(skippedNote);
+    // The group view stays: which lesson each batch landed in.
+    var groupLines = [];
+    receipt.groupResults.forEach(function (r) {
+      var label = r.group.lesson
+        ? '课次「' + r.group.lesson + '」'
+        : (r.group.includeInScope ? '默写范围（课次待确认）' : '课次待确认');
+      groupLines.push((r.ok ? '已指定' : '指定失败') + label + '：' + r.group.words.join('、') +
+        (r.ok ? '' : ' — ' + r.error));
+    });
+    if (groupLines.length) {
+      var groupNote = document.createElement('p');
+      groupNote.className = 'result-note';
+      groupNote.textContent = groupLines.join('；');
+      box.appendChild(groupNote);
     }
 
     if (unlearnedNames.length) {
       var unlearnedNote = document.createElement('p');
       unlearnedNote.className = 'result-note';
       unlearnedNote.textContent = '课次「' + unlearnedNames.join('」「') +
-        '」尚未学到：这些词已保存，但不会自动选入默写；在教材管理中改进度后即可参与。';
+        '」尚未学到：这些词已保存，但不会自动选入默写范围；在教材管理中改进度后即可加入。';
       box.appendChild(unlearnedNote);
     }
 
@@ -1931,9 +2947,12 @@
   /**
    * 放弃识别结果: the draft is client-side only — dropping it provably
    * leaves the library untouched (nothing was written at recognition).
+   * A PDF draft also releases the pdf.js document (page retries end with
+   * the draft — Issue #7).
    */
   PhotoAddForm.prototype.handleDiscard = function () {
     var kit = global.__parentFormKit || {};
+    this.releasePdf();
     this.resetEntries();
     this.showFormError('');
     if (kit.clearContainer) {
@@ -1948,29 +2967,24 @@
   // the one-shot REST upload — no chunking, no WS).
   // ------------------------------------------------------------------
 
-  function readAsDataURL(file) {
+  /**
+   * Decode the file into an <img> via an object URL (revoked after load) —
+   * no base64 round trip, so a multi-MB photo never doubles into a data
+   * URL string first (the thumbnail path uses the same mechanism).
+   */
+  function loadImageFromFile(file) {
     return new Promise(function (resolve, reject) {
-      var reader = new FileReader();
-      reader.onload = function () {
-        resolve(reader.result);
-      };
-      reader.onerror = function () {
-        reject(reader.error || new Error('read failed'));
-      };
-      reader.readAsDataURL(file);
-    });
-  }
-
-  function loadImage(dataURL) {
-    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file);
       var img = new Image();
       img.onload = function () {
+        URL.revokeObjectURL(url);
         resolve(img);
       };
       img.onerror = function () {
+        URL.revokeObjectURL(url);
         reject(new Error('无法读取这张照片，请换一张'));
       };
-      img.src = dataURL;
+      img.src = url;
     });
   }
 
@@ -1986,9 +3000,14 @@
   global.PhotoAddForm = PhotoAddForm;
   global.classifyPhotoEntries = classifyPhotoEntries;
   global.matchTextbookForMeta = matchTextbookForMeta;
-  global.suggestTextbookName = suggestTextbookName;
-  global.nextLessonList = nextLessonList;
   global.distinctLessons = distinctLessons;
   global.distinctRowLessons = distinctRowLessons;
+  global.isCommittable = isCommittable;
+  global.isResolved = isResolved;
   global.planAssignments = planAssignments;
+  global.buildTextbookReceipt = buildTextbookReceipt;
+  // Issue #7: the upload budget's ONE encoder — parent-pdf.js's page
+  // renderer walks the same ladder and cap the photo path uses.
+  global.PHOTO_QUALITY_LADDER = QUALITY_LADDER;
+  global.PHOTO_MAX_UPLOAD_BYTES = MAX_UPLOAD_BYTES;
 })(typeof window !== 'undefined' ? window : this);

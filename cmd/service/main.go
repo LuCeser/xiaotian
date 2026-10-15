@@ -86,7 +86,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		log.Printf("config load failed: %v", err)
 		return 1
 	}
-	if err := cfg.Validate(); err != nil {
+	if err = cfg.Validate(); err != nil {
 		log.SetPrefix(bootstrapPrefix)
 		log.SetFlags(0)
 		log.Printf("config validation failed: %v", err)
@@ -113,12 +113,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	// means static serving is disabled (Database.Path precedent) and is NOT
 	// an error.
 	if cfg.Server.StaticDir != "" {
-		info, err := os.Stat(cfg.Server.StaticDir)
-		if err != nil {
+		info, statErr := os.Stat(cfg.Server.StaticDir)
+		if statErr != nil {
 			logger.Error("static directory not accessible",
 				infra.F("component", "infra.main"),
 				infra.F("dir", cfg.Server.StaticDir),
-				infra.ErrField(err),
+				infra.ErrField(statErr),
 			)
 			return 1
 		}
@@ -195,8 +195,8 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := cache.CleanupStale(30 * time.Minute); err != nil {
-					logger.Warn("TTS cache stale cleanup error", infra.ErrField(err))
+				if cleanErr := cache.CleanupStale(30 * time.Minute); cleanErr != nil {
+					logger.Warn("TTS cache stale cleanup error", infra.ErrField(cleanErr))
 				}
 			}
 		}
@@ -249,7 +249,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		return 1
 	}
 	defer func() {
-		if err := db.Close(); err != nil {
+		if err = db.Close(); err != nil {
 			logger.Warn("database close error",
 				infra.F("component", "infra.main"),
 				infra.ErrField(err),
@@ -259,7 +259,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 
 	// Run idempotent migration for Go-owned tables (D-08).
 	// Does NOT touch Python-owned cards/review_logs.
-	if err := database.Migrate(ctx, db); err != nil {
+	if err = database.Migrate(ctx, db); err != nil {
 		logger.Error("database migration failed",
 			infra.F("component", "infra.main"),
 			infra.ErrField(err),
@@ -274,7 +274,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	// manager's classroom tools (get_lesson_state / advance_word); the
 	// LessonTools adapter satisfies rt.LessonExecutor (compile-time checked
 	// in pkg/rt/mimo_adapters.go).
-	if err := lesson.Migrate(ctx, db); err != nil {
+	if err = lesson.Migrate(ctx, db); err != nil {
 		logger.Error("lesson migration failed",
 			infra.F("component", "infra.main"),
 			infra.ErrField(err),
@@ -463,7 +463,14 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			return hub.Stats()
 		})
 
-		go manager.Start(ctx)
+		go func() {
+			if startErr := manager.Start(ctx); startErr != nil {
+				logger.Error("session manager start failed",
+					infra.F("component", "infra.main"),
+					infra.ErrField(startErr),
+				)
+			}
+		}()
 
 		// ------------------------------------------------------------------
 		// Phase 8.2 (Ticket 03): voice-command pipeline — streamed mic audio
@@ -488,6 +495,11 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// answers 503 recognition_unavailable (same RT-10 degraded
 		// semantics as the rt providers above).
 		var wordlistOCR *ocr.WordlistPipeline
+		// Issue #8: the parent missing-meaning supplement pipeline. Nil
+		// when MIMO_API_KEY is absent — POST /words/meaning/generate then
+		// answers 503 generation_unavailable (same RT-10 degraded
+		// semantics as the recognizer above).
+		var meaningGen *ocr.MeaningGenerator
 		// 13.1-03: the check-stage photo OCR reader. Nil when MIMO_API_KEY is
 		// absent — the TurnManager answers photo_chunk with a coded
 		// photo_unavailable error and the check stage keeps working
@@ -501,17 +513,17 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			if cfg.Photo.RequestTimeout > mimoTimeout {
 				mimoTimeout = cfg.Photo.RequestTimeout
 			}
-			mimoClient, err := mimo.NewClient(mimo.ClientConfig{
+			mimoClient, clientErr := mimo.NewClient(mimo.ClientConfig{
 				APIKey:  apiKey,
 				BaseURL: cfg.Voice.BaseURL,
 				Timeout: mimoTimeout,
 			}, logger)
-			if err != nil {
+			if clientErr != nil {
 				logger.Error("mimo client construction failed",
 					infra.F("component", "infra.main"),
-					infra.ErrField(err),
+					infra.ErrField(clientErr),
 				)
-				return err
+				return clientErr
 			}
 			// Lifetime fix (2026-09-13 UAT): this wiring closure RETURNS while the
 			// HTTP/WS servers keep running in goroutines, so a defer HERE would
@@ -529,13 +541,13 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// per-word failure the generator falls back to the Volcengine
 			// whole-batch path internally, so this wiring cannot break
 			// session init when Mimo degrades.
-			wordSynth, err := tts.NewMimoWordSynthesizer(mimoClient, logger)
-			if err != nil {
+			wordSynth, synthErr := tts.NewMimoWordSynthesizer(mimoClient, logger)
+			if synthErr != nil {
 				logger.Error("mimo word synthesizer construction failed",
 					infra.F("component", "infra.main"),
-					infra.ErrField(err),
+					infra.ErrField(synthErr),
 				)
-				return err
+				return synthErr
 			}
 			gen.SetWordSynthesizer(wordSynth)
 			logger.Info("mimo dictation word source enabled (volcengine whole-batch fallback)",
@@ -586,6 +598,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// type so small PNGs upload verbatim without a canvas re-encode).
 			wordlistOCR = ocr.NewWordlistPipeline(
 				mimoListReader(mimoClient, cfg.Photo.ChatModel), cfg.Photo.MaxImageBytes)
+			// Issue #8: the missing-meaning supplement rides the TEXT chat
+			// model — the mimoChatter adapter the voice intent classifier
+			// uses, type-converted onto the ocr.ChatReader seam (no image
+			// part is involved).
+			meaningGen = ocr.NewMeaningGenerator(
+				ocr.ChatReader(mimoChatter(mimoClient, cfg.Voice.ChatModel)))
 			logger.Info("voice command pipeline enabled",
 				infra.F("component", "infra.main"),
 				infra.F("chat_model", cfg.Voice.ChatModel),
@@ -652,6 +670,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// practice_logs store, never the FSRS schedule.
 			Practice:      cardRepo,
 			PracticeStore: practiceStore,
+			// Issue #9 (ADR-0006): the on-demand example-sentence context
+			// resolver — the same read-only repos the parent pages use
+			// (English card resolution + textbook background + learned-word
+			// sample). Nil would honestly degrade generation to fallback
+			// replies; the live service always wires it.
+			Examples: &rt.ExampleResolver{Cards: cardRepo, Textbooks: textbookRepo},
 			// 13.3-01: the save-receipt store rides the same DI block — the
 			// constructor's fail-fast above guarantees a live store here
 			// (a nil would silently disable receipts).
@@ -728,7 +752,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// the word-list photo recognizer (nil without a vision key — the
 		// recognize route then answers 503, keeping the endpoint honest).
 		publicMux.Handle("/api/v1/", http.StripPrefix("/api/v1",
-			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, cfg.Python, logger)))
+			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, meaningGen, cfg.Python, logger)))
 		logger.Info("api v1 mounted",
 			infra.F("component", "infra.main"),
 			infra.F("route", "/api/v1/"),

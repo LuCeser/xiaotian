@@ -61,33 +61,39 @@ const maxStdoutDiagnosticRunes = 300
 // the receipt store for the honest save status (submitted ≠ written-to-FSRS).
 // Since Issue #3, recognizer carries the word-list photo pipeline (nil when
 // the service boots without a vision key — POST /words/photo/recognize then
-// answers 503 recognition_unavailable instead of 404ing).
+// answers 503 recognition_unavailable instead of 404ing). Since Issue #8,
+// generator carries the missing-meaning supplement pipeline (nil without
+// an LLM key — POST /words/meaning/generate answers 503
+// generation_unavailable instead of 404ing).
 type handler struct {
 	exec       pybridge.Executor
 	cards      database.CardRepository
 	textbooks  database.TextbookRepository
+	logger     infra.Logger
 	lessons    *lesson.Store
 	practice   *lesson.PracticeStore
 	receipts   *lesson.ReceiptStore
 	recognizer *ocr.WordlistPipeline
+	generator  *ocr.MeaningGenerator
 	cfg        infra.PythonConfig
-	logger     infra.Logger
 }
 
 // NewHandler builds the /api/v1 handler with its internal method-pattern
 // ServeMux. Logger may be nil (NewNoOpLogger is substituted, D-47) so
-// tests can construct the handler cheaply. recognizer may be nil (photo
-// recognition unavailable — see the handler struct comment).
-func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
+// tests can construct the handler cheaply. recognizer and generator may
+// be nil (photo recognition / meaning supplement unavailable — see the
+// handler struct comment).
+func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, generator *ocr.MeaningGenerator, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}
-	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, cfg: cfg, logger: logger}
+	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, generator: generator, cfg: cfg, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /words", h.listWords)
 	mux.HandleFunc("POST /words", h.addWords)
 	mux.HandleFunc("POST /words/photo/recognize", h.recognizeWordsPhoto)
+	mux.HandleFunc("POST /words/meaning/generate", h.generateWordMeanings)
 	mux.HandleFunc("GET /units", h.listUnits)
 	mux.HandleFunc("PUT /words/{id}", h.editWord)
 	mux.HandleFunc("PUT /words/participation", h.setWordParticipation)
@@ -301,14 +307,19 @@ func (h *handler) deleteWords(w http.ResponseWriter, r *http.Request) {
 // wordJSON is one element of the GET /words response array. Field tags
 // are snake_case per the shared response convention (health.go:18-26).
 type wordJSON struct {
-	ID           int64                          `json:"id"`
-	Word         string                         `json:"word"`
-	Meaning      string                         `json:"meaning"`
-	Example      string                         `json:"example"`
-	Unit         string                         `json:"unit"`
-	Category     string                         `json:"category"`
-	Participates bool                           `json:"participates"`
-	Textbooks    []database.TextbookAssignment  `json:"textbooks"`
+	Word     string `json:"word"`
+	Meaning  string `json:"meaning"`
+	Example  string `json:"example"`
+	Unit     string `json:"unit"`
+	Category string `json:"category"`
+	// MeaningSource rides along for the browse view's 系统 supplement
+	// marker (Issue #8): the display rule is meaning non-empty AND
+	// meaning_source == "generated" — the client applies it, the wire
+	// just carries the provenance.
+	MeaningSource string                        `json:"meaning_source"`
+	Textbooks     []database.TextbookAssignment `json:"textbooks"`
+	ID            int64                         `json:"id"`
+	Participates  bool                          `json:"participates"`
 }
 
 // wordsResponse is the GET /words response envelope.
@@ -385,16 +396,25 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Issue #4: the textbook attribution projection rides along so the
-	// browse chips (教材·课次 / 待确认) need no second request. A repo
-	// failure degrades to empty attribution (the words still render) —
-	// assignment data is presentational here, never load-bearing.
+	// browse chips (教材·课次 / 待确认) need no second request. An
+	// UNFILTERED browse asks for the whole projection directly — building
+	// a whole-library IN-list for it would only re-parse N placeholders. A
+	// repo failure degrades to empty attribution (the words still render)
+	// — assignment data is presentational here, never load-bearing.
 	attribution := make(map[int64][]database.TextbookAssignment, len(cards))
 	if h.textbooks != nil && len(cards) > 0 {
-		ids := make([]int64, 0, len(cards))
-		for _, c := range cards {
-			ids = append(ids, c.ID)
+		var byCard map[int64][]database.TextbookAssignment
+		var err error
+		if category == "" && unit == "" && q == "" {
+			byCard, err = h.textbooks.AllAssignments(r.Context())
+		} else {
+			ids := make([]int64, 0, len(cards))
+			for _, c := range cards {
+				ids = append(ids, c.ID)
+			}
+			byCard, err = h.textbooks.AssignmentsByCardIDs(r.Context(), ids)
 		}
-		if byCard, err := h.textbooks.AssignmentsByCardIDs(r.Context(), ids); err == nil {
+		if err == nil {
 			attribution = byCard
 		} else {
 			h.logger.Warn("word attribution projection failed",
@@ -407,14 +427,15 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 	words := make([]wordJSON, 0, len(cards))
 	for _, c := range cards {
 		row := wordJSON{
-			ID:           c.ID,
-			Word:         c.Word,
-			Meaning:      c.Meaning,
-			Example:      c.Example,
-			Unit:         c.Unit,
-			Category:     c.Category,
-			Participates: c.Participates,
-			Textbooks:    []database.TextbookAssignment{},
+			ID:            c.ID,
+			Word:          c.Word,
+			Meaning:       c.Meaning,
+			Example:       c.Example,
+			Unit:          c.Unit,
+			Category:      c.Category,
+			MeaningSource: c.MeaningSource,
+			Participates:  c.Participates,
+			Textbooks:     []database.TextbookAssignment{},
 		}
 		if rows, ok := attribution[c.ID]; ok {
 			row.Textbooks = rows
@@ -443,9 +464,10 @@ func (h *handler) addWords(w http.ResponseWriter, r *http.Request) {
 	opts := pybridge.AddOpts{Category: req.Category, Unit: req.Unit}
 	for _, e := range req.Entries {
 		opts.Entries = append(opts.Entries, pybridge.AddEntry{
-			Word:    e.Word,
-			Meaning: e.Meaning,
-			Example: e.Example,
+			Word:          e.Word,
+			Meaning:       e.Meaning,
+			Example:       e.Example,
+			MeaningSource: e.MeaningSource,
 		})
 	}
 
@@ -524,15 +546,15 @@ func (h *handler) listUnits(w http.ResponseWriter, r *http.Request) {
 type lessonListItem struct {
 	LessonID    string `json:"lesson_id"`
 	CreatedAt   string `json:"created_at"`
-	WordCount   int    `json:"word_count"`
 	Stage       string `json:"stage"`
 	Kind        string `json:"kind"`
-	Completed   bool   `json:"completed"`
-	Unchecked   bool   `json:"unchecked"`
 	SaveStatus  string `json:"save_status"`
+	WordCount   int    `json:"word_count"`
 	Correct     int    `json:"correct"`
 	Wrong       int    `json:"wrong"`
 	Unconfirmed int    `json:"unconfirmed"`
+	Completed   bool   `json:"completed"`
+	Unchecked   bool   `json:"unchecked"`
 }
 
 // lessonsResponse is the GET /lessons response envelope.
@@ -553,13 +575,13 @@ type lessonWordJSON struct {
 // always present — nil would hide an OCR prefill); practice rows fill
 // word/correct/hints/rating from the practice_logs record.
 type lessonResultJSON struct {
-	Word    string `json:"word"`
-	Correct bool   `json:"correct"`
 	Manual  *bool  `json:"manual,omitempty"`
-	Hints   int    `json:"hints"`
+	Word    string `json:"word"`
 	Rating  string `json:"rating,omitempty"`
 	Outcome string `json:"outcome,omitempty"`
 	OcrText string `json:"ocr_text,omitempty"`
+	Hints   int    `json:"hints"`
+	Correct bool   `json:"correct"`
 }
 
 // receiptJSON is one element of the detail response's save_receipts array —
@@ -569,12 +591,12 @@ type receiptJSON struct {
 	LessonID    string   `json:"lesson_id"`
 	RequestID   string   `json:"request_id"`
 	Kind        string   `json:"kind"`
-	Requested   []string `json:"requested"`
-	Updated     []string `json:"updated"`
-	Missing     []string `json:"missing"`
 	Status      string   `json:"status"`
 	CreatedAt   string   `json:"created_at"`
 	CompletedAt string   `json:"completed_at"`
+	Requested   []string `json:"requested"`
+	Updated     []string `json:"updated"`
+	Missing     []string `json:"missing"`
 }
 
 // lessonDetailResponse is the completed-lesson GET /lessons/{id} body: the
@@ -582,10 +604,10 @@ type receiptJSON struct {
 // present (empty arrays, never null/absent) so the parent view's emptiness
 // is data-driven, not shape-driven.
 type lessonDetailResponse struct {
-	lessonListItem
 	Words        []lessonWordJSON   `json:"words"`
 	Results      []lessonResultJSON `json:"results"`
 	SaveReceipts []receiptJSON      `json:"save_receipts"`
+	lessonListItem
 }
 
 // lessonKind classifies a lesson id for the parent view's type badge:
@@ -768,12 +790,12 @@ func (h *handler) getLesson(w http.ResponseWriter, r *http.Request) {
 
 	if lessonKind(id) == "practice" {
 		// Extra-practice results live in practice_logs (never in verdicts).
-		records, err := h.practice.ListPracticeByLesson(r.Context(), id)
-		if err != nil {
+		records, recErr := h.practice.ListPracticeByLesson(r.Context(), id)
+		if recErr != nil {
 			h.logger.Error("get lesson: practice read failed",
 				infra.F("component", "web/api"),
 				infra.F("lesson_id", id),
-				infra.ErrField(err),
+				infra.ErrField(recErr),
 			)
 			writeError(w, http.StatusInternalServerError, codeInternal,
 				"internal error")

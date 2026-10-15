@@ -422,18 +422,8 @@ func (b *Bridge) RunEdit(ctx context.Context, opts EditOpts) (EditResult, error)
 //  3. Learning state is never touched: the script writes only the
 //     participates column (D-07 kin — proven byte-level by the e2e suite).
 func (b *Bridge) RunSetParticipation(ctx context.Context, opts SetParticipationOpts) (SetParticipationResult, error) {
-	if len(opts.IDs) == 0 || len(opts.IDs) > 500 {
-		return SetParticipationResult{}, fmt.Errorf("set participation: ids must contain 1..500 values")
-	}
-	seen := make(map[int64]struct{}, len(opts.IDs))
-	for _, id := range opts.IDs {
-		if id <= 0 {
-			return SetParticipationResult{}, fmt.Errorf("set participation: id must be > 0, got %d", id)
-		}
-		if _, exists := seen[id]; exists {
-			return SetParticipationResult{}, fmt.Errorf("set participation: duplicate id %d", id)
-		}
-		seen[id] = struct{}{}
+	if err := validateBatchIDs("set-participation", opts.IDs); err != nil {
+		return SetParticipationResult{}, err
 	}
 	start := time.Now()
 	args := setParticipationArgs(b.cfg, opts)
@@ -561,32 +551,34 @@ func textbookCreateArgs(cfg infra.PythonConfig, opts TextbookCreateOpts) []strin
 }
 
 // textbookUpdateArgs builds the argv slice for `textbook-update` (Issue
-// #4). Gated fields (Has* bool) omit their flags entirely so the script
-// keeps the column — the pointer-free shape of editArgs' nil contract.
+// #4). Nil pointer fields omit their flags entirely so the script keeps
+// the column — editArgs' nil contract, one shape.
 func textbookUpdateArgs(cfg infra.PythonConfig, opts TextbookUpdateOpts) []string {
 	args := []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "textbook-update",
 		"--id", strconv.FormatInt(opts.ID, 10)}
-	if opts.Name != "" {
-		args = append(args, "--name", opts.Name)
+	if opts.Name != nil {
+		args = append(args, "--name", *opts.Name)
 	}
-	for _, m := range []struct{ flag, value string }{
-		{"edition", opts.Edition}, {"stage", opts.Stage}, {"grade", opts.Grade},
-		{"volume", opts.Volume}, {"module", opts.Module},
+	for _, m := range []struct {
+		value *string
+		flag  string
+	}{
+		{value: opts.Edition, flag: "edition"},
+		{value: opts.Stage, flag: "stage"},
+		{value: opts.Grade, flag: "grade"},
+		{value: opts.Volume, flag: "volume"},
+		{value: opts.Module, flag: "module"},
 	} {
-		if m.value != "" {
-			args = append(args, "--"+m.flag, m.value)
+		if m.value != nil {
+			args = append(args, "--"+m.flag, *m.value)
 		}
 	}
-	if opts.HasLessons {
-		lessons := opts.Lessons
-		if lessons == nil {
-			lessons = []string{}
-		}
-		raw, _ := json.Marshal(lessons)
+	if opts.Lessons != nil {
+		raw, _ := json.Marshal(opts.Lessons)
 		args = append(args, "--lessons", string(raw))
 	}
-	if opts.HasLearnedLessons {
-		args = append(args, "--learned-lessons", strconv.Itoa(opts.LearnedLessons))
+	if opts.LearnedLessons != nil {
+		args = append(args, "--learned-lessons", strconv.Itoa(*opts.LearnedLessons))
 	}
 	if opts.SetPrimary {
 		args = append(args, "--set-primary")
@@ -640,6 +632,28 @@ func validateBatchIDs(op string, ids []int64) error {
 	return nil
 }
 
+// runMgmt is the shared mgmt-command lifecycle after argv building: run
+// one subprocess under MgmtTimeout, log it, classify into the pybridge
+// sentinels, unmarshal the trailing JSON. The Issue #4 textbook Run*
+// methods all ride it (the older RunEdit-family commands keep their
+// inline shape).
+func runMgmt[T any](b *Bridge, ctx context.Context, cmd string, args []string) (T, error) {
+	start := time.Now()
+	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.MgmtTimeout, b.cfg.Interpreter, args...)
+	defer b.logResult(cmd, start, stdout, stderr, exitCode, err)
+	raw, clsErr := classifyMgmtRun(cmd, stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		var zero T
+		return zero, clsErr
+	}
+	var result T
+	if err := json.Unmarshal(raw, &result); err != nil {
+		var zero T
+		return zero, errors.Wrap(ErrPythonJSONParse, "run "+cmd)
+	}
+	return result, nil
+}
+
 // RunTextbookCreate executes the vocab_manager.py `textbook-create`
 // subcommand (Issue #4). Pre-validation mirrors the script's own guards
 // (name/category) so a caller bug never wastes a subprocess.
@@ -651,49 +665,23 @@ func (b *Bridge) RunTextbookCreate(ctx context.Context, opts TextbookCreateOpts)
 		return TextbookMutationResult{}, fmt.Errorf(
 			"textbook-create: category must be english or chinese, got %q", opts.Category)
 	}
-
-	start := time.Now()
-	args := textbookCreateArgs(b.cfg, opts)
-	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.MgmtTimeout, b.cfg.Interpreter, args...)
-	defer b.logResult("textbook-create", start, stdout, stderr, exitCode, err)
-	raw, clsErr := classifyMgmtRun("textbook-create", stdout, stderr, exitCode, err)
-	if clsErr != nil {
-		return TextbookMutationResult{}, clsErr
-	}
-	var result TextbookMutationResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return TextbookMutationResult{}, errors.Wrap(ErrPythonJSONParse, "run textbook-create")
-	}
-	return result, nil
+	return runMgmt[TextbookMutationResult](b, ctx, "textbook-create", textbookCreateArgs(b.cfg, opts))
 }
 
 // RunTextbookUpdate executes the vocab_manager.py `textbook-update`
-// subcommand (Issue #4). At least one change must be gated on (the script
+// subcommand (Issue #4). At least one change must be set (the script
 // would no-op otherwise — surfaced here as a caller bug, not a silent
 // round trip).
 func (b *Bridge) RunTextbookUpdate(ctx context.Context, opts TextbookUpdateOpts) (TextbookMutationResult, error) {
 	if opts.ID <= 0 {
 		return TextbookMutationResult{}, fmt.Errorf("textbook-update: id must be > 0, got %d", opts.ID)
 	}
-	if opts.Name == "" && opts.Edition == "" && opts.Stage == "" && opts.Grade == "" &&
-		opts.Volume == "" && opts.Module == "" && !opts.HasLessons &&
-		!opts.HasLearnedLessons && !opts.SetPrimary {
+	if opts.Name == nil && opts.Edition == nil && opts.Stage == nil && opts.Grade == nil &&
+		opts.Volume == nil && opts.Module == nil && opts.Lessons == nil &&
+		opts.LearnedLessons == nil && !opts.SetPrimary {
 		return TextbookMutationResult{}, errors.New("textbook-update: at least one change is required")
 	}
-
-	start := time.Now()
-	args := textbookUpdateArgs(b.cfg, opts)
-	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.MgmtTimeout, b.cfg.Interpreter, args...)
-	defer b.logResult("textbook-update", start, stdout, stderr, exitCode, err)
-	raw, clsErr := classifyMgmtRun("textbook-update", stdout, stderr, exitCode, err)
-	if clsErr != nil {
-		return TextbookMutationResult{}, clsErr
-	}
-	var result TextbookMutationResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return TextbookMutationResult{}, errors.Wrap(ErrPythonJSONParse, "run textbook-update")
-	}
-	return result, nil
+	return runMgmt[TextbookMutationResult](b, ctx, "textbook-update", textbookUpdateArgs(b.cfg, opts))
 }
 
 // RunAssignWords executes the vocab_manager.py `assign-words` subcommand
@@ -706,20 +694,7 @@ func (b *Bridge) RunAssignWords(ctx context.Context, opts AssignWordsOpts) (Assi
 	if err := validateBatchIDs("assign-words", opts.IDs); err != nil {
 		return AssignWordsResult{}, err
 	}
-
-	start := time.Now()
-	args := assignWordsArgs(b.cfg, opts)
-	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.MgmtTimeout, b.cfg.Interpreter, args...)
-	defer b.logResult("assign-words", start, stdout, stderr, exitCode, err)
-	raw, clsErr := classifyMgmtRun("assign-words", stdout, stderr, exitCode, err)
-	if clsErr != nil {
-		return AssignWordsResult{}, clsErr
-	}
-	var result AssignWordsResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return AssignWordsResult{}, errors.Wrap(ErrPythonJSONParse, "run assign-words")
-	}
-	return result, nil
+	return runMgmt[AssignWordsResult](b, ctx, "assign-words", assignWordsArgs(b.cfg, opts))
 }
 
 // RunUnassignWords executes the vocab_manager.py `unassign-words`
@@ -731,18 +706,5 @@ func (b *Bridge) RunUnassignWords(ctx context.Context, opts UnassignWordsOpts) (
 	if err := validateBatchIDs("unassign-words", opts.IDs); err != nil {
 		return UnassignWordsResult{}, err
 	}
-
-	start := time.Now()
-	args := unassignWordsArgs(b.cfg, opts)
-	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.MgmtTimeout, b.cfg.Interpreter, args...)
-	defer b.logResult("unassign-words", start, stdout, stderr, exitCode, err)
-	raw, clsErr := classifyMgmtRun("unassign-words", stdout, stderr, exitCode, err)
-	if clsErr != nil {
-		return UnassignWordsResult{}, clsErr
-	}
-	var result UnassignWordsResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return UnassignWordsResult{}, errors.Wrap(ErrPythonJSONParse, "run unassign-words")
-	}
-	return result, nil
+	return runMgmt[UnassignWordsResult](b, ctx, "unassign-words", unassignWordsArgs(b.cfg, opts))
 }

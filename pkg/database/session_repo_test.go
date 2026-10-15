@@ -201,7 +201,7 @@ func TestSessionRepository(t *testing.T) {
 
 		// Append multiple events
 		for i := 0; i < 3; i++ {
-			if err := repo.AppendEvent(context.Background(), SessionEvent{
+			if err = repo.AppendEvent(context.Background(), SessionEvent{
 				SessionID: id,
 				EventType: "test_event",
 				Payload:   "test",

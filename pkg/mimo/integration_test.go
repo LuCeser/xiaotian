@@ -157,10 +157,10 @@ func TestIntegration_Synthesize_RealAPI(t *testing.T) {
 	defer client.Close()
 
 	tests := []struct {
+		validateResult func(*testing.T, DecodedAudioData)
 		name           string
 		text           string
 		opts           []TTSOption
-		validateResult func(*testing.T, DecodedAudioData)
 		wantErr        bool
 	}{
 		{
@@ -385,11 +385,11 @@ func TestIntegration_Transcribe_RealAPI(t *testing.T) {
 	defer client.Close()
 
 	tests := []struct {
-		name           string
-		audioData      []byte
-		format         string
-		opts           []ASROption
 		validateResult func(*testing.T, ASRResponse)
+		name           string
+		format         string
+		audioData      []byte
+		opts           []ASROption
 		wantErr        bool
 	}{
 		{
@@ -646,9 +646,9 @@ func TestIntegration_ErrorHandling_RealAPI(t *testing.T) {
 	baseURL := getTestBaseURL()
 
 	tests := []struct {
+		wantErr error
 		name    string
 		config  ClientConfig
-		wantErr error
 	}{
 		{
 			name: "invalid API key",

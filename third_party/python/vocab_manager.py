@@ -217,6 +217,15 @@ def init_db(db):
     if "participates" not in cols:
         db.execute("ALTER TABLE cards ADD COLUMN participates INTEGER NOT NULL DEFAULT 1 CHECK (participates IN (0, 1))")
     db.execute("CREATE INDEX IF NOT EXISTS idx_cards_participates ON cards(category, participates)")
+    # Issue #8 / ADR-0005: meaning provenance. 'material' = 材料原文或词库
+    # 既有释义（历史数据一律如此）; 'generated' = 系统按教材语境补充（家长
+    # 可能已改写，仍非教材原文）。展示规则 = meaning 非空且 source=
+    # 'generated'; 编辑（cmd_edit）不改来源。
+    if "meaning_source" not in cols:
+        db.execute(
+            "ALTER TABLE cards ADD COLUMN meaning_source TEXT NOT NULL DEFAULT 'material' "
+            "CHECK (meaning_source IN ('material', 'generated'))"
+        )
     db.commit()
 
 
@@ -271,6 +280,16 @@ def scope_predicate(db):
     return sql, params
 
 
+def normalize_meaning_source(source, meaning):
+    """Issue #8 / ADR-0005: collapse a wire meaning_source onto the stored
+    enum. Only 'generated' is distinguishable, and only with a non-empty
+    meaning — an empty gloss never carries a marker (cancelled supplements
+    and untouched missing rows both store 'material')."""
+    if not meaning:
+        return "material"
+    return "generated" if source == "generated" else "material"
+
+
 def cmd_add(db, args):
     """Add words to the vocabulary database."""
     if args.file:
@@ -315,6 +334,7 @@ def cmd_add(db, args):
                 "word": word.strip(),
                 "meaning": str(item.get("meaning", "")) if item.get("meaning") else "",
                 "example": str(item.get("example", "")) if item.get("example") else "",
+                "meaning_source": normalize_meaning_source(item.get("meaning_source"), item.get("meaning")),
             })
     else:
         print("Error: data must be a JSON object or array")
@@ -327,7 +347,7 @@ def cmd_add(db, args):
         fsrs_card = Card()
         try:
             db.execute(
-                "INSERT INTO cards (word, meaning, example, unit, category, fsrs_card) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO cards (word, meaning, example, unit, category, fsrs_card, meaning_source) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry["word"],
                     entry.get("meaning", ""),
@@ -335,6 +355,7 @@ def cmd_add(db, args):
                     args.unit or "",
                     args.category or "english",
                     fsrs_card.to_json(),
+                    entry.get("meaning_source", "material"),
                 ),
             )
             added += 1
@@ -663,7 +684,8 @@ def cmd_stats(db, args):
     if has_textbook_tables(db):
         scope_sql, scope_params = scope_predicate(db)
     rows = db.execute(
-        "SELECT id, fsrs_card FROM cards c WHERE c.category = ? AND c.participates = 1" + scope_sql,
+        "SELECT id, fsrs_card, fetch_locked_until FROM cards c "
+        "WHERE c.category = ? AND c.participates = 1" + scope_sql,
         [category] + scope_params,
     ).fetchall()
 
@@ -675,12 +697,9 @@ def cmd_stats(db, args):
     fetch_locked_count = 0  # total locked (any due status)
     due_locked_count = 0    # locked AND due (same scope as due_count)
 
-    # Preload fetch_locked_until for all rows to avoid N+1 queries
-    lock_rows = db.execute(
-        "SELECT id, fetch_locked_until FROM cards c WHERE c.category = ? AND c.participates = 1" + scope_sql,
-        [category] + scope_params,
-    ).fetchall()
-    lock_map = {r["id"]: r["fetch_locked_until"] for r in lock_rows}
+    # fetch_locked_until rides the SAME scan (one pass over the scoped
+    # pool — the scope predicate's EXISTS subqueries run once per card).
+    lock_map = {r["id"]: r["fetch_locked_until"] for r in rows}
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
     for row in rows:
@@ -842,26 +861,10 @@ def cmd_set_participation(db, args):
     wording so the Go handler's stdout not-found mapping (Pitfall 2)
     surfaces it as an honest 404 instead of a partial success.
     """
-    try:
-        ids = json.loads(args.ids)
-    except json.JSONDecodeError:
-        print("Error: --ids must be a JSON array of integers")
-        sys.exit(1)
-    if (not isinstance(ids, list) or not 1 <= len(ids) <= 500 or
-            not all(isinstance(i, int) and not isinstance(i, bool) and i > 0 for i in ids) or
-            len(set(ids)) != len(ids)):
-        print("Error: --ids must contain 1..500 unique positive integers")
-        sys.exit(1)
-    placeholders = ",".join("?" for _ in ids)
+    ids = _parse_card_ids(args.ids)
     db.execute("BEGIN IMMEDIATE")
-    existing = {row["id"] for row in db.execute(
-        f"SELECT id FROM cards WHERE id IN ({placeholders})", ids
-    ).fetchall()}
-    missing = [card_id for card_id in ids if card_id not in existing]
-    if missing:
-        db.rollback()
-        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
-        sys.exit(1)
+    existing = {row["id"] for row in _require_cards(db, ids)}
+    placeholders = ",".join("?" for _ in ids)
     value = 1 if args.participates == "true" else 0
     db.execute(
         f"UPDATE cards SET participates = ? WHERE id IN ({placeholders})",
@@ -916,6 +919,22 @@ def _parse_card_ids(raw):
         print("Error: --ids must contain 1..500 unique positive integers")
         sys.exit(1)
     return ids
+
+
+def _require_cards(db, ids, cols="id"):
+    """Resolve a batch's card rows inside an OPEN BEGIN IMMEDIATE
+    transaction; a missing id rolls back with the shared not-found
+    diagnostic (the wording the Go handler maps to 404, Pitfall 2)."""
+    placeholders = ",".join("?" for _ in ids)
+    rows = db.execute(
+        f"SELECT {cols} FROM cards WHERE id IN ({placeholders})", ids
+    ).fetchall()
+    missing = [i for i in ids if i not in {r["id"] for r in rows}]
+    if missing:
+        db.rollback()
+        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
+        sys.exit(1)
+    return rows
 
 
 def cmd_textbook_create(db, args):
@@ -1039,16 +1058,7 @@ def cmd_assign_words(db, args):
     include = 1 if args.include_in_scope else 0
 
     db.execute("BEGIN IMMEDIATE")
-    placeholders = ",".join("?" for _ in ids)
-    rows = db.execute(
-        f"SELECT id, category FROM cards WHERE id IN ({placeholders})", ids
-    ).fetchall()
-    existing = {r["id"] for r in rows}
-    missing = [i for i in ids if i not in existing]
-    if missing:
-        db.rollback()
-        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
-        sys.exit(1)
+    rows = _require_cards(db, ids, cols="id, category")
     mismatched = [str(r["id"]) for r in rows if r["category"] != textbook["category"]]
     if mismatched:
         db.rollback()
@@ -1087,14 +1097,7 @@ def cmd_unassign_words(db, args):
         sys.exit(1)
     db.execute("BEGIN IMMEDIATE")
     placeholders = ",".join("?" for _ in ids)
-    existing = {row["id"] for row in db.execute(
-        f"SELECT id FROM cards WHERE id IN ({placeholders})", ids
-    ).fetchall()}
-    missing = [i for i in ids if i not in existing]
-    if missing:
-        db.rollback()
-        print("Error: card ids not found: " + ", ".join(str(i) for i in missing))
-        sys.exit(1)
+    _require_cards(db, ids)
     cur = db.execute(
         f"DELETE FROM card_assignments WHERE textbook_id = ? AND card_id IN ({placeholders})",
         [args.textbook_id] + ids,

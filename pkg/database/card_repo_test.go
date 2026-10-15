@@ -89,15 +89,54 @@ func TestCardRepository(t *testing.T) {
 		if err != nil || len(cards) != 1 || !cards[0].Participates {
 			t.Fatalf("legacy participating list = %+v, err=%v; want one enabled card", cards, err)
 		}
-		if _, err := db.Exec("ALTER TABLE cards ADD COLUMN participates INTEGER NOT NULL DEFAULT 1"); err != nil {
+		if _, err = db.Exec("ALTER TABLE cards ADD COLUMN participates INTEGER NOT NULL DEFAULT 1"); err != nil {
 			t.Fatalf("migrate legacy cards: %v", err)
 		}
-		if _, err := db.Exec("UPDATE cards SET participates = 0 WHERE id = 1"); err != nil {
+		if _, err = db.Exec("UPDATE cards SET participates = 0 WHERE id = 1"); err != nil {
 			t.Fatalf("disable migrated card: %v", err)
 		}
 		cards, err = repo.List(context.Background(), CardFilter{ParticipatingOnly: true})
 		if err != nil || len(cards) != 0 {
 			t.Fatalf("same repository after migration = %+v, err=%v; want disabled card excluded", cards, err)
+		}
+	})
+
+	t.Run("meaning_source degraded-reads as material until Python migrates it", func(t *testing.T) {
+		// Issue #8 / ADR-0005: the provenance column follows the
+		// participates degraded-read precedent — pre-migration rows read
+		// "material" (legacy meanings predate supplementation by
+		// construction), and the same repository observes real values the
+		// moment the column lands.
+		db := newTestDBWithCards(t)
+		repo, err := NewCardRepository(db, infra.NewNoOpLogger())
+		if err != nil {
+			t.Fatalf("NewCardRepository: %v", err)
+		}
+		cards, err := repo.List(context.Background(), CardFilter{})
+		if err != nil {
+			t.Fatalf("pre-migration list: %v", err)
+		}
+		for _, c := range cards {
+			if c.MeaningSource != "material" {
+				t.Fatalf("pre-migration MeaningSource = %q, want \"material\"", c.MeaningSource)
+			}
+		}
+		if _, err = db.Exec("ALTER TABLE cards ADD COLUMN meaning_source TEXT NOT NULL DEFAULT 'material'"); err != nil {
+			t.Fatalf("migrate meaning_source: %v", err)
+		}
+		if _, err = db.Exec("UPDATE cards SET meaning_source = 'generated' WHERE word = 'apple'"); err != nil {
+			t.Fatalf("mark apple generated: %v", err)
+		}
+		cards, err = repo.List(context.Background(), CardFilter{})
+		if err != nil {
+			t.Fatalf("post-migration list: %v", err)
+		}
+		byWord := map[string]string{}
+		for _, c := range cards {
+			byWord[c.Word] = c.MeaningSource
+		}
+		if byWord["apple"] != "generated" || byWord["banana"] != "material" {
+			t.Fatalf("post-migration sources = %v, want apple=generated banana=material", byWord)
 		}
 	})
 
