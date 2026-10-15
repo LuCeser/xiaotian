@@ -700,3 +700,64 @@ func TestEventLoop_Repeat_StaleWordCompleteDropped(t *testing.T) {
 	cancel()
 	waitDone(t, s, 2*time.Second)
 }
+
+// TestEventLoop_DictatingTimeoutSkipsWithoutSpin: a dictating deadline
+// advances to the next word on the event loop itself. The new deadline
+// stays in the future, so the timer does not skip every remaining word
+// in one burst, and the session stays alive.
+func TestEventLoop_DictatingTimeoutSkipsWithoutSpin(t *testing.T) {
+	streamer := &fakeStreamer{}
+	hub := &fakeHub{}
+	twoCards := []pybridge.DueCard{{ID: 1, Word: "apple"}, {ID: 2, Word: "banana"}}
+	fsrsSvc := &fakeFSRSService{dueCards: twoCards}
+	gen := &fakeTTSGenerator{}
+	repo := newFakeSessionRepository()
+
+	cfg := testCfg()
+	cfg.SessionTimeout.IdleStateTimeout = 5 * time.Second
+	cfg.SessionTimeout.ListeningStateTimeout = 5 * time.Second
+	cfg.SessionTimeout.DictatingStateTimeout = 120 * time.Millisecond
+	cfg.SessionTimeout.WaitingParentStateTimeout = 5 * time.Second
+
+	s, err := session.NewSession(context.Background(), nil, "c1", fsrsSvc, gen, streamer, repo, nil, hub, nil, cfg, fsrs.SelectOpts{})
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	s.Push(session.SessionEvent{Type: session.EventControlFrame, ControlType: "play_word"})
+	waitForState(t, s, database.StateDictating, 2*time.Second)
+	if got := s.CurrentWord(); got != "apple" {
+		t.Fatalf("CurrentWord() = %q, want apple", got)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.State() == database.StateDictating && s.CurrentWord() == "banana" {
+			break
+		}
+		if s.State() == database.StateWaitingParent {
+			t.Fatal("both words were skipped before banana was dictated; the deadline refired immediately")
+		}
+		select {
+		case <-s.Done():
+			t.Fatal("session exited on a dictating timeout")
+		default:
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if s.State() != database.StateDictating || s.CurrentWord() != "banana" {
+		t.Fatalf("state=%s word=%q, want DICTATING banana", s.State(), s.CurrentWord())
+	}
+	if !s.Deadline().After(time.Now().Add(50 * time.Millisecond)) {
+		t.Fatalf("deadline %v is not ahead of now; the timeout would refire immediately", s.Deadline())
+	}
+	select {
+	case <-s.Done():
+		t.Fatal("session exited after skipping one word")
+	default:
+	}
+}

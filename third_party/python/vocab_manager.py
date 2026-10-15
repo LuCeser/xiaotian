@@ -22,12 +22,32 @@ import sys
 from datetime import datetime, timezone, timedelta
 
 
+# Same ceiling as Go pybridge.MaxDueLimit / FSRS DefaultWordCount [1, 100].
+MAX_CARD_LIMIT = 100
+# Ten 366-day years. Must match Go pybridge.MaxFetchLockHours.
+MAX_FETCH_LOCK_HOURS = 24 * 366 * 10
+
+
 def positive_int(value):
     """Argparse type: reject 0 and negative numbers."""
     iv = int(value)
     if iv <= 0:
         raise argparse.ArgumentTypeError(f"value must be a positive integer, got {value}")
     return iv
+
+
+def bounded_positive_int(maximum):
+    """Argparse type factory: positive integer no larger than maximum."""
+
+    def parse(value):
+        iv = positive_int(value)
+        if iv > maximum:
+            raise argparse.ArgumentTypeError(
+                f"value must be <= {maximum}, got {value}"
+            )
+        return iv
+
+    return parse
 
 # FSRS imports
 from fsrs import Scheduler, Card, Rating, State
@@ -1253,16 +1273,16 @@ def main():
     p_due.add_argument("--unit", default="", help="Filter by unit (exact match)")
     p_due.add_argument("--units", default="", help="Filter by multiple units (comma-separated, e.g. 'L10纸的发明,L11赵州桥')")
     p_due.add_argument("--category", default="english", help="Category")
-    p_due.add_argument("--limit", type=positive_int, help="Max cards to return")
+    p_due.add_argument("--limit", type=bounded_positive_int(MAX_CARD_LIMIT), help="Max cards to return")
     p_due.add_argument("--exclude", default="", help="Exclude words already read out (comma-separated)")
     p_due.add_argument("--peek", action="store_true", help="Preview due cards without marking them as fetched (no side effects)")
-    p_due.add_argument("--fetch-lock-hours", type=positive_int, default=None, help=f"Hours to lock fetched cards (default: {FETCH_LOCK_HOURS})")
+    p_due.add_argument("--fetch-lock-hours", type=bounded_positive_int(MAX_FETCH_LOCK_HOURS), default=None, help=f"Hours to lock fetched cards (default: {FETCH_LOCK_HOURS})")
 
     # new
     p_new = subparsers.add_parser("new", help="Get new (unreviewed) cards")
     p_new.add_argument("--unit", default="", help="Filter by unit")
     p_new.add_argument("--category", default="english", help="Category")
-    p_new.add_argument("--limit", type=positive_int, help="Max cards to return")
+    p_new.add_argument("--limit", type=bounded_positive_int(MAX_CARD_LIMIT), help="Max cards to return")
 
     # review
     p_review = subparsers.add_parser("review", help="Record review results")
