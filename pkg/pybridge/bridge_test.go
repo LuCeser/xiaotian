@@ -401,3 +401,41 @@ func TestLogResultNoSecretLeak(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeRunErr(t *testing.T) {
+	killed := errors.New("signal: killed")
+
+	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancelDeadline()
+	time.Sleep(time.Millisecond)
+
+	got := normalizeRunErr(deadlineCtx, killed)
+	if !errors.Is(got, context.DeadlineExceeded) {
+		t.Errorf("normalizeRunErr(deadline, killed) = %v, want DeadlineExceeded", got)
+	}
+	if !errors.Is(got, killed) {
+		t.Errorf("normalizeRunErr dropped the process error: %v", got)
+	}
+
+	if got := normalizeRunErr(deadlineCtx, nil); !errors.Is(got, context.DeadlineExceeded) {
+		t.Errorf("normalizeRunErr(deadline, nil) = %v, want DeadlineExceeded", got)
+	}
+	if got := normalizeRunErr(deadlineCtx, context.DeadlineExceeded); !errors.Is(got, context.DeadlineExceeded) || got != context.DeadlineExceeded {
+		t.Errorf("already-deadline error was rewrapped: %v", got)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got = normalizeRunErr(canceledCtx, killed)
+	if !errors.Is(got, context.Canceled) {
+		t.Errorf("normalizeRunErr(canceled, killed) = %v, want Canceled", got)
+	}
+
+	live := context.Background()
+	if got := normalizeRunErr(live, killed); got != killed {
+		t.Errorf("live context changed err: %v", got)
+	}
+	if got := normalizeRunErr(live, nil); got != nil {
+		t.Errorf("live context with nil err = %v, want nil", got)
+	}
+}

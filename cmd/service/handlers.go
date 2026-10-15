@@ -442,11 +442,13 @@ func handleSelectDueCards(ctx context.Context, client *ws.Client, params json.Ra
 		return nil
 	}
 
+	// fetch_lock_hours from the client is discarded. The lock window is
+	// FSRSConfig.FetchLockHours, applied inside SelectDueCards.
+	_ = p.FetchLockHours
 	cards, err := fsrsSvc.SelectDueCards(ctx, fsrs.SelectOpts{
-		Limit:          p.Limit,
-		Category:       p.Category,
-		Units:          []string{p.Units},
-		FetchLockHours: float64(p.FetchLockHours),
+		Limit:    p.Limit,
+		Category: p.Category,
+		Units:    []string{p.Units},
 	})
 	if err != nil {
 		logger.Warn("select_due_cards failed", infra.ErrField(err))

@@ -139,9 +139,11 @@ type DueOpts struct {
 	// previews.
 	Peek bool
 
-	// FetchLockHours overrides the default fetch-lock window
-	// (--fetch-lock-hours). vocab_manager treats this as a float. <= 0
-	// means use the script default.
+	// FetchLockHours sets the fetch-lock window (--fetch-lock-hours).
+	// The bridge emits a whole number of hours: vocab_manager.py's
+	// argparse type is a positive int, and values above
+	// MaxFetchLockHours are clamped. <= 0 means omit the flag and use
+	// the script default.
 	FetchLockHours float64
 }
 

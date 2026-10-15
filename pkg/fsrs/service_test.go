@@ -166,10 +166,22 @@ func TestSelectDueCardsConfigDefaults(t *testing.T) {
 			25, "english", 24.0,
 		},
 		{
-			"opts override config",
+			"in-range limit passes through; client lock hours ignored",
 			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: "english"},
 			SelectOpts{Limit: 10, Category: "chinese", FetchLockHours: 48.0},
-			10, "chinese", 48.0,
+			10, "chinese", 24.0,
+		},
+		{
+			"limit above the default-word-count ceiling is clamped",
+			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 24.0, DefaultCategory: "english"},
+			SelectOpts{Limit: 10000, FetchLockHours: 1},
+			100, "english", 24.0,
+		},
+		{
+			"fractional server lock hours become whole hours",
+			infra.FSRSConfig{DefaultWordCount: 25, FetchLockHours: 12.5, DefaultCategory: "english"},
+			SelectOpts{FetchLockHours: 3},
+			25, "english", 12.0,
 		},
 	}
 
@@ -261,12 +273,13 @@ func TestSelectDueCardsFetchLock(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// A client lock duration must not override the server configuration.
 	_, err = svc.SelectDueCards(context.Background(), SelectOpts{FetchLockHours: 48.0})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if fake.dueCalls[0].FetchLockHours != 48.0 {
-		t.Errorf("FetchLockHours = %v, want 48.0", fake.dueCalls[0].FetchLockHours)
+	if got, want := fake.dueCalls[0].FetchLockHours, validCfg().FetchLockHours; got != want {
+		t.Errorf("FetchLockHours = %v, want server config %v", got, want)
 	}
 }
 

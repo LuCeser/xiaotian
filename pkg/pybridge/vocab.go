@@ -27,6 +27,7 @@ package pybridge
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -36,6 +37,54 @@ import (
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
+
+// MaxDueLimit is the upper bound on --limit. It matches
+// FSRSConfig.DefaultWordCount's validated range [1, 100] and
+// vocab_manager.py MAX_CARD_LIMIT.
+const MaxDueLimit = 100
+
+// MaxFetchLockHours is the upper bound on --fetch-lock-hours: ten
+// 366-day years. That stays far below datetime's year-9999 ceiling and
+// still covers the 24h server default. vocab_manager.py
+// MAX_FETCH_LOCK_HOURS must stay equal to this value.
+const MaxFetchLockHours = 24 * 366 * 10
+
+// WholeLockHours converts a configured hour count into the whole hours
+// forwarded to vocab_manager.py. Non-positive, NaN, and negative-infinity
+// inputs return 0 (the flag is omitted). A positive fraction below 1
+// becomes 1 so the server lock is not replaced by the script default.
+// Values above MaxFetchLockHours, including +Inf, are clamped.
+func WholeLockHours(hours float64) float64 {
+	n, ok := integerLockHours(hours)
+	if !ok {
+		return 0
+	}
+	return float64(n)
+}
+
+func integerLockHours(hours float64) (int, bool) {
+	if math.IsNaN(hours) || hours <= 0 || math.IsInf(hours, -1) {
+		return 0, false
+	}
+	if math.IsInf(hours, 1) || hours >= float64(MaxFetchLockHours) {
+		return MaxFetchLockHours, true
+	}
+	n := int(hours) // hours is in (0, MaxFetchLockHours); truncate toward zero
+	if n < 1 {
+		n = 1
+	}
+	return n, true
+}
+
+func clampDueLimit(limit int) (int, bool) {
+	if limit <= 0 {
+		return 0, false
+	}
+	if limit > MaxDueLimit {
+		limit = MaxDueLimit
+	}
+	return limit, true
+}
 
 // dueArgs builds the argv slice for the vocab_manager.py `due` subcommand.
 //
@@ -53,11 +102,13 @@ import (
 //
 // Flag mapping (verified against vocab_manager.py:729-736):
 //   - opts.Category   -> --category <value>
-//   - opts.Limit      -> --limit <int>            (omitted when <= 0)
+//   - opts.Limit      -> --limit <int>            (omitted when <= 0; clamped to MaxDueLimit)
 //   - opts.Units      -> --units <comma-joined>   (omitted when empty)
 //   - opts.Exclude    -> --exclude <comma-joined> (omitted when empty)
 //   - opts.Peek       -> --peek (boolean flag, omitted when false)
-//   - opts.FetchLockHours -> --fetch-lock-hours <float> (omitted when <= 0)
+//   - opts.FetchLockHours -> --fetch-lock-hours <int> (omitted when <= 0;
+//     fractional hours truncate toward zero, with a floor of 1 and a
+//     ceiling of MaxFetchLockHours)
 //
 // The function performs no I/O and no validation beyond the zero-value
 // checks -- it is a pure transform of (cfg, opts) into an argv slice, which
@@ -67,8 +118,8 @@ func dueArgs(cfg infra.PythonConfig, opts DueOpts) []string {
 	if opts.Category != "" {
 		args = append(args, "--category", opts.Category)
 	}
-	if opts.Limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(opts.Limit))
+	if n, ok := clampDueLimit(opts.Limit); ok {
+		args = append(args, "--limit", strconv.Itoa(n))
 	}
 	if len(opts.Units) > 0 {
 		args = append(args, "--units", strings.Join(opts.Units, ","))
@@ -79,11 +130,8 @@ func dueArgs(cfg infra.PythonConfig, opts DueOpts) []string {
 	if opts.Peek {
 		args = append(args, "--peek")
 	}
-	if opts.FetchLockHours > 0 {
-		args = append(args,
-			"--fetch-lock-hours",
-			strconv.FormatFloat(opts.FetchLockHours, 'f', -1, 64),
-		)
+	if n, ok := integerLockHours(opts.FetchLockHours); ok {
+		args = append(args, "--fetch-lock-hours", strconv.Itoa(n))
 	}
 	return args
 }
