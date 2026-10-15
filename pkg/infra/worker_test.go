@@ -434,6 +434,118 @@ func TestWorkerPoolConcurrentSubmit(t *testing.T) {
 	}
 }
 
+// TestWorkerPoolSubmitConcurrentWithShutdown reproduces the issue #26
+// production panic: auditState-style callers Submit from session
+// goroutines while Server.Shutdown (or a test cleanup) drains the pool —
+// the old close(p.tasks) vs send(p.tasks) race was a
+// send-on-closed-channel panic waiting to fire. The contract now: every
+// racing Submit either lands or returns a typed error, Shutdown waits for
+// the same drain from every caller, and on the clean nil-return every
+// ACCEPTED task has completed (graceful drain, D-21, preserved).
+func TestWorkerPoolSubmitConcurrentWithShutdown(t *testing.T) {
+	cfg := WorkerConfig{PoolSize: 2, QueueSize: 4}
+	pool, err := NewWorkerPool(cfg, NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewWorkerPool: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := pool.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var ran atomic.Int64
+	var accepted, rejected atomic.Int64
+	var wg sync.WaitGroup
+
+	// 8 submitters keep the channel busy (succeed + backpressure + the
+	// post-close rejection are all valid outcomes; a panic is not).
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				err := pool.Submit(func(ctx context.Context) error {
+					ran.Add(1)
+					return nil
+				})
+				switch {
+				case err == nil:
+					accepted.Add(1)
+				case errors.Is(err, ErrWorkerPoolFull):
+					rejected.Add(1)
+				case errors.Is(err, ErrWorkerPoolClosed):
+					return // shutdown won the race: the documented outcome
+				default:
+					t.Errorf("unexpected Submit error: %v", err)
+					return
+				}
+			}
+		}()
+	}
+
+	// Let the storm build up some genuine send/close interleaving before
+	// shutting down mid-flight.
+	time.Sleep(50 * time.Millisecond)
+
+	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer sCancel()
+	if err := pool.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown: %v (want clean drain)", err)
+	}
+
+	waitOrTimeout(t, &wg, 2*time.Second, "submitters did not observe closure")
+
+	// Clean drain ⇒ every accepted task completed before Shutdown returned.
+	if got, want := ran.Load(), accepted.Load(); got != want {
+		t.Errorf("tasks run: got %d, want %d (accepted submits)", got, want)
+	}
+	if total := accepted.Load() + rejected.Load(); total == 0 {
+		t.Error("storm exercised no Submit paths — test did not actually race")
+	}
+
+	// Post-shutdown Submit is the typed rejection, never a panic.
+	if err := pool.Submit(func(context.Context) error { return nil }); !errors.Is(err, ErrWorkerPoolClosed) {
+		t.Errorf("post-shutdown Submit: got %v, want ErrWorkerPoolClosed", err)
+	}
+}
+
+// TestWorkerPoolShutdownIdempotent proves the relaxed one-shot contract:
+// a second (and concurrent) Shutdown no longer panics on
+// close-of-closed-channel — it skips the close and still waits for the
+// same drain, returning nil once every worker has exited.
+func TestWorkerPoolShutdownIdempotent(t *testing.T) {
+	cfg := WorkerConfig{PoolSize: 2, QueueSize: 4}
+	pool, err := NewWorkerPool(cfg, NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewWorkerPool: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := pool.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			shutdownCtx, sCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer sCancel()
+			if err := pool.Shutdown(shutdownCtx); err != nil {
+				t.Errorf("concurrent Shutdown: %v", err)
+			}
+		}()
+	}
+	waitOrTimeout(t, &wg, 2*time.Second, "concurrent Shutdowns did not return")
+
+	// A late sequential call is equally safe.
+	if err := pool.Shutdown(context.Background()); err != nil {
+		t.Errorf("second sequential Shutdown: %v", err)
+	}
+}
+
 // TestWorkerPoolRejectsInvalidConfig proves D-04 fail-fast: bad config
 // at construction time returns an error wrapping ErrInvalidWorkerConfig
 // instead of producing a pool that would panic at Start.

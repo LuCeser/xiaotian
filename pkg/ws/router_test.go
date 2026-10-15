@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -156,13 +157,19 @@ func TestRouterImplementsFrameHandler(t *testing.T) {
 // TestRouterRouteAudio tests routing audio messages
 func TestRouterRouteAudio(t *testing.T) {
 	callCount := atomic.Int32{}
+	// recvMu guards receivedHeader/receivedPayload: the handler runs on a
+	// worker goroutine while this test goroutine reads them back (a bare
+	// read races the handler's write under -race, issue #26).
+	var recvMu sync.Mutex
 	var receivedHeader *FrameHeader
 	var receivedPayload []byte
 
 	audioHandler := func(ctx context.Context, c *Client, h *FrameHeader, payload []byte) error {
 		callCount.Add(1)
+		recvMu.Lock()
 		receivedHeader = h
 		receivedPayload = payload
+		recvMu.Unlock()
 		return nil
 	}
 
@@ -193,14 +200,18 @@ func TestRouterRouteAudio(t *testing.T) {
 	// Give time for async handler execution
 	time.Sleep(100 * time.Millisecond)
 
+	recvMu.Lock()
+	gotHeader, gotPayload := receivedHeader, receivedPayload
+	recvMu.Unlock()
+
 	if callCount.Load() != 1 {
 		t.Errorf("expected handler called 1 time, got %d", callCount.Load())
 	}
-	if receivedHeader == nil {
+	if gotHeader == nil {
 		t.Error("expected header to be received")
 	}
-	if receivedPayload == nil || len(receivedPayload) != 4 {
-		t.Errorf("expected payload to be received with 4 bytes, got %v", receivedPayload)
+	if gotPayload == nil || len(gotPayload) != 4 {
+		t.Errorf("expected payload to be received with 4 bytes, got %v", gotPayload)
 	}
 }
 
@@ -327,11 +338,16 @@ func TestRouterRoutePanicRecovery(t *testing.T) {
 // TestRouterRouteSerial tests that sequential Route calls trigger handlers in order
 func TestRouterRouteSerial(t *testing.T) {
 	callOrder := atomic.Int32{}
+	// orderMu guards order: the handler appends on the worker goroutine
+	// while this test goroutine later reads the slice back (issue #26).
+	var orderMu sync.Mutex
 	order := []int32{}
 
 	handler := func(ctx context.Context, c *Client, h *FrameHeader, payload []byte) error {
 		seq := callOrder.Add(1)
+		orderMu.Lock()
 		order = append(order, seq)
+		orderMu.Unlock()
 		return nil
 	}
 
@@ -365,14 +381,18 @@ func TestRouterRouteSerial(t *testing.T) {
 	// Give time for async handler execution
 	time.Sleep(200 * time.Millisecond)
 
-	if len(order) != 10 {
-		t.Errorf("expected 10 handler calls, got %d", len(order))
+	orderMu.Lock()
+	got := append([]int32(nil), order...)
+	orderMu.Unlock()
+
+	if len(got) != 10 {
+		t.Errorf("expected 10 handler calls, got %d", len(got))
 	}
 
 	// Verify order is sequential (1,2,3,...10)
 	for i := 0; i < 10; i++ {
-		if order[i] != int32(i+1) {
-			t.Errorf("expected order[%d]=%d, got %d", i, i+1, order[i])
+		if got[i] != int32(i+1) {
+			t.Errorf("expected order[%d]=%d, got %d", i, i+1, got[i])
 		}
 	}
 }
