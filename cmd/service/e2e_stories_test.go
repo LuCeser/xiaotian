@@ -202,8 +202,14 @@ func TestE2E_Story_PerWordVoiceFlow(t *testing.T) {
 		t.Errorf("word 2 judgment = %+v, want incorrect near-miss/hard", res2)
 	}
 
-	// Finish dictation → parent review completion.
+	// Finish dictation, then parent review. Control handlers run on a worker
+	// pool, so the two frames are not applied in send order. EventParentReview
+	// is valid only in WAITING_PARENT; if it is pushed while the session is
+	// still DICTATING, the FSM drops it and session_complete is never sent.
+	// Wait for the progress frame that announces WAITING_PARENT — the same
+	// gate the browser uses before submit_review.
 	sendControlJSON(t, conn, `{"type":"next_word","params":{}}`)
+	readControlUntil(t, conn, `"status":"WAITING_PARENT"`)
 	sendControlJSON(t, conn, `{"type":"submit_review","params":{"ratings":{"`+first+`":"good","`+second+`":"hard"},"category":"chinese"}}`)
 	readControlUntil(t, conn, `"type":"submit_review_result"`)
 	readControlUntil(t, conn, "session_complete")
