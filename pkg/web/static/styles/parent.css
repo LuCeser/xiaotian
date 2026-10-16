@@ -15,8 +15,11 @@
  *
  * 2026-10-14 follow-up: rules for the JS-emitted classes the convergence
  * pass left unstyled (photo rows/statuses, pdf pending chip + page lesson
- * apply, browse list host, toolbar textbook entry, modal forms), 44px hit
- * areas on the two bare 18px checkboxes, toast-success contrast fix.
+ * apply, browse list host, toolbar textbook entry, modal forms),
+ * toast-success contrast fix. The 44px hit areas on the two bare 18px
+ * checkboxes named here were reverted that day (padding on a native
+ * checkbox is zeroed); Issue #18 restores them via wrapping labels
+ * (.inline-check-hit).
  */
 
 :root {
@@ -686,6 +689,22 @@ body {
   box-sizing: border-box;
 }
 
+/* Issue #18: the 44px touch floor for the inline 18px checkboxes. Chrome
+   zeroes the USED padding on appearance:auto checkboxes (the reverted
+   padding + negative-margin attempt), so the hit area rides a wrapping
+   <label> — a label click toggles the input, which keeps its 18px visual
+   size. Shared by the photo review rows (.photo-row-check) and the browse
+   word rows (.word-select). */
+.inline-check-hit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
 .photo-row-check {
   width: 18px;
   height: 18px;
@@ -740,6 +759,9 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
+  /* Issue #18: the whole label (radio + gap + text) is the hit area —
+     44px floor, the input keeps its 18px visual size. */
+  min-height: 44px;
   font-size: 14px;
   font-weight: 400;
   color: var(--ink);
@@ -997,16 +1019,20 @@ body {
   margin-right: auto;
 }
 
+/* Issue #18: the input keeps its 18px visual size; the 44px hit area is
+   the wrapping label.inline-check-hit (see its note by .photo-row-check). */
 .word-select {
   width: 18px;
   height: 18px;
-  flex: 0 0 auto;
 }
 
 .participation-toggle {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  /* Issue #18: the whole label (checkbox + gap + text) is the hit area —
+     44px floor, the input keeps its 18px visual size. */
+  min-height: 44px;
   white-space: nowrap;
   color: var(--muted);
   font-size: 14px;
