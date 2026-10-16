@@ -74,8 +74,12 @@ async function openPhotoTab(page) {
   return panel;
 }
 
-/** Upload a file, run 开始识别, and wait for the review rows to render. */
+/** Upload a file, run 开始识别, and wait for the review rows to render.
+ *  Issue #10: the SAME entry now requires the subject radio — this suite
+ *  imports English word lists, so 英语 is selected explicitly (the
+ *  pre-#10 fixed subject became a pick, never a silent default). */
 async function recognize(page, file) {
+  await page.locator('input[name="parent-category-photo"][value="english"]').check();
   await page.locator('#parent-photo-file').setInputFiles(file);
   await page.getByRole('button', { name: '开始识别' }).click();
   await expect(page.locator('.photo-row').first()).toBeVisible({ timeout: 30_000 });
@@ -188,11 +192,12 @@ test('photo import: recognition failure shows the reason and retry succeeds', as
 
     // Unregistered image → stub 500 → service 502 recognition_failed →
     // the form shows the reason; the same form stays usable for a retry.
+    await page.locator('input[name="parent-category-photo"][value="english"]').check();
     await page.locator('#parent-photo-file').setInputFiles({
       name: 'unregistered.png', mimeType: 'image/png', buffer: UNREGISTERED_PNG,
     });
     await page.getByRole('button', { name: '开始识别' }).click();
-    await expect(page.locator('.photo-add-form .form-error')).toContainText('识别失败', { timeout: 30_000 });
+    await expect(page.locator('#parent-photo-form-error')).toContainText('识别失败', { timeout: 30_000 });
     await expect(page.locator('.photo-row')).toHaveCount(0);
 
     // Retry with a registered word-list photo on the SAME form.

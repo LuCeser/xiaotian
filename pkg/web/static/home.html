@@ -31,7 +31,7 @@
   -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#f5f7fa">
-  <meta name="description" content="家庭首页 — 开始今天的听写，或打开家长的记录与词库">
+  <meta name="description" content="家庭首页 — 开始英语单词或语文词语听写，或打开家长的记录与词库">
   <title>听写小助手</title>
   <link rel="stylesheet" href="styles/home.css?v=20261010a">
 </head>
@@ -47,13 +47,21 @@
       </header>
 
       <!--
-        The two doors (form A). They NAVIGATE, so they stay anchor
-        elements styled as buttons — never <button>s. Touch targets are
-        60px tall, exceeding the 48px iPad minimum (tutor-page parity).
-        No PIN, no session, no permission element of any kind.
+        The doors (form A). They NAVIGATE, so they stay anchor elements
+        styled as buttons — never <button>s. Touch targets are 60px tall,
+        exceeding the 48px iPad minimum (tutor-page parity). No PIN, no
+        session, no permission element of any kind.
+
+        Issue #10: the student door splits by SUBJECT — 英语单词默写 keeps
+        the legacy /tutor/ (the pre-#10 bookmark lands exactly where it
+        did), 语文词语默写 rides /tutor/?category=chinese (the tutor page
+        forwards the subject through session_init; the server normalizes
+        anything but "chinese" back to english). Both are the SAME
+        classroom, one row per subject per day.
       -->
       <nav class="home-doors" aria-label="家庭入口">
-        <a class="home-door home-door-primary" href="/tutor/">开始今天的听写</a>
+        <a class="home-door home-door-primary" href="/tutor/">英语单词默写</a>
+        <a class="home-door home-door-primary" href="/tutor/?category=chinese">语文词语默写</a>
         <a class="home-door home-door-secondary" href="/parent.html">家长：记录与词库</a>
       </nav>
     </main>

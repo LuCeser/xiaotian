@@ -207,7 +207,7 @@ test('T18: 新建教材 is established only at commit — empty name refused, no
     // parent-photo.js:2063). The error is the photo form's inline surface.
     await nameInput.fill('');
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
-    await expect(page.locator('#add-panel-photo .form-error'))
+    await expect(page.locator('#parent-photo-form-error'))
       .toContainText('请先填写教材名称');
 
     // The book does NOT exist in the real DB before a successful submit:

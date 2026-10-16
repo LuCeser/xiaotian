@@ -257,7 +257,8 @@
   // Capture session category for dictation language detection. session_ready
   // is a known control type dispatched inside handleControlFrame, so it never
   // reaches handleMessage — wrap the dispatcher to observe it first. The
-  // backend does not yet send a category field; this defaults gracefully.
+  // backend echoes the lesson row's subject here (Issue #10; absent ⇒
+  // english, the pre-#10 default).
   // Ticket 06: a new session also retires the previous session's report.
   var originalHandleControlFrame = wsClient.handleControlFrame.bind(wsClient);
   wsClient.handleControlFrame = function (payload) {

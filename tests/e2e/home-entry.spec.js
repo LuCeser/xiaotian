@@ -28,8 +28,12 @@ test('/home.html serves the two doors with no gate', async ({ page }) => {
   expect(res.status(), '/home.html answers 200 from the real backend').toBe(200);
   await expect(page).toHaveTitle('听写小助手');
 
-  // Door 1: the student tutor. Door 2: the parent workspace (13.3-03 tabs).
-  await expect(page.locator('a[href="/tutor/"]')).toHaveText('开始今天的听写');
+  // Door 1/2: the student tutor, split by subject (Issue #10 — the
+  // chinese door rides ?category=chinese, the english door keeps the
+  // legacy /tutor/ every pre-#10 bookmark uses). Door 3: the parent
+  // workspace (13.3-03 tabs).
+  await expect(page.locator('a[href="/tutor/"]')).toHaveText('英语单词默写');
+  await expect(page.locator('a[href="/tutor/?category=chinese"]')).toHaveText('语文词语默写');
   await expect(page.locator('a[href="/parent.html"]')).toHaveText('家长：记录与词库');
 
   // Pure navigation (consensus decision 2): no PIN/session/permission
