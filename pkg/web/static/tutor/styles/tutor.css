@@ -6,6 +6,19 @@
  * elementary-school students. No framework, no build step.
  */
 
+/*
+ * Family accent token (Issue #16, 13.3 UI review fix 2). home.css and
+ * parent.css declare the SAME custom property with the SAME value —
+ * shared by value, never via @import (the 13.3 cut list keeps every
+ * stylesheet standalone). Every accent fill/outline in this file
+ * consumes var(--accent) so the home.html -> /tutor/ -> home.html
+ * journey reads as one product; the phase-13 tutor blue is retired
+ * (Issue #16 records its former value).
+ */
+:root {
+  --accent: #2563eb;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
@@ -57,7 +70,7 @@ body[data-page="tutor"] {
 .rt-state[data-state="speaking"] .rt-state-chip[data-chip="speaking"],
 .rt-state[data-state="paused"] .rt-state-chip[data-chip="paused"],
 .rt-state[data-state="ended"] .rt-state-chip[data-chip="ended"] {
-  background: #2f6fed;
+  background: var(--accent);
   color: #ffffff;
 }
 
@@ -131,7 +144,7 @@ body[data-page="tutor"] {
 }
 
 .rt-word-chip:focus-visible {
-  outline: 3px solid #2f6fed;
+  outline: 3px solid var(--accent);
   outline-offset: 3px;
 }
 
@@ -156,7 +169,7 @@ body[data-page="tutor"] {
 }
 
 .rt-word-chip.rt-word-current {
-  background: #2f6fed;
+  background: var(--accent);
   color: #ffffff;
   transform: scale(1.05);
 }
@@ -171,7 +184,7 @@ body[data-page="tutor"] {
 .rt-progress-fill {
   height: 100%;
   border-radius: 5px;
-  background: linear-gradient(90deg, #4f9bff, #2f6fed);
+  background: linear-gradient(90deg, #4f9bff, var(--accent));
   transition: width 0.4s ease;
 }
 
@@ -280,7 +293,7 @@ body[data-page="tutor"] {
   font-size: 18px;
   font-weight: 700;
   color: #ffffff;
-  background: #2563eb; /* family accent — same value as home.css/parent.css --accent */
+  background: var(--accent); /* family accent token — same --accent as home.css/parent.css */
   text-decoration: none;
   cursor: pointer;
   transition: transform 0.08s ease, background 0.2s ease;
@@ -425,7 +438,7 @@ body[data-page="tutor"] {
   flex: none;
   border: none;
   border-radius: 14px;
-  background: #2f6fed;
+  background: var(--accent);
 }
 
 .rt-check-submit:disabled {
@@ -450,7 +463,7 @@ body[data-page="tutor"] {
   border: 2px dashed #9fc1ef;
   border-radius: 14px;
   background: #f2f7ff;
-  color: #2f6fed;
+  color: var(--accent);
 }
 
 .rt-check-photo:disabled {

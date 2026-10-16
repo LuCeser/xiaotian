@@ -1,6 +1,6 @@
 # E2E Coverage Matrix
 
-Updated: 2026-10-14. Source of truth for which acceptance items are automated
+Updated: 2026-10-16. Source of truth for which acceptance items are automated
 where. **Default gate is browser E2E** (Playwright L2 / hermetic L3 browser).
 iPad / device-only rows are residual and do **not** block `npm run regress`.
 
@@ -45,6 +45,7 @@ Layer legend: see [E2E-ISOLATION-SPEC.md](E2E-ISOLATION-SPEC.md).
 | UAT-8 home button + degraded `/` | L2 + L3b | `home-button.spec.js`, `home-entry.spec.js` | covered |
 | UAT-9 back-nav / hit targets / viewport | L3b | `family-nav.spec.js` (browser equivalents) | covered |
 | UAT-10 negative cut list | L2 + L3b | parent-lessons read-only actions + `family-nav` | covered |
+| UI review fix 2 single family accent (#16) | L1 + L2 | `pkg/infra/static_accent_test.go`, `family-accent.spec.js` | covered |
 
 ## Phase 13 / 13.1 (high-signal)
 
