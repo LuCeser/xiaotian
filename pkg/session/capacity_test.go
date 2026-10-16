@@ -102,6 +102,36 @@ func TestManagerCapacity_FreesOnExit(t *testing.T) {
 	}
 }
 
+// TestManagerCapacity_CancelledContextDoesNotLeakSlot proves registration is
+// complete before the event loop can observe cancellation and remove itself.
+// A leaked registry entry would permanently consume the manager's only slot.
+func TestManagerCapacity_CancelledContextDoesNotLeakSlot(t *testing.T) {
+	m := bootCapManager(t, 1)
+
+	for i := 0; i < 100; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		connID := "cancelled-" + strconv.Itoa(i)
+
+		s, err := m.NewSession(ctx, nil, connID, fsrs.SelectOpts{Limit: 2})
+		if err != nil {
+			t.Fatalf("NewSession %d: %v", i, err)
+		}
+		select {
+		case <-s.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("session %d did not exit after its context was cancelled", i)
+		}
+		if got := m.Lookup(connID); got != nil {
+			t.Fatalf("session %d remained registered after exit", i)
+		}
+	}
+
+	if got := m.ActiveCount(); got != 0 {
+		t.Fatalf("ActiveCount = %d, want 0 after cancelled sessions exited", got)
+	}
+}
+
 // TestManagerCapacity_ConcurrentStartsStayAtCap: N simultaneous NewSession
 // calls at cap N-1 admit exactly N-1 — the reservation closes the TOCTOU
 // window a plain check-then-act gate leaves open (Ticket 07 review).
