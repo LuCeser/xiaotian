@@ -3,6 +3,7 @@ package infra
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -11,8 +12,15 @@ import (
 // and child loggers means a test can pass `fake.With(F("request_id",...))`
 // into RecoveryMiddleware and still observe the recovered-panic entry via
 // the original fake reference (the test's seam).
+//
+// mu serializes record calls: the fake gets handed to product components
+// (MemoryMonitor's loop, Server.Shutdown) that log from several goroutines,
+// and the real zap logger it fakes is concurrency-safe (issue #26). Tests
+// read msgs only after their goroutines have been joined/quiesced, so the
+// reads are covered by that happens-before edge.
 type fakeLoggerState struct {
 	msgs []loggedMsg
+	mu   sync.Mutex
 }
 
 // loggedMsg is the decoded form of one Logger call. Fields is the fully
@@ -43,6 +51,8 @@ func newFakeLogger() *fakeLogger {
 func (f *fakeLogger) record(level, msg string, fs []Field) {
 	combined := append([]Field{}, f.fields...)
 	combined = append(combined, fs...)
+	f.state.mu.Lock()
+	defer f.state.mu.Unlock()
 	f.state.msgs = append(f.state.msgs, loggedMsg{Level: level, Msg: msg, Fields: combined})
 }
 

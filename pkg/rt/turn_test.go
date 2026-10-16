@@ -2175,9 +2175,7 @@ func TestTurnHalfDuplexGatesUplinkWhileSpeaking(t *testing.T) {
 	tm.IngestAudio(s, loud)
 	time.Sleep(150 * time.Millisecond)
 
-	asr.mu.Lock()
-	fed := len(asr.fedBytes)
-	asr.mu.Unlock()
+	fed := asr.fedCount()
 	if fed != 1 {
 		t.Errorf("asr calls = %d, want 1 (only the turn's own utterance; gated uplink must not transcribe)", fed)
 	}
@@ -3423,7 +3421,7 @@ func TestVADStartGraceSuppressesEarlyAudio(t *testing.T) {
 	tm.IngestAudio(s, ttUtterance())
 	tm.IngestAudio(s, ttUtterance())
 	time.Sleep(100 * time.Millisecond)
-	if got := len(asr.fedBytes); got != 0 {
+	if got := asr.fedCount(); got != 0 {
 		t.Fatalf("asr calls during the start grace = %d, want 0", got)
 	}
 
@@ -3432,8 +3430,8 @@ func TestVADStartGraceSuppressesEarlyAudio(t *testing.T) {
 	tm.sessionReadyAt = time.Now().Add(-11 * time.Second)
 	tm.mu.Unlock()
 	tm.IngestAudio(s, ttUtterance())
-	if !waitFor(t, 5*time.Second, func() bool { return len(asr.fedBytes) == 1 }) {
-		t.Fatalf("asr calls after the grace = %d, want 1", len(asr.fedBytes))
+	if !waitFor(t, 5*time.Second, func() bool { return asr.fedCount() == 1 }) {
+		t.Fatalf("asr calls after the grace = %d, want 1", asr.fedCount())
 	}
 }
 
@@ -3457,7 +3455,7 @@ func TestVADEchoTailStartsAtPlaybackAck(t *testing.T) {
 	ttAwaitSpoken(t, s, 3)
 	tm.IngestAudio(s, ttUtterance())
 	time.Sleep(50 * time.Millisecond)
-	if got := len(asr.fedBytes); got != 0 {
+	if got := asr.fedCount(); got != 0 {
 		t.Fatalf("asr calls during playback-pending = %d, want 0", got)
 	}
 
@@ -3466,7 +3464,7 @@ func TestVADEchoTailStartsAtPlaybackAck(t *testing.T) {
 	ttWaitListening(t, s)
 	tm.IngestAudio(s, ttUtterance())
 	time.Sleep(50 * time.Millisecond)
-	if got := len(asr.fedBytes); got != 0 {
+	if got := asr.fedCount(); got != 0 {
 		t.Fatalf("asr calls during the echo tail = %d, want 0", got)
 	}
 
@@ -3475,8 +3473,8 @@ func TestVADEchoTailStartsAtPlaybackAck(t *testing.T) {
 	tm.echoTailUntil = time.Now().Add(-time.Millisecond)
 	tm.mu.Unlock()
 	tm.IngestAudio(s, ttUtterance())
-	if !waitFor(t, 5*time.Second, func() bool { return len(asr.fedBytes) == 1 }) {
-		t.Fatalf("asr calls after the tail = %d, want 1", len(asr.fedBytes))
+	if !waitFor(t, 5*time.Second, func() bool { return asr.fedCount() == 1 }) {
+		t.Fatalf("asr calls after the tail = %d, want 1", asr.fedCount())
 	}
 	tm.mu.Lock()
 	stamped := !tm.lastPlaybackCompletedAt.IsZero()
@@ -3520,7 +3518,7 @@ func TestVADEchoTailRejectsStaleAck(t *testing.T) {
 	}
 	tm.IngestAudio(s, ttUtterance())
 	time.Sleep(50 * time.Millisecond)
-	if got := len(asr.fedBytes); got != 0 {
+	if got := asr.fedCount(); got != 0 {
 		t.Errorf("asr calls after a stale ack = %d, want 0", got)
 	}
 }
@@ -3576,8 +3574,8 @@ func TestPlaybackPendingInterruptStillImmediate(t *testing.T) {
 	// With the gate lifted, a real utterance reaches the ASR (the gated
 	// burst above was never transcribed).
 	tm.IngestAudio(s, ttUtterance())
-	if !waitFor(t, 5*time.Second, func() bool { return len(asr.fedBytes) == 1 }) {
-		t.Fatalf("asr calls after the interrupt = %d, want 1", len(asr.fedBytes))
+	if !waitFor(t, 5*time.Second, func() bool { return asr.fedCount() == 1 }) {
+		t.Fatalf("asr calls after the interrupt = %d, want 1", asr.fedCount())
 	}
 }
 
@@ -3695,8 +3693,8 @@ func TestASRInvalidResponseRetriedOnce(t *testing.T) {
 
 	ttRunIntentTurn(t, tm, s, 3)
 
-	if len(asr.fedBytes) != 2 {
-		t.Errorf("asr calls = %d, want 2 (exactly one retry)", len(asr.fedBytes))
+	if asr.fedCount() != 2 {
+		t.Errorf("asr calls = %d, want 2 (exactly one retry)", asr.fedCount())
 	}
 	if llm.callCount() != 1 {
 		t.Errorf("classification calls = %d, want 1", llm.callCount())

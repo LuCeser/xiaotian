@@ -56,6 +56,16 @@ func (f *fakeASR) Transcribe(_ context.Context, pcm []byte) (string, error) {
 	return head.text, nil
 }
 
+// fedCount returns the number of Transcribe calls so far, under the same
+// mutex Transcribe appends with. turn-manager tests poll it while a
+// processTurn goroutine may be mid-call — a bare len(f.fedBytes) read
+// races that append (issue #26).
+func (f *fakeASR) fedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.fedBytes)
+}
+
 // ---------------------------------------------------------------------------
 // fakeLLM
 // ---------------------------------------------------------------------------
