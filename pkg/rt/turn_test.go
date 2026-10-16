@@ -125,6 +125,7 @@ type fakeExecutor struct {
 	requestResults   map[string]lesson.AdvanceResult
 	checkResults     map[string]any
 	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
+	stateIDs         []string // the lesson ids GetLessonState was asked for (Issue #10)
 	advanceCalls     []fakeAdvanceCall
 	checkCalls       []fakeCheckCall
 	lesson           lesson.Lesson
@@ -183,7 +184,7 @@ func (f *fakeExecutor) EnsureLesson(_ context.Context, _ string, _ []string) (le
 	return f.lesson, nil
 }
 
-func (f *fakeExecutor) EnsureLessonCards(_ context.Context, lessonID string, cards []lesson.Word) (lesson.Lesson, error) {
+func (f *fakeExecutor) EnsureLessonCards(_ context.Context, lessonID string, cards []lesson.Word, category string) (lesson.Lesson, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ensureCardsCalls++
@@ -191,18 +192,41 @@ func (f *fakeExecutor) EnsureLessonCards(_ context.Context, lessonID string, car
 	f.lesson.LessonID = lessonID // the real store reads the row back under the requested id
 	f.lesson.Cards = cards
 	f.lesson.Words = cardWords(cards)
+	f.lesson.Category = category // the real store persists the row's subject (Issue #10)
 	f.exists = true
 	return f.lesson, nil
 }
 
-func (f *fakeExecutor) GetLessonState(_ context.Context, _ string) (lesson.Lesson, error) {
+func (f *fakeExecutor) GetLessonState(_ context.Context, lessonID string) (lesson.Lesson, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stateCalls++
+	f.stateIDs = append(f.stateIDs, lessonID)
 	if !f.exists {
 		return lesson.Lesson{}, lesson.ErrLessonNotFound
 	}
 	return f.lesson, nil
+}
+
+// stateIDCalls returns every GetLessonState lesson id, in call order.
+func (f *fakeExecutor) stateIDCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.stateIDs...)
+}
+
+// ensureIDCalls returns every EnsureLessonCards lesson id, in call order.
+func (f *fakeExecutor) ensureIDCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ensureIDs...)
+}
+
+// rowCategory returns the in-memory row's subject (Issue #10).
+func (f *fakeExecutor) rowCategory() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lesson.Category
 }
 
 func (f *fakeExecutor) AdvanceWord(_ context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error) {
@@ -4615,6 +4639,30 @@ func (f *fakePracticeSource) allCallsParticipatingOnly() bool {
 		}
 	}
 	return true
+}
+
+// allCallsCarryCategory (Issue #10): every List call is scoped to the
+// given subject together with the Issue #4 switches — the practice pick
+// never reads the other subject's vocabulary.
+func (f *fakePracticeSource) allCallsCarryCategory(category string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.filters) == 0 {
+		return false
+	}
+	for _, filter := range f.filters {
+		if filter.Category != category || !filter.ParticipatingOnly || !filter.ScopeEligibleOnly {
+			return false
+		}
+	}
+	return true
+}
+
+// filtersSnapshot copies the recorded List filters for failure messages.
+func (f *fakePracticeSource) filtersSnapshot() []database.CardFilter {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]database.CardFilter(nil), f.filters...)
 }
 
 func (f *fakePracticeSource) listCalls() int {

@@ -67,10 +67,11 @@ type LessonExecutor interface {
 	EnsureLesson(ctx context.Context, lessonID string, words []string) (lesson.Lesson, error)
 	// GetLessonState returns the current lesson row.
 	GetLessonState(ctx context.Context, lessonID string) (lesson.Lesson, error)
-	// EnsureLessonCards creates the lesson row carrying word cards if
-	// absent and returns it (first stored content wins; a legacy row with
-	// empty cards is NOT backfilled — the caller detects it).
-	EnsureLessonCards(ctx context.Context, lessonID string, cards []lesson.Word) (lesson.Lesson, error)
+	// EnsureLessonCards creates the lesson row carrying word cards and the
+	// classroom's subject (Issue #10) if absent and returns it (first stored
+	// content wins; a legacy row with empty cards is NOT backfilled — the
+	// caller detects it).
+	EnsureLessonCards(ctx context.Context, lessonID string, cards []lesson.Word, category string) (lesson.Lesson, error)
 	// AdvanceWord moves the cursor forward one word, idempotently by
 	// requestID, guarded by expectedVersion.
 	AdvanceWord(ctx context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error)
@@ -351,6 +352,16 @@ type TurnManager struct {
 	// mode is the page-supplied UI mode (13.1 D-08, normalized to
 	// student/test at session_init); plan 02's masking consumes it.
 	mode string
+	// category is the classroom's subject (Issue #10, normalized to
+	// english/chinese at session_init from the init message — and from the
+	// lesson ROW on every resume/correction/completed reconnect, so a
+	// post-hoc correction submits its review under the subject the lesson
+	// was actually taught in). Everything subject-scoped reads it: due
+	// fetch, review write, practice pick, no-due copy, session_ready echo.
+	// (例句生成 stays English-scoped by design — the ExampleResolver
+	// grounds on English cards and a 语文 word degrades honestly to the
+	// classification fallback, per AC2's 不强制英语式例句.)
+	category string
 	// turnSentences are the sentences sent for the current announcement, in
 	// order (the interrupt-trim source).
 	turnSentences []sentenceInfo
@@ -496,9 +507,11 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	}
 
 	// Retain the write half for server-initiated announcements that have no
-	// request context behind them (the 13-09 timeout auto-advance), and the
+	// request context behind them (the 13-09 timeout auto-advance), the
 	// page's UI mode (13.1 D-08: "test" keeps today's full-reveal behavior;
-	// absent/invalid → student — the iPad bookmark must never leak words).
+	// absent/invalid → student — the iPad bookmark must never leak words)
+	// and the classroom's subject (Issue #10: "chinese" opens the 语文
+	// classroom; absent/invalid → english, the pre-#10 landing).
 	// 13.3-05: the production force switch short-circuits the SAME single
 	// adjudication point — when cfg.ForceStudent is set, the client-supplied
 	// mode is ignored and every session runs the student projection (the
@@ -511,6 +524,7 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	} else {
 		tm.mode = normalizeSessionMode(m.Mode)
 	}
+	tm.category = normalizeSessionCategory(m.Category)
 	tm.mu.Unlock()
 
 	if m.Practice {
@@ -524,7 +538,8 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 		return
 	}
 
-	lessonID := resolveLessonID(tm.cfg.LessonID, time.Now())
+	category := tm.sessionCategory()
+	lessonID := lessonIDForCategory(tm.cfg.LessonID, time.Now(), category)
 
 	unlock := lockLessonInit(lessonID)
 	defer unlock()
@@ -536,10 +551,17 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 		return
 	}
 
-	if errors.Is(err, lesson.ErrLessonNotFound) {
+	if err == nil {
+		// Existing row: the ROW is the subject authority from here on — a
+		// reconnect echoes and reviews under the subject the lesson was
+		// actually created under, not whatever the page re-declared.
+		tm.mu.Lock()
+		tm.category = lesson.NormalizeCategory(l.Category)
+		tm.mu.Unlock()
+	} else {
 		// Fresh lesson: this process instance is the single creator (init
-		// lock held) — fetch due words now.
-		cards, ferr := tm.cfg.Words.FetchDueWords(ctx, dueWordsLimit)
+		// lock held) — fetch due words now, scoped to the same subject.
+		cards, ferr := tm.cfg.Words.FetchDueWords(ctx, dueWordsLimit, category)
 		if ferr != nil {
 			tm.failLessonInit(s)
 			return
@@ -548,7 +570,7 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 			tm.startNoDueSession(s, lessonID)
 			return
 		}
-		l, err = tm.exec.EnsureLessonCards(ctx, lessonID, cards)
+		l, err = tm.exec.EnsureLessonCards(ctx, lessonID, cards, category)
 		if err != nil {
 			// RunDue succeeded but the lesson row did not materialize; the
 			// 13-10 fetch lock (1h) may linger — recorded honestly below.
@@ -601,6 +623,20 @@ func normalizeSessionMode(mode string) string {
 	return ModeStudent
 }
 
+// normalizeSessionCategory normalizes the page-supplied subject (Issue #10):
+// only the exact "chinese" value opens a 语文 classroom; anything else —
+// including an absent field — is the English classroom, so every pre-#10
+// page that never sends the field lands exactly where it did. The same
+// deny-by-default shape as normalizeSessionMode: an off-enum value must
+// never open the wrong subject's classroom, it falls back to the legacy
+// subject.
+func normalizeSessionCategory(category string) string {
+	if category == lesson.CategoryChinese {
+		return lesson.CategoryChinese
+	}
+	return lesson.CategoryEnglish
+}
+
 // startNoDueSession answers session_ready with an empty word table, lets
 // the teacher explain (zero due words — with the D-13 days variant when the
 // vocabulary's due data names the next review), and ends the session only
@@ -617,6 +653,7 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
 		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
 		Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
+		Category:  tm.sessionCategory(),
 	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
@@ -642,6 +679,7 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
 		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
 		Lesson:    tm.lessonViewFor(l),
+		Category:  tm.sessionCategory(),
 	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
@@ -670,6 +708,7 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
 		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
 		Lesson:    tm.lessonViewFor(l),
+		Category:  tm.sessionCategory(),
 	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
@@ -719,6 +758,14 @@ func (tm *TurnManager) sessionMode() string {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return tm.mode
+}
+
+// sessionCategory returns the classroom's subject (CategoryEnglish before
+// session_init stores one — the same pre-#10 default as the wire field).
+func (tm *TurnManager) sessionCategory() string {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.category
 }
 
 // lessonViewFor projects a lesson row through the session's mode: student

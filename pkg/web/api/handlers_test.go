@@ -1116,10 +1116,11 @@ const testLessonCards = `[{"word":"苹果","meaning":"apple","example":"I eat an
 
 // summaryItemKeys is the EXACT key set an in-progress lesson may expose —
 // list row and detail summary alike. Anything beyond this set on an
-// in-progress row is a leak-guard breach.
+// in-progress row is a leak-guard breach. category (Issue #10) is summary
+// metadata — the subject badge, never a word surface.
 var summaryItemKeys = []string{
 	"lesson_id", "created_at", "word_count", "stage", "kind", "completed",
-	"unchecked", "save_status", "correct", "wrong", "unconfirmed",
+	"unchecked", "save_status", "correct", "wrong", "unconfirmed", "category",
 }
 
 // assertSummaryKeysExact fails when the decoded row's key set differs from

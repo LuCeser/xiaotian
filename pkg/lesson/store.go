@@ -50,6 +50,7 @@ var (
     outcomes TEXT NOT NULL DEFAULT '{}',  -- JSON object: word index → WordOutcome
     verdicts TEXT NOT NULL DEFAULT '[]',  -- JSON array of CheckVerdict
     unchecked INTEGER NOT NULL DEFAULT 0, -- 13.1 D-03: lesson closed without a check
+    category TEXT NOT NULL DEFAULT '',    -- Issue #10: 'english' | 'chinese' ('' = legacy english)
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 )`
@@ -79,6 +80,11 @@ var (
 	alterLessonsAddOutcomes  = `ALTER TABLE lessons ADD COLUMN outcomes TEXT NOT NULL DEFAULT '{}'`
 	alterLessonsAddVerdicts  = `ALTER TABLE lessons ADD COLUMN verdicts TEXT NOT NULL DEFAULT '[]'`
 	alterLessonsAddUnchecked = `ALTER TABLE lessons ADD COLUMN unchecked INTEGER NOT NULL DEFAULT 0`
+
+	// alterLessonsAddCategory (Issue #10): the classroom's subject travels
+	// WITH the record — '' on legacy rows means the English-only era and
+	// reads back as CategoryEnglish (NormalizeCategory), never as "unknown".
+	alterLessonsAddCategory = `ALTER TABLE lessons ADD COLUMN category TEXT NOT NULL DEFAULT ''`
 )
 
 // Word is one vocabulary card carried with the lesson row: the surface word,
@@ -158,6 +164,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		{"outcomes", alterLessonsAddOutcomes},
 		{"verdicts", alterLessonsAddVerdicts},
 		{"unchecked", alterLessonsAddUnchecked},
+		{"category", alterLessonsAddCategory},
 	} {
 		has, err := lessonsHasColumn(ctx, db, col.name)
 		if err != nil {
@@ -206,7 +213,10 @@ func lessonsHasColumn(ctx context.Context, db *sql.DB, name string) (bool, error
 // list on disk ([]string); Cards is the JSON-serialized word-card list
 // ([]Word) — the meaning/example ground truth persisted with the classroom
 // row so a same-day reconnect does not lose it. Version drives optimistic
-// concurrency for advance_word writes (Executor.AdvanceWord).
+// concurrency for advance_word writes (Executor.AdvanceWord). Category is
+// the classroom's subject (Issue #10): "" on rows written before the column
+// existed — normalize via NormalizeCategory, which maps it to English (the
+// product was English-only then), never to "unknown".
 //
 // The 13.1 check-stage fields (Stage/Outcomes/Verdicts/Unchecked) persist the
 // three-stage classroom across sessions: Stage records ” (no check recorded)
@@ -226,6 +236,30 @@ type Lesson struct {
 	CurrentIndex int
 	Version      int
 	Unchecked    bool
+	Category     string
+}
+
+// Vocabulary-category values the lessons row can carry (Issue #10). The
+// literals match the cards table's category enum (vocab_manager.py / D-06):
+// "english" and "chinese".
+const (
+	CategoryEnglish = "english"
+	CategoryChinese = "chinese"
+)
+
+// NormalizeCategory maps a stored/declared category onto the canonical
+// English/Chinese pair: "" (a pre-Issue-#10 row or an absent field) reads as
+// English — the product was English-only before Chinese classrooms existed,
+// so the default is a historical fact, not a guess. Any other value also
+// reads as English: the column is written only through EnsureLessonCards,
+// which validates at the gate, so an off-enum value is corruption best
+// rendered as the legacy default rather than surfaced to a parent as
+// "unknown subject".
+func NormalizeCategory(v string) string {
+	if v == CategoryChinese {
+		return CategoryChinese
+	}
+	return CategoryEnglish
 }
 
 // Store is the create-once/read path for lessons rows. Repository pattern
@@ -284,10 +318,13 @@ func (s *Store) EnsureLesson(ctx context.Context, lessonID string, words []strin
 }
 
 // EnsureLessonCards creates the lessons row for lessonID if absent, carrying
-// both the plain word list (extracted from the cards) and the full word-card
-// JSON, and reads the full row back. INSERT OR IGNORE semantics identical to
-// EnsureLesson: first content wins, a second call with different cards
-// returns the first stored content and leaves version untouched.
+// both the plain word list (extracted from the cards), the full word-card
+// JSON and the classroom's subject (Issue #10), and reads the full row back.
+// INSERT OR IGNORE semantics identical to EnsureLesson: first content wins, a
+// second call with different cards returns the first stored content and
+// leaves version untouched. category is normalized here ("" → english), so a
+// legacy caller that never learned about subjects keeps writing the
+// historical default.
 //
 // Boundary (deliberate, tested): INSERT OR IGNORE is NOT a replacement
 // mechanism. A pre-existing row with an EMPTY cards column — e.g. a legacy
@@ -296,7 +333,7 @@ func (s *Store) EnsureLesson(ctx context.Context, lessonID string, words []strin
 // surface lesson_unavailable instead of indexing empty word cards or
 // re-running RunDue. Completed rows are likewise read-only for 13-08; this
 // store never rebuilds them.
-func (s *Store) EnsureLessonCards(ctx context.Context, lessonID string, cards []Word) (Lesson, error) {
+func (s *Store) EnsureLessonCards(ctx context.Context, lessonID string, cards []Word, category string) (Lesson, error) {
 	if lessonID == "" || len(cards) == 0 {
 		return Lesson{}, errors.Wrap(ErrInvalidLesson, "ensure lesson cards: lesson_id and cards must be non-empty")
 	}
@@ -316,10 +353,11 @@ func (s *Store) EnsureLessonCards(ctx context.Context, lessonID string, cards []
 	}
 
 	if _, err = s.db.ExecContext(ctx,
-		"INSERT OR IGNORE INTO lessons (lesson_id, words, cards) VALUES (?, ?, ?)",
+		"INSERT OR IGNORE INTO lessons (lesson_id, words, cards, category) VALUES (?, ?, ?, ?)",
 		lessonID,
 		string(wordsJSON),
 		string(cardsJSON),
+		NormalizeCategory(category),
 	); err != nil {
 		s.logger.Error("lesson ensure cards: insert failed",
 			infra.F("component", "lesson/store"),
@@ -387,7 +425,7 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 	)
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT lesson_id, words, cards, stage, outcomes, verdicts, unchecked, current_index, version, created_at, updated_at FROM lessons WHERE lesson_id = ?",
+		"SELECT lesson_id, words, cards, stage, outcomes, verdicts, unchecked, current_index, version, created_at, updated_at, category FROM lessons WHERE lesson_id = ?",
 		lessonID,
 	).Scan(
 		&l.LessonID,
@@ -401,6 +439,7 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 		&l.Version,
 		&l.CreatedAt,
 		&l.UpdatedAt,
+		&l.Category,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -474,6 +513,7 @@ func SummarizeLesson(l Lesson) LessonSummary {
 		Unchecked:    l.Unchecked,
 		CurrentIndex: l.CurrentIndex,
 		WordCount:    len(l.Cards),
+		Category:     NormalizeCategory(l.Category),
 	}
 	for _, v := range l.Verdicts {
 		if !v.Manual {
@@ -524,6 +564,9 @@ type LessonSummary struct {
 	Unconfirmed  int
 	Unchecked    bool
 	Completed    bool
+	// Category is the row's subject, already normalized ('' → english) —
+	// the parent records view renders a subject badge from it (Issue #10).
+	Category string
 }
 
 // ListLessons limit normalization — the bounds live HERE, in the store, so a
@@ -557,7 +600,7 @@ func normalizeListLessonsLimit(limit int) int {
 // wrapped error — a silently-empty verdict list would misstate the counts.
 func (s *Store) ListLessons(ctx context.Context, limit int) ([]LessonSummary, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT lesson_id, stage, unchecked, current_index, cards, verdicts, created_at FROM lessons ORDER BY created_at DESC, lesson_id DESC LIMIT ?",
+		"SELECT lesson_id, stage, unchecked, current_index, cards, verdicts, created_at, category FROM lessons ORDER BY created_at DESC, lesson_id DESC LIMIT ?",
 		normalizeListLessonsLimit(limit),
 	)
 	if err != nil {
@@ -577,7 +620,7 @@ func (s *Store) ListLessons(ctx context.Context, limit int) ([]LessonSummary, er
 			verdictsJSON string
 			unchecked    int
 		)
-		if err := rows.Scan(&row.LessonID, &row.Stage, &unchecked, &row.CurrentIndex, &cardsJSON, &verdictsJSON, &row.CreatedAt); err != nil {
+		if err := rows.Scan(&row.LessonID, &row.Stage, &unchecked, &row.CurrentIndex, &cardsJSON, &verdictsJSON, &row.CreatedAt, &row.Category); err != nil {
 			return nil, errors.Wrap(err, "list lessons: scan")
 		}
 		row.Unchecked = unchecked != 0

@@ -184,7 +184,15 @@ func (tm *TurnManager) noDueWordsTextForNow() string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), practiceListTimeout)
 	defer cancel()
-	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{ParticipatingOnly: true, ScopeEligibleOnly: true})
+	// Issue #10: the days-until-next-review counts THIS subject's cards only
+	// (the session's category; english before session_init) — a Chinese
+	// classroom's 「下次复习在 X 天后」 must not read the English column's
+	// dues.
+	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{
+		ParticipatingOnly: true,
+		ScopeEligibleOnly: true,
+		Category:          tm.sessionCategory(),
+	})
 	if err != nil {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeProviderFailed),
@@ -217,6 +225,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 	}
 
 	now := time.Now()
+	category := tm.sessionCategory()
 	lessonID := resolvePracticeLessonID(now)
 
 	// The per-lesson init lock discipline: two simultaneous practice
@@ -228,9 +237,11 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 
 	// The exclusion set: today's dictated lesson words first (tolerate
 	// ErrLessonNotFound — a day with no lesson yet means nothing to exclude
-	// from that side).
+	// from that side). The daily id is THIS subject's (Issue #10): a Chinese
+	// practice excludes the Chinese daily lesson's 词语, not the English
+	// classroom's words.
 	exclude := map[string]bool{}
-	dailyID := resolveLessonID(tm.cfg.LessonID, now)
+	dailyID := lessonIDForCategory(tm.cfg.LessonID, now, category)
 	if l, err := tm.exec.GetLessonState(ctx, dailyID); err != nil {
 		if !errors.Is(err, lesson.ErrLessonNotFound) {
 			tm.failLessonInit(s)
@@ -255,8 +266,14 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 	// Random pick over the full eligible vocabulary — participating AND
 	// inside the Issue #4 textbook scope (加练 must not bypass progress;
 	// read-only direct List, never RunDue's lock, T-13.1-12 accepts the
-	// single-family scan scale).
-	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{ParticipatingOnly: true, ScopeEligibleOnly: true})
+	// single-family scan scale) AND inside the session's subject (Issue #10:
+	// an English practice never hands the child 语文词语, and vice versa —
+	// the pick is subject-isolated at the same seam as the due fetch).
+	cards, err := tm.cfg.Practice.List(ctx, database.CardFilter{
+		ParticipatingOnly: true,
+		ScopeEligibleOnly: true,
+		Category:          category,
+	})
 	if err != nil {
 		tm.failLessonInit(s)
 		return
@@ -275,6 +292,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 			Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
 			TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
 			Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
+			Category:  category,
 		})
 		tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
@@ -286,7 +304,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 		return
 	}
 
-	l, err := tm.exec.EnsureLessonCards(ctx, lessonID, picked)
+	l, err := tm.exec.EnsureLessonCards(ctx, lessonID, picked, category)
 	if err != nil {
 		tm.failLessonInit(s)
 		return

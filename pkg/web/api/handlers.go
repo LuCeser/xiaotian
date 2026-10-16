@@ -555,6 +555,10 @@ type lessonListItem struct {
 	Unconfirmed int    `json:"unconfirmed"`
 	Completed   bool   `json:"completed"`
 	Unchecked   bool   `json:"unchecked"`
+	// Category is the lesson's subject ("english"/"chinese", Issue #10) —
+	// the records view renders its subject badge from this field, never by
+	// parsing the lesson id.
+	Category string `json:"category"`
 }
 
 // lessonsResponse is the GET /lessons response envelope.
@@ -643,6 +647,7 @@ func newLessonListItem(s lesson.LessonSummary, receipt lesson.Receipt, hasReceip
 		Completed:  s.Completed,
 		Unchecked:  s.Unchecked,
 		SaveStatus: saveStatus,
+		Category:   s.Category,
 	}
 	if s.Completed {
 		item.Correct = s.Correct
