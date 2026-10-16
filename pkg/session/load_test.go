@@ -130,6 +130,7 @@ func TestLoad_50ConcurrentSessions(t *testing.T) {
 	}()
 
 	var wg sync.WaitGroup
+	sessions := make([]*session.Session, n)
 	start := time.Now()
 	for i := 0; i < n; i++ {
 		wg.Add(1)
@@ -141,6 +142,9 @@ func TestLoad_50ConcurrentSessions(t *testing.T) {
 				t.Errorf("session %d: %v", i, err)
 				return
 			}
+			// Distinct slot per goroutine + wg.Wait below = happens-before
+			// for the drain loop's reads, no lock needed.
+			sessions[i] = s
 			// Drive the spine: play → DICTATING(word 1) → next_word →
 			// DICTATING(word 2) → next_word (last) → WAITING_PARENT →
 			// parent review → FEEDBACK. Waits pin state AND current word —
@@ -160,13 +164,26 @@ func TestLoad_50ConcurrentSessions(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Registry must fully drain (every session exited + onExit fired).
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if manager.ActiveCount() == 0 {
-			break
+	// Registry drain is an event wait, not a timing guess: every driver
+	// pushed EventCancel above, and run() closes done only AFTER the D-10
+	// exit chain — including onExit's registry removal — so done closing
+	// for all n sessions implies ActiveCount()==0. The timer is purely a
+	// hang detector for a stuck exit chain (e.g. a blocking defer); it is
+	// not a budget the happy path can approach.
+	drainTimer := time.NewTimer(loadWaitBudget)
+	defer drainTimer.Stop()
+	drained := 0
+	for i, s := range sessions {
+		if s == nil {
+			continue // NewSession failed; already reported via t.Errorf
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-s.Done():
+			drained++
+		case <-drainTimer.C:
+			t.Fatalf("session %d did not exit within %v — exit chain stuck? (drained %d/%d)",
+				i, loadWaitBudget, drained, n)
+		}
 	}
 	if got := manager.ActiveCount(); got != 0 {
 		t.Errorf("registry did not drain: %d sessions still active", got)
@@ -196,11 +213,22 @@ func TestLoad_50ConcurrentSessions(t *testing.T) {
 	}
 }
 
+// loadWaitBudget bounds one state wait and the fleet drain. It is a hang
+// detector, not a timing assumption: with fakes at every seam a session's
+// full spine finishes in single-digit milliseconds (measured under -race
+// with every core hogged by busy loops and GOMAXPROCS=2: the whole
+// 50-session fleet drains in ~25ms, issue #29), so the budget only fires
+// when an event loop or exit chain is genuinely stuck. Single monotonic
+// deadline per wait — no per-iteration refresh, so a stalled runner and a
+// lost event are distinguishable by the failure's attribution, not by how
+// long it took.
+const loadWaitBudget = 15 * time.Second
+
 // waitLoadState polls a session until it reaches want (bounded; failure names
 // the connID).
 func waitLoadState(t *testing.T, s *session.Session, want database.SessionState, connID string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(loadWaitBudget)
 	for time.Now().Before(deadline) {
 		if s.State() == want {
 			return
@@ -215,7 +243,7 @@ func waitLoadState(t *testing.T, s *session.Session, want database.SessionState,
 // only the word disambiguates them (ticket-05 lesson).
 func waitLoadWord(t *testing.T, s *session.Session, want database.SessionState, word, connID string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(loadWaitBudget)
 	for time.Now().Before(deadline) {
 		if s.State() == want && s.CurrentWord() == word {
 			return
