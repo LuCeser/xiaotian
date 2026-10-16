@@ -798,6 +798,12 @@
     row.setAttribute('data-word', word.word);
     row.setAttribute('data-id', String(word.id));
 
+    // Issue #18: the 44px touch floor rides a wrapping label
+    // (.inline-check-hit) — the input itself stays 18px (Chrome zeroes
+    // used padding on native checkboxes, so the input cannot carry the
+    // hit area itself).
+    var selectHit = document.createElement('label');
+    selectHit.className = 'inline-check-hit';
     var select = document.createElement('input');
     select.type = 'checkbox';
     select.className = 'word-select';
@@ -808,6 +814,7 @@
       else { delete self.selectedIds[String(word.id)]; }
       self.updateSelectionControls();
     });
+    selectHit.appendChild(select);
 
     var text = document.createElement('span');
     text.className = 'word-text';
@@ -897,7 +904,7 @@
     participationLabel.appendChild(participation);
     participationLabel.appendChild(participationText);
 
-    row.appendChild(select);
+    row.appendChild(selectHit);
     row.appendChild(text);
     if (word.meaning) {
       row.appendChild(meaning);

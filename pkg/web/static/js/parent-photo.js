@@ -1672,6 +1672,12 @@
 
     var checkCell = document.createElement('td');
     checkCell.className = 'preview-index';
+    // Issue #18: the 44px touch floor rides a wrapping label
+    // (.inline-check-hit) — the input itself stays 18px (Chrome zeroes
+    // used padding on native checkboxes, so the input cannot carry the
+    // hit area itself).
+    var checkHit = document.createElement('label');
+    checkHit.className = 'inline-check-hit';
     var check = document.createElement('input');
     check.type = 'checkbox';
     check.className = 'photo-row-check';
@@ -1683,7 +1689,8 @@
       self.rows[i].checked = check.checked;
       self.updateCommitButton();
     });
-    checkCell.appendChild(check);
+    checkHit.appendChild(check);
+    checkCell.appendChild(checkHit);
     tr.appendChild(checkCell);
 
     var wordCell = document.createElement('td');
