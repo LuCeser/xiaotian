@@ -250,6 +250,15 @@ func (h *Hub) Close() {
 	h.closed = true
 }
 
+// isClosed reports whether Close has flipped the shutdown flag. It is the
+// synchronized read side of the closeMu-guarded field — polling h.closed
+// directly would race Run's deferred Close write (issue #26).
+func (h *Hub) isClosed() bool {
+	h.closeMu.RLock()
+	defer h.closeMu.RUnlock()
+	return h.closed
+}
+
 // Clients returns the current number of active clients (D-11 thread-safe).
 func (h *Hub) Clients() int {
 	h.mu.RLock()

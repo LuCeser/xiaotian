@@ -12,6 +12,7 @@ package rt
 import (
 	"encoding/binary"
 	"math"
+	"sync"
 )
 
 // VADConfig tunes the energy segmenter. All thresholds are normalized RMS
@@ -57,11 +58,12 @@ func DefaultVADConfig() VADConfig {
 }
 
 // VAD is the stateful utterance segmenter. Feed it uplink PCM as it arrives
-// (any chunk sizes); it returns complete utterances. Not safe for concurrent
-// use — the turn manager owns it on its audio path under its own
-// serialization (one IngestAudio caller at a time per connection).
+// (any chunk sizes); it returns complete utterances. Feed and Reset are safe
+// to call from different goroutines: the turn manager feeds from the
+// transport read loop while close/interrupt paths Reset from announcement
+// goroutines, so the segmenter serializes itself with its own leaf mutex
+// (held only across pure in-memory state work — no calls out, no deadlock).
 type VAD struct {
-
 	// pending holds bytes not yet consumed to whole frames: a partial tail
 	// of a Feed call, plus whole frames that arrived after a segment closed
 	// mid-call (the single-segment return contract — see Feed).
@@ -84,6 +86,9 @@ type VAD struct {
 	segmentMs     int
 
 	inSegment bool
+
+	// mu serializes every field above across Feed/Reset callers.
+	mu sync.Mutex
 }
 
 // NewVAD builds a segmenter. Non-positive tuning fields fall back to the
@@ -137,6 +142,8 @@ func NewVAD(cfg VADConfig) *VAD {
 //     by the next Feed — callers that keep streaming (the read loop does)
 //     see it then.
 func (v *VAD) Feed(pcm []byte) ([]byte, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.pending = append(v.pending, pcm...)
 	for len(v.pending) >= v.frameBytes {
 		frame := v.pending[:v.frameBytes]
@@ -160,8 +167,12 @@ func (v *VAD) Feed(pcm []byte) ([]byte, bool) {
 
 // Reset clears all state: partial frames, ring, open segment, counters.
 // Called on interrupt (the in-flight utterance is abandoned) and on session
-// teardown so a reused VAD starts clean.
+// teardown so a reused VAD starts clean. Safe to call concurrently with an
+// in-flight Feed — whichever wins the mutex decides the serialization, and
+// either order leaves the state machine consistent.
 func (v *VAD) Reset() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.pending = nil
 	v.inSegment = false
 	v.consec = 0

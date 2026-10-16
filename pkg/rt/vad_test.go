@@ -10,7 +10,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"sync"
 	"testing"
+	"time"
 )
 
 const (
@@ -271,5 +273,69 @@ func TestVADReset(t *testing.T) {
 	}
 	if !bytes.Equal(resetSegs[0], freshSegs[0]) {
 		t.Error("post-Reset segment differs from a fresh VAD's segment")
+	}
+}
+
+// TestVADConcurrentFeedReset reproduces the issue #26 shape: the turn
+// manager feeds the VAD from the transport read loop while close/interrupt
+// paths Reset it from announcement goroutines (internalClose → Reset races
+// both Feed and other Resets). Feed and Reset from many goroutines at once;
+// under -race the pre-fix code reports the data race here, the fixed code
+// only serializes. Afterwards the state machine must still segment exactly
+// like a fresh instance — the storm may interleave but never corrupt.
+func TestVADConcurrentFeedReset(t *testing.T) {
+	v := NewVAD(DefaultVADConfig())
+
+	speech := vadSine(12000, 90) // three frames: one onset trigger minimum
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Two feeders: the read loop analog.
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_, _ = v.Feed(speech)
+				}
+			}
+		}()
+	}
+	// Two resetters: the internalClose analog (concurrent Reset vs Feed and
+	// Reset vs Reset are both in the issue's race set).
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					v.Reset()
+				}
+			}
+		}()
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// Post-storm integrity: quiesced, the segmenter closes exactly the one
+	// utterance a fresh VAD closes for the same input.
+	v.Reset()
+	input := append(append(vadSilence(510), vadSine(12000, 720)...), vadSilence(810)...)
+	stormSegs := vadFeedAll(v, input)
+	freshSegs := vadFeedAll(NewVAD(DefaultVADConfig()), input)
+	if len(stormSegs) != 1 || len(freshSegs) != 1 {
+		t.Fatalf("post-storm segments: got %d, fresh %d, want 1 and 1", len(stormSegs), len(freshSegs))
+	}
+	if !bytes.Equal(stormSegs[0], freshSegs[0]) {
+		t.Error("post-storm segment differs from a fresh VAD's segment")
 	}
 }

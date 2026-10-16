@@ -26,6 +26,14 @@ var (
 	// a panic).
 	ErrWorkerPoolFull = errors.New("worker pool queue full")
 
+	// ErrWorkerPoolClosed is the typed rejection returned by Submit once
+	// Shutdown has closed the task channel. A Submit racing Shutdown gets
+	// this error instead of a send-on-closed-channel panic; callers treat
+	// it exactly like backpressure (log-and-drop), which during a drain is
+	// the correct outcome — the work arrives after the pool committed to
+	// finishing only what was already queued.
+	ErrWorkerPoolClosed = errors.New("worker pool closed")
+
 	// ErrPoolAlreadyRunning is returned by a second Start call on the
 	// same pool. It prevents double-spawning workers off the same
 	// WaitGroup, which would race the wg.Add/Done accounting.
@@ -59,15 +67,28 @@ var (
 //   - Start MUST be called exactly once. A second call returns
 //     ErrPoolAlreadyRunning.
 //   - Submit is goroutine-safe; callers may submit from many goroutines.
-//   - Submit MUST NOT be called concurrently with Shutdown. After
-//     Shutdown has been initiated (close of p.tasks), Submit will panic
-//     on send-on-closed-channel. The caller owns this ordering.
-//   - Shutdown MUST be called at most once. A second call panics
-//     (close-of-closed-channel). This is the documented one-shot pool
-//     contract; restart requires constructing a new WorkerPool.
+//   - Submit MAY be called concurrently with Shutdown: the pair is
+//     mutually excluded by an internal mutex, and a Submit that loses
+//     the race returns ErrWorkerPoolClosed (a typed rejection, same
+//     handling as ErrWorkerPoolFull) instead of panicking on
+//     send-on-closed-channel.
+//   - Shutdown MAY be called more than once and from concurrent
+//     goroutines: only the first call closes the task channel; later
+//     calls still wait for the same drain and return the same outcome.
+//     Restarting still requires constructing a new WorkerPool.
 type WorkerPool struct {
 	logger Logger
 	tasks  chan Task
+
+	// mu guards the tasks channel's lifecycle: Submit's send and
+	// Shutdown's close are mutually exclusive under it, so a Submit racing
+	// Shutdown observes closed and returns ErrWorkerPoolClosed instead of
+	// panicking on send-on-closed-channel. It is never held across a
+	// blocking operation (Submit's select has a default; Shutdown only
+	// flips the flag and closes), so the lock cannot deadlock or delay the
+	// worker's unguarded receives.
+	mu     sync.Mutex
+	closed bool
 
 	// wg tracks in-flight worker goroutines. Add happens in Start before
 	// the goroutine is launched; Done happens via defer in worker. wg.
@@ -217,14 +238,20 @@ func (p *WorkerPool) runTask(ctx context.Context, task Task, workerID int) {
 
 // Submit enqueues a Task. It never blocks: when the bounded queue is
 // full it returns ErrWorkerPoolFull immediately (D-72 backpressure
-// signal). The caller (Plan 08 server) translates this into an HTTP 503
-// or an explicit backpressure frame to the client (D-74 graceful
-// rejection — never a silent drop, never a panic).
+// signal), and once Shutdown has closed the task channel it returns
+// ErrWorkerPoolClosed. The caller (Plan 08 server) translates either
+// typed error into an HTTP 503 or an explicit backpressure frame to the
+// client (D-74 graceful rejection — never a silent drop, never a panic).
 //
-// Submit MUST NOT be called concurrently with Shutdown or after
-// Shutdown has been initiated. Doing so panics on
-// send-on-closed-channel; the caller owns this ordering invariant.
+// The mutex-held select has a default, so Submit cannot block on a full
+// queue OR on Shutdown holding the lock; workers receive from p.tasks
+// without touching the lock, so a busy worker never keeps Submit waiting.
 func (p *WorkerPool) Submit(task Task) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return ErrWorkerPoolClosed
+	}
 	select {
 	case p.tasks <- task:
 		return nil
@@ -243,19 +270,22 @@ func (p *WorkerPool) Submit(task Task) error {
 // all workers to exit OR ctx to expire. On clean drain it returns nil;
 // on ctx expiry it returns ErrShutdownTimeout (D-22).
 //
-// Shutdown MUST be called at most once per WorkerPool instance. A second
-// call panics (close of closed channel) — this is the documented
-// one-shot pool contract. To "restart" a pool, construct a new one.
+// Shutdown is safe to call concurrently with Submit and safe to call
+// more than once: only the first caller closes the channel (later ones
+// skip the close), and every caller waits on the same worker WaitGroup.
+// To "restart" a pool, construct a new one.
 //
 // Shutdown does NOT cancel the Start context. If Shutdown returns
 // ErrShutdownTimeout, in-flight workers may still be running; the caller
 // should cancel the Start context to force termination. On a clean
 // drain (nil return), all workers have exited before Shutdown returns.
-//
-// Submit MUST NOT be called after Shutdown returns (in either branch);
-// see the Submit contract.
 func (p *WorkerPool) Shutdown(ctx context.Context) error {
-	close(p.tasks)
+	p.mu.Lock()
+	if !p.closed {
+		p.closed = true
+		close(p.tasks)
+	}
+	p.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		p.wg.Wait()

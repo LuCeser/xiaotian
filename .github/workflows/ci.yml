@@ -38,7 +38,12 @@ jobs:
           version: v2.14.0
           args: --config=.golangci.yml
 
+      # -race needs cgo; the job-level CGO_ENABLED=0 stays for make build's
+      # static binary (issue #26: the mix silently disabled race detection
+      # for months — the test step must override explicitly).
       - run: make test
+        env:
+          CGO_ENABLED: 1
 
       - run: make build
 

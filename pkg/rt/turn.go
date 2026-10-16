@@ -289,12 +289,14 @@ func playbackAckTimeout(pcmSamples int) time.Duration {
 // processTurn, greeting/completion goroutines (and their TTS callbacks) run
 // on separate goroutines. mu guards every field below — including all
 // DictationTutor state (single-lock discipline, see dictation.go). The VAD
-// is only touched from the read loop and needs no lock. Provider calls
-// (ASR/LLM/TTS) always happen OUTSIDE mu; their results re-acquire it.
-// SendControl/SendAudio are non-blocking queue enqueues, so calling them
-// under mu is safe and makes "epoch check + send" atomic with respect to
-// interrupt handling — after HandleControl(interrupt) returns, no further
-// chunk or subtitle of the interrupted announcement can be emitted.
+// is fed from the read loop but Reset also runs on close paths driven from
+// announcement goroutines, so the VAD carries its own leaf mutex (vad.go).
+// Provider calls (ASR/LLM/TTS) always happen OUTSIDE mu; their results
+// re-acquire it. SendControl/SendAudio are non-blocking queue enqueues, so
+// calling them under mu is safe and makes "epoch check + send" atomic with
+// respect to interrupt handling — after HandleControl(interrupt) returns,
+// no further chunk or subtitle of the interrupted announcement can be
+// emitted.
 type TurnManager struct {
 	// echoTailUntil gates ordinary uplink through the echo tail that starts
 	// at the valid playback ack.
@@ -323,7 +325,8 @@ type TurnManager struct {
 	ocrPipeline *ocr.Pipeline
 	recorder    *EventRecorder
 
-	// vad is fed from the read loop only (see concurrency note).
+	// vad is fed from the read loop; its own mutex covers the Reset calls
+	// that arrive from close paths on other goroutines (see concurrency note).
 	vad *VAD
 	// turnCancel cancels the current turn's/announcement's provider context.
 	turnCancel context.CancelFunc

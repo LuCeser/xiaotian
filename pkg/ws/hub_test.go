@@ -226,9 +226,10 @@ func TestHubStopsOnContextCancel(t *testing.T) {
 	}
 
 	// Exit proof: Close is deferred inside Run, so closed==true means Run has
-	// returned and its goroutine has exited (no CR-01 leak).
+	// returned and its goroutine has exited (no CR-01 leak). isClosed takes
+	// closeMu — a bare field read here would race Run's deferred Close write.
 	cancel()
-	if !waitFor(t, 2*time.Second, "hub.closed == true after cancel()", func() bool { return hub.closed }) {
+	if !waitFor(t, 2*time.Second, "hub.closed == true after cancel()", func() bool { return hub.isClosed() }) {
 		t.Fatalf("hub.closed == true after cancel() (timed out after %v)", 2*time.Second)
 	}
 
