@@ -182,7 +182,7 @@ func TestWordlistPipeline_Recognize(t *testing.T) {
 			}
 			p := NewWordlistPipeline(fr.read, maxBytes)
 
-			res, err := p.Recognize(context.Background(), tt.image)
+			res, err := p.Recognize(context.Background(), tt.image, "")
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("Recognize error = %v, want %v", err, tt.wantErr)
@@ -292,7 +292,7 @@ func TestWordlistPipeline_RecognizeTextbookMeta(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fr := &fakeListReader{reply: tt.reply}
 			p := NewWordlistPipeline(fr.read, 1<<20)
-			res, err := p.Recognize(context.Background(), jpegSoi)
+			res, err := p.Recognize(context.Background(), jpegSoi, "")
 			if err != nil {
 				t.Fatalf("Recognize: %v", err)
 			}
@@ -325,7 +325,7 @@ func TestWordlistPipeline_RecognizeTextbookMeta(t *testing.T) {
 
 func TestWordlistPipeline_NilSeam(t *testing.T) {
 	p := NewWordlistPipeline(nil, 1<<20)
-	if _, err := p.Recognize(context.Background(), jpegSoi); !errors.Is(err, errNilSeam) {
+	if _, err := p.Recognize(context.Background(), jpegSoi, ""); !errors.Is(err, errNilSeam) {
 		t.Fatalf("Recognize error = %v, want errNilSeam", err)
 	}
 }
@@ -335,13 +335,13 @@ func TestWordlistPipeline_NilSeam(t *testing.T) {
 func TestWordlistPipeline_ReaderNeverCalledOnRejection(t *testing.T) {
 	fr := &fakeListReader{reply: `[]`}
 	p := NewWordlistPipeline(fr.read, 16)
-	if _, err := p.Recognize(context.Background(), nil); !errors.Is(err, ErrEmptyImage) {
+	if _, err := p.Recognize(context.Background(), nil, ""); !errors.Is(err, ErrEmptyImage) {
 		t.Fatalf("empty: err = %v", err)
 	}
-	if _, err := p.Recognize(context.Background(), []byte("not an image")); !errors.Is(err, ErrNotImage) {
+	if _, err := p.Recognize(context.Background(), []byte("not an image"), ""); !errors.Is(err, ErrNotImage) {
 		t.Fatalf("non-image: err = %v", err)
 	}
-	if _, err := p.Recognize(context.Background(), append(append([]byte{}, pngMagic...), make([]byte, 64)...)); !errors.Is(err, ErrImageTooLarge) {
+	if _, err := p.Recognize(context.Background(), append(append([]byte{}, pngMagic...), make([]byte, 64)...), ""); !errors.Is(err, ErrImageTooLarge) {
 		t.Fatalf("oversize: err = %v", err)
 	}
 	if fr.calls != 0 {
@@ -357,7 +357,7 @@ func TestWordlistPipeline_ReaderNeverCalledOnRejection(t *testing.T) {
 func TestWordlistPromptsCarryTheContract(t *testing.T) {
 	fr := &fakeListReader{reply: `[]`}
 	p := NewWordlistPipeline(fr.read, 1<<20)
-	if _, err := p.Recognize(context.Background(), jpegSoi); err != nil {
+	if _, err := p.Recognize(context.Background(), jpegSoi, ""); err != nil {
 		t.Fatalf("Recognize: %v", err)
 	}
 	for _, want := range []string{"词表", "短语", "原文", "JSON", "教材", "课次", "null"} {
@@ -367,5 +367,92 @@ func TestWordlistPromptsCarryTheContract(t *testing.T) {
 	}
 	if fr.gotUser == "" {
 		t.Error("user prompt is empty")
+	}
+}
+
+// TestWordlistChinesePromptContract (Issue #10) pins the SUBJECT selection
+// and the 语文 prompt's own clauses: category=chinese routes the Chinese
+// system+user prompts (subject isolation starts at the seam), the clause
+// set keeps 词语 whole (不拆单字), keeps the material's own pinyin/annotation
+// as the meaning (no forced gloss), and ignores English content on a mixed
+// page. The default ("" and "english") keeps the Issue #3 English prompts.
+func TestWordlistChinesePromptContract(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		category    string
+		wantChinese bool
+	}{
+		{"chinese selects the chinese prompts", CategoryChinese, true},
+		{"english keeps the english prompts", CategoryEnglish, false},
+		{"absent category defaults to english", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := &fakeListReader{reply: `[]`}
+			p := NewWordlistPipeline(fr.read, 1<<20)
+			if _, err := p.Recognize(context.Background(), jpegSoi, tc.category); err != nil {
+				t.Fatalf("Recognize: %v", err)
+			}
+			if got := strings.Contains(fr.gotSystem, "语文词语导入助手"); got != tc.wantChinese {
+				t.Errorf("system prompt chinese=%v, want %v\n%s", got, tc.wantChinese, fr.gotSystem)
+			}
+			if got := strings.Contains(fr.gotUser, "语文词语表"); got != tc.wantChinese {
+				t.Errorf("user prompt chinese=%v, want %q", got, fr.gotUser)
+			}
+			if got := strings.Contains(fr.gotSystem, "英语词表导入助手"); got == tc.wantChinese {
+				t.Errorf("system prompt english=%v, want %v", got, !tc.wantChinese)
+			}
+		})
+	}
+
+	// The chinese clause set (AC2: 明确词语表, 不拆单字; AC6: 同页中英混排隔离;
+	// 保留材料给出的拼音, 不强制释义).
+	fr := &fakeListReader{reply: `[]`}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	if _, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese); err != nil {
+		t.Fatalf("Recognize chinese: %v", err)
+	}
+	for _, want := range []string{
+		"词语表",      // only clear word-list entries
+		"不要拆成单个汉字", // multi-char words stay whole
+		"英文单词",     // mixed-page English content is ignored
+		"拼音",       // the material's own annotation is transcribed
+		"不要求补写释义",  // no forced English-style gloss
+		"JSON",     // strict output contract
+		"教材",       // textbook header reading
+	} {
+		if !strings.Contains(fr.gotSystem, want) {
+			t.Errorf("chinese system prompt lost clause %q:\n%s", want, fr.gotSystem)
+		}
+	}
+}
+
+// TestWordlistRecognizeChineseEntries — the chinese draft parses through the
+// SAME lenient reply pipeline (object contract, textbook header, empty
+// meanings legal), so a 语文 reply needs no parsing special-case.
+func TestWordlistRecognizeChineseEntries(t *testing.T) {
+	reply := `{"textbook":{"edition":"统编版","stage":null,"grade":"二年级","volume":"下册","module":null,"lesson":"第5课"},
+		"entries":[
+			{"word":"美丽","meaning":"měi lì","lesson":"第5课","confidence":0.95},
+			{"word":"世界","meaning":"","lesson":null,"confidence":0.9}
+		]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize chinese entries: %v", err)
+	}
+	if res.Textbook == nil || res.Textbook.Edition != "统编版" || res.Textbook.Lesson != "第5课" {
+		t.Errorf("textbook = %+v, want 统编版 header with lesson 第5课", res.Textbook)
+	}
+	if len(res.Entries) != 2 {
+		t.Fatalf("entries len = %d, want 2", len(res.Entries))
+	}
+	if res.Entries[0].Word != "美丽" || res.Entries[0].Meaning != "měi lì" || res.Entries[0].Lesson != "第5课" {
+		t.Errorf("entry[0] = %+v, want 美丽/měi lì/第5课", res.Entries[0])
+	}
+	// A null own-lesson inherits the page-level lesson; an empty meaning is
+	// legal (词语表没有给注释).
+	if res.Entries[1].Word != "世界" || res.Entries[1].Meaning != "" || res.Entries[1].Lesson != "第5课" {
+		t.Errorf("entry[1] = %+v, want 世界/empty/第5课 (page-level lesson inherited)", res.Entries[1])
 	}
 }

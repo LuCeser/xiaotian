@@ -67,14 +67,14 @@ type WordlistResult struct {
 	Entries  []WordlistEntry   `json:"entries"`
 }
 
-// wordlistSystemPrompt instructs the model to extract ONLY clear word-list
-// entries plus the textbook header that is actually printed on the page.
-// The clauses map to Issue #3's acceptance criteria (body text and exercise
-// questions must not become entries — 无需预先裁图, the model does the
-// cropping semantically; phrases keep their spaces; meanings are verbatim)
-// and Issue #5's honesty rule: unread header fields are null, never guessed
-// from grade, word difficulty or the filename.
-const wordlistSystemPrompt = `你是家长端英语词表导入助手。家长上传一张英语单词表的照片（PNG 或 JPEG），可能是印刷教材，也可能拍照略有倾斜。
+// wordlistSystemPromptEnglish instructs the model to extract ONLY clear
+// word-list entries plus the textbook header that is actually printed on the
+// page. The clauses map to Issue #3's acceptance criteria (body text and
+// exercise questions must not become entries — 无需预先裁图, the model does
+// the cropping semantically; phrases keep their spaces; meanings are
+// verbatim) and Issue #5's honesty rule: unread header fields are null,
+// never guessed from grade, word difficulty or the filename.
+const wordlistSystemPromptEnglish = `你是家长端英语词表导入助手。家长上传一张英语单词表的照片（PNG 或 JPEG），可能是印刷教材，也可能拍照略有倾斜。
 请只提取照片中明确的词表条目：以列表或表格排版、作为单词表出现的单词、短语和它们旁边的原文释义。
 不要把普通正文句子里出现的词、练习题、题目编号、页眉页脚或装饰文字当作词条；无需裁图，直接忽略这些内容。
 短语中的空格要保留，整个短语算一个条目；释义按照片原文转录（中文或英文都照抄），词表没有给释义就留空。
@@ -84,10 +84,40 @@ const wordlistSystemPrompt = `你是家长端英语词表导入助手。家长�
 整个教材信息都识别不出时 textbook 为 null；entries 里每条的 lesson 能从照片确定就填，不能确定填 null。
 confidence 是你对这一条识别正确性的把握，0 到 1 的数字。没有识别到任何词表条目时 entries 为 []。不要输出对象以外的内容。`
 
+// wordlistSystemPromptChinese is the Issue #10 counterpart for 语文词语表
+// photos: the SAME entry point, prompt and JSON contract, with the subject's
+// own extraction rules. AC mapping: 只提取明确词语表（词语/字词表排版），
+// 不把课文每个汉字拆成词条；保留材料给出的相关内容（旁边的拼音或注释
+// 原样转录），不强制英语式释义（没有就留空）；英文内容不混入语文导入
+// （同页混排的英文单词、音标一律忽略）——subject selection is the isolator,
+// the model does the rest of the cropping semantically, same as English.
+const wordlistSystemPromptChinese = `你是家长端语文词语导入助手。家长上传一张语文词语表的照片（PNG 或 JPEG），可能是印刷教材，也可能拍照略有倾斜。
+请只提取照片中明确的词语表条目：以词语表、字词表或词语栏排版、作为词语表出现的词语和它们旁边的拼音或注释。
+不要把课文正文里的汉字逐个拆成词条；也不要把练习题、题目编号、页眉页脚、装饰文字或页面上的英文单词和音标当作词条；无需裁图，直接忽略这些内容。
+多字词语是一个完整条目，不要拆成单个汉字；词语必须按照片原文逐字转录，不要纠正错别字；旁边的拼音或注释按照片原文转录进 meaning，词语表没有给就留空，不要求补写释义或例句。
+同时读取照片上明确印出的教材信息：版本（出版社或教材系列）、学段、年级、上下册、单元或模块、课次（如 第 5 课、课文 8、Unit 3）。
+教材信息只能报告照片上真实印着的内容；任何一项识别不出或照片上没有就填 null，不要根据词语难度、年级或文件名推测教材和课次。
+只输出一个 JSON 对象，格式：{"textbook":{"edition":"统编版","stage":null,"grade":"二年级","volume":"下册","module":null,"lesson":"第5课"},"entries":[{"word":"美丽","meaning":"měi lì","lesson":"第5课","confidence":0.9}]}
+整个教材信息都识别不出时 textbook 为 null；entries 里每条的 lesson 能从照片确定就填，不能确定填 null。
+confidence 是你对这一条识别正确性的把握，0 到 1 的数字。没有识别到任何词语表条目时 entries 为 []。不要输出对象以外的内容。`
+
 // wordlistUserPrompt is the per-image user turn (same shape as the student
 // pipeline: the system prompt carries the contract, this keeps the vision
-// turn's two content parts).
-const wordlistUserPrompt = `请提取这张照片里的英语词表条目和教材信息。`
+// turn's two content parts). The subject rides the system prompt; the user
+// turn names the same subject so the two content parts cannot disagree.
+func wordlistUserPrompt(category string) string {
+	if category == CategoryChinese {
+		return `请提取这张照片里的语文词语表条目和教材信息。`
+	}
+	return `请提取这张照片里的英语词表条目和教材信息。`
+}
+
+// Category values the word-list pipeline understands (Issue #10). The
+// literals match the vocabulary category enum (D-06: "english"|"chinese").
+const (
+	CategoryEnglish = "english"
+	CategoryChinese = "chinese"
+)
 
 // maxWordlistEntries caps one recognition at the add path's per-request
 // entry cap (100, pkg/web/api maxEntries): a photo whose recognized list
@@ -122,13 +152,17 @@ func (p *WordlistPipeline) MaxBytes() int {
 }
 
 // Recognize converts one photo's bytes into the draft recognition result
-// (textbook header + entries). The MIME type is sniffed from the magic
-// bytes (never trusting the declared Content-Type) and forwarded so the
-// vision API decodes the right format. Error contract mirrors
+// (textbook header + entries) for the given subject. category selects the
+// extraction contract: CategoryChinese reads a 语文词语表 (multi-character
+// 词语, pinyin/annotation into meaning, English content on the page
+// ignored); CategoryEnglish — and any other value, the pre-Issue-#10
+// default — reads an English word list. The MIME type is sniffed from the
+// magic bytes (never trusting the declared Content-Type) and forwarded so
+// the vision API decodes the right format. Error contract mirrors
 // Pipeline.Process: sentinels are detectable via errors.Is. A photo with
 // no recognizable word-list entries is a legal outcome — the caller shows
 // "nothing recognized", not an error.
-func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte) (*WordlistResult, error) {
+func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte, category string) (*WordlistResult, error) {
 	if len(image) == 0 {
 		return nil, ErrEmptyImage
 	}
@@ -143,7 +177,11 @@ func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte) (*Wordli
 		return nil, errNilSeam
 	}
 
-	reply, err := p.read(ctx, wordlistSystemPrompt, wordlistUserPrompt, image, mimeType)
+	system := wordlistSystemPromptEnglish
+	if category == CategoryChinese {
+		system = wordlistSystemPromptChinese
+	}
+	reply, err := p.read(ctx, system, wordlistUserPrompt(category), image, mimeType)
 	if err != nil {
 		// Double-%w keeps both the sentinel and the upstream cause reachable
 		// (same shape as Pipeline.Process).

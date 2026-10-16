@@ -21,6 +21,22 @@ import (
 // jpegPrefix mirrors pkg/ocr's sniff input (SOI + marker start).
 var jpegPrefix = []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
 
+// newCategoryCaptureHandler wires a handler whose recognizer records the
+// prompt pair it was called with (the closure seam's system/user strings)
+// and answers an empty draft — enough to pin the ?category= routing.
+func newCategoryCaptureHandler(t *testing.T) (http.Handler, *[]string) {
+	t.Helper()
+	_, lessons, practice, receipts := newLessonTestStores(t)
+	var prompts []string
+	pipeline := ocr.NewWordlistPipeline(
+		func(_ context.Context, system, user string, _ []byte, _ string) (string, error) {
+			prompts = append(prompts, system, user)
+			return `[]`, nil
+		}, 1<<20)
+	return NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
+		pipeline, nil, infra.PythonConfig{}, infra.NewNoOpLogger()), &prompts
+}
+
 // pngPrefix mirrors pkg/ocr's PNG signature.
 var pngPrefix = []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
 
@@ -222,6 +238,61 @@ func TestRecognizeWordPhoto(t *testing.T) {
 		}
 		if !strings.Contains(rec.Body.String(), "recognition_unavailable") {
 			t.Errorf("body = %s, want recognition_unavailable envelope", rec.Body.String())
+		}
+	})
+}
+
+// TestRecognizeWordPhotoCategory (Issue #10) pins the route's ?category=
+// contract: the SAME endpoint reads either subject's list — chinese routes
+// the 语文 prompt pair, english (and absent, the pre-#10 wire shape) keeps
+// the Issue #3 English pair, and an off-enum value 400s BEFORE any vision
+// cost (the D-06 gate every category-bearing route applies).
+func TestRecognizeWordPhotoCategory(t *testing.T) {
+	post := func(h http.Handler, rawQuery string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/words/photo/recognize?"+rawQuery,
+			strings.NewReader(string(jpegPrefix)+"x"))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("chinese routes the 语文 prompt pair", func(t *testing.T) {
+		h, prompts := newCategoryCaptureHandler(t)
+		if rec := post(h, "category=chinese"); rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if len(*prompts) != 2 {
+			t.Fatalf("pipeline calls = %d prompt strings, want the one system+user pair", len(*prompts))
+		}
+		if !strings.Contains((*prompts)[0], "语文词语导入助手") || !strings.Contains((*prompts)[1], "语文词语表") {
+			t.Errorf("prompts = %q / %q, want the chinese pair", (*prompts)[0], (*prompts)[1])
+		}
+	})
+
+	t.Run("english and absent keep the english pair", func(t *testing.T) {
+		for _, rawQuery := range []string{"category=english", ""} {
+			h, prompts := newCategoryCaptureHandler(t)
+			if rec := post(h, rawQuery); rec.Code != http.StatusOK {
+				t.Fatalf("?%s status = %d, want 200", rawQuery, rec.Code)
+			}
+			if len(*prompts) != 2 ||
+				!strings.Contains((*prompts)[0], "英语词表导入助手") || !strings.Contains((*prompts)[1], "英语词表") {
+				t.Errorf("?%s prompts = %q / %q, want the english pair", rawQuery, (*prompts)[0], (*prompts)[1])
+			}
+		}
+	})
+
+	t.Run("off-enum category 400s before any vision call", func(t *testing.T) {
+		h, prompts := newCategoryCaptureHandler(t)
+		rec := post(h, "category=france")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), codeInvalidRequest) {
+			t.Errorf("body = %s, want invalid_request envelope", rec.Body.String())
+		}
+		if len(*prompts) != 0 {
+			t.Errorf("pipeline calls = %d, want 0 (a typo'd subject must never cost a vision round)", len(*prompts))
 		}
 	})
 }
