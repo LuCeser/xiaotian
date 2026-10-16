@@ -230,13 +230,13 @@ type Lesson struct {
 	Stage        string
 	CreatedAt    string
 	UpdatedAt    string
+	Category     string
 	Words        []string
 	Cards        []Word
 	Verdicts     []CheckVerdict
 	CurrentIndex int
 	Version      int
 	Unchecked    bool
-	Category     string
 }
 
 // Vocabulary-category values the lessons row can carry (Issue #10). The
@@ -554,9 +554,12 @@ func LessonCompleted(stage string, currentIndex, cardLen int) bool {
 // guard's first line — the type itself cannot carry a word). Correct/Wrong
 // count ONLY manual verdicts (完成勾≠写对); Unconfirmed is the remainder.
 type LessonSummary struct {
-	LessonID     string
-	CreatedAt    string
-	Stage        string
+	LessonID  string
+	CreatedAt string
+	Stage     string
+	// Category is the row's subject, already normalized ('' → english) —
+	// the parent records view renders a subject badge from it (Issue #10).
+	Category     string
 	CurrentIndex int
 	WordCount    int
 	Correct      int
@@ -564,9 +567,6 @@ type LessonSummary struct {
 	Unconfirmed  int
 	Unchecked    bool
 	Completed    bool
-	// Category is the row's subject, already normalized ('' → english) —
-	// the parent records view renders a subject badge from it (Issue #10).
-	Category string
 }
 
 // ListLessons limit normalization — the bounds live HERE, in the store, so a

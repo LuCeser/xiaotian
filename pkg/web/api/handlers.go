@@ -544,21 +544,21 @@ func (h *handler) listUnits(w http.ResponseWriter, r *http.Request) {
 // serialization-layer white-list — "not in the JSON" is the only "not
 // leaked", RESEARCH Pattern 2).
 type lessonListItem struct {
-	LessonID    string `json:"lesson_id"`
-	CreatedAt   string `json:"created_at"`
-	Stage       string `json:"stage"`
-	Kind        string `json:"kind"`
-	SaveStatus  string `json:"save_status"`
+	LessonID   string `json:"lesson_id"`
+	CreatedAt  string `json:"created_at"`
+	Stage      string `json:"stage"`
+	Kind       string `json:"kind"`
+	SaveStatus string `json:"save_status"`
+	// Category is the lesson's subject ("english"/"chinese", Issue #10) —
+	// the records view renders its subject badge from this field, never by
+	// parsing the lesson id.
+	Category    string `json:"category"`
 	WordCount   int    `json:"word_count"`
 	Correct     int    `json:"correct"`
 	Wrong       int    `json:"wrong"`
 	Unconfirmed int    `json:"unconfirmed"`
 	Completed   bool   `json:"completed"`
 	Unchecked   bool   `json:"unchecked"`
-	// Category is the lesson's subject ("english"/"chinese", Issue #10) —
-	// the records view renders its subject badge from this field, never by
-	// parsing the lesson id.
-	Category string `json:"category"`
 }
 
 // lessonsResponse is the GET /lessons response envelope.

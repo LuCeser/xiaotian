@@ -225,9 +225,9 @@ type LessonView struct {
 type SessionInitMsg struct {
 	Type     string    `json:"type"`
 	Mode     string    `json:"mode,omitempty"`
+	Category string    `json:"category,omitempty"`
 	Audio    AudioSpec `json:"audio"`
 	Practice bool      `json:"practice,omitempty"`
-	Category string    `json:"category,omitempty"`
 }
 
 // Classroom category values (Issue #10). The literals match the vocabulary
@@ -301,10 +301,10 @@ type EndSessionMsg struct {
 type SessionReadyMsg struct {
 	Type      string     `json:"type"`
 	SessionID string     `json:"session_id"`
+	Category  string     `json:"category,omitempty"`
 	Audio     AudioSpec  `json:"audio"`
 	Lesson    LessonView `json:"lesson"`
 	TTS       TTSSpec    `json:"tts"`
-	Category  string     `json:"category,omitempty"`
 }
 
 // TurnStartMsg announces a new turn (one student utterance → one teacher

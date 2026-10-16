@@ -124,17 +124,17 @@ func (c *captureSender) listeningCount() int {
 type fakeExecutor struct {
 	requestResults   map[string]lesson.AdvanceResult
 	checkResults     map[string]any
-	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
 	stateIDs         []string // the lesson ids GetLessonState was asked for (Issue #10)
 	advanceCalls     []fakeAdvanceCall
 	checkCalls       []fakeCheckCall
+	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
 	lesson           lesson.Lesson
-	mu               sync.Mutex
-	exists           bool
 	ensureCalls      int
 	ensureCardsCalls int
 	stateCalls       int
 	conflictVersion  int
+	mu               sync.Mutex
+	exists           bool
 }
 
 type fakeAdvanceCall struct {
