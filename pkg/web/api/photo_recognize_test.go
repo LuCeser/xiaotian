@@ -34,7 +34,7 @@ func newCategoryCaptureHandler(t *testing.T) (http.Handler, *[]string) {
 			return `[]`, nil
 		}, 1<<20)
 	return NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-		pipeline, nil, infra.PythonConfig{}, infra.NewNoOpLogger()), &prompts
+		pipeline, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger()), &prompts
 }
 
 // pngPrefix mirrors pkg/ocr's PNG signature.
@@ -53,7 +53,7 @@ func newRecognizeHandler(t *testing.T, reply string, readErr error, maxBytes int
 			return reply, nil
 		}, maxBytes)
 	return NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-		pipeline, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+		pipeline, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 }
 
 func TestRecognizeWordPhoto(t *testing.T) {
@@ -228,7 +228,7 @@ func TestRecognizeWordPhoto(t *testing.T) {
 	t.Run("nil recognizer returns 503 recognition_unavailable", func(t *testing.T) {
 		_, lessons, practice, receipts := newLessonTestStores(t)
 		h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-			nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+			nil, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 		req := httptest.NewRequest(http.MethodPost, "/words/photo/recognize",
 			strings.NewReader(string(jpegPrefix)+"x"))
 		rec := httptest.NewRecorder()
@@ -264,7 +264,9 @@ func TestRecognizeWordPhotoCategory(t *testing.T) {
 		if len(*prompts) != 2 {
 			t.Fatalf("pipeline calls = %d prompt strings, want the one system+user pair", len(*prompts))
 		}
-		if !strings.Contains((*prompts)[0], "语文词语导入助手") || !strings.Contains((*prompts)[1], "语文词语表") {
+		// Issue #11 widens the chinese pair into the mixed-page contract —
+		// the pair is still unmistakably the 语文 one.
+		if !strings.Contains((*prompts)[0], "语文学习内容导入助手") || !strings.Contains((*prompts)[1], "完整古诗") {
 			t.Errorf("prompts = %q / %q, want the chinese pair", (*prompts)[0], (*prompts)[1])
 		}
 	})
