@@ -74,6 +74,27 @@ func ocrWordsUserPrompt(expectedCount int) string {
 	return fmt.Sprintf("这张照片里的听写词一共有 %d 个。请逐个转录照片里手写文字的每个词。", expectedCount)
 }
 
+// ocrPoemLinesSystemPrompt is the whole-poem variant (Issue #12): the child
+// wrote an ENTIRE classical poem from memory, one verse line per written
+// row, and the check stage judges line N against the poem's line N. The
+// verbatim rule carries over unchanged — a "corrected" transcription would
+// mask the actual mistake; the poem's own line breaks are the segmentation,
+// so the model must never merge or split rows.
+const ocrPoemLinesSystemPrompt = `你是小学语文背默课的作业识别器。学生把一整首古诗默写在纸上并拍照上传整页。
+请按书写顺序（从上到下）逐行原样转录照片里的每一句诗句（手写或印刷都算）：
+不要纠正错别字、不要补全、不要翻译、不要合并或拆分诗句，一行诗对应一项。
+学生可能是6-12岁儿童，笔迹可能不工整，请尽力辨认。
+只输出一个 JSON 数组，格式：[{"text":"床前明月光","confidence":0.9},{"text":"疑是地上霜","confidence":0.85}]
+数组第 N 项就是纸上第 N 行诗句的转录；没有辨认出来的行 text 为空字符串，confidence 仍要给出。
+confidence 是你对该行转录正确性的把握，0 到 1 的数字。不要输出数组以外的内容。`
+
+// ocrPoemLinesUserPrompt is the whole-poem user turn; it carries the poem's
+// LINE count (never the lines themselves) so the model segments the page
+// into exactly that many rows without biasing the transcription.
+func ocrPoemLinesUserPrompt(lineCount int) string {
+	return fmt.Sprintf("这张照片里默写的古诗一共有 %d 行诗句。请逐行转录照片里手写文字的每一句。", lineCount)
+}
+
 // Pipeline reads one photo's handwritten answer end-to-end: validate the
 // JPEG, call the vision seam, parse the reply, gate on confidence. The
 // handler layer owns chunk buffering (voice.Buffers) and answer judging;
@@ -158,6 +179,48 @@ func (p *Pipeline) ProcessWords(ctx context.Context, imageJPEG []byte, expected 
 	}
 
 	reply, err := p.read(ctx, ocrWordsSystemPrompt, ocrWordsUserPrompt(len(expected)), imageJPEG)
+	if err != nil {
+		// Same double-%w shape as Process: sentinel + upstream cause.
+		return nil, fmt.Errorf("%w: %w", errReaderFailed, err)
+	}
+
+	readings, ok := parseWordsJSON(reply)
+	if !ok {
+		return nil, errUnparseableReply
+	}
+	low := false
+	for i := range readings {
+		readings[i].Text = strings.TrimSpace(readings[i].Text)
+		readings[i].Confidence = clamp01(readings[i].Confidence)
+		if readings[i].Confidence < p.minConfidence {
+			low = true
+		}
+	}
+	if low {
+		return readings, ErrLowConfidence
+	}
+	return readings, nil
+}
+
+// ProcessLines converts one whole-poem photo's JPEG bytes into per-LINE
+// readings (Issue #12), positionally aligned with expected — index N grades
+// against expected[N], the poem's own verse order. Identical contract to
+// ProcessWords (Reader seam, JPEG validation, confidence gate, length
+// mismatch returned AS-IS); only the prompts differ — the page is one poem,
+// one verse line per row, never merged or split. The CALLER decides the
+// grading language (a Chinese poem line grades with wordLang "zh").
+func (p *Pipeline) ProcessLines(ctx context.Context, imageJPEG []byte, expected []string) ([]WordReading, error) {
+	if len(imageJPEG) == 0 {
+		return nil, ErrEmptyImage
+	}
+	if !isJPEG(imageJPEG) {
+		return nil, ErrNotJPEG
+	}
+	if p.read == nil {
+		return nil, errNilSeam
+	}
+
+	reply, err := p.read(ctx, ocrPoemLinesSystemPrompt, ocrPoemLinesUserPrompt(len(expected)), imageJPEG)
 	if err != nil {
 		// Same double-%w shape as Process: sentinel + upstream cause.
 		return nil, fmt.Errorf("%w: %w", errReaderFailed, err)
