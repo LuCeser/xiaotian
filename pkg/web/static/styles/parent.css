@@ -1014,6 +1014,13 @@ body {
   margin: 8px 0 12px;
 }
 
+/* The class's display:flex would out-rank the [hidden] attribute (later
+   source order beats the UA rule); Issue #11 hides the whole bulk bar on
+   the 古诗 page, so the guard has to be explicit. */
+.participation-bulk[hidden] {
+  display: none;
+}
+
 .selection-count {
   color: var(--muted);
   margin-right: auto;
@@ -1918,5 +1925,178 @@ body {
   color: var(--badge-en-text);
   font-size: 11px;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* 整首古诗 (Issue #11): the mixed 语文 page's poem cards + display-only */
+/* other blocks in the photo preview, and the unified content view's    */
+/* 古诗 page (type filter + whole-work cards).                          */
+/* ------------------------------------------------------------------ */
+
+/* Section titles inside the photo preview (古诗 / 其他内容) — the
+   preview-table's own header register. */
+.photo-section-title {
+  margin: 16px 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* One poem = one card (a whole work, not a table row): the top row is
+   check + title + author + requirement badge + status; the lines live
+   in ONE textarea (one line per row — 分行和顺序 are the work's own
+   structure); the bottom row carries the lesson input / status note. */
+.photo-poem-host,
+.photo-others-host {
+  margin-top: 8px;
+}
+
+.photo-poem-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.photo-poem-invalid {
+  background: var(--background);
+}
+
+.photo-poem-invalid .form-input,
+.photo-poem-invalid .form-textarea {
+  background: var(--background);
+}
+
+.photo-poem-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.photo-poem-top .inline-check-hit {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.photo-poem-check {
+  width: 18px;
+  height: 18px;
+}
+
+.photo-poem-title {
+  flex: 1 1 140px;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.photo-poem-author {
+  flex: 0 1 120px;
+  min-width: 0;
+}
+
+.photo-poem-required {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-strong);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.photo-poem-status {
+  flex: 0 0 auto;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.photo-poem-status-invalid {
+  color: var(--danger-strong);
+}
+
+.photo-poem-lines {
+  min-height: 72px;
+  line-height: 1.8;
+  font-family: inherit;
+}
+
+.photo-poem-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.photo-poem-lesson {
+  flex: 0 1 160px;
+  min-width: 0;
+}
+
+.photo-poem-note {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* 其他内容 rows: kind badge + one-line summary + the 不导入 marker —
+   display only, nothing selectable. */
+.photo-other-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.photo-other-row:last-child {
+  border-bottom: none;
+}
+
+.photo-other-kind {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.photo-other-text {
+  border: 1px solid var(--badge-zh-bg);
+  background: var(--badge-zh-bg);
+  color: var(--badge-zh-text);
+}
+
+.photo-other-exercise {
+  border: 1px solid var(--badge-en-bg);
+  background: var(--badge-en-bg);
+  color: var(--badge-en-text);
+}
+
+.photo-other-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-other-note {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
   white-space: nowrap;
 }
