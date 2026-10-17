@@ -341,6 +341,23 @@ type DictationTutor struct {
 	// stage-agnostic — practice differs ONLY at the submit (and the ending
 	// reason), never at pacing, the check panel, or the D-05 gate.
 	practice bool
+	// poem marks a WHOLE-POEM 背默 session (Issue #12): the words are the
+	// poem's ordered LINES, the teacher NEVER reads them (背默任务，不能逐句
+	// 念原文), no per-word pacing or timer exists, and the check submit writes
+	// poem_practice_logs keyed by the poem — never SubmitReview. Non-nil only
+	// in a poem classroom; poem.go owns the behavior behind it.
+	poem *poemRef
+}
+
+// poemRef is the poem classroom's work identity (Issue #12): what the child
+// is writing from memory. The lines themselves live in words (one line = one
+// card, the check stage's word_index space); this ref carries only the
+// display/save identity — title and author ride session_ready's PoemTaskView
+// and the receipt's requested set.
+type poemRef struct {
+	ID     int64
+	Title  string
+	Author string
 }
 
 // newDictationTutor binds the FSM to a lesson row read back from the
