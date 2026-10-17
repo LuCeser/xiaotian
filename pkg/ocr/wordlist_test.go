@@ -370,12 +370,16 @@ func TestWordlistPromptsCarryTheContract(t *testing.T) {
 	}
 }
 
-// TestWordlistChinesePromptContract (Issue #10) pins the SUBJECT selection
-// and the 语文 prompt's own clauses: category=chinese routes the Chinese
-// system+user prompts (subject isolation starts at the seam), the clause
-// set keeps 词语 whole (不拆单字), keeps the material's own pinyin/annotation
-// as the meaning (no forced gloss), and ignores English content on a mixed
-// page. The default ("" and "english") keeps the Issue #3 English prompts.
+// TestWordlistChinesePromptContract (Issue #10, widened by Issue #11 into
+// the MIXED-PAGE contract) pins the SUBJECT selection and the 语文 prompt's
+// own clauses: category=chinese routes the Chinese system+user prompts
+// (subject isolation starts at the seam), the clause set keeps 词语 whole
+// (不拆单字), keeps the material's own pinyin/annotation as the meaning (no
+// forced gloss), ignores English content on a mixed page, and — #11 —
+// extracts WHOLE poems (title/author/ordered lines, verbatim, never
+// generated) while 课文正文 and 练习题 land in the display-only others
+// array (区分展示, 练习题不自动选入). The default ("" and "english") keeps
+// the Issue #3 English prompts.
 func TestWordlistChinesePromptContract(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -392,11 +396,11 @@ func TestWordlistChinesePromptContract(t *testing.T) {
 			if _, err := p.Recognize(context.Background(), jpegSoi, tc.category); err != nil {
 				t.Fatalf("Recognize: %v", err)
 			}
-			if got := strings.Contains(fr.gotSystem, "语文词语导入助手"); got != tc.wantChinese {
+			if got := strings.Contains(fr.gotSystem, "语文学习内容导入助手"); got != tc.wantChinese {
 				t.Errorf("system prompt chinese=%v, want %v\n%s", got, tc.wantChinese, fr.gotSystem)
 			}
-			if got := strings.Contains(fr.gotUser, "语文词语表"); got != tc.wantChinese {
-				t.Errorf("user prompt chinese=%v, want %q", got, fr.gotUser)
+			if got := strings.Contains(fr.gotUser, "完整古诗"); got != tc.wantChinese {
+				t.Errorf("user prompt chinese=%v, want the mixed-page extraction ask, got %q", got, fr.gotUser)
 			}
 			if got := strings.Contains(fr.gotSystem, "英语词表导入助手"); got == tc.wantChinese {
 				t.Errorf("system prompt english=%v, want %v", got, !tc.wantChinese)
@@ -405,20 +409,26 @@ func TestWordlistChinesePromptContract(t *testing.T) {
 	}
 
 	// The chinese clause set (AC2: 明确词语表, 不拆单字; AC6: 同页中英混排隔离;
-	// 保留材料给出的拼音, 不强制释义).
+	// 保留材料给出的拼音, 不强制释义; #11: 古诗整首、原文不生成、练习题只展示).
 	fr := &fakeListReader{reply: `[]`}
 	p := NewWordlistPipeline(fr.read, 1<<20)
 	if _, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese); err != nil {
 		t.Fatalf("Recognize chinese: %v", err)
 	}
 	for _, want := range []string{
-		"词语表",      // only clear word-list entries
-		"不要拆成单个汉字", // multi-char words stay whole
-		"英文单词",     // mixed-page English content is ignored
-		"拼音",       // the material's own annotation is transcribed
-		"不要求补写释义",  // no forced English-style gloss
-		"JSON",     // strict output contract
-		"教材",       // textbook header reading
+		"词语表",            // only clear word-list entries
+		"不要拆成单个汉字",      // multi-char words stay whole
+		"英文单词",           // mixed-page English content is ignored
+		"拼音",             // the material's own annotation is transcribed
+		"不要求补写释义",        // no forced English-style gloss
+		"完整的古诗",          // #11: whole poems are their own array
+		"整首保存",           // #11: a poem is saved as one work
+		"保留原有分行",         // #11: line breaks and order survive
+		"不要凭记忆补写或生成",     // #11: never generate the unclear原文
+		"背诵或默写要求",        // #11: the page's explicit mark rides required
+		"不会导入",           // #11: others are display-only
+		"JSON",           // strict output contract
+		"教材",             // textbook header reading
 	} {
 		if !strings.Contains(fr.gotSystem, want) {
 			t.Errorf("chinese system prompt lost clause %q:\n%s", want, fr.gotSystem)
@@ -454,5 +464,142 @@ func TestWordlistRecognizeChineseEntries(t *testing.T) {
 	// legal (词语表没有给注释).
 	if res.Entries[1].Word != "世界" || res.Entries[1].Meaning != "" || res.Entries[1].Lesson != "第5课" {
 		t.Errorf("entry[1] = %+v, want 世界/empty/第5课 (page-level lesson inherited)", res.Entries[1])
+	}
+}
+
+// TestWordlistRecognizeMixedPagePoems (Issue #11) — a 语文 mixed-page reply
+// classifies its blocks: 词语 entries, WHOLE poems (title/author/ordered
+// lines/required/lesson) and display-only others (正文 text / 练习题
+// exercise). The poems keep their line order and fall back to the
+// page-level lesson exactly like entries do.
+func TestWordlistRecognizeMixedPagePoems(t *testing.T) {
+	reply := `{"textbook":{"edition":"统编版","grade":"二年级","volume":"下册","lesson":"第8课"},
+		"entries":[{"word":"夜空","meaning":"yè kōng","lesson":"第8课","confidence":0.9}],
+		"poems":[
+			{"title":"静夜思","author":"李白","lines":["床前明月光，疑是地上霜。","","举头望明月，低头思故乡。"],"lesson":"第8课","required":"背诵","confidence":0.92},
+			{"title":"春晓","author":null,"lines":["春眠不觉晓，处处闻啼鸟。","夜来风雨声，花落知多少。"],"lesson":null,"required":null,"confidence":0.88}
+		],
+		"others":[
+			{"kind":"exercise","summary":"读一读，记一记","confidence":0.85},
+			{"kind":"text","summary":"课文《夕阳》正文段落","confidence":0.8},
+			{"kind":"weird","summary":"未知类型归正文","confidence":0.7},
+			{"kind":"text","summary":"  ","confidence":0.6}
+		]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize mixed page: %v", err)
+	}
+
+	if len(res.Entries) != 1 || res.Entries[0].Word != "夜空" {
+		t.Errorf("entries = %+v, want the single 词语", res.Entries)
+	}
+
+	if len(res.Poems) != 2 {
+		t.Fatalf("poems len = %d, want 2 (%+v)", len(res.Poems), res.Poems)
+	}
+	first := res.Poems[0]
+	if first.Title != "静夜思" || first.Author != "李白" || first.Required != "背诵" || first.Lesson != "第8课" {
+		t.Errorf("poem[0] = %+v, want 静夜思/李白/背诵/第8课", first)
+	}
+	// The empty middle line is dropped; the two real lines keep their order
+	// (分行和顺序保留).
+	if len(first.Lines) != 2 || first.Lines[0] != "床前明月光，疑是地上霜。" || first.Lines[1] != "举头望明月，低头思故乡。" {
+		t.Errorf("poem[0].lines = %q, want the two ordered verse lines", first.Lines)
+	}
+	// A null author decodes empty; a null own-lesson inherits the page-level
+	// one; a null required stays "" (the page printed no mark).
+	second := res.Poems[1]
+	if second.Title != "春晓" || second.Author != "" || second.Required != "" || second.Lesson != "第8课" {
+		t.Errorf("poem[1] = %+v, want 春晓/empty author/empty required/inherited 第8课", second)
+	}
+
+	// Others are display-only: the empty-summary row is dropped, an unknown
+	// kind normalizes to text, and the two kinds stay distinguishable.
+	if len(res.Others) != 3 {
+		t.Fatalf("others len = %d, want 3 (%+v)", len(res.Others), res.Others)
+	}
+	if res.Others[0].Kind != OtherKindExercise || res.Others[0].Summary != "读一读，记一记" {
+		t.Errorf("others[0] = %+v, want the exercise block", res.Others[0])
+	}
+	if res.Others[1].Kind != OtherKindText {
+		t.Errorf("others[1] = %+v, want the body-text block", res.Others[1])
+	}
+	if res.Others[2].Kind != OtherKindText {
+		t.Errorf("others[2] = %+v, want the unknown kind normalized to text", res.Others[2])
+	}
+}
+
+// TestWordlistRecognizePoemsOnlyPage — a poems-only mixed page (entries
+// legitimately empty) still parses: the poem array alone is a legal reply.
+func TestWordlistRecognizePoemsOnlyPage(t *testing.T) {
+	reply := `{"textbook":null,"entries":[],"poems":[{"title":"咏鹅","author":"骆宾王","lines":["鹅，鹅，鹅，曲项向天歌。"],"required":"背诵","confidence":0.9}],"others":[]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize poems-only page: %v", err)
+	}
+	if len(res.Entries) != 0 {
+		t.Errorf("entries len = %d, want 0", len(res.Entries))
+	}
+	if len(res.Poems) != 1 || res.Poems[0].Title != "咏鹅" {
+		t.Errorf("poems = %+v, want the single 咏鹅", res.Poems)
+	}
+	if len(res.Others) != 0 {
+		t.Errorf("others len = %d, want 0", len(res.Others))
+	}
+}
+
+// TestWordlistRecognizeDropsBrokenPoems — a poem missing its title or every
+// line is a misparse, not a work to salvage: it is dropped so the preview
+// never offers an empty shell for confirmation.
+func TestWordlistRecognizeDropsBrokenPoems(t *testing.T) {
+	reply := `{"entries":[],"poems":[
+		{"title":"","author":"无名","lines":["有内容没有题目"],"confidence":0.9},
+		{"title":"只有题目","author":"","lines":["","  "],"confidence":0.9}
+	]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize broken poems: %v", err)
+	}
+	if len(res.Poems) != 0 {
+		t.Errorf("poems = %+v, want both broken drafts dropped", res.Poems)
+	}
+}
+
+// TestWordlistRecognizeTooManyPoems — the poems array obeys its own runaway
+// cap (ErrTooManyPoems), distinct from the entries cap.
+func TestWordlistRecognizeTooManyPoems(t *testing.T) {
+	poems := make([]string, 0, maxWordlistPoems+1)
+	for i := 0; i <= maxWordlistPoems; i++ {
+		poems = append(poems, fmt.Sprintf(`{"title":"诗%d","lines":["一行"],"confidence":0.9}`, i))
+	}
+	reply := `{"entries":[],"poems":[` + strings.Join(poems, ",") + `]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	if _, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese); !errors.Is(err, ErrTooManyPoems) {
+		t.Fatalf("Recognize over-cap poems: err = %v, want ErrTooManyPoems", err)
+	}
+}
+
+// TestWordlistRecognizeEnglishReplyHasNoPoems — the English contract never
+// asks for poems: an English reply decodes with empty poems/others arrays
+// (never nil), so the wire shape stays array-typed for either subject.
+func TestWordlistRecognizeEnglishReplyHasNoPoems(t *testing.T) {
+	fr := &fakeListReader{reply: `[{"word":"apple","meaning":"苹果","confidence":0.9}]`}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryEnglish)
+	if err != nil {
+		t.Fatalf("Recognize english: %v", err)
+	}
+	if res.Poems == nil || len(res.Poems) != 0 {
+		t.Errorf("poems = %+v, want empty non-nil", res.Poems)
+	}
+	if res.Others == nil || len(res.Others) != 0 {
+		t.Errorf("others = %+v, want empty non-nil", res.Others)
 	}
 }
