@@ -252,11 +252,12 @@ test('unified content view: 古诗 type filter, attribution and progress scope m
     await expect(poemCard.locator('.poem-scope')).toHaveText('无教材归属（补充内容）');
 
     // Poems carry NO dictation surfaces: no participation toggle, no
-    // selection checkbox, the bulk bar hidden — and the page never
-    // claims 可完成背默 (the classroom note says 后续更新开放).
+    // selection checkbox, the bulk bar hidden — and the poems page keeps its
+    // whole-work note (Issue #12 replaced the 后续更新开放 placeholder: the
+    // 背默这首 entry on each in-scope card is the classroom door now).
     await expect(poemCard.locator('input')).toHaveCount(0);
     await expect(page.locator('.participation-bulk')).toBeHidden();
-    await expect(page.locator('.list-note')).toContainText('古诗课堂将在后续更新开放');
+    await expect(page.locator('.list-note')).toContainText('进入范围后可在卡片上开始整首背默');
 
     // Subject filter: the 英语 pill hides the chinese poem.
     await page.locator('.category-pills button', { hasText: '英语' }).click();
