@@ -822,12 +822,14 @@ func (tm *TurnManager) replyDisplay(reply string) string {
 	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	// Issue #12: a poem classroom masks LLM replies in EVERY mode pre-check
-	// — a chatty reply quoting the poem would defeat the 背默 task.
-	if tm.mode == ModeTest && !(tm.tutor != nil && tm.tutor.poem != nil && !tm.tutor.checking) {
+	if tm.tutor == nil {
 		return reply
 	}
-	if tm.tutor == nil {
+	// Issue #12: a poem classroom masks LLM replies in EVERY mode pre-check
+	// — a chatty reply quoting the poem would defeat the 背默 task. Word
+	// classrooms keep the pre-13.1 shape: test mode returns the reply as-is.
+	poemPreCheck := tm.tutor.poem != nil && !tm.tutor.checking
+	if tm.mode == ModeTest && !poemPreCheck {
 		return reply
 	}
 	return maskTranscript(reply, tm.tutor.maskedWords())

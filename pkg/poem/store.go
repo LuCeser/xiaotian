@@ -447,13 +447,15 @@ func (s *Store) attachAssignments(ctx context.Context, poems []Poem) error {
 
 	books := map[int64]bookProgress{}
 	assignments := map[int64][]Assignment{}
-	query := `SELECT a.poem_id, a.textbook_id, a.lesson, a.include_in_scope,
+	const assignQueryPrefix = `SELECT a.poem_id, a.textbook_id, a.lesson, a.include_in_scope,
 	        t.name, t.lessons, t.learned_lessons
 	 FROM poem_assignments a
 	 LEFT JOIN textbooks t ON t.id = a.textbook_id
-	 WHERE a.poem_id IN (` + strings.Join(placeholders, ",") + `)
+	 WHERE a.poem_id IN (`
+	const assignQuerySuffix = `)
 	 ORDER BY a.poem_id, a.textbook_id`
-	assignRows, aerr := s.db.QueryContext(ctx, query, args...) //nolint:gosec // G202: placeholders are '?', ids are bound parameters
+	query := assignQueryPrefix + strings.Join(placeholders, ",") + assignQuerySuffix //nolint:gosec // G202: placeholders are '?', poem ids are bound parameters
+	assignRows, aerr := s.db.QueryContext(ctx, query, args...)
 	if aerr != nil {
 		// No textbooks table yet (a database older than Issue #4): no
 		// attribution can exist either — every poem reads supplementary

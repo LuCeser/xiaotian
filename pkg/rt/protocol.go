@@ -312,12 +312,12 @@ type EndSessionMsg struct {
 // the poem's TEXT itself never rides here; Lesson.Words stays masked (""
 // per line) until check_started, in every mode.
 type SessionReadyMsg struct {
+	Poem      *PoemTaskView `json:"poem,omitempty"`
 	Type      string        `json:"type"`
 	SessionID string        `json:"session_id"`
 	Category  string        `json:"category,omitempty"`
 	Audio     AudioSpec     `json:"audio"`
 	Lesson    LessonView    `json:"lesson"`
-	Poem      *PoemTaskView `json:"poem,omitempty"`
 	TTS       TTSSpec       `json:"tts"`
 }
 
@@ -326,11 +326,11 @@ type SessionReadyMsg struct {
 // itself. Method names the practice way (练习方式) so the page and the
 // parent records share one vocabulary.
 type PoemTaskView struct {
-	ID        int64  `json:"id"`
 	Title     string `json:"title"`
 	Author    string `json:"author,omitempty"`
-	LineCount int    `json:"line_count"`
 	Method    string `json:"method"`
+	ID        int64  `json:"id"`
+	LineCount int    `json:"line_count"`
 }
 
 // TurnStartMsg announces a new turn (one student utterance → one teacher

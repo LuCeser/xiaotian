@@ -159,8 +159,8 @@ func TestGetReturnsScopedPoem(t *testing.T) {
 		`INSERT INTO textbooks (name, category, lessons, learned_lessons) VALUES ('语文书', 'chinese', '["第1课","第2课"]', 1)`); err != nil {
 		t.Fatalf("seed textbook: %v", err)
 	}
-	if err := h.store.Assign(ctx, poemID, 1, "第2课", false); err != nil {
-		t.Fatalf("assign: %v", err)
+	if aerr := h.store.Assign(ctx, poemID, 1, "第2课", false); aerr != nil {
+		t.Fatalf("assign: %v", aerr)
 	}
 	p, err = h.store.Get(ctx, poemID)
 	if err != nil {
@@ -170,8 +170,8 @@ func TestGetReturnsScopedPoem(t *testing.T) {
 		t.Fatalf("unlearned scope = %s/%v, want progress_pending/out", p.ScopeReason, p.InScope)
 	}
 
-	if err := h.store.Assign(ctx, poemID, 1, "第1课", false); err != nil {
-		t.Fatalf("assign learned lesson: %v", err)
+	if aerr := h.store.Assign(ctx, poemID, 1, "第1课", false); aerr != nil {
+		t.Fatalf("assign learned lesson: %v", aerr)
 	}
 	p, err = h.store.Get(ctx, poemID)
 	if err != nil {

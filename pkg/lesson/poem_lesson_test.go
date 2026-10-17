@@ -60,9 +60,13 @@ func TestEnsurePoemLesson(t *testing.T) {
 	// Shape gate: nothing writes for an empty id, a missing poem or no lines.
 	for _, bad := range []struct {
 		id    string
-		poem  int64
 		lines []string
-	}{{"", 7, lines}, {"r0p-x", 0, lines}, {"r0p-x", 7, nil}} {
+		poem  int64
+	}{
+		{id: "", poem: 7, lines: lines},
+		{id: "r0p-x", poem: 0, lines: lines},
+		{id: "r0p-x", poem: 7, lines: nil},
+	} {
 		if _, err = store.EnsurePoemLesson(ctx, bad.id, bad.poem, bad.lines); !errors.Is(err, ErrInvalidLesson) {
 			t.Errorf("EnsurePoemLesson(%q,%d,%d lines) err = %v, want ErrInvalidLesson", bad.id, bad.poem, len(bad.lines), err)
 		}
@@ -150,8 +154,8 @@ func TestLatestPoemLessonID(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if id, err := store.LatestPoemLessonID(ctx, 3); err != nil || id != "" {
-		t.Fatalf("LatestPoemLessonID unpracticed = %q/%v, want \"\"/nil", id, err)
+	if id, lerr := store.LatestPoemLessonID(ctx, 3); lerr != nil || id != "" {
+		t.Fatalf("LatestPoemLessonID unpracticed = %q/%v, want \"\"/nil", id, lerr)
 	}
 	if _, err = store.LatestPoemLessonID(ctx, 0); !errors.Is(err, ErrInvalidLesson) {
 		t.Errorf("LatestPoemLessonID(0) err = %v, want ErrInvalidLesson", err)
@@ -169,11 +173,11 @@ func TestLatestPoemLessonID(t *testing.T) {
 			t.Fatalf("EnsurePoemLesson %s: %v", row.id, err)
 		}
 	}
-	if id, err := store.LatestPoemLessonID(ctx, 3); err != nil || id != "r0p-20261018-090000" {
-		t.Errorf("LatestPoemLessonID(3) = %q/%v, want the 090000 attempt", id, err)
+	if id, lerr := store.LatestPoemLessonID(ctx, 3); lerr != nil || id != "r0p-20261018-090000" {
+		t.Errorf("LatestPoemLessonID(3) = %q/%v, want the 090000 attempt", id, lerr)
 	}
-	if id, err := store.LatestPoemLessonID(ctx, 4); err != nil || id != "r0p-20261018-093000" {
-		t.Errorf("LatestPoemLessonID(4) = %q/%v, want the 093000 attempt", id, err)
+	if id, lerr := store.LatestPoemLessonID(ctx, 4); lerr != nil || id != "r0p-20261018-093000" {
+		t.Errorf("LatestPoemLessonID(4) = %q/%v, want the 093000 attempt", id, lerr)
 	}
 
 	// A word lesson never interferes: poem 5 has no rows even though other

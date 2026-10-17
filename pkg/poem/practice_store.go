@@ -49,10 +49,10 @@ var idxPoemPracticePoem = `CREATE INDEX IF NOT EXISTS idx_poem_practice_poem ON 
 // verdict (整首全对). ReviewedAt is optional (empty defers to the column
 // DEFAULT); ReviewedDay is REQUIRED (Beijing "2006-01-02").
 type PracticeRecord struct {
-	PoemID       int64
 	LessonID     string
 	ReviewedAt   string
 	ReviewedDay  string
+	PoemID       int64
 	TotalLines   int
 	CorrectLines int
 	Hints        int

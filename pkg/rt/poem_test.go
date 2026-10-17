@@ -26,8 +26,8 @@ var ttPoemLines = []string{"床前明月光", "疑是地上霜", "举头望明�
 
 // fakePoemSource pins one poem behind PoemSource.
 type fakePoemSource struct {
-	p   poem.Poem
 	err error
+	p   poem.Poem
 }
 
 func (f *fakePoemSource) FetchPoem(_ context.Context, _ int64) (poem.Poem, error) {
@@ -36,9 +36,9 @@ func (f *fakePoemSource) FetchPoem(_ context.Context, _ int64) (poem.Poem, error
 
 // fakePoemPractice captures the whole-poem practice writes.
 type fakePoemPractice struct {
-	mu      sync.Mutex
-	records []poem.PracticeRecord
 	err     error
+	records []poem.PracticeRecord
+	mu      sync.Mutex
 }
 
 func (f *fakePoemPractice) RecordPractice(_ context.Context, r poem.PracticeRecord) error {
@@ -61,7 +61,7 @@ func (f *fakePoemPractice) recorded() []poem.PracticeRecord {
 func ttInScopePoem() poem.Poem {
 	return poem.Poem{
 		ID: 42, Title: "静夜思", Author: "李白", Category: "chinese",
-		Lines: append([]string(nil), ttPoemLines...),
+		Lines:   append([]string(nil), ttPoemLines...),
 		InScope: true, ScopeReason: poem.ScopeSupplementary,
 	}
 }
@@ -226,7 +226,7 @@ func TestPoemInitGates(t *testing.T) {
 	}
 
 	// Unknown poem.
-	tm, s, exec = newTM(&fakePoemSource{err: poem.ErrPoemNotFound})
+	tm, s, _ = newTM(&fakePoemSource{err: poem.ErrPoemNotFound})
 	tm.HandleControl(s, mustJSON(t, SessionInitMsg{Type: TypeSessionInit, Poem: 99, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1}}))
 	if s.countOf(TypeError) != 1 || s.countOf(TypeSessionReady) != 0 {
 		t.Errorf("unknown poem: errors=%d ready=%d, want a coded error and no session", s.countOf(TypeError), s.countOf(TypeSessionReady))
@@ -237,7 +237,7 @@ func TestPoemInitGates(t *testing.T) {
 	outOfScope := ttInScopePoem()
 	outOfScope.InScope = false
 	outOfScope.ScopeReason = poem.ScopeProgressPending
-	tm, s, exec = newTM(&fakePoemSource{p: outOfScope})
+	tm, s, _ = newTM(&fakePoemSource{p: outOfScope})
 	tm.HandleControl(s, mustJSON(t, SessionInitMsg{Type: TypeSessionInit, Poem: 42, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1}}))
 	if s.countOf(TypeError) != 1 || s.countOf(TypeSessionReady) != 0 {
 		t.Errorf("out-of-scope poem: errors=%d ready=%d, want a coded error and no session", s.countOf(TypeError), s.countOf(TypeSessionReady))

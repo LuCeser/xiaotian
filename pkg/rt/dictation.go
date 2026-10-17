@@ -283,70 +283,23 @@ type historyRound struct {
 // TurnManager's mu — the tutor never locks on its own, and every method
 // below assumes the caller already holds that lock.
 type DictationTutor struct {
+	poem           *poemRef
+	perWordHints   map[int]int
 	perWordOutcome map[int]string
-	perWordHints   map[int]int // per-word hint request count (U-9, 2026-10-06)
 	lessonID       string
-	// category is the ROW's subject (Issue #10), normalized at bind: the
-	// review writes ride it so a SubmitReview batch always lands on the
-	// vocabulary column the lesson was actually taught in — including the
-	// close-path fallback, which runs after the session's own category is
-	// irrelevant and only the row remains.
-	category     string
-	shortHistory []historyRound // capped deque, oldest dropped (last 4 rounds)
-	words        []lesson.Word
-	// checkVerdicts caches the stored verdict list for rendering/announce
-	// purposes — NOT the authority: the lessons row is. Every write goes
-	// through the executor and resyncs this cache from the returned row
-	// state (resyncCheck), so the cache can never drift from the store for
-	// longer than one call.
-	checkVerdicts []lesson.CheckVerdict
-	reviewResult  ReviewResultMsg
-	currentIndex  int
-	version       int
-	// paused is the independent CLASSROOM pause bit (13-09): set by a
-	// recognized pause command, cleared by a recognized resume. It is
-	// deliberately NOT the voice state — the internal state may be
-	// processing/speaking (the pause acknowledgement itself, or a student
-	// utterance being classified), while the client-effective state stays
-	// paused once playback settles (effectiveClientStateLocked). While
-	// paused the per-word timer stays stopped and ordinary uplink keeps
-	// flowing so the resume command is recognized through the real ASR /
-	// classification path.
-	paused bool
-
-	// --- 13.1-01 check-stage state (same single-lock discipline) -----------
-
-	// checking marks the lesson as inside the check stage (stage='checking'
-	// persisted): word pacing is over, verdicts are pending, and the unified
-	// submit has not run. Voice turns are gated off while it holds (the
-	// screen path is this plan's input; voice corrections are 13.1-06).
-	checking  bool
-	completed bool
-	// reviewSeen marks the unified submit as delivered in this session (the
-	// in-session mirror of stage='submitted'); reviewResult keeps that
-	// delivery's honest sets so a duplicate check_submit can be recognized
-	// and answered with NO second SubmitReview and NO second summary
-	// (Pitfall 6 / T-13.1-01).
-	reviewSeen bool
-	// correction marks a session that reopened a SUBMITTED row carrying the
-	// D-03 unchecked marker (13.1-04): the check panel shows the derived
-	// downgraded verdicts as pending hints and check_submit takes the
-	// diff-only correction path instead of the CompleteCheck latch. checking
-	// holds too — the panel, the verdict writes and the voice gate behave
-	// exactly as in a live check stage.
-	correction bool
-	// practice marks a PRACTICE session (13.1-05, D-11/D-12): the word set
-	// was randomly picked from the vocabulary (r0x- lesson id), and the
-	// check submit writes practice_logs instead of SubmitReview. The FSM is
-	// stage-agnostic — practice differs ONLY at the submit (and the ending
-	// reason), never at pacing, the check panel, or the D-05 gate.
-	practice bool
-	// poem marks a WHOLE-POEM 背默 session (Issue #12): the words are the
-	// poem's ordered LINES, the teacher NEVER reads them (背默任务，不能逐句
-	// 念原文), no per-word pacing or timer exists, and the check submit writes
-	// poem_practice_logs keyed by the poem — never SubmitReview. Non-nil only
-	// in a poem classroom; poem.go owns the behavior behind it.
-	poem *poemRef
+	category       string
+	shortHistory   []historyRound
+	words          []lesson.Word
+	checkVerdicts  []lesson.CheckVerdict
+	reviewResult   ReviewResultMsg
+	currentIndex   int
+	version        int
+	paused         bool
+	checking       bool
+	completed      bool
+	reviewSeen     bool
+	correction     bool
+	practice       bool
 }
 
 // poemRef is the poem classroom's work identity (Issue #12): what the child
@@ -355,9 +308,9 @@ type DictationTutor struct {
 // display/save identity — title and author ride session_ready's PoemTaskView
 // and the receipt's requested set.
 type poemRef struct {
-	ID     int64
 	Title  string
 	Author string
+	ID     int64
 }
 
 // newDictationTutor binds the FSM to a lesson row read back from the

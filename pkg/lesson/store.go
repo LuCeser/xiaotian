@@ -444,7 +444,7 @@ func (s *Store) EnsurePoemLesson(ctx context.Context, lessonID string, poemID in
 
 // LatestPoemLessonID returns the lesson id of the poem's most recent attempt
 // row ("" when the poem has never been practiced) — the resume probe of the
-// poem classroom's session_init: an IN-FLIGHT row (stage '' or checking) is
+// poem classroom's session_init: an IN-FLIGHT row (stage ” or checking) is
 // resumed under its own id, a submitted one means the attempt settled and a
 // new init opens a fresh attempt. Same ORDER BY shape as ListLessons
 // (created_at DESC, lesson_id DESC as the same-second tiebreak).

@@ -307,7 +307,7 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	expected := tm.tutor.version
 	outcomes := tm.tutor.snapshotCheckOutcomes()
 	total := len(tm.tutor.words)
-	isPoem := tm.tutor.poem != nil // Issue #12: the poem's own bridge copy/reason
+	isPoem := tm.tutor.poem != nil    // Issue #12: the poem's own bridge copy/reason
 	words := make([]string, 0, total) // the FULL plaintext list (D-10 unmask)
 	for _, c := range tm.tutor.words {
 		words = append(words, c.Word)
