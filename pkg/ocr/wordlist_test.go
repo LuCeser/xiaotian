@@ -416,19 +416,19 @@ func TestWordlistChinesePromptContract(t *testing.T) {
 		t.Fatalf("Recognize chinese: %v", err)
 	}
 	for _, want := range []string{
-		"词语表",            // only clear word-list entries
-		"不要拆成单个汉字",      // multi-char words stay whole
-		"英文单词",           // mixed-page English content is ignored
-		"拼音",             // the material's own annotation is transcribed
-		"不要求补写释义",        // no forced English-style gloss
-		"完整的古诗",          // #11: whole poems are their own array
-		"整首保存",           // #11: a poem is saved as one work
-		"保留原有分行",         // #11: line breaks and order survive
-		"不要凭记忆补写或生成",     // #11: never generate the unclear原文
-		"背诵或默写要求",        // #11: the page's explicit mark rides required
-		"不会导入",           // #11: others are display-only
-		"JSON",           // strict output contract
-		"教材",             // textbook header reading
+		"词语表",        // only clear word-list entries
+		"不要拆成单个汉字",   // multi-char words stay whole
+		"英文单词",       // mixed-page English content is ignored
+		"拼音",         // the material's own annotation is transcribed
+		"不要求补写释义",    // no forced English-style gloss
+		"完整的古诗",      // #11: whole poems are their own array
+		"整首保存",       // #11: a poem is saved as one work
+		"保留原有分行",     // #11: line breaks and order survive
+		"不要凭记忆补写或生成", // #11: never generate the unclear原文
+		"背诵或默写要求",    // #11: the page's explicit mark rides required
+		"不会导入",       // #11: others are display-only
+		"JSON",       // strict output contract
+		"教材",         // textbook header reading
 	} {
 		if !strings.Contains(fr.gotSystem, want) {
 			t.Errorf("chinese system prompt lost clause %q:\n%s", want, fr.gotSystem)
