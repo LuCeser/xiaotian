@@ -2100,3 +2100,99 @@ body {
   font-size: 12px;
   white-space: nowrap;
 }
+
+/* The unified content view's 类型 filter: the second pill row keeps the
+   category pills' shape — smaller so the subject stays the primary
+   filter. */
+.type-pills {
+  margin-top: 4px;
+}
+
+.type-pills .pill {
+  min-height: 44px;
+  padding: 6px 14px;
+  font-size: 14px;
+}
+
+/* The 古诗 page's shared note (scope wording never claims 背默). */
+.list-note {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* One whole poem card: head (title/author/badge/scope/manage) + the
+   ordered lines block + attribution chips. */
+.poem-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.poem-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.poem-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.poem-author {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.poem-scope {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.poem-scope-in,
+.poem-scope-included,
+.poem-scope-learned {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+  color: var(--success-strong);
+}
+
+.poem-scope-progress_pending {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-strong);
+}
+
+.poem-manage-btn {
+  margin-left: auto;
+}
+
+.poem-lines {
+  margin: 0;
+  padding-left: 4px;
+}
+
+.poem-line {
+  margin: 0 0 4px;
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.poem-line:last-child {
+  margin-bottom: 0;
+}
