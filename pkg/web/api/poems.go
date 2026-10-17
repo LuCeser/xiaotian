@@ -128,15 +128,15 @@ type poemsCommitResponse struct {
 // NEXT task, and a poem can never enter the word-dictation selection
 // (poems are not cards).
 type poemJSON struct {
-	Lines       []string            `json:"lines"`
-	Textbooks   []poem.Assignment   `json:"textbooks"`
-	Title       string              `json:"title"`
-	Author      string              `json:"author"`
-	Category    string              `json:"category"`
-	CreatedAt   string              `json:"created_at"`
-	ScopeReason string              `json:"scope_reason"`
-	ID          int64               `json:"id"`
-	InScope     bool                `json:"in_scope"`
+	Title       string            `json:"title"`
+	Author      string            `json:"author"`
+	Category    string            `json:"category"`
+	CreatedAt   string            `json:"created_at"`
+	ScopeReason string            `json:"scope_reason"`
+	Lines       []string          `json:"lines"`
+	Textbooks   []poem.Assignment `json:"textbooks"`
+	ID          int64             `json:"id"`
+	InScope     bool              `json:"in_scope"`
 }
 
 // poemsResponse is the GET /poems envelope.

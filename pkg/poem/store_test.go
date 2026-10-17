@@ -207,13 +207,13 @@ func TestCommitStickyInclude(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if err := h.store.Assign(ctx, poems[0].ID, bookID, "第2课", true); err != nil {
+	if err = h.store.Assign(ctx, poems[0].ID, bookID, "第2课", true); err != nil {
 		t.Fatalf("assign include: %v", err)
 	}
 
 	// Re-import the same poem under the same book with a corrected lesson:
 	// existing work, lesson refreshes, include STAYS set.
-	if _, err := h.store.Commit(ctx, CommitInput{Drafts: []Draft{draft}, Category: "chinese", TextbookID: bookID}); err != nil {
+	if _, err = h.store.Commit(ctx, CommitInput{Drafts: []Draft{draft}, Category: "chinese", TextbookID: bookID}); err != nil {
 		t.Fatalf("re-commit: %v", err)
 	}
 	poems, err = h.store.List(ctx, ListFilter{})
@@ -299,7 +299,7 @@ func TestScopeVerdict(t *testing.T) {
 
 	// The parent moves progress to 第9课 — the once-pending poem enters the
 	// scope without any re-import (范围随进度生效).
-	if _, err := h.db.ExecContext(ctx, "UPDATE textbooks SET learned_lessons = 3"); err != nil {
+	if _, err = h.db.ExecContext(ctx, "UPDATE textbooks SET learned_lessons = 3"); err != nil {
 		t.Fatalf("advance progress: %v", err)
 	}
 	poems, err = h.store.List(ctx, ListFilter{})

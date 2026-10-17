@@ -269,10 +269,10 @@ func TestListPoemsSubjectFilter(t *testing.T) {
 func TestPoemsUnavailableDegradedBoot(t *testing.T) {
 	h := newTestHandler(t, &fakeExecutor{}, &fakeCardRepo{})
 	for _, tc := range []struct {
-		name string
 		do   func()
+		name string
 	}{
-		{"list", func() {
+		{name: "list", do: func() {
 			req := httptest.NewRequest(http.MethodGet, "/poems", nil)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -280,7 +280,7 @@ func TestPoemsUnavailableDegradedBoot(t *testing.T) {
 				t.Errorf("GET /poems = %d/%s, want 503 %s", rec.Code, rec.Body.String(), codePoemsUnavailable)
 			}
 		}},
-		{"commit", func() {
+		{name: "commit", do: func() {
 			rec := postPoems(t, h, jingYeSi)
 			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), codePoemsUnavailable) {
 				t.Errorf("POST /poems = %d/%s, want 503 %s", rec.Code, rec.Body.String(), codePoemsUnavailable)

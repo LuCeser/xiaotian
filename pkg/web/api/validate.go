@@ -522,7 +522,7 @@ func validateTextbookAssignRequest(req *TextbookAssignRequest) string {
 // recognition at the same bound), each field capped for storage/rendering
 // cost. Runes, not bytes.
 const (
-	maxPoems         = 20
+	maxPoems           = 20
 	maxPoemTitleRunes  = 200
 	maxPoemAuthorRunes = 100
 	maxPoemLineRunes   = 200
@@ -535,14 +535,14 @@ const (
 // type; the explicit field keeps the wire honest if more subjects ever
 // gain poem-shaped works.
 type PoemCommitRequest struct {
-	Category   string `json:"category"`
-	TextbookID int64  `json:"textbook_id"`
-	Poems      []struct {
+	Category string `json:"category"`
+	Poems    []struct {
 		Title  string   `json:"title"`
 		Author string   `json:"author"`
-		Lines  []string `json:"lines"`
 		Lesson string   `json:"lesson"`
+		Lines  []string `json:"lines"`
 	} `json:"poems"`
+	TextbookID int64 `json:"textbook_id"`
 }
 
 // validatePoemCommitRequest enforces the commit-path contract: category
@@ -600,9 +600,9 @@ func validatePoemCommitRequest(req *PoemCommitRequest) string {
 // content view's explicit attribution management (lesson + include
 // refresh together).
 type PoemAssignRequest struct {
-	TextbookID    int64  `json:"textbook_id"`
-	Lesson        string `json:"lesson"`
-	IncludeInScope bool  `json:"includeInScope"`
+	Lesson         string `json:"lesson"`
+	TextbookID     int64  `json:"textbook_id"`
+	IncludeInScope bool   `json:"includeInScope"`
 }
 
 // validatePoemAssignRequest enforces the management-path contract: a
