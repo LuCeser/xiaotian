@@ -79,7 +79,10 @@ var (
 // not exist. Idempotent: safe to call on every boot, mirroring
 // lesson.Migrate (which main.go calls right after database.Migrate).
 func Migrate(ctx context.Context, db *sql.DB) error {
-	for _, stmt := range []string{poemsDDL, idxPoemsFingerprint, poemAssignmentsDDL, idxPoemAssignmentsTextbook} {
+	for _, stmt := range []string{
+		poemsDDL, idxPoemsFingerprint, poemAssignmentsDDL, idxPoemAssignmentsTextbook,
+		poemPracticeDDL, idxPoemPracticePoem, // Issue #12: whole-poem practice records
+	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("poem/migrate: %w", err)
 		}
@@ -398,7 +401,6 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Poem, error) {
 	defer rows.Close()
 
 	poems := []Poem{}
-	byID := map[int64]*Poem{}
 	for rows.Next() {
 		var p Poem
 		var linesJSON string
@@ -415,21 +417,44 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Poem, error) {
 	if len(poems) == 0 {
 		return poems, nil
 	}
+
+	// The attribution projection rides ONE query for the whole page (the
+	// shared attachAssignments helper, Issue #12's Get/PoemsByIDs seam).
+	if aerr := s.attachAssignments(ctx, poems); aerr != nil {
+		return nil, aerr
+	}
+	return poems, nil
+}
+
+// attachAssignments loads the attribution projection for exactly the given
+// poems (ONE joined query bounded by the page's ids — never the whole
+// poem_assignments table) and stamps each poem's scope verdict. On a
+// pre-migration database (no textbooks table yet) the join degrades to
+// nameless assignments and progress-pending scope, never an error: the
+// poems still render (the card repo's same degraded-read discipline).
+func (s *Store) attachAssignments(ctx context.Context, poems []Poem) error {
+	if len(poems) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*Poem, len(poems))
+	placeholders := make([]string, 0, len(poems))
+	args := make([]any, 0, len(poems))
 	for i := range poems {
 		byID[poems[i].ID] = &poems[i]
+		placeholders = append(placeholders, "?")
+		args = append(args, poems[i].ID)
 	}
 
-	// The attribution projection rides ONE query for the whole page: the
-	// assignment rows joined with the textbook's name/lessons/learned
-	// progress so the scope verdict needs no second round trip per poem.
 	books := map[int64]bookProgress{}
 	assignments := map[int64][]Assignment{}
-	if assignRows, aerr := s.db.QueryContext(ctx,
-		`SELECT a.poem_id, a.textbook_id, a.lesson, a.include_in_scope,
-		        t.name, t.lessons, t.learned_lessons
-		 FROM poem_assignments a
-		 LEFT JOIN textbooks t ON t.id = a.textbook_id
-		 ORDER BY a.poem_id, a.textbook_id`); aerr != nil {
+	query := `SELECT a.poem_id, a.textbook_id, a.lesson, a.include_in_scope,
+	        t.name, t.lessons, t.learned_lessons
+	 FROM poem_assignments a
+	 LEFT JOIN textbooks t ON t.id = a.textbook_id
+	 WHERE a.poem_id IN (` + strings.Join(placeholders, ",") + `)
+	 ORDER BY a.poem_id, a.textbook_id`
+	assignRows, aerr := s.db.QueryContext(ctx, query, args...) //nolint:gosec // G202: placeholders are '?', ids are bound parameters
+	if aerr != nil {
 		// No textbooks table yet (a database older than Issue #4): no
 		// attribution can exist either — every poem reads supplementary
 		// until the table does. The honest degraded read, not a failed
@@ -439,43 +464,110 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Poem, error) {
 				infra.F("component", "poem/store"),
 				infra.ErrField(aerr),
 			)
-			return nil, errors.Wrap(aerr, "poem list: assignments")
+			return errors.Wrap(aerr, "poem list: assignments")
 		}
-	} else {
-		defer assignRows.Close()
-		for assignRows.Next() {
-			var poemID, textbookID, include int64
-			var lesson string
-			var nameNull, lessonsNull sql.NullString
-			var learnedNull sql.NullInt64
-			if err = assignRows.Scan(&poemID, &textbookID, &lesson, &include, &nameNull, &lessonsNull, &learnedNull); err != nil {
-				return nil, errors.Wrap(err, "poem list: assignments scan")
-			}
-			if _, wanted := byID[poemID]; !wanted {
-				continue // an assignment for a poem outside this page
-			}
-			if _, seen := books[textbookID]; !seen {
-				books[textbookID] = bookProgress{
-					lessons: decodeLessons(lessonsNull.String),
-					learned: int(learnedNull.Int64),
-				}
-			}
-			assignments[poemID] = append(assignments[poemID], Assignment{
-				TextbookID:     textbookID,
-				TextbookName:   nameNull.String,
-				Lesson:         lesson,
-				IncludeInScope: include == 1,
-			})
+		for i := range poems {
+			applyScope(&poems[i], nil)
 		}
-		if err = assignRows.Err(); err != nil {
-			return nil, errors.Wrap(err, "poem list: assignments iteration")
+		return nil
+	}
+	defer assignRows.Close()
+	for assignRows.Next() {
+		var poemID, textbookID, include int64
+		var lesson string
+		var nameNull, lessonsNull sql.NullString
+		var learnedNull sql.NullInt64
+		if err := assignRows.Scan(&poemID, &textbookID, &lesson, &include, &nameNull, &lessonsNull, &learnedNull); err != nil {
+			return errors.Wrap(err, "poem list: assignments scan")
 		}
+		if _, wanted := byID[poemID]; !wanted {
+			continue // an assignment for a poem outside this page
+		}
+		if _, seen := books[textbookID]; !seen {
+			books[textbookID] = bookProgress{
+				lessons: decodeLessons(lessonsNull.String),
+				learned: int(learnedNull.Int64),
+			}
+		}
+		assignments[poemID] = append(assignments[poemID], Assignment{
+			TextbookID:     textbookID,
+			TextbookName:   nameNull.String,
+			Lesson:         lesson,
+			IncludeInScope: include == 1,
+		})
+	}
+	if err := assignRows.Err(); err != nil {
+		return errors.Wrap(err, "poem list: assignments iteration")
 	}
 	for i := range poems {
 		if rows, ok := assignments[poems[i].ID]; ok {
 			poems[i].Assignments = rows
 		}
 		applyScope(&poems[i], books)
+	}
+	return nil
+}
+
+// Get returns ONE stored poem by id with the same attribution projection
+// and scope verdict as List — the poem classroom's fetch (issue #12: the
+// session must start from an in-scope WHOLE work, so the caller branches on
+// InScope). ErrPoemNotFound is the honest miss for an unknown or deleted
+// id.
+func (s *Store) Get(ctx context.Context, id int64) (Poem, error) {
+	poems, err := s.PoemsByIDs(ctx, []int64{id})
+	if err != nil {
+		return Poem{}, err
+	}
+	if len(poems) == 0 || poems[0].ID != id {
+		return Poem{}, errors.Wrap(ErrPoemNotFound, fmt.Sprintf("poem get: poem %d", id))
+	}
+	return poems[0], nil
+}
+
+// PoemsByIDs returns the stored poems for the given ids (arbitrary order —
+// the caller keys by id; poems missing from the store are simply absent
+// from the result). One shared read backs the parent lesson projection
+// (issue #12: the records view needs the poem's title/author per lesson
+// row without a per-row round trip).
+func (s *Store) PoemsByIDs(ctx context.Context, ids []int64) ([]Poem, error) {
+	if len(ids) == 0 {
+		return []Poem{}, nil
+	}
+	placeholders := make([]string, 0, len(ids))
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, title, author, lines, category, created_at FROM poems WHERE id IN ("+strings.Join(placeholders, ",")+")", //nolint:gosec // G202: placeholders are '?', ids are bound parameters
+		args...)
+	if err != nil {
+		s.logger.Error("poem get by ids failed",
+			infra.F("component", "poem/store"),
+			infra.F("count", len(ids)),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "poem get by ids")
+	}
+	defer rows.Close()
+
+	poems := []Poem{}
+	for rows.Next() {
+		var p Poem
+		var linesJSON string
+		if err := rows.Scan(&p.ID, &p.Title, &p.Author, &linesJSON, &p.Category, &p.CreatedAt); err != nil {
+			return nil, errors.Wrap(err, "poem get by ids: scan")
+		}
+		p.Lines = decodeLines(linesJSON)
+		p.Assignments = []Assignment{}
+		poems = append(poems, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.Wrap(err, "poem get by ids: iteration")
+	}
+	if aerr := s.attachAssignments(ctx, poems); aerr != nil {
+		return nil, aerr
 	}
 	return poems, nil
 }
