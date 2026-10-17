@@ -127,12 +127,12 @@ type Poem struct {
 	Author      string
 	Category    string
 	CreatedAt   string
+	Fingerprint string
+	ScopeReason string
 	Lines       []string
 	Assignments []Assignment
-	Fingerprint string
-	InScope     bool
-	ScopeReason string
 	ID          int64
+	InScope     bool
 }
 
 // Draft is one confirmed poem on the commit path — exactly what the parent
@@ -141,8 +141,8 @@ type Poem struct {
 type Draft struct {
 	Title  string
 	Author string
-	Lines  []string
 	Lesson string
+	Lines  []string
 }
 
 // Commit status values (AC: 重复确认不复制作品 — the receipt names what
@@ -168,8 +168,8 @@ type CommitOutcome struct {
 // attribution target established BEFORE the commit (0 = 不指定教材; the
 // lesson rides each draft).
 type CommitInput struct {
-	Drafts     []Draft
 	Category   string
+	Drafts     []Draft
 	TextbookID int64
 }
 

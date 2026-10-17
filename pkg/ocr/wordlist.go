@@ -70,9 +70,9 @@ type WordlistTextbook struct {
 type PoemDraft struct {
 	Title      string   `json:"title"`
 	Author     string   `json:"author"`
-	Lines      []string `json:"lines"`
 	Lesson     string   `json:"lesson"`
 	Required   string   `json:"required"`
+	Lines      []string `json:"lines"`
 	Confidence float64  `json:"confidence"`
 }
 
