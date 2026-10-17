@@ -71,6 +71,12 @@ const (
 	// saved/failed expresses the practice_logs storage result, NOT an FSRS
 	// write (practice never enters the FSRS schedule, D-11).
 	ReceiptKindPractice = "practice"
+	// ReceiptKindPoem marks the whole-poem 背默 submission (Issue #12). Its
+	// requested/updated sets carry ONE entry — the poem's title — because the
+	// save scope is the WHOLE work (never one entry per line); saved/failed
+	// expresses the poem_practice_logs storage result, never an FSRS write
+	// (poems are not cards, the same D-11 isolation).
+	ReceiptKindPoem = "poem"
 )
 
 // Receipt status values — the two-phase lifecycle. pending = Begin landed
