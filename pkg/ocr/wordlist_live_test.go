@@ -102,7 +102,7 @@ func TestWordlistLive_RealVision(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	res, err := pipeline.Recognize(ctx, image)
+	res, err := pipeline.Recognize(ctx, image, "")
 	if err != nil {
 		t.Fatalf("live recognize: %v", err)
 	}

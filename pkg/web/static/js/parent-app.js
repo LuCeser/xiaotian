@@ -325,9 +325,15 @@
         });
     },
     // Issue #3 照片导入: the recognize call rides postImage (60s budget —
-    // a vision model over an image outruns the 15s JSON timeout).
-    recognizePhoto: function (blob) {
-      return postImage('/api/v1/words/photo/recognize', blob);
+    // a vision model over an image outruns the 15s JSON timeout). Issue
+    // #10: the subject rides the query string — the same endpoint reads
+    // either subject's list; category '' keeps the English default.
+    recognizePhoto: function (blob, category) {
+      var url = '/api/v1/words/photo/recognize';
+      if (category) {
+        url += '?category=' + encodeURIComponent(category);
+      }
+      return postImage(url, blob);
     },
     // Issue #8 缺失释义补充: one batched text-LLM call per click; the 15s
     // JSON timeout covers it (a text completion is not a vision round

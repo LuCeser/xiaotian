@@ -222,6 +222,22 @@ func itInitPractice(t *testing.T, conn *websocket.Conn) SessionReadyMsg {
 	return readyMsg
 }
 
+// itInitCategory is itInit with an explicit classroom subject (Issue #10).
+func itInitCategory(t *testing.T, conn *websocket.Conn, category string) SessionReadyMsg {
+	t.Helper()
+	itSendText(t, conn, SessionInitMsg{
+		Type:     TypeSessionInit,
+		Audio:    AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+		Category: category,
+	})
+	ready := itRead(t, conn, 5*time.Second, func(m itMsg) bool { return m.typ == TypeSessionReady })
+	var readyMsg SessionReadyMsg
+	if err := json.Unmarshal(ready.raw, &readyMsg); err != nil {
+		t.Fatalf("session_ready decode: %v", err)
+	}
+	return readyMsg
+}
+
 // itAnnounceAck reads messages through one announcement: acks every
 // audio_end (completion-ack semantics) and returns the announcement's
 // teacher sentence texts once the FSM hands control back (listening).
@@ -735,7 +751,7 @@ func itReadCheckVerdicts(t *testing.T, conn *websocket.Conn) CheckVerdictsMsg {
 func itSeedCheckRow(t *testing.T, exec *fakeExecutor, outcomes map[string]lesson.WordOutcome, verdicts ...lesson.CheckVerdict) lesson.Lesson {
 	t.Helper()
 	ctx := context.Background()
-	l, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards)
+	l, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards, lesson.CategoryEnglish)
 	if err != nil {
 		t.Fatalf("EnsureLessonCards: %v", err)
 	}
@@ -870,7 +886,7 @@ func TestUncheckedCorrection(t *testing.T) {
 	// fallback hard (derived correct); 香蕉: confirmed+1 → fallback again
 	// (derived wrong).
 	ctx := context.Background()
-	l, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards)
+	l, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards, lesson.CategoryEnglish)
 	if err != nil {
 		t.Fatalf("EnsureLessonCards: %v", err)
 	}
@@ -1043,7 +1059,7 @@ func TestPracticeSessionEndToEnd(t *testing.T) {
 	words := newFakeWords() // a due fetch here would mean the practice path leaked into FSRS
 	exec := newFakeExecutorNoRow("it-lesson")
 	// Seed today's main lesson row (the exclusion set's source).
-	if _, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards); err != nil {
+	if _, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards, lesson.CategoryEnglish); err != nil {
 		t.Fatalf("seed daily row: %v", err)
 	}
 
@@ -1588,7 +1604,7 @@ func TestCrossConnectionCorrectionStraggler(t *testing.T) {
 	// Seed exactly what uncheckedCloseFallback persists: outcomes stored,
 	// stage submitted, unchecked=1, verdicts empty.
 	ctx := context.Background()
-	l, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards)
+	l, err := exec.EnsureLessonCards(ctx, "it-lesson", itCards, lesson.CategoryEnglish)
 	if err != nil {
 		t.Fatalf("EnsureLessonCards: %v", err)
 	}

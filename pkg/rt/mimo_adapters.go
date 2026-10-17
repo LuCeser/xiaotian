@@ -135,11 +135,12 @@ func (t *LessonTools) EnsureLesson(ctx context.Context, lessonID string, words [
 	return t.store.EnsureLesson(ctx, lessonID, words)
 }
 
-// EnsureLessonCards creates the lesson row carrying word cards if absent
-// (first content wins). A legacy row with empty cards is NOT backfilled —
-// the 13-08 FSM detects that state and answers lesson_unavailable.
-func (t *LessonTools) EnsureLessonCards(ctx context.Context, lessonID string, cards []lesson.Word) (lesson.Lesson, error) {
-	return t.store.EnsureLessonCards(ctx, lessonID, cards)
+// EnsureLessonCards creates the lesson row carrying word cards and the
+// classroom's subject (Issue #10) if absent (first content wins). A legacy
+// row with empty cards is NOT backfilled — the 13-08 FSM detects that state
+// and answers lesson_unavailable.
+func (t *LessonTools) EnsureLessonCards(ctx context.Context, lessonID string, cards []lesson.Word, category string) (lesson.Lesson, error) {
+	return t.store.EnsureLessonCards(ctx, lessonID, cards, category)
 }
 
 // GetLessonState returns the current lesson row (get_lesson_state tool).
@@ -185,7 +186,7 @@ var _ LessonExecutor = (*LessonTools)(nil)
 // time.
 var (
 	_ func(*lesson.Store, context.Context, string, []string) (lesson.Lesson, error)                                                = (*lesson.Store).EnsureLesson
-	_ func(*lesson.Store, context.Context, string, []lesson.Word) (lesson.Lesson, error)                                           = (*lesson.Store).EnsureLessonCards
+	_ func(*lesson.Store, context.Context, string, []lesson.Word, string) (lesson.Lesson, error)                                   = (*lesson.Store).EnsureLessonCards
 	_ func(*lesson.Executor, context.Context, string) (lesson.Lesson, error)                                                       = (*lesson.Executor).GetLessonState
 	_ func(*lesson.Executor, context.Context, string, int, string) (lesson.AdvanceResult, error)                                   = (*lesson.Executor).AdvanceWord
 	_ func(*lesson.Executor, context.Context, string, int, string, map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) = (*lesson.Executor).EnterCheck
@@ -226,20 +227,23 @@ func NewPyFSRS(exec pybridge.Executor, logger infra.Logger) (*PyFSRS, error) {
 }
 
 // FetchDueWords returns up to limit due vocabulary cards from the FSRS
-// store. A limit <= 0 falls back to the FSM's own cap (dueWordsLimit = 10).
-// RunDue is ALWAYS called with an explicit FetchLockHours=1 (never the
-// script's 24h default, never a peek): the lock serializes one fetch per
-// card for the classroom window while bounding leftover locks to one hour.
-// Cards map into lesson.Word field-for-field (word/meaning/example — the
-// json tags were aligned losslessly in 13-07) and keep the script's order.
-// Zero cards is a legal result (no due words today), not an error.
-func (p *PyFSRS) FetchDueWords(ctx context.Context, limit int) ([]lesson.Word, error) {
+// store in category (Issue #10: "" normalizes to the script's english
+// default — same call as before the field existed). A limit <= 0 falls back
+// to the FSM's own cap (dueWordsLimit = 10). RunDue is ALWAYS called with an
+// explicit FetchLockHours=1 (never the script's 24h default, never a peek):
+// the lock serializes one fetch per card for the classroom window while
+// bounding leftover locks to one hour. Cards map into lesson.Word
+// field-for-field (word/meaning/example — the json tags were aligned
+// losslessly in 13-07) and keep the script's order. Zero cards is a legal
+// result (no due words today), not an error.
+func (p *PyFSRS) FetchDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error) {
 	if limit <= 0 {
 		limit = dueWordsLimit
 	}
 	res, err := p.exec.RunDue(ctx, pybridge.DueOpts{
 		Limit:          limit,
 		FetchLockHours: pyfsrsFetchLockHours,
+		Category:       lesson.NormalizeCategory(category),
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "rt: pyfsrs fetch due words")
@@ -256,8 +260,13 @@ func (p *PyFSRS) FetchDueWords(ctx context.Context, limit int) ([]lesson.Word, e
 }
 
 // SubmitReview writes one review batch (word → good/hard/again/easy rating)
-// and reports what ACTUALLY happened. An empty results map is a no-op:
-// it returns the zero result WITHOUT spawning a python subprocess.
+// in category and reports what ACTUALLY happened. An empty results map is a
+// no-op: it returns the zero result WITHOUT spawning a python subprocess.
+//
+// Category (Issue #10, AC4 写错历史): the script's review lookup prefers the
+// english column when --category is omitted, so a Chinese classroom's
+// ratings MUST ride an explicit chinese category — "" normalizes to english,
+// the pre-Issue-#10 behavior.
 //
 // A nil error NEVER means "everything saved": the returned sets are the
 // truth — Requested is the submitted keys, Updated the words the backend
@@ -270,11 +279,14 @@ func (p *PyFSRS) FetchDueWords(ctx context.Context, limit int) ([]lesson.Word, e
 // Updated words that were never requested, or that repeat, violate the
 // provider contract and surface as a provider-contract error (not retried)
 // rather than being silently folded into the sets.
-func (p *PyFSRS) SubmitReview(ctx context.Context, results map[string]string) (ReviewWriteResult, error) {
+func (p *PyFSRS) SubmitReview(ctx context.Context, results map[string]string, category string) (ReviewWriteResult, error) {
 	if len(results) == 0 {
 		return ReviewWriteResult{}, nil
 	}
-	res, err := p.exec.RunReview(ctx, pybridge.ReviewOpts{Results: results})
+	res, err := p.exec.RunReview(ctx, pybridge.ReviewOpts{
+		Results:  results,
+		Category: lesson.NormalizeCategory(category),
+	})
 	if err != nil {
 		return ReviewWriteResult{}, errors.Wrap(err, "rt: pyfsrs submit review")
 	}

@@ -1,11 +1,15 @@
 // photo_recognize.go implements the parent word-list photo draft endpoint
-// (Issue #3 + #5): POST /words/photo/recognize.
+// (Issue #3 + #5): POST /words/photo/recognize?category= (Issue #10: the
+// subject rides the query string — the body stays the raw image bytes).
 //
 // Contract:
 //   - Request: the raw PNG or JPEG bytes as the body (the declared
 //     Content-Type is ignored; the pipeline sniffs the magic bytes and is
 //     authoritative). One image per request — the single-photo limit Issue #3
-//     settles for this flow (multi-page PDF is a later task).
+//     settles for this flow (multi-page PDF is a later task). The optional
+//     category query parameter selects the subject's extraction contract:
+//     "chinese" reads a 语文词语表, absent or "english" reads an English word
+//     list (the pre-Issue-#10 default); any other value is a 400.
 //   - Response 200: {"textbook":{"edition","stage","grade","volume",
 //     "module","lesson"}|null,"entries":[{"word","meaning","lesson",
 //     "confidence"}]} — a RECOGNITION DRAFT ONLY. The textbook header is
@@ -40,15 +44,28 @@ const (
 	codeRecognitionUnavailable = "recognition_unavailable"
 )
 
-// recognizeWordsPhoto serves POST /words/photo/recognize. h.recognizer is
-// nil when the service booted without a vision key — the 503 branch keeps
-// the endpoint mounted and honest (the parent UI shows why photo import is
-// off instead of guessing at a 404).
+// recognizeWordsPhoto serves POST /words/photo/recognize?category=. h.
+// recognizer is nil when the service booted without a vision key — the 503
+// branch keeps the endpoint mounted and honest (the parent UI shows why
+// photo import is off instead of guessing at a 404).
 func (h *handler) recognizeWordsPhoto(w http.ResponseWriter, r *http.Request) {
 	if h.recognizer == nil {
 		writeError(w, http.StatusServiceUnavailable, codeRecognitionUnavailable,
 			"photo recognition is not configured on this server")
 		return
+	}
+
+	// Issue #10: the subject rides the query string (empty = english, the
+	// Issue #3 default). The enum check is the same D-06 gate every other
+	// category-bearing route applies — a typo'd subject must 400 before any
+	// vision cost, never silently recognize the wrong subject's list.
+	category := r.URL.Query().Get("category")
+	if category != "" {
+		if err := ValidateCategory(category); err != nil {
+			writeError(w, http.StatusBadRequest, codeInvalidRequest,
+				"category must be \"english\" or \"chinese\"")
+			return
+		}
 	}
 
 	// The byte cap comes from the pipeline itself (built from the photo
@@ -68,7 +85,7 @@ func (h *handler) recognizeWordsPhoto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := h.recognizer.Recognize(r.Context(), image)
+	res, err := h.recognizer.Recognize(r.Context(), image, category)
 	if err != nil {
 		switch {
 		case errors.Is(err, ocr.ErrEmptyImage), errors.Is(err, ocr.ErrNotImage):

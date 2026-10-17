@@ -170,7 +170,7 @@ func TestEnsureLessonCards(t *testing.T) {
 	}
 
 	t.Run("roundtrip stores words and full cards", func(t *testing.T) {
-		got, err := store.EnsureLessonCards(ctx, "LC1", first)
+		got, err := store.EnsureLessonCards(ctx, "LC1", first, "")
 		if err != nil {
 			t.Fatalf("EnsureLessonCards: %v", err)
 		}
@@ -191,7 +191,7 @@ func TestEnsureLessonCards(t *testing.T) {
 	t.Run("same id different cards keeps first content", func(t *testing.T) {
 		got, err := store.EnsureLessonCards(ctx, "LC1", []Word{
 			{Word: "别的", Meaning: "other", Example: "别的句子。"},
-		})
+		}, "")
 		if err != nil {
 			t.Fatalf("EnsureLessonCards second call: %v", err)
 		}
@@ -212,7 +212,7 @@ func TestEnsureLessonCards(t *testing.T) {
 			{"empty lesson id", "", first},
 			{"empty cards", "LC-EMPTY", nil},
 		} {
-			_, err := store.EnsureLessonCards(ctx, tc.lessonID, tc.cards)
+			_, err := store.EnsureLessonCards(ctx, tc.lessonID, tc.cards, "")
 			if !errors.Is(err, ErrInvalidLesson) {
 				t.Errorf("%s: error = %v, want ErrInvalidLesson", tc.name, err)
 			}
@@ -305,7 +305,7 @@ func TestEnsureLessonCardsDoesNotReplaceLegacyEmptyCards(t *testing.T) {
 
 	got, err := store.EnsureLessonCards(ctx, "L-EMPTY", []Word{
 		{Word: "新词", Meaning: "new", Example: "新例句。"},
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("EnsureLessonCards over empty-cards row: %v", err)
 	}
@@ -425,12 +425,128 @@ func TestStoreMigrateAddsStageColumns(t *testing.T) {
 	}
 
 	// Fresh rows created after the migration default cleanly too.
-	fresh, err := store.EnsureLessonCards(ctx, "FRESH", []Word{{Word: "新词", Meaning: "new", Example: "新例句。"}})
+	fresh, err := store.EnsureLessonCards(ctx, "FRESH", []Word{{Word: "新词", Meaning: "new", Example: "新例句。"}}, "")
 	if err != nil {
 		t.Fatalf("EnsureLessonCards fresh: %v", err)
 	}
 	if fresh.Stage != "" || len(fresh.Outcomes) != 0 || len(fresh.Verdicts) != 0 || fresh.Unchecked {
 		t.Errorf("fresh read-back = %+v, want check-stage defaults", fresh)
+	}
+}
+
+// TestLessonCategoryColumn (Issue #10) — the classroom's subject travels with
+// the lessons row: EnsureLessonCards persists it, GetLesson and the
+// ListLessons/SummarizeLesson projection read it back, a legacy pre-column
+// row (and the "" of a caller that predates subjects) normalizes to english —
+// the product was English-only then — and chinese rows keep their subject.
+func TestLessonCategoryColumn(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "category.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+
+	legacyDDL := `CREATE TABLE IF NOT EXISTS lessons (
+    lesson_id TEXT PRIMARY KEY,
+    words TEXT NOT NULL,
+    cards TEXT NOT NULL DEFAULT '[]',
+    current_index INTEGER NOT NULL DEFAULT 0,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`
+	if _, err = db.ExecContext(ctx, legacyDDL); err != nil {
+		t.Fatalf("create legacy lessons: %v", err)
+	}
+	if _, err = db.ExecContext(ctx,
+		"INSERT INTO lessons (lesson_id, words, cards, current_index, version) VALUES ('LEGACY', '[\"old\"]', '[]', 1, 2)",
+	); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if err = Migrate(ctx, db); err != nil {
+		t.Fatalf("Migrate legacy db: %v", err)
+	}
+	has, err := lessonsHasColumn(ctx, db, "category")
+	if err != nil || !has {
+		t.Fatalf("category column after Migrate: has=%v err=%v", has, err)
+	}
+
+	store, err := NewStore(db, infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	legacy, err := store.GetLesson(ctx, "LEGACY")
+	if err != nil {
+		t.Fatalf("GetLesson legacy: %v", err)
+	}
+	if NormalizeCategory(legacy.Category) != CategoryEnglish {
+		t.Errorf("legacy row category %q normalizes to %q, want english", legacy.Category, NormalizeCategory(legacy.Category))
+	}
+
+	zh, err := store.EnsureLessonCards(ctx, "LC-ZH", []Word{
+		{Word: "美丽", Meaning: "měi lì"},
+		{Word: "世界", Meaning: "shì jiè"},
+	}, CategoryChinese)
+	if err != nil {
+		t.Fatalf("EnsureLessonCards chinese: %v", err)
+	}
+	if zh.Category != CategoryChinese {
+		t.Errorf("chinese row Category = %q, want %q", zh.Category, CategoryChinese)
+	}
+
+	// A pre-subjects caller's "" must keep writing the historical default.
+	en, err := store.EnsureLessonCards(ctx, "LC-EN", []Word{{Word: "river", Meaning: "河流"}}, "")
+	if err != nil {
+		t.Fatalf("EnsureLessonCards default: %v", err)
+	}
+	if en.Category != CategoryEnglish {
+		t.Errorf("default row Category = %q, want english", en.Category)
+	}
+
+	// INSERT OR IGNORE keeps the first content INCLUDING the subject: a
+	// same-id re-ensure with the other category must not rewrite history.
+	if _, err = store.EnsureLessonCards(ctx, "LC-ZH", []Word{{Word: "别的"}}, CategoryEnglish); err != nil {
+		t.Fatalf("EnsureLessonCards re-ensure: %v", err)
+	}
+	again, err := store.GetLesson(ctx, "LC-ZH")
+	if err != nil {
+		t.Fatalf("GetLesson re-ensure: %v", err)
+	}
+	if again.Category != CategoryChinese || len(again.Cards) != 2 {
+		t.Errorf("re-ensure row = category %q / %d cards, want chinese / first-stored 2", again.Category, len(again.Cards))
+	}
+
+	summaries, err := store.ListLessons(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListLessons: %v", err)
+	}
+	byID := map[string]LessonSummary{}
+	for _, s := range summaries {
+		byID[s.LessonID] = s
+	}
+	if c := byID["LC-ZH"].Category; c != CategoryChinese {
+		t.Errorf("ListLessons LC-ZH category = %q, want chinese", c)
+	}
+	if c := byID["LEGACY"].Category; c != CategoryEnglish {
+		t.Errorf("ListLessons LEGACY category = %q, want normalized english", c)
+	}
+}
+
+// TestNormalizeCategory — the single mapping authority for the lessons
+// subject column: chinese stays chinese, everything else ("" legacy,
+// off-enum corruption) reads as english, never "unknown".
+func TestNormalizeCategory(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{CategoryChinese, CategoryChinese},
+		{CategoryEnglish, CategoryEnglish},
+		{"", CategoryEnglish},
+		{"off-enum", CategoryEnglish},
+	} {
+		if got := NormalizeCategory(tc.in); got != tc.want {
+			t.Errorf("NormalizeCategory(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

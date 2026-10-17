@@ -323,7 +323,10 @@
     global.chunkBatch(rows, MAX_BATCH_ENTRIES).forEach(function (part) {
       chain = chain.then(function () {
         return form.submitWords({
-          category: 'english',
+          // Issue #10: the DRAFT's subject — locked at recognize time, so
+          // a mid-flow radio switch (which resets the draft) can never
+          // commit rows under the other subject.
+          category: form.draftCategory,
           unit: unit,
           entries: part.map(function (r) {
             return {
@@ -459,9 +462,11 @@
 
   /**
    * options:
-   *   recognizePhoto(blob) → Promise<{textbook, entries: [...]}> — POST
-   *       /api/v1/words/photo/recognize (wired in parent-app.js with its
-   *       own longer timeout; the vision call can take ~20s)
+   *   recognizePhoto(blob, category) → Promise<{textbook, entries: [...]}> —
+   *       POST /api/v1/words/photo/recognize?category= (wired in
+   *       parent-app.js with its own longer timeout; the vision call can
+   *       take ~20s). The subject selects the extraction contract
+   *       (Issue #10: 语文词语表 vs English word list).
    *   submitWords(payload) → Promise<{added, skipped}> — POST /api/v1/words
    *   fetchWords(category) → Promise<Array> — GET /api/v1/words?category=
    *       (the classification snapshot; ALSO re-fetched after commit to
@@ -473,8 +478,9 @@
    *       absent or partial ⇒ the textbook panel degrades to the plain
    *       Issue #3 supplementary flow)
    *   onCommitted(result) — fired after a successful commit (refresh hook)
-   *   onCategoryChange(v) — fired once at mount with 'english' so the
-   *       shared 单元 datalist populates for this flow's fixed category
+   *   onCategoryChange(v) — fired when the parent picks a subject (the
+   *       D-06 radio has no pre-selection) so the shared 单元 datalist
+   *       populates for that subject
    */
   function PhotoAddForm(container, options) {
     options = options || {};
@@ -507,19 +513,30 @@
     this.form.className = 'photo-add-form';
     this.form.noValidate = true;
 
-    // Fixed-category note: this flow imports ENGLISH word lists (Issue #3).
-    // 语文词语照片导入 is a later task — a static explanation, not a radio.
-    var catField = document.createElement('div');
-    catField.className = 'form-field';
-    var catLabel = document.createElement('span');
-    catLabel.className = 'form-label';
-    catLabel.textContent = '分类';
-    var catNote = document.createElement('p');
-    catNote.className = 'form-hint';
-    catNote.textContent = '英语词表（语文词语照片导入暂未开放）';
-    catField.appendChild(catLabel);
-    catField.appendChild(catNote);
-    this.form.appendChild(catField);
+    // Issue #10: the SAME D-06 category radio the manual add forms use —
+    // one entry point recognizes either subject's list; the selection
+    // rides the recognize call (?category=), the classification snapshot,
+    // the commit and the textbook attribution. Without the shared kit the
+    // tab cannot mount an honest selector, so it falls back to the old
+    // closed note rather than a fake default.
+    this.categoryKit = kit.buildCategoryField
+      ? kit.buildCategoryField('parent-category-photo', this.onCategorySelected.bind(this))
+      : null;
+    if (this.categoryKit) {
+      this.form.appendChild(this.categoryKit.field);
+    } else {
+      var catField = document.createElement('div');
+      catField.className = 'form-field';
+      var catLabel = document.createElement('span');
+      catLabel.className = 'form-label';
+      catLabel.textContent = '分类';
+      var catNote = document.createElement('p');
+      catNote.className = 'form-hint';
+      catNote.textContent = '分类组件未加载，请刷新页面';
+      catField.appendChild(catLabel);
+      catField.appendChild(catNote);
+      this.form.appendChild(catField);
+    }
 
     // 单元 — same shared-datalist field as the other add forms.
     var unit = kit.buildUnitField ? kit.buildUnitField('parent-unit-photo') : null;
@@ -539,7 +556,7 @@
     pickLabel.textContent = '词表照片／扫描 PDF';
     var pickHint = document.createElement('p');
     pickHint.className = 'form-hint';
-    pickHint.textContent = '拍摄或选择一张英语单词表照片（PNG / JPEG），或整本扫描 PDF（最多 100 页），无需裁图。';
+    pickHint.textContent = '拍摄或选择一张英语单词表或语文词语表照片（PNG / JPEG），或整本扫描 PDF（最多 100 页），无需裁图。';
     var pickRow = document.createElement('div');
     pickRow.className = 'photo-pick-row';
     this.fileInput = document.createElement('input');
@@ -575,7 +592,12 @@
     this.recognizeBtn.disabled = true;
     this.form.appendChild(this.recognizeBtn);
 
+    // Issue #10: the form's OWN error surface carries an id — the panel now
+    // also holds the shared category radio's inline error (p.form-error,
+    // always present), so a scoped selector is the only unambiguous way to
+    // address THIS element from tests and future code.
     this.formError = document.createElement('p');
+    this.formError.id = 'parent-photo-form-error';
     this.formError.className = 'form-error';
     this.formError.setAttribute('aria-live', 'polite');
     this.formError.hidden = true;
@@ -638,8 +660,14 @@
     this.currentFile = null;
     this.rows = []; // current classified rows (source of truth on edit)
     this.existingWords = [];
+    // Issue #10: the subject the CURRENT draft belongs to, locked at
+    // recognize time. Every subject-scoped call after that — snapshot,
+    // commit, textbook attribution, reconcile — rides it, so switching
+    // the radio mid-flow can never split one draft across two subjects:
+    // the switch resets the draft instead (onCategorySelected).
+    this.draftCategory = '';
     this.detectedMeta = null; // the READ-off-the-photo textbook header
-    this.books = []; // existing english textbooks (textbook panel list)
+    this.books = []; // the draft's subject's textbooks (panel list)
     this.bookChoice = 'none'; // 'none' | 'new' | a textbook id (number)
     this.includePending = false; // 待确认课次的词直接加入默写范围
     // Issue #7: while a PDF is in play — { doc, plan, aborted, metaDone,
@@ -670,9 +698,44 @@
 
     container.appendChild(this.form);
 
-    // The shared datalist populates for THIS flow's fixed category.
-    this.onCategoryChange('english');
+    // No mount-time category: the D-06 radio has NO pre-selection (the
+    // single/batch forms' shape) — the unit datalist populates when the
+    // parent picks a subject, via onCategorySelected.
   }
+
+  /**
+   * onCategorySelected (Issue #10) — the D-06 radio's change hook: the
+   * shared 单元 datalist re-populates for the new subject, and a draft
+   * recognized under the OTHER subject resets — a preview's rows,
+   * textbook panel and meta were classified against the other subject's
+   * library, so keeping them would straddle subjects at commit. The
+   * category itself stays selected (the parent just switched to it).
+   */
+  PhotoAddForm.prototype.onCategorySelected = function (category) {
+    this.onCategoryChange(category);
+    if (this.draftCategory && category !== this.draftCategory) {
+      // The draft belongs to the OTHER subject: resetEntries clears the
+      // rows/panel state; the snapshot, book list and supplement bar are
+      // the other subject's too. currentFile STAYS — the photo itself is
+      // subject-agnostic, 重新识别 under the new subject is the retry.
+      // An in-flight PDF run is STOPPED first (releasePdf alone does not
+      // signal the page loop — without the abort flag the loop would keep
+      // rendering pages of the closed document under the new subject).
+      if (this.pdfState) {
+        this.pdfState.aborted = true;
+      }
+      this.draftCategory = category;
+      this.existingWords = [];
+      this.books = [];
+      this.releasePdf();
+      this.meaningBar.hidden = true;
+      this.resetEntries();
+      this.renderPreviewHint('分类已切换，请重新点「开始识别」');
+      this.updateCommitButton();
+      return;
+    }
+    this.draftCategory = category;
+  };
 
   /** Button builder used only when the parent-modes kit is unavailable. */
   PhotoAddForm.prototype.buildFallbackButton = function (labelText) {
@@ -801,6 +864,16 @@
     if (this.recognizeBtn.disabled || !this.currentFile) {
       return;
     }
+    // Issue #10: the subject is REQUIRED before any vision cost — the
+    // same 请选择分类 gate the manual add forms apply at submit.
+    var category = this.categoryKit ? this.categoryKit.selected() : '';
+    if (!category) {
+      if (this.categoryKit) {
+        this.categoryKit.setError('请选择分类');
+      }
+      return;
+    }
+    this.draftCategory = category;
     if (this.isPickedPdf()) {
       this.handlePdfRecognize();
       return;
@@ -817,9 +890,18 @@
           throw new Error('照片压缩后仍然太大，请换一张更小的照片');
         }
         uploadBytes = bytes;
-        return self.recognizePhoto(bytes);
+        return self.recognizePhoto(bytes, category);
       })
       .then(function (data) {
+        // Issue #10 race guard: a radio switch mid-flight reset the draft
+        // under the OTHER subject — a late landing would repopulate the
+        // preview rows against a classification snapshot that no longer
+        // matches the draft's subject. Drop it; the switch hint already
+        // told the parent to 重新识别.
+        if (self.draftCategory !== category) {
+          self.setBusy(false);
+          return;
+        }
         var parsed = parseRecognized(data);
         var entries = parsed.entries;
         var meta = parsed.meta;
@@ -833,13 +915,15 @@
         self.bookChoice = 'none';
         self.includePending = false;
         // Snapshot the REAL library for classification; load the textbook
-        // list in parallel for the attribution panel. A textbook-list
+        // list in parallel for the attribution panel. Both ride the
+        // DRAFT's subject (a Chinese draft classifies against the 语文
+        // library and lists 语文 textbooks — Issue #10). A textbook-list
         // failure degrades the panel (with its reason), never the preview.
         var booksLoad = self.fetchTextbooks
-          ? self.fetchTextbooks('english').catch(function () { return null; })
+          ? self.fetchTextbooks(category).catch(function () { return null; })
           : Promise.resolve(null);
         return Promise.all([
-          self.fetchWords('english').catch(function () { return []; }),
+          self.fetchWords(category).catch(function () { return []; }),
           booksLoad,
         ]).then(function (loaded) {
           self.existingWords = loaded[0] || [];
@@ -887,6 +971,9 @@
   PhotoAddForm.prototype.handlePdfRecognize = function () {
     var self = this;
     var kit = global.__parentFormKit || {};
+    // The DRAFT's subject (locked by handleRecognize before dispatch):
+    // every page's recognize call and the one library snapshot ride it.
+    var category = this.draftCategory;
     this.showFormError('');
     this.setBusy(true);
     this.releasePdf();
@@ -909,12 +996,13 @@
         // ONE library snapshot classifies every page as it lands (the run
         // can take minutes; raced duplicates stay honest through the
         // server's UNIQUE + the post-commit reconciliation — the photo
-        // flow's precedent, just stretched over pages).
+        // flow's precedent, just stretched over pages). Subject-scoped
+        // (Issue #10): a 语文 run classifies against the 语文 library.
         var booksLoad = self.fetchTextbooks
-          ? self.fetchTextbooks('english').catch(function () { return null; })
+          ? self.fetchTextbooks(category).catch(function () { return null; })
           : Promise.resolve(null);
         return Promise.all([
-          self.fetchWords('english').catch(function () { return []; }),
+          self.fetchWords(category).catch(function () { return []; }),
           booksLoad,
         ]).then(function (loaded) {
           self.existingWords = loaded[0] || [];
@@ -979,7 +1067,7 @@
         if (!blob) {
           throw new Error('这页压缩后仍然太大');
         }
-        return self.recognizePhoto(blob);
+        return self.recognizePhoto(blob, self.draftCategory);
       })
       .then(function (data) {
         var parsed = parseRecognized(data);
@@ -1990,7 +2078,7 @@
         // network blip can never reclassify server-confirmed adds as
         // failures (honesty cuts both ways).
         var reconcile = (outcome.skipped || 0) > 0 || failedWith
-          ? self.fetchWords('english').catch(function () { return null; })
+          ? self.fetchWords(self.draftCategory).catch(function () { return null; })
           : Promise.resolve(null);
         return reconcile.then(function (fresh) {
           if (fresh) {
@@ -2088,7 +2176,7 @@
         // The textbook list changed (created/appended lessons/backfilled
         // meta) — reload it for the next recognition, then reset the flow.
         if (self.fetchTextbooks) {
-          self.fetchTextbooks('english').catch(function () { return null; }).then(function (books) {
+          self.fetchTextbooks(self.draftCategory).catch(function () { return null; }).then(function (books) {
             if (books) {
               self.books = books;
             }
@@ -2112,7 +2200,7 @@
         // REUSE it, not create a same-named duplicate — re-point the panel
         // at the established book and say what persisted.
         var reloaded = self.fetchTextbooks
-          ? self.fetchTextbooks('english').catch(function () { return null; })
+          ? self.fetchTextbooks(self.draftCategory).catch(function () { return null; })
           : Promise.resolve(null);
         reloaded.then(function (books) {
           if (books) {
@@ -2163,7 +2251,9 @@
     if (this.bookChoice === 'new') {
       var payload = {
         name: createValues.name,
-        category: 'english',
+        // Issue #10: the new book is filed under the DRAFT's subject — a
+        // 语文 import creates a 语文 textbook, never an English one.
+        category: this.draftCategory,
         lessons: finalLessons,
       };
       META_FIELDS.forEach(function (meta) {
@@ -2253,7 +2343,7 @@
       // The snapshot serves reconciliation (raced duplicates) AND card-id
       // resolution for the edits and assignments — one fetch, three
       // honest uses (and the sticky-include lookup rides it too).
-      return self.fetchWords('english').catch(function () { return null; })
+      return self.fetchWords(self.draftCategory).catch(function () { return null; })
         .then(function (fresh) {
           if (fresh) {
             self.existingWords = fresh;
@@ -2374,6 +2464,13 @@
     clearEl(this.meaningBar);
     this.meaningGenBtn = null;
     this.meaningGenLabel = null;
+    // Issue #10: the supplement generates ENGLISH-style glosses — a 语文
+    // draft's meaning column is the material's own pinyin/annotation
+    // (empty is legal, 不强制英语式释义), so the affordance never mounts
+    // for a Chinese draft.
+    if (this.draftCategory === 'chinese') {
+      return;
+    }
     if (!this.generateMeanings || !global.supplementWords || !this.rows.length) {
       return;
     }

@@ -13,7 +13,7 @@
  * so the view structurally cannot show word surfaces for them):
  *   list row: { lesson_id, created_at, word_count, stage, kind,
  *               completed, unchecked, save_status,
- *               correct, wrong, unconfirmed }
+ *               correct, wrong, unconfirmed, category }
  *   detail:   the summary row plus, for COMPLETED lessons:
  *               words:        [{word, meaning, example}]
  *               results:      [{word, correct, manual?, hints,
@@ -24,6 +24,10 @@
  *             (words/results/save_receipts are ABSENT for in-progress
  *             lessons — the summary IS the whole response; emptiness is
  *             data-driven, never shape-guessed.)
+ *   category (Issue #10) is the row's subject ("english"/"chinese") —
+ *   rendered as the SAME 英语/中文 badge the browse view uses, read from
+ *   this field and NEVER parsed out of the lesson id. Absent (a pre-#10
+ *   payload) renders no badge.
  *
  * Honest-copy contract (verbatim strings, ROADMAP 成功标准 3):
  *   save_status four states (server receipt truth — NEVER inferred from
@@ -72,6 +76,12 @@
     lesson: '到期复习',
     practice: '加练',
     unknown: '类型待核实'
+  };
+
+  /** Subject badge copy (Issue #10) — the browse view's 英语/中文 pair. */
+  var SUBJECT_COPY = {
+    english: '英语',
+    chinese: '中文'
   };
 
   /** Verbatim receipt-kind copy (the four submission endpoints). */
@@ -231,11 +241,27 @@
   };
 
   /**
-   * One list row (a full-row button): 日期 + kind badge + 词数, then the
-   * honest payload — completed rows show the judgement counts (and the
-   * 未核对 flag), in-progress rows show ONLY the stage summary. The
-   * save chip renders on completed rows: a lesson still in the room has
-   * nothing saved yet, and 「保存状态未知（历史记录）」 would be a lie
+   * Subject badge (Issue #10): the shared 英语/中文 pill, rendered from the
+   * row's category field. null when the payload carries no known subject
+   * (a pre-#10 summary) — the row then renders exactly as it did before.
+   */
+  LessonsView.prototype.buildSubjectBadge = function (category) {
+    if (!Object.prototype.hasOwnProperty.call(SUBJECT_COPY, category)) {
+      return null;
+    }
+    var badge = document.createElement('span');
+    badge.className = 'badge badge-' + (category === 'chinese' ? 'chinese' : 'english');
+    badge.setAttribute('data-coding', category);
+    badge.textContent = SUBJECT_COPY[category];
+    return badge;
+  };
+
+  /**
+   * One list row (a full-row button): 日期 + kind badge + 学科徽章 + 词数,
+   * then the honest payload — completed rows show the judgement counts
+   * (and the 未核对 flag), in-progress rows show ONLY the stage summary.
+   * The save chip renders on completed rows: a lesson still in the room
+   * has nothing saved yet, and 「保存状态未知（历史记录）」 would be a lie
    * about it.
    */
   LessonsView.prototype.buildListRow = function (item) {
@@ -255,6 +281,10 @@
     kind.textContent = KIND_COPY[item.kind] || KIND_COPY.unknown;
     top.appendChild(day);
     top.appendChild(kind);
+    var subject = this.buildSubjectBadge(item.category);
+    if (subject) {
+      top.appendChild(subject);
+    }
 
     var mid = document.createElement('span');
     mid.className = 'lesson-row-mid';
@@ -429,6 +459,10 @@
     kind.textContent = KIND_COPY[detail.kind] || KIND_COPY.unknown;
     meta.appendChild(day);
     meta.appendChild(kind);
+    var subject = this.buildSubjectBadge(detail.category);
+    if (subject) {
+      meta.appendChild(subject);
+    }
     if (completed) {
       meta.appendChild(this.buildSaveChip(detail.save_status, true));
       if (detail.unchecked) {

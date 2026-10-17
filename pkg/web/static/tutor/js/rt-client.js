@@ -284,6 +284,11 @@
     // sets it BEFORE connect(); absent/invalid normalizes server-side to
     // student, so a page that never sets it stays safe by default.
     this.initMode = null;
+    // Issue #10: classroom subject sent in session_init
+    // ("english"|"chinese"). The page sets it BEFORE connect(); absent
+    // normalizes server-side to english, so every pre-#10 bookmark stays
+    // on the English classroom.
+    this.initCategory = null;
     // 13.1-05 D-11: practice flag sent in session_init (「再练一组」). The
     // page sets it BEFORE connect() for ONE practice session; the field is
     // left false by every flow that never touches it (server-side absent ==
@@ -333,6 +338,7 @@
         audio: UPLINK_AUDIO_SPEC,
         mode: self.initMode || 'student'
       };
+      if (self.initCategory) initMsg.category = self.initCategory; // Issue #10
       if (self.initPractice === true) initMsg.practice = true; // 13.1-05 D-11
       self.sendJSON(initMsg);
     };

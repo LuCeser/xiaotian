@@ -34,16 +34,23 @@ const dueWordsLimit = 10
 //   - A nil WordSource in TurnManagerConfig means the classroom cannot
 //     start: session_init answers lesson_unavailable (the honest degraded
 //     state until 13-10 wires the adapter).
+//
+// Category (Issue #10): both methods take the classroom's subject
+// ("english"/"chinese") so the due fetch and the review write scope to the
+// SAME vocabulary category the session was opened under — the fetch never
+// hands the 语文 classroom English words, and the review never lands a
+// Chinese word's history on the English column (the script's --category
+// default is english; omitting it was the AC4 defect this seam closes).
 type WordSource interface {
-	// FetchDueWords returns up to limit due vocabulary cards. Zero cards is
-	// a legal result (no due words today), not an error.
-	FetchDueWords(ctx context.Context, limit int) ([]lesson.Word, error)
-	// SubmitReview writes one review batch (word → good/hard/again/easy
-	// rating, the pybridge ReviewOpts.Results vocabulary) and reports what
-	// ACTUALLY happened: partial and zero updates can accompany a nil
-	// error, so callers must branch on the returned sets, never assume
-	// full success from err == nil.
-	SubmitReview(ctx context.Context, results map[string]string) (ReviewWriteResult, error)
+	// FetchDueWords returns up to limit due vocabulary cards in category.
+	// Zero cards is a legal result (no due words today), not an error.
+	FetchDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error)
+	// SubmitReview writes one review batch in category (word →
+	// good/hard/again/easy rating, the pybridge ReviewOpts.Results
+	// vocabulary) and reports what ACTUALLY happened: partial and zero
+	// updates can accompany a nil error, so callers must branch on the
+	// returned sets, never assume full success from err == nil.
+	SubmitReview(ctx context.Context, results map[string]string, category string) (ReviewWriteResult, error)
 }
 
 // ReviewWriteResult is the actual outcome of one review write, reported as
@@ -279,8 +286,14 @@ type DictationTutor struct {
 	perWordOutcome map[int]string
 	perWordHints   map[int]int // per-word hint request count (U-9, 2026-10-06)
 	lessonID       string
-	shortHistory   []historyRound // capped deque, oldest dropped (last 4 rounds)
-	words          []lesson.Word
+	// category is the ROW's subject (Issue #10), normalized at bind: the
+	// review writes ride it so a SubmitReview batch always lands on the
+	// vocabulary column the lesson was actually taught in — including the
+	// close-path fallback, which runs after the session's own category is
+	// irrelevant and only the row remains.
+	category     string
+	shortHistory []historyRound // capped deque, oldest dropped (last 4 rounds)
+	words        []lesson.Word
 	// checkVerdicts caches the stored verdict list for rendering/announce
 	// purposes — NOT the authority: the lessons row is. Every write goes
 	// through the executor and resyncs this cache from the returned row
@@ -335,6 +348,7 @@ type DictationTutor struct {
 func newDictationTutor(l lesson.Lesson) *DictationTutor {
 	return &DictationTutor{
 		lessonID:       l.LessonID,
+		category:       lesson.NormalizeCategory(l.Category),
 		words:          l.Cards,
 		version:        l.Version,
 		currentIndex:   l.CurrentIndex,
@@ -897,6 +911,26 @@ func resolveLessonID(configured string, now time.Time) string {
 	}
 	cst := time.FixedZone("CST", 8*3600)
 	return "r0-" + now.In(cst).Format("20060102")
+}
+
+// chineseLessonIDSuffix qualifies a lesson id for the 语文 classroom
+// (Issue #10). ONE daily lesson row per subject: an English classroom and a
+// Chinese classroom on the same day (or under the same configured pinned id)
+// must never share a row — first-content-wins would hand whichever subject
+// initialized second the FIRST subject's words. The suffix keeps the r0-
+// prefix family intact (lessonKind's r0-/r0x- classification keeps working)
+// and stays inside the 64-rune lesson-id cap for every realistic id.
+const chineseLessonIDSuffix = "-chinese"
+
+// lessonIDForCategory scopes resolveLessonID's output to the classroom's
+// subject: chinese qualifies the id (daily and configured alike); english —
+// and any other value — keeps the legacy id byte-for-byte, so every
+// existing row and resume path is untouched.
+func lessonIDForCategory(configured string, now time.Time, category string) string {
+	if lesson.NormalizeCategory(category) == lesson.CategoryChinese {
+		return resolveLessonID(configured, now) + chineseLessonIDSuffix
+	}
+	return resolveLessonID(configured, now)
 }
 
 // ---------------------------------------------------------------------------

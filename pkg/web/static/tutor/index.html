@@ -105,7 +105,7 @@
     (registerProcessor scope has no AudioWorkletProcessor under a plain
     script tag; loading it here would throw and break the page).
   -->
-  <script src="js/rt-client.js?v=20261012capture-fix"></script>
+  <script src="js/rt-client.js?v=20261016a"></script>
   <script src="js/rt-capture.js?v=20261012capture-fix"></script>
   <script src="js/rt-playback.js?v=20261008a"></script>
   <script src="js/rt-photo.js?v=20261008a"></script>
@@ -161,8 +161,17 @@
       // session_init via client.initMode; the SERVER is the masking
       // authority (13.1-02): this page renders only what it was sent and
       // never fills in a word it did not receive.
-      var mode = new URLSearchParams(window.location.search).get('mode') === 'test' ? 'test' : 'student';
+      var pageQuery = new URLSearchParams(window.location.search);
+      var mode = pageQuery.get('mode') === 'test' ? 'test' : 'student';
       client.initMode = mode;
+      // ----- classroom subject (Issue #10) -------------------------------------
+      // Only the exact value "chinese" opens the 语文词语 classroom; anything
+      // else — including absent — stays the English classroom (the server
+      // normalizes the same way, the same deny-by-default shape as mode).
+      // The subject rides session_init via client.initCategory and scopes
+      // the due fetch, the review writes and the lesson row; session_ready
+      // echoes the row's subject back.
+      client.initCategory = pageQuery.get('category') === 'chinese' ? 'chinese' : 'english';
 
       // ----- check-stage state (13.1-01) --------------------------------------
       // verdicts is a server-echo mirror ONLY: it is written by
