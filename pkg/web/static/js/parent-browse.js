@@ -324,11 +324,20 @@
     // modal from the toolbar and the 批量指定 modal from the bulk bar.
     this.onManageTextbooks = options.onManageTextbooks || null;
     this.onAssignTextbook = options.onAssignTextbook || null;
+    // Issue #11: the unified content view's 古诗 page — the whole-poem
+    // list, the explicit attribution write and the textbook list the
+    // assign modal reads. Absent fetchPoems ⇒ the 类型 filter never
+    // mounts and the view stays exactly the pre-#11 词语 page.
+    this.fetchPoems = options.fetchPoems || null;
+    this.assignPoem = options.assignPoem || null;
+    this.fetchTextbooks = options.fetchTextbooks || null;
 
     this.container = container;
     this.category = '';   // '' = 全部 | 'english' | 'chinese'
+    this.type = 'words';  // 'words' | 'poems' (Issue #11, default 词语)
     this.query = '';
     this.words = [];
+    this.poems = [];
     this.units = [];
     this.fetchSeq = 0;    // stale-response guard for debounced refetches
     this.debounceTimer = null;
@@ -391,6 +400,33 @@
     toolbar.appendChild(searchBox);
     toolbar.appendChild(pills);
 
+    // Issue #11: the unified content view's 类型 filter — 词语 (the
+    // existing page) | 古诗. Mounts only when the poem list handler is
+    // wired; otherwise the toolbar stays exactly the pre-#11 shape.
+    if (typeof this.fetchPoems === 'function') {
+      var typePills = document.createElement('div');
+      typePills.className = 'category-pills type-pills';
+      typePills.setAttribute('role', 'group');
+      typePills.setAttribute('aria-label', '类型筛选');
+      this.typePillButtons = [];
+      [
+        { value: 'words', text: '词语' },
+        { value: 'poems', text: '古诗' },
+      ].forEach(function (pill) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pill' + (pill.value === 'words' ? ' active' : '');
+        btn.textContent = pill.text;
+        btn.setAttribute('aria-pressed', pill.value === 'words' ? 'true' : 'false');
+        btn.addEventListener('click', function () {
+          self.setType(pill.value);
+        });
+        self.typePillButtons.push({ value: pill.value, btn: btn });
+        typePills.appendChild(btn);
+      });
+      toolbar.appendChild(typePills);
+    }
+
     // Issue #4: the 教材管理 entry rides the toolbar (textbook entities,
     // lesson order and learned progress all live behind it).
     if (typeof this.onManageTextbooks === 'function') {
@@ -407,6 +443,7 @@
 
     var bulk = document.createElement('div');
     bulk.className = 'participation-bulk';
+    this.bulkBar = bulk;
     this.selectionCount = document.createElement('span');
     this.selectionCount.className = 'selection-count';
     this.selectionCount.textContent = '未选择';
@@ -542,13 +579,50 @@
   };
 
   /**
-   * Re-fetch words + unit counts and re-render. The sequence token
+   * setType (Issue #11) — switch the unified content view between the
+   * 词语 page and the 古诗 page. The bulk participation bar is a WORD
+   * surface only (poems never enter the dictation selection), and the
+   * search placeholder follows the page so the q contract stays honest.
+   */
+  BrowseView.prototype.setType = function (value) {
+    if (this.type === value) {
+      return;
+    }
+    this.type = value;
+    (this.typePillButtons || []).forEach(function (pill) {
+      var active = pill.value === value;
+      pill.btn.classList.toggle('active', active);
+      pill.btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    this.bulkBar.hidden = value !== 'words';
+    this.searchInput.placeholder = value === 'poems'
+      ? '搜索诗题、作者或诗句' : '搜索单词或意思';
+    this.selectedIds = {};
+    this.refresh();
+  };
+
+  /**
+   * Re-fetch the current type's list and re-render. The sequence token
    * drops stale responses when a debounced search races a pill switch.
    */
   BrowseView.prototype.refresh = function () {
     var seq = ++this.fetchSeq;
     this.renderSkeleton();
     var self = this;
+    if (this.type === 'poems') {
+      return this.fetchPoems(this.category, this.query).then(function (poems) {
+        if (seq !== self.fetchSeq) {
+          return;
+        }
+        self.poems = Array.isArray(poems) ? poems : [];
+        self.render();
+      }).catch(function (err) {
+        if (seq !== self.fetchSeq) {
+          return;
+        }
+        self.renderError(err);
+      });
+    }
     return Promise.all([
       this.fetchWords(this.category, this.query),
       this.fetchUnits(this.category),
@@ -605,28 +679,60 @@
   BrowseView.prototype.render = function () {
     clearContainer(this.listHost);
 
+    // Issue #11: the 古诗 page renders whole works — no selection, no
+    // bulk bar, no dictation surfaces (poems are not cards).
+    if (this.type === 'poems') {
+      if (!this.poems.length) {
+        this.renderEmptyState();
+        return;
+      }
+      var self = this;
+      var note = document.createElement('p');
+      note.className = 'list-note';
+      note.textContent = '古诗按整首保存，学习范围随教材已学进度或手动加入生效；古诗课堂将在后续更新开放，暂不支持默写。';
+      this.listHost.appendChild(note);
+      this.poems.forEach(function (poem) {
+        self.listHost.appendChild(self.buildPoemCard(poem));
+      });
+      return;
+    }
+
     if (!this.words.length) {
       this.renderEmptyState();
       return;
     }
 
     var groups = this.groupWords();
-    var self = this;
+    var self2 = this;
     groups.forEach(function (group) {
-      self.listHost.appendChild(self.buildGroup(group));
+      self2.listHost.appendChild(self2.buildGroup(group));
     });
   };
 
   /**
    * Empty states (UI Considerations empty/library + empty/search):
    * zero words → 词库还是空的 + guidance copy; no matches → 没有找到
-   * 「{q}」相关的单词 + 换个关键词试试.
+   * 「{q}」相关的单词 + 换个关键词试试. Issue #11: the 古诗 page carries
+   * its own pair (still empty / no poem matched).
    */
   BrowseView.prototype.renderEmptyState = function () {
     var title = document.createElement('p');
     title.className = 'list-empty list-empty-title';
     var hint = document.createElement('p');
     hint.className = 'list-empty list-empty-hint';
+
+    if (this.type === 'poems') {
+      if (this.query) {
+        title.textContent = '没有找到「' + this.query + '」相关的古诗';
+        hint.textContent = '换个关键词试试，或清空搜索看全部。';
+      } else {
+        title.textContent = '还没有古诗';
+        hint.textContent = '在「照片导入」里拍一张带古诗的语文页面，核对后整首保存。';
+      }
+      this.listHost.appendChild(title);
+      this.listHost.appendChild(hint);
+      return;
+    }
 
     if (this.query) {
       title.textContent = '没有找到「' + this.query + '」相关的单词';
@@ -919,6 +1025,265 @@
     row.appendChild(participationLabel);
     row.appendChild(actions);
     return row;
+  };
+
+  // ------------------------------------------------------------------
+  // Issue #11 — the unified content view's 古诗 page. A poem renders as
+  // ONE whole work (title, author, ordered lines) with its attribution
+  // chips and the scope verdict — but NONE of the word dictation
+  // surfaces: no selection checkbox, no 加入默写范围 toggle, no bulk
+  // bar. Poems are not cards; the poem classroom is the NEXT task.
+  // ------------------------------------------------------------------
+
+  /** Parent-facing label for one poem's scope_reason (management state
+   *  only — the wording never claims 可完成背默). */
+  function poemScopeLabel(reason, inScope) {
+    if (reason === 'included') {
+      return '已加入学习范围（手动）';
+    }
+    if (reason === 'learned') {
+      return '已学课次内，随进度在范围内';
+    }
+    if (reason === 'progress_pending') {
+      return '课次尚未学到，暂不在学习范围';
+    }
+    // supplementary (or anything unknown): no attribution at all.
+    return inScope ? '无教材归属（补充内容）' : '无教材归属';
+  }
+
+  /**
+   * buildPoemCard — one whole poem: title + author header, the ordered
+   * verse lines as one block (分行和顺序是作品本身的结构), the category
+   * badge, attribution chips and the scope verdict. The single action is
+   * 管理归属 (POST /poems/{id}/assign) — mounted only when both the
+   * assign write and the textbook list are wired.
+   */
+  BrowseView.prototype.buildPoemCard = function (poem) {
+    var self = this;
+    var card = document.createElement('div');
+    card.className = 'poem-card';
+    card.setAttribute('data-poem-id', String(poem.id));
+    card.setAttribute('data-poem-title', poem.title || '');
+
+    var head = document.createElement('div');
+    head.className = 'poem-head';
+
+    var title = document.createElement('span');
+    title.className = 'poem-title';
+    title.textContent = poem.title || '（无诗题）';
+    head.appendChild(title);
+
+    if (poem.author) {
+      var author = document.createElement('span');
+      author.className = 'poem-author';
+      author.textContent = poem.author;
+      head.appendChild(author);
+    }
+
+    var badge = document.createElement('span');
+    badge.className = 'badge badge-' + (poem.category === 'chinese' ? 'chinese' : 'english');
+    badge.setAttribute('data-coding', poem.category);
+    badge.textContent = poem.category === 'chinese' ? '中文' : '英语';
+    head.appendChild(badge);
+
+    var scope = document.createElement('span');
+    scope.className = 'poem-scope poem-scope-' +
+      (poem.scope_reason || 'supplementary') +
+      (poem.in_scope ? ' poem-scope-in' : '');
+    scope.textContent = poemScopeLabel(poem.scope_reason, poem.in_scope);
+    head.appendChild(scope);
+
+    if (this.assignPoem && this.fetchTextbooks) {
+      var manageBtn = document.createElement('button');
+      manageBtn.type = 'button';
+      manageBtn.className = 'row-action poem-manage-btn';
+      manageBtn.textContent = '管理归属';
+      manageBtn.addEventListener('click', function () {
+        self.openAssignPoemModal(poem);
+      });
+      head.appendChild(manageBtn);
+    }
+
+    card.appendChild(head);
+
+    // The ordered verse lines: one <p> per line keeps the work's own
+    // 分行和顺序 (never a joined blob, never re-orderable here).
+    var lines = document.createElement('div');
+    lines.className = 'poem-lines';
+    (poem.lines || []).forEach(function (line) {
+      var p = document.createElement('p');
+      p.className = 'poem-line';
+      p.textContent = line;
+      lines.appendChild(p);
+    });
+    card.appendChild(lines);
+
+    // Attribution chips — the word row's chip shape, plus a 手动 marker
+    // on assignments the parent explicitly included.
+    (poem.textbooks || []).forEach(function (entry) {
+      var chip = document.createElement('span');
+      chip.className = 'textbook-chip' + (entry.lesson ? '' : ' textbook-chip-pending');
+      chip.textContent = (entry.name || '？') +
+        (entry.lesson ? ('·' + entry.lesson) : '·待确认') +
+        (entry.includeInScope ? '（手动加入）' : '');
+      chip.title = entry.includeInScope
+        ? '已手动加入学习范围：无论进度如何都在范围内'
+        : (entry.lesson
+          ? '教材课次归属：' + (entry.name || '') + '（随已学进度进入范围）'
+          : '课次待确认：暂不进入学习范围，确认课次或手动加入后生效');
+      card.appendChild(chip);
+    });
+
+    return card;
+  };
+
+  /**
+   * openAssignPoemModal — the 古诗 page's explicit attribution management
+   * (归属与进度管理): pick a textbook (the poem's OWN subject's books),
+   * set the lesson and the explicit include together — POST
+   * /poems/{id}/assign carries the whole desired state (the endpoint's
+   * contract). A book-less subject or a failed list degrades honestly:
+   * the modal says so instead of guessing.
+   */
+  BrowseView.prototype.openAssignPoemModal = function (poem) {
+    var self = this;
+
+    openModal({
+      title: '管理古诗归属',
+      build: function (body, actions, close) {
+        var form = document.createElement('form');
+        form.className = 'modal-form';
+        form.noValidate = true;
+
+        var poemLine = document.createElement('p');
+        poemLine.className = 'modal-message';
+        poemLine.textContent = '「' + (poem.title || '（无诗题）') + '」' +
+          (poem.author ? '（' + poem.author + '）' : '');
+        form.appendChild(poemLine);
+
+        var bookField = document.createElement('div');
+        var bookLabel = document.createElement('label');
+        bookLabel.className = 'form-label';
+        bookLabel.textContent = '教材';
+        var bookSelect = document.createElement('select');
+        bookSelect.className = 'form-input';
+        bookSelect.setAttribute('aria-label', '教材');
+        var loadingOption = document.createElement('option');
+        loadingOption.textContent = '读取教材中…';
+        bookSelect.appendChild(loadingOption);
+        bookField.appendChild(bookLabel);
+        bookField.appendChild(bookSelect);
+        form.appendChild(bookField);
+
+        var lessonField = buildModalField('课次', 'poem-lesson-input', false);
+        lessonField.input.value = (poem.textbooks && poem.textbooks.length)
+          ? (poem.textbooks[0].lesson || '') : '';
+        form.appendChild(lessonField.field);
+
+        var includeField = document.createElement('div');
+        includeField.className = 'form-field';
+        var includeLabel = document.createElement('label');
+        includeLabel.className = 'participation-toggle';
+        var include = document.createElement('input');
+        include.type = 'checkbox';
+        include.checked = !!(poem.textbooks && poem.textbooks[0] &&
+          poem.textbooks[0].includeInScope);
+        var includeText = document.createElement('span');
+        includeText.textContent = '手动加入学习范围（不受已学进度限制）';
+        includeLabel.appendChild(include);
+        includeLabel.appendChild(includeText);
+        includeField.appendChild(includeLabel);
+        form.appendChild(includeField);
+
+        var error = document.createElement('p');
+        error.className = 'form-error';
+        error.setAttribute('aria-live', 'polite');
+        form.appendChild(error);
+
+        // The textbook list rides the poem's OWN subject; a failed load
+        // keeps the modal open with its reason (never a fabricated
+        // empty list).
+        self.fetchTextbooks(poem.category || '').then(function (books) {
+          clearContainer(bookSelect);
+          (books || []).forEach(function (book) {
+            var opt = document.createElement('option');
+            opt.value = String(book.id);
+            opt.textContent = book.name;
+            bookSelect.appendChild(opt);
+          });
+          if (!books || !books.length) {
+            var none = document.createElement('option');
+            none.value = '';
+            none.textContent = '（该学科还没有教材）';
+            bookSelect.appendChild(none);
+            bookSelect.disabled = true;
+            error.textContent = '该学科还没有教材，请先在「教材管理」中建立教材。';
+            return;
+          }
+          // Preselect the poem's current attribution when present.
+          if (poem.textbooks && poem.textbooks.length) {
+            bookSelect.value = String(poem.textbooks[0].id);
+          }
+        }).catch(function (err) {
+          clearContainer(bookSelect);
+          var failed = document.createElement('option');
+          failed.value = '';
+          failed.textContent = '（教材读取失败）';
+          bookSelect.appendChild(failed);
+          bookSelect.disabled = true;
+          error.textContent = '教材读取失败：' + errorMessage(err);
+        });
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = '取消';
+        cancelBtn.addEventListener('click', close);
+
+        var saveBtn = buildLoadingButton('保存归属', 'btn btn-primary');
+        saveBtn.type = 'submit';
+
+        actions.appendChild(cancelBtn);
+        actions.appendChild(saveBtn);
+        form.appendChild(actions);
+        body.appendChild(form);
+
+        function handleSave() {
+          if (saveBtn.disabled) {
+            return;
+          }
+          error.textContent = '';
+          var bookId = parseInt(bookSelect.value, 10);
+          if (!bookId) {
+            error.textContent = '请选择教材（或先在「教材管理」中建立教材）';
+            return;
+          }
+          setLoading(saveBtn, true);
+          self.assignPoem(poem.id, {
+            textbook_id: bookId,
+            lesson: lessonField.input.value.trim(),
+            includeInScope: include.checked,
+          }).then(function () {
+            close();
+            toast('已保存古诗归属', 'success');
+            self.refresh();
+            self.onMutated();
+          }).catch(function (err) {
+            setLoading(saveBtn, false);
+            toast('保存失败：' + errorMessage(err) + '。内容没有保存，请检查后重试。', 'error');
+          });
+        }
+
+        saveBtn.addEventListener('click', function (event) {
+          event.preventDefault();
+          handleSave();
+        });
+        form.addEventListener('submit', function (event) {
+          event.preventDefault();
+          handleSave();
+        });
+      },
+    });
   };
 
   /**

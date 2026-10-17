@@ -26,7 +26,7 @@ func newMeaningHandler(t *testing.T, reply string, chatErr error) (http.Handler,
 	})
 	_, lessons, practice, receipts := newLessonTestStores(t)
 	return NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-		nil, gen, infra.PythonConfig{}, infra.NewNoOpLogger()), &prompts
+		nil, gen, nil, infra.PythonConfig{}, infra.NewNoOpLogger()), &prompts
 }
 
 func postMeanings(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
@@ -41,7 +41,7 @@ func TestGenerateWordMeanings(t *testing.T) {
 	t.Run("nil generator returns 503 generation_unavailable", func(t *testing.T) {
 		_, lessons, practice, receipts := newLessonTestStores(t)
 		h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-			nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+			nil, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 		rec := postMeanings(t, h, `{"words":["apple"],"textbook":{}}`)
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d, want 503 (body=%s)", rec.Code, rec.Body.String())

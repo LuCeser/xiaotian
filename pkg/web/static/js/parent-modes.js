@@ -704,6 +704,10 @@
    *       the Issue #4 textbook surfaces, passed through to PhotoAddForm's
    *       Issue #5 attribution panel. All-or-nothing: absent ⇒ the panel
    *       degrades to the plain supplementary flow.
+   *   submitPoems(payload) / fetchPoems(category) — the Issue #11 whole-
+   *       poem commit + snapshot surfaces, passed through to PhotoAddForm
+   *       (POST/GET /api/v1/poems). Absent ⇒ the poem cards degrade with
+   *       their reason; the 词语 flow is untouched.
    */
   function AddCard(container, options) {
     options = options || {};
@@ -803,6 +807,11 @@
         recognizePhoto: recognizePhoto,
         submitWords: submitWords,
         fetchWords: fetchWords,
+        // Issue #11: the whole-poem commit + snapshot surfaces (absent ⇒
+        // the poem cards degrade with their reason; the 词语 flow keeps
+        // working — poems are an additive surface on the same mixed page).
+        submitPoems: options.submitPoems || null,
+        fetchPoems: options.fetchPoems || null,
         textbookDeps: textbookDeps,
         // Issue #8: the missing-meaning supplement call (absent ⇒ the
         // affordance never mounts; the import flow is unchanged).

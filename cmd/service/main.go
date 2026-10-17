@@ -33,6 +33,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/fsrs"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
+	"github.com/xiaotian/home-tutor-agent/pkg/poem"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
@@ -297,6 +298,26 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
+	// Issue #11: the poem tables (poems/poem_assignments) — Go-owned like
+	// the lesson tables, migrated on the same shared pool. The store powers
+	// the /api/v1/poems routes (whole-poem commit, content view, explicit
+	// attribution management).
+	if err = poem.Migrate(ctx, db); err != nil {
+		logger.Error("poem migration failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	poemStore, err := poem.NewStore(db, logger)
+	if err != nil {
+		logger.Error("poem store construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+
 	rtLessonExec, err := rt.NewLessonTools(lessonStore, lessonExec)
 	if err != nil {
 		logger.Error("rt lesson tools construction failed",
@@ -752,7 +773,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// the word-list photo recognizer (nil without a vision key — the
 		// recognize route then answers 503, keeping the endpoint honest).
 		publicMux.Handle("/api/v1/", http.StripPrefix("/api/v1",
-			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, meaningGen, cfg.Python, logger)))
+			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, meaningGen, poemStore, cfg.Python, logger)))
 		logger.Info("api v1 mounted",
 			infra.F("component", "infra.main"),
 			infra.F("route", "/api/v1/"),
