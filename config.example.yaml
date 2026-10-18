@@ -41,7 +41,9 @@ server:
   addr: "0.0.0.0:8080"
   # Slowloris defences (D-22).
   readTimeout: 10s
-  writeTimeout: 10s
+  # Must exceed the photo vision deadline (60s) plus write-back margin,
+  # else the response is cut off after OCR already succeeded (issue #42).
+  writeTimeout: 75s
   # Localhost-only health/metrics listener. Kept separate from the public
   # addr so probe traffic does not compete with session traffic.
   healthAddr: "127.0.0.1:8081"

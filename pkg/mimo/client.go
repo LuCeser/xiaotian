@@ -410,9 +410,14 @@ func (c *mimoClient) ChatVision(ctx context.Context, systemPrompt, userPrompt st
 
 // buildChatVisionRequest assembles the vision request. ChatOptions are
 // applied to a ChatRequest first so the shared option vocabulary
-// (WithChatModel/WithMaxTokens/WithTemperature) configures the vision
+// (WithChatModel/WithMaxTokens/WithThinkingDisabled) configures the vision
 // request's matching fields; Temperature is dropped because the vision model
 // runs in thinking mode server-side (same rationale as WithTemperature's doc).
+// Thinking MUST be passed through: the model enables it by default and then
+// burns the whole budget on reasoning_content, returning an empty content
+// (issue #42), so WithThinkingDisabled would otherwise be a no-op here.
+// ChatRequest has no MaxCompletionTokens field, so the MaxTokens set by
+// WithMaxTokens is also mapped onto the official max_completion_tokens field.
 func (c *mimoClient) buildChatVisionRequest(systemPrompt, userPrompt string, image []byte, mimeType string, opts ...ChatOption) ChatVisionRequest {
 	base := ChatRequest{Model: DefaultChatModel}
 	for _, opt := range opts {
@@ -433,7 +438,9 @@ func (c *mimoClient) buildChatVisionRequest(systemPrompt, userPrompt string, ima
 				{Type: "text", Text: userPrompt},
 			}},
 		},
-		MaxTokens: base.MaxTokens,
+		MaxTokens:           base.MaxTokens,
+		Thinking:            base.Thinking,
+		MaxCompletionTokens: base.MaxTokens,
 	}
 }
 

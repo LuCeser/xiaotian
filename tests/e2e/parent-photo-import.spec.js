@@ -301,6 +301,59 @@ test('classroom: photo-imported words are selected for dictation', async ({ page
 });
 
 // ---------------------------------------------------------------------------
+// Issue #42 — the 单词 column of the review table must stay VISUALLY
+// readable. The acceptance run caught an auto-table-layout collapse: the
+// width:100% inputs have a near-zero min-content, so the fixed-size cells
+// (nowrap badge, status chip) starved the 单词 track down to 34px (an 18px
+// input) while every DOM-value assertion stayed green — the words were in
+// the DOM the whole time, just invisible. Discriminators here are
+// GEOMETRY, not values: a column narrower than the floor fails even
+// though toHaveValue('ice cream') keeps passing.
+// ---------------------------------------------------------------------------
+test('review rows: the 单词 column stays visually readable (Issue #42 width regression)', async ({ page, request }) => {
+  await deleteUnit(request, UNIT_IMPORT);
+  try {
+    await openPhotoTab(page);
+    await recognize(page, FIXTURE_MAIN);
+    const row = (i) => page.locator(`.photo-row[data-row-index="${i}"]`);
+
+    /** Geometry of one row's word/meaning inputs + the column headers. */
+    await row(2).scrollIntoViewIfNeeded();
+    const geo = await page.evaluate(() => {
+      const pick = (sel) => document.querySelector(sel);
+      const word = pick('.photo-row input[aria-label="单词 第 3 行"]');
+      const meaning = pick('.photo-row input[aria-label="释义 第 3 行"]');
+      const ths = Array.from(document.querySelectorAll('.photo-preview-table thead th'));
+      return {
+        wordW: word.getBoundingClientRect().width,
+        wordH: word.getBoundingClientRect().height,
+        meaningW: meaning.getBoundingClientRect().width,
+        cols: ths.map((th) => ({ label: th.textContent.trim(), w: th.getBoundingClientRect().width })),
+        tableW: pick('.photo-preview-table').getBoundingClientRect().width,
+      };
+    });
+    const col = (name) => geo.cols.find((c) => c.label === name);
+
+    // The 34px-collapse regression floor: the word INPUT must show real
+    // text (~116px under the fixed layout; 80px leaves margin for the
+    // 4-column mode and font tweaks without letting a collapse pass).
+    expect(geo.wordW, '单词 input visible width >= 80px').toBeGreaterThanOrEqual(80);
+    expect(geo.wordH, 'in-cell touch floor stays 44px (Issue #18)').toBeGreaterThanOrEqual(44);
+    // The column track itself keeps its floor and never becomes the
+    // narrowest content column...
+    expect(col('单词').w, '单词 column >= 120px').toBeGreaterThanOrEqual(120);
+    // ...while 释义（原文） stays the visual center (widest column) — the
+    // fixed-layout contract that makes the split deterministic.
+    expect(col('释义（原文）').w, '释义 stays the widest column').toBeGreaterThan(col('单词').w);
+    expect(geo.meaningW).toBeGreaterThan(80);
+    // The table never shrinks below its scroll floor.
+    expect(geo.tableW, 'table keeps its 640px min-width floor').toBeGreaterThanOrEqual(640);
+  } finally {
+    await deleteUnit(request, UNIT_IMPORT);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Issue #18 — the review rows' inline checkboxes/radios meet the 44px
 // touch floor. The input keeps its 18px visual size; the hit area is the
 // wrapping <label> (Chrome zeroes USED padding on appearance:auto

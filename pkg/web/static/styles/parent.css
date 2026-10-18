@@ -680,6 +680,52 @@ body {
   vertical-align: top;
 }
 
+/* Issue #42: the auto table layout collapsed the 单词 column to 34px — a
+   width:100% text input has a near-zero min-content, so the fixed-size
+   content (nowrap badge + 取消补充, the status chip) ate the track and the
+   inputs starved. Fixed layout makes the split deterministic at every
+   panel width: the px floors below are honoured, and 释义 — the only
+   auto-width column — takes the remainder and stays the widest column.
+   min-width 640px floors that remainder at ~180px: under the sum the
+   table overflows its scroller sideways (see the .preview-scroll rule)
+   instead of re-crushing a column — measured: 释义 hit 0px at 375px
+   without it. */
+.photo-preview-table {
+  table-layout: fixed;
+  min-width: 640px;
+}
+
+/* 加入 60px = the 44px .inline-check-hit floor + td padding (Issue #18
+   untouched). 单词 150px keeps ~116px of visible input; longer words
+   (up to ~35 chars) scroll inside the field. 课次 120px honours the
+   existing .photo-lesson-cell floor; 状态 130px fits a conflict radio
+   option (18 + gap + 6×14px text + padding ≈ 122px) on one line. In the
+   4-column (non-textbook) mode 状态 lands on the 120px nth-child(4)
+   rule — roomier, harmless. */
+.photo-preview-table th:nth-child(1) {
+  width: 60px;
+}
+
+.photo-preview-table th:nth-child(2) {
+  width: 150px;
+}
+
+.photo-preview-table th:nth-child(4) {
+  width: 120px;
+}
+
+.photo-preview-table th:nth-child(5) {
+  width: 130px;
+}
+
+/* Below the table's 640px floor the scroller takes the overflow
+   sideways instead of re-crushing a column — the phone-width escape
+   hatch; every px floor above stays the acceptance floor while
+   scrolling. */
+.photo-add-form .preview-scroll {
+  overflow-x: auto;
+}
+
 /* In-cell inputs: same field styling, tighter box for the table rows.
    44px is the nested-control touch floor (page-level fields are 60px). */
 .photo-cell-input {
@@ -1722,6 +1768,26 @@ body {
   .add-section {
     grid-column: 2;
     grid-row: 1;
+  }
+
+  /* Issue #42: the photo review table is the one wide workflow in the
+     词库 panel — five editable columns never fit a 1fr rail (and its
+     min-content was prying the fr tracks open to ~528px each, the 527px
+     constraint the acceptance run measured). While the 照片导入 tab is
+     showing (#add-panel-photo unhidden via its hidden attribute), the
+     grid collapses to a single full-width column in the DOM order the
+     <1024px layout already uses: 添加 on top, 浏览 below. The other two
+     add tabs keep the 2fr/1fr rail untouched; browsers without :has()
+     degrade to the rail + the sideways-scroll floor above, never the
+     34px collapse. */
+  .parent-panel-vocab:has(#add-panel-photo:not([hidden])) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .parent-panel-vocab:has(#add-panel-photo:not([hidden])) .add-section,
+  .parent-panel-vocab:has(#add-panel-photo:not([hidden])) .browse-section {
+    grid-column: 1;
+    grid-row: auto;
   }
 }
 
