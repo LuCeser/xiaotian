@@ -84,7 +84,7 @@ func TestWordlistPipeline_Recognize(t *testing.T) {
 			wantConfs: []float64{1},
 		},
 		{
-			name: "decoration marks around word are trimmed, mark-only word dropped",
+			name:  "decoration marks around word are trimmed, mark-only word dropped",
 			image: jpegSoi,
 			reply: `[{"word":"★library ★","meaning":"图书馆","confidence":0.9},` +
 				`{"word":"● go for a walk ","meaning":"散步","confidence":0.8},` +
@@ -427,22 +427,22 @@ func TestWordlistChinesePromptContract(t *testing.T) {
 		t.Fatalf("Recognize chinese: %v", err)
 	}
 	for _, want := range []string{
-		"词语表",         // only clear word-list entries
-		"不要拆成单个汉字",    // multi-char words stay whole
-		"中文词语",        // #47: entries' word must be a Han-carrying word
+		"词语表",          // only clear word-list entries
+		"不要拆成单个汉字",     // multi-char words stay whole
+		"中文词语",         // #47: entries' word must be a Han-carrying word
 		"不要放进 entries", // #47: English words/phrases never enter entries
-		"装饰符",         // #47: ★-style layout marks stay out of word
-		"英文单词",        // mixed-page English content is ignored
-		"拼音",          // the material's own annotation is transcribed
-		"不要求补写释义",     // no forced English-style gloss
-		"完整的古诗",       // #11: whole poems are their own array
-		"整首保存",        // #11: a poem is saved as one work
-		"保留原有分行",      // #11: line breaks and order survive
-		"不要凭记忆补写或生成",  // #11: never generate the unclear原文
-		"背诵或默写要求",     // #11: the page's explicit mark rides required
-		"不会导入",        // #11: others are display-only
-		"JSON",        // strict output contract
-		"教材",          // textbook header reading
+		"装饰符",          // #47: ★-style layout marks stay out of word
+		"英文单词",         // mixed-page English content is ignored
+		"拼音",           // the material's own annotation is transcribed
+		"不要求补写释义",      // no forced English-style gloss
+		"完整的古诗",        // #11: whole poems are their own array
+		"整首保存",         // #11: a poem is saved as one work
+		"保留原有分行",       // #11: line breaks and order survive
+		"不要凭记忆补写或生成",   // #11: never generate the unclear原文
+		"背诵或默写要求",      // #11: the page's explicit mark rides required
+		"不会导入",         // #11: others are display-only
+		"JSON",         // strict output contract
+		"教材",           // textbook header reading
 	} {
 		if !strings.Contains(fr.gotSystem, want) {
 			t.Errorf("chinese system prompt lost clause %q:\n%s", want, fr.gotSystem)
@@ -532,12 +532,12 @@ func TestWordlistTrimWordDecorations(t *testing.T) {
 		{"★library", "library"},
 		{" ※美丽● ", "美丽"},
 		{"☆ ice cream ★", "ice cream"},
-		{"ice cream", "ice cream"},   // spaces INSIDE a phrase stay
-		{"ice-cream", "ice-cream"},   // hyphen is a word character
-		{"it's", "it's"},             // apostrophe is a word character
-		{"阿·凡提", "阿·凡提"},               // interpunct inside a name stays
-		{"★★★", ""},                    // mark-only collapses to empty
-		{"＊word＊", "word"},             // fullwidth asterisk is a mark too
+		{"ice cream", "ice cream"}, // spaces INSIDE a phrase stay
+		{"ice-cream", "ice-cream"}, // hyphen is a word character
+		{"it's", "it's"},           // apostrophe is a word character
+		{"阿·凡提", "阿·凡提"},           // interpunct inside a name stays
+		{"★★★", ""},                // mark-only collapses to empty
+		{"＊word＊", "word"},         // fullwidth asterisk is a mark too
 	} {
 		if got := trimWordDecorations(tc.in); got != tc.want {
 			t.Errorf("trimWordDecorations(%q) = %q, want %q", tc.in, got, tc.want)
