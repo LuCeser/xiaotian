@@ -116,6 +116,23 @@ body[data-page="tutor"] {
 
 /* Lesson progress ---------------------------------------------------- */
 
+/* Issue #12: the whole-poem 背默 task banner — the work's identity only
+   (title · author · line count · method); the lines never render here. */
+.rt-poem {
+  background: #fdf6e8;
+  border: 1px solid #f0dcb4;
+  border-radius: 16px;
+  padding: 12px 16px;
+}
+
+.rt-poem-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #7a5a1e;
+  text-align: center;
+}
+
 .rt-progress {
   background: #ffffff;
   border-radius: 16px;

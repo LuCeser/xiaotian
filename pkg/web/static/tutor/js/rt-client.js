@@ -294,6 +294,11 @@
     // left false by every flow that never touches it (server-side absent ==
     // the daily due lesson).
     this.initPractice = false;
+    // Issue #12: whole-poem 背默 classroom id sent in session_init
+    // (poems.id, from the parent content view's 背默这首 entry). The page
+    // sets it BEFORE connect(); absent/zero keeps the word classroom —
+    // server-side the same deny-by-default normalization applies.
+    this.initPoem = 0;
   }
 
   /**
@@ -340,6 +345,7 @@
       };
       if (self.initCategory) initMsg.category = self.initCategory; // Issue #10
       if (self.initPractice === true) initMsg.practice = true; // 13.1-05 D-11
+      if (self.initPoem > 0) initMsg.poem = self.initPoem; // Issue #12
       self.sendJSON(initMsg);
     };
 

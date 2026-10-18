@@ -128,15 +128,18 @@ type poemsCommitResponse struct {
 // NEXT task, and a poem can never enter the word-dictation selection
 // (poems are not cards).
 type poemJSON struct {
-	Title       string            `json:"title"`
-	Author      string            `json:"author"`
-	Category    string            `json:"category"`
-	CreatedAt   string            `json:"created_at"`
-	ScopeReason string            `json:"scope_reason"`
-	Lines       []string          `json:"lines"`
-	Textbooks   []poem.Assignment `json:"textbooks"`
-	ID          int64             `json:"id"`
-	InScope     bool              `json:"in_scope"`
+	Title         string            `json:"title"`
+	Author        string            `json:"author"`
+	Category      string            `json:"category"`
+	CreatedAt     string            `json:"created_at"`
+	ScopeReason   string            `json:"scope_reason"`
+	NextReviewDay string            `json:"next_review_day,omitempty"`
+	Lines         []string          `json:"lines"`
+	Textbooks     []poem.Assignment `json:"textbooks"`
+	ID            int64             `json:"id"`
+	InScope       bool              `json:"in_scope"`
+	HasPractice   bool              `json:"has_practice"`
+	LastMastered  bool              `json:"last_mastered"`
 }
 
 // poemsResponse is the GET /poems envelope.
@@ -182,7 +185,9 @@ func (h *handler) listPoems(w http.ResponseWriter, r *http.Request) {
 			ID: p.ID, Title: p.Title, Author: p.Author, Category: p.Category,
 			CreatedAt: p.CreatedAt, Lines: p.Lines,
 			InScope: p.InScope, ScopeReason: p.ScopeReason,
-			Textbooks: []poem.Assignment{},
+			HasPractice: p.HasPractice, LastMastered: p.LastMastered,
+			NextReviewDay: p.NextReviewDay,
+			Textbooks:     []poem.Assignment{},
 		}
 		if p.Assignments != nil {
 			row.Textbooks = p.Assignments

@@ -468,3 +468,130 @@ func TestPipeline_ReceivesPrompts(t *testing.T) {
 		t.Errorf("system prompt should pin the JSON output contract")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ProcessLines — the Issue #12 whole-poem variant: one array entry per
+// WRITTEN VERSE LINE, positionally aligned with the poem's own order.
+// ---------------------------------------------------------------------------
+
+func TestPipeline_ProcessLines(t *testing.T) {
+	tests := []struct {
+		readerErr error
+		wantErr   error
+		name      string
+		reply     string
+		image     []byte
+		wantTexts []string
+		minConf   float64
+	}{
+		{
+			name:      "poem lines round-trip in verse order",
+			image:     jpegSoi,
+			reply:     `[{"text":"床前明月光","confidence":0.9},{"text":"疑是地上霜","confidence":0.85},{"text":"举头望明月","confidence":0.88},{"text":"低头思故乡","confidence":0.87}]`,
+			minConf:   0.6,
+			wantTexts: []string{"床前明月光", "疑是地上霜", "举头望明月", "低头思故乡"},
+		},
+		{
+			name:      "verbatim rule holds: a miswritten line transcribes as written",
+			image:     jpegSoi,
+			reply:     `[{"text":"床前明月光","confidence":0.9},{"text":"疑是地上箱","confidence":0.8}]`,
+			minConf:   0.6,
+			wantTexts: []string{"床前明月光", "疑是地上箱"},
+		},
+		{
+			name:      "unrecognized line keeps its position with empty text",
+			image:     jpegSoi,
+			reply:     `[{"text":"","confidence":0.2},{"text":"处处闻啼鸟","confidence":0.9}]`,
+			minConf:   0.6,
+			wantErr:   ErrLowConfidence,
+			wantTexts: []string{"", "处处闻啼鸟"},
+		},
+		{
+			name:    "empty image fails before reader",
+			image:   nil,
+			minConf: 0.6,
+			wantErr: ErrEmptyImage,
+		},
+		{
+			name:    "png magic rejected",
+			image:   []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A},
+			minConf: 0.6,
+			wantErr: ErrNotJPEG,
+		},
+		{
+			name:      "reader error wraps and propagates",
+			image:     jpegSoi,
+			readerErr: errors.New("upstream 500"),
+			minConf:   0.6,
+			wantErr:   errReaderFailed,
+		},
+		{
+			name:    "unparseable reply",
+			image:   jpegSoi,
+			reply:   "照片上是一首诗，但我无法逐行转录。",
+			minConf: 0.6,
+			wantErr: errUnparseableReply,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewPipeline(func(_ context.Context, _, _ string, _ []byte) (string, error) {
+				if tt.readerErr != nil {
+					return "", tt.readerErr
+				}
+				return tt.reply, nil
+			}, tt.minConf)
+
+			readings, err := p.ProcessLines(context.Background(), tt.image, []string{"床前明月光", "疑是地上霜"})
+
+			if tt.wantErr != nil {
+				if err == nil || !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ProcessLines() expected error %v, got %v", tt.wantErr, err)
+				}
+				if tt.wantErr == ErrLowConfidence {
+					wantReadings(t, readings, tt.wantTexts)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ProcessLines() unexpected error: %v", err)
+			}
+			wantReadings(t, readings, tt.wantTexts)
+		})
+	}
+}
+
+func TestPipeline_ProcessLinesNilSeam(t *testing.T) {
+	p := NewPipeline(nil, 0.6)
+	if _, err := p.ProcessLines(context.Background(), jpegSoi, []string{"春眠不觉晓"}); !errors.Is(err, errNilSeam) {
+		t.Fatalf("expected errNilSeam, got %v", err)
+	}
+}
+
+// TestPipeline_ProcessLinesPromptsCarryPoemContract — the line prompts pin
+// the per-LINE contract (never merge/split verse rows) and carry the LINE
+// count only, never the poem's own text (the transcription must not be
+// biased toward the expected original).
+func TestPipeline_ProcessLinesPromptsCarryPoemContract(t *testing.T) {
+	var gotSystem, gotUser string
+	p := NewPipeline(func(_ context.Context, system, user string, _ []byte) (string, error) {
+		gotSystem, gotUser = system, user
+		return `[{"text":"春眠不觉晓","confidence":0.9},{"text":"处处闻啼鸟","confidence":0.88}]`, nil
+	}, 0.6)
+
+	if _, err := p.ProcessLines(context.Background(), jpegSoi, []string{"春眠不觉晓", "处处闻啼鸟"}); err != nil {
+		t.Fatalf("ProcessLines() unexpected error: %v", err)
+	}
+	if !strings.Contains(gotSystem, "古诗") || !strings.Contains(gotSystem, "不要合并或拆分诗句") {
+		t.Errorf("system prompt should pin the whole-poem per-line contract: %q", gotSystem)
+	}
+	// The format example may quote SOME poem (the words prompt's apple/cat
+	// precedent); it must never carry the POEM UNDER TEST's own text.
+	if strings.Contains(gotSystem, "春眠不觉晓") || strings.Contains(gotUser, "春眠不觉晓") {
+		t.Errorf("prompts must not leak the poem under test's text: system=%q user=%q", gotSystem, gotUser)
+	}
+	if !strings.Contains(gotUser, "2") || !strings.Contains(gotUser, "行诗句") {
+		t.Errorf("user prompt should carry the line count for segmentation: %q", gotUser)
+	}
+}

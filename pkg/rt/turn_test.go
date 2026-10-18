@@ -197,6 +197,39 @@ func (f *fakeExecutor) EnsureLessonCards(_ context.Context, lessonID string, car
 	return f.lesson, nil
 }
 
+// EnsurePoemLesson (Issue #12): mirrors the real store's first-content-wins
+// insert — the in-memory row adopts the poem shape and exists from now on.
+func (f *fakeExecutor) EnsurePoemLesson(_ context.Context, lessonID string, poemID int64, lines []string) (lesson.Lesson, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensureCalls++
+	f.ensureIDs = append(f.ensureIDs, lessonID)
+	cards := make([]lesson.Word, 0, len(lines))
+	for _, line := range lines {
+		cards = append(cards, lesson.Word{Word: line})
+	}
+	if !f.exists {
+		// First content wins: a fresh row adopts the poem shape wholesale.
+		f.lesson = lesson.Lesson{
+			LessonID: lessonID, Words: lines, Cards: cards,
+			Category: lesson.CategoryChinese, PoemID: poemID, Version: 1,
+		}
+		f.exists = true
+	}
+	return f.lesson, nil
+}
+
+// LatestPoemLessonID (Issue #12): the resume probe — answers the single
+// poem row this fake knows (when it is one), else "".
+func (f *fakeExecutor) LatestPoemLessonID(_ context.Context, poemID int64) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if poemID > 0 && f.exists && f.lesson.PoemID == poemID {
+		return f.lesson.LessonID, nil
+	}
+	return "", nil
+}
+
 func (f *fakeExecutor) GetLessonState(_ context.Context, lessonID string) (lesson.Lesson, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

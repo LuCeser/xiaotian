@@ -85,6 +85,15 @@ var (
 	// WITH the record — '' on legacy rows means the English-only era and
 	// reads back as CategoryEnglish (NormalizeCategory), never as "unknown".
 	alterLessonsAddCategory = `ALTER TABLE lessons ADD COLUMN category TEXT NOT NULL DEFAULT ''`
+
+	// alterLessonsAddPoemID (Issue #12): a whole-poem 背默 classroom stamps
+	// the practiced work's poems.id here — 0 on every non-poem row (the
+	// default), and the parent records projection's join key for the poem's
+	// title/author. The lesson row IS the attempt record (its verdicts are
+	// the per-line judgment); the poem_practice_logs row written at submit is
+	// the SAVE, so a failed save must not lose the poem identity either —
+	// hence the column lives on this row, not only the log.
+	alterLessonsAddPoemID = `ALTER TABLE lessons ADD COLUMN poem_id INTEGER NOT NULL DEFAULT 0`
 )
 
 // Word is one vocabulary card carried with the lesson row: the surface word,
@@ -165,6 +174,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		{"verdicts", alterLessonsAddVerdicts},
 		{"unchecked", alterLessonsAddUnchecked},
 		{"category", alterLessonsAddCategory},
+		{"poem_id", alterLessonsAddPoemID},
 	} {
 		has, err := lessonsHasColumn(ctx, db, col.name)
 		if err != nil {
@@ -224,6 +234,12 @@ func lessonsHasColumn(ctx context.Context, db *sql.DB, name string) (bool, error
 // keyed by word index ("0", "1", …); Verdicts carries the stored check
 // verdicts in submission order; Unchecked marks a lesson that was closed
 // without finishing its check (the D-03 fallback consumer is 13.1-04).
+//
+// PoemID (Issue #12) is non-zero only on whole-poem 背默 rows: the practiced
+// poems.id whose LINES ride in Words/Cards (one line = one card, the check
+// stage's word_index space). It is the records projection's join key — the
+// poem's title/author are read from the poems table at projection time, never
+// duplicated into the row.
 type Lesson struct {
 	Outcomes     map[string]WordOutcome
 	LessonID     string
@@ -236,6 +252,7 @@ type Lesson struct {
 	Verdicts     []CheckVerdict
 	CurrentIndex int
 	Version      int
+	PoemID       int64
 	Unchecked    bool
 }
 
@@ -374,6 +391,86 @@ func (s *Store) EnsureLessonCards(ctx context.Context, lessonID string, cards []
 	return created, nil
 }
 
+// EnsurePoemLesson creates the lessons row for ONE whole-poem 背默 attempt
+// (Issue #12): the poem's ordered LINES ride as the cards (one line = one
+// card, the check stage's word_index space), the subject is always 语文
+// (poems are a Chinese content type — never parameterized), and poem_id
+// stamps the practiced work. INSERT OR IGNORE semantics identical to
+// EnsureLessonCards: first content wins, the store never rebuilds a row —
+// a poem re-attempt resolves a FRESH lesson id from the caller instead.
+func (s *Store) EnsurePoemLesson(ctx context.Context, lessonID string, poemID int64, lines []string) (Lesson, error) {
+	if lessonID == "" || poemID <= 0 || len(lines) == 0 {
+		return Lesson{}, errors.Wrap(ErrInvalidLesson, "ensure poem lesson: lesson_id, poem_id and lines must be non-empty")
+	}
+
+	cards := make([]Word, 0, len(lines))
+	words := make([]string, 0, len(lines))
+	for _, line := range lines {
+		cards = append(cards, Word{Word: line})
+		words = append(words, line)
+	}
+	cardsJSON, err := json.Marshal(cards)
+	if err != nil {
+		return Lesson{}, errors.Wrap(err, "ensure poem lesson: marshal cards")
+	}
+	wordsJSON, err := json.Marshal(words)
+	if err != nil {
+		return Lesson{}, errors.Wrap(err, "ensure poem lesson: marshal words")
+	}
+
+	if _, err = s.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO lessons (lesson_id, words, cards, category, poem_id) VALUES (?, ?, ?, ?, ?)",
+		lessonID,
+		string(wordsJSON),
+		string(cardsJSON),
+		CategoryChinese,
+		poemID,
+	); err != nil {
+		s.logger.Error("lesson ensure poem: insert failed",
+			infra.F("component", "lesson/store"),
+			infra.F("lesson_id", lessonID),
+			infra.F("poem_id", poemID),
+			infra.ErrField(err),
+		)
+		return Lesson{}, errors.Wrap(err, "ensure poem lesson: insert")
+	}
+
+	created, err := s.GetLesson(ctx, lessonID)
+	if err != nil {
+		return Lesson{}, errors.Wrap(err, "ensure poem lesson: read back")
+	}
+	return created, nil
+}
+
+// LatestPoemLessonID returns the lesson id of the poem's most recent attempt
+// row ("" when the poem has never been practiced) — the resume probe of the
+// poem classroom's session_init: an IN-FLIGHT row (stage ” or checking) is
+// resumed under its own id, a submitted one means the attempt settled and a
+// new init opens a fresh attempt. Same ORDER BY shape as ListLessons
+// (created_at DESC, lesson_id DESC as the same-second tiebreak).
+func (s *Store) LatestPoemLessonID(ctx context.Context, poemID int64) (string, error) {
+	if poemID <= 0 {
+		return "", errors.Wrap(ErrInvalidLesson, "latest poem lesson: poem_id must be positive")
+	}
+	var lessonID string
+	err := s.db.QueryRowContext(ctx,
+		"SELECT lesson_id FROM lessons WHERE poem_id = ? ORDER BY created_at DESC, lesson_id DESC LIMIT 1",
+		poemID,
+	).Scan(&lessonID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		s.logger.Error("latest poem lesson failed",
+			infra.F("component", "lesson/store"),
+			infra.F("poem_id", poemID),
+			infra.ErrField(err),
+		)
+		return "", errors.Wrap(err, "latest poem lesson")
+	}
+	return lessonID, nil
+}
+
 // decodeOutcomesJSON decodes the lessons outcomes column with legacy-default
 // tolerance: an empty raw value (a row written before the column's backfill)
 // decodes to the empty map, corrupted non-empty JSON surfaces as an error.
@@ -425,7 +522,7 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 	)
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT lesson_id, words, cards, stage, outcomes, verdicts, unchecked, current_index, version, created_at, updated_at, category FROM lessons WHERE lesson_id = ?",
+		"SELECT lesson_id, words, cards, stage, outcomes, verdicts, unchecked, current_index, version, created_at, updated_at, category, poem_id FROM lessons WHERE lesson_id = ?",
 		lessonID,
 	).Scan(
 		&l.LessonID,
@@ -440,6 +537,7 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 		&l.CreatedAt,
 		&l.UpdatedAt,
 		&l.Category,
+		&l.PoemID,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -514,6 +612,7 @@ func SummarizeLesson(l Lesson) LessonSummary {
 		CurrentIndex: l.CurrentIndex,
 		WordCount:    len(l.Cards),
 		Category:     NormalizeCategory(l.Category),
+		PoemID:       l.PoemID,
 	}
 	for _, v := range l.Verdicts {
 		if !v.Manual {
@@ -561,12 +660,16 @@ type LessonSummary struct {
 	// the parent records view renders a subject badge from it (Issue #10).
 	Category     string
 	CurrentIndex int
-	WordCount    int
-	Correct      int
-	Wrong        int
-	Unconfirmed  int
-	Unchecked    bool
-	Completed    bool
+	// PoemID is non-zero only on whole-poem 背默 rows (Issue #12) — the
+	// records projection's join key for the poem's title/author. The summary
+	// carries the id ONLY; the title never rides a per-row round trip.
+	PoemID      int64
+	WordCount   int
+	Correct     int
+	Wrong       int
+	Unconfirmed int
+	Unchecked   bool
+	Completed   bool
 }
 
 // ListLessons limit normalization — the bounds live HERE, in the store, so a
@@ -600,7 +703,7 @@ func normalizeListLessonsLimit(limit int) int {
 // wrapped error — a silently-empty verdict list would misstate the counts.
 func (s *Store) ListLessons(ctx context.Context, limit int) ([]LessonSummary, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT lesson_id, stage, unchecked, current_index, cards, verdicts, created_at, category FROM lessons ORDER BY created_at DESC, lesson_id DESC LIMIT ?",
+		"SELECT lesson_id, stage, unchecked, current_index, cards, verdicts, created_at, category, poem_id FROM lessons ORDER BY created_at DESC, lesson_id DESC LIMIT ?",
 		normalizeListLessonsLimit(limit),
 	)
 	if err != nil {
@@ -620,7 +723,7 @@ func (s *Store) ListLessons(ctx context.Context, limit int) ([]LessonSummary, er
 			verdictsJSON string
 			unchecked    int
 		)
-		if err := rows.Scan(&row.LessonID, &row.Stage, &unchecked, &row.CurrentIndex, &cardsJSON, &verdictsJSON, &row.CreatedAt, &row.Category); err != nil {
+		if err := rows.Scan(&row.LessonID, &row.Stage, &unchecked, &row.CurrentIndex, &cardsJSON, &verdictsJSON, &row.CreatedAt, &row.Category, &row.PoemID); err != nil {
 			return nil, errors.Wrap(err, "list lessons: scan")
 		}
 		row.Unchecked = unchecked != 0

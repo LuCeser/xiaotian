@@ -148,6 +148,17 @@ func (t *LessonTools) GetLessonState(ctx context.Context, lessonID string) (less
 	return t.exec.GetLessonState(ctx, lessonID)
 }
 
+// EnsurePoemLesson creates the whole-poem 背默 attempt row (Issue #12).
+func (t *LessonTools) EnsurePoemLesson(ctx context.Context, lessonID string, poemID int64, lines []string) (lesson.Lesson, error) {
+	return t.store.EnsurePoemLesson(ctx, lessonID, poemID, lines)
+}
+
+// LatestPoemLessonID returns the poem's most recent attempt row id (Issue
+// #12's resume probe).
+func (t *LessonTools) LatestPoemLessonID(ctx context.Context, poemID int64) (string, error) {
+	return t.store.LatestPoemLessonID(ctx, poemID)
+}
+
 // AdvanceWord moves the cursor forward one word, idempotently by requestID
 // under the expectedVersion optimistic lock (advance_word tool).
 func (t *LessonTools) AdvanceWord(ctx context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error) {
