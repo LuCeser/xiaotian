@@ -227,8 +227,8 @@ func TestDefaultConfig(t *testing.T) {
 			t.Errorf("Voice.BaseURL = %q, want pkg/mimo.NewClient default",
 				cfg.Voice.BaseURL)
 		}
-		if cfg.Voice.ChatModel != "mimo-v2.5" {
-			t.Errorf("Voice.ChatModel = %q, want mimo-v2.5 (deliberate duplicate of the pkg/mimo default; see VoiceConfig docs)",
+		if cfg.Voice.ChatModel != "mimo-v2.6-flash" {
+			t.Errorf("Voice.ChatModel = %q, want mimo-v2.6-flash (deliberate duplicate of the pkg/mimo default; see VoiceConfig docs)",
 				cfg.Voice.ChatModel)
 		}
 		if cfg.Voice.MaxRecordingBytes != 327680 {
@@ -248,8 +248,8 @@ func TestDefaultConfig(t *testing.T) {
 	})
 
 	t.Run("photo defaults — boots with no photo: block (Ticket 04)", func(t *testing.T) {
-		if cfg.Photo.ChatModel != "mimo-v2.5" {
-			t.Errorf("Photo.ChatModel = %q, want mimo-v2.5 (vision-capable, same default as voice)",
+		if cfg.Photo.ChatModel != "mimo-v2.6-flash" {
+			t.Errorf("Photo.ChatModel = %q, want mimo-v2.6-flash (vision-capable, same default as voice)",
 				cfg.Photo.ChatModel)
 		}
 		if cfg.Photo.MaxImageBytes != 1048576 {

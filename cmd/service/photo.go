@@ -56,7 +56,7 @@ func newPhotoService(read ocr.Reader, judge answerJudger, logger infra.Logger, c
 
 // mimoReader adapts the mimo ChatVision call onto the ocr.Reader seam,
 // keeping the mimo dependency out of the service layer's test surface.
-// Thinking MUST be explicitly disabled: mimo-v2.5 enables it by default and
+// Thinking MUST be explicitly disabled: the model enables it by default and
 // then spends the whole token budget on reasoning_content, returning an empty
 // content (issue #42). With thinking off the same call returns the word list
 // with content populated; live-measured latency dropped from 57.6s to 11.8s.

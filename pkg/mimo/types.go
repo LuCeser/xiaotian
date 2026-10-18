@@ -187,7 +187,7 @@ func (r *ASRResponse) ExtractText() string {
 }
 
 // ThinkingConfig controls MiMo's thinking mode on a chat completion request.
-// mimo-v2.5 ships with thinking ENABLED by default (extra reasoning_content
+// MiMo chat models ship with thinking ENABLED by default (extra reasoning_content
 // output and a server-forced temperature 1.0 — a large slice of first-response
 // latency); realtime callers must send {"type":"disabled"} explicitly to turn
 // it off (13-RESEARCH Pitfall 1 / RT-04).
@@ -250,11 +250,11 @@ type ChatRequest struct {
 	// (13-RESEARCH Pitfall 7), so WithToolChoiceAuto is the only meaningful
 	// setter.
 	ToolChoice any `json:"tool_choice,omitempty"`
-	// Thinking controls the mimo-v2.5 thinking mode. It is ENABLED by default
+	// Thinking controls the MiMo thinking mode. It is ENABLED by default
 	// server-side and must be explicitly disabled for latency-sensitive
 	// realtime turns (Pitfall 1) — see WithThinkingDisabled.
 	Thinking *ThinkingConfig `json:"thinking,omitempty"`
-	// Model specifies the LLM to use (e.g. "mimo-v2.5", "mimo-v2.5-pro")
+	// Model specifies the LLM to use (e.g. "mimo-v2.6-flash", "mimo-v2.6-pro")
 	Model string `json:"model"`
 	// Messages carries the conversation (system prompt + user turns)
 	Messages []Message `json:"messages"`
@@ -264,7 +264,7 @@ type ChatRequest struct {
 	Tools []ToolDef `json:"tools,omitempty"`
 	// MaxTokens caps the completion length (0 = server default)
 	MaxTokens int `json:"max_tokens,omitempty"`
-	// Temperature tunes sampling (0 = omitted; mimo-v2.5 thinking mode
+	// Temperature tunes sampling (0 = omitted; thinking mode
 	// ignores it server-side anyway per the official docs)
 	Temperature float64 `json:"temperature,omitempty"`
 }
@@ -344,7 +344,7 @@ type ChatContentPartImage struct {
 // (Ticket 04 — photo OCR). Same endpoint and option vocabulary as
 // ChatRequest; only the user message content differs (image + text parts).
 type ChatVisionRequest struct {
-	// Model specifies the vision-capable LLM (default: mimo-v2.5)
+	// Model specifies the vision-capable LLM (default: mimo-v2.6-flash)
 	Model string `json:"model"`
 	// Messages carries the conversation. ChatVision builds a system message
 	// (plain string content) plus a user message (image_url + text parts) —
@@ -453,12 +453,14 @@ type ASROption func(*ASRRequest)
 // ChatOption configures LLM chat completion behavior
 type ChatOption func(*ChatRequest)
 
-// DefaultChatModel is the default LLM for chat completions. mimo-v2.5 (not
-// -pro) keeps per-command intent classification fast and cheap on the 1C1G
-// VPS budget; override per call via WithChatModel.
-const DefaultChatModel = "mimo-v2.5"
+// DefaultChatModel is the default LLM for chat completions. mimo-v2.6-flash
+// (not -pro) keeps per-command intent classification fast and cheap on the
+// 1C1G VPS budget; override per call via WithChatModel. Migrated off
+// mimo-v2.5, which the platform turned off on 2026-10-21 (auto-routed to
+// v2.6-flash since 2026-10-14; live-probed: thinking-disabled chat ~1s).
+const DefaultChatModel = "mimo-v2.6-flash"
 
-// WithChatModel sets the chat completion model (e.g. "mimo-v2.5-pro")
+// WithChatModel sets the chat completion model (e.g. "mimo-v2.6-pro")
 func WithChatModel(model string) ChatOption {
 	return func(req *ChatRequest) {
 		req.Model = model
@@ -472,7 +474,7 @@ func WithMaxTokens(n int) ChatOption {
 	}
 }
 
-// WithTemperature sets sampling temperature (mimo-v2.5 thinking mode forces
+// WithTemperature sets sampling temperature (thinking mode forces
 // 1.0 server-side per the official docs — this is a no-op there)
 func WithTemperature(t float64) ChatOption {
 	return func(req *ChatRequest) {
@@ -497,7 +499,7 @@ func WithToolChoiceAuto() ChatOption {
 	}
 }
 
-// WithThinkingDisabled turns off mimo-v2.5's default-enabled thinking mode
+// WithThinkingDisabled turns off the model's default-enabled thinking mode
 // (no reasoning_content, lower first-response latency — Pitfall 1 / RT-04).
 func WithThinkingDisabled() ChatOption {
 	return func(req *ChatRequest) {
