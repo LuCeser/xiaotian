@@ -222,12 +222,20 @@ type LessonView struct {
 // lesson row all scope to the chinese vocabulary category); absent or
 // "english" keeps the English classroom — the pre-Issue-#10 default, so
 // existing pages that never send the field land exactly where they did.
+//
+// Poem (Issue #12) requests a WHOLE-POEM 背默 classroom for the poems.id it
+// names instead of the due-word lesson: the poem's ordered lines become the
+// task and the check rows, never a per-line dictation (the teacher does NOT
+// read the poem aloud), and the submit records the whole-poem scope. A
+// non-positive value (absent) keeps the word classroom — the same
+// deny-by-default shape as Practice/Category.
 type SessionInitMsg struct {
 	Type     string    `json:"type"`
 	Mode     string    `json:"mode,omitempty"`
 	Category string    `json:"category,omitempty"`
 	Audio    AudioSpec `json:"audio"`
 	Practice bool      `json:"practice,omitempty"`
+	Poem     int64     `json:"poem,omitempty"`
 }
 
 // Classroom category values (Issue #10). The literals match the vocabulary
@@ -298,13 +306,31 @@ type EndSessionMsg struct {
 // (speech-recognition locale, word display) key off it, and a reconnect to
 // an existing row echoes the ROW's subject, which is what the row was
 // created under.
+//
+// Poem (Issue #12) is non-nil only for a whole-poem 背默 classroom: the
+// practiced work's identity the page renders (title/author/line count) —
+// the poem's TEXT itself never rides here; Lesson.Words stays masked (""
+// per line) until check_started, in every mode.
 type SessionReadyMsg struct {
-	Type      string     `json:"type"`
-	SessionID string     `json:"session_id"`
-	Category  string     `json:"category,omitempty"`
-	Audio     AudioSpec  `json:"audio"`
-	Lesson    LessonView `json:"lesson"`
-	TTS       TTSSpec    `json:"tts"`
+	Poem      *PoemTaskView `json:"poem,omitempty"`
+	Type      string        `json:"type"`
+	SessionID string        `json:"session_id"`
+	Category  string        `json:"category,omitempty"`
+	Audio     AudioSpec     `json:"audio"`
+	Lesson    LessonView    `json:"lesson"`
+	TTS       TTSSpec       `json:"tts"`
+}
+
+// PoemTaskView is the whole-poem 背默 task's identity on session_ready
+// (Issue #12): WHAT the child is writing from memory, never the text
+// itself. Method names the practice way (练习方式) so the page and the
+// parent records share one vocabulary.
+type PoemTaskView struct {
+	Title     string `json:"title"`
+	Author    string `json:"author,omitempty"`
+	Method    string `json:"method"`
+	ID        int64  `json:"id"`
+	LineCount int    `json:"line_count"`
 }
 
 // TurnStartMsg announces a new turn (one student utterance → one teacher
@@ -478,6 +504,11 @@ const (
 	// CheckStartedReasonCorrection: a stored unchecked lesson reopens for
 	// the post-hoc photo correction (13.1-04).
 	CheckStartedReasonCorrection = "correction"
+	// CheckStartedReasonPoemDone: the whole-poem 背默 task finished its
+	// writing stage — the student said 写完了 and the panel opens against
+	// the poem's own ordered LINES (Issue #12; the same D-10 unmask point:
+	// before this message the poem's text never reached the client).
+	CheckStartedReasonPoemDone = "poem_done"
 )
 
 // CheckStartedMsg opens the check stage (server → client). Words is the

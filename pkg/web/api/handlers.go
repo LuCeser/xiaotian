@@ -15,6 +15,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -574,11 +575,19 @@ type lessonListItem struct {
 	// Category is the lesson's subject ("english"/"chinese", Issue #10) —
 	// the records view renders its subject badge from this field, never by
 	// parsing the lesson id.
-	Category    string `json:"category"`
+	Category string `json:"category"`
+	// PoemTitle/PoemAuthor/Method ride ONLY whole-poem 背默 rows (Issue #12,
+	// empty otherwise): the records view distinguishes 古诗作品、练习方式 and
+	// the per-line judgment from the same row. PoemID is the join key the
+	// projection filled the title through.
+	PoemTitle   string `json:"poem_title,omitempty"`
+	PoemAuthor  string `json:"poem_author,omitempty"`
+	Method      string `json:"method,omitempty"`
 	WordCount   int    `json:"word_count"`
 	Correct     int    `json:"correct"`
 	Wrong       int    `json:"wrong"`
 	Unconfirmed int    `json:"unconfirmed"`
+	PoemID      int64  `json:"poem_id,omitempty"`
 	Completed   bool   `json:"completed"`
 	Unchecked   bool   `json:"unchecked"`
 }
@@ -637,9 +646,12 @@ type lessonDetailResponse struct {
 }
 
 // lessonKind classifies a lesson id for the parent view's type badge:
-// r0x- extra-practice sessions, r0- classroom lessons, anything else unknown.
+// r0p- whole-poem 背默 attempts (Issue #12), r0x- extra-practice sessions,
+// r0- classroom lessons, anything else unknown.
 func lessonKind(lessonID string) string {
 	switch {
+	case strings.HasPrefix(lessonID, "r0p-"):
+		return "poem"
 	case strings.HasPrefix(lessonID, "r0x-"):
 		return "practice"
 	case strings.HasPrefix(lessonID, "r0-"):
@@ -647,6 +659,52 @@ func lessonKind(lessonID string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// applyPoemProjection fills a poem row's work identity (title/author/method)
+// from the resolved poem map. A poem the store can no longer serve (or a
+// nil store, degraded boot) keeps its id and kind — the row still renders,
+// only without the title; the judgment and save status never depended on
+// the join.
+func applyPoemProjection(item *lessonListItem, poems map[int64]poem.Poem, poemID int64) {
+	if poemID <= 0 {
+		return
+	}
+	item.PoemID = poemID
+	item.Method = "背默"
+	if p, ok := poems[poemID]; ok {
+		item.PoemTitle = p.Title
+		item.PoemAuthor = p.Author
+	}
+}
+
+// resolvePoemsForSummaries bulk-resolves the page's poem rows into one map
+// (ONE store round trip, the poems.go projection seam). A nil poem store or
+// a lookup error degrades to the empty map — assignment data is
+// presentational here, exactly like the word attribution projection.
+func (h *handler) resolvePoemsForSummaries(ctx context.Context, summaries []lesson.LessonSummary) map[int64]poem.Poem {
+	ids := make([]int64, 0, 4)
+	for _, s := range summaries {
+		if s.PoemID > 0 {
+			ids = append(ids, s.PoemID)
+		}
+	}
+	if len(ids) == 0 || h.poems == nil {
+		return map[int64]poem.Poem{}
+	}
+	rows, err := h.poems.PoemsByIDs(ctx, ids)
+	if err != nil {
+		h.logger.Warn("poem projection failed",
+			infra.F("component", "web/api"),
+			infra.ErrField(err),
+		)
+		return map[int64]poem.Poem{}
+	}
+	out := make(map[int64]poem.Poem, len(rows))
+	for _, p := range rows {
+		out[p.ID] = p
+	}
+	return out
 }
 
 // newLessonListItem projects a store summary + the lesson's latest receipt
@@ -741,9 +799,12 @@ func (h *handler) listLessons(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items := make([]lessonListItem, 0, len(summaries))
+	poems := h.resolvePoemsForSummaries(r.Context(), summaries)
 	for _, s := range summaries {
 		receipt, hasReceipt := latest[s.LessonID]
-		items = append(items, newLessonListItem(s, receipt, hasReceipt))
+		item := newLessonListItem(s, receipt, hasReceipt)
+		applyPoemProjection(&item, poems, s.PoemID)
+		items = append(items, item)
 	}
 	writeJSON(w, lessonsResponse{Lessons: items})
 }
@@ -792,7 +853,10 @@ func (h *handler) getLesson(w http.ResponseWriter, r *http.Request) {
 		latest = nil
 	}
 	receipt, hasReceipt := latest[id]
-	item := newLessonListItem(lesson.SummarizeLesson(l), receipt, hasReceipt)
+	summary := lesson.SummarizeLesson(l)
+	item := newLessonListItem(summary, receipt, hasReceipt)
+	poems := h.resolvePoemsForSummaries(r.Context(), []lesson.LessonSummary{summary})
+	applyPoemProjection(&item, poems, summary.PoemID)
 
 	if !lesson.LessonCompleted(l.Stage, l.CurrentIndex, len(l.Cards)) {
 		// In-progress: the summary row IS the whole response — the word

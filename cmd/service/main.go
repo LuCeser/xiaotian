@@ -338,6 +338,17 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
+	// Issue #12: the whole-poem practice-record store — ONE row per 背默
+	// submit, keyed by the poem, never the FSRS schedule (poems are not
+	// cards). Same boot-fail-fast discipline as every constructor.
+	poemPracticeStore, err := poem.NewPracticeStore(db, logger)
+	if err != nil {
+		logger.Error("poem practice store construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
 
 	rtLessonExec, err := rt.NewLessonTools(lessonStore, lessonExec)
 	if err != nil {
@@ -712,6 +723,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// practice_logs store, never the FSRS schedule.
 			Practice:      cardRepo,
 			PracticeStore: practiceStore,
+			// Issue #12: the whole-poem classroom's seams — the poem read
+			// source (scope gate + lines) and the whole-poem practice-record
+			// write target, both on the same shared pool as every other
+			// store.
+			Poems:        &rt.PoemStoreSource{Store: poemStore},
+			PoemPractice: poemPracticeStore,
 			// Issue #9 (ADR-0006): the on-demand example-sentence context
 			// resolver — the same read-only repos the parent pages use
 			// (English card resolution + textbook background + learned-word

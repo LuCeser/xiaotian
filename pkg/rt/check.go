@@ -248,6 +248,13 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	tm.state = StateListening
 	tm.sessionReadyAt = time.Now()
 	tm.mu.Unlock()
+	// Issue #12: a POEM row reopened into its check panel keeps its poem
+	// identity (the task view on session_ready + the submit's whole-poem
+	// save need it).
+	poemView := tm.poemViewForRow(l)
+	if poemView != nil {
+		tm.bindPoemRef(l, poemView)
+	}
 
 	_ = s.SendControl(SessionReadyMsg{
 		Type:      TypeSessionReady,
@@ -256,6 +263,7 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
 		Lesson:    tm.lessonViewFor(l),
 		Category:  tm.sessionCategory(),
+		Poem:      poemView,
 	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
@@ -299,6 +307,7 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	expected := tm.tutor.version
 	outcomes := tm.tutor.snapshotCheckOutcomes()
 	total := len(tm.tutor.words)
+	isPoem := tm.tutor.poem != nil    // Issue #12: the poem's own bridge copy/reason
 	words := make([]string, 0, total) // the FULL plaintext list (D-10 unmask)
 	for _, c := range tm.tutor.words {
 		words = append(words, c.Word)
@@ -358,13 +367,19 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	}
 
 	tm.recorder.Emit(EventCheckStarted, infra.F("total", total))
+	reason := CheckStartedReasonDictationDone
+	bridge := checkBridgeText(total)
+	if isPoem {
+		reason = CheckStartedReasonPoemDone
+		bridge = poemCheckBridgeText(total)
+	}
 	_ = s.SendControl(CheckStartedMsg{
 		Type:   TypeCheckStarted,
 		Words:  words,
-		Reason: CheckStartedReasonDictationDone,
+		Reason: reason,
 	})
 
-	tm.runAnnouncement(s, ctx, cancel, checkBridgeText(total), purposeCheckBridge, nil)
+	tm.runAnnouncement(s, ctx, cancel, bridge, purposeCheckBridge, nil)
 }
 
 // handleCheckVerdict applies one screen verdict (the check_verdict control
@@ -480,6 +495,17 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 			return
 		}
 		tm.submitCorrections(s, m)
+		return
+	}
+	tm.mu.Lock()
+	isPoem := tm.tutor.poem != nil
+	tm.mu.Unlock()
+	if isPoem {
+		// Issue #12: the whole-poem submit — the same manual gate and the
+		// same CompleteCheck latch, then the poem practice record instead
+		// of ANY word write (in-session duplicates were already absorbed by
+		// the reviewSeen gate above).
+		tm.submitPoem(s, m)
 		return
 	}
 	tm.mu.Lock()
@@ -987,6 +1013,7 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 func (tm *TurnManager) uncheckedCloseFallback() {
 	tm.mu.Lock()
 	eligible := tm.tutor != nil && !tm.closed && tm.tutor.checking
+	isPoem := eligible && tm.tutor.poem != nil
 	var lessonID string
 	var version int
 	var category string
@@ -997,6 +1024,13 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 	}
 	tm.mu.Unlock()
 	if !eligible {
+		return
+	}
+	if isPoem {
+		// A poem has no behavior-derived fallback. Keep stage=checking so a
+		// refresh or disconnect reopens the same ordered lines and preserves
+		// the human confirmation work already stored on the lesson row.
+		tm.recorder.Emit(EventUncheckedFallback, infra.F("requested", 0), infra.F("updated", 0), infra.F("poem", true))
 		return
 	}
 
@@ -1154,6 +1188,7 @@ func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
 
 	tm.mu.Lock()
 	pipeline := tm.ocrPipeline
+	isPoem := tm.tutor != nil && tm.tutor.poem != nil
 	var expected []string
 	if tm.tutor != nil && !tm.closed && tm.tutor.checking {
 		expected = make([]string, len(tm.tutor.words))
@@ -1168,7 +1203,15 @@ func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
 		return
 	}
 
-	readings, err := pipeline.ProcessWords(ctx, jpeg, expected)
+	// Issue #12: a poem page transcribes per VERSE LINE (one written row per
+	// line); a word page stays per word. Both grade positionally below.
+	var readings []ocr.WordReading
+	var err error
+	if isPoem {
+		readings, err = pipeline.ProcessLines(ctx, jpeg, expected)
+	} else {
+		readings, err = pipeline.ProcessWords(ctx, jpeg, expected)
+	}
 	if err != nil && !errors.Is(err, ocr.ErrLowConfidence) {
 		// OCR genuinely failed: visible honest notice; the manual check
 		// path continues untouched.

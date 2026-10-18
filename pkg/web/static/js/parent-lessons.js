@@ -71,10 +71,11 @@
     unknown: '保存状态未知'
   };
 
-  /** Verbatim kind badge copy. */
+  /** Verbatim kind badge copy. Issue #12: poem = whole-poem 背默 attempts. */
   var KIND_COPY = {
     lesson: '到期复习',
     practice: '加练',
+    poem: '古诗背默',
     unknown: '类型待核实'
   };
 
@@ -84,12 +85,13 @@
     chinese: '中文'
   };
 
-  /** Verbatim receipt-kind copy (the four submission endpoints). */
+  /** Verbatim receipt-kind copy (the submission endpoints + Issue #12). */
   var RECEIPT_KIND_COPY = {
     check: '检查提交',
     correction: '事后修正',
     unchecked_fallback: '未核对兜底',
-    practice: '加练记录'
+    practice: '加练记录',
+    poem: '古诗背默记录'
   };
 
   /** In-progress stage summary; anything unmapped reads 进行中. */
@@ -288,16 +290,33 @@
 
     var mid = document.createElement('span');
     mid.className = 'lesson-row-mid';
-    var words = document.createElement('span');
-    words.className = 'lesson-words';
-    words.textContent = (item.word_count || 0) + ' 词';
-    mid.appendChild(words);
+    if (item.kind === 'poem') {
+      // Issue #12: a poem row names the WORK (《题》·作者 · 背默) and counts
+      // LINES — the whole-poem scope, never per-line word wording.
+      var work = document.createElement('span');
+      work.className = 'lesson-words';
+      work.textContent = '《' + (item.poem_title || '古诗') + '》' +
+        (item.poem_author ? ' · ' + item.poem_author : '') +
+        ' · ' + (item.method || '背默');
+      mid.appendChild(work);
+    } else {
+      var words = document.createElement('span');
+      words.className = 'lesson-words';
+      words.textContent = (item.word_count || 0) + ' 词';
+      mid.appendChild(words);
+    }
 
     if (item.completed) {
       var counts = document.createElement('span');
       counts.className = 'lesson-counts';
-      counts.textContent = '已核对 ' + (item.correct || 0) + ' 对 / ' +
-        (item.wrong || 0) + ' 错 / ' + (item.unconfirmed || 0) + ' 未确认';
+      if (item.kind === 'poem') {
+        counts.textContent = (item.word_count || 0) === (item.correct || 0)
+          ? '整首 ' + (item.word_count || 0) + ' 句全对，已掌握'
+          : '共 ' + (item.word_count || 0) + ' 句，对 ' + (item.correct || 0) + ' 句';
+      } else {
+        counts.textContent = '已核对 ' + (item.correct || 0) + ' 对 / ' +
+          (item.wrong || 0) + ' 错 / ' + (item.unconfirmed || 0) + ' 未确认';
+      }
       mid.appendChild(counts);
       if (item.unchecked) {
         var flag = document.createElement('span');
@@ -486,12 +505,29 @@
       practiceNote.textContent = '加练记录：不调整复习计划';
       head.appendChild(practiceNote);
     }
+    if (detail.kind === 'poem') {
+      // Issue #12: the poem attempt's own identity + scheduling contract —
+      // whole-poem records never enter the word/FSRS plan (the 衔接方式 the
+      // parent sees on the record itself).
+      var poemNote = document.createElement('p');
+      poemNote.className = 'lesson-practice-note';
+      poemNote.textContent = '《' + (detail.poem_title || '古诗') + '》' +
+        (detail.poem_author ? ' · ' + detail.poem_author : '') +
+        ' · ' + (detail.method || '背默') + '：按整首记录掌握，不进入单词复习计划';
+      head.appendChild(poemNote);
+    }
 
     if (completed) {
       var counts = document.createElement('p');
       counts.className = 'lesson-detail-counts';
-      counts.textContent = '已核对 ' + (detail.correct || 0) + ' 对 / ' +
-        (detail.wrong || 0) + ' 错 / ' + (detail.unconfirmed || 0) + ' 未确认';
+      if (detail.kind === 'poem') {
+        counts.textContent = (detail.word_count || 0) === (detail.correct || 0)
+          ? '整首 ' + (detail.word_count || 0) + ' 句全对，已掌握'
+          : '共 ' + (detail.word_count || 0) + ' 句，对 ' + (detail.correct || 0) + ' 句';
+      } else {
+        counts.textContent = '已核对 ' + (detail.correct || 0) + ' 对 / ' +
+          (detail.wrong || 0) + ' 错 / ' + (detail.unconfirmed || 0) + ' 未确认';
+      }
       head.appendChild(counts);
     } else {
       var progressNote = document.createElement('p');

@@ -39,6 +39,14 @@
 
   <main class="rt-main">
 
+    <!--
+      Poem task banner (Issue #12): shown only on a whole-poem 背默 session
+      (session_ready.poem) — the work's identity (title·author·line count)
+      and the practice way. The poem's TEXT never renders here; the chips
+      below stay line-number placeholders until check_started reveals them.
+    -->
+    <section class="rt-poem" id="rt-poem" hidden aria-label="古诗背默任务"></section>
+
     <!-- Lesson progress: words + current_index from session_ready / lesson_update -->
     <section class="rt-progress" aria-label="课堂进度">
       <div class="rt-words" id="rt-words"></div>
@@ -172,6 +180,32 @@
       // the due fetch, the review writes and the lesson row; session_ready
       // echoes the row's subject back.
       client.initCategory = pageQuery.get('category') === 'chinese' ? 'chinese' : 'english';
+      // ----- whole-poem 背默 classroom (Issue #12) ------------------------------
+      // ?poem=<poems.id> opens the poem classroom for THAT work (the parent
+      // content view's 背默这首 entry). Absent/non-numeric stays 0 = the word
+      // classroom; the server applies the same deny-by-default rule.
+      client.initPoem = parseInt(pageQuery.get('poem'), 10) || 0;
+
+      // poemTask mirrors session_ready.poem (display-only identity: title /
+      // author / line count / method). The poem's lines themselves arrive
+      // ONLY with check_started — never before (背默任务，原文不上屏).
+      var poemTask = null;
+      var poemEl = $('rt-poem');
+
+      function renderPoemBanner() {
+        clearChildren(poemEl);
+        if (!poemTask) {
+          poemEl.hidden = true;
+          return;
+        }
+        var title = document.createElement('p');
+        title.className = 'rt-poem-title';
+        title.textContent = '《' + poemTask.title + '》' +
+          (poemTask.author ? ' · ' + poemTask.author : '') +
+          ' · 共 ' + poemTask.line_count + ' 句 · ' + poemTask.method;
+        poemEl.appendChild(title);
+        poemEl.hidden = false;
+      }
 
       // ----- check-stage state (13.1-01) --------------------------------------
       // verdicts is a server-echo mirror ONLY: it is written by
@@ -261,11 +295,21 @@
         clearChildren(bannerEl);
         var p = document.createElement('p');
         if (reason === 'lesson_complete') {
-          // N from the check state (the panel's rows = the checked words).
-          p.textContent = '今天的 ' + check.words.length + ' 个词都默写完了！' +
-            (check.resultText || '真棒！');
+          if (poemTask) {
+            // Issue #12: the poem's own ending copy — the work's name, the
+            // judged line count, and the honest save result.
+            p.textContent = '《' + poemTask.title + '》背默完成！' +
+              (check.resultText || '真棒！');
+          } else {
+            // N from the check state (the panel's rows = the checked words).
+            p.textContent = '今天的 ' + check.words.length + ' 个词都默写完了！' +
+              (check.resultText || '真棒！');
+          }
           bannerEl.appendChild(p);
-          addPracticeButton(bannerEl);
+          // Issue #12: a poem session never offers 再练一组 — that button
+          // starts a WORD practice; re-practicing the poem is a fresh 背默
+          // entry from the parent page.
+          if (!poemTask) addPracticeButton(bannerEl);
         } else if (reason === 'practice_complete') {
           p.textContent = '这组练习完成啦，真棒！想再练就点「开始上课」。';
           bannerEl.appendChild(p); // no practice button — bounded loop by design
@@ -300,7 +344,10 @@
 
         var title = document.createElement('p');
         title.className = 'rt-check-title';
-        title.textContent = '检查时间：每个词点「对」还是「错」';
+        // Issue #12: a poem check compares against the work's own lines.
+        title.textContent = poemTask
+          ? '对照原文：每一句点「对」还是「错」'
+          : '检查时间：每个词点「对」还是「错」';
         panel.appendChild(title);
 
         check.words.forEach(function (word, i) {
@@ -406,12 +453,18 @@
         for (var i = 0; i < lesson.words.length; i++) {
           var chip = document.createElement('button');
           chip.type = 'button';
-          chip.setAttribute('aria-label', '重读第 ' + (i + 1) + ' 个词');
-          chip.title = '点击重读第 ' + (i + 1) + ' 个词';
+          // Issue #12: a poem classroom labels the chips 句 (line numbers);
+          // the read_word re-reading stays disabled there pre-check — a
+          // poem's lines are never read aloud (背默红线).
+          var unit = poemTask ? '句' : '词';
+          chip.setAttribute('aria-label', '第 ' + (i + 1) + ' ' + unit);
+          chip.title = poemTask ? '第 ' + (i + 1) + ' 句' : '点击重读第 ' + (i + 1) + ' 个词';
           chip.disabled = !canReadWord(i);
           chip.addEventListener('click', sendReadWord.bind(null, i));
-          if (mode === 'test') {
-            // Test mode keeps the pre-13.1 full-reveal rendering.
+          if (mode === 'test' && !poemTask) {
+            // Test mode keeps the pre-13.1 full-reveal rendering — except a
+            // poem classroom: its lines stay masked in EVERY mode until the
+            // check stage reveals them (Issue #12).
             chip.className = 'rt-word-chip' + (i === lesson.currentIndex ? ' rt-word-current' : '');
             chip.textContent = lesson.words[i];
           } else if (lesson.words[i] === '') {
@@ -437,11 +490,21 @@
           return;
         }
         progressFill.style.width = (total > 0 ? Math.round((lesson.currentIndex / total) * 100) : 0) + '%';
-        progressText.textContent = '第 ' + (lesson.currentIndex + 1) + ' / ' + (total > 0 ? total : '-') + ' 个词';
+        if (poemTask && !check.active) {
+          // Issue #12: the writing stage has no cursor — the whole poem is
+          // ONE task, never 机械推进 per line.
+          progressText.textContent = '整首 ' + total + ' 句 · 凭记忆默写';
+          return;
+        }
+        progressText.textContent = '第 ' + (lesson.currentIndex + 1) + ' / ' + (total > 0 ? total : '-') + (poemTask ? ' 句' : ' 个词');
       }
 
       function canReadWord(index) {
         var state = statusEl.getAttribute('data-state');
+        // Issue #12: a poem classroom has NO re-reading — read_word would
+        // speak the original line (背默任务，老师不念原文); the server
+        // refuses it too, this keeps the chip honestly disabled.
+        if (poemTask) return false;
         return started && !courseEnded && !terminalDraining && !readPending &&
           !check.submitPending && !check.resultText &&
           connEl.getAttribute('data-conn') === 'connected' &&
@@ -556,6 +619,10 @@
         lesson.words = (m.lesson && m.lesson.words) || [];
         lesson.currentIndex = (m.lesson && m.lesson.current_index) || 0;
         lesson.version = (m.lesson && m.lesson.version) || 0;
+        // Issue #12: the poem task identity rides every poem session (a
+        // resumed check panel included); a word session clears it.
+        poemTask = (m && m.poem) || null;
+        renderPoemBanner();
         // Fresh session: the previous ending's banner/notice step aside.
         bannerEl.hidden = true;
         noticeEl.hidden = true;
@@ -676,6 +743,10 @@
         // dressed up as success (prohibition P3, S-05).
         if (m.requested > 0 && m.updated < m.requested) {
           check.resultText = '保存了 ' + m.updated + ' / ' + m.requested + ' 个，别担心，下次会补上。';
+        } else if (m.requested > 0 && poemTask) {
+          // Issue #12: the poem's save scope is ONE whole work — never
+          // per-line wording.
+          check.resultText = '整首背默结果保存好啦。';
         } else if (m.requested > 0) {
           check.resultText = '学习记录保存好了，' + m.requested + ' 个词都记上啦。';
         } else {
@@ -894,6 +965,7 @@
             stopNowCalls: playback.stopNowCalls || 0,
             pendingSources: playback._sources ? playback._sources.length : 0,
             mode: mode,
+            poem: poemTask ? { title: poemTask.title, lineCount: poemTask.line_count } : null,
             check: {
               active: check.active,
               rows: check.words.length,

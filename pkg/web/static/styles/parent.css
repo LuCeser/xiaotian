@@ -2528,3 +2528,29 @@ body {
 .passage-scope-add-btn {
   margin-left: auto;
 }
+
+/* Issue #12: the whole-poem 背默 entry — one primary door per in-scope work;
+   an out-of-scope poem shows the honest disabled state instead. */
+.poem-recite-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.poem-recite-btn {
+  padding: 8px 18px;
+  border-radius: 8px;
+  border: 1px solid var(--success-border);
+  background: var(--success-bg);
+  color: var(--success-strong);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.poem-recite-btn:disabled {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+

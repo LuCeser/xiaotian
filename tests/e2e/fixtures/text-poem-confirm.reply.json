@@ -1,0 +1,4 @@
+{
+  "match": "正在陪孩子完成古诗背默练习",
+  "content": "{\"intent\":\"confirm\",\"reply\":\"好的，我们来对答案。\",\"index\":0}"
+}

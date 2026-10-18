@@ -720,7 +720,7 @@
       var self = this;
       var note = document.createElement('p');
       note.className = 'list-note';
-      note.textContent = '古诗按整首保存，学习范围随教材已学进度或手动加入生效；古诗课堂将在后续更新开放，暂不支持默写。';
+      note.textContent = '古诗按整首保存与练习；学习范围随教材已学进度或手动加入生效，进入范围后可在卡片上开始整首背默。';
       this.listHost.appendChild(note);
       this.poems.forEach(function (poem) {
         self.listHost.appendChild(self.buildPoemCard(poem));
@@ -1200,6 +1200,40 @@
       lines.appendChild(p);
     });
     card.appendChild(lines);
+
+    // Issue #12: the whole-poem 背默 entry. Only an IN-SCOPE poem can start
+    // a classroom (从符合范围的整首古诗开始练习) — an out-of-scope card shows
+    // the honest disabled reason instead. The door opens the student tutor
+    // page with the poem id; handing the iPad to the child is the parent's
+    // one gesture.
+    var reciteRow = document.createElement('div');
+    reciteRow.className = 'poem-recite-row';
+    var reciteBtn = document.createElement('button');
+    reciteBtn.type = 'button';
+    reciteBtn.className = 'row-action poem-recite-btn';
+    if (poem.in_scope) {
+      reciteBtn.textContent = '背默这首';
+      reciteBtn.title = '打开学生页，凭记忆默写整首';
+      reciteBtn.addEventListener('click', function () {
+        global.open('/tutor/?poem=' + encodeURIComponent(poem.id) +
+          '&category=chinese', '_blank');
+      });
+    } else {
+      reciteBtn.textContent = '暂不在学习范围';
+      reciteBtn.disabled = true;
+      reciteBtn.title = '课次尚未学到且未手动加入，暂不能开始背默';
+    }
+    reciteRow.appendChild(reciteBtn);
+    card.appendChild(reciteRow);
+
+    if (poem.has_practice && poem.next_review_day) {
+      var reviewPlan = document.createElement('p');
+      reviewPlan.className = 'poem-review-plan';
+      reviewPlan.textContent = poem.last_mastered
+        ? '上次整首已掌握 · ' + poem.next_review_day + ' 再巩固'
+        : '上次尚未整首掌握 · ' + poem.next_review_day + ' 再练';
+      card.appendChild(reviewPlan);
+    }
 
     // Attribution chips — the word row's chip shape, plus a 手动 marker
     // on assignments the parent explicitly included.

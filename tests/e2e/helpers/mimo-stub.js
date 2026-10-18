@@ -26,6 +26,12 @@
 //         exercising the page-level fail → 重试该页 → succeed path. The
 //         count must cover the service's own vision retries (mimo client
 //         defaults to 4 attempts total, so the marker says 4).
+//   POST */chat/completions with stream:true (the /rt classroom's TTS
+//     calls, Issue #12): answered with a minimal SSE audio stream — one
+//     data chunk carrying base64 pcm16 silence (the e2e drivers never
+//     listen) and a finish_reason=stop terminator, then [DONE]. This is
+//     what lets the poem-classroom e2e drive the REAL service's
+//     announcement / summary flow through the stub.
 //   POST */chat/completions without an image (LLM/ASR/TTS-shaped calls):
 //     Issue #8 text-generation fixtures FIRST: every text-*.reply.json in
 //     --fixtures carrying {"match": "<substring>", "content": "<reply>"}
@@ -140,6 +146,21 @@ function findImagePart(body) {
   return null;
 }
 
+// streamTTSChunks builds the canned SSE reply for a streaming TTS call:
+// one 100ms pcm16-silence data chunk then the finish_reason=stop
+// terminator and [DONE] (mimo StreamChunk's wire shape: choices[0].delta.
+// audio.data / finish_reason).
+function streamTTSChunks() {
+  const pcm = Buffer.alloc(2 * 2400); // 100ms of 24kHz s16le silence
+  const data = JSON.stringify({
+    choices: [{ index: 0, delta: { audio: { data: pcm.toString('base64') } } }],
+  });
+  const fin = JSON.stringify({
+    choices: [{ index: 0, delta: { audio: { data: '' } }, finish_reason: 'stop' }],
+  });
+  return 'data: ' + data + '\n\ndata: ' + fin + '\n\ndata: [DONE]\n\n';
+}
+
 function completion(content) {
   return {
     id: 'stub-' + Math.random().toString(36).slice(2),
@@ -168,6 +189,19 @@ const server = http.createServer((req, res) => {
     } catch (e) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'bad json' } }));
+      return;
+    }
+    // Issue #12: streaming TTS. The /rt classroom synthesizes every
+    // teacher sentence through SynthesizeStream (SSE audio chunks); the
+    // stub answers with one short silence chunk + the stop terminator so
+    // the REAL announcement/summary flow completes through its acks.
+    if (body.stream === true) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      });
+      res.write(streamTTSChunks());
+      res.end();
       return;
     }
     const image = findImagePart(body);
