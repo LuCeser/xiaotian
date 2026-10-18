@@ -81,7 +81,8 @@ var (
 func Migrate(ctx context.Context, db *sql.DB) error {
 	for _, stmt := range []string{
 		poemsDDL, idxPoemsFingerprint, poemAssignmentsDDL, idxPoemAssignmentsTextbook,
-		poemPracticeDDL, idxPoemPracticePoem, // Issue #12: whole-poem practice records
+		poemPracticeDDL, idxPoemPracticePoem,
+		poemReviewScheduleDDL,
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("poem/migrate: %w", err)
@@ -126,16 +127,19 @@ const (
 // lines decoded from the JSON column, the attribution rows, and the scope
 // verdict computed under the Issue #4 rules.
 type Poem struct {
-	Title       string
-	Author      string
-	Category    string
-	CreatedAt   string
-	Fingerprint string
-	ScopeReason string
-	Lines       []string
-	Assignments []Assignment
-	ID          int64
-	InScope     bool
+	Title         string
+	Author        string
+	Category      string
+	CreatedAt     string
+	Fingerprint   string
+	ScopeReason   string
+	NextReviewDay string
+	Lines         []string
+	Assignments   []Assignment
+	ID            int64
+	InScope       bool
+	HasPractice   bool
+	LastMastered  bool
 }
 
 // Draft is one confirmed poem on the commit path — exactly what the parent
@@ -423,7 +427,52 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Poem, error) {
 	if aerr := s.attachAssignments(ctx, poems); aerr != nil {
 		return nil, aerr
 	}
+	if serr := s.attachReviewSchedules(ctx, poems); serr != nil {
+		return nil, serr
+	}
 	return poems, nil
+}
+
+// attachReviewSchedules adds the persisted whole-poem next-review decision
+// to the same objects used by the content page and classroom lookup.
+func (s *Store) attachReviewSchedules(ctx context.Context, poems []Poem) error {
+	if len(poems) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*Poem, len(poems))
+	placeholders := make([]string, 0, len(poems))
+	args := make([]any, 0, len(poems))
+	for i := range poems {
+		byID[poems[i].ID] = &poems[i]
+		placeholders = append(placeholders, "?")
+		args = append(args, poems[i].ID)
+	}
+	query := `SELECT poem_id, next_review_day, last_mastered FROM poem_review_schedule WHERE poem_id IN (` + strings.Join(placeholders, ",") + `)` //nolint:gosec // placeholders only
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return nil
+		}
+		return errors.Wrap(err, "poem list: schedules")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var poemID int64
+		var next string
+		var mastered int
+		if err = rows.Scan(&poemID, &next, &mastered); err != nil {
+			return errors.Wrap(err, "poem list: schedules scan")
+		}
+		if p := byID[poemID]; p != nil {
+			p.HasPractice = true
+			p.NextReviewDay = next
+			p.LastMastered = mastered != 0
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return errors.Wrap(err, "poem list: schedules iteration")
+	}
+	return nil
 }
 
 // attachAssignments loads the attribution projection for exactly the given
@@ -570,6 +619,9 @@ func (s *Store) PoemsByIDs(ctx context.Context, ids []int64) ([]Poem, error) {
 	}
 	if aerr := s.attachAssignments(ctx, poems); aerr != nil {
 		return nil, aerr
+	}
+	if serr := s.attachReviewSchedules(ctx, poems); serr != nil {
+		return nil, serr
 	}
 	return poems, nil
 }

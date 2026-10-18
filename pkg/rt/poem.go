@@ -102,14 +102,14 @@ const (
 )
 
 // resolvePoemLessonID derives the poem-attempt lesson id:
-// "r0p-YYYYMMDD-HHMMSS" on the Beijing calendar (resolvePracticeLessonID's
-// discipline). The r0p- prefix is the namespace guarantee: lessonKind never
-// confuses an attempt with r0- daily lessons or r0x- practice sets, and the
-// HHMMSS suffix keeps same-day re-attempts distinct rows.
-func resolvePoemLessonID(now time.Time) string {
+// "r0p-YYYYMMDD-HHMMSS.NNNNNNNNN-<poem>" on the Beijing calendar. The
+// nanosecond plus poem id prevents two works opened in the same second from
+// sharing an INSERT OR IGNORE row; the r0p- prefix keeps lessonKind's stable
+// whole-poem classification.
+func resolvePoemLessonID(now time.Time, poemID int64) string {
 	cst := time.FixedZone("CST", 8*3600)
 	local := now.In(cst)
-	return "r0p-" + local.Format("20060102") + "-" + local.Format("150405")
+	return fmt.Sprintf("r0p-%s-%d", local.Format("20060102-150405.000000000"), poemID)
 }
 
 // poemGreetingText opens the task: WHAT to write, from memory, how many
@@ -267,14 +267,21 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
 		}
 	}
 
-	lessonID := resolvePoemLessonID(time.Now())
+	lessonID := resolvePoemLessonID(time.Now(), poemID)
 	// The per-lesson init lock discipline (two simultaneous poem connections
-	// must not both create rows for the same second).
+	// for this exact attempt id must not both create its row).
 	unlock := lockLessonInit(lessonID)
 	defer unlock()
 
 	l, err := tm.exec.EnsurePoemLesson(ctx, lessonID, poemID, p.Lines)
 	if err != nil {
+		tm.failLessonInit(s)
+		return
+	}
+	if l.PoemID != poemID {
+		// Defensive identity check: a lesson row must never announce one work
+		// while checking another work's lines.
+		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "poem_identity"))
 		tm.failLessonInit(s)
 		return
 	}

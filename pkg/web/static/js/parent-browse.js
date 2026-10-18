@@ -1143,6 +1143,15 @@
     reciteRow.appendChild(reciteBtn);
     card.appendChild(reciteRow);
 
+    if (poem.has_practice && poem.next_review_day) {
+      var reviewPlan = document.createElement('p');
+      reviewPlan.className = 'poem-review-plan';
+      reviewPlan.textContent = poem.last_mastered
+        ? '上次整首已掌握 · ' + poem.next_review_day + ' 再巩固'
+        : '上次尚未整首掌握 · ' + poem.next_review_day + ' 再练';
+      card.appendChild(reviewPlan);
+    }
+
     // Attribution chips — the word row's chip shape, plus a 手动 marker
     // on assignments the parent explicitly included.
     (poem.textbooks || []).forEach(function (entry) {

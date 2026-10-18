@@ -1,7 +1,8 @@
 /**
  * Parent poem-recitation E2E — 整首古诗背默 (Issue #12): the WHOLE flow
  * against the ISOLATED real service — import-side seeding through the real
- * commit API, the student classroom over the REAL /rt WebSocket (session
+ * commit API, the student classroom through the REAL browser page and /rt
+ * WebSocket (session
  * → task announcement → 写完了 → line check against the poem's own text →
  * photo OCR prefill → manual verdicts → whole-poem submit), and the
  * parent's records view showing the work, the practice way, the mastery
@@ -36,7 +37,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 const WebSocket = require('ws');
-const fs = require('node:fs');
 const path = require('node:path');
 
 const ANSWER_FIXTURE = path.join(__dirname, 'fixtures', 'photo-zh-poem-answer.jpg');
@@ -58,164 +58,102 @@ async function commitPoem(request, title) {
   return body.results[0].poem_id;
 }
 
-/** sineFrame builds one 30ms 16kHz s16le frame above the VAD start RMS. */
-function speechFrame() {
-  const samples = 480; // 30ms at 16kHz
-  const buf = Buffer.alloc(samples * 2);
-  for (let i = 0; i < samples; i++) {
-    const v = Math.round(9000 * Math.sin((2 * Math.PI * 440 * i) / 16000));
-    buf.writeInt16LE(v, i * 2);
-  }
-  return buf;
-}
-
 /**
- * drivePoemClassroom runs the student-side WHOLE classroom over the real
- * /rt socket: continuous mic pump (speech while speakUntil holds, silence
- * otherwise — the faithful-browser shape), sentence acks after every
- * audio_end, the one 写完了 voice turn through the real VAD/ASR/LLM path,
- * the answer-sheet photo upload, the manual per-line verdicts and the
- * submit. Resolves with the captured control messages.
+ * drivePoemClassroom runs the whole classroom from the real student page.
+ * It starts the page, sends one 写完了 voice turn through that page's live
+ * socket, uploads the answer sheet through the file picker, confirms every
+ * line with the rendered controls, and submits with the rendered button.
  */
-function drivePoemClassroom(poemId) {
-  return new Promise((resolve, reject) => {
-    const captured = {
-      ready: null,
-      teacherTexts: [],
-      checkStarted: null,
-      ocr: null,
-      review: null,
-      ended: null,
-      errors: [],
-    };
-    const ws = new WebSocket(RT_URL, { origin: RT_ORIGIN });
-    ws.binaryType = 'nodebuffer';
+async function drivePoemClassroom(page, poemId, title) {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
 
-    const silence = Buffer.alloc(960); // 30ms of s16le zeros
-    const speech = speechFrame();
-    let speakUntil = 0;
-    let spokeOnce = false;
-    let submitted = false;
-    let verdictEcho = 0;
-    const acked = new Set();
-    const fail = setTimeout(() => {
-      cleanup();
-      reject(new Error('poem classroom timeout: ' + JSON.stringify(captured)));
-    }, 90_000);
+  await page.goto('/tutor/?poem=' + poemId + '&category=chinese&mode=test');
+  // Keep the committed JPEG bytes stable for the exact-byte local vision
+  // stub. The real file picker, RTPhoto validation, chunking, transport and
+  // server OCR path still run; the resize/encode helper has its own tests.
+  await page.evaluate(() => {
+    window.RTPhoto.prototype._downscale = async (file) =>
+      new Uint8Array(await file.arrayBuffer());
+  });
+  await page.locator('#rt-start').click();
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 30_000 })
+    .not.toBeNull();
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().poem), { timeout: 30_000 })
+    .toEqual({ title, lineCount: 4 });
 
-    let pump = null;
-    function cleanup() {
-      clearTimeout(fail);
-      if (pump) clearInterval(pump);
-      try { ws.close(); } catch (_) { /* already closed */ }
+  const poemBanner = page.locator('#rt-poem');
+  await expect(poemBanner).toContainText('《' + title + '》');
+  await expect(poemBanner).toContainText('李白');
+  await expect(poemBanner).toContainText('共 4 句');
+  await expect(poemBanner).toContainText('背默');
+  expect(await page.evaluate(() => window.__rtTutor.sessionState.words)).toEqual(['', '', '', '']);
+
+  await expect(page.locator('#rt-trace .rt-trace-teacher').first()).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 30_000 })
+    .toBe('listening');
+  const teacherTexts = await page.locator('#rt-trace .rt-trace-teacher').allTextContents();
+  const preCheckText = await page.locator('body').innerText();
+
+  // The browser page owns the live socket. Inject one 30ms-cadence PCM turn
+  // through it so the real VAD/ASR/classifier handles 写完了.
+  await page.evaluate(async () => {
+    const ws = window.__rtTutor.client.ws;
+    const speech = new Int16Array(480);
+    for (let i = 0; i < speech.length; i++) {
+      speech[i] = Math.round(9000 * Math.sin((2 * Math.PI * 440 * i) / 16000));
     }
-
-    ws.on('error', (err) => {
-      cleanup();
-      reject(err);
-    });
-    ws.on('open', () => {
-      ws.send(JSON.stringify({
-        type: 'session_init',
-        audio: { sampleRate: 16000, format: 's16le', channels: 1 },
-        mode: 'test', // even test mode must NOT reveal a poem's lines
-        category: 'chinese',
-        poem: poemId,
-      }));
-      // The faithful-browser mic: never muted, 30ms cadence.
-      pump = setInterval(() => {
-        if (ws.readyState !== WebSocket.OPEN) return;
-        ws.send(Date.now() < speakUntil ? speech : silence);
+    const silence = new Int16Array(480);
+    const sendFrames = (frame, count) => new Promise((resolve) => {
+      let sent = 0;
+      const timer = setInterval(() => {
+        if (ws.readyState !== WebSocket.OPEN || sent >= count) {
+          clearInterval(timer);
+          resolve();
+          return;
+        }
+        ws.send(frame.buffer);
+        sent += 1;
       }, 30);
     });
-    ws.on('message', (data, isBinary) => {
-      if (isBinary) return;
-      let msg;
-      try {
-        msg = JSON.parse(String(data));
-      } catch (_) {
-        return;
-      }
-      switch (msg.type) {
-        case 'session_ready':
-          captured.ready = msg;
-          break;
-        case 'teacher_sentence':
-          if (msg.text) captured.teacherTexts.push(msg.text);
-          break;
-        case 'audio_end':
-          if (msg.sentence_id && !acked.has(msg.sentence_id)) {
-            acked.add(msg.sentence_id);
-            ws.send(JSON.stringify({
-              type: 'sentence_ack',
-              sentence_id: msg.sentence_id,
-              epoch: msg.epoch,
-            }));
-          }
-          break;
-        case 'state':
-          // The greeting settled: speak 写完了 once, past the echo tail.
-          if (msg.value === 'listening' && captured.ready && !spokeOnce &&
-            captured.teacherTexts.length > 0) {
-            spokeOnce = true;
-            setTimeout(() => {
-              speakUntil = Date.now() + 1800;
-            }, 800);
-          }
-          break;
-        case 'check_started': {
-          captured.checkStarted = msg;
-          // The whole answer sheet in one shot (the page is ~30KB — a
-          // single final photo_chunk; the server's assembler accepts it).
-          const jpeg = fs.readFileSync(ANSWER_FIXTURE);
-          ws.send(JSON.stringify({
-            type: 'photo_chunk',
-            seq: 1,
-            data: jpeg.toString('base64'),
-            final: true,
-          }));
-          break;
-        }
-        case 'ocr_result': {
-          captured.ocr = msg;
-          // The human pass: confirm lines 1-3 对 and line 4 错 (the OCR's
-          // honest verbatim read backs the mistake — 沿用人工确认/纠错).
-          for (let i = 0; i < POEM_LINES.length; i++) {
-            ws.send(JSON.stringify({
-              type: 'check_verdict',
-              request_id: 'e2e-poem-v-' + i,
-              word_index: i,
-              correct: i < 3,
-            }));
-          }
-          break;
-        }
-        case 'check_verdicts':
-          verdictEcho = ((msg.verdicts || []).filter((v) => v.manual)).length;
-          if (verdictEcho >= POEM_LINES.length && !submitted) {
-            submitted = true;
-            ws.send(JSON.stringify({
-              type: 'check_submit',
-              request_id: 'e2e-poem-submit',
-            }));
-          }
-          break;
-        case 'review_result':
-          captured.review = msg;
-          break;
-        case 'session_ended':
-          captured.ended = msg;
-          cleanup();
-          resolve(captured);
-          break;
-        case 'error':
-          captured.errors.push(msg);
-          break;
-        default:
-          break;
-      }
-    });
+    await sendFrames(speech, 60);
+    await sendFrames(silence, 50);
   });
+
+  await expect(page.locator('#rt-check')).toBeVisible({ timeout: 45_000 });
+  const rows = page.locator('#rt-check .rt-check-row');
+  await expect(rows).toHaveCount(4);
+  for (let i = 0; i < POEM_LINES.length; i++) {
+    await expect(rows.nth(i).locator('.rt-check-word')).toHaveText((i + 1) + '. ' + POEM_LINES[i]);
+  }
+
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.locator('#rt-check .rt-check-photo').click(),
+  ]);
+  await chooser.setFiles(ANSWER_FIXTURE);
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.ocrRows), { timeout: 30_000 })
+    .toBe(4);
+  const ocrTexts = await page.locator('#rt-check .rt-ocr-text').allTextContents();
+
+  for (let i = 0; i < POEM_LINES.length; i++) {
+    await rows.nth(i).locator('button').nth(i < 3 ? 0 : 1).click();
+    await expect
+      .poll(() => page.evaluate(() => window.__rtTutor.observe().check.checked),
+        { timeout: 10_000 })
+      .toBe(i + 1);
+  }
+  const submit = page.locator('#rt-check .rt-check-submit');
+  await expect(submit).toBeEnabled({ timeout: 10_000 });
+  await submit.click();
+  await expect(page.locator('#rt-banner')).toContainText('背默完成', { timeout: 45_000 });
+  await expect(page.locator('#rt-banner')).toContainText('整首背默结果保存好啦');
+
+  return { pageErrors, teacherTexts, preCheckText, ocrTexts };
 }
 
 /** rtPoemInitError opens a session_init for a poem expected to REFUSE. */
@@ -250,40 +188,21 @@ test('whole flow: 背默 → 检查 → 提交 → 家长查看，整首保存�
   const title = '静夜思-e2e-' + Date.now();
   const poemId = await commitPoem(request, title);
 
-  const run = await drivePoemClassroom(poemId);
+  const run = await drivePoemClassroom(page, poemId, title);
 
-  // The classroom opened on the whole work — masked, in EVERY mode.
-  expect(run.errors).toEqual([]);
-  expect(run.ready.poem).toBeTruthy();
-  expect(run.ready.poem.title).toBe(title);
-  expect(run.ready.poem.author).toBe('李白');
-  expect(run.ready.poem.line_count).toBe(4);
-  expect(run.ready.poem.method).toBe('背默');
-  expect(run.ready.category).toBe('chinese');
-  expect(run.ready.lesson.words).toEqual(['', '', '', '']);
-
-  // The 背默 red line: no teacher sentence ever carried a line.
+  // The student page opened on the whole work, with every line masked.
+  expect(run.pageErrors, JSON.stringify(run.pageErrors)).toEqual([]);
   const spoken = run.teacherTexts.join('\n');
   expect(spoken).toContain(title);
   expect(spoken).toContain('默写');
   for (const line of POEM_LINES) {
     expect(spoken).not.toContain(line);
+    expect(run.preCheckText).not.toContain(line);
   }
 
-  // The check rows are the poem's own ordered lines.
-  expect(run.checkStarted.reason).toBe('poem_done');
-  expect(run.checkStarted.words).toEqual(POEM_LINES);
-
-  // The photo's honest per-line read prefilled (line 4's mistake verbatim).
-  const entries = run.ocr.entries || [];
-  expect(entries.length).toBe(4);
-  expect(entries[3].ocr_text).toBe('低头思故香');
-  expect(entries[3].correct).toBe(false);
-
-  // ONE whole-poem save, honestly reported.
-  expect(run.review.requested).toBe(1);
-  expect(run.review.updated).toBe(1);
-  expect(run.ended.reason).toBe('lesson_complete');
+  // The browser upload rendered the photo's honest line-4 mistake.
+  expect(run.ocrTexts).toHaveLength(4);
+  expect(run.ocrTexts[3]).toContain('低头思故香');
 
   // The records API: the work, the practice way, the 3/4 mastery, the save.
   const listRes = await request.get('/api/v1/lessons');
@@ -313,6 +232,14 @@ test('whole flow: 背默 → 检查 → 提交 → 家长查看，整首保存�
   expect(detail.save_receipts[0].status).toBe('saved');
   expect(detail.save_receipts[0].requested).toEqual([title]);
 
+  // A failed whole-poem attempt is scheduled for another practice day.
+  const poemsRes = await request.get('/api/v1/poems?category=chinese&q=' + encodeURIComponent(title));
+  expect(poemsRes.ok()).toBeTruthy();
+  const practiced = (await poemsRes.json()).poems.find((p) => p.id === poemId);
+  expect(practiced.has_practice).toBe(true);
+  expect(practiced.last_mastered).toBe(false);
+  expect(practiced.next_review_day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
   // The parent's records view: the row, then the detail.
   await page.goto('/parent.html');
   const lessonRow = page.locator('.lesson-row[data-lesson-id="' + row.lesson_id + '"]');
@@ -336,6 +263,14 @@ test('whole flow: 背默 → 检查 → 提交 → 家长查看，整首保存�
   await expect(receiptLine).toBeVisible();
   await expect(receiptLine).toContainText('已保存');
   await expect(receiptLine).toContainText('保存 1 / 1');
+
+  // The parent content view exposes the persisted next-practice decision.
+  await page.getByRole('tab', { name: '词库' }).click();
+  await page.locator('.type-pills button', { hasText: '古诗' }).click();
+  const poemCard = page.locator('.poem-card', { hasText: title });
+  await expect(poemCard).toContainText('上次尚未整首掌握');
+  await expect(poemCard).toContainText(practiced.next_review_day);
+  await expect(poemCard).toContainText('再练');
 });
 
 test('entry & gates: 背默这首 opens the student page; 范围外/未知古诗诚实拒绝', async ({ page, request }) => {

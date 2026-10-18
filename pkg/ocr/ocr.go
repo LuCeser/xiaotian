@@ -168,48 +168,17 @@ func isJPEG(b []byte) bool {
 // prefill verdicts from a gated photo). A length mismatch with expected is
 // returned AS-IS — the caller matches positionally and never fakes alignment.
 func (p *Pipeline) ProcessWords(ctx context.Context, imageJPEG []byte, expected []string) ([]WordReading, error) {
-	if len(imageJPEG) == 0 {
-		return nil, ErrEmptyImage
-	}
-	if !isJPEG(imageJPEG) {
-		return nil, ErrNotJPEG
-	}
-	if p.read == nil {
-		return nil, errNilSeam
-	}
-
-	reply, err := p.read(ctx, ocrWordsSystemPrompt, ocrWordsUserPrompt(len(expected)), imageJPEG)
-	if err != nil {
-		// Same double-%w shape as Process: sentinel + upstream cause.
-		return nil, fmt.Errorf("%w: %w", errReaderFailed, err)
-	}
-
-	readings, ok := parseWordsJSON(reply)
-	if !ok {
-		return nil, errUnparseableReply
-	}
-	low := false
-	for i := range readings {
-		readings[i].Text = strings.TrimSpace(readings[i].Text)
-		readings[i].Confidence = clamp01(readings[i].Confidence)
-		if readings[i].Confidence < p.minConfidence {
-			low = true
-		}
-	}
-	if low {
-		return readings, ErrLowConfidence
-	}
-	return readings, nil
+	return p.processReadings(ctx, imageJPEG, ocrWordsSystemPrompt, ocrWordsUserPrompt(len(expected)))
 }
 
 // ProcessLines converts one whole-poem photo's JPEG bytes into per-LINE
-// readings (Issue #12), positionally aligned with expected — index N grades
-// against expected[N], the poem's own verse order. Identical contract to
-// ProcessWords (Reader seam, JPEG validation, confidence gate, length
-// mismatch returned AS-IS); only the prompts differ — the page is one poem,
-// one verse line per row, never merged or split. The CALLER decides the
-// grading language (a Chinese poem line grades with wordLang "zh").
+// readings (Issue #12). It keeps a distinct domain entry point while sharing
+// transport, parsing and confidence handling with ProcessWords.
 func (p *Pipeline) ProcessLines(ctx context.Context, imageJPEG []byte, expected []string) ([]WordReading, error) {
+	return p.processReadings(ctx, imageJPEG, ocrPoemLinesSystemPrompt, ocrPoemLinesUserPrompt(len(expected)))
+}
+
+func (p *Pipeline) processReadings(ctx context.Context, imageJPEG []byte, systemPrompt, userPrompt string) ([]WordReading, error) {
 	if len(imageJPEG) == 0 {
 		return nil, ErrEmptyImage
 	}
@@ -220,7 +189,7 @@ func (p *Pipeline) ProcessLines(ctx context.Context, imageJPEG []byte, expected 
 		return nil, errNilSeam
 	}
 
-	reply, err := p.read(ctx, ocrPoemLinesSystemPrompt, ocrPoemLinesUserPrompt(len(expected)), imageJPEG)
+	reply, err := p.read(ctx, systemPrompt, userPrompt, imageJPEG)
 	if err != nil {
 		// Same double-%w shape as Process: sentinel + upstream cause.
 		return nil, fmt.Errorf("%w: %w", errReaderFailed, err)

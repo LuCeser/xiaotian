@@ -84,6 +84,14 @@ func TestRecordPracticeOneRowPerAttempt(t *testing.T) {
 	if latest.LessonID != second.LessonID || !latest.Mastered {
 		t.Errorf("latest = %+v, want the second attempt", latest)
 	}
+	p, err := h.store.Get(ctx, poemID)
+	if err != nil {
+		t.Fatalf("get scheduled poem: %v", err)
+	}
+	if !p.HasPractice || !p.LastMastered || p.NextReviewDay != "2026-10-26" {
+		t.Errorf("schedule = practiced=%v mastered=%v next=%q, want mastered +7 days",
+			p.HasPractice, p.LastMastered, p.NextReviewDay)
+	}
 }
 
 // TestRecordPracticeShapeGate — a half-shaped mastery record rejects before
@@ -101,6 +109,7 @@ func TestRecordPracticeShapeGate(t *testing.T) {
 		{PoemID: poemID, LessonID: "l", TotalLines: 0, CorrectLines: 0, ReviewedDay: "2026-10-18"},
 		{PoemID: poemID, LessonID: "l", TotalLines: 2, CorrectLines: 3, ReviewedDay: "2026-10-18"},
 		{PoemID: poemID, LessonID: "l", TotalLines: 2, CorrectLines: -1, ReviewedDay: "2026-10-18"},
+		{PoemID: poemID, LessonID: "l", TotalLines: 2, CorrectLines: 1, ReviewedDay: "18-10-2026"},
 	}
 	for i, r := range bad {
 		if err := store.RecordPractice(ctx, r); !errors.Is(err, ErrInvalidPoem) {
@@ -118,6 +127,13 @@ func TestRecordPracticeShapeGate(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].CorrectLines != 0 || rows[0].Mastered {
 		t.Fatalf("rows = %+v, want the single zero-correct attempt", rows)
+	}
+	p, err := h.store.Get(ctx, poemID)
+	if err != nil {
+		t.Fatalf("get scheduled poem: %v", err)
+	}
+	if !p.HasPractice || p.LastMastered || p.NextReviewDay != "2026-10-19" {
+		t.Errorf("non-mastered schedule = %+v, want next-day retry", p)
 	}
 }
 

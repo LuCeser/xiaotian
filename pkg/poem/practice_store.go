@@ -5,19 +5,18 @@
 // WORD-shaped and feed the 当日已默 word exclusion) and never touches the
 // FSRS schedule (poems are not cards — the store.go ownership contract).
 //
-// The 后续练习安排 seam (issue #12: 本任务明确与现有学习调度的衔接方式):
-// poems schedule OUTSIDE FSRS by design. Eligibility to PRACTICE stays the
-// Issue #4 scope verdict (poem.InScope — 已学进度/手动加入/补充); what this
-// table adds is the mastery history per poem — LatestByPoem is the single
-// read the parent records view (and a future auto-arrangement) consume. A
-// row with Mastered=true means 整首全对 for THAT attempt only; mastery of
-// one poem never implies anything about another poem or about 课文 (US-43).
+// Whole-poem scheduling stays outside word FSRS: a non-mastered attempt is
+// due again the next Beijing day; a mastered attempt is due for consolidation
+// seven days later. The schedule is written atomically with the attempt and
+// displayed in the parent content view. Scope eligibility remains governed by
+// Issue #4; a due date never overrides an out-of-scope work.
 package poem
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/pkg/errors"
 
@@ -42,6 +41,16 @@ var poemPracticeDDL = `CREATE TABLE IF NOT EXISTS poem_practice_logs (
 
 // idxPoemPracticePoem serves ListByPoem/LatestByPoem.
 var idxPoemPracticePoem = `CREATE INDEX IF NOT EXISTS idx_poem_practice_poem ON poem_practice_logs(poem_id)`
+
+// poemReviewScheduleDDL stores the actionable next whole-poem review. One
+// row per work is replaced only after a successfully committed attempt.
+var poemReviewScheduleDDL = `CREATE TABLE IF NOT EXISTS poem_review_schedule (
+    poem_id INTEGER PRIMARY KEY,
+    last_lesson_id TEXT NOT NULL,
+    next_review_day TEXT NOT NULL,
+    last_mastered INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`
 
 // PracticeRecord is ONE whole-poem attempt's result: the judged line counts
 // (the lessons row's verdicts are the per-line detail; this row is the
@@ -93,22 +102,35 @@ func (s *PracticeStore) RecordPractice(ctx context.Context, r PracticeRecord) er
 	if r.TotalLines <= 0 || r.CorrectLines < 0 || r.CorrectLines > r.TotalLines {
 		return errors.Wrap(ErrInvalidPoem, "record poem practice: line counts out of range")
 	}
+	reviewedDay, err := time.Parse("2006-01-02", r.ReviewedDay)
+	if err != nil {
+		return errors.Wrap(ErrInvalidPoem, "record poem practice: reviewed_day must be YYYY-MM-DD")
+	}
 	mastered := 0
 	if r.Mastered {
 		mastered = 1
 	}
+	daysUntilReview := 1
+	if r.Mastered {
+		daysUntilReview = 7
+	}
+	nextReviewDay := reviewedDay.AddDate(0, 0, daysUntilReview).Format("2006-01-02")
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.Wrap(err, "record poem practice: begin")
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after commit
 	var (
 		res sql.Result
-		err error
 	)
 	if r.ReviewedAt != "" {
-		res, err = s.db.ExecContext(ctx,
+		res, err = tx.ExecContext(ctx,
 			`INSERT INTO poem_practice_logs (poem_id, lesson_id, total_lines, correct_lines, hints, mastered, reviewed_at, reviewed_day)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			r.PoemID, r.LessonID, r.TotalLines, r.CorrectLines, r.Hints, mastered, r.ReviewedAt, r.ReviewedDay,
 		)
 	} else {
-		res, err = s.db.ExecContext(ctx,
+		res, err = tx.ExecContext(ctx,
 			`INSERT INTO poem_practice_logs (poem_id, lesson_id, total_lines, correct_lines, hints, mastered, reviewed_day)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			r.PoemID, r.LessonID, r.TotalLines, r.CorrectLines, r.Hints, mastered, r.ReviewedDay,
@@ -125,6 +147,21 @@ func (s *PracticeStore) RecordPractice(ctx context.Context, r PracticeRecord) er
 	}
 	if n, cerr := res.RowsAffected(); cerr == nil && n != 1 {
 		return errors.Wrap(ErrInvalidPoem, fmt.Sprintf("record poem practice: unexpected affected rows %d", n))
+	}
+	if _, err = tx.ExecContext(ctx,
+		`INSERT INTO poem_review_schedule (poem_id, last_lesson_id, next_review_day, last_mastered, updated_at)
+		 VALUES (?, ?, ?, ?, datetime('now'))
+		 ON CONFLICT(poem_id) DO UPDATE SET
+		 last_lesson_id=excluded.last_lesson_id,
+		 next_review_day=excluded.next_review_day,
+		 last_mastered=excluded.last_mastered,
+		 updated_at=datetime('now')`,
+		r.PoemID, r.LessonID, nextReviewDay, mastered,
+	); err != nil {
+		return errors.Wrap(err, "record poem practice: schedule")
+	}
+	if err = tx.Commit(); err != nil {
+		return errors.Wrap(err, "record poem practice: commit")
 	}
 	return nil
 }

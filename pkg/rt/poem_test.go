@@ -543,3 +543,61 @@ func TestPoemResumeInFlightCheck(t *testing.T) {
 		t.Error("the resumed tutor lost the poem identity")
 	}
 }
+
+func TestResolvePoemLessonIDSeparatesWorksInSameSecond(t *testing.T) {
+	now := time.Date(2026, 10, 18, 8, 0, 0, 123, time.UTC)
+	a := resolvePoemLessonID(now, 42)
+	b := resolvePoemLessonID(now, 43)
+	if a == b {
+		t.Fatalf("two works received the same attempt id %q", a)
+	}
+	if !strings.HasPrefix(a, "r0p-") || !strings.HasSuffix(a, "-42") {
+		t.Fatalf("poem attempt id = %q, want r0p namespace and work identity", a)
+	}
+}
+
+// A connection loss during the human check keeps the same attempt open.
+// Re-entering the poem must restore that check instead of starting the
+// writing task again and abandoning the already confirmed rows.
+func TestPoemDisconnectDuringCheckResumesSameAttempt(t *testing.T) {
+	exec := newFakeExecutor(ttLessonID, ttCards(ttPoemLines...))
+	exec.mu.Lock()
+	exec.lesson.PoemID = 42
+	exec.lesson.Stage = lesson.StageChecking
+	exec.mu.Unlock()
+
+	config := func(c *TurnManagerConfig) {
+		c.Poems = &fakePoemSource{p: ttInScopePoem()}
+		c.PoemPractice = &fakePoemPractice{}
+	}
+	first := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(2, 320), exec,
+		ttConfigWith(nil, config), NewEventRecorder(&captureLogger{}, "first"), nil)
+	firstSender := &captureSender{}
+	first.HandleControl(firstSender, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Poem: 42,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	first.Close(firstSender)
+
+	exec.mu.Lock()
+	stage, unchecked := exec.lesson.Stage, exec.lesson.Unchecked
+	exec.mu.Unlock()
+	if stage != lesson.StageChecking || unchecked {
+		t.Fatalf("disconnect changed poem check to stage=%q unchecked=%v", stage, unchecked)
+	}
+
+	second := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(2, 320), exec,
+		ttConfigWith(nil, config), NewEventRecorder(&captureLogger{}, "second"), nil)
+	secondSender := &captureSender{}
+	second.HandleControl(secondSender, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Poem: 42,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	started := ttCheckStartedWanted(t, secondSender)
+	if started["reason"] != CheckStartedReasonResume {
+		t.Fatalf("reconnected check reason = %v, want resume", started["reason"])
+	}
+	if exec.ensureCalls != 0 {
+		t.Fatalf("ensure calls = %d, want the original attempt", exec.ensureCalls)
+	}
+}

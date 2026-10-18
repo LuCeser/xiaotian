@@ -1013,6 +1013,7 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 func (tm *TurnManager) uncheckedCloseFallback() {
 	tm.mu.Lock()
 	eligible := tm.tutor != nil && !tm.closed && tm.tutor.checking
+	isPoem := eligible && tm.tutor.poem != nil
 	var lessonID string
 	var version int
 	var category string
@@ -1023,6 +1024,13 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 	}
 	tm.mu.Unlock()
 	if !eligible {
+		return
+	}
+	if isPoem {
+		// A poem has no behavior-derived fallback. Keep stage=checking so a
+		// refresh or disconnect reopens the same ordered lines and preserves
+		// the human confirmation work already stored on the lesson row.
+		tm.recorder.Emit(EventUncheckedFallback, infra.F("requested", 0), infra.F("updated", 0), infra.F("poem", true))
 		return
 	}
 
@@ -1040,27 +1048,10 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 	tm.tutor.checking = false
 	tm.tutor.completed = true
 	words := append([]lesson.Word(nil), tm.tutor.words...)
-	isPoem := tm.tutor.poem != nil
 	tm.mu.Unlock()
 	if res.Idempotent {
 		// The latch already fell (a racing check_submit or a prior close
 		// wrote first): never a second SubmitReview (T-13.1-09).
-		return
-	}
-
-	if isPoem {
-		// Issue #12: an unchecked poem close has NO human verdicts, and a
-		// poem's mastery is judgment-only (行为不能推导掌握) — so the honest
-		// fallback writes NOTHING: no poem_practice_logs row (that would be
-		// a fabricated judgment), and certainly no SubmitReview (poem lines
-		// must never reach the word review channel). The lesson row stays
-		// submitted+unchecked for the parent; re-practicing opens a fresh
-		// attempt.
-		tm.recorder.Emit(EventUncheckedFallback,
-			infra.F("requested", 0),
-			infra.F("updated", 0),
-			infra.F("poem", true),
-		)
 		return
 	}
 
