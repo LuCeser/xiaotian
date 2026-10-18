@@ -619,3 +619,161 @@ func validatePoemAssignRequest(req *PoemAssignRequest) string {
 	}
 	return ""
 }
+
+// Passage route caps (Issue #13): one commit carries at most maxPassages
+// whole passages (a photo page holds one or two; the ocr pipeline caps
+// its own recognition at the same bound), each field capped for
+// storage/rendering cost. A 自然段 runs far longer than a verse line —
+// maxPassageParagraphRunes is the poem line cap's prose counterpart.
+// Runes, not bytes.
+const (
+	maxPassages              = 10
+	maxPassageTitleRunes     = 200
+	maxPassageAuthorRunes    = 100
+	maxPassageParagraphRunes = 1000
+	maxPassageParagraphs     = 60
+)
+
+// PassageScopeRequest is the decoded practice-range object (练习范围) —
+// inside a commit draft AND the standalone scope route's body: whole
+// (整篇) XOR an explicit 1-based paragraph set (指定自然段). An absent
+// scope on a draft means "store the text only, the parent picks a range
+// later"; on the scope route a body without whole and without paragraphs
+// is rejected below.
+type PassageScopeRequest struct {
+	Paragraphs []int `json:"paragraphs"`
+	Whole      bool  `json:"whole"`
+}
+
+// validatePassageScopeShape enforces the range's own contract, shared by
+// the commit and scope routes: whole carries NO paragraphs (the two forms
+// are mutually exclusive); a paragraph set names at least one index, at
+// most maxPassageParagraphs, every index positive. paragraphCount > 0
+// additionally bounds the indexes to a REAL paragraph of the passage the
+// range targets (选择范围必须指向真实段落) — the store re-validates
+// against its own stored text.
+func validatePassageScopeShape(scope *PassageScopeRequest, paragraphCount int, field string) string {
+	if scope.Whole {
+		if len(scope.Paragraphs) != 0 {
+			return field + " must not carry paragraphs when whole is true"
+		}
+		return ""
+	}
+	if len(scope.Paragraphs) == 0 {
+		return field + " must be whole or name at least one paragraph"
+	}
+	if len(scope.Paragraphs) > maxPassageParagraphs {
+		return fmt.Sprintf("%s must contain between 1 and %d paragraphs, got %d",
+			field, maxPassageParagraphs, len(scope.Paragraphs))
+	}
+	for _, i := range scope.Paragraphs {
+		if i < 1 {
+			return field + " paragraph numbers are 1-based and must be positive"
+		}
+		if paragraphCount > 0 && i > paragraphCount {
+			return fmt.Sprintf("%s names paragraph %d but the passage has %d paragraphs", field, i, paragraphCount)
+		}
+	}
+	return ""
+}
+
+// PassageCommitRequest is the decoded POST /passages body: the confirmed
+// drafts (paragraphs in 自然段 order, the preview's range choice riding
+// each draft) plus the attribution target established in the preview
+// (0 = 不指定教材). Category is optional and defaults to chinese — the
+// acceptance focuses 语文课文, but the structured original is not
+// subject-bound (an English whole sentence / short text rides "english").
+type PassageCommitRequest struct {
+	Category string `json:"category"`
+	Passages []struct {
+		Title      string               `json:"title"`
+		Author     string               `json:"author"`
+		Lesson     string               `json:"lesson"`
+		Scope      *PassageScopeRequest `json:"scope"`
+		Paragraphs []string             `json:"paragraphs"`
+	} `json:"passages"`
+	TextbookID int64 `json:"textbook_id"`
+}
+
+// validatePassageCommitRequest enforces the commit-path contract:
+// category enum (default chinese), batch size, per-passage
+// title/author/lesson caps and the paragraph rules (at least one
+// non-empty paragraph — empty rows are editing noise the store drops —
+// ≤ maxPassageParagraphs paragraphs, each ≤ maxPassageParagraphRunes),
+// then each draft's range shape against THAT draft's own non-empty
+// paragraph count. Returns "" on success or the invalid_request message
+// naming the offending field.
+func validatePassageCommitRequest(req *PassageCommitRequest) string {
+	if req.Category == "" {
+		req.Category = CategoryChinese
+	}
+	if err := ValidateCategory(req.Category); err != nil {
+		return "category must be \"english\" or \"chinese\""
+	}
+	if len(req.Passages) < 1 || len(req.Passages) > maxPassages {
+		return fmt.Sprintf("passages must contain between 1 and %d items, got %d", maxPassages, len(req.Passages))
+	}
+	if req.TextbookID < 0 {
+		return "textbook_id must not be negative"
+	}
+	for i, p := range req.Passages {
+		if strings.TrimSpace(p.Title) == "" {
+			return fmt.Sprintf("passages[%d].title must not be empty", i)
+		}
+		if n := len([]rune(p.Title)); n > maxPassageTitleRunes {
+			return fmt.Sprintf("passages[%d].title exceeds %d characters", i, maxPassageTitleRunes)
+		}
+		if n := len([]rune(p.Author)); n > maxPassageAuthorRunes {
+			return fmt.Sprintf("passages[%d].author exceeds %d characters", i, maxPassageAuthorRunes)
+		}
+		if n := len([]rune(p.Lesson)); n > maxTextbookLessonRunes {
+			return fmt.Sprintf("passages[%d].lesson exceeds %d characters", i, maxTextbookLessonRunes)
+		}
+		if len(p.Paragraphs) < 1 || len(p.Paragraphs) > maxPassageParagraphs {
+			return fmt.Sprintf("passages[%d].paragraphs must contain between 1 and %d items, got %d",
+				i, maxPassageParagraphs, len(p.Paragraphs))
+		}
+		nonEmpty := 0
+		for j, paragraph := range p.Paragraphs {
+			if strings.TrimSpace(paragraph) == "" {
+				continue
+			}
+			nonEmpty++
+			if n := len([]rune(paragraph)); n > maxPassageParagraphRunes {
+				return fmt.Sprintf("passages[%d].paragraphs[%d] exceeds %d characters",
+					i, j, maxPassageParagraphRunes)
+			}
+		}
+		if nonEmpty == 0 {
+			return fmt.Sprintf("passages[%d].paragraphs must contain at least one non-empty paragraph", i)
+		}
+		if p.Scope != nil {
+			if msg := validatePassageScopeShape(p.Scope, nonEmpty,
+				fmt.Sprintf("passages[%d].scope", i)); msg != "" {
+				return msg
+			}
+		}
+	}
+	return ""
+}
+
+// PassageAssignRequest is the decoded POST /passages/{id}/assign body —
+// the content view's explicit attribution management (lesson + include
+// refresh together), the poem twin verbatim.
+type PassageAssignRequest struct {
+	Lesson         string `json:"lesson"`
+	TextbookID     int64  `json:"textbook_id"`
+	IncludeInScope bool   `json:"includeInScope"`
+}
+
+// validatePassageAssignRequest mirrors validatePoemAssignRequest: a
+// positive textbook id and the lesson cap.
+func validatePassageAssignRequest(req *PassageAssignRequest) string {
+	if req.TextbookID <= 0 {
+		return "textbook_id must be positive"
+	}
+	if n := len([]rune(req.Lesson)); n > maxTextbookLessonRunes {
+		return fmt.Sprintf("lesson exceeds %d characters", maxTextbookLessonRunes)
+	}
+	return ""
+}

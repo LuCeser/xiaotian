@@ -255,8 +255,8 @@ func TestCommitParagraphScopeSeparateFromText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add whole scope: %v", err)
 	}
-	if whole.ID == first[0].ScopeID {
-		t.Fatalf("whole range is a different range, got the same id %d", whole.ID)
+	if whole.Status != StatusAdded || whole.Row.ID == first[0].ScopeID {
+		t.Fatalf("whole range is a different range, got the same id %d", whole.Row.ID)
 	}
 	var passageCount int
 	if err = h.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM passages").Scan(&passageCount); err != nil {
@@ -283,8 +283,8 @@ func TestScopeCanonicalIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add reordered: %v", err)
 	}
-	if reordered.ID != first[0].ScopeID {
-		t.Fatalf("[3,2,2] is the same range as [2,3], got id %d want %d", reordered.ID, first[0].ScopeID)
+	if reordered.Status != StatusExisting || reordered.Row.ID != first[0].ScopeID {
+		t.Fatalf("[3,2,2] is the same range as [2,3], got id %d want %d", reordered.Row.ID, first[0].ScopeID)
 	}
 }
 
@@ -390,6 +390,7 @@ func TestRemoveScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add whole: %v", err)
 	}
+	wholeID := whole.Row.ID
 
 	if err = h.store.RemoveScope(ctx, passageID, outcomes[0].ScopeID); err != nil {
 		t.Fatalf("remove scope: %v", err)
@@ -401,14 +402,14 @@ func TestRemoveScope(t *testing.T) {
 	if len(rows) != 1 || len(rows[0].Paragraphs) != 5 {
 		t.Fatalf("passage and its paragraphs must survive: %+v", rows)
 	}
-	if len(rows[0].Scopes) != 1 || rows[0].Scopes[0].ID != whole.ID {
+	if len(rows[0].Scopes) != 1 || rows[0].Scopes[0].ID != wholeID {
 		t.Fatalf("only the removed range goes, the whole range stays: %+v", rows[0].Scopes)
 	}
 
 	if err = h.store.RemoveScope(ctx, passageID, outcomes[0].ScopeID); err == nil {
 		t.Fatalf("removing a missing range should report ErrScopeNotFound")
 	}
-	if err = h.store.RemoveScope(ctx, passageID+99, whole.ID); err == nil {
+	if err = h.store.RemoveScope(ctx, passageID+99, wholeID); err == nil {
 		t.Fatalf("a range on another passage must not be removable")
 	}
 }

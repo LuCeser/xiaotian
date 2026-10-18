@@ -505,18 +505,27 @@ func (s *Store) scopeTx(ctx context.Context, tx *sql.Tx, passageID int64, paragr
 	}
 }
 
+// AddOutcome is AddScope's result: the stored row (id, whole, canonical
+// index set, created_at) plus the added/existing verdict — re-selecting
+// the same range reports existing and reuses the row (重复确认不重复建立
+// 相同范围).
+type AddOutcome struct {
+	Status string
+	Row    ScopeRow
+}
+
 // AddScope lands ONE practice range on the management path (统一内容页的
 // 范围选择): same identity and validation as the commit path, in its own
 // transaction. A passage id with no row reports ErrPassageNotFound; an
 // out-of-range paragraph index reports ErrScopeOutOfRange with nothing
 // written.
-func (s *Store) AddScope(ctx context.Context, passageID int64, scope Scope) (ScopeRow, error) {
+func (s *Store) AddScope(ctx context.Context, passageID int64, scope Scope) (AddOutcome, error) {
 	if passageID <= 0 {
-		return ScopeRow{}, errors.Wrap(ErrInvalidPassage, "passage add scope: id must be positive")
+		return AddOutcome{}, errors.Wrap(ErrInvalidPassage, "passage add scope: id must be positive")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return ScopeRow{}, errors.Wrap(err, "passage add scope: begin")
+		return AddOutcome{}, errors.Wrap(err, "passage add scope: begin")
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
 
@@ -524,24 +533,29 @@ func (s *Store) AddScope(ctx context.Context, passageID int64, scope Scope) (Sco
 	if err = tx.QueryRowContext(ctx,
 		"SELECT paragraphs FROM passages WHERE id = ?", passageID).Scan(&paragraphsJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return ScopeRow{}, errors.Wrap(ErrPassageNotFound, fmt.Sprintf("passage add scope: passage %d", passageID))
+			return AddOutcome{}, errors.Wrap(ErrPassageNotFound, fmt.Sprintf("passage add scope: passage %d", passageID))
 		}
-		return ScopeRow{}, errors.Wrap(err, "passage add scope: passage lookup")
+		return AddOutcome{}, errors.Wrap(err, "passage add scope: passage lookup")
 	}
 	paragraphs := decodeParagraphs(paragraphsJSON)
 
 	outcome, err := s.scopeTx(ctx, tx, passageID, paragraphs, scope)
 	if err != nil {
-		return ScopeRow{}, err
+		return AddOutcome{}, err
 	}
 	if err = tx.Commit(); err != nil {
-		return ScopeRow{}, errors.Wrap(err, "passage add scope: commit")
+		return AddOutcome{}, errors.Wrap(err, "passage add scope: commit")
 	}
 	row := ScopeRow{
 		ID: outcome.ID, Whole: scope.Whole,
 		Paragraphs: canonicalOrEmpty(scope, paragraphs),
 	}
-	return row, nil
+	// created_at rides the response for an honest receipt; a read failure
+	// degrades to empty (the row's identity — id/whole/indexes — already
+	// carries the outcome).
+	_ = s.db.QueryRowContext(ctx,
+		"SELECT created_at FROM passage_scopes WHERE id = ?", outcome.ID).Scan(&row.CreatedAt)
+	return AddOutcome{Row: row, Status: outcome.Status}, nil
 }
 
 // canonicalOrEmpty projects the caller's scope onto the ScopeRow shape for
