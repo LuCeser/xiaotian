@@ -352,6 +352,15 @@ type ChatVisionRequest struct {
 	Messages []VisionMessage `json:"messages"`
 	// MaxTokens caps the completion length (0 = server default)
 	MaxTokens int `json:"max_tokens,omitempty"`
+	// Thinking controls the model's thinking mode. It is ENABLED BY DEFAULT
+	// server-side, which spends the whole token budget on reasoning_content
+	// and returns an empty content — vision callers must send
+	// {"type":"disabled"} explicitly (issue #42).
+	Thinking *ThinkingConfig `json:"thinking,omitempty"`
+	// MaxCompletionTokens is the OFFICIAL budget field (the OpenAI-compatible
+	// endpoint documents max_completion_tokens, not max_tokens). It covers
+	// reasoning + visible output together. 0 = omitted = server default.
+	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 }
 
 // VisionMessage is one message of a ChatVisionRequest. Content is

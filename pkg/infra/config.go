@@ -1000,9 +1000,13 @@ func DefaultConfig() Config {
 			MaxImageBytes: 1048576,
 			// Same separate-routes rationale as voice.assembleWait.
 			AssembleWait: 2 * time.Second,
-			// Vision thinking over an image runs slower than text-only
-			// classification (voice: 15s); 20s with headroom.
-			RequestTimeout: 20 * time.Second,
+			// Live-measured with thinking disabled: ~20s for a small image
+			// and 27s for a dense one — but one run of the SAME dense image
+			// blew past 30s, so the upstream latency spread is too wide for
+			// a tight bound. 60s absorbs it. main.go derives the shared
+			// mimo client's HTTP timeout as max(voice, photo), so this also
+			// becomes that client's wall-clock bound.
+			RequestTimeout: 60 * time.Second,
 			// Below 0.6 the client offers manual input prefilled with the
 			// best guess rather than auto-judging.
 			ConfidenceThreshold: 0.6,

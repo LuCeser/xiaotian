@@ -259,8 +259,8 @@ func TestDefaultConfig(t *testing.T) {
 		if cfg.Photo.AssembleWait != 2*time.Second {
 			t.Errorf("Photo.AssembleWait = %v, want 2s", cfg.Photo.AssembleWait)
 		}
-		if cfg.Photo.RequestTimeout != 20*time.Second {
-			t.Errorf("Photo.RequestTimeout = %v, want 20s", cfg.Photo.RequestTimeout)
+		if cfg.Photo.RequestTimeout != 60*time.Second {
+			t.Errorf("Photo.RequestTimeout = %v, want 60s", cfg.Photo.RequestTimeout)
 		}
 		if cfg.Photo.ConfidenceThreshold != 0.6 {
 			t.Errorf("Photo.ConfidenceThreshold = %v, want 0.6", cfg.Photo.ConfidenceThreshold)
