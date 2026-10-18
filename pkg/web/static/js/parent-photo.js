@@ -3128,13 +3128,13 @@
     var n = this.bookChoice !== 'none' ? this.committedRows().length : this.submittableRows().length;
     // Issue #11/#13: checked poem and passage drafts ride the SAME
     // commit; the label names every kind honestly. Word-only drafts keep
-    // the established label.
+    // the established label verbatim (确认添加（N 个） — specs pin it).
     var m = this.submittablePoems().length;
     var k = this.submittablePassages().length;
     if (label) {
       var parts = [];
       if (n > 0) {
-        parts.push(n + ' 个词语');
+        parts.push(n + ' 个');
       }
       if (m > 0) {
         parts.push(m + ' 首古诗');

@@ -202,18 +202,28 @@ test('mixed page: 区分展示, 纠错确认 stores the whole passage with its p
     expect(rows[0].scopes[0].whole).toBe(false);
     expect(rows[0].scopes[0].paragraphs).toEqual([2]);
 
-    // 未接入类型不误入词语课堂: the word library holds ONLY the 词语; the
-    // chinese classroom selects the 词语 and never a passage line.
+    // 未接入类型不误入词语课堂: the word library holds ONLY the 词语;
+    // the chinese classroom selects 词语 cards and never a passage line.
     const wordsResp = await request.get('/api/v1/words?category=' + CAT_ZH);
     const words = (await wordsResp.json()).words || [];
     const surfaces = words.map((w) => w.word);
     expect(surfaces).toContain('钥匙');
     expect(surfaces.some((w) => w.includes('秋天的雨') || w.includes(title))).toBe(false);
 
+    // The pinned /rt chinese lesson row (e2e-parent-photo-chinese) is
+    // created by whichever spec probes /rt first in this run and then
+    // REUSED verbatim — membership in it is creation-order-dependent, so
+    // the probe asserts this AC's actual invariant: whatever 词语 the
+    // classroom holds, no passage surface (title or paragraph text) can
+    // appear among them (passages are not cards; the due fetch reads only
+    // the cards table).
     const ready = await rtSessionInit(CAT_ZH);
     expect(ready.category).toBe(CAT_ZH);
-    expect(ready.lesson.words).toContain('钥匙');
-    expect(ready.lesson.words.join('\n')).not.toContain('秋天的雨');
+    const lessonSurfaces = ready.lesson.words.join('\n');
+    expect(lessonSurfaces).not.toContain('秋天的雨');
+    expect(lessonSurfaces).not.toContain(title);
+    expect(lessonSurfaces).not.toContain('一把钥匙');
+    expect(lessonSurfaces).not.toContain('五彩缤纷');
   } finally {
     await deleteUnit(request, CAT_ZH, UNIT_IMPORT);
   }
