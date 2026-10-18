@@ -13,7 +13,6 @@ package rt
 
 import (
 	"encoding/base64"
-	"time"
 
 	"github.com/pkg/errors"
 
@@ -32,7 +31,10 @@ const (
 
 // Photo-channel defaults and bounds (13.1-03). They mirror PhotoConfig's
 // documented defaults so the /rt path needs no new config sections; main.go
-// injects the real values from the existing photo block (Task 3).
+// injects the real values from the existing photo block (Task 3). The OCR
+// call's request timeout is NOT frozen here — it flows in through
+// TurnManagerConfig.PhotoRequestTimeout (Issue #44), whose fallback defers
+// to the photo config block's own default.
 const (
 	// defaultPhotoMaxBytes mirrors PhotoConfig.MaxImageBytes' 1MiB default:
 	// the assembled JPEG memory guard on the 1C1G VPS (T-13.1-06).
@@ -40,10 +42,6 @@ const (
 	// defaultPhotoConfidence mirrors PhotoConfig.ConfidenceThreshold's 0.6
 	// default — the OCR prefill confidence floor.
 	defaultPhotoConfidence = 0.6
-	// photoRequestTimeout bounds one vision OCR call (PhotoConfig's 20s
-	// RequestTimeout semantics): a wedged upstream must not pin the OCR
-	// goroutine forever.
-	photoRequestTimeout = 20 * time.Second
 )
 
 // Fixed human wordings for the photo channel's visible errors (short,

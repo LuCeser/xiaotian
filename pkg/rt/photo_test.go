@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
 )
 
@@ -84,6 +85,29 @@ func ttBindPhoto(tm *TurnManager, reader *fakeOCRReader, maxBytes int) {
 		tm.cfg.PhotoMaxBytes = maxBytes
 	}
 	tm.ocrPipeline = ocr.NewPipeline(ocr.Reader(tm.cfg.OCR), tm.cfg.PhotoConfidence)
+}
+
+// TestPhotoRequestTimeoutFollowsConfigDefault (Issue #44): the /rt OCR
+// bound must defer to the photo config block's default — never a second
+// frozen literal in this package — while an injected value wins as-is.
+func TestPhotoRequestTimeoutFollowsConfigDefault(t *testing.T) {
+	cards := ttCards("苹果")
+	exec := newFakeExecutor(ttLessonID, cards)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(newFakeWords(cards)), nil, nil)
+	t.Cleanup(tm.internalClose)
+	want := infra.DefaultConfig().Photo.RequestTimeout
+	if got := tm.cfg.PhotoRequestTimeout; got != want {
+		t.Fatalf("unset PhotoRequestTimeout = %v, want photo config default %v", got, want)
+	}
+	custom := 42 * time.Second
+	cfg := ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) {
+		c.PhotoRequestTimeout = custom
+	})
+	tm2 := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, cfg, nil, nil)
+	t.Cleanup(tm2.internalClose)
+	if got := tm2.cfg.PhotoRequestTimeout; got != custom {
+		t.Fatalf("explicit PhotoRequestTimeout = %v, want %v", got, custom)
+	}
 }
 
 // ttPhotoChunk ships one photo_chunk control frame.

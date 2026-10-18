@@ -1181,9 +1181,11 @@ func manualVerdictFor(verdicts []lesson.CheckVerdict, index int) bool {
 // on its own goroutine: vision OCR → per-word judgement → prefill → the
 // authoritative check_verdicts echo + ocr_result. Low-confidence or failed
 // recognition never blocks the manual path — the student just confirms
-// every word by hand (D-05: the human pass is mandatory anyway).
+// every word by hand (D-05: the human pass is mandatory anyway). The vision
+// call is bounded by TurnManagerConfig.PhotoRequestTimeout (Issue #44: the
+// photo config block's RequestTimeout, injected by main.go).
 func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
-	ctx, cancel := context.WithTimeout(context.Background(), photoRequestTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), tm.cfg.PhotoRequestTimeout)
 	defer cancel()
 
 	tm.mu.Lock()
