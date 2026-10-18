@@ -120,7 +120,7 @@ func TestPyFSRSFetchDueMapsCards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPyFSRS: %v", err)
 	}
-	words, err := ad.FetchDueWords(context.Background(), 0)
+	words, err := ad.FetchDueWords(context.Background(), 0, "")
 	if err != nil {
 		t.Fatalf("FetchDueWords: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestPyFSRSFetchDueMapsCards(t *testing.T) {
 	// A positive limit passes through unchanged with the same lock contract.
 	fake2 := &fakePyBridge{}
 	ad2, _ := NewPyFSRS(fake2, infra.NewNoOpLogger())
-	if _, err := ad2.FetchDueWords(context.Background(), 5); err != nil {
+	if _, err := ad2.FetchDueWords(context.Background(), 5, ""); err != nil {
 		t.Fatalf("FetchDueWords(5): %v", err)
 	}
 	if got := fake2.dueCalls[0].Limit; got != 5 {
@@ -177,7 +177,7 @@ func TestPyFSRSFetchDueErrorPropagates(t *testing.T) {
 	sentinel := errors.New("python subprocess timed out")
 	fake := &fakePyBridge{dueErrs: []error{sentinel}}
 	ad, _ := NewPyFSRS(fake, infra.NewNoOpLogger())
-	words, err := ad.FetchDueWords(context.Background(), 10)
+	words, err := ad.FetchDueWords(context.Background(), 10, "")
 	if err == nil {
 		t.Fatal("FetchDueWords = nil error, want the python failure propagated")
 	}
@@ -203,7 +203,7 @@ func TestPyFSRSSubmitReviewPassesResultsAndSkipsEmpty(t *testing.T) {
 	ad, _ := NewPyFSRS(fake, infra.NewNoOpLogger())
 
 	// Empty map: no python spawn, zero result, nil error.
-	res, err := ad.SubmitReview(context.Background(), map[string]string{})
+	res, err := ad.SubmitReview(context.Background(), map[string]string{}, "")
 	if err != nil {
 		t.Fatalf("SubmitReview(empty) = %v, want nil", err)
 	}
@@ -215,7 +215,7 @@ func TestPyFSRSSubmitReviewPassesResultsAndSkipsEmpty(t *testing.T) {
 	}
 
 	// Non-empty map: forwarded verbatim, exactly one call.
-	res, err = ad.SubmitReview(context.Background(), map[string]string{"苹果": "good", "香蕉": "hard"})
+	res, err = ad.SubmitReview(context.Background(), map[string]string{"苹果": "good", "香蕉": "hard"}, "")
 	if err != nil {
 		t.Fatalf("SubmitReview = %v, want nil", err)
 	}
@@ -242,7 +242,7 @@ func TestPyFSRSSubmitReviewReportsPartialUpdated(t *testing.T) {
 		}},
 	}
 	ad, _ := NewPyFSRS(fake, infra.NewNoOpLogger())
-	res, err := ad.SubmitReview(context.Background(), map[string]string{"苹果": "good", "香蕉": "hard"})
+	res, err := ad.SubmitReview(context.Background(), map[string]string{"苹果": "good", "香蕉": "hard"}, "")
 	if err != nil {
 		t.Fatalf("SubmitReview = %v, want nil (partial update is not an error)", err)
 	}
@@ -268,7 +268,7 @@ func TestPyFSRSSubmitReviewReportsPartialUpdated(t *testing.T) {
 func TestPyFSRSSubmitReviewReportsZeroUpdated(t *testing.T) {
 	fake := &fakePyBridge{nextReview: pybridge.ReviewResult{Updated: nil}}
 	ad, _ := NewPyFSRS(fake, infra.NewNoOpLogger())
-	res, err := ad.SubmitReview(context.Background(), map[string]string{"苹果": "good", "香蕉": "hard"})
+	res, err := ad.SubmitReview(context.Background(), map[string]string{"苹果": "good", "香蕉": "hard"}, "")
 	if err != nil {
 		t.Fatalf("SubmitReview = %v, want nil (zero updates with nil error is a legal outcome)", err)
 	}

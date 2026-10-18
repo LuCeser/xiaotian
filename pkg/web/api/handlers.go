@@ -26,6 +26,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
+	"github.com/xiaotian/home-tutor-agent/pkg/poem"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 )
 
@@ -64,7 +65,9 @@ const maxStdoutDiagnosticRunes = 300
 // answers 503 recognition_unavailable instead of 404ing). Since Issue #8,
 // generator carries the missing-meaning supplement pipeline (nil without
 // an LLM key — POST /words/meaning/generate answers 503
-// generation_unavailable instead of 404ing).
+// generation_unavailable instead of 404ing). Since Issue #11, poems is the
+// Go-owned whole-poem store behind the /poems routes (nil on a degraded
+// boot — they answer 503 poems_unavailable instead of 404ing).
 type handler struct {
 	exec       pybridge.Executor
 	cards      database.CardRepository
@@ -75,6 +78,7 @@ type handler struct {
 	receipts   *lesson.ReceiptStore
 	recognizer *ocr.WordlistPipeline
 	generator  *ocr.MeaningGenerator
+	poems      *poem.Store
 	cfg        infra.PythonConfig
 }
 
@@ -83,11 +87,11 @@ type handler struct {
 // tests can construct the handler cheaply. recognizer and generator may
 // be nil (photo recognition / meaning supplement unavailable — see the
 // handler struct comment).
-func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, generator *ocr.MeaningGenerator, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
+func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, generator *ocr.MeaningGenerator, poems *poem.Store, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}
-	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, generator: generator, cfg: cfg, logger: logger}
+	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, generator: generator, poems: poems, cfg: cfg, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /words", h.listWords)
@@ -114,6 +118,12 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks
 	// lesson never reaches the response as anything but a summary row.
 	mux.HandleFunc("GET /lessons", h.listLessons)
 	mux.HandleFunc("GET /lessons/{id}", h.getLesson)
+	// Issue #11: the whole-poem content routes (commit / list / assign).
+	// The commit is the ONLY write path — the recognize route stays a
+	// draft-only draft (未确认的原文不正式入库).
+	mux.HandleFunc("POST /poems", h.commitPoems)
+	mux.HandleFunc("GET /poems", h.listPoems)
+	mux.HandleFunc("POST /poems/{id}/assign", h.assignPoem)
 	return mux
 }
 
@@ -544,11 +554,15 @@ func (h *handler) listUnits(w http.ResponseWriter, r *http.Request) {
 // serialization-layer white-list — "not in the JSON" is the only "not
 // leaked", RESEARCH Pattern 2).
 type lessonListItem struct {
-	LessonID    string `json:"lesson_id"`
-	CreatedAt   string `json:"created_at"`
-	Stage       string `json:"stage"`
-	Kind        string `json:"kind"`
-	SaveStatus  string `json:"save_status"`
+	LessonID   string `json:"lesson_id"`
+	CreatedAt  string `json:"created_at"`
+	Stage      string `json:"stage"`
+	Kind       string `json:"kind"`
+	SaveStatus string `json:"save_status"`
+	// Category is the lesson's subject ("english"/"chinese", Issue #10) —
+	// the records view renders its subject badge from this field, never by
+	// parsing the lesson id.
+	Category    string `json:"category"`
 	WordCount   int    `json:"word_count"`
 	Correct     int    `json:"correct"`
 	Wrong       int    `json:"wrong"`
@@ -643,6 +657,7 @@ func newLessonListItem(s lesson.LessonSummary, receipt lesson.Receipt, hasReceip
 		Completed:  s.Completed,
 		Unchecked:  s.Unchecked,
 		SaveStatus: saveStatus,
+		Category:   s.Category,
 	}
 	if s.Completed {
 		item.Correct = s.Correct

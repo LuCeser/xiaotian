@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
@@ -114,6 +115,9 @@ type Session struct {
 	wordIndex   int
 	dbID        int64  // audit row id (best-effort, D-06; may lag behind)
 	streamGen   uint64 // spawnStreamWord's monotonically increasing stream generation; read/written ONLY on the event-loop goroutine (D-02 single-writer, same as wordQueue/wordIndex — no lock). Spawned goroutines only ever use the by-value copy captured via the go statement.
+	// droppedEvents counts events Push discarded because the buffer was
+	// full (PR #27: a flood must never block the router worker).
+	droppedEvents atomic.Int64
 
 	// --- FSM state (protected by mu for cross-goroutine reads) ---
 	mu            sync.RWMutex
@@ -392,15 +396,17 @@ func (s *Session) run(ctx context.Context) {
 				continue
 			}
 			// DICTATING timeout means the student didn't answer in time: skip
-			// the word by pushing a synthetic next_word event and keep the
-			// session alive. Any other state timeout terminates the session
-			// (existing behavior).
+			// the word on this goroutine and keep the session alive. Pushing
+			// the skip back onto s.events would block the only consumer when
+			// the buffer is full, and leaving the deadline in the past makes
+			// time.After fire again immediately. Any other state timeout
+			// terminates the session (existing behavior).
 			if s.State() == database.StateDictating {
 				s.logger.Debug("session: dictating timeout, skipping word",
 					infra.F("component", "session"),
 					infra.F("session_id", s.id),
 				)
-				s.Push(SessionEvent{Type: EventControlFrame, ControlType: "next_word"})
+				s.skipTimedOutWord()
 				continue
 			}
 			return
@@ -411,13 +417,58 @@ func (s *Session) run(ctx context.Context) {
 	}
 }
 
-// Push sends an event onto the session's events channel. Non-blocking w/ a
-// ctx.Done guard so a caller cannot block forever if the session has exited.
+// Push sends an event onto the session's events channel. A full buffer
+// drops the event and counts it (T-07-05: a flood must not block the
+// router worker). A cancelled session returns without blocking and
+// without counting a drop. Push before Start is a no-op.
 func (s *Session) Push(ev SessionEvent) {
+	if s.runCtx == nil {
+		return
+	}
+	select {
+	case <-s.runCtx.Done():
+		return
+	default:
+	}
 	select {
 	case s.events <- ev:
-	case <-s.runCtx.Done():
+		return
+	default:
 	}
+	select {
+	case <-s.runCtx.Done():
+		return
+	default:
+	}
+	n := s.droppedEvents.Add(1)
+	s.logger.Warn("session: dropping event, buffer full",
+		infra.F("component", "session"),
+		infra.F("session_id", s.id),
+		infra.F("dropped", n),
+		infra.F("event", ev.Type.String()),
+	)
+}
+
+// DroppedCount reports how many events Push has discarded because the
+// buffer was full.
+func (s *Session) DroppedCount() int64 {
+	return s.droppedEvents.Load()
+}
+
+// skipTimedOutWord advances past the current dictating word on the event
+// loop itself. A successful next_word transition resets the deadline in
+// onTransition. A rejected transition leaves the deadline in the past, so
+// move it forward here; otherwise time.Until of a past deadline is <= 0
+// and the timer fires again on the next iteration.
+func (s *Session) skipTimedOutWord() {
+	s.handleEvent(SessionEvent{Type: EventControlFrame, ControlType: "next_word"})
+	if s.Deadline().After(time.Now()) {
+		return
+	}
+	timeout := s.timeoutFor(s.State())
+	s.mu.Lock()
+	s.deadline = time.Now().Add(timeout)
+	s.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------

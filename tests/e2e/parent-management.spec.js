@@ -593,6 +593,130 @@ test('responsive matrix (phone/tablet/desktop) + backstop visual checks', async 
 });
 
 // ---------------------------------------------------------------------------
+// Issue #18 — the browse rows' inline checkbox (选择) and the 加入默写范围
+// toggle meet the 44px touch floor. The input keeps its 18px visual size;
+// the hit area is the wrapping <label> (Chrome zeroes USED padding on
+// appearance:auto checkboxes, so the reverted padding + negative-margin
+// approach on the input itself cannot work). Discriminators are behavioral,
+// not CSS declarations: a tap INSIDE the 44px label but OUTSIDE the 18px
+// input must toggle — under the bare-input implementation that corner is
+// row background/word text and the tap does nothing.
+// ---------------------------------------------------------------------------
+test('browse rows: inline checkbox meets the 44px touch floor without deforming the row (Issue #18)', async ({ page, request }) => {
+  const unit = 'e2e-touch-floor';
+  await deleteUnit(request, unit);
+  const seed = await request.post('/api/v1/words', {
+    data: {
+      category: CAT, unit,
+      entries: [
+        { word: 'e2e-touch-a', meaning: '触控测试甲' },
+        { word: 'e2e-touch-b', meaning: '触控测试乙' },
+      ],
+    },
+  });
+  expect(seed.ok()).toBeTruthy();
+
+  const consoleErrors = [];
+  page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
+  page.on('pageerror', (err) => consoleErrors.push(String(err)));
+
+  try {
+    await page.goto('/parent.html');
+    await page.getByRole('tab', { name: '词库' }).click();
+    const group = page.locator(`.unit-group[data-unit="${unit}"]`);
+    await expect(group.locator('.word-row')).toHaveCount(2);
+
+    /** Label/input geometry of the first row's 选择 checkbox. Scrolled
+     *  into view first: the corner taps below ride viewport coordinates
+     *  (page.mouse), which miss a below-the-fold label. */
+    const hitMetrics = async () => {
+      await group.locator('.word-row').first().scrollIntoViewIfNeeded();
+      return group.locator('.word-row').first().locator('.word-select')
+        .evaluate((el) => {
+          const label = el.closest('label');
+          const l = (label || el).getBoundingClientRect();
+          const b = el.getBoundingClientRect();
+          return {
+            wrapped: !!label,
+            labelX: l.x, labelY: l.y, labelW: l.width, labelH: l.height,
+            inputW: b.width, inputH: b.height,
+          };
+        });
+    };
+
+    // AC 1/2: >=44px hit area, ~18px visual input.
+    const m = await hitMetrics();
+    expect(m.wrapped, 'the row checkbox rides a wrapping label (Issue #18 方案 A)').toBe(true);
+    expect(m.labelW, 'hit area width >= 44px').toBeGreaterThanOrEqual(44);
+    expect(m.labelH, 'hit area height >= 44px').toBeGreaterThanOrEqual(44);
+    expect(m.inputW, 'visual size stays ~18px (no giant checkbox)').toBeLessThanOrEqual(20);
+    expect(m.inputH, 'visual size stays ~18px (no giant checkbox)').toBeLessThanOrEqual(20);
+
+    // Behavioral discriminator: corner taps inside the 44px label but
+    // 10px outside the centered 18px input must toggle the checkbox.
+    const check = group.locator('.word-row').first().locator('.word-select');
+    await page.mouse.click(m.labelX + m.labelW - 3, m.labelY + m.labelH - 3);
+    await expect(check).toBeChecked();
+    await page.mouse.click(m.labelX + 3, m.labelY + 3);
+    await expect(check).not.toBeChecked();
+
+    // The 加入默写范围 label (checkbox + gap + text) is itself >=44px tall.
+    const toggleH = await group.locator('.word-row').first().locator('.participation-toggle')
+      .evaluate((el) => el.getBoundingClientRect().height);
+    expect(toggleH, 'participation toggle label height >= 44px').toBeGreaterThanOrEqual(44);
+
+    // AC 3: row height stays uniform at the 61px rhythm (44px action
+    // floor + 2×8px row padding + 1px separator border) — the label must
+    // not stretch or skew the rows. The group's LAST row drops its
+    // separator by design (.word-row:last-child), so normalize the border
+    // out before comparing: 60px rhythm + 0/1px separator = 60/61px rows.
+    const rhythms = await group.locator('.word-row').evaluateAll((els) =>
+      els.map((el) => {
+        const border = parseFloat(getComputedStyle(el).borderBottomWidth) || 0;
+        return el.getBoundingClientRect().height - border;
+      }));
+    expect(new Set(rhythms.map((h) => Math.round(h))).size, 'every row measures the same height').toBe(1);
+    expect(rhythms[0], 'row height stays at the pre-fix 60px content rhythm').toBeGreaterThanOrEqual(59);
+    expect(rhythms[0]).toBeLessThanOrEqual(61);
+
+    // AC 4: 390px narrow screen — no horizontal overflow, hit area intact.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const narrow = await hitMetrics();
+    expect(narrow.labelH, 'hit area survives the narrow-screen wrap').toBeGreaterThanOrEqual(44);
+    const overflow = await page.evaluate(() => ({
+      scrollW: document.scrollingElement.scrollWidth,
+      innerW: window.innerWidth,
+    }));
+    expect(overflow.scrollW, '390px viewport: no horizontal overflow').toBeLessThanOrEqual(overflow.innerW);
+
+    // AC 5: keyboard reach — Tab from the unit header lands on the
+    // checkbox with the :focus-visible ring (3px accent outline).
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await group.locator('.unit-toggle').focus();
+    let ring = null;
+    for (let i = 0; i < 6 && !ring; i++) {
+      await page.keyboard.press('Tab');
+      ring = await page.evaluate((u) => {
+        const el = document.activeElement;
+        if (!el || !el.classList.contains('word-select')) return null;
+        const g = el.closest('.unit-group');
+        if (!g || g.dataset.unit !== u) return null;
+        const s = getComputedStyle(el);
+        return { outlineStyle: s.outlineStyle, outlineWidth: s.outlineWidth };
+      }, unit);
+    }
+    expect(ring, 'Tab from the unit header reaches the row checkbox').not.toBeNull();
+    expect(ring.outlineStyle, ':focus-visible outline is active on keyboard focus').not.toBe('none');
+    expect(parseFloat(ring.outlineWidth), 'focus ring keeps the 3px accessibility contract').toBeGreaterThanOrEqual(3);
+
+    // AC 6: the page produced no console errors along the way.
+    expect(consoleErrors, 'no console errors on the parent page').toEqual([]);
+  } finally {
+    await deleteUnit(request, unit);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 13.3-03 Task 1 — page-level tab smoke (real backend): the page opens on
 // 学习记录, 词库/设置 swap their panels via the hidden attribute, and a
 // reload resets to the default tab (tab state deliberately not persisted).

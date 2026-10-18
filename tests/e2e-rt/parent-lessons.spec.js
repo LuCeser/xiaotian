@@ -25,6 +25,10 @@
  *     buttons — no re-submit/re-judge entries anywhere).
  *   - tab-wiring regression on the mock origin: 词库 still reaches the
  *     add card.
+ *   - the issue #19 spacing pin: the save-chip zone (padding/gap/margin)
+ *     stays on the UI-SPEC 4px scale, completed rows keep an even height
+ *     rhythm, the four chip states stay visually distinct with AA text
+ *     contrast, and 390px never overflows horizontally.
  */
 
 const { test, expect } = require('@playwright/test');
@@ -256,4 +260,117 @@ test('learning record: tab wiring still reaches 词库 (add card visible)', asyn
   await page.getByRole('tab', { name: '词库' }).click();
   await expect(page.locator('#addSection')).toBeVisible();
   await expect(page.locator('#addSection').getByRole('button', { name: '添加单词' })).toBeVisible();
+});
+
+// Issue #19: the save-chip zone must stay on the UI-SPEC 4px spacing
+// scale (the 2/10/6 values that rode in with the 2026-10-14 contrast
+// pass were ruled a regression, not a design exception). Measured in the
+// REAL cascade the way a designer would measure it: computed styles and
+// bounding boxes in Chromium, not a re-reading of the stylesheet text.
+test('learning record: save chips sit on the 4px spacing scale with even rows (issue #19)', async ({ page }) => {
+  const pageErrors = [];
+  const consoleErrors = [];
+  // The mock origin implements ONLY the /api/v1/lessons* routes; the
+  // other tabs' /units, /words and /settings/fsrs probes 404 on boot.
+  // Those are mock artifacts, not page defects (the real-backend suites
+  // cover the real endpoints) — every OTHER console error fails here.
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+  page.on('console', (msg) => {
+    if (msg.type() !== 'error') return;
+    const url = (msg.location() && msg.location().url) || '';
+    if (!url.includes('/api/v1/')) consoleErrors.push(`${url || '(no url)'} ${msg.text()}`);
+  });
+
+  await page.goto('/parent.html');
+  await expect(page.locator('.lesson-row')).toHaveCount(4);
+
+  const spacing = await page.evaluate(() => {
+    const px = (el, prop) => parseFloat(getComputedStyle(el)[prop]);
+    const chip = document.querySelector('.save-chip');
+    const bottom = document.querySelector('.lesson-row-bottom');
+    return {
+      chipPaddingV: px(chip, 'paddingTop'),
+      chipPaddingH: px(chip, 'paddingLeft'),
+      chipGap: px(chip, 'columnGap'),
+      bottomMarginTop: px(bottom, 'marginTop')
+    };
+  });
+  for (const [name, value] of Object.entries(spacing)) {
+    // UI-SPEC Spacing Scale: declared values are multiples of 4 only.
+    expect(value % 4, `${name}=${value} must be a multiple of 4`).toBe(0);
+  }
+
+  // Row rhythm: the three completed rows are one chip-zone taller than
+  // the in-progress row, equal among themselves up to the 未核对 flag's
+  // 1px font-metric wobble, and every rendered chip is the same height.
+  const rows = await page.evaluate(() =>
+    [...document.querySelectorAll('.lesson-row')].map((row) => ({
+      id: row.getAttribute('data-lesson-id'),
+      completed: !!row.querySelector('.lesson-row-bottom'),
+      height: row.getBoundingClientRect().height
+    }))
+  );
+  const chipHeights = await page.evaluate(() =>
+    [...document.querySelectorAll('.save-chip')].map((c) => c.getBoundingClientRect().height)
+  );
+  const completedHeights = rows.filter((r) => r.completed).map((r) => r.height);
+  const inProgressHeights = rows.filter((r) => !r.completed).map((r) => r.height);
+  expect(completedHeights).toHaveLength(3);
+  expect(Math.max(...completedHeights) - Math.min(...completedHeights)).toBeLessThanOrEqual(2);
+  expect(Math.min(...completedHeights)).toBeGreaterThan(Math.max(...inProgressHeights));
+  expect(Math.max(...chipHeights) - Math.min(...chipHeights)).toBeLessThanOrEqual(0.5);
+
+  // Four-state probe: the stub list only renders saved/pending, so mount
+  // one chip per state (the classes are the unit under test) and check
+  // the 2026-10-14 contrast pass holds: distinct tints pairwise, text
+  // >=4.5:1 on each tint (WCAG AA at 14px/600).
+  const states = await page.evaluate(() => {
+    const host = document.querySelector('#lessonsSection');
+    const probe = document.createElement('div');
+    probe.className = 'lesson-row-bottom';
+    probe.id = 'issue19-probe';
+    host.appendChild(probe);
+    const lum = (color) => {
+      const [r, g, b] = color.match(/\d+/g).slice(0, 3).map(Number);
+      const f = (c) => {
+        c /= 255;
+        return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+    };
+    const copy = {
+      saved: '已保存',
+      failed: '保存未完成',
+      pending: '待核实',
+      unknown: '保存状态未知'
+    };
+    return Object.keys(copy).map((state) => {
+      const chip = document.createElement('span');
+      chip.className = 'save-chip save-chip-' + state;
+      chip.dataset.state = state;
+      chip.textContent = copy[state];
+      probe.appendChild(chip);
+      const cs = getComputedStyle(chip);
+      const [l1, l2] = [lum(cs.color), lum(cs.backgroundColor)].sort((a, b) => b - a);
+      return { state, bg: cs.backgroundColor, ratio: (l1 + 0.05) / (l2 + 0.05) };
+    });
+  });
+  const bgs = states.map((s) => s.bg);
+  expect(new Set(bgs).size).toBe(bgs.length); // four distinct tints
+  for (const { state, ratio } of states) {
+    expect(ratio, `${state} text contrast ${ratio.toFixed(2)}:1 must meet AA 4.5:1`)
+      .toBeGreaterThanOrEqual(4.5);
+  }
+
+  // 390px narrow screen: the chip zone must not push the page sideways.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const overflow = await page.evaluate(() => ({
+    doc: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    body: document.body.scrollWidth - document.documentElement.clientWidth
+  }));
+  expect(overflow.doc).toBeLessThanOrEqual(0);
+  expect(overflow.body).toBeLessThanOrEqual(0);
+
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
 });

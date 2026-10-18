@@ -15,8 +15,11 @@
  *
  * 2026-10-14 follow-up: rules for the JS-emitted classes the convergence
  * pass left unstyled (photo rows/statuses, pdf pending chip + page lesson
- * apply, browse list host, toolbar textbook entry, modal forms), 44px hit
- * areas on the two bare 18px checkboxes, toast-success contrast fix.
+ * apply, browse list host, toolbar textbook entry, modal forms),
+ * toast-success contrast fix. The 44px hit areas on the two bare 18px
+ * checkboxes named here were reverted that day (padding on a native
+ * checkbox is zeroed); Issue #18 restores them via wrapping labels
+ * (.inline-check-hit).
  */
 
 :root {
@@ -686,6 +689,22 @@ body {
   box-sizing: border-box;
 }
 
+/* Issue #18: the 44px touch floor for the inline 18px checkboxes. Chrome
+   zeroes the USED padding on appearance:auto checkboxes (the reverted
+   padding + negative-margin attempt), so the hit area rides a wrapping
+   <label> — a label click toggles the input, which keeps its 18px visual
+   size. Shared by the photo review rows (.photo-row-check) and the browse
+   word rows (.word-select). */
+.inline-check-hit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
 .photo-row-check {
   width: 18px;
   height: 18px;
@@ -740,6 +759,9 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
+  /* Issue #18: the whole label (radio + gap + text) is the hit area —
+     44px floor, the input keeps its 18px visual size. */
+  min-height: 44px;
   font-size: 14px;
   font-weight: 400;
   color: var(--ink);
@@ -992,21 +1014,32 @@ body {
   margin: 8px 0 12px;
 }
 
+/* The class's display:flex would out-rank the [hidden] attribute (later
+   source order beats the UA rule); Issue #11 hides the whole bulk bar on
+   the 古诗 page, so the guard has to be explicit. */
+.participation-bulk[hidden] {
+  display: none;
+}
+
 .selection-count {
   color: var(--muted);
   margin-right: auto;
 }
 
+/* Issue #18: the input keeps its 18px visual size; the 44px hit area is
+   the wrapping label.inline-check-hit (see its note by .photo-row-check). */
 .word-select {
   width: 18px;
   height: 18px;
-  flex: 0 0 auto;
 }
 
 .participation-toggle {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  /* Issue #18: the whole label (checkbox + gap + text) is the hit area —
+     44px floor, the input keeps its 18px visual size. */
+  min-height: 44px;
   white-space: nowrap;
   color: var(--muted);
   font-size: 14px;
@@ -1469,18 +1502,22 @@ body {
 
 .lesson-row-bottom {
   display: flex;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
-/* Four-state save chips — one color per state, verbatim copy. */
+/* Four-state save chips — one color per state, verbatim copy. Spacing
+   sits on the UI-SPEC 4px scale (sm 8px gaps; 4/12 padding keeps the
+   badge compact like .lesson-kind/.lesson-flag) per issue #19: the old
+   2/10/6 values rode in with the contrast pass and never carried a
+   design rationale. */
 .save-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 14px;
   font-weight: 600;
   line-height: 1.4;
-  padding: 2px 10px;
+  padding: 4px 12px;
   border-radius: 999px;
   white-space: nowrap;
 }
@@ -1889,4 +1926,273 @@ body {
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* 整首古诗 (Issue #11): the mixed 语文 page's poem cards + display-only */
+/* other blocks in the photo preview, and the unified content view's    */
+/* 古诗 page (type filter + whole-work cards).                          */
+/* ------------------------------------------------------------------ */
+
+/* Section titles inside the photo preview (古诗 / 其他内容) — the
+   preview-table's own header register. */
+.photo-section-title {
+  margin: 16px 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* One poem = one card (a whole work, not a table row): the top row is
+   check + title + author + requirement badge + status; the lines live
+   in ONE textarea (one line per row — 分行和顺序 are the work's own
+   structure); the bottom row carries the lesson input / status note. */
+.photo-poem-host,
+.photo-others-host {
+  margin-top: 8px;
+}
+
+.photo-poem-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.photo-poem-invalid {
+  background: var(--background);
+}
+
+.photo-poem-invalid .form-input,
+.photo-poem-invalid .form-textarea {
+  background: var(--background);
+}
+
+.photo-poem-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.photo-poem-top .inline-check-hit {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.photo-poem-check {
+  width: 18px;
+  height: 18px;
+}
+
+.photo-poem-title {
+  flex: 1 1 140px;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.photo-poem-author {
+  flex: 0 1 120px;
+  min-width: 0;
+}
+
+.photo-poem-required {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-strong);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.photo-poem-status {
+  flex: 0 0 auto;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.photo-poem-status-invalid {
+  color: var(--danger-strong);
+}
+
+.photo-poem-lines {
+  min-height: 72px;
+  line-height: 1.8;
+  font-family: inherit;
+}
+
+.photo-poem-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.photo-poem-lesson {
+  flex: 0 1 160px;
+  min-width: 0;
+}
+
+.photo-poem-note {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* 其他内容 rows: kind badge + one-line summary + the 不导入 marker —
+   display only, nothing selectable. */
+.photo-other-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.photo-other-row:last-child {
+  border-bottom: none;
+}
+
+.photo-other-kind {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.photo-other-text {
+  border: 1px solid var(--badge-zh-bg);
+  background: var(--badge-zh-bg);
+  color: var(--badge-zh-text);
+}
+
+.photo-other-exercise {
+  border: 1px solid var(--badge-en-bg);
+  background: var(--badge-en-bg);
+  color: var(--badge-en-text);
+}
+
+.photo-other-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-other-note {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* The unified content view's 类型 filter: the second pill row keeps the
+   category pills' shape — smaller so the subject stays the primary
+   filter. */
+.type-pills {
+  margin-top: 4px;
+}
+
+.type-pills .pill {
+  min-height: 44px;
+  padding: 6px 14px;
+  font-size: 14px;
+}
+
+/* The 古诗 page's shared note (scope wording never claims 背默). */
+.list-note {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* One whole poem card: head (title/author/badge/scope/manage) + the
+   ordered lines block + attribution chips. */
+.poem-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.poem-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.poem-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.poem-author {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.poem-scope {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.poem-scope-in,
+.poem-scope-included,
+.poem-scope-learned {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+  color: var(--success-strong);
+}
+
+.poem-scope-progress_pending {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-strong);
+}
+
+.poem-manage-btn {
+  margin-left: auto;
+}
+
+.poem-lines {
+  margin: 0;
+  padding-left: 4px;
+}
+
+.poem-line {
+  margin: 0 0 4px;
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.poem-line:last-child {
+  margin-bottom: 0;
 }

@@ -185,28 +185,16 @@ func (m *Manager) NewSession(
 	}
 	m.reserved++
 	m.mu.Unlock()
-	// On any failure path the reservation must be handed back; on success the
-	// deferred commit converts it into the registry entry (after `go run` is
-	// spawned, so the sweeper's RLock establishes happens-before with the
-	// lifecycle fields set below).
-	var s *Session
-	commit := false
-	defer func() {
-		m.mu.Lock()
-		m.reserved--
-		if commit {
-			m.sessions[connID] = s
-		}
-		m.mu.Unlock()
-	}()
 
-	var err error
-	s, err = NewSession(
+	s, err := NewSession(
 		ctx, client, connID,
 		m.fsrsSvc, m.gen, m.streamer, m.repo, m.pool,
 		m.hub, m.logger, m.cfg, selectOpts,
 	)
 	if err != nil {
+		m.mu.Lock()
+		m.reserved--
+		m.mu.Unlock()
 		return nil, err
 	}
 
@@ -224,9 +212,14 @@ func (m *Manager) NewSession(
 		m.streamer.ClearSeqCounter(s.ID())
 	}
 
-	// Convert the reservation into the registry entry (the deferred commit
-	// runs after this return).
-	commit = true
+	// Convert the reservation into a registry entry before run can observe a
+	// cancelled context and invoke onExit. Registering after go run would let
+	// a fast exit remove nothing, followed by the finished session being
+	// written back into the registry permanently.
+	m.mu.Lock()
+	m.reserved--
+	m.sessions[connID] = s
+	m.mu.Unlock()
 
 	go s.run(s.runCtx)
 	return s, nil

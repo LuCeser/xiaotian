@@ -74,8 +74,12 @@ async function openPhotoTab(page) {
   return panel;
 }
 
-/** Upload a file, run 开始识别, and wait for the review rows to render. */
+/** Upload a file, run 开始识别, and wait for the review rows to render.
+ *  Issue #10: the SAME entry now requires the subject radio — this suite
+ *  imports English word lists, so 英语 is selected explicitly (the
+ *  pre-#10 fixed subject became a pick, never a silent default). */
 async function recognize(page, file) {
+  await page.locator('input[name="parent-category-photo"][value="english"]').check();
   await page.locator('#parent-photo-file').setInputFiles(file);
   await page.getByRole('button', { name: '开始识别' }).click();
   await expect(page.locator('.photo-row').first()).toBeVisible({ timeout: 30_000 });
@@ -188,11 +192,12 @@ test('photo import: recognition failure shows the reason and retry succeeds', as
 
     // Unregistered image → stub 500 → service 502 recognition_failed →
     // the form shows the reason; the same form stays usable for a retry.
+    await page.locator('input[name="parent-category-photo"][value="english"]').check();
     await page.locator('#parent-photo-file').setInputFiles({
       name: 'unregistered.png', mimeType: 'image/png', buffer: UNREGISTERED_PNG,
     });
     await page.getByRole('button', { name: '开始识别' }).click();
-    await expect(page.locator('.photo-add-form .form-error')).toContainText('识别失败', { timeout: 30_000 });
+    await expect(page.locator('#parent-photo-form-error')).toContainText('识别失败', { timeout: 30_000 });
     await expect(page.locator('.photo-row')).toHaveCount(0);
 
     // Retry with a registered word-list photo on the SAME form.
@@ -292,5 +297,91 @@ test('classroom: photo-imported words are selected for dictation', async ({ page
     expect(selected).toContain('moon');
   } finally {
     await deleteUnit(request, UNIT_CLASSROOM);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #18 — the review rows' inline checkboxes/radios meet the 44px
+// touch floor. The input keeps its 18px visual size; the hit area is the
+// wrapping <label> (Chrome zeroes USED padding on appearance:auto
+// checkboxes, so the reverted padding + negative-margin approach on the
+// input itself cannot work). Discriminators are behavioral, not CSS
+// declarations: a tap INSIDE the 44px label but OUTSIDE the 18px input
+// must toggle — under the bare-input implementation that corner is empty
+// cell space and the tap does nothing.
+// ---------------------------------------------------------------------------
+test('review rows: checkbox and conflict radios meet the 44px touch floor (Issue #18)', async ({ page, request }) => {
+  await deleteUnit(request, UNIT_IMPORT);
+  await deleteUnit(request, UNIT_SEED);
+  // Same seed as the main flow: apple conflicts, river exists.
+  const seed = await request.post('/api/v1/words', {
+    data: {
+      category: CAT, unit: UNIT_SEED,
+      entries: [
+        { word: 'river', meaning: '河流' },
+        { word: 'apple', meaning: '苹果（水果）' },
+      ],
+    },
+  });
+  expect(seed.ok()).toBeTruthy();
+
+  try {
+    await openPhotoTab(page);
+    await recognize(page, FIXTURE_MAIN);
+    const row = (i) => page.locator(`.photo-row[data-row-index="${i}"]`);
+
+    /** Label/input geometry for one .photo-row-check. */
+    const hitMetrics = (i) => row(i).locator('.photo-row-check').evaluate((el) => {
+      const label = el.closest('label');
+      const l = (label || el).getBoundingClientRect();
+      const b = el.getBoundingClientRect();
+      return {
+        wrapped: !!label,
+        labelX: l.x, labelY: l.y, labelW: l.width, labelH: l.height,
+        inputW: b.width, inputH: b.height,
+      };
+    });
+
+    // Row 2 (ice cream) is committable and checked: 44px label hit area,
+    // 18px visual input. The review table renders below the fold — bring
+    // each probed row into the viewport FIRST: the metrics and the corner
+    // taps below are viewport-coordinate based (page.mouse).
+    await row(2).scrollIntoViewIfNeeded();
+    const m = await hitMetrics(2);
+    expect(m.wrapped, 'the row checkbox rides a wrapping label (Issue #18 方案 A)').toBe(true);
+    expect(m.labelW, 'hit area width >= 44px').toBeGreaterThanOrEqual(44);
+    expect(m.labelH, 'hit area height >= 44px').toBeGreaterThanOrEqual(44);
+    expect(m.inputW, 'visual size stays ~18px (no giant checkbox)').toBeLessThanOrEqual(20);
+    expect(m.inputH, 'visual size stays ~18px (no giant checkbox)').toBeLessThanOrEqual(20);
+
+    // A corner tap 3px inside the label is 10px OUTSIDE the centered
+    // 18px input — it must still toggle (unchecks the checked row).
+    await page.mouse.click(m.labelX + m.labelW - 3, m.labelY + m.labelH - 3);
+    await expect(row(2).locator('.photo-row-check')).not.toBeChecked();
+
+    // The disabled conflict row's corner tap stays a no-op: label
+    // forwarding never bypasses the disabled state.
+    await row(0).scrollIntoViewIfNeeded();
+    const c = await hitMetrics(0);
+    expect(c.wrapped).toBe(true);
+    await page.mouse.click(c.labelX + 3, c.labelY + 3);
+    await expect(row(0).locator('.photo-row-check')).toBeDisabled();
+    await expect(row(0).locator('.photo-row-check')).not.toBeChecked();
+
+    // Textbook mode renders the conflict radios; their labels are 44px
+    // tall and tapping the option TEXT (not the 18px radio) resolves.
+    // Scoped to row 0: earlier suites may leave other conflicting words
+    // in the shared per-run library, which legitimately render their own
+    // choice blocks (the suite's DB is per-run, not per-test).
+    await page.locator('#parent-photo-textbook').selectOption('new');
+    await expect(row(0).locator('.photo-conflict-choice')).toHaveCount(1);
+    const optionH = await row(0).locator('.photo-conflict-option').first()
+      .evaluate((el) => el.getBoundingClientRect().height);
+    expect(optionH, 'conflict option label height >= 44px').toBeGreaterThanOrEqual(44);
+    await row(0).locator('.photo-conflict-option').first().click();
+    await expect(row(0).locator('.photo-conflict-choice input[value="keep"]')).toBeChecked();
+  } finally {
+    await deleteUnit(request, UNIT_IMPORT);
+    await deleteUnit(request, UNIT_SEED);
   }
 });

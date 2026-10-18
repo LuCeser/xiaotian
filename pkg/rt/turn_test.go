@@ -124,16 +124,17 @@ func (c *captureSender) listeningCount() int {
 type fakeExecutor struct {
 	requestResults   map[string]lesson.AdvanceResult
 	checkResults     map[string]any
-	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
+	stateIDs         []string // the lesson ids GetLessonState was asked for (Issue #10)
 	advanceCalls     []fakeAdvanceCall
 	checkCalls       []fakeCheckCall
+	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
 	lesson           lesson.Lesson
-	mu               sync.Mutex
-	exists           bool
 	ensureCalls      int
 	ensureCardsCalls int
 	stateCalls       int
 	conflictVersion  int
+	mu               sync.Mutex
+	exists           bool
 }
 
 type fakeAdvanceCall struct {
@@ -183,7 +184,7 @@ func (f *fakeExecutor) EnsureLesson(_ context.Context, _ string, _ []string) (le
 	return f.lesson, nil
 }
 
-func (f *fakeExecutor) EnsureLessonCards(_ context.Context, lessonID string, cards []lesson.Word) (lesson.Lesson, error) {
+func (f *fakeExecutor) EnsureLessonCards(_ context.Context, lessonID string, cards []lesson.Word, category string) (lesson.Lesson, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ensureCardsCalls++
@@ -191,18 +192,41 @@ func (f *fakeExecutor) EnsureLessonCards(_ context.Context, lessonID string, car
 	f.lesson.LessonID = lessonID // the real store reads the row back under the requested id
 	f.lesson.Cards = cards
 	f.lesson.Words = cardWords(cards)
+	f.lesson.Category = category // the real store persists the row's subject (Issue #10)
 	f.exists = true
 	return f.lesson, nil
 }
 
-func (f *fakeExecutor) GetLessonState(_ context.Context, _ string) (lesson.Lesson, error) {
+func (f *fakeExecutor) GetLessonState(_ context.Context, lessonID string) (lesson.Lesson, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stateCalls++
+	f.stateIDs = append(f.stateIDs, lessonID)
 	if !f.exists {
 		return lesson.Lesson{}, lesson.ErrLessonNotFound
 	}
 	return f.lesson, nil
+}
+
+// stateIDCalls returns every GetLessonState lesson id, in call order.
+func (f *fakeExecutor) stateIDCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.stateIDs...)
+}
+
+// ensureIDCalls returns every EnsureLessonCards lesson id, in call order.
+func (f *fakeExecutor) ensureIDCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ensureIDs...)
+}
+
+// rowCategory returns the in-memory row's subject (Issue #10).
+func (f *fakeExecutor) rowCategory() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lesson.Category
 }
 
 func (f *fakeExecutor) AdvanceWord(_ context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error) {
@@ -2175,9 +2199,7 @@ func TestTurnHalfDuplexGatesUplinkWhileSpeaking(t *testing.T) {
 	tm.IngestAudio(s, loud)
 	time.Sleep(150 * time.Millisecond)
 
-	asr.mu.Lock()
-	fed := len(asr.fedBytes)
-	asr.mu.Unlock()
+	fed := asr.fedCount()
 	if fed != 1 {
 		t.Errorf("asr calls = %d, want 1 (only the turn's own utterance; gated uplink must not transcribe)", fed)
 	}
@@ -3423,7 +3445,7 @@ func TestVADStartGraceSuppressesEarlyAudio(t *testing.T) {
 	tm.IngestAudio(s, ttUtterance())
 	tm.IngestAudio(s, ttUtterance())
 	time.Sleep(100 * time.Millisecond)
-	if got := len(asr.fedBytes); got != 0 {
+	if got := asr.fedCount(); got != 0 {
 		t.Fatalf("asr calls during the start grace = %d, want 0", got)
 	}
 
@@ -3432,8 +3454,8 @@ func TestVADStartGraceSuppressesEarlyAudio(t *testing.T) {
 	tm.sessionReadyAt = time.Now().Add(-11 * time.Second)
 	tm.mu.Unlock()
 	tm.IngestAudio(s, ttUtterance())
-	if !waitFor(t, 5*time.Second, func() bool { return len(asr.fedBytes) == 1 }) {
-		t.Fatalf("asr calls after the grace = %d, want 1", len(asr.fedBytes))
+	if !waitFor(t, 5*time.Second, func() bool { return asr.fedCount() == 1 }) {
+		t.Fatalf("asr calls after the grace = %d, want 1", asr.fedCount())
 	}
 }
 
@@ -3457,7 +3479,7 @@ func TestVADEchoTailStartsAtPlaybackAck(t *testing.T) {
 	ttAwaitSpoken(t, s, 3)
 	tm.IngestAudio(s, ttUtterance())
 	time.Sleep(50 * time.Millisecond)
-	if got := len(asr.fedBytes); got != 0 {
+	if got := asr.fedCount(); got != 0 {
 		t.Fatalf("asr calls during playback-pending = %d, want 0", got)
 	}
 
@@ -3466,7 +3488,7 @@ func TestVADEchoTailStartsAtPlaybackAck(t *testing.T) {
 	ttWaitListening(t, s)
 	tm.IngestAudio(s, ttUtterance())
 	time.Sleep(50 * time.Millisecond)
-	if got := len(asr.fedBytes); got != 0 {
+	if got := asr.fedCount(); got != 0 {
 		t.Fatalf("asr calls during the echo tail = %d, want 0", got)
 	}
 
@@ -3475,8 +3497,8 @@ func TestVADEchoTailStartsAtPlaybackAck(t *testing.T) {
 	tm.echoTailUntil = time.Now().Add(-time.Millisecond)
 	tm.mu.Unlock()
 	tm.IngestAudio(s, ttUtterance())
-	if !waitFor(t, 5*time.Second, func() bool { return len(asr.fedBytes) == 1 }) {
-		t.Fatalf("asr calls after the tail = %d, want 1", len(asr.fedBytes))
+	if !waitFor(t, 5*time.Second, func() bool { return asr.fedCount() == 1 }) {
+		t.Fatalf("asr calls after the tail = %d, want 1", asr.fedCount())
 	}
 	tm.mu.Lock()
 	stamped := !tm.lastPlaybackCompletedAt.IsZero()
@@ -3520,7 +3542,7 @@ func TestVADEchoTailRejectsStaleAck(t *testing.T) {
 	}
 	tm.IngestAudio(s, ttUtterance())
 	time.Sleep(50 * time.Millisecond)
-	if got := len(asr.fedBytes); got != 0 {
+	if got := asr.fedCount(); got != 0 {
 		t.Errorf("asr calls after a stale ack = %d, want 0", got)
 	}
 }
@@ -3576,8 +3598,8 @@ func TestPlaybackPendingInterruptStillImmediate(t *testing.T) {
 	// With the gate lifted, a real utterance reaches the ASR (the gated
 	// burst above was never transcribed).
 	tm.IngestAudio(s, ttUtterance())
-	if !waitFor(t, 5*time.Second, func() bool { return len(asr.fedBytes) == 1 }) {
-		t.Fatalf("asr calls after the interrupt = %d, want 1", len(asr.fedBytes))
+	if !waitFor(t, 5*time.Second, func() bool { return asr.fedCount() == 1 }) {
+		t.Fatalf("asr calls after the interrupt = %d, want 1", asr.fedCount())
 	}
 }
 
@@ -3695,8 +3717,8 @@ func TestASRInvalidResponseRetriedOnce(t *testing.T) {
 
 	ttRunIntentTurn(t, tm, s, 3)
 
-	if len(asr.fedBytes) != 2 {
-		t.Errorf("asr calls = %d, want 2 (exactly one retry)", len(asr.fedBytes))
+	if asr.fedCount() != 2 {
+		t.Errorf("asr calls = %d, want 2 (exactly one retry)", asr.fedCount())
 	}
 	if llm.callCount() != 1 {
 		t.Errorf("classification calls = %d, want 1", llm.callCount())
@@ -4617,6 +4639,30 @@ func (f *fakePracticeSource) allCallsParticipatingOnly() bool {
 		}
 	}
 	return true
+}
+
+// allCallsCarryCategory (Issue #10): every List call is scoped to the
+// given subject together with the Issue #4 switches — the practice pick
+// never reads the other subject's vocabulary.
+func (f *fakePracticeSource) allCallsCarryCategory(category string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.filters) == 0 {
+		return false
+	}
+	for _, filter := range f.filters {
+		if filter.Category != category || !filter.ParticipatingOnly || !filter.ScopeEligibleOnly {
+			return false
+		}
+	}
+	return true
+}
+
+// filtersSnapshot copies the recorded List filters for failure messages.
+func (f *fakePracticeSource) filtersSnapshot() []database.CardFilter {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]database.CardFilter(nil), f.filters...)
 }
 
 func (f *fakePracticeSource) listCalls() int {

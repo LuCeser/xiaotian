@@ -32,6 +32,11 @@ var (
 	// one request (Issue #3's single-photo limit mirrors maxEntries).
 	ErrTooManyEntries = errors.New("ocr: too many word-list entries")
 
+	// ErrTooManyPoems is the Issue #11 poems-side twin of ErrTooManyEntries:
+	// the mixed-page reply carries more whole poems than the commit path
+	// accepts in one request (maxWordlistPoems).
+	ErrTooManyPoems = errors.New("ocr: too many poems in one recognition")
+
 	// ErrEmptyWords is returned by MeaningGenerator.Generate when the
 	// supplement request carries no usable words after trim/dedup — the
 	// HTTP layer maps it to a 400 rather than spending an LLM round trip

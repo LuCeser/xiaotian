@@ -184,13 +184,15 @@
 
   /**
    * parseRecognized — one home for the recognize-reply shape shared by the
-   * photo path and every PDF page: the entries array (absent → []) and
-   * the textbook header, with an all-empty header cut to null (honesty
-   * cuts both ways — a reply whose every field is unreadable is no
-   * header, never a 待确认 shell built from nothing).
+   * photo path and every PDF page: the entries array (absent → []), the
+   * textbook header (an all-empty one cut to null — honesty cuts both
+   * ways), and since Issue #11 the mixed-page arrays: whole poems (absent
+   * → []) and the display-only other blocks (absent → []).
    */
   function parseRecognized(data) {
     var entries = data && Array.isArray(data.entries) ? data.entries : [];
+    var poems = data && Array.isArray(data.poems) ? data.poems : [];
+    var others = data && Array.isArray(data.others) ? data.others : [];
     var meta = data && data.textbook && typeof data.textbook === 'object'
       ? data.textbook : null;
     if (meta && !META_KEYS.concat(['lesson']).some(function (key) {
@@ -198,7 +200,198 @@
     })) {
       meta = null;
     }
-    return { entries: entries, meta: meta };
+    return { entries: entries, poems: poems, others: others, meta: meta };
+  }
+
+  // ------------------------------------------------------------------
+  // Issue #11 — whole-poem draft functions (window-exposed for the Node
+  // test, tests/test-parent-photo-poem.js — the classifyPhotoEntries kin).
+  // ------------------------------------------------------------------
+
+  /** Poem field caps — mirror pkg/web/api validate.go (runes, not bytes). */
+  var MAX_POEM_TITLE_RUNES = 200;
+  var MAX_POEM_AUTHOR_RUNES = 100;
+  var MAX_POEM_LINE_RUNES = 200;
+  var MAX_POEM_LINES = 64;
+  /** One POST /poems call carries at most 20 poems (validate.go maxPoems). */
+  var MAX_POEM_BATCH = 20;
+
+  /**
+   * normalizePoemText — the CLIENT mirror of the server's fingerprint
+   * normalization: trimmed title + trimmed author + trimmed non-empty
+   * lines joined in order. The existing-poems comparison is exact over
+   * this text (identity is the FULL work, never the title — the server
+   * re-verifies with its own hash; the client classification is a preview
+   * convenience, the commit's per-poem outcome stays authoritative).
+   */
+  function normalizePoemText(title, author, lines) {
+    var clean = (lines || []).map(function (l) {
+      return l == null ? '' : String(l).trim();
+    }).filter(function (l) { return l !== ''; });
+    return metaField(title) + '\n' + metaField(author) + '\n' + clean.join('\n');
+  }
+
+  /**
+   * poemRequiredLabel — the page's own explicit 背诵/默写 mark as a badge
+   * label ('' when the page printed none). Only the two known marks carry
+   * a label; anything else the model reported still reads honestly as an
+   * unspecified requirement.
+   */
+  function poemRequiredLabel(required) {
+    var v = metaField(required);
+    if (v === '背诵' || v === '默写') {
+      return '要求' + v;
+    }
+    return '';
+  }
+
+  /**
+   * classifyPoemDrafts (Issue #11) — classify recognized whole poems
+   * against the CURRENT poem library snapshot (existingPoems: [{title,
+   * author, lines}] — the GET /poems shape). Pure: no DOM, no fetch; the
+   * Node unit test pins the contract.
+   *
+   * Statuses (the classifyPhotoEntries kin):
+   *   'new'      — committable; checked defaults to the page's own explicit
+   *                背诵/默写 mark (明确背诵/默写要求影响默认选择 — an
+   *                unmarked poem stays unchecked for the parent to choose)
+   *   'exists'   — the FULL normalized work already stored (重复确认不复制;
+   *                a same-title different-text poem stays 'new' — identity
+   *                is the complete text, never the title)
+   *   'invalid'  — fails a commit rule (reason carries the cause)
+   */
+  function classifyPoemDrafts(poems, existingPoems) {
+    var byText = {};
+    (existingPoems || []).forEach(function (p) {
+      if (p && p.title) {
+        byText[normalizePoemText(p.title, p.author, p.lines)] = p;
+      }
+    });
+
+    var seen = {};
+    return (poems || []).map(function (p, i) {
+      var title = metaField(p && p.title);
+      var author = metaField(p && p.author);
+      var lines = (p && Array.isArray(p.lines) ? p.lines : [])
+        .map(function (l) { return l == null ? '' : String(l).trim(); })
+        .filter(function (l) { return l !== ''; });
+      var lesson = metaField(p && p.lesson);
+      var required = metaField(p && p.required);
+      var row = {
+        index: i, title: title, author: author, lines: lines, lesson: lesson,
+        required: required, status: 'new', reason: '', checked: false, page: 0,
+      };
+
+      if (!title) {
+        row.status = 'invalid';
+        row.reason = 'empty-title';
+        return row;
+      }
+      if (title.length > MAX_POEM_TITLE_RUNES) {
+        row.status = 'invalid';
+        row.reason = 'title-too-long';
+        return row;
+      }
+      if (author.length > MAX_POEM_AUTHOR_RUNES) {
+        row.status = 'invalid';
+        row.reason = 'author-too-long';
+        return row;
+      }
+      if (!lines.length) {
+        row.status = 'invalid';
+        row.reason = 'no-lines';
+        return row;
+      }
+      if (lines.length > MAX_POEM_LINES) {
+        row.status = 'invalid';
+        row.reason = 'too-many-lines';
+        return row;
+      }
+      if (lines.some(function (l) { return l.length > MAX_POEM_LINE_RUNES; })) {
+        row.status = 'invalid';
+        row.reason = 'line-too-long';
+        return row;
+      }
+
+      var text = normalizePoemText(title, author, lines);
+      if (seen[text] !== undefined) {
+        row.status = 'invalid';
+        row.reason = 'duplicate:' + (seen[text] + 1);
+        return row;
+      }
+      seen[text] = i;
+
+      // The page's own explicit mark drives the default selection; an
+      // unmarked poem is selectable but not auto-checked.
+      row.checked = poemRequiredLabel(required) !== '';
+
+      if (Object.prototype.hasOwnProperty.call(byText, text)) {
+        row.status = 'exists';
+      }
+      return row;
+    });
+  }
+
+  /** Human-readable text for one invalid poem reason. */
+  function describePoemInvalidReason(reason) {
+    if (reason === 'empty-title') {
+      return '诗题不能为空';
+    }
+    if (reason === 'title-too-long') {
+      return '诗题超过 ' + MAX_POEM_TITLE_RUNES + ' 个字符';
+    }
+    if (reason === 'author-too-long') {
+      return '作者超过 ' + MAX_POEM_AUTHOR_RUNES + ' 个字符';
+    }
+    if (reason === 'no-lines') {
+      return '诗句不能为空';
+    }
+    if (reason === 'too-many-lines') {
+      return '诗句超过 ' + MAX_POEM_LINES + ' 行';
+    }
+    if (reason === 'line-too-long') {
+      return '单行诗句超过 ' + MAX_POEM_LINE_RUNES + ' 个字符';
+    }
+    if (/^duplicate:/.test(reason)) {
+      return '与第 ' + reason.slice('duplicate:'.length) + ' 首重复';
+    }
+    return reason;
+  }
+
+  /**
+   * mergePagePoems (Issue #11, PDF runs) — the mergePageRows kin for poem
+   * drafts: the newly recognized page's poems REPLACE that page's segment
+   * (a retry can never duplicate), other pages' poems survive untouched,
+   * and the incoming drafts re-classify against the existing library
+   * (classifyPoemDrafts) so cross-page duplicate poems flag themselves.
+   */
+  function mergePagePoems(current, pageNo, incoming, existingPoems) {
+    var kept = (current || []).filter(function (r) { return r.page !== pageNo; });
+    var fresh = (incoming || []).map(function (p, i) {
+      return Object.assign({ page: pageNo }, p, { index: i });
+    });
+    var classified = classifyPoemDrafts(fresh, existingPoems);
+    return kept.concat(classified.map(function (r) {
+      r.page = pageNo;
+      return r;
+    }));
+  }
+
+  /**
+   * mergePageOthers (Issue #11, PDF runs) — the display-only others array
+   * replaces the retried page's segment the same way poems do (page-tagged
+   * by arrival; nothing here is committable).
+   */
+  function mergePageOthers(current, pageNo, incoming) {
+    var kept = (current || []).filter(function (o) { return o.page !== pageNo; });
+    (incoming || []).forEach(function (o) {
+      kept.push({
+        page: pageNo,
+        kind: o && o.kind === 'exercise' ? 'exercise' : 'text',
+        summary: metaField(o && o.summary),
+      });
+    });
+    return kept;
   }
 
   /** Human-readable text for one invalid reason (batch-parser copy kin). */
@@ -323,7 +516,10 @@
     global.chunkBatch(rows, MAX_BATCH_ENTRIES).forEach(function (part) {
       chain = chain.then(function () {
         return form.submitWords({
-          category: 'english',
+          // Issue #10: the DRAFT's subject — locked at recognize time, so
+          // a mid-flow radio switch (which resets the draft) can never
+          // commit rows under the other subject.
+          category: form.draftCategory,
           unit: unit,
           entries: part.map(function (r) {
             return {
@@ -459,9 +655,11 @@
 
   /**
    * options:
-   *   recognizePhoto(blob) → Promise<{textbook, entries: [...]}> — POST
-   *       /api/v1/words/photo/recognize (wired in parent-app.js with its
-   *       own longer timeout; the vision call can take ~20s)
+   *   recognizePhoto(blob, category) → Promise<{textbook, entries: [...]}> —
+   *       POST /api/v1/words/photo/recognize?category= (wired in
+   *       parent-app.js with its own longer timeout; the vision call can
+   *       take ~20s). The subject selects the extraction contract
+   *       (Issue #10: 语文词语表 vs English word list).
    *   submitWords(payload) → Promise<{added, skipped}> — POST /api/v1/words
    *   fetchWords(category) → Promise<Array> — GET /api/v1/words?category=
    *       (the classification snapshot; ALSO re-fetched after commit to
@@ -472,9 +670,17 @@
    *       as ONE all-or-nothing set (parent-app wires them together;
    *       absent or partial ⇒ the textbook panel degrades to the plain
    *       Issue #3 supplementary flow)
+   *   submitPoems(payload) → Promise<{results, added, existing}> —
+   *       POST /api/v1/poems (Issue #11): the confirmed whole poems. An
+   *       absent handler ⇒ the poem cards' commit affordance degrades
+   *       with its reason (the 词语 flow keeps working — poems are an
+   *       ADDITIVE surface on the same mixed page).
+   *   fetchPoems(category) → Promise<Array> — GET /api/v1/poems?category=
+   *       (the poem library snapshot the draft classification reads)
    *   onCommitted(result) — fired after a successful commit (refresh hook)
-   *   onCategoryChange(v) — fired once at mount with 'english' so the
-   *       shared 单元 datalist populates for this flow's fixed category
+   *   onCategoryChange(v) — fired when the parent picks a subject (the
+   *       D-06 radio has no pre-selection) so the shared 单元 datalist
+   *       populates for that subject
    */
   function PhotoAddForm(container, options) {
     options = options || {};
@@ -487,6 +693,11 @@
     this.fetchWords = options.fetchWords || function () {
       return Promise.reject(new Error('PhotoAddForm: missing fetchWords handler'));
     };
+    // Issue #11: the whole-poem commit + snapshot surfaces (optional; a
+    // degraded wiring disables the poem commit with its reason, never the
+    // 词语 flow).
+    this.submitPoems = options.submitPoems || null;
+    this.fetchPoems = options.fetchPoems || null;
     var td = options.textbookDeps || {};
     this.fetchTextbooks = td.fetchTextbooks || null;
     this.createTextbook = td.createTextbook || null;
@@ -507,19 +718,30 @@
     this.form.className = 'photo-add-form';
     this.form.noValidate = true;
 
-    // Fixed-category note: this flow imports ENGLISH word lists (Issue #3).
-    // 语文词语照片导入 is a later task — a static explanation, not a radio.
-    var catField = document.createElement('div');
-    catField.className = 'form-field';
-    var catLabel = document.createElement('span');
-    catLabel.className = 'form-label';
-    catLabel.textContent = '分类';
-    var catNote = document.createElement('p');
-    catNote.className = 'form-hint';
-    catNote.textContent = '英语词表（语文词语照片导入暂未开放）';
-    catField.appendChild(catLabel);
-    catField.appendChild(catNote);
-    this.form.appendChild(catField);
+    // Issue #10: the SAME D-06 category radio the manual add forms use —
+    // one entry point recognizes either subject's list; the selection
+    // rides the recognize call (?category=), the classification snapshot,
+    // the commit and the textbook attribution. Without the shared kit the
+    // tab cannot mount an honest selector, so it falls back to the old
+    // closed note rather than a fake default.
+    this.categoryKit = kit.buildCategoryField
+      ? kit.buildCategoryField('parent-category-photo', this.onCategorySelected.bind(this))
+      : null;
+    if (this.categoryKit) {
+      this.form.appendChild(this.categoryKit.field);
+    } else {
+      var catField = document.createElement('div');
+      catField.className = 'form-field';
+      var catLabel = document.createElement('span');
+      catLabel.className = 'form-label';
+      catLabel.textContent = '分类';
+      var catNote = document.createElement('p');
+      catNote.className = 'form-hint';
+      catNote.textContent = '分类组件未加载，请刷新页面';
+      catField.appendChild(catLabel);
+      catField.appendChild(catNote);
+      this.form.appendChild(catField);
+    }
 
     // 单元 — same shared-datalist field as the other add forms.
     var unit = kit.buildUnitField ? kit.buildUnitField('parent-unit-photo') : null;
@@ -539,7 +761,7 @@
     pickLabel.textContent = '词表照片／扫描 PDF';
     var pickHint = document.createElement('p');
     pickHint.className = 'form-hint';
-    pickHint.textContent = '拍摄或选择一张英语单词表照片（PNG / JPEG），或整本扫描 PDF（最多 100 页），无需裁图。';
+    pickHint.textContent = '拍摄或选择一张英语单词表或语文词语表照片（PNG / JPEG），或整本扫描 PDF（最多 100 页），无需裁图。';
     var pickRow = document.createElement('div');
     pickRow.className = 'photo-pick-row';
     this.fileInput = document.createElement('input');
@@ -575,7 +797,12 @@
     this.recognizeBtn.disabled = true;
     this.form.appendChild(this.recognizeBtn);
 
+    // Issue #10: the form's OWN error surface carries an id — the panel now
+    // also holds the shared category radio's inline error (p.form-error,
+    // always present), so a scoped selector is the only unambiguous way to
+    // address THIS element from tests and future code.
     this.formError = document.createElement('p');
+    this.formError.id = 'parent-photo-form-error';
     this.formError.className = 'form-error';
     this.formError.setAttribute('aria-live', 'polite');
     this.formError.hidden = true;
@@ -614,6 +841,18 @@
     this.preview.appendChild(this.previewHint);
     this.form.appendChild(this.preview);
 
+    // Issue #11: the mixed-page poem cards and the display-only others
+    // render as their own sections right under the 词语 table (a poem is
+    // one whole work, not a table row; others never join the commit).
+    this.poemHost = document.createElement('div');
+    this.poemHost.className = 'photo-poem-host';
+    this.poemHost.hidden = true;
+    this.form.appendChild(this.poemHost);
+    this.othersHost = document.createElement('div');
+    this.othersHost.className = 'photo-others-host';
+    this.othersHost.hidden = true;
+    this.form.appendChild(this.othersHost);
+
     // 确认添加（{n} 个） + 放弃识别结果.
     var actions = document.createElement('div');
     actions.className = 'photo-actions';
@@ -638,8 +877,20 @@
     this.currentFile = null;
     this.rows = []; // current classified rows (source of truth on edit)
     this.existingWords = [];
+    // Issue #11: the mixed-page companions — classified poem drafts
+    // (poemRows), the display-only other blocks (otherSections) and the
+    // poem library snapshot the classification reads (existingPoems).
+    this.poemRows = [];
+    this.otherSections = [];
+    this.existingPoems = [];
+    // Issue #10: the subject the CURRENT draft belongs to, locked at
+    // recognize time. Every subject-scoped call after that — snapshot,
+    // commit, textbook attribution, reconcile — rides it, so switching
+    // the radio mid-flow can never split one draft across two subjects:
+    // the switch resets the draft instead (onCategorySelected).
+    this.draftCategory = '';
     this.detectedMeta = null; // the READ-off-the-photo textbook header
-    this.books = []; // existing english textbooks (textbook panel list)
+    this.books = []; // the draft's subject's textbooks (panel list)
     this.bookChoice = 'none'; // 'none' | 'new' | a textbook id (number)
     this.includePending = false; // 待确认课次的词直接加入默写范围
     // Issue #7: while a PDF is in play — { doc, plan, aborted, metaDone,
@@ -670,9 +921,45 @@
 
     container.appendChild(this.form);
 
-    // The shared datalist populates for THIS flow's fixed category.
-    this.onCategoryChange('english');
+    // No mount-time category: the D-06 radio has NO pre-selection (the
+    // single/batch forms' shape) — the unit datalist populates when the
+    // parent picks a subject, via onCategorySelected.
   }
+
+  /**
+   * onCategorySelected (Issue #10) — the D-06 radio's change hook: the
+   * shared 单元 datalist re-populates for the new subject, and a draft
+   * recognized under the OTHER subject resets — a preview's rows,
+   * textbook panel and meta were classified against the other subject's
+   * library, so keeping them would straddle subjects at commit. The
+   * category itself stays selected (the parent just switched to it).
+   */
+  PhotoAddForm.prototype.onCategorySelected = function (category) {
+    this.onCategoryChange(category);
+    if (this.draftCategory && category !== this.draftCategory) {
+      // The draft belongs to the OTHER subject: resetEntries clears the
+      // rows/panel state; the snapshot, book list and supplement bar are
+      // the other subject's too. currentFile STAYS — the photo itself is
+      // subject-agnostic, 重新识别 under the new subject is the retry.
+      // An in-flight PDF run is STOPPED first (releasePdf alone does not
+      // signal the page loop — without the abort flag the loop would keep
+      // rendering pages of the closed document under the new subject).
+      if (this.pdfState) {
+        this.pdfState.aborted = true;
+      }
+      this.draftCategory = category;
+      this.existingWords = [];
+      this.existingPoems = [];
+      this.books = [];
+      this.releasePdf();
+      this.meaningBar.hidden = true;
+      this.resetEntries();
+      this.renderPreviewHint('分类已切换，请重新点「开始识别」');
+      this.updateCommitButton();
+      return;
+    }
+    this.draftCategory = category;
+  };
 
   /** Button builder used only when the parent-modes kit is unavailable. */
   PhotoAddForm.prototype.buildFallbackButton = function (labelText) {
@@ -801,6 +1088,16 @@
     if (this.recognizeBtn.disabled || !this.currentFile) {
       return;
     }
+    // Issue #10: the subject is REQUIRED before any vision cost — the
+    // same 请选择分类 gate the manual add forms apply at submit.
+    var category = this.categoryKit ? this.categoryKit.selected() : '';
+    if (!category) {
+      if (this.categoryKit) {
+        this.categoryKit.setError('请选择分类');
+      }
+      return;
+    }
+    this.draftCategory = category;
     if (this.isPickedPdf()) {
       this.handlePdfRecognize();
       return;
@@ -817,13 +1114,24 @@
           throw new Error('照片压缩后仍然太大，请换一张更小的照片');
         }
         uploadBytes = bytes;
-        return self.recognizePhoto(bytes);
+        return self.recognizePhoto(bytes, category);
       })
       .then(function (data) {
+        // Issue #10 race guard: a radio switch mid-flight reset the draft
+        // under the OTHER subject — a late landing would repopulate the
+        // preview rows against a classification snapshot that no longer
+        // matches the draft's subject. Drop it; the switch hint already
+        // told the parent to 重新识别.
+        if (self.draftCategory !== category) {
+          self.setBusy(false);
+          return;
+        }
         var parsed = parseRecognized(data);
         var entries = parsed.entries;
         var meta = parsed.meta;
-        if (!entries.length) {
+        // Issue #11: a mixed 语文 page may carry ONLY poems (entries empty)
+        // — that is a legal recognition, not a 没有识别到词表 dead end.
+        if (!entries.length && !parsed.poems.length) {
           self.setBusy(false);
           self.renderPreviewHint('这张照片里没有识别到词表，请换一张更清晰的照片');
           self.resetEntries();
@@ -832,19 +1140,36 @@
         self.detectedMeta = meta;
         self.bookChoice = 'none';
         self.includePending = false;
-        // Snapshot the REAL library for classification; load the textbook
-        // list in parallel for the attribution panel. A textbook-list
-        // failure degrades the panel (with its reason), never the preview.
+        // Snapshot the REAL libraries for classification; load the textbook
+        // list in parallel for the attribution panel. All ride the DRAFT's
+        // subject (a Chinese draft classifies against the 语文 word library
+        // AND the poem library — Issue #10/#11). A textbook-list failure
+        // degrades the panel (with its reason), never the preview; a poem
+        // snapshot failure degrades the poem classification to unchecked
+        // new drafts (the commit's per-poem outcome stays authoritative).
         var booksLoad = self.fetchTextbooks
-          ? self.fetchTextbooks('english').catch(function () { return null; })
+          ? self.fetchTextbooks(category).catch(function () { return null; })
+          : Promise.resolve(null);
+        var poemsLoad = self.fetchPoems
+          ? self.fetchPoems(category).catch(function () { return null; })
           : Promise.resolve(null);
         return Promise.all([
-          self.fetchWords('english').catch(function () { return []; }),
+          self.fetchWords(category).catch(function () { return []; }),
           booksLoad,
+          poemsLoad,
         ]).then(function (loaded) {
           self.existingWords = loaded[0] || [];
           self.books = loaded[1] || [];
+          self.existingPoems = loaded[2] || [];
           self.rows = classifyPhotoEntries(entries, self.existingWords);
+          self.poemRows = classifyPoemDrafts(parsed.poems, self.existingPoems);
+          self.otherSections = parsed.others.map(function (o) {
+            return {
+              kind: o && o.kind === 'exercise' ? 'exercise' : 'text',
+              summary: metaField(o && o.summary),
+              page: 0,
+            };
+          });
           self.renderTextbookPanel(loaded[1] === null ? '教材信息读取失败，可重试或直接确认添加' : '');
           self.renderPreview();
           self.discardBtn.hidden = false;
@@ -887,6 +1212,9 @@
   PhotoAddForm.prototype.handlePdfRecognize = function () {
     var self = this;
     var kit = global.__parentFormKit || {};
+    // The DRAFT's subject (locked by handleRecognize before dispatch):
+    // every page's recognize call and the one library snapshot ride it.
+    var category = this.draftCategory;
     this.showFormError('');
     this.setBusy(true);
     this.releasePdf();
@@ -909,16 +1237,23 @@
         // ONE library snapshot classifies every page as it lands (the run
         // can take minutes; raced duplicates stay honest through the
         // server's UNIQUE + the post-commit reconciliation — the photo
-        // flow's precedent, just stretched over pages).
+        // flow's precedent, just stretched over pages). Subject-scoped
+        // (Issue #10): a 语文 run classifies against the 语文 word library;
+        // Issue #11 adds the poem library snapshot beside it.
         var booksLoad = self.fetchTextbooks
-          ? self.fetchTextbooks('english').catch(function () { return null; })
+          ? self.fetchTextbooks(category).catch(function () { return null; })
+          : Promise.resolve(null);
+        var poemsLoad = self.fetchPoems
+          ? self.fetchPoems(category).catch(function () { return null; })
           : Promise.resolve(null);
         return Promise.all([
-          self.fetchWords('english').catch(function () { return []; }),
+          self.fetchWords(category).catch(function () { return []; }),
           booksLoad,
+          poemsLoad,
         ]).then(function (loaded) {
           self.existingWords = loaded[0] || [];
           self.books = loaded[1] || [];
+          self.existingPoems = loaded[2] || [];
           return self.runPdfPages();
         });
       })
@@ -979,7 +1314,7 @@
         if (!blob) {
           throw new Error('这页压缩后仍然太大');
         }
-        return self.recognizePhoto(blob);
+        return self.recognizePhoto(blob, self.draftCategory);
       })
       .then(function (data) {
         var parsed = parseRecognized(data);
@@ -989,13 +1324,17 @@
         }
         var classified = global.classifyPhotoEntries(parsed.entries, self.existingWords);
         self.rows = global.mergePageRows(self.rows, pageNo, classified);
+        // Issue #11: the page's poems and display-only others replace
+        // their own page segments (a retry never duplicates either).
+        self.poemRows = mergePagePoems(self.poemRows, pageNo, parsed.poems, self.existingPoems);
+        self.otherSections = mergePageOthers(self.otherSections, pageNo, parsed.others);
         state.plan = global.applyPageEvent(state.plan, pageNo, 'done');
         // The textbook panel renders with the FIRST rows that land: its
         // preselect fixes bookChoice, so the reclassify below (and any
         // mid-run edit) sees the real textbook mode — the ordering the
         // photo flow gets for free by rendering the panel right after its
         // single recognition. A retry never rebuilds it.
-        if (!state.panelRendered && self.rows.length) {
+        if (!state.panelRendered && (self.rows.length || self.poemRows.length)) {
           self.renderTextbookPanel('');
           state.panelRendered = true;
         }
@@ -1003,7 +1342,7 @@
         // come from classifyPhotoEntries over the whole merged array, and
         // the preview should show them the moment the page lands.
         self.reclassify();
-        if (self.rows.length) {
+        if (self.rows.length || self.poemRows.length) {
           self.renderPreview();
         }
         self.renderPdfBar();
@@ -1026,7 +1365,9 @@
     if (!this.pdfState) {
       return;
     }
-    if (!this.rows.length) {
+    // Issue #11: a poems-only run is a real result too — emptiness is
+    // judged over BOTH content kinds.
+    if (!this.rows.length && !this.poemRows.length) {
       this.resetEntries();
       this.renderPreviewHint(summary && summary.failed > 0
         ? '这一轮没有一页识别成功，请检查文件后重试'
@@ -1183,6 +1524,9 @@
 
   PhotoAddForm.prototype.resetEntries = function () {
     this.rows = [];
+    this.poemRows = [];
+    this.otherSections = [];
+    this.existingPoems = [];
     this.detectedMeta = null;
     this.bookChoice = 'none';
     this.includePending = false;
@@ -1548,10 +1892,27 @@
   PhotoAddForm.prototype.renderPreview = function () {
     var self = this;
     clearEl(this.preview);
-    if (!this.rows.length) {
+    // Issue #11: a poems-only draft is a real preview — the hint shows
+    // only when BOTH content kinds are empty.
+    if (!this.rows.length && !this.poemRows.length) {
       this.renderPreviewHint('选择照片或 PDF 后点「开始识别」');
       this.updateCommitButton();
       this.renderMeaningBar();
+      this.renderPoemPreview();
+      this.renderOthersPreview();
+      return;
+    }
+    if (!this.rows.length) {
+      // Poems only: the 词语 table renders its honest header instead of
+      // the pick-a-photo hint (the poems below ARE the recognition).
+      var wordsNote = document.createElement('p');
+      wordsNote.className = 'preview-empty';
+      wordsNote.textContent = '这张照片没有识别到词语表条目';
+      this.preview.appendChild(wordsNote);
+      this.updateCommitButton();
+      this.renderMeaningBar();
+      this.renderPoemPreview();
+      this.renderOthersPreview();
       return;
     }
     var textbookMode = this.bookChoice !== 'none';
@@ -1612,6 +1973,252 @@
     }
     this.updateCommitButton();
     this.renderMeaningBar();
+    this.renderPoemPreview();
+    this.renderOthersPreview();
+  };
+
+  /**
+   * renderPoemPreview (Issue #11) — the mixed page's 古诗 section: one
+   * editable CARD per whole poem (checkbox, title, author, the ordered
+   * verse lines in one textarea — one line per row, a poem is edited as a
+   * work, never as unrelated rows — and the per-poem lesson in textbook
+   * mode). The page's own 背诵/默写 mark rides a badge; an unmarked poem
+   * is selectable but NOT auto-checked (明确背诵/默写要求影响默认选择).
+   * textContent/createElement only (Pitfall 10).
+   */
+  PhotoAddForm.prototype.renderPoemPreview = function () {
+    var self = this;
+    this.poemHost.hidden = true;
+    clearEl(this.poemHost);
+    if (!this.poemRows.length) {
+      return;
+    }
+    var textbookMode = this.bookChoice !== 'none';
+
+    var head = document.createElement('h4');
+    head.className = 'photo-section-title';
+    head.textContent = '古诗（' + this.poemRows.length + ' 首，整首保存）';
+    this.poemHost.appendChild(head);
+    this.poemHost.hidden = false;
+
+    // Degraded wiring (no submitPoems handler): the poems stay visible
+    // for 核对 but cannot join the commit — the reason says so, the 词语
+    // flow is untouched (poems are an additive surface).
+    if (!this.submitPoems) {
+      var degraded = document.createElement('p');
+      degraded.className = 'photo-poem-note';
+      degraded.textContent = '本页暂不支持保存古诗（古诗接口未接入）；词语导入不受影响。';
+      this.poemHost.appendChild(degraded);
+    }
+
+    this.poemRows.forEach(function (row, i) {
+      self.poemHost.appendChild(self.buildPoemCard(row, i, textbookMode));
+    });
+
+    if (textbookMode) {
+      // The poem lesson inputs share the 词语 table's datalist (the same
+      // book's lessons); free typing stays allowed.
+      var datalist = document.createElement('datalist');
+      datalist.id = 'parent-photo-poem-lesson-options';
+      this.lessonOptions().forEach(function (name) {
+        if (name) {
+          var o = document.createElement('option');
+          o.value = name;
+          datalist.appendChild(o);
+        }
+      });
+      this.poemHost.appendChild(datalist);
+    }
+  };
+
+  /** One editable poem card (the buildReviewRow kin for whole works). */
+  PhotoAddForm.prototype.buildPoemCard = function (row, i, textbookMode) {
+    var self = this;
+    var card = document.createElement('div');
+    card.className = 'photo-poem-card photo-poem-' + row.status;
+    card.setAttribute('data-poem-index', String(i));
+
+    var top = document.createElement('div');
+    top.className = 'photo-poem-top';
+
+    // A poem joins the commit ONLY when the parent checks it (exists rows
+    // stay checkable too — the server reports existing and never copies).
+    // Degraded wiring (no submitPoems) keeps the check visible but inert.
+    var checkHit = document.createElement('label');
+    checkHit.className = 'inline-check-hit';
+    var check = document.createElement('input');
+    check.type = 'checkbox';
+    check.className = 'photo-poem-check';
+    check.id = 'parent-photo-poem-check-' + i;
+    check.checked = row.status !== 'invalid' && row.checked !== false;
+    check.disabled = row.status === 'invalid' || !self.submitPoems;
+    check.setAttribute('aria-label', '加入 ' + (row.title || ('第 ' + (i + 1) + ' 首')));
+    check.addEventListener('change', function () {
+      self.poemRows[i].checked = check.checked;
+      self.updateCommitButton();
+    });
+    checkHit.appendChild(check);
+    top.appendChild(checkHit);
+
+    var titleInput = document.createElement('input');
+    titleInput.type = 'text';
+    titleInput.className = 'form-input photo-poem-title';
+    titleInput.value = row.title;
+    titleInput.setAttribute('aria-label', '诗题 第 ' + (i + 1) + ' 首');
+    titleInput.addEventListener('input', function () {
+      self.poemRows[i].title = titleInput.value;
+      self.onPoemEdited(i);
+    });
+    top.appendChild(titleInput);
+
+    var authorInput = document.createElement('input');
+    authorInput.type = 'text';
+    authorInput.className = 'form-input photo-poem-author';
+    authorInput.value = row.author;
+    authorInput.placeholder = '作者（可空）';
+    authorInput.setAttribute('aria-label', '作者 第 ' + (i + 1) + ' 首');
+    authorInput.addEventListener('input', function () {
+      self.poemRows[i].author = authorInput.value;
+      self.onPoemEdited(i);
+    });
+    top.appendChild(authorInput);
+
+    var required = poemRequiredLabel(row.required);
+    if (required) {
+      var reqBadge = document.createElement('span');
+      reqBadge.className = 'photo-poem-required';
+      reqBadge.textContent = required;
+      reqBadge.title = '照片上明确印出的要求，默认勾选加入';
+      top.appendChild(reqBadge);
+    }
+
+    var statusText = document.createElement('span');
+    statusText.className = 'photo-poem-status photo-poem-status-' + row.status;
+    statusText.textContent = row.status === 'new'
+      ? '新古诗'
+      : (row.status === 'exists' ? '已有（不会重复建立）' : '无法添加');
+    top.appendChild(statusText);
+    card.appendChild(top);
+
+    // The ordered verse lines: one textarea, one line per row — order and
+    // line breaks are the work's own structure (分行和顺序保留).
+    var linesInput = document.createElement('textarea');
+    linesInput.className = 'form-textarea photo-poem-lines';
+    linesInput.rows = Math.max(2, row.lines.length);
+    linesInput.value = row.lines.join('\n');
+    linesInput.setAttribute('aria-label', '诗句 第 ' + (i + 1) + ' 首（每行一句）');
+    linesInput.addEventListener('input', function () {
+      self.poemRows[i].lines = linesInput.value.split('\n');
+      self.onPoemEdited(i);
+    });
+    card.appendChild(linesInput);
+
+    var bottom = document.createElement('div');
+    bottom.className = 'photo-poem-bottom';
+    if (textbookMode) {
+      var lessonInput = document.createElement('input');
+      lessonInput.type = 'text';
+      lessonInput.className = 'form-input photo-poem-lesson';
+      lessonInput.setAttribute('list', 'parent-photo-poem-lesson-options');
+      lessonInput.setAttribute('aria-label', '课次 第 ' + (i + 1) + ' 首');
+      lessonInput.placeholder = '待确认';
+      lessonInput.value = row.lesson || '';
+      lessonInput.disabled = row.status === 'invalid';
+      lessonInput.addEventListener('input', function () {
+        self.poemRows[i].lesson = lessonInput.value;
+      });
+      bottom.appendChild(lessonInput);
+    }
+    if (row.status === 'exists') {
+      var note = document.createElement('span');
+      note.className = 'photo-poem-note';
+      note.textContent = '内容库已有这首诗（整首相同）；勾选后仅补指定课次';
+      bottom.appendChild(note);
+    }
+    if (row.status === 'invalid') {
+      var why = document.createElement('span');
+      why.className = 'photo-poem-note';
+      why.textContent = describePoemInvalidReason(row.reason);
+      bottom.appendChild(why);
+    }
+    card.appendChild(bottom);
+    return card;
+  };
+
+  /**
+   * onPoemEdited — re-classify ONE poem row's derived surfaces after an
+   * edit WITHOUT re-rendering the card (a full re-render would steal the
+   * caret mid-word, the onRowEdited reason). Status/checkbox sync only;
+   * the caller keeps the row model current.
+   */
+  PhotoAddForm.prototype.onPoemEdited = function (i) {
+    var next = classifyPoemDrafts(this.poemRows, this.existingPoems)[i];
+    var row = this.poemRows[i];
+    if (!row || !next) {
+      return;
+    }
+    // Preserve the parent's explicit choices across the re-classification;
+    // the status/verdict follow the edited text.
+    next.checked = row.checked;
+    next.page = row.page;
+    this.poemRows[i] = next;
+
+    var card = this.poemHost.querySelector('[data-poem-index="' + i + '"]');
+    if (!card) {
+      return;
+    }
+    card.className = 'photo-poem-card photo-poem-' + next.status;
+    var check = card.querySelector('.photo-poem-check');
+    if (check) {
+      check.disabled = next.status === 'invalid';
+      check.checked = next.status !== 'invalid' && next.checked !== false;
+    }
+    var statusEl = card.querySelector('.photo-poem-status');
+    if (statusEl) {
+      statusEl.textContent = next.status === 'new'
+        ? '新古诗'
+        : (next.status === 'exists' ? '已有（不会重复建立）' : '无法添加');
+    }
+    this.updateCommitButton();
+  };
+
+  /**
+   * renderOthersPreview (Issue #11) — the mixed page's display-only
+   * 其他内容 section: 课文正文 and 练习题 blocks are SHOWN (区分展示) with
+   * their own kind badges and a plain 不会导入 note — they are not
+   * selectable, never join the commit, and never become dictation words
+   * (练习题不自动选入; 课文原文导入是后续任务).
+   */
+  PhotoAddForm.prototype.renderOthersPreview = function () {
+    this.othersHost.hidden = true;
+    clearEl(this.othersHost);
+    if (!this.otherSections.length) {
+      return;
+    }
+    var head = document.createElement('h4');
+    head.className = 'photo-section-title';
+    head.textContent = '其他内容（仅展示，不导入）';
+    this.othersHost.appendChild(head);
+
+    this.otherSections.forEach(function (o, i) {
+      var line = document.createElement('div');
+      line.className = 'photo-other-row';
+      line.setAttribute('data-other-index', String(i));
+      var badge = document.createElement('span');
+      badge.className = 'photo-other-kind photo-other-' + o.kind;
+      badge.textContent = o.kind === 'exercise' ? '练习题' : '课文正文';
+      var summary = document.createElement('span');
+      summary.className = 'photo-other-summary';
+      summary.textContent = o.summary;
+      var note = document.createElement('span');
+      note.className = 'photo-other-note';
+      note.textContent = '不导入';
+      line.appendChild(badge);
+      line.appendChild(summary);
+      line.appendChild(note);
+      this.othersHost.appendChild(line);
+    }, this);
+    this.othersHost.hidden = false;
   };
 
   /**
@@ -1672,6 +2279,12 @@
 
     var checkCell = document.createElement('td');
     checkCell.className = 'preview-index';
+    // Issue #18: the 44px touch floor rides a wrapping label
+    // (.inline-check-hit) — the input itself stays 18px (Chrome zeroes
+    // used padding on native checkboxes, so the input cannot carry the
+    // hit area itself).
+    var checkHit = document.createElement('label');
+    checkHit.className = 'inline-check-hit';
     var check = document.createElement('input');
     check.type = 'checkbox';
     check.className = 'photo-row-check';
@@ -1683,7 +2296,8 @@
       self.rows[i].checked = check.checked;
       self.updateCommitButton();
     });
-    checkCell.appendChild(check);
+    checkHit.appendChild(check);
+    checkCell.appendChild(checkHit);
     tr.appendChild(checkCell);
 
     var wordCell = document.createElement('td');
@@ -1906,15 +2520,85 @@
   PhotoAddForm.prototype.updateCommitButton = function () {
     var label = this.commitBtn.querySelector('.btn-label');
     var n = this.bookChoice !== 'none' ? this.committedRows().length : this.submittableRows().length;
+    // Issue #11: checked poem drafts ride the SAME commit; the label says
+    // both kinds honestly. Word-only drafts keep the established label.
+    var m = this.submittablePoems().length;
     if (label) {
-      label.textContent = '确认添加（' + n + ' 个）';
+      label.textContent = m > 0
+        ? (n > 0
+          ? '确认添加（' + n + ' 个词语 · ' + m + ' 首古诗）'
+          : '确认添加（' + m + ' 首古诗）')
+        : '确认添加（' + n + ' 个）';
     }
-    this.commitBtn.disabled = n === 0;
+    this.commitBtn.disabled = n === 0 && m === 0;
   };
 
   PhotoAddForm.prototype.submittableRows = function () {
     return this.rows.filter(function (r) {
       return r.status === 'new' && r.checked !== false;
+    });
+  };
+
+  /**
+   * submittablePoems (Issue #11) — the poem drafts joining the commit:
+   * checked, not invalid. An 'exists' poem is included too — the server
+   * reports existing and never copies, and its attribution still applies
+   * (the buildReviewRow exists-rows kin).
+   */
+  PhotoAddForm.prototype.submittablePoems = function () {
+    return this.poemRows.filter(function (r) {
+      return r.status !== 'invalid' && r.checked !== false;
+    });
+  };
+
+  /**
+   * runPoemCommit (Issue #11) — the checked poem drafts ride the SAME
+   * confirm as the words: POST /api/v1/poems in maxPoemBatch-sized slices
+   * (the submitChunked kin; a multi-page PDF run can exceed one call's
+   * cap), per-poem outcomes aggregated. NEVER throws: the receipt piece
+   * carries error instead, so a poem failure can coexist honestly with
+   * landed words in one banner (independent surfaces — a failed poem
+   * commit never rolls back, and never masks, the word outcome).
+   * textbookId 0 = the supplementary path (no attribution).
+   */
+  PhotoAddForm.prototype.runPoemCommit = function (textbookId) {
+    var poems = this.submittablePoems();
+    if (!poems.length) {
+      return Promise.resolve({ skipped: true, added: 0, existing: 0, results: [], submitted: [], error: null });
+    }
+    var self = this;
+    var outcome = { skipped: false, added: 0, existing: 0, results: [], submitted: poems, error: null };
+    var slices = global.chunkBatch
+      ? global.chunkBatch(poems, MAX_POEM_BATCH)
+      : [poems];
+    var chain = Promise.resolve();
+    slices.forEach(function (part) {
+      chain = chain.then(function () {
+        return self.submitPoems({
+          category: self.draftCategory,
+          textbook_id: textbookId || 0,
+          poems: part.map(function (r) {
+            return {
+              title: r.title, author: r.author, lines: r.lines,
+              lesson: metaField(r.lesson),
+            };
+          }),
+        }).then(function (result) {
+          outcome.added += (result && result.added) || 0;
+          outcome.existing += (result && result.existing) || 0;
+          (result && Array.isArray(result.results) ? result.results : [])
+            .forEach(function (row) { outcome.results.push(row); });
+        });
+      });
+    });
+    return chain.catch(function (err) {
+      // A mid-run slice failure keeps what landed: the per-poem results
+      // stay partial but the counts are the server's own, and the
+      // un-attempted poems surface through the receipt's 未保存 note.
+      outcome.error = (err && err.message) || '未知错误';
+      return outcome;
+    }).then(function () {
+      return outcome;
     });
   };
 
@@ -1953,13 +2637,17 @@
     }
 
     var rows = this.submittableRows();
-    if (!rows.length) {
-      this.showFormError('没有可添加的新词，请勾选或编辑后再确认');
+    // Issue #11: the checked poems ride the SAME confirm; a poems-only
+    // draft (words empty) is a legal commit, so emptiness is judged over
+    // both kinds.
+    var poems = this.submittablePoems();
+    if (!rows.length && !poems.length) {
+      this.showFormError('没有可添加的新内容，请勾选或编辑后再确认');
       this.updateCommitButton();
       return;
     }
 
-    if (!global.chunkBatch) {
+    if (rows.length && !global.chunkBatch) {
       this.showFormError('页面脚本未完整加载，请刷新后重试');
       return;
     }
@@ -1971,27 +2659,44 @@
     // word from the real snapshot, and the rows stay for a plain
     // re-confirm (the server skips what a retry finds already present).
     var failedWith = null;
-    submitChunked(this, rows)
-      .catch(function (err) {
-        failedWith = err;
-        return err.partialOutcome || { added: 0, skipped: 0 };
-      })
+    var wordsRun = rows.length
+      ? submitChunked(this, rows)
+        .catch(function (err) {
+          failedWith = err;
+          return err.partialOutcome || { added: 0, skipped: 0 };
+        })
+      : Promise.resolve({ added: 0, skipped: 0 });
+    wordsRun
       .then(function (outcome) {
+        // Issue #11: the poem commit rides AFTER the words settle —
+        // independent surfaces, one receipt (a poem failure keeps the
+        // draft for a retry exactly like a word slice failure does).
+        return self.runPoemCommit(0).then(function (poemReceipt) {
+          return { words: outcome, poem: poemReceipt };
+        });
+      })
+      .then(function (run) {
+        var outcome = run.words;
         // Reconcile on skips (a raced duplicate) OR a mid-run slice
         // failure (what actually landed matters). A failed snapshot fetch
         // resolves null — "unavailable", NOT an empty library — so a
         // network blip can never reclassify server-confirmed adds as
         // failures (honesty cuts both ways).
         var reconcile = (outcome.skipped || 0) > 0 || failedWith
-          ? self.fetchWords('english').catch(function () { return null; })
+          ? self.fetchWords(self.draftCategory).catch(function () { return null; })
           : Promise.resolve(null);
         return reconcile.then(function (fresh) {
           if (fresh) {
             self.existingWords = fresh;
           }
-          self.renderCommitResult(outcome, rows, fresh);
-          if (failedWith) {
-            var message = (failedWith && failedWith.message) ? failedWith.message : '未知错误';
+          self.renderCommitResult(outcome, rows, fresh, run.poem);
+          // Any surface failed (word slices or poems) keeps the whole
+          // draft — landed parts are never lost, the re-confirm retries
+          // what remains (the server skips what it already has).
+          var poemFailed = run.poem && run.poem.error;
+          if (failedWith || poemFailed) {
+            var message = failedWith && failedWith.message
+              ? failedWith.message : (poemFailed || '未知错误');
             if (kit.showToast) {
               kit.showToast('部分添加失败：' + message + '。已添加的部分不会丢失，请重试未完成的部分。', 'error');
             } else {
@@ -2044,12 +2749,20 @@
     var self = this;
 
     var committed = this.committedRows();
-    if (!committed.length) {
-      this.showFormError('没有勾选任何词，请勾选后再确认');
+    // Issue #11: the checked poems ride the same textbook commit (their
+    // own lesson inputs); a poems-only commit (words all unchecked/empty)
+    // is legal.
+    var poems = this.submittablePoems();
+    if (!committed.length && !poems.length) {
+      this.showFormError('没有勾选任何内容，请勾选后再确认');
       this.updateCommitButton();
       return;
     }
-    if (!global.chunkBatch) {
+    if (poems.length && !this.submitPoems) {
+      this.showFormError('本页暂不支持保存古诗（古诗接口未接入），请取消勾选古诗后再确认');
+      return;
+    }
+    if (committed.length && !global.chunkBatch) {
       this.showFormError('页面脚本未完整加载，请刷新后重试');
       return;
     }
@@ -2070,10 +2783,28 @@
     // still name what already persisted (per-step honesty: a partial
     // commit never renders as a plain failure with unreported writes).
     var established = null;
-    this.resolveTargetBook(committed, createValues)
+    this.resolveTargetBook(committed, createValues, poems)
       .then(function (book) {
         established = book;
         return self.addAndAssign(book, committed);
+      })
+      .then(function (receipt) {
+        // Issue #11: the poems commit AFTER the words land (their
+        // attribution needs the established book id). A poem failure
+        // throws with poemFailure — the catch keeps the draft and
+        // re-points the panel at the established book, exactly like a
+        // word-step failure (landed words are never lost; the retry
+        // re-commits them as 已有).
+        return self.runPoemCommit(receipt.book.id).then(function (poemReceipt) {
+          if (poemReceipt.error) {
+            var err = new Error('古诗保存失败：' + poemReceipt.error);
+            err.poemFailure = true;
+            err.partialOutcome = receipt.addOutcome || { added: 0, skipped: 0 };
+            throw err;
+          }
+          receipt.poemReceipt = poemReceipt;
+          return receipt;
+        });
       })
       .then(function (receipt) {
         self.renderTextbookCommitResult(receipt);
@@ -2081,7 +2812,7 @@
         // The textbook list changed (created/appended lessons/backfilled
         // meta) — reload it for the next recognition, then reset the flow.
         if (self.fetchTextbooks) {
-          self.fetchTextbooks('english').catch(function () { return null; }).then(function (books) {
+          self.fetchTextbooks(self.draftCategory).catch(function () { return null; }).then(function (books) {
             if (books) {
               self.books = books;
             }
@@ -2105,7 +2836,7 @@
         // REUSE it, not create a same-named duplicate — re-point the panel
         // at the established book and say what persisted.
         var reloaded = self.fetchTextbooks
-          ? self.fetchTextbooks('english').catch(function () { return null; })
+          ? self.fetchTextbooks(self.draftCategory).catch(function () { return null; })
           : Promise.resolve(null);
         reloaded.then(function (books) {
           if (books) {
@@ -2149,14 +2880,24 @@
    * whole commit on error — a supplementary add would silently change
    * what selection can reach.
    */
-  PhotoAddForm.prototype.resolveTargetBook = function (committed, createValues) {
+  PhotoAddForm.prototype.resolveTargetBook = function (committed, createValues, poemRows) {
     var self = this;
     var finalLessons = distinctRowLessons(committed);
+    // Issue #11: the poems' own confirmed lessons join the book's lesson
+    // set (a poems-only page still establishes its 课次 table).
+    (poemRows || []).forEach(function (r) {
+      var lesson = metaField(r && r.lesson);
+      if (lesson && finalLessons.indexOf(lesson) === -1) {
+        finalLessons.push(lesson);
+      }
+    });
 
     if (this.bookChoice === 'new') {
       var payload = {
         name: createValues.name,
-        category: 'english',
+        // Issue #10: the new book is filed under the DRAFT's subject — a
+        // 语文 import creates a 语文 textbook, never an English one.
+        category: this.draftCategory,
         lessons: finalLessons,
       };
       META_FIELDS.forEach(function (meta) {
@@ -2246,7 +2987,7 @@
       // The snapshot serves reconciliation (raced duplicates) AND card-id
       // resolution for the edits and assignments — one fetch, three
       // honest uses (and the sticky-include lookup rides it too).
-      return self.fetchWords('english').catch(function () { return null; })
+      return self.fetchWords(self.draftCategory).catch(function () { return null; })
         .then(function (fresh) {
           if (fresh) {
             self.existingWords = fresh;
@@ -2367,6 +3108,13 @@
     clearEl(this.meaningBar);
     this.meaningGenBtn = null;
     this.meaningGenLabel = null;
+    // Issue #10: the supplement generates ENGLISH-style glosses — a 语文
+    // draft's meaning column is the material's own pinyin/annotation
+    // (empty is legal, 不强制英语式释义), so the affordance never mounts
+    // for a Chinese draft.
+    if (this.draftCategory === 'chinese') {
+      return;
+    }
     if (!this.generateMeanings || !global.supplementWords || !this.rows.length) {
       return;
     }
@@ -2742,11 +3490,50 @@
   }
 
   /**
+   * appendPoemReceipt (Issue #11) — the poem half of BOTH commit banners:
+   * one detail line per server outcome class (新增/已有/无法保存, per-poem
+   * titles), and — on a transport failure — the honest 未保存 note (what
+   * landed is never fabricated; the counts stay the server's own).
+   */
+  function appendPoemReceipt(box, poemReceipt) {
+    var byStatus = { added: [], existing: [], invalid: [] };
+    (poemReceipt.results || []).forEach(function (r) {
+      var title = (r && r.title) || '（无诗题）';
+      if (r && byStatus[r.status]) {
+        byStatus[r.status].push(r.reason ? (title + '（' + r.reason + '）') : title);
+      }
+    });
+    var lines = [];
+    if (byStatus.added.length) {
+      lines.push('新增古诗：' + byStatus.added.join('、'));
+    }
+    if (byStatus.existing.length) {
+      lines.push('古诗已有（不会重复建立）：' + byStatus.existing.join('、'));
+    }
+    if (byStatus.invalid.length) {
+      lines.push('无法保存（请修改后重试）：' + byStatus.invalid.join('、'));
+    }
+    if (lines.length) {
+      var detail = document.createElement('p');
+      detail.className = 'result-detail';
+      detail.textContent = lines.join('；');
+      box.appendChild(detail);
+    }
+    if (poemReceipt.error) {
+      var failed = document.createElement('p');
+      failed.className = 'result-note';
+      failed.textContent = '古诗保存失败：' + poemReceipt.error +
+        '。已添加的部分不会丢失，请重试未完成的部分。';
+      box.appendChild(failed);
+    }
+  }
+
+  /**
    * Per-item result view (transparency prohibition: partial success is
    * never a plain success). Groups keep every word visible with its own
    * outcome.
    */
-  PhotoAddForm.prototype.renderCommitResult = function (outcome, submittedRows, fresh) {
+  PhotoAddForm.prototype.renderCommitResult = function (outcome, submittedRows, fresh, poemReceipt) {
     clearEl(this.banner);
     var kit = global.__parentFormKit || {};
 
@@ -2764,9 +3551,16 @@
     var notSubmitted = this.rows.filter(function (r) {
       return r.status !== 'new' || r.checked === false;
     });
+    // Issue #11: poems not joining this confirm (unchecked or invalid)
+    // get their own 未提交 line — a whole work is named by its title.
+    var poemsNotSubmitted = this.poemRows.filter(function (r) {
+      return r.status === 'invalid' || r.checked === false;
+    });
 
     var box = document.createElement('div');
-    var partial = existed.length > 0 || failed.length > 0 || unverified.length > 0 || notSubmitted.length > 0;
+    var partial = existed.length > 0 || failed.length > 0 || unverified.length > 0 ||
+      notSubmitted.length > 0 || poemsNotSubmitted.length > 0 ||
+      (poemReceipt && (poemReceipt.existing > 0 || poemReceipt.error));
     box.className = 'result-banner ' +
       (partial ? 'result-banner-warning' : 'result-banner-success');
     box.setAttribute('role', 'status');
@@ -2779,7 +3573,12 @@
       (existed.length ? '，已有 ' + existed.length + ' 个' : '') +
       (failed.length ? '，未添加 ' + failed.length + ' 个' : '') +
       (unverified.length ? '，未核对 ' + unverified.length + ' 个' : '') +
-      (notSubmitted.length ? '，未提交 ' + notSubmitted.length + ' 个' : '');
+      (notSubmitted.length ? '，未提交 ' + notSubmitted.length + ' 个' : '') +
+      (poemReceipt && !poemReceipt.skipped
+        ? ('，已添加古诗 ' + poemReceipt.added + ' 首' +
+          (poemReceipt.existing ? '，古诗已有 ' + poemReceipt.existing + ' 首' : ''))
+        : '') +
+      (poemsNotSubmitted.length ? '，未提交古诗 ' + poemsNotSubmitted.length + ' 首' : '');
     box.appendChild(summary);
 
     var detail = document.createElement('p');
@@ -2808,6 +3607,13 @@
       box.appendChild(detail);
     }
 
+    // Issue #11: the poem outcomes ride the same banner — per-poem lines
+    // from the server's own results (added/existing/invalid), plus the
+    // transport-failure note naming what did not get saved.
+    if (poemReceipt && !poemReceipt.skipped) {
+      appendPoemReceipt(box, poemReceipt);
+    }
+
     if (notSubmitted.length) {
       var skippedNote = document.createElement('p');
       skippedNote.className = 'result-detail';
@@ -2819,6 +3625,17 @@
       });
       skippedNote.textContent = '未提交：' + skippedWords.join('、');
       box.appendChild(skippedNote);
+    }
+
+    if (poemsNotSubmitted.length) {
+      var poemsSkipped = document.createElement('p');
+      poemsSkipped.className = 'result-detail';
+      poemsSkipped.textContent = '未提交古诗：' + poemsNotSubmitted.map(function (r) {
+        var why = r.status === 'invalid'
+          ? describePoemInvalidReason(r.reason) : '未勾选';
+        return (r.title || '（无诗题）') + '（' + why + '）';
+      }).join('、');
+      box.appendChild(poemsSkipped);
     }
 
     var note = document.createElement('p');
@@ -2883,6 +3700,7 @@
 
     // AC-6: the summary names the four result kinds (plus the honesty
     // buckets when non-zero) and is the tally of the per-item list below.
+    // Issue #11: the poem half rides the same sentence (新增/已有古诗).
     var summary = document.createElement('p');
     summary.className = 'result-summary';
     var parts = RECEIPT_CATEGORIES.filter(function (c) {
@@ -2890,8 +3708,12 @@
     }).map(function (c) {
       return c.label + ' ' + built.summary[c.key] + ' 个';
     });
+    if (receipt.poemReceipt && !receipt.poemReceipt.skipped) {
+      parts.push('新增古诗 ' + receipt.poemReceipt.added + ' 首' +
+        (receipt.poemReceipt.existing ? '，古诗已有 ' + receipt.poemReceipt.existing + ' 首' : ''));
+    }
     summary.textContent = '教材「' + (book ? book.name : '？') + '」：' +
-      (parts.length ? parts.join('，') : '没有可提交的词');
+      (parts.length ? parts.join('，') : '没有可提交的内容');
     box.appendChild(summary);
 
     // Per-item lines, one per category in the fixed order.
@@ -2934,6 +3756,17 @@
       unlearnedNote.textContent = '课次「' + unlearnedNames.join('」「') +
         '」尚未学到：这些词已保存，但不会自动选入默写范围；在教材管理中改进度后即可加入。';
       box.appendChild(unlearnedNote);
+    }
+
+    // Issue #11: the poem outcomes + the honest classroom note — the
+    // scope rule (已学进度) already governs poems server-side, but the
+    // 古诗课堂 itself is the NEXT task: never 可完成背默, never dictation.
+    if (receipt.poemReceipt && !receipt.poemReceipt.skipped) {
+      appendPoemReceipt(box, receipt.poemReceipt);
+      var poemNote = document.createElement('p');
+      poemNote.className = 'result-note';
+      poemNote.textContent = '古诗按整首保存；学习范围随教材已学进度生效，古诗课堂将在后续更新中开放。';
+      box.appendChild(poemNote);
     }
 
     var note = document.createElement('p');
@@ -3006,6 +3839,13 @@
   global.isResolved = isResolved;
   global.planAssignments = planAssignments;
   global.buildTextbookReceipt = buildTextbookReceipt;
+  // Issue #11: the whole-poem draft surfaces (the classifyPhotoEntries
+  // kin — pure, so the Node unit test pins the contract).
+  global.normalizePoemText = normalizePoemText;
+  global.classifyPoemDrafts = classifyPoemDrafts;
+  global.describePoemInvalidReason = describePoemInvalidReason;
+  global.mergePagePoems = mergePagePoems;
+  global.mergePageOthers = mergePageOthers;
   // Issue #7: the upload budget's ONE encoder — parent-pdf.js's page
   // renderer walks the same ladder and cap the photo path uses.
   global.PHOTO_QUALITY_LADDER = QUALITY_LADDER;

@@ -384,7 +384,7 @@ func TestApplyVerdictIdempotent(t *testing.T) {
 	if _, err := store.EnsureLessonCards(ctx, "L1", []Word{
 		{Word: "苹果", Meaning: "cat", Example: "x"},
 		{Word: "香蕉", Meaning: "dog", Example: "y"},
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("EnsureLessonCards: %v", err)
 	}
 	ec, err := ex.EnterCheck(ctx, "L1", 1, "L1-enter-check", map[string]WordOutcome{
@@ -467,7 +467,7 @@ func TestCompleteCheckGate(t *testing.T) {
 	if _, err := store.EnsureLessonCards(ctx, "L1", []Word{
 		{Word: "苹果", Meaning: "cat", Example: "x"},
 		{Word: "香蕉", Meaning: "dog", Example: "y"},
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("EnsureLessonCards: %v", err)
 	}
 	ec, err := ex.EnterCheck(ctx, "L1", 1, "L1-enter-check", nil)
@@ -541,7 +541,7 @@ func TestClearUnchecked(t *testing.T) {
 	if _, err := store.EnsureLessonCards(ctx, "L1", []Word{
 		{Word: "苹果", Meaning: "cat", Example: "x"},
 		{Word: "香蕉", Meaning: "dog", Example: "y"},
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("EnsureLessonCards: %v", err)
 	}
 	ec, err := ex.EnterCheck(ctx, "L1", 1, "L1-enter-check", map[string]WordOutcome{

@@ -19,7 +19,10 @@
 const { expect } = require('@playwright/test');
 const WebSocket = require('ws');
 
-/** Open the parent page into the 照片导入 tab and recognize one photo. */
+/** Open the parent page into the 照片导入 tab and recognize one photo.
+ *  Issue #10: the SAME entry now requires the subject radio — these suites
+ *  import English word lists, so they select 英语 (the pre-#10 default
+ *  became an explicit pick, never a silent one). */
 async function recognize(page, file, unit) {
   await page.goto('/parent.html');
   await page.getByRole('tab', { name: '词库' }).click();
@@ -27,6 +30,7 @@ async function recognize(page, file, unit) {
   await page.getByRole('tab', { name: '照片导入' }).click();
   const panel = page.locator('#add-panel-photo');
   await panel.waitFor();
+  await panel.locator('input[name="parent-category-photo"][value="english"]').check();
   await panel.getByRole('combobox', { name: '单元', exact: true }).fill(unit);
   await page.locator('#parent-photo-file').setInputFiles(file);
   await page.getByRole('button', { name: '开始识别' }).click();

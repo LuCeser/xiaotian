@@ -255,6 +255,7 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
 		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
 		Lesson:    tm.lessonViewFor(l),
+		Category:  tm.sessionCategory(),
 	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
@@ -621,6 +622,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 	confirmed, timedOutN, hinted := tm.tutor.outcomeCounts()
 	hintWords, hintTotal := tm.tutor.hintAccounting()
 	lessonID := tm.tutor.lessonID
+	category := tm.tutor.category
 	tm.mu.Unlock()
 
 	var (
@@ -651,7 +653,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 			}
 		}
 
-		wres, err := tm.cfg.Words.SubmitReview(ctx, ratings)
+		wres, err := tm.cfg.Words.SubmitReview(ctx, ratings, category)
 		switch {
 		case err != nil:
 			// Honest failure: the record was NOT saved — never a narrated
@@ -843,6 +845,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	go tm.finishCorrections(s, ctx, cancel, correctionInputs{
 		requestID: m.RequestID,
 		lessonID:  lessonID,
+		category:  lesson.NormalizeCategory(l.Category),
 		version:   l.Version,
 		changed:   changed,
 		total:     total,
@@ -855,9 +858,12 @@ type correctionInputs struct {
 	changed   map[string]string
 	requestID string
 	lessonID  string
-	version   int
-	total     int
-	correct   int
+	// category is the ROW's subject (Issue #10): the diff write lands on the
+	// vocabulary column the lesson was actually taught in.
+	category string
+	version  int
+	total    int
+	correct  int
 }
 
 // finishCorrections runs on its own goroutine (runNaturalEnding blocks on
@@ -890,7 +896,7 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 			}
 		}
 
-		wres, err := tm.cfg.Words.SubmitReview(ctx, in.changed)
+		wres, err := tm.cfg.Words.SubmitReview(ctx, in.changed, in.category)
 		switch {
 		case err != nil:
 			// Honest failure: the correction was NOT saved — never a
@@ -983,9 +989,11 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 	eligible := tm.tutor != nil && !tm.closed && tm.tutor.checking
 	var lessonID string
 	var version int
+	var category string
 	if eligible {
 		lessonID = tm.tutor.lessonID
 		version = tm.tutor.version
+		category = tm.tutor.category
 	}
 	tm.mu.Unlock()
 	if !eligible {
@@ -1038,7 +1046,7 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 			}
 		}
 
-		wres, werr := tm.cfg.Words.SubmitReview(ctx, ratings)
+		wres, werr := tm.cfg.Words.SubmitReview(ctx, ratings, category)
 		switch {
 		case werr != nil:
 			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))

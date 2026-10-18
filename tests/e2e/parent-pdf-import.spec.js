@@ -56,6 +56,7 @@ async function wordValues(page) {
   return values;
 }
 
+test.describe('Issue #7 acceptance', () => {
 test('whole textbook, cross-lesson: page-grouped preview, cross-page duplicate flagged, per-page lesson batch, real DB + classroom scope', async ({ page, request }) => {
   await deleteUnit(request, UNIT);
   try {
@@ -144,7 +145,7 @@ test('partial failure: page 2 fails with its reason, completed pages keep their 
     await expect(page.locator('.pdf-page-chip[data-status="failed"]')).toHaveCount(1);
     await expect(page.locator('.pdf-page-chip[data-status="failed"]')).toHaveAttribute('data-page', '2');
     await expect(page.locator('.pdf-summary-line')).toContainText('失败 1');
-    await expect(page.locator('#add-panel-photo .form-error:not([hidden])')).toContainText('有 1 页识别失败');
+    await expect(page.locator('#parent-photo-form-error')).toContainText('有 1 页识别失败');
 
     // Completed pages' results are already on review (AC-4) — in order,
     // with NO duck row (its page failed).
@@ -194,14 +195,16 @@ test('limits: over-cap size refused at pick, over-cap page count refused at open
       mimeType: 'application/pdf',
       buffer: Buffer.alloc(40 * 1024 * 1024 + 1, 1),
     });
-    await expect(page.locator('#add-panel-photo .form-error:not([hidden])')).toContainText('PDF 超过 40MB 上限');
+    await expect(page.locator('#parent-photo-form-error')).toContainText('PDF 超过 40MB 上限');
     await expect(page.getByRole('button', { name: '开始识别' })).toBeDisabled();
 
     // 101 pages: the file loads, the page count is over the cap — the
-    // honest refusal, no page ever runs.
+    // honest refusal, no page ever runs. (Issue #10: the subject radio is
+    // required before 开始识别 does anything — 英语, this suite's subject.)
+    await panel.locator('input[name="parent-category-photo"][value="english"]').check();
     await page.locator('#parent-photo-file').setInputFiles(PDF_TOOMANY);
     await page.getByRole('button', { name: '开始识别' }).click();
-    await expect(page.locator('#add-panel-photo .form-error:not([hidden])')).toContainText('超过 100 页上限', { timeout: 30_000 });
+    await expect(page.locator('#parent-photo-form-error')).toContainText('超过 100 页上限', { timeout: 30_000 });
     await expect(page.locator('.pdf-page-chip')).toHaveCount(0);
 
     // A damaged PDF (random bytes, valid size): 无法读取, nothing processed.
@@ -211,10 +214,11 @@ test('limits: over-cap size refused at pick, over-cap page count refused at open
       buffer: Buffer.from('this is not a pdf at all, just bytes'),
     });
     await page.getByRole('button', { name: '开始识别' }).click();
-    await expect(page.locator('#add-panel-photo .form-error:not([hidden])')).toContainText('无法读取这个 PDF', { timeout: 30_000 });
+    await expect(page.locator('#parent-photo-form-error')).toContainText('无法读取这个 PDF', { timeout: 30_000 });
     await expect(page.locator('.pdf-page-chip')).toHaveCount(0);
     await expect(page.locator('tr.photo-row')).toHaveCount(0);
   } finally {
     await deleteUnit(request, UNIT);
   }
+});
 });

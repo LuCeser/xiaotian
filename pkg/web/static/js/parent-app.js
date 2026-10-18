@@ -230,6 +230,50 @@
     return fetchJSON('PUT', '/api/v1/words/' + encodeURIComponent(id), payload);
   };
 
+  // Issue #4/#5 教材 API wiring — ONE implementation feeds both consumers
+  // (the AddCard options below and TextbookUI.init further down); only the
+  // post-mutation refresh differs per consumer.
+  var textbookDeps = {
+    fetchTextbooks: function (category) {
+      var url = '/api/v1/textbooks' +
+        (category ? ('?category=' + encodeURIComponent(category)) : '');
+      return fetchJSON('GET', url).then(function (data) {
+        return (data && Array.isArray(data.textbooks)) ? data.textbooks : [];
+      });
+    },
+    createTextbook: function (payload) {
+      return fetchJSON('POST', '/api/v1/textbooks', payload);
+    },
+    updateTextbook: function (id, payload) {
+      return fetchJSON('PUT', '/api/v1/textbooks/' + encodeURIComponent(id), payload);
+    },
+    assignWords: function (textbookId, payload) {
+      return fetchJSON('POST',
+        '/api/v1/textbooks/' + encodeURIComponent(textbookId) + '/assign', payload);
+    },
+  };
+
+  // Issue #11 整首古诗 API wiring — ONE implementation feeds both
+  // consumers (the browse view's 古诗 page and the photo form's snapshot
+  // via AddCard below): the unified content list (subject + search ride
+  // the query string) and the content view's explicit attribution write.
+  var fetchPoems = function (category, q) {
+    var params = [];
+    if (category) {
+      params.push('category=' + encodeURIComponent(category));
+    }
+    if (q) {
+      params.push('q=' + encodeURIComponent(q));
+    }
+    var url = '/api/v1/poems' + (params.length ? '?' + params.join('&') : '');
+    return fetchJSON('GET', url).then(function (data) {
+      return (data && Array.isArray(data.poems)) ? data.poems : [];
+    });
+  };
+  var assignPoem = function (id, payload) {
+    return fetchJSON('POST', '/api/v1/poems/' + encodeURIComponent(id) + '/assign', payload);
+  };
+
   var browse = new window.BrowseView(browseContainer, {
     fetchWords: function (category, q) {
       var params = [];
@@ -289,30 +333,13 @@
         window.TextbookUI.openAssign(ids, words);
       }
     },
+    // Issue #11: the unified content view's 古诗 page — the poem list
+    // (subject/search scoped) and its explicit attribution write. Absent
+    // ⇒ the browse view's 类型 filter degrades to the 词语 page only.
+    fetchPoems: fetchPoems,
+    assignPoem: assignPoem,
+    fetchTextbooks: textbookDeps.fetchTextbooks,
   });
-
-  // Issue #4/#5 教材 API wiring — ONE implementation feeds both consumers
-  // (the AddCard options below and TextbookUI.init further down); only the
-  // post-mutation refresh differs per consumer.
-  var textbookDeps = {
-    fetchTextbooks: function (category) {
-      var url = '/api/v1/textbooks' +
-        (category ? ('?category=' + encodeURIComponent(category)) : '');
-      return fetchJSON('GET', url).then(function (data) {
-        return (data && Array.isArray(data.textbooks)) ? data.textbooks : [];
-      });
-    },
-    createTextbook: function (payload) {
-      return fetchJSON('POST', '/api/v1/textbooks', payload);
-    },
-    updateTextbook: function (id, payload) {
-      return fetchJSON('PUT', '/api/v1/textbooks/' + encodeURIComponent(id), payload);
-    },
-    assignWords: function (textbookId, payload) {
-      return fetchJSON('POST',
-        '/api/v1/textbooks/' + encodeURIComponent(textbookId) + '/assign', payload);
-    },
-  };
 
   var addCard = new window.AddCard(addContainer, {
     submitWords: function (payload) {
@@ -325,9 +352,15 @@
         });
     },
     // Issue #3 照片导入: the recognize call rides postImage (60s budget —
-    // a vision model over an image outruns the 15s JSON timeout).
-    recognizePhoto: function (blob) {
-      return postImage('/api/v1/words/photo/recognize', blob);
+    // a vision model over an image outruns the 15s JSON timeout). Issue
+    // #10: the subject rides the query string — the same endpoint reads
+    // either subject's list; category '' keeps the English default.
+    recognizePhoto: function (blob, category) {
+      var url = '/api/v1/words/photo/recognize';
+      if (category) {
+        url += '?category=' + encodeURIComponent(category);
+      }
+      return postImage(url, blob);
     },
     // Issue #8 缺失释义补充: one batched text-LLM call per click; the 15s
     // JSON timeout covers it (a text completion is not a vision round
@@ -335,6 +368,13 @@
     generateMeanings: function (payload) {
       return fetchJSON('POST', '/api/v1/words/meaning/generate', payload);
     },
+    // Issue #11 整首古诗: the mixed 语文 page's whole-poem commit and the
+    // poem-library snapshot the preview classification reads (both plain
+    // JSON calls under the 15s timeout).
+    submitPoems: function (payload) {
+      return fetchJSON('POST', '/api/v1/poems', payload);
+    },
+    fetchPoems: fetchPoems,
     // Issue #5 教材归属: the same textbook surfaces TextbookUI uses,
     // passed through AddCard into PhotoAddForm's attribution panel.
     // Issue #6 adds editWord — the 采用照片释义 conflict resolution rides

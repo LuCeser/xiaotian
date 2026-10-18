@@ -55,6 +55,7 @@ function genButton(page) {
   return page.locator('.photo-meaning-gen-btn');
 }
 
+test.describe('Issue #8 acceptance', () => {
 test('meaning supplement: fills only the blanks, marks them, and the real write keeps the source', async ({ page, request }) => {
   await deleteUnit(request, UNIT);
   try {
@@ -114,7 +115,7 @@ test('meaning supplement: parent edit keeps the marker, cancel falls back to mis
     // The reply answers deer+goat only — wolf is an honest per-word miss.
     await expect(meaningInput(page, 1)).toHaveValue('n. 鹿');
     await expect(meaningInput(page, 2)).toHaveValue('n. 山羊');
-    await expect(page.locator('#add-panel-photo .form-error')).toContainText('1 个词未生成释义');
+    await expect(page.locator('#parent-photo-form-error')).toContainText('1 个词未生成释义');
     await expect(meaningInput(page, 3)).toHaveValue('');
     await expect(page.locator('tr[data-row-index="3"] .photo-gen-failed-note'))
       .toContainText('释义生成失败，可重试或保留缺失');
@@ -155,7 +156,7 @@ test('meaning supplement: a failed generation is reported honestly and the retry
     // The stub's failcount marker sinks the click INCLUDING the client's
     // own retries — the honest 502 reaches the form, nothing is faked.
     await genButton(page).click();
-    await expect(page.locator('#add-panel-photo .form-error')).toContainText('释义生成失败', { timeout: 30_000 });
+    await expect(page.locator('#parent-photo-form-error')).toContainText('释义生成失败', { timeout: 30_000 });
     await expect(meaningInput(page, 1)).toHaveValue('');
     await expect(page.locator('tr[data-row-index="1"] .meaning-source-badge')).toBeHidden();
 
@@ -175,4 +176,5 @@ test('meaning supplement: a failed generation is reported honestly and the retry
   } finally {
     await deleteUnit(request, UNIT);
   }
+});
 });

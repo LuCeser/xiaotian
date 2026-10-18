@@ -216,12 +216,26 @@ type LessonView struct {
 // daily due lesson: random words from the full vocabulary minus today's
 // dictated/practiced words, the same three-stage flow, results recorded to
 // the Go-owned practice_logs only — never the FSRS schedule (D-12).
+//
+// Category (Issue #10) selects the classroom's subject: "chinese" opens a
+// 语文词语 classroom (due fetch, review writes, practice picks and the
+// lesson row all scope to the chinese vocabulary category); absent or
+// "english" keeps the English classroom — the pre-Issue-#10 default, so
+// existing pages that never send the field land exactly where they did.
 type SessionInitMsg struct {
 	Type     string    `json:"type"`
 	Mode     string    `json:"mode,omitempty"`
+	Category string    `json:"category,omitempty"`
 	Audio    AudioSpec `json:"audio"`
 	Practice bool      `json:"practice,omitempty"`
 }
+
+// Classroom category values (Issue #10). The literals match the vocabulary
+// category enum (D-06) and lesson.NormalizeCategory's canonical pair.
+const (
+	CategoryEnglish = "english"
+	CategoryChinese = "chinese"
+)
 
 // UI mode values carried by SessionInitMsg.Mode (13.1 D-08). Anything else —
 // including an absent field — is student mode: the iPad bookmark must never
@@ -279,10 +293,15 @@ type EndSessionMsg struct {
 
 // SessionReadyMsg answers a valid SessionInitMsg. Audio echoes the confirmed
 // uplink values; TTS declares the downlink sample rate; Lesson carries the
-// initial lesson snapshot.
+// initial lesson snapshot. Category echoes the session's subject
+// ("english"/"chinese", Issue #10) — the page's language-dependent surfaces
+// (speech-recognition locale, word display) key off it, and a reconnect to
+// an existing row echoes the ROW's subject, which is what the row was
+// created under.
 type SessionReadyMsg struct {
 	Type      string     `json:"type"`
 	SessionID string     `json:"session_id"`
+	Category  string     `json:"category,omitempty"`
 	Audio     AudioSpec  `json:"audio"`
 	Lesson    LessonView `json:"lesson"`
 	TTS       TTSSpec    `json:"tts"`

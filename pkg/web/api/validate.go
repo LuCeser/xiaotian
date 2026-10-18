@@ -516,3 +516,106 @@ func validateTextbookAssignRequest(req *TextbookAssignRequest) string {
 	}
 	return ""
 }
+
+// Poem route caps (Issue #11): one commit carries at most maxPoems whole
+// poems (a photo page holds a handful; the ocr pipeline caps its own
+// recognition at the same bound), each field capped for storage/rendering
+// cost. Runes, not bytes.
+const (
+	maxPoems           = 20
+	maxPoemTitleRunes  = 200
+	maxPoemAuthorRunes = 100
+	maxPoemLineRunes   = 200
+	maxPoemLines       = 64
+)
+
+// PoemCommitRequest is the decoded POST /poems body: the confirmed drafts
+// plus the attribution target established in the preview (0 = 不指定教材).
+// Category is optional and defaults to chinese — poems are a 语文 content
+// type; the explicit field keeps the wire honest if more subjects ever
+// gain poem-shaped works.
+type PoemCommitRequest struct {
+	Category string `json:"category"`
+	Poems    []struct {
+		Title  string   `json:"title"`
+		Author string   `json:"author"`
+		Lesson string   `json:"lesson"`
+		Lines  []string `json:"lines"`
+	} `json:"poems"`
+	TextbookID int64 `json:"textbook_id"`
+}
+
+// validatePoemCommitRequest enforces the commit-path contract: category
+// enum (default chinese), batch size, per-poem title/author/lesson caps
+// and the lines rules (at least one non-empty line, ≤ maxPoemLines lines,
+// each ≤ maxPoemLineRunes). Returns "" on success or the invalid_request
+// message naming the offending field.
+func validatePoemCommitRequest(req *PoemCommitRequest) string {
+	if req.Category == "" {
+		req.Category = CategoryChinese
+	}
+	if err := ValidateCategory(req.Category); err != nil {
+		return "category must be \"english\" or \"chinese\""
+	}
+	if len(req.Poems) < 1 || len(req.Poems) > maxPoems {
+		return fmt.Sprintf("poems must contain between 1 and %d items, got %d", maxPoems, len(req.Poems))
+	}
+	if req.TextbookID < 0 {
+		return "textbook_id must not be negative"
+	}
+	for i, p := range req.Poems {
+		if strings.TrimSpace(p.Title) == "" {
+			return fmt.Sprintf("poems[%d].title must not be empty", i)
+		}
+		if n := len([]rune(p.Title)); n > maxPoemTitleRunes {
+			return fmt.Sprintf("poems[%d].title exceeds %d characters", i, maxPoemTitleRunes)
+		}
+		if n := len([]rune(p.Author)); n > maxPoemAuthorRunes {
+			return fmt.Sprintf("poems[%d].author exceeds %d characters", i, maxPoemAuthorRunes)
+		}
+		if n := len([]rune(p.Lesson)); n > maxTextbookLessonRunes {
+			return fmt.Sprintf("poems[%d].lesson exceeds %d characters", i, maxTextbookLessonRunes)
+		}
+		if len(p.Lines) < 1 || len(p.Lines) > maxPoemLines {
+			return fmt.Sprintf("poems[%d].lines must contain between 1 and %d items, got %d", i, maxPoemLines, len(p.Lines))
+		}
+		nonEmpty := 0
+		for j, line := range p.Lines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			nonEmpty++
+			if n := len([]rune(line)); n > maxPoemLineRunes {
+				return fmt.Sprintf("poems[%d].lines[%d] exceeds %d characters", i, j, maxPoemLineRunes)
+			}
+		}
+		if nonEmpty == 0 {
+			return fmt.Sprintf("poems[%d].lines must contain at least one non-empty line", i)
+		}
+	}
+	return ""
+}
+
+// PoemAssignRequest is the decoded POST /poems/{id}/assign body — the
+// content view's explicit attribution management (lesson + include
+// refresh together).
+type PoemAssignRequest struct {
+	Lesson         string `json:"lesson"`
+	TextbookID     int64  `json:"textbook_id"`
+	IncludeInScope bool   `json:"includeInScope"`
+}
+
+// validatePoemAssignRequest enforces the management-path contract: a
+// positive textbook id, the lesson cap, and the include flag stated
+// explicitly (an absent bool defaults to false — for a management action
+// the caller always sends the whole desired state, matching the word
+// assign endpoint's shape).
+func validatePoemAssignRequest(req *PoemAssignRequest) string {
+	if req.TextbookID <= 0 {
+		return "textbook_id must be positive"
+	}
+	if n := len([]rune(req.Lesson)); n > maxTextbookLessonRunes {
+		return fmt.Sprintf("lesson exceeds %d characters", maxTextbookLessonRunes)
+	}
+	return ""
+}

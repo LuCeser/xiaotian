@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -146,20 +147,76 @@ func (r *fsmRepo) ListRecentResults(_ context.Context, _ int) ([]database.Sessio
 	return nil, nil
 }
 
+// testFrameWaitBudget bounds one readFrameUntil wait. It is a lost-frame /
+// hang detector, not a timing assumption: with the AI seams faked the whole
+// pipeline (router worker → handler → session event loop → write pump)
+// delivers a frame in single-digit milliseconds, so even a heavily loaded CI
+// runner stays orders of magnitude below it. The old shape — a fresh 5s
+// socket deadline per read — burned the full 5s on a lost frame and reported
+// a bare "i/o timeout" that named neither the awaited frame nor what
+// arrived instead (issue #29: that misattribution read as "load jitter").
+// One monotonic budget plus attribution keeps real regressions failing,
+// just with evidence. A budget must exist: a dropped frame is only
+// detectable as "the awaited frame never came".
+const testFrameWaitBudget = 15 * time.Second
+
+// frameTraceLen caps how many recently-read frames a timeout error names —
+// enough to see the interleaving around a lost frame without dumping the
+// whole session transcript into the CI log.
+const frameTraceLen = 8
+
+// frameSummary renders one read frame for timeout attribution. Control
+// payloads are JSON with the "type" field leading, so the payload's first
+// bytes are exactly what a frame-wait failure needs to name.
+const frameSummaryLen = 60
+
+func frameSummary(header *ws.FrameHeader, payload []byte) string {
+	if len(payload) > frameSummaryLen {
+		payload = payload[:frameSummaryLen]
+	}
+	return fmt.Sprintf("%s %s", header.MsgType, payload)
+}
+
 // readFrameUntil reads server frames until one of msgType arrives whose
 // payload contains substr, returning that payload. Fails the test on
-// timeout. Used to skip interleaved frames (voice_result, progress) while
-// waiting for a specific lifecycle frame.
+// timeout, naming the awaited frame and the tail of what actually arrived
+// (the sample collection issue #29 asked for, built into the failure).
+// Used to skip interleaved frames (voice_result, progress) while waiting
+// for a specific lifecycle frame.
 func readFrameUntil(t *testing.T, conn *websocket.Conn, msgType ws.MessageType, substr string) string {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		header, payload := readFrame(t, conn)
+	deadline := time.Now().Add(testFrameWaitBudget)
+	var recent []string
+	for {
+		// The per-read deadline is whatever remains of the one budget, so a
+		// quiet socket, a slow trickle, and the loop bound all expire on the
+		// same monotonic clock — no per-frame refresh.
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(remaining)); err != nil {
+			t.Fatalf("failed to set read deadline: %v", err)
+		}
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("no %s frame containing %q within %v (socket: %v); recent frames: %v",
+				msgType, substr, testFrameWaitBudget, err, recent)
+		}
+		header, payload, err := ws.DecodeFrame(raw)
+		if err != nil {
+			t.Fatalf("failed to decode reply frame: %v", err)
+		}
+		recent = append(recent, frameSummary(header, payload))
+		if len(recent) > frameTraceLen {
+			recent = recent[len(recent)-frameTraceLen:]
+		}
 		if header.MsgType == msgType && strings.Contains(string(payload), substr) {
 			return string(payload)
 		}
 	}
-	t.Fatalf("timed out waiting for %d frame containing %q", msgType, substr)
+	t.Fatalf("no %s frame containing %q within %v; recent frames: %v",
+		msgType, substr, testFrameWaitBudget, recent)
 	return ""
 }
 
@@ -231,13 +288,17 @@ func TestVoiceCommand_PauseReachesRealFSM(t *testing.T) {
 		t.Fatal("no session_ready")
 	}
 
-	// 2. Capture the server-side client via one dummy audio frame.
+	// 2. Capture the server-side client via one dummy audio frame. The wait
+	// shares testFrameWaitBudget: the channel send fires from the audio
+	// route worker in milliseconds, so a 5s bound had the same CI-stall
+	// exposure that produced the readFrameUntil flake (issue #29) — and a
+	// bare "timed out" with no hint of what was awaited.
 	sendAudioFrame(t, conn, 1, make([]byte, ws.AudioFrameSize))
 	var sc *ws.Client
 	select {
 	case sc = <-serverClient:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out capturing server-side client")
+	case <-time.After(testFrameWaitBudget):
+		t.Fatal("timed out capturing server-side client — audio route never delivered the frame")
 	}
 	connID := clientConnID(sc)
 
@@ -246,9 +307,10 @@ func TestVoiceCommand_PauseReachesRealFSM(t *testing.T) {
 	sendControlJSON(t, conn, `{"type":"play_word","params":{"word_id":"苹果"}}`)
 
 	// 4. Wait (deterministic poll, ticket-02 convention) for DICTATING —
-	// pause is only valid from there in the FSM table.
+	// pause is only valid from there in the FSM table. testFrameWaitBudget
+	// as the poll bound: same hang-detector rationale as the frame reads.
 	pausedReached := false
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testFrameWaitBudget)
 	for time.Now().Before(deadline) {
 		if s := manager.Lookup(connID); s != nil && s.State() == database.StateDictating {
 			pausedReached = true

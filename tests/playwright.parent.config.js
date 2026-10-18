@@ -60,18 +60,27 @@ function resolvePython() {
   return found;
 }
 
-// Per-run isolated state root, deleted when the Playwright process exits.
-const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-parent-e2e-'));
-// The service expects its data/cache dirs to pre-exist (same contract as
-// run.ps1's .hta-data layout).
-fs.mkdirSync(path.join(isolatedRoot, 'cache', 'audio'), { recursive: true });
-process.on('exit', () => fs.rmSync(isolatedRoot, { recursive: true, force: true }));
+// Per-run isolated state root. Guard against Playwright re-evaluating this
+// config in a worker (a second mkdtemp would desync PARENT_E2E_DB from the
+// webServer's vocab path and break family-journey SQLite seeding).
+function ensureIsolatedRoot() {
+  if (process.env.PARENT_E2E_ROOT && fs.existsSync(process.env.PARENT_E2E_ROOT)) {
+    return process.env.PARENT_E2E_ROOT;
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-parent-e2e-'));
+  fs.mkdirSync(path.join(root, 'cache', 'audio'), { recursive: true });
+  process.env.PARENT_E2E_ROOT = root;
+  process.env.PARENT_E2E_DB = path.join(root, 'vocab.db');
+  process.on('exit', () => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+const isolatedRoot = ensureIsolatedRoot();
 
 module.exports = defineConfig({
   testDir: './e2e',
   // Only the parent suites ride this config; the student specs stay on the
   // legacy config (they need the .env-loaded dev service).
-  testMatch: /parent-(management|photo-import|pdf-import|photo-reimport|photo-textbook|textbook-scope|meaning-supplement|uat-gaps)\.spec\.js|pdf-capture\.spec\.js/,
+  testMatch: /(?:parent-(management|photo-chinese|photo-import|poem-import|pdf-import|photo-reimport|photo-textbook|textbook-scope|meaning-supplement|uat-gaps)|family-journey)\.spec\.js|pdf-capture\.spec\.js/,
   timeout: 120_000,
   retries: 0,
   // One isolated instance, one vocabulary DB: serialize like the legacy
@@ -110,6 +119,10 @@ module.exports = defineConfig({
       reuseExistingServer: false, // never adopt a stray 18080 listener
       env: {
         ...process.env,
+        // Pin ports from the committed template — never inherit a stray
+        // HTA_SERVER_* override from the launching shell.
+        HTA_SERVER_ADDR: '127.0.0.1:18080',
+        HTA_SERVER_HEALTHADDR: '127.0.0.1:18081',
         HTA_PYTHON_INTERPRETER: resolvePython(),
         HTA_PYTHON_VOCABDBPATH: path.join(isolatedRoot, 'vocab.db'),
         HTA_PYTHON_DATADIR: isolatedRoot,

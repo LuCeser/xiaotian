@@ -35,12 +35,11 @@ config-init:
 		cp config.example.yaml config.yaml; \
 		echo "Created config.yaml from config.example.yaml — edit python.interpreter for your venv"; }
 
-# -race temporarily OFF: the first real CI run of -race (issue #26 for the
-# full story — a cgo conflict had killed it instantly for months) surfaced
-# 26 latent data races. Restored by the race-fix PR tracked in #26; until
-# then `make cover` (manual, cgo-enabled) still runs -race locally.
+# -race requires cgo: run with CGO_ENABLED=1 (CI sets it on this step; a
+# bare `make test` on a cgo-disabled shell errors out fast and loud — see
+# issue #26 for the months that combination silently hid every race).
 test:
-	go test -v $(PKG)
+	go test -v -race $(PKG)
 
 test-short:
 	go test -v -short $(PKG)

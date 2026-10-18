@@ -25,6 +25,8 @@ for (const pdf of ['pdf-textbook.pdf', 'pdf-retry.pdf']) {
     await page.locator('#addSection').waitFor();
     await page.getByRole('tab', { name: '照片导入' }).click();
     await page.locator('#add-panel-photo').waitFor();
+    // Issue #10: the subject radio is required before 开始识别 runs.
+    await page.locator('input[name="parent-category-photo"][value="english"]').check();
     await page.locator('#parent-photo-file').setInputFiles(
       'tests/e2e/fixtures/' + pdf);
     await page.getByRole('button', { name: '开始识别' }).click();

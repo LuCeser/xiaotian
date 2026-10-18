@@ -56,6 +56,16 @@ func (f *fakeASR) Transcribe(_ context.Context, pcm []byte) (string, error) {
 	return head.text, nil
 }
 
+// fedCount returns the number of Transcribe calls so far, under the same
+// mutex Transcribe appends with. turn-manager tests poll it while a
+// processTurn goroutine may be mid-call — a bare len(f.fedBytes) read
+// races that append (issue #26).
+func (f *fakeASR) fedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.fedBytes)
+}
+
 // ---------------------------------------------------------------------------
 // fakeLLM
 // ---------------------------------------------------------------------------
@@ -489,12 +499,15 @@ func TestFakesTTSStreamUntilCancel(t *testing.T) {
 // fakeWordSource is the scripted WordSource: each FetchDueWords call pops
 // the next due batch (empty batch = the no-due ending); SubmitReview
 // records every submission and answers with the scripted result/error.
+// Both record the category the classroom passed (Issue #10 assertions).
 type fakeWordSource struct {
 	fetchErr     error
 	reviewErr    error
 	reviewResult ReviewWriteResult
 	due          [][]lesson.Word
 	submitCalls  []map[string]string
+	submitCat    []string
+	fetchCats    []string
 	fetchCalls   int
 	mu           sync.Mutex
 }
@@ -504,10 +517,11 @@ func newFakeWords(due ...[]lesson.Word) *fakeWordSource {
 }
 
 // FetchDueWords implements WordSource.
-func (f *fakeWordSource) FetchDueWords(_ context.Context, limit int) ([]lesson.Word, error) {
+func (f *fakeWordSource) FetchDueWords(_ context.Context, limit int, category string) ([]lesson.Word, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fetchCalls++
+	f.fetchCats = append(f.fetchCats, category)
 	if f.fetchErr != nil {
 		return nil, f.fetchErr
 	}
@@ -523,14 +537,29 @@ func (f *fakeWordSource) FetchDueWords(_ context.Context, limit int) ([]lesson.W
 }
 
 // SubmitReview implements WordSource.
-func (f *fakeWordSource) SubmitReview(_ context.Context, results map[string]string) (ReviewWriteResult, error) {
+func (f *fakeWordSource) SubmitReview(_ context.Context, results map[string]string, category string) (ReviewWriteResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.submitCalls = append(f.submitCalls, results)
+	f.submitCat = append(f.submitCat, category)
 	if f.reviewErr != nil {
 		return ReviewWriteResult{}, f.reviewErr
 	}
 	return f.reviewResult, nil
+}
+
+// submittedCategories returns every SubmitReview category, in call order.
+func (f *fakeWordSource) submittedCategories() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.submitCat...)
+}
+
+// fetchedCategories returns every FetchDueWords category, in call order.
+func (f *fakeWordSource) fetchedCategories() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.fetchCats...)
 }
 
 func (f *fakeWordSource) fetchCount() int {
