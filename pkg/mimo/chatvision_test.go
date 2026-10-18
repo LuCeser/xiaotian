@@ -329,17 +329,17 @@ func TestClient_ChatVision_RetriesTransientErrors(t *testing.T) {
 // message content stays raw because it is polymorphic (string for system,
 // parts array for user).
 type capturedVision struct {
-	Model    string `json:"model"`
+	Model    string          `json:"model"`
+	Thinking *ThinkingConfig `json:"thinking"`
+	// raw is the original request body, kept so tests can assert the exact
+	// serialized wire shape (including omitempty behavior).
+	raw      []byte
 	Messages []struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	} `json:"messages"`
-	MaxTokens           int             `json:"max_tokens"`
-	Thinking            *ThinkingConfig `json:"thinking"`
-	MaxCompletionTokens int             `json:"max_completion_tokens"`
-	// raw is the original request body, kept so tests can assert the exact
-	// serialized wire shape (including omitempty behavior).
-	raw []byte
+	MaxTokens           int `json:"max_tokens"`
+	MaxCompletionTokens int `json:"max_completion_tokens"`
 }
 
 // decodeCapturedVision decodes a captured request body; returns nil for an

@@ -346,17 +346,17 @@ type ChatContentPartImage struct {
 type ChatVisionRequest struct {
 	// Model specifies the vision-capable LLM (default: mimo-v2.6-flash)
 	Model string `json:"model"`
+	// Thinking controls the model's thinking mode. It is ENABLED BY DEFAULT
+	// server-side, which spends the whole token budget on reasoning_content
+	// and returns an empty content — vision callers must send
+	// {"type":"disabled"} explicitly (issue #42).
+	Thinking *ThinkingConfig `json:"thinking,omitempty"`
 	// Messages carries the conversation. ChatVision builds a system message
 	// (plain string content) plus a user message (image_url + text parts) —
 	// the exact wire shape of the official image-understanding examples.
 	Messages []VisionMessage `json:"messages"`
 	// MaxTokens caps the completion length (0 = server default)
 	MaxTokens int `json:"max_tokens,omitempty"`
-	// Thinking controls the model's thinking mode. It is ENABLED BY DEFAULT
-	// server-side, which spends the whole token budget on reasoning_content
-	// and returns an empty content — vision callers must send
-	// {"type":"disabled"} explicitly (issue #42).
-	Thinking *ThinkingConfig `json:"thinking,omitempty"`
 	// MaxCompletionTokens is the OFFICIAL budget field (the OpenAI-compatible
 	// endpoint documents max_completion_tokens, not max_tokens). It covers
 	// reasoning + visible output together. 0 = omitted = server default.
