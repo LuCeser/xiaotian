@@ -187,11 +187,13 @@
    * photo path and every PDF page: the entries array (absent → []), the
    * textbook header (an all-empty one cut to null — honesty cuts both
    * ways), and since Issue #11 the mixed-page arrays: whole poems (absent
-   * → []) and the display-only other blocks (absent → []).
+   * → []), whole passages (absent → [], Issue #13) and the display-only
+   * other blocks (absent → []).
    */
   function parseRecognized(data) {
     var entries = data && Array.isArray(data.entries) ? data.entries : [];
     var poems = data && Array.isArray(data.poems) ? data.poems : [];
+    var passages = data && Array.isArray(data.passages) ? data.passages : [];
     var others = data && Array.isArray(data.others) ? data.others : [];
     var meta = data && data.textbook && typeof data.textbook === 'object'
       ? data.textbook : null;
@@ -200,7 +202,7 @@
     })) {
       meta = null;
     }
-    return { entries: entries, poems: poems, others: others, meta: meta };
+    return { entries: entries, poems: poems, passages: passages, others: others, meta: meta };
   }
 
   // ------------------------------------------------------------------
@@ -392,6 +394,209 @@
       });
     });
     return kept;
+  }
+
+  // ------------------------------------------------------------------
+  // Issue #13 — whole-passage draft functions (window-exposed for the
+  // Node test, tests/test-parent-photo-passages.js — the poem kin).
+  // ------------------------------------------------------------------
+
+  /** Passage field caps — mirror pkg/web/api validate.go (runes, not bytes). */
+  var MAX_PASSAGE_TITLE_RUNES = 200;
+  var MAX_PASSAGE_AUTHOR_RUNES = 100;
+  var MAX_PASSAGE_PARAGRAPH_RUNES = 1000;
+  var MAX_PASSAGE_PARAGRAPHS = 60;
+  /** One POST /passages call carries at most 10 passages (validate.go maxPassages). */
+  var MAX_PASSAGE_BATCH = 10;
+
+  /**
+   * normalizePassageText — the CLIENT mirror of the server's passage
+   * fingerprint normalization: trimmed title + trimmed author + trimmed
+   * non-empty paragraphs joined in order. The existing-passages comparison
+   * is exact over this text (identity is the FULL original, never the
+   * title — a corrected text is a different passage until confirmed; the
+   * server re-verifies with its own hash; the client classification is a
+   * preview convenience, the commit's per-passage outcome stays
+   * authoritative).
+   */
+  function normalizePassageText(title, author, paragraphs) {
+    var clean = (paragraphs || []).map(function (p) {
+      return p == null ? '' : String(p).trim();
+    }).filter(function (p) { return p !== ''; });
+    return metaField(title) + '\n' + metaField(author) + '\n' + clean.join('\n');
+  }
+
+  /**
+   * passageRequiredLabel — the page's own whole-text 背诵/默写 mark as a
+   * badge label ('' when the page printed none). A passage's mark usually
+   * reads 背诵课文/默写课文, so the two known verbs are matched as
+   * substrings; anything else the model reported still reads honestly as
+   * an unspecified requirement.
+   */
+  function passageRequiredLabel(required) {
+    var v = metaField(required);
+    if (v.indexOf('背诵') >= 0) {
+      return '要求背诵';
+    }
+    if (v.indexOf('默写') >= 0) {
+      return '要求默写';
+    }
+    return '';
+  }
+
+  /**
+   * classifyPassageDrafts (Issue #13) — classify recognized whole passages
+   * against the CURRENT passage library snapshot (existingPassages:
+   * [{title, author, paragraphs}] — the GET /passages shape). Pure: no
+   * DOM, no fetch; the Node unit test pins the contract.
+   *
+   * Statuses (the classifyPoemDrafts kin):
+   *   'new'      — committable; the default range follows the page's own
+   *                marks (有背诵标记的段落默认勾选 — required_paragraphs
+   *                selects exactly those paragraphs; a whole-text 背诵/默写
+   *                mark selects 整篇; an unmarked passage stays unchecked
+   *                with NO range — 其他正文可按篇或段选择, the parent
+   *                chooses; a checked-but-rangeless passage commits as
+   *                text-only, the range is picked later on the content
+   *                page)
+   *   'exists'   — the FULL normalized original already stored (重复确认
+   *                不复制; a same-title different-text passage stays 'new')
+   *   'invalid'  — fails a commit rule (reason carries the cause)
+   *
+   * The row carries the scope choice the preview edits: scopeWhole +
+   * scopeParagraphs (1-based 自然段 numbers over the kept paragraphs).
+   */
+  function classifyPassageDrafts(passages, existingPassages) {
+    var byText = {};
+    (existingPassages || []).forEach(function (p) {
+      if (p && p.title) {
+        byText[normalizePassageText(p.title, p.author, p.paragraphs)] = p;
+      }
+    });
+
+    var seen = {};
+    return (passages || []).map(function (p, i) {
+      var title = metaField(p && p.title);
+      var author = metaField(p && p.author);
+      var paragraphs = (p && Array.isArray(p.paragraphs) ? p.paragraphs : [])
+        .map(function (t) { return t == null ? '' : String(t).trim(); })
+        .filter(function (t) { return t !== ''; });
+      var lesson = metaField(p && p.lesson);
+      var required = metaField(p && p.required);
+      var row = {
+        index: i, title: title, author: author, paragraphs: paragraphs,
+        lesson: lesson, required: required, requiredParagraphs: [],
+        status: 'new', reason: '', checked: false, page: 0,
+        scopeWhole: false, scopeParagraphs: [],
+      };
+
+      if (!title) {
+        row.status = 'invalid';
+        row.reason = 'empty-title';
+        return row;
+      }
+      if (title.length > MAX_PASSAGE_TITLE_RUNES) {
+        row.status = 'invalid';
+        row.reason = 'title-too-long';
+        return row;
+      }
+      if (author.length > MAX_PASSAGE_AUTHOR_RUNES) {
+        row.status = 'invalid';
+        row.reason = 'author-too-long';
+        return row;
+      }
+      if (!paragraphs.length) {
+        row.status = 'invalid';
+        row.reason = 'no-paragraphs';
+        return row;
+      }
+      if (paragraphs.length > MAX_PASSAGE_PARAGRAPHS) {
+        row.status = 'invalid';
+        row.reason = 'too-many-paragraphs';
+        return row;
+      }
+      if (paragraphs.some(function (t) { return t.length > MAX_PASSAGE_PARAGRAPH_RUNES; })) {
+        row.status = 'invalid';
+        row.reason = 'paragraph-too-long';
+        return row;
+      }
+
+      var text = normalizePassageText(title, author, paragraphs);
+      if (seen[text] !== undefined) {
+        row.status = 'invalid';
+        row.reason = 'duplicate:' + (seen[text] + 1);
+        return row;
+      }
+      seen[text] = i;
+
+      // The page's own marks drive the default range (有背诵标记的段落
+      // 默认勾选): per-paragraph marks select exactly those paragraphs, a
+      // whole-text mark selects 整篇, anything else leaves the choice open.
+      var marks = (p && Array.isArray(p.required_paragraphs) ? p.required_paragraphs : [])
+        .filter(function (n) { return n >= 1 && n <= paragraphs.length; })
+        .sort(function (a, b) { return a - b; })
+        .filter(function (n, j, arr) { return j === 0 || arr[j - 1] !== n; });
+      row.requiredParagraphs = marks;
+      if (marks.length) {
+        row.checked = true;
+        row.scopeWhole = false;
+        row.scopeParagraphs = marks.slice();
+      } else if (passageRequiredLabel(required)) {
+        row.checked = true;
+        row.scopeWhole = true;
+        row.scopeParagraphs = [];
+      }
+
+      if (Object.prototype.hasOwnProperty.call(byText, text)) {
+        row.status = 'exists';
+      }
+      return row;
+    });
+  }
+
+  /** Human-readable text for one invalid passage reason. */
+  function describePassageInvalidReason(reason) {
+    if (reason === 'empty-title') {
+      return '课文标题不能为空';
+    }
+    if (reason === 'title-too-long') {
+      return '课文标题超过 ' + MAX_PASSAGE_TITLE_RUNES + ' 个字符';
+    }
+    if (reason === 'author-too-long') {
+      return '作者超过 ' + MAX_PASSAGE_AUTHOR_RUNES + ' 个字符';
+    }
+    if (reason === 'no-paragraphs') {
+      return '自然段不能为空';
+    }
+    if (reason === 'too-many-paragraphs') {
+      return '自然段超过 ' + MAX_PASSAGE_PARAGRAPHS + ' 段';
+    }
+    if (reason === 'paragraph-too-long') {
+      return '单个自然段超过 ' + MAX_PASSAGE_PARAGRAPH_RUNES + ' 个字符';
+    }
+    if (/^duplicate:/.test(reason)) {
+      return '与第 ' + reason.slice('duplicate:'.length) + ' 篇重复';
+    }
+    return reason;
+  }
+
+  /**
+   * mergePagePassages (Issue #13, PDF runs) — the mergePagePoems kin for
+   * passage drafts: the newly recognized page's passages REPLACE that
+   * page's segment (a retry can never duplicate), other pages' passages
+   * survive untouched, and the incoming drafts re-classify against the
+   * existing library so cross-page duplicate passages flag themselves.
+   */
+  function mergePagePassages(current, pageNo, incoming, existingPassages) {
+    var kept = (current || []).filter(function (r) { return r.page !== pageNo; });
+    var fresh = (incoming || []).map(function (p, i) {
+      return Object.assign({ page: pageNo }, p, { index: i });
+    });
+    var classified = classifyPassageDrafts(fresh, existingPassages);
+    return kept.concat(classified.map(function (r) {
+      r.page = pageNo;
+      return r;
+    }));
   }
 
   /** Human-readable text for one invalid reason (batch-parser copy kin). */
@@ -3846,6 +4051,12 @@
   global.describePoemInvalidReason = describePoemInvalidReason;
   global.mergePagePoems = mergePagePoems;
   global.mergePageOthers = mergePageOthers;
+  // Issue #13: the whole-passage draft surfaces (the poem kin — pure, so
+  // the Node unit test pins the contract).
+  global.normalizePassageText = normalizePassageText;
+  global.classifyPassageDrafts = classifyPassageDrafts;
+  global.describePassageInvalidReason = describePassageInvalidReason;
+  global.mergePagePassages = mergePagePassages;
   // Issue #7: the upload budget's ONE encoder — parent-pdf.js's page
   // renderer walks the same ladder and cap the photo path uses.
   global.PHOTO_QUALITY_LADDER = QUALITY_LADDER;
