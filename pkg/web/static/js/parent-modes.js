@@ -209,8 +209,23 @@
     return {
       field: field,
       selected: selected,
+      /**
+       * Write the validation copy and, when non-empty, bring the field into
+       * the viewport and focus the first radio — issue #42: the parent's
+       * eyes are on the submit button, so an inline message alone reads as
+       * "nothing happened". Clearing (empty message) must stay silent.
+       */
       setError: function (message) {
         error.textContent = message;
+        if (!message) {
+          return;
+        }
+        if (field.scrollIntoView) {
+          field.scrollIntoView({ block: 'center' });
+        }
+        if (radios.length && radios[0].radio.focus) {
+          radios[0].radio.focus();
+        }
       },
     };
   }

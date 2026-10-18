@@ -147,6 +147,44 @@ func TestClient_ChatVision(t *testing.T) {
 			},
 		},
 		{
+			name:     "thinking disabled is serialized on the wire",
+			handler:  defaultVisionHandler,
+			image:    visionTestImage,
+			mimeType: "image/jpeg",
+			opts:     []ChatOption{WithThinkingDisabled()},
+			wantText: `{"text":"apple","confidence":0.9}`,
+			validateReq: func(t *testing.T, got *capturedVision) {
+				if got.Thinking == nil {
+					t.Fatal("expected non-nil Thinking, got nil")
+				}
+				if got.Thinking.Type != "disabled" {
+					t.Errorf("Thinking.Type = %q, want %q", got.Thinking.Type, "disabled")
+				}
+				// Struct field alone is not enough: assert the exact top-level
+				// wire shape, since that is what actually turns thinking off.
+				const wire = `"thinking":{"type":"disabled"}`
+				if !bytes.Contains(got.raw, []byte(wire)) {
+					t.Errorf("serialized request missing %s: %s", wire, got.raw)
+				}
+			},
+		},
+		{
+			name:     "thinking is omitted from the wire by default",
+			handler:  defaultVisionHandler,
+			image:    visionTestImage,
+			mimeType: "image/jpeg",
+			opts:     []ChatOption{},
+			wantText: `{"text":"apple","confidence":0.9}`,
+			validateReq: func(t *testing.T, got *capturedVision) {
+				if got.Thinking != nil {
+					t.Errorf("expected nil Thinking by default, got %+v", got.Thinking)
+				}
+				if bytes.Contains(got.raw, []byte(`"thinking"`)) {
+					t.Errorf("serialized request must not contain thinking: %s", got.raw)
+				}
+			},
+		},
+		{
 			name:     "png mime is honored in the data uri",
 			handler:  defaultVisionHandler,
 			image:    []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A},
@@ -291,12 +329,17 @@ func TestClient_ChatVision_RetriesTransientErrors(t *testing.T) {
 // message content stays raw because it is polymorphic (string for system,
 // parts array for user).
 type capturedVision struct {
-	Model    string `json:"model"`
+	Model    string          `json:"model"`
+	Thinking *ThinkingConfig `json:"thinking"`
+	// raw is the original request body, kept so tests can assert the exact
+	// serialized wire shape (including omitempty behavior).
+	raw      []byte
 	Messages []struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	} `json:"messages"`
-	MaxTokens int `json:"max_tokens"`
+	MaxTokens           int `json:"max_tokens"`
+	MaxCompletionTokens int `json:"max_completion_tokens"`
 }
 
 // decodeCapturedVision decodes a captured request body; returns nil for an
@@ -310,5 +353,6 @@ func decodeCapturedVision(t *testing.T, body []byte) *capturedVision {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("captured request is not valid JSON: %v (%s)", err, body)
 	}
+	got.raw = body
 	return &got
 }

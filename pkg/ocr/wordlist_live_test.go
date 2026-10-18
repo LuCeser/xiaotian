@@ -89,10 +89,13 @@ func TestWordlistLive_RealVision(t *testing.T) {
 	}
 
 	// The production adapter shape (cmd/service mimoListReader): ChatVision
-	// over the sniffed MIME type with the photo chat model.
+	// over the sniffed MIME type with the photo chat model, thinking
+	// disabled (issue #42: default thinking burns the budget on
+	// reasoning_content and returns empty content).
 	read := ListReader(func(ctx context.Context, systemPrompt, userPrompt string, img []byte, mimeType string) (string, error) {
 		resp, visionErr := client.ChatVision(ctx, systemPrompt, userPrompt, img, mimeType,
-			mimo.WithChatModel(infra.DefaultConfig().Photo.ChatModel))
+			mimo.WithChatModel(infra.DefaultConfig().Photo.ChatModel),
+			mimo.WithThinkingDisabled())
 		if visionErr != nil {
 			return "", visionErr
 		}

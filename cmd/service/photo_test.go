@@ -444,7 +444,7 @@ func TestPhotoCancel_DiscardsUpload(t *testing.T) {
 // contract at the type level (the live behavior is covered by the gated live
 // test).
 func TestMimoReader_IsReaderSeam(t *testing.T) {
-	r := mimoReader(nil, "mimo-v2.5")
+	r := mimoReader(nil, "mimo-v2.6-flash")
 	if r == nil {
 		t.Fatal("mimoReader returned nil")
 	}

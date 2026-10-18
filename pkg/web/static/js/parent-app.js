@@ -158,15 +158,17 @@
    * postImage — binary-body variant of fetchJSON for the word-list photo
    * recognize call (Issue #3). The image bytes go as the raw request body
    * with their own Content-Type; response handling reuses parseEnvelope.
-   * The timeout is its own (60s): a vision model thinking over an image
-   * legitimately outruns fetchJSON's 15s JSON budget (the server side
-   * allows 20s).
+   * The timeout is its own (90s): a vision call over a dense photo
+   * legitimately outruns fetchJSON's 15s JSON budget, and the server
+   * side allows 60s (PhotoConfig.RequestTimeout) — the client must wait
+   * longer than the server's own deadline or it aborts a call that was
+   * about to succeed (issue #42).
    */
   function postImage(url, blob, timeoutMs) {
     var controller = new AbortController();
     var timer = setTimeout(function () {
       controller.abort();
-    }, timeoutMs || 60000);
+    }, timeoutMs || 90000);
 
     return fetch(url, {
       method: 'POST',

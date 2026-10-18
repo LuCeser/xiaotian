@@ -55,15 +55,17 @@ func newPhotoService(read ocr.Reader, judge answerJudger, logger infra.Logger, c
 }
 
 // mimoReader adapts the mimo ChatVision call onto the ocr.Reader seam,
-// keeping the mimo dependency out of the service layer's test surface. NO
-// MaxTokens cap: mimo-v2.5 runs in thinking mode, whose reasoning alone can
-// exceed a few hundred tokens — a 256 cap (live-observed) truncated the
-// model mid-thought with no final JSON at all. The wall-clock bound is the
-// handler's requestTimeout; the reply itself is a tiny JSON object.
+// keeping the mimo dependency out of the service layer's test surface.
+// Thinking MUST be explicitly disabled: the model enables it by default and
+// then spends the whole token budget on reasoning_content, returning an empty
+// content (issue #42). With thinking off the same call returns the word list
+// with content populated; live-measured latency dropped from 57.6s to 11.8s.
+// The wall-clock bound is the handler's requestTimeout; the reply itself is a
+// tiny JSON object.
 func mimoReader(mc mimo.Client, model string) ocr.Reader {
 	return func(ctx context.Context, systemPrompt, userPrompt string, imageJPEG []byte) (string, error) {
 		resp, err := mc.ChatVision(ctx, systemPrompt, userPrompt, imageJPEG, "image/jpeg",
-			mimo.WithChatModel(model))
+			mimo.WithChatModel(model), mimo.WithThinkingDisabled())
 		if err != nil {
 			return "", err
 		}
@@ -74,13 +76,14 @@ func mimoReader(mc mimo.Client, model string) ocr.Reader {
 // mimoListReader adapts the same ChatVision call onto the ocr.ListReader
 // seam (Issue #3): the only difference from mimoReader is the MIME type —
 // the parent word-list upload may be a PNG shipped verbatim, so the sniffed
-// type rides the seam instead of a hardcoded image/jpeg. Same no-MaxTokens
-// rationale: a word-list reply is still a bounded JSON array, and capping
-// a thinking model's output truncates it mid-thought.
+// type rides the seam instead of a hardcoded image/jpeg. Same thinking-off
+// rationale as mimoReader: the default thinking mode burns the budget on
+// reasoning_content and returns an empty content, so a word-list reply is
+// only reliable with thinking disabled.
 func mimoListReader(mc mimo.Client, model string) ocr.ListReader {
 	return func(ctx context.Context, systemPrompt, userPrompt string, image []byte, mimeType string) (string, error) {
 		resp, err := mc.ChatVision(ctx, systemPrompt, userPrompt, image, mimeType,
-			mimo.WithChatModel(model))
+			mimo.WithChatModel(model), mimo.WithThinkingDisabled())
 		if err != nil {
 			return "", err
 		}
