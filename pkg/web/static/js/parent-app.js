@@ -291,6 +291,16 @@
       return (data && Array.isArray(data.passages)) ? data.passages : [];
     });
   };
+  var assignPassage = function (id, payload) {
+    return fetchJSON('POST', '/api/v1/passages/' + encodeURIComponent(id) + '/assign', payload);
+  };
+  var addPassageScope = function (id, payload) {
+    return fetchJSON('POST', '/api/v1/passages/' + encodeURIComponent(id) + '/scopes', payload);
+  };
+  var removePassageScope = function (id, scopeId) {
+    return fetchJSON('DELETE', '/api/v1/passages/' + encodeURIComponent(id) +
+      '/scopes/' + encodeURIComponent(scopeId));
+  };
 
   var browse = new window.BrowseView(browseContainer, {
     fetchWords: function (category, q) {
@@ -356,6 +366,13 @@
     // ⇒ the browse view's 类型 filter degrades to the 词语 page only.
     fetchPoems: fetchPoems,
     assignPoem: assignPoem,
+    // Issue #13: the 课文 page — the passage list, its practice-range
+    // selection writes and its explicit attribution write. Absent
+    // fetchPassages ⇒ the 课文 pill never mounts.
+    fetchPassages: fetchPassages,
+    assignPassage: assignPassage,
+    addPassageScope: addPassageScope,
+    removePassageScope: removePassageScope,
     fetchTextbooks: textbookDeps.fetchTextbooks,
   });
 

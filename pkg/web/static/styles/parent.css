@@ -2359,3 +2359,172 @@ body {
 .poem-line:last-child {
   margin-bottom: 0;
 }
+
+/* One whole passage card (Issue #13, the poem card's prose kin): head
+   (title/author/badge/scope/manage) + the ordered 自然段 rows + the
+   practice-range box + attribution chips. */
+.passage-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.passage-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.passage-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.passage-author {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.passage-scope {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.passage-scope-in,
+.passage-scope-included,
+.passage-scope-learned {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+  color: var(--success-strong);
+}
+
+.passage-scope-progress_pending {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-strong);
+}
+
+.passage-manage-btn {
+  margin-left: auto;
+}
+
+.passage-paragraphs {
+  margin: 0;
+  padding-left: 4px;
+}
+
+.passage-paragraph {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--ink);
+}
+
+.passage-paragraph:last-child {
+  margin-bottom: 0;
+}
+
+.passage-paragraph-no {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.passage-paragraph-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A 自然段 inside a chosen practice range reads marked (选段不动其他段
+   — the others stay plainly visible). */
+.passage-paragraph-in-scope .passage-paragraph-text {
+  background: var(--success-bg);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.passage-scopes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+}
+
+.passage-scopes-label {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.passage-scope-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--success-border);
+  background: var(--success-bg);
+  font-size: 12px;
+  color: var(--success-strong);
+}
+
+.passage-scope-row-text {
+  white-space: nowrap;
+}
+
+.passage-scope-remove {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.passage-scope-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  padding-top: 2px;
+}
+
+.passage-scope-add .inline-check-hit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.passage-scope-add input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+}
+
+.passage-scope-add-btn {
+  margin-left: auto;
+}
