@@ -68,17 +68,14 @@ func liveWordlistKey(t *testing.T) string {
 	return apiKey
 }
 
-// TestWordlistLive_RealVision is the "不把模拟通过当成识别质量通过" check:
-// the same fixture the stubbed browser e2e uses, against the real service.
-func TestWordlistLive_RealVision(t *testing.T) {
+// liveWordlistPipeline wires the production adapter shape (cmd/service
+// mimoListReader: ChatVision over the sniffed MIME type with the photo chat
+// model, thinking disabled — issue #42: default thinking burns the budget on
+// reasoning_content and returns empty content). Skip-gated on MIMO_API_KEY
+// so every live test below costs only its own vision calls.
+func liveWordlistPipeline(t *testing.T) *WordlistPipeline {
+	t.Helper()
 	apiKey := liveWordlistKey(t)
-
-	fixture := filepath.Join("..", "..", "tests", "e2e", "fixtures", "photo-wordlist.png")
-	image, err := os.ReadFile(fixture)
-	if err != nil {
-		t.Fatalf("read fixture %s: %v (regenerate via scripts/gen-wordlist-fixture.py)", fixture, err)
-	}
-
 	client, err := mimo.NewClient(mimo.ClientConfig{
 		APIKey:  apiKey,
 		BaseURL: infra.DefaultConfig().Voice.BaseURL,
@@ -87,11 +84,6 @@ func TestWordlistLive_RealVision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mimo client: %v", err)
 	}
-
-	// The production adapter shape (cmd/service mimoListReader): ChatVision
-	// over the sniffed MIME type with the photo chat model, thinking
-	// disabled (issue #42: default thinking burns the budget on
-	// reasoning_content and returns empty content).
 	read := ListReader(func(ctx context.Context, systemPrompt, userPrompt string, img []byte, mimeType string) (string, error) {
 		resp, visionErr := client.ChatVision(ctx, systemPrompt, userPrompt, img, mimeType,
 			mimo.WithChatModel(infra.DefaultConfig().Photo.ChatModel),
@@ -101,7 +93,19 @@ func TestWordlistLive_RealVision(t *testing.T) {
 		}
 		return resp.Text(), nil
 	})
-	pipeline := NewWordlistPipeline(read, infra.DefaultConfig().Photo.MaxImageBytes)
+	return NewWordlistPipeline(read, infra.DefaultConfig().Photo.MaxImageBytes)
+}
+
+// TestWordlistLive_RealVision is the "不把模拟通过当成识别质量通过" check:
+// the same fixture the stubbed browser e2e uses, against the real service.
+func TestWordlistLive_RealVision(t *testing.T) {
+	pipeline := liveWordlistPipeline(t)
+
+	fixture := filepath.Join("..", "..", "tests", "e2e", "fixtures", "photo-wordlist.png")
+	image, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v (regenerate via scripts/gen-wordlist-fixture.py)", fixture, err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -151,8 +155,49 @@ func TestWordlistLive_RealVision(t *testing.T) {
 				t.Errorf("noise became an entry: %q (all entries: %v)", e.Word, formatEntries(res.Entries))
 			}
 		}
+		// Issue #47: layout marks (★ 重点词标记 style) never ride word —
+		// the prompt asks the model to strip them and the server's end
+		// trimmer removes them regardless of what the model echoes.
+		if strings.ContainsAny(e.Word, wordDecorationRunes) {
+			t.Errorf("decoration mark survived in word: %q", e.Word)
+		}
 	}
 	t.Logf("live wordlist recognition: meta=%+v, %d entries, %d/5 expected hits", res.Textbook, len(res.Entries), hits)
+}
+
+// TestWordlistLive_WrongSubjectIsolation (Issue #47) — the wrong-category
+// acceptance on the real service: the SAME English fixture recognized under
+// category=chinese, the mis-click that used to import 39 English words into
+// a 语文 word list. Whatever the live model answers, the deterministic
+// server guard means a chinese draft can only carry Han words (typically
+// just a few misreads or nothing) — and never a decorated word. One more
+// vision call per run.
+func TestWordlistLive_WrongSubjectIsolation(t *testing.T) {
+	pipeline := liveWordlistPipeline(t)
+
+	fixture := filepath.Join("..", "..", "tests", "e2e", "fixtures", "photo-wordlist.png")
+	image, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", fixture, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	res, err := pipeline.Recognize(ctx, image, CategoryChinese)
+	if err != nil {
+		t.Fatalf("live recognize (chinese over an english list): %v", err)
+	}
+	for _, e := range res.Entries {
+		if !containsHan(e.Word) {
+			t.Errorf("non-Han word entered the chinese draft: %q (all entries: %v)",
+				e.Word, formatEntries(res.Entries))
+		}
+		if strings.ContainsAny(e.Word, wordDecorationRunes) {
+			t.Errorf("decoration mark survived in word: %q", e.Word)
+		}
+	}
+	t.Logf("live wrong-subject recognition: %d entries (guarded), %d poems, %d others",
+		len(res.Entries), len(res.Poems), len(res.Others))
 }
 
 func formatEntries(entries []WordlistEntry) string {
