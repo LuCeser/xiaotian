@@ -708,6 +708,11 @@
    *       poem commit + snapshot surfaces, passed through to PhotoAddForm
    *       (POST/GET /api/v1/poems). Absent ⇒ the poem cards degrade with
    *       their reason; the 词语 flow is untouched.
+   *   submitPassages(payload) / fetchPassages(category) — the Issue #13
+   *       whole-passage commit + snapshot surfaces, passed through to
+   *       PhotoAddForm (POST/GET /api/v1/passages). Absent ⇒ the passage
+   *       cards degrade with their reason; the 词语/古诗 flows are
+   *       untouched.
    */
   function AddCard(container, options) {
     options = options || {};
@@ -812,6 +817,11 @@
         // working — poems are an additive surface on the same mixed page).
         submitPoems: options.submitPoems || null,
         fetchPoems: options.fetchPoems || null,
+        // Issue #13: the whole-passage commit + snapshot surfaces (absent
+        // ⇒ the passage cards degrade with their reason; the 词语/古诗
+        // flows keep working — passages are an additive surface too).
+        submitPassages: options.submitPassages || null,
+        fetchPassages: options.fetchPassages || null,
         textbookDeps: textbookDeps,
         // Issue #8: the missing-meaning supplement call (absent ⇒ the
         // affordance never mounts; the import flow is unchanged).

@@ -274,6 +274,24 @@
     return fetchJSON('POST', '/api/v1/poems/' + encodeURIComponent(id) + '/assign', payload);
   };
 
+  // Issue #13 课文 API wiring — the passage twin of the poem block above:
+  // ONE implementation feeds the photo form (commit + snapshot through
+  // AddCard below); the range-management and browse-side surfaces join
+  // with the content-view task below.
+  var fetchPassages = function (category, q) {
+    var params = [];
+    if (category) {
+      params.push('category=' + encodeURIComponent(category));
+    }
+    if (q) {
+      params.push('q=' + encodeURIComponent(q));
+    }
+    var url = '/api/v1/passages' + (params.length ? '?' + params.join('&') : '');
+    return fetchJSON('GET', url).then(function (data) {
+      return (data && Array.isArray(data.passages)) ? data.passages : [];
+    });
+  };
+
   var browse = new window.BrowseView(browseContainer, {
     fetchWords: function (category, q) {
       var params = [];
@@ -375,6 +393,14 @@
       return fetchJSON('POST', '/api/v1/poems', payload);
     },
     fetchPoems: fetchPoems,
+    // Issue #13 课文: the mixed 语文 page's whole-passage commit (with
+    // the chosen practice range riding each draft) and the
+    // passage-library snapshot the preview classification reads (both
+    // plain JSON calls under the 15s timeout).
+    submitPassages: function (payload) {
+      return fetchJSON('POST', '/api/v1/passages', payload);
+    },
+    fetchPassages: fetchPassages,
     // Issue #5 教材归属: the same textbook surfaces TextbookUI uses,
     // passed through AddCard into PhotoAddForm's attribution panel.
     // Issue #6 adds editWord — the 采用照片释义 conflict resolution rides
