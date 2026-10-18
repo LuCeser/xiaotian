@@ -177,10 +177,11 @@ func runLiveVoiceCommand(t *testing.T, spokenText string) voiceResultResponse {
 	defer client.Close()
 
 	// The exact composition main.go performs. RequestTimeout is raised far
-	// above the production 15s default: the chat model's thinking mode is on
-	// by default, classification replies take ~8s live, and this test must
-	// not mistake a cancelled call for a classification result (the 2s in
-	// testVoiceConfig exists for the fast offline tests, not for live AI).
+	// above the production 15s default: mimoChatter disables thinking (issue
+	// #45), so a chat reply takes ~1s, but the TTS→ASR legs of this pipeline
+	// still dominate, and this test must not mistake a cancelled call for a
+	// classification result (the 2s in testVoiceConfig exists for the fast
+	// offline tests, not for live AI).
 	cfg := testVoiceConfig(0)
 	cfg.RequestTimeout = 45 * time.Second
 	vs := newVoiceService(
