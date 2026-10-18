@@ -297,8 +297,9 @@ type VoiceConfig struct {
 	BaseURL string `json:"baseUrl" mapstructure:"baseUrl"`
 
 	// ChatModel is the LLM used for intent classification of voice commands
-	// that miss the keyword fast path. Default "mimo-v2.5" (the -pro variant
-	// costs more latency than a 4-way classification justifies).
+	// that miss the keyword fast path. Default "mimo-v2.6-flash" (the -pro
+	// variant costs more latency than a 4-way classification justifies;
+	// mimo-v2.5 was turned off by the platform on 2026-10-21).
 	ChatModel string `json:"chatModel" mapstructure:"chatModel"`
 
 	// MaxRecordingBytes caps one voice-command recording's accumulated PCM
@@ -316,7 +317,7 @@ type VoiceConfig struct {
 	// then the LLM chat fallback when the keyword fast path misses) served
 	// under one voice command — one context spans both calls, so a slow ASR
 	// eats into the LLM's budget rather than extending the total. Default
-	// 15s, sized on live observation: ASR ~2s + a mimo-v2.5 thinking-model
+	// 15s, sized on live observation: ASR ~2s + a thinking-mode LLM
 	// classification ~8s ≈ 10s, leaving retry headroom; bounded so a wedged
 	// upstream cannot pin router workers (WR-02 bounds Close, not individual
 	// handlers). MUST be > 0.
@@ -355,8 +356,9 @@ func (c VoiceConfig) Validate() error {
 // boots with NO photo: block in config.yaml.
 type PhotoConfig struct {
 	// ChatModel is the vision-capable LLM used for OCR. Default
-	// "mimo-v2.5" — the official image-understanding examples run this
-	// model, keeping voice/ photo/ on one deployment shape.
+	// "mimo-v2.6-flash" — live-probed on the wordlist fixture (vision
+	// input + thinking-disabled + max_completion_tokens all honored,
+	// ~2s), keeping voice/ photo/ on one deployment shape.
 	ChatModel string `json:"chatModel" mapstructure:"chatModel"`
 
 	// MaxImageBytes caps one photo's reassembled JPEG size (memory guard on
@@ -980,9 +982,10 @@ func DefaultConfig() Config {
 			// Same default as pkg/mimo.NewClient — duplicated so operators
 			// see the surface at the infra layer (see VoiceConfig docs).
 			BaseURL: "https://api.xiaomimimo.com/v1",
-			// mimo-v2.5: intent classification is a 4-way choice; -pro's
-			// extra capability buys latency we do not want per command.
-			ChatModel: "mimo-v2.5",
+			// mimo-v2.6-flash: intent classification is a 4-way choice; -pro's
+			// extra capability buys latency we do not want per command
+			// (mimo-v2.5 turned off by the platform 2026-10-21).
+			ChatModel: "mimo-v2.6-flash",
 			// ~10.2s of 16kHz 16-bit mono — generous for a spoken command.
 			MaxRecordingBytes: 327680,
 			// Audio and control routes are separate worker pools; the
@@ -992,17 +995,22 @@ func DefaultConfig() Config {
 			RequestTimeout: 15 * time.Second,
 		},
 		Photo: PhotoConfig{
-			// Vision-capable per the official image-understanding docs; same
-			// deployment shape as the voice intent classifier.
-			ChatModel: "mimo-v2.5",
+			// Vision-capable (live-probed on v2.6-flash, see
+			// PhotoConfig.ChatModel docs); same deployment shape as the
+			// voice intent classifier.
+			ChatModel: "mimo-v2.6-flash",
 			// 1MiB cap — the client re-encodes to ~768KiB max, leaving
 			// headroom. Bounds orphaned-buffer memory on the 1C1G VPS.
 			MaxImageBytes: 1048576,
 			// Same separate-routes rationale as voice.assembleWait.
 			AssembleWait: 2 * time.Second,
-			// Vision thinking over an image runs slower than text-only
-			// classification (voice: 15s); 20s with headroom.
-			RequestTimeout: 20 * time.Second,
+			// Live-measured with thinking disabled: ~20s for a small image
+			// and 27s for a dense one — but one run of the SAME dense image
+			// blew past 30s, so the upstream latency spread is too wide for
+			// a tight bound. 60s absorbs it. main.go derives the shared
+			// mimo client's HTTP timeout as max(voice, photo), so this also
+			// becomes that client's wall-clock bound.
+			RequestTimeout: 60 * time.Second,
 			// Below 0.6 the client offers manual input prefilled with the
 			// best guess rather than auto-judging.
 			ConfidenceThreshold: 0.6,

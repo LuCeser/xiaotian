@@ -125,8 +125,7 @@ func TestLiveChatToolsThinkingDisabled(t *testing.T) {
 }
 
 // TestLiveChatThinkingDefaultLatencyProbe is the A4 comparison probe: the
-// same request WITHOUT WithThinkingDisabled (mimo-v2.5 thinking is on by
-// default). Only HTTP success is asserted — elapsed time and whether
+// same request WITHOUT WithThinkingDisabled (thinking is on by default). Only HTTP success is asserted — elapsed time and whether
 // reasoning_content appeared are logged to leave real-device evidence for
 // the RT-04 latency assessment (sixth-week check), per the plan.
 func TestLiveChatThinkingDefaultLatencyProbe(t *testing.T) {
