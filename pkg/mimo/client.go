@@ -416,8 +416,8 @@ func (c *mimoClient) ChatVision(ctx context.Context, systemPrompt, userPrompt st
 // Thinking MUST be passed through: the model enables it by default and then
 // burns the whole budget on reasoning_content, returning an empty content
 // (issue #42), so WithThinkingDisabled would otherwise be a no-op here.
-// ChatRequest has no MaxCompletionTokens field, so the MaxTokens set by
-// WithMaxTokens is also mapped onto the official max_completion_tokens field.
+// WithMaxTokens sets both budget fields on the ChatRequest carrier (issue
+// #46), so each maps straight across.
 func (c *mimoClient) buildChatVisionRequest(systemPrompt, userPrompt string, image []byte, mimeType string, opts ...ChatOption) ChatVisionRequest {
 	base := ChatRequest{Model: DefaultChatModel}
 	for _, opt := range opts {
@@ -440,7 +440,7 @@ func (c *mimoClient) buildChatVisionRequest(systemPrompt, userPrompt string, ima
 		},
 		MaxTokens:           base.MaxTokens,
 		Thinking:            base.Thinking,
-		MaxCompletionTokens: base.MaxTokens,
+		MaxCompletionTokens: base.MaxCompletionTokens,
 	}
 }
 
