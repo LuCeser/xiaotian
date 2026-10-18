@@ -84,6 +84,17 @@ func TestWordlistPipeline_Recognize(t *testing.T) {
 			wantConfs: []float64{1},
 		},
 		{
+			name: "decoration marks around word are trimmed, mark-only word dropped",
+			image: jpegSoi,
+			reply: `[{"word":"★library ★","meaning":"图书馆","confidence":0.9},` +
+				`{"word":"● go for a walk ","meaning":"散步","confidence":0.8},` +
+				`{"word":"※★★","meaning":"只有装饰符","confidence":0.9}]`,
+			checkMime: "image/jpeg",
+			wantWords: []string{"library", "go for a walk"},
+			wantMeans: []string{"图书馆", "散步"},
+			wantConfs: []float64{0.9, 0.8},
+		},
+		{
 			name:      "fenced reply still parses",
 			image:     jpegSoi,
 			reply:     "```json\n[{\"word\":\"apple\",\"meaning\":\"苹果\",\"confidence\":0.9}]\n```",
@@ -464,6 +475,70 @@ func TestWordlistRecognizeChineseEntries(t *testing.T) {
 	// legal (词语表没有给注释).
 	if res.Entries[1].Word != "世界" || res.Entries[1].Meaning != "" || res.Entries[1].Lesson != "第5课" {
 		t.Errorf("entry[1] = %+v, want 世界/empty/第5课 (page-level lesson inherited)", res.Entries[1])
+	}
+}
+
+// TestWordlistRecognizeChineseGuardsNonHanEntries (Issue #47) — the 语文
+// contract's server-side isolation backstop. When the parent mis-selects
+// 中文 over an ENGLISH word list, the model's English entries — exactly what
+// a live 4A photo produced ("★library", "classroom"…) — are dropped from the
+// draft and can never be committed into a 语文 word list. Real 词语 survive
+// (a Han character anywhere in the word counts: 「3D打印」 is a 词语), and
+// the same reply under the english contract keeps every entry — the guard
+// is the chinese subject's only, not a global word filter.
+func TestWordlistRecognizeChineseGuardsNonHanEntries(t *testing.T) {
+	reply := `{"entries":[` +
+		`{"word":"★library","meaning":"图书馆","confidence":0.9},` +
+		`{"word":"classroom","meaning":"教室","confidence":0.85},` +
+		`{"word":"美丽","meaning":"měi lì","confidence":0.95},` +
+		`{"word":"78","meaning":"数字也不是词语","confidence":0.9},` +
+		`{"word":"3D打印","meaning":"sān dī dǎ yìn","confidence":0.9}` +
+		`]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize chinese over english list: %v", err)
+	}
+	if len(res.Entries) != 2 || res.Entries[0].Word != "美丽" || res.Entries[1].Word != "3D打印" {
+		t.Fatalf("entries = %+v, want only the Han-carrying 美丽/3D打印 (english leaks dropped)", res.Entries)
+	}
+
+	resEn, err := p.Recognize(context.Background(), jpegSoi, CategoryEnglish)
+	if err != nil {
+		t.Fatalf("Recognize english: %v", err)
+	}
+	if len(resEn.Entries) != 5 {
+		t.Fatalf("english entries = %d (%+v), want all 5 (the guard never filters english)", len(resEn.Entries), resEn.Entries)
+	}
+	if resEn.Entries[0].Word != "library" {
+		t.Errorf("english entries[0].Word = %q, want ★ stripped", resEn.Entries[0].Word)
+	}
+}
+
+// TestWordlistTrimWordDecorations pins the decoration trimmer itself: ends
+// only (an inner mark or space stays), whitespace interleaved with the marks
+// folds away, and normal word punctuation — hyphens, apostrophes, the
+// interpunct a transliterated name carries INSIDE itself — is never eaten.
+func TestWordlistTrimWordDecorations(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{"★library", "library"},
+		{" ※美丽● ", "美丽"},
+		{"☆ ice cream ★", "ice cream"},
+		{"ice cream", "ice cream"},   // spaces INSIDE a phrase stay
+		{"ice-cream", "ice-cream"},   // hyphen is a word character
+		{"it's", "it's"},             // apostrophe is a word character
+		{"阿·凡提", "阿·凡提"},               // interpunct inside a name stays
+		{"★★★", ""},                    // mark-only collapses to empty
+		{"＊word＊", "word"},             // fullwidth asterisk is a mark too
+	} {
+		if got := trimWordDecorations(tc.in); got != tc.want {
+			t.Errorf("trimWordDecorations(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

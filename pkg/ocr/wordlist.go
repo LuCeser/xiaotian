@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ListReader is the seam the word-list pipeline uses to reach a vision API.
@@ -222,7 +223,10 @@ func (p *WordlistPipeline) MaxBytes() int {
 // the vision API decodes the right format. Error contract mirrors
 // Pipeline.Process: sentinels are detectable via errors.Is. A photo with
 // no recognizable word-list entries is a legal outcome — the caller shows
-// "nothing recognized", not an error.
+// "nothing recognized", not an error. Issue #47 adds the deterministic
+// backstop on top of the contract: typographic decoration marks around
+// word are trimmed for either subject, and under CategoryChinese an entry
+// whose word carries no Han character never reaches the draft.
 func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte, category string) (*WordlistResult, error) {
 	if len(image) == 0 {
 		return nil, ErrEmptyImage
@@ -280,8 +284,27 @@ func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte, category
 
 	out := make([]WordlistEntry, 0, len(parsed.entries))
 	for _, e := range parsed.entries {
-		word := strings.TrimSpace(e.Word)
+		// Issue #47: word is the LANGUAGE unit only — the typographic marks
+		// a printed list sets around its words (★ key-word stars, ※,
+		// bullets…) are trimmed off both ends together with the whitespace
+		// interleaving them ("★ library " → "library"); a mark-only word
+		// ("★★") collapses into the empty-word case below.
+		word := trimWordDecorations(e.Word)
 		if word == "" {
+			continue
+		}
+		// Issue #47's isolation backstop: the 语文 contract admits only
+		// Han-carrying words into entries. A word with NO Han character is
+		// English leaking through a mis-selected category (or stray
+		// symbols) and is DROPPED, not re-shaped into others: OtherDraft
+		// is a display-block contract (kind text=课文正文 / exercise,
+		// summary a one-sentence block description) that an English word
+		// fits neither, and the pipeline's precedent for a miscontracted
+		// draft (empty word, untitled poem) is to drop it. The tightened
+		// prompt keeps the model summarizing English content in others
+		// itself — visible feedback stays the model's job, the guard
+		// stays dumb and deterministic.
+		if category == CategoryChinese && !containsHan(word) {
 			continue
 		}
 		lesson := strings.TrimSpace(e.Lesson)
@@ -374,6 +397,44 @@ func trimOtherDrafts(others []OtherDraft) []OtherDraft {
 		})
 	}
 	return out
+}
+
+// wordDecorationRunes are the typographic marks a printed word list sets
+// around its words — ★ key-word marks, asterisks, the ※ reference mark,
+// bullets, geometric shapes (Issue #47: a live 4A English list answered
+// "★library" because every key word on the page is starred). They are
+// layout, not language: none of these can be part of an English word or a
+// 词语, so trimming them off the ENDS of word cannot eat a real character.
+// The set is curated on purpose — extend it rune by rune, never widen to
+// "all symbols": the interpunct · stays out because transliterated names
+// carry it INSIDE a word, and hyphens/apostrophes are word characters.
+const wordDecorationRunes = "*＊※★☆✩✪✫✬✭✮✯✰✦✧" +
+	"•‧◦∘○●◎⊙" +
+	"▲△▼▽◇◆□■▣◈◐◑" +
+	"♠♣♥♦♪♫"
+
+// trimWordDecorations strips the decoration marks (and the whitespace
+// interleaved with them) off both ends of a word: "★ library " reads
+// "library", " ※美丽● " reads "美丽". Inner characters are never touched —
+// "ice cream" keeps its space, a mark inside a word stays where the model
+// put it.
+func trimWordDecorations(word string) string {
+	return strings.TrimFunc(word, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(wordDecorationRunes, r)
+	})
+}
+
+// containsHan reports whether s carries at least one Han character — the
+// writing system a 语文词语 is made of (Issue #47's chinese guard: pinyin,
+// digits and English never qualify; 汉字 does, so 「3D打印」 counts as a
+// 词语 while "library" does not).
+func containsHan(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
 }
 
 // sniffImage detects PNG and JPEG from their magic bytes and reports the
