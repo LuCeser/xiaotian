@@ -1,0 +1,3 @@
+{
+  "content": "{\"textbook\":{\"edition\":\"统编版\",\"stage\":null,\"grade\":\"三年级\",\"volume\":\"上册\",\"module\":null,\"lesson\":\"第6课\"},\"entries\":[{\"word\":\"钥匙\",\"meaning\":\"yào shi\",\"lesson\":\"第6课\",\"confidence\":0.92},{\"word\":\"颜料\",\"meaning\":\"yán liào\",\"lesson\":\"第6课\",\"confidence\":0.9}],\"poems\":[],\"passages\":[{\"title\":\"秋天的雨\",\"author\":null,\"paragraphs\":[\"秋天的雨，是一把钥匙。\",\"秋天的雨，有一盒五彩缤纷的颜料。\",\"秋天的雨，藏着非常好闻的气味。\",\"秋天的雨，吹起了金色的小喇叭。\"],\"lesson\":\"第6课\",\"required\":\"背诵课文第2自然段\",\"required_paragraphs\":[2],\"confidence\":0.9}],\"others\":[{\"kind\":\"exercise\",\"summary\":\"课后题：读一读，抄写第二自然段中的一句话\",\"confidence\":0.85}]}"
+}

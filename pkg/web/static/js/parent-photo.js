@@ -2703,8 +2703,8 @@
   };
 
   /**
-   * syncPassageCard — refresh ONE card's derived surfaces (status class,
-   * check enablement, 整篇 box, the range summary note) without
+   * syncPassageCard — refresh ONE card's derived surfaces (status class
+   * AND text, check enablement, 整篇 box, the range summary note) without
    * re-rendering the card. The row model is the caller's to keep current.
    */
   PhotoAddForm.prototype.syncPassageCard = function (i) {
@@ -2723,6 +2723,12 @@
     if (whole) {
       whole.disabled = row.status === 'invalid';
       whole.checked = row.scopeWhole;
+    }
+    var statusEl = card.querySelector('.photo-passage-status');
+    if (statusEl) {
+      statusEl.textContent = row.status === 'new'
+        ? '新课文'
+        : (row.status === 'exists' ? '已有（不会重复建立）' : '无法添加');
     }
     this.syncPassageCardNote(card, row);
   };
