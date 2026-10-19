@@ -37,6 +37,11 @@ var (
 	// accepts in one request (maxWordlistPoems).
 	ErrTooManyPoems = errors.New("ocr: too many poems in one recognition")
 
+	// ErrTooManyPassages is the Issue #13 passages-side twin of
+	// ErrTooManyEntries: the mixed-page reply carries more whole passages
+	// than the commit path accepts in one request (maxWordlistPassages).
+	ErrTooManyPassages = errors.New("ocr: too many passages in one recognition")
+
 	// ErrEmptyWords is returned by MeaningGenerator.Generate when the
 	// supplement request carries no usable words after trim/dedup — the
 	// HTTP layer maps it to a 400 rather than spending an LLM round trip

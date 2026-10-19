@@ -34,7 +34,7 @@ func newCategoryCaptureHandler(t *testing.T) (http.Handler, *[]string) {
 			return `[]`, nil
 		}, 1<<20)
 	return NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-		pipeline, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger()), &prompts
+		pipeline, nil, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger()), &prompts
 }
 
 // pngPrefix mirrors pkg/ocr's PNG signature.
@@ -53,7 +53,7 @@ func newRecognizeHandler(t *testing.T, reply string, readErr error, maxBytes int
 			return reply, nil
 		}, maxBytes)
 	return NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-		pipeline, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+		pipeline, nil, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 }
 
 func TestRecognizeWordPhoto(t *testing.T) {
@@ -228,7 +228,7 @@ func TestRecognizeWordPhoto(t *testing.T) {
 	t.Run("nil recognizer returns 503 recognition_unavailable", func(t *testing.T) {
 		_, lessons, practice, receipts := newLessonTestStores(t)
 		h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-			nil, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+			nil, nil, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 		req := httptest.NewRequest(http.MethodPost, "/words/photo/recognize",
 			strings.NewReader(string(jpegPrefix)+"x"))
 		rec := httptest.NewRecorder()

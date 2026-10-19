@@ -35,6 +35,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
+	"github.com/xiaotian/home-tutor-agent/pkg/passage"
 	"github.com/xiaotian/home-tutor-agent/pkg/poem"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 	"github.com/xiaotian/home-tutor-agent/pkg/rt"
@@ -312,6 +313,26 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	poemStore, err := poem.NewStore(db, logger)
 	if err != nil {
 		logger.Error("poem store construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	// Issue #13: the passage tables (passages/passage_assignments/
+	// passage_scopes) — Go-owned like the poem tables, migrated on the
+	// same shared pool. The store powers the /api/v1/passages routes
+	// (structured originals with paragraph boundaries, practice ranges
+	// and explicit attribution management).
+	if err = passage.Migrate(ctx, db); err != nil {
+		logger.Error("passage migration failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
+	passageStore, err := passage.NewStore(db, logger)
+	if err != nil {
+		logger.Error("passage store construction failed",
 			infra.F("component", "infra.main"),
 			infra.ErrField(err),
 		)
@@ -790,7 +811,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// the word-list photo recognizer (nil without a vision key — the
 		// recognize route then answers 503, keeping the endpoint honest).
 		publicMux.Handle("/api/v1/", http.StripPrefix("/api/v1",
-			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, meaningGen, poemStore, cfg.Python, logger)))
+			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, meaningGen, poemStore, passageStore, cfg.Python, logger)))
 		logger.Info("api v1 mounted",
 			infra.F("component", "infra.main"),
 			infra.F("route", "/api/v1/"),

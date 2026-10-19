@@ -106,7 +106,7 @@ func TestPoemLessonRecordsProjection(t *testing.T) {
 		t.Fatalf("poem store: %v", err)
 	}
 	h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, nil, receipts,
-		nil, nil, poemStore, infra.PythonConfig{}, infra.NewNoOpLogger())
+		nil, nil, poemStore, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 
 	lessonID := seedPoemLesson(t, h, lessons, receipts, poemStore)
 
@@ -172,7 +172,7 @@ func TestWordLessonRowsKeepLegacyShape(t *testing.T) {
 		t.Fatalf("poem store: %v", err)
 	}
 	h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, nil, receipts,
-		nil, nil, poemStore, infra.PythonConfig{}, infra.NewNoOpLogger())
+		nil, nil, poemStore, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 
 	if _, err = lessons.EnsureLessonCards(t.Context(), "r0-20261018", []lesson.Word{{Word: "苹果"}}, "chinese"); err != nil {
 		t.Fatalf("ensure word lesson: %v", err)

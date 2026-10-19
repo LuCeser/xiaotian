@@ -331,13 +331,22 @@
     this.fetchPoems = options.fetchPoems || null;
     this.assignPoem = options.assignPoem || null;
     this.fetchTextbooks = options.fetchTextbooks || null;
+    // Issue #13: the unified content view's 课文 page — the
+    // structured-passage list, the practice-range selection writes
+    // (add/remove) and the explicit attribution write. Absent
+    // fetchPassages ⇒ the 课文 pill never mounts.
+    this.fetchPassages = options.fetchPassages || null;
+    this.assignPassage = options.assignPassage || null;
+    this.addPassageScope = options.addPassageScope || null;
+    this.removePassageScope = options.removePassageScope || null;
 
     this.container = container;
     this.category = '';   // '' = 全部 | 'english' | 'chinese'
-    this.type = 'words';  // 'words' | 'poems' (Issue #11, default 词语)
+    this.type = 'words';  // 'words' | 'poems' | 'passages' (default 词语)
     this.query = '';
     this.words = [];
     this.poems = [];
+    this.passages = [];
     this.units = [];
     this.fetchSeq = 0;    // stale-response guard for debounced refetches
     this.debounceTimer = null;
@@ -400,19 +409,25 @@
     toolbar.appendChild(searchBox);
     toolbar.appendChild(pills);
 
-    // Issue #11: the unified content view's 类型 filter — 词语 (the
-    // existing page) | 古诗. Mounts only when the poem list handler is
-    // wired; otherwise the toolbar stays exactly the pre-#11 shape.
-    if (typeof this.fetchPoems === 'function') {
+    // Issue #11/#13: the unified content view's 类型 filter — 词语 (the
+    // existing page) | 古诗 | 课文. The poems pill mounts only when the
+    // poem list handler is wired; the passages pill only when the passage
+    // list handler is; otherwise the toolbar stays exactly the pre-#11
+    // shape.
+    if (typeof this.fetchPoems === 'function' || typeof this.fetchPassages === 'function') {
       var typePills = document.createElement('div');
       typePills.className = 'category-pills type-pills';
       typePills.setAttribute('role', 'group');
       typePills.setAttribute('aria-label', '类型筛选');
       this.typePillButtons = [];
       [
-        { value: 'words', text: '词语' },
-        { value: 'poems', text: '古诗' },
+        { value: 'words', text: '词语', wired: true },
+        { value: 'poems', text: '古诗', wired: typeof this.fetchPoems === 'function' },
+        { value: 'passages', text: '课文', wired: typeof this.fetchPassages === 'function' },
       ].forEach(function (pill) {
+        if (!pill.wired) {
+          return;
+        }
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'pill' + (pill.value === 'words' ? ' active' : '');
@@ -579,10 +594,11 @@
   };
 
   /**
-   * setType (Issue #11) — switch the unified content view between the
-   * 词语 page and the 古诗 page. The bulk participation bar is a WORD
-   * surface only (poems never enter the dictation selection), and the
-   * search placeholder follows the page so the q contract stays honest.
+   * setType (Issue #11/#13) — switch the unified content view between the
+   * 词语, 古诗 and 课文 pages. The bulk participation bar is a WORD
+   * surface only (poems and passages never enter the dictation
+   * selection), and the search placeholder follows the page so the q
+   * contract stays honest.
    */
   BrowseView.prototype.setType = function (value) {
     if (this.type === value) {
@@ -596,7 +612,8 @@
     });
     this.bulkBar.hidden = value !== 'words';
     this.searchInput.placeholder = value === 'poems'
-      ? '搜索诗题、作者或诗句' : '搜索单词或意思';
+      ? '搜索诗题、作者或诗句'
+      : (value === 'passages' ? '搜索课文标题或正文' : '搜索单词或意思');
     this.selectedIds = {};
     this.refresh();
   };
@@ -615,6 +632,20 @@
           return;
         }
         self.poems = Array.isArray(poems) ? poems : [];
+        self.render();
+      }).catch(function (err) {
+        if (seq !== self.fetchSeq) {
+          return;
+        }
+        self.renderError(err);
+      });
+    }
+    if (this.type === 'passages') {
+      return this.fetchPassages(this.category, this.query).then(function (passages) {
+        if (seq !== self.fetchSeq) {
+          return;
+        }
+        self.passages = Array.isArray(passages) ? passages : [];
         self.render();
       }).catch(function (err) {
         if (seq !== self.fetchSeq) {
@@ -697,6 +728,25 @@
       return;
     }
 
+    // Issue #13: the 课文 page renders whole originals with their
+    // practice ranges — no selection, no bulk bar, no dictation surfaces
+    // (passages are not cards; the passage classroom is a later task).
+    if (this.type === 'passages') {
+      if (!this.passages.length) {
+        this.renderEmptyState();
+        return;
+      }
+      var selfP = this;
+      var passageNote = document.createElement('p');
+      passageNote.className = 'list-note';
+      passageNote.textContent = '课文按整篇保存，练习范围可选整篇或指定自然段、随时调整而不用重新导入；学习范围随教材已学进度或手动加入生效，课文课堂将在后续更新开放。';
+      this.listHost.appendChild(passageNote);
+      this.passages.forEach(function (passage) {
+        selfP.listHost.appendChild(selfP.buildPassageCard(passage));
+      });
+      return;
+    }
+
     if (!this.words.length) {
       this.renderEmptyState();
       return;
@@ -728,6 +778,19 @@
       } else {
         title.textContent = '还没有古诗';
         hint.textContent = '在「照片导入」里拍一张带古诗的语文页面，核对后整首保存。';
+      }
+      this.listHost.appendChild(title);
+      this.listHost.appendChild(hint);
+      return;
+    }
+
+    if (this.type === 'passages') {
+      if (this.query) {
+        title.textContent = '没有找到「' + this.query + '」相关的课文';
+        hint.textContent = '换个关键词试试，或清空搜索看全部。';
+      } else {
+        title.textContent = '还没有课文';
+        hint.textContent = '在「照片导入」里拍一张课文页面，核对后整篇保存并选择练习范围。';
       }
       this.listHost.appendChild(title);
       this.listHost.appendChild(hint);
@@ -1052,6 +1115,26 @@
   }
 
   /**
+   * passageScopeLabel — the passage twin of poemScopeLabel: the SAME
+   * Issue #4 verdict strings ride both content types, so one shared
+   * mapping keeps the copy identical (delegates instead of duplicating).
+   */
+  function passageScopeLabel(reason, inScope) {
+    return poemScopeLabel(reason, inScope);
+  }
+
+  /**
+   * passageScopeText — one stored range as parent copy: 整篇 or the
+   * explicit paragraph numbers (指定自然段).
+   */
+  function passageScopeText(scope) {
+    if (!scope) {
+      return '？';
+    }
+    return scope.whole ? '整篇' : ('第 ' + (scope.paragraphs || []).join('、') + ' 段');
+  }
+
+  /**
    * buildPoemCard — one whole poem: title + author header, the ordered
    * verse lines as one block (分行和顺序是作品本身的结构), the category
    * badge, attribution chips and the scope verdict. The single action is
@@ -1300,6 +1383,389 @@
           }).then(function () {
             close();
             toast('已保存古诗归属', 'success');
+            self.refresh();
+            self.onMutated();
+          }).catch(function (err) {
+            setLoading(saveBtn, false);
+            toast('保存失败：' + errorMessage(err) + '。内容没有保存，请检查后重试。', 'error');
+          });
+        }
+
+        saveBtn.addEventListener('click', function (event) {
+          event.preventDefault();
+          handleSave();
+        });
+        form.addEventListener('submit', function (event) {
+          event.preventDefault();
+          handleSave();
+        });
+      },
+    });
+  };
+
+  /**
+   * buildPassageCard (Issue #13) — one whole passage: title + author
+   * header, the ordered 自然段 (每段一行, boundaries and order are the
+   * work's own structure; paragraphs inside a chosen range read marked),
+   * the practice ranges with their own add/remove management (范围可查看、
+   * 修改和重新选择 — the text itself never re-imports), the category
+   * badge, attribution chips and the scope verdict.
+   */
+  BrowseView.prototype.buildPassageCard = function (passage) {
+    var self = this;
+    var card = document.createElement('div');
+    card.className = 'passage-card';
+    card.setAttribute('data-passage-id', String(passage.id));
+    card.setAttribute('data-passage-title', passage.title || '');
+
+    var head = document.createElement('div');
+    head.className = 'passage-head';
+
+    var title = document.createElement('span');
+    title.className = 'passage-title';
+    title.textContent = passage.title || '（无标题）';
+    head.appendChild(title);
+
+    if (passage.author) {
+      var author = document.createElement('span');
+      author.className = 'passage-author';
+      author.textContent = passage.author;
+      head.appendChild(author);
+    }
+
+    var badge = document.createElement('span');
+    badge.className = 'badge badge-' + (passage.category === 'chinese' ? 'chinese' : 'english');
+    badge.setAttribute('data-coding', passage.category);
+    badge.textContent = passage.category === 'chinese' ? '中文' : '英语';
+    head.appendChild(badge);
+
+    var scope = document.createElement('span');
+    scope.className = 'passage-scope passage-scope-' +
+      (passage.scope_reason || 'supplementary') +
+      (passage.in_scope ? ' passage-scope-in' : '');
+    scope.textContent = passageScopeLabel(passage.scope_reason, passage.in_scope);
+    head.appendChild(scope);
+
+    if (this.assignPassage && this.fetchTextbooks) {
+      var manageBtn = document.createElement('button');
+      manageBtn.type = 'button';
+      manageBtn.className = 'row-action passage-manage-btn';
+      manageBtn.textContent = '管理归属';
+      manageBtn.addEventListener('click', function () {
+        self.openAssignPassageModal(passage);
+      });
+      head.appendChild(manageBtn);
+    }
+
+    card.appendChild(head);
+
+    // The ordered 自然段: one row per paragraph keeps the original's own
+    // boundaries and order; a paragraph inside ANY chosen range reads
+    // marked so 选择第 2、3 段 visibly leaves the others in place.
+    var covered = {};
+    (passage.scopes || []).forEach(function (s) {
+      (s.paragraphs || []).forEach(function (no) { covered[no] = true; });
+      if (s.whole) {
+        (passage.paragraphs || []).forEach(function (_, i) { covered[i + 1] = true; });
+      }
+    });
+    var paragraphs = document.createElement('div');
+    paragraphs.className = 'passage-paragraphs';
+    (passage.paragraphs || []).forEach(function (text, i) {
+      var no = i + 1;
+      var line = document.createElement('p');
+      line.className = 'passage-paragraph' + (covered[no] ? ' passage-paragraph-in-scope' : '');
+      var noLabel = document.createElement('span');
+      noLabel.className = 'passage-paragraph-no';
+      noLabel.textContent = '第 ' + no + ' 段';
+      var body = document.createElement('span');
+      body.className = 'passage-paragraph-text';
+      body.textContent = text;
+      line.appendChild(noLabel);
+      line.appendChild(body);
+      paragraphs.appendChild(line);
+    });
+    card.appendChild(paragraphs);
+
+    // The practice ranges: existing rows with their own 移除 button, and
+    // the add/re-select control (整篇 checkbox + one checkbox per
+    // paragraph + 添加). Re-adding the same selection is idempotent — the
+    // server reports existing and never duplicates.
+    var scopesBox = document.createElement('div');
+    scopesBox.className = 'passage-scopes';
+    var scopesLabel = document.createElement('span');
+    scopesLabel.className = 'passage-scopes-label';
+    scopesLabel.textContent = '练习范围';
+    scopesBox.appendChild(scopesLabel);
+
+    if (!this.addPassageScope && !this.removePassageScope) {
+      var noManage = document.createElement('span');
+      noManage.className = 'passage-scope-row-text';
+      noManage.textContent = (passage.scopes || []).length
+        ? (passage.scopes || []).map(passageScopeText).join('；')
+        : '（未选择）';
+      scopesBox.appendChild(noManage);
+    } else {
+      (passage.scopes || []).forEach(function (s) {
+        var row = document.createElement('span');
+        row.className = 'passage-scope-row';
+        row.setAttribute('data-scope-id', String(s.id));
+        var text = document.createElement('span');
+        text.className = 'passage-scope-row-text';
+        text.textContent = passageScopeText(s);
+        row.appendChild(text);
+        if (self.removePassageScope) {
+          var removeBtn = document.createElement('button');
+          removeBtn.type = 'button';
+          removeBtn.className = 'row-action passage-scope-remove';
+          removeBtn.textContent = '移除';
+          removeBtn.setAttribute('aria-label', '移除练习范围 ' + passageScopeText(s));
+          removeBtn.addEventListener('click', function () {
+            removeBtn.disabled = true;
+            self.removePassageScope(passage.id, s.id).then(function () {
+              toast('已移除练习范围「' + passageScopeText(s) + '」，课文原文和其他范围不受影响', 'success');
+              self.refresh();
+              self.onMutated();
+            }).catch(function (err) {
+              removeBtn.disabled = false;
+              toast('移除失败：' + errorMessage(err) + '。请重试。', 'error');
+            });
+          });
+          row.appendChild(removeBtn);
+        }
+        scopesBox.appendChild(row);
+      });
+
+      if (this.addPassageScope) {
+        var addBox = document.createElement('div');
+        addBox.className = 'passage-scope-add';
+        var wholeHit = document.createElement('label');
+        wholeHit.className = 'inline-check-hit';
+        var wholeCheck = document.createElement('input');
+        wholeCheck.type = 'checkbox';
+        wholeCheck.setAttribute('aria-label', '添加整篇练习范围');
+        var wholeText = document.createElement('span');
+        wholeText.textContent = '整篇';
+        wholeHit.appendChild(wholeCheck);
+        wholeHit.appendChild(wholeText);
+        addBox.appendChild(wholeHit);
+
+        var paragraphChecks = [];
+        (passage.paragraphs || []).forEach(function (_, i) {
+          var no = i + 1;
+          var hit = document.createElement('label');
+          hit.className = 'inline-check-hit passage-scope-para-hit';
+          var check = document.createElement('input');
+          check.type = 'checkbox';
+          check.setAttribute('aria-label', '添加第 ' + no + ' 段练习范围');
+          check.addEventListener('change', function () {
+            if (check.checked) {
+              wholeCheck.checked = false;
+            }
+          });
+          var noText = document.createElement('span');
+          noText.textContent = String(no);
+          hit.appendChild(check);
+          hit.appendChild(noText);
+          addBox.appendChild(hit);
+          paragraphChecks.push({ no: no, check: check });
+        });
+        wholeCheck.addEventListener('change', function () {
+          if (wholeCheck.checked) {
+            paragraphChecks.forEach(function (p) { p.check.checked = false; });
+          }
+        });
+
+        var addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'row-action passage-scope-add-btn';
+        addBtn.textContent = '添加练习范围';
+        addBtn.addEventListener('click', function () {
+          var payload = null;
+          if (wholeCheck.checked) {
+            payload = { whole: true };
+          } else {
+            var chosen = paragraphChecks
+              .filter(function (p) { return p.check.checked; })
+              .map(function (p) { return p.no; });
+            if (!chosen.length) {
+              toast('请先勾选整篇或要练习的自然段', 'error');
+              return;
+            }
+            payload = { paragraphs: chosen };
+          }
+          var label = passageScopePayloadText(payload);
+          addBtn.disabled = true;
+          self.addPassageScope(passage.id, payload).then(function (result) {
+            toast((!result || result.status !== 'existing')
+              ? '已添加练习范围「' + label + '」'
+              : '练习范围「' + label + '」已存在，不会重复建立', 'success');
+            self.refresh();
+            self.onMutated();
+          }).catch(function (err) {
+            addBtn.disabled = false;
+            toast('添加失败：' + errorMessage(err) + '。请重试。', 'error');
+          });
+        });
+        addBox.appendChild(addBtn);
+        scopesBox.appendChild(addBox);
+      }
+    }
+    card.appendChild(scopesBox);
+
+    // Attribution chips — the poem card's chip shape, plus a 手动 marker
+    // on assignments the parent explicitly included.
+    (passage.textbooks || []).forEach(function (entry) {
+      var chip = document.createElement('span');
+      chip.className = 'textbook-chip' + (entry.lesson ? '' : ' textbook-chip-pending');
+      chip.textContent = (entry.name || '？') +
+        (entry.lesson ? ('·' + entry.lesson) : '·待确认') +
+        (entry.includeInScope ? '（手动加入）' : '');
+      chip.title = entry.includeInScope
+        ? '已手动加入学习范围：无论进度如何都在范围内'
+        : (entry.lesson
+          ? '教材课次归属：' + (entry.name || '') + '（随已学进度进入范围）'
+          : '课次待确认：暂不进入学习范围，确认课次或手动加入后生效');
+      card.appendChild(chip);
+    });
+
+    return card;
+  };
+
+  /** passageScopePayloadText — the ADD payload as parent copy. */
+  function passageScopePayloadText(payload) {
+    return payload && payload.whole
+      ? '整篇'
+      : ('第 ' + (payload.paragraphs || []).join('、') + ' 段');
+  }
+
+  /**
+   * openAssignPassageModal — the 课文 page's explicit attribution
+   * management, the openAssignPoemModal twin (pick the passage's OWN
+   * subject's textbook, set the lesson and the explicit include together
+   * — POST /passages/{id}/assign carries the whole desired state).
+   */
+  BrowseView.prototype.openAssignPassageModal = function (passage) {
+    var self = this;
+
+    openModal({
+      title: '管理课文归属',
+      build: function (body, actions, close) {
+        var form = document.createElement('form');
+        form.className = 'modal-form';
+        form.noValidate = true;
+
+        var passageLine = document.createElement('p');
+        passageLine.className = 'modal-message';
+        passageLine.textContent = '「' + (passage.title || '（无标题）') + '」' +
+          (passage.author ? '（' + passage.author + '）' : '');
+        form.appendChild(passageLine);
+
+        var bookField = document.createElement('div');
+        var bookLabel = document.createElement('label');
+        bookLabel.className = 'form-label';
+        bookLabel.textContent = '教材';
+        var bookSelect = document.createElement('select');
+        bookSelect.className = 'form-input';
+        bookSelect.setAttribute('aria-label', '教材');
+        var loadingOption = document.createElement('option');
+        loadingOption.textContent = '读取教材中…';
+        bookSelect.appendChild(loadingOption);
+        bookField.appendChild(bookLabel);
+        bookField.appendChild(bookSelect);
+        form.appendChild(bookField);
+
+        var lessonField = buildModalField('课次', 'passage-lesson-input', false);
+        lessonField.input.value = (passage.textbooks && passage.textbooks.length)
+          ? (passage.textbooks[0].lesson || '') : '';
+        form.appendChild(lessonField.field);
+
+        var includeField = document.createElement('div');
+        includeField.className = 'form-field';
+        var includeLabel = document.createElement('label');
+        includeLabel.className = 'participation-toggle';
+        var include = document.createElement('input');
+        include.type = 'checkbox';
+        include.checked = !!(passage.textbooks && passage.textbooks[0] &&
+          passage.textbooks[0].includeInScope);
+        var includeText = document.createElement('span');
+        includeText.textContent = '手动加入学习范围（不受已学进度限制）';
+        includeLabel.appendChild(include);
+        includeLabel.appendChild(includeText);
+        includeField.appendChild(includeLabel);
+        form.appendChild(includeField);
+
+        var error = document.createElement('p');
+        error.className = 'form-error';
+        error.setAttribute('aria-live', 'polite');
+        form.appendChild(error);
+
+        // The textbook list rides the passage's OWN subject; a failed load
+        // keeps the modal open with its reason (never a fabricated empty
+        // list).
+        self.fetchTextbooks(passage.category || '').then(function (books) {
+          clearContainer(bookSelect);
+          (books || []).forEach(function (book) {
+            var opt = document.createElement('option');
+            opt.value = String(book.id);
+            opt.textContent = book.name;
+            bookSelect.appendChild(opt);
+          });
+          if (!books || !books.length) {
+            var none = document.createElement('option');
+            none.value = '';
+            none.textContent = '（该学科还没有教材）';
+            bookSelect.appendChild(none);
+            bookSelect.disabled = true;
+            error.textContent = '该学科还没有教材，请先在「教材管理」中建立教材。';
+            return;
+          }
+          // Preselect the passage's current attribution when present.
+          if (passage.textbooks && passage.textbooks.length) {
+            bookSelect.value = String(passage.textbooks[0].id);
+          }
+        }).catch(function (err) {
+          clearContainer(bookSelect);
+          var failed = document.createElement('option');
+          failed.value = '';
+          failed.textContent = '（教材读取失败）';
+          bookSelect.appendChild(failed);
+          bookSelect.disabled = true;
+          error.textContent = '教材读取失败：' + errorMessage(err);
+        });
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = '取消';
+        cancelBtn.addEventListener('click', close);
+
+        var saveBtn = buildLoadingButton('保存归属', 'btn btn-primary');
+        saveBtn.type = 'submit';
+
+        actions.appendChild(cancelBtn);
+        actions.appendChild(saveBtn);
+        form.appendChild(actions);
+        body.appendChild(form);
+
+        function handleSave() {
+          if (saveBtn.disabled) {
+            return;
+          }
+          error.textContent = '';
+          var bookId = parseInt(bookSelect.value, 10);
+          if (!bookId) {
+            error.textContent = '请选择教材（或先在「教材管理」中建立教材）';
+            return;
+          }
+          setLoading(saveBtn, true);
+          self.assignPassage(passage.id, {
+            textbook_id: bookId,
+            lesson: lessonField.input.value.trim(),
+            includeInScope: include.checked,
+          }).then(function () {
+            close();
+            toast('已保存课文归属', 'success');
             self.refresh();
             self.onMutated();
           }).catch(function (err) {
