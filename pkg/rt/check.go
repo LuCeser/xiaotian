@@ -255,6 +255,13 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	if poemView != nil {
 		tm.bindPoemRef(l, poemView)
 	}
+	// Issue #14: a PASSAGE row reopened into its check panel keeps its
+	// work + range identity the same way (the range always re-reads from
+	// the ROW — what the child actually practiced).
+	passageView := tm.passageViewForRow(l)
+	if passageView != nil {
+		tm.bindPassageRef(passageView)
+	}
 
 	_ = s.SendControl(SessionReadyMsg{
 		Type:      TypeSessionReady,
@@ -264,6 +271,7 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 		Lesson:    tm.lessonViewFor(l),
 		Category:  tm.sessionCategory(),
 		Poem:      poemView,
+		Passage:   passageView,
 	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
@@ -307,8 +315,9 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	expected := tm.tutor.version
 	outcomes := tm.tutor.snapshotCheckOutcomes()
 	total := len(tm.tutor.words)
-	isPoem := tm.tutor.poem != nil    // Issue #12: the poem's own bridge copy/reason
-	words := make([]string, 0, total) // the FULL plaintext list (D-10 unmask)
+	isPoem := tm.tutor.poem != nil       // Issue #12: the poem's own bridge copy/reason
+	isPassage := tm.tutor.passage != nil // Issue #14: the passage range's own bridge
+	words := make([]string, 0, total)    // the FULL plaintext list (D-10 unmask)
 	for _, c := range tm.tutor.words {
 		words = append(words, c.Word)
 	}
@@ -372,6 +381,15 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	if isPoem {
 		reason = CheckStartedReasonPoemDone
 		bridge = poemCheckBridgeText(total)
+	} else if isPassage {
+		// Issue #14: the passage's own bridge copy/reason — the rows are
+		// this range's paragraphs, labeled by the range the task announced.
+		reason = CheckStartedReasonPassageDone
+		tm.mu.Lock()
+		if tm.tutor != nil && tm.tutor.passage != nil {
+			bridge = passageCheckBridgeText(tm.tutor.passage.Whole, tm.tutor.passage.Paragraphs, total)
+		}
+		tm.mu.Unlock()
 	}
 	_ = s.SendControl(CheckStartedMsg{
 		Type:   TypeCheckStarted,
@@ -499,6 +517,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	}
 	tm.mu.Lock()
 	isPoem := tm.tutor.poem != nil
+	isPassage := tm.tutor.passage != nil
 	tm.mu.Unlock()
 	if isPoem {
 		// Issue #12: the whole-poem submit — the same manual gate and the
@@ -506,6 +525,13 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		// of ANY word write (in-session duplicates were already absorbed by
 		// the reviewSeen gate above).
 		tm.submitPoem(s, m)
+		return
+	}
+	if isPassage {
+		// Issue #14: the passage-range submit — the same manual gate and
+		// the same CompleteCheck latch, then the content + range practice
+		// record instead of ANY word write.
+		tm.submitPassage(s, m)
 		return
 	}
 	tm.mu.Lock()

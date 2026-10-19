@@ -96,6 +96,15 @@ type LessonExecutor interface {
 	// when never practiced) — the poem session's resume probe (an in-flight
 	// attempt reopens under its own id; a submitted one stays settled).
 	LatestPoemLessonID(ctx context.Context, poemID int64) (string, error)
+	// EnsurePassageLesson creates the passage-range 背默 attempt row (Issue
+	// #14): the range's own ordered PARAGRAPHS ride as the cards and the
+	// content + range identity is stamped on the row; first stored content
+	// wins.
+	EnsurePassageLesson(ctx context.Context, lessonID string, passageID, scopeID int64, whole bool, paragraphs []int, texts []string, category string) (lesson.Lesson, error)
+	// LatestPassageLessonID returns the passage RANGE's most recent attempt
+	// row id ("" when never practiced) — the passage session's resume probe,
+	// keyed by content + range (never the scope row id).
+	LatestPassageLessonID(ctx context.Context, passageID int64, whole bool, paragraphs []int) (string, error)
 }
 
 // TurnManagerConfig configures one TurnManager.
@@ -142,6 +151,17 @@ type TurnManagerConfig struct {
 	// cards). Nil means the poem classroom's save path is unwired: the
 	// submit then reports the honest zero-saved result.
 	PoemPractice PoemPracticeRecorder
+	// Passages is the passage read seam (Issue #14): a passage session_init
+	// resolves the work (paragraphs, scope verdict, stored ranges) through
+	// it. Nil answers the passage init with a coded honest error — never a
+	// silent fallback into a due-word lesson.
+	Passages PassageSource
+	// PassagePractice is the Go-owned passage practice-record write seam
+	// (Issue #14): ONE row per 背默 submit, keyed by content + range —
+	// never the word-shaped practice_logs, never the FSRS schedule
+	// (passages are not cards). Nil means the passage classroom's save path
+	// is unwired: the submit then reports the honest zero-saved result.
+	PassagePractice PassagePracticeRecorder
 	// OCR is the photo-check vision seam (13.1-03): the raw-model-reply
 	// func the manager wraps in an ocr.Pipeline. Nil disables the photo
 	// check path — the check stage keeps working manual-only (RT-10
@@ -559,6 +579,14 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 		return
 	}
 
+	// Issue #14: a passage-range 背默 classroom branches the same way — the
+	// selected paragraphs never enter FetchDueWords, and the range's own
+	// resume/correction branches live in handlePassageInit.
+	if m.Passage > 0 {
+		tm.handlePassageInit(s, m.Passage, m.PassageScope)
+		return
+	}
+
 	if tm.cfg.Words == nil {
 		// T-13-14: fixed human wording; the adapter is wired by 13-10.
 		tm.sendError(s, ErrCodeLessonUnavailable, lessonUnavailableNotice, false)
@@ -798,12 +826,13 @@ func (tm *TurnManager) sessionCategory() string {
 // lessonViewFor projects a lesson row through the session's mode: student
 // masks undictated words (D-09); test keeps the full reveal.
 func (tm *TurnManager) lessonViewFor(l lesson.Lesson) LessonView {
-	// Issue #12: a whole-poem 背默 row masks its lines in EVERY mode until
-	// the check stage — the task is writing from MEMORY, so even mode=test
-	// must not hand the child the original text (unlike a word lesson,
-	// where test mode is a debugging affordance). lessonViewStudent's
-	// pre-check shape ("" per line) is exactly that projection.
-	if l.PoemID > 0 && l.Stage != lesson.StageChecking && l.Stage != lesson.StageSubmitted {
+	// Issue #12/#14: a 背默 row (poem or passage) masks its original in
+	// EVERY mode until the check stage — the task is writing from MEMORY,
+	// so even mode=test must not hand the child the text (unlike a word
+	// lesson, where test mode is a debugging affordance).
+	// lessonViewStudent's pre-check shape ("" per line/paragraph) is exactly
+	// that projection.
+	if (l.PoemID > 0 || l.PassageID > 0) && l.Stage != lesson.StageChecking && l.Stage != lesson.StageSubmitted {
 		return lessonViewStudent(l)
 	}
 	if tm.sessionMode() == ModeTest {
@@ -825,11 +854,12 @@ func (tm *TurnManager) replyDisplay(reply string) string {
 	if tm.tutor == nil {
 		return reply
 	}
-	// Issue #12: a poem classroom masks LLM replies in EVERY mode pre-check
-	// — a chatty reply quoting the poem would defeat the 背默 task. Word
-	// classrooms keep the pre-13.1 shape: test mode returns the reply as-is.
-	poemPreCheck := tm.tutor.poem != nil && !tm.tutor.checking
-	if tm.mode == ModeTest && !poemPreCheck {
+	// Issue #12/#14: a 背默 classroom (poem or passage) masks LLM replies
+	// in EVERY mode pre-check — a chatty reply quoting the original would
+	// defeat the 背默 task. Word classrooms keep the pre-13.1 shape: test
+	// mode returns the reply as-is.
+	recitePreCheck := tm.tutor.recitation() && !tm.tutor.checking
+	if tm.mode == ModeTest && !recitePreCheck {
 		return reply
 	}
 	return maskTranscript(reply, tm.tutor.maskedWords())
@@ -1199,13 +1229,13 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	// classification input keep the raw transcript. In the check stage the
 	// masked set is empty by construction (nothing re-masks after
 	// check_started) — the display copy is the raw transcript either way.
-	// Issue #12: a poem classroom masks in EVERY mode pre-check — the child
-	// reciting a line back must not put the original on screen before the
-	// check reveals it.
+	// Issue #12/#14: a 背默 classroom (poem or passage) masks in EVERY mode
+	// pre-check — the child reciting the original back must not put it on
+	// screen before the check reveals it.
 	display := transcript
 	tm.mu.Lock()
 	tm.tutor.appendUserRound(transcript)
-	if tm.mode != ModeTest || (tm.tutor.poem != nil && !tm.tutor.checking) {
+	if tm.mode != ModeTest || (tm.tutor.recitation() && !tm.tutor.checking) {
 		display = maskTranscript(transcript, tm.tutor.maskedWords())
 	}
 	tm.mu.Unlock()
@@ -1219,18 +1249,28 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		return
 	}
 
-	// Issue #12: the poem WRITING stage classifies through its own prompt
-	// (the payload's Index drives the line hint) and dispatches through
-	// poem.go's branch table — never the per-word pacing switch below.
+	// Issue #12/#14: a 背默 WRITING stage classifies through its own prompt
+	// (the payload's Index drives the line/paragraph hint) and dispatches
+	// through its own branch table — never the per-word pacing switch below.
 	tm.mu.Lock()
-	poemMode := tm.tutor.poem != nil
+	reciteMode := tm.tutor.recitation()
+	isPoemTask := tm.tutor.poem != nil
 	tm.mu.Unlock()
-	if poemMode {
-		p := tm.classifyPoemTurn(ctx, transcript)
+	if reciteMode {
+		var p intentPayload
+		if isPoemTask {
+			p = tm.classifyPoemTurn(ctx, transcript)
+		} else {
+			p = tm.classifyPassageTurn(ctx, transcript)
+		}
 		if !tm.epochCurrent(epoch) {
 			return
 		}
-		tm.dispatchPoemTurn(s, ctx, cancel, turnID, epoch, p)
+		if isPoemTask {
+			tm.dispatchPoemTurn(s, ctx, cancel, turnID, epoch, p)
+		} else {
+			tm.dispatchPassageTurn(s, ctx, cancel, turnID, epoch, p)
+		}
 		return
 	}
 

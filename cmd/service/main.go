@@ -349,6 +349,17 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		)
 		return 1
 	}
+	// Issue #14: the passage practice-record store — ONE row per 背默
+	// submit, keyed by content + range, never the FSRS schedule (passages
+	// are not cards). Same boot-fail-fast discipline as every constructor.
+	passagePracticeStore, err := passage.NewPracticeStore(db, logger)
+	if err != nil {
+		logger.Error("passage practice store construction failed",
+			infra.F("component", "infra.main"),
+			infra.ErrField(err),
+		)
+		return 1
+	}
 
 	rtLessonExec, err := rt.NewLessonTools(lessonStore, lessonExec)
 	if err != nil {
@@ -729,6 +740,11 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// store.
 			Poems:        &rt.PoemStoreSource{Store: poemStore},
 			PoemPractice: poemPracticeStore,
+			// Issue #14: the passage classroom's seams — the passage read
+			// source (scope gate + stored ranges) and the per-range
+			// practice-record write target, both on the same shared pool.
+			Passages:        &rt.PassageStoreSource{Store: passageStore},
+			PassagePractice: passagePracticeStore,
 			// Issue #9 (ADR-0006): the on-demand example-sentence context
 			// resolver — the same read-only repos the parent pages use
 			// (English card resolution + textbook background + learned-word
