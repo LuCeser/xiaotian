@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -149,13 +150,18 @@ func bootBatchSession(t *testing.T, fakeFSRS *batchFSRS, repo database.SessionRe
 
 // waitBatchWord polls the manager until the connection's session reaches the
 // wanted state with the wanted current word (deterministic poll, ticket-02
-// convention).
+// convention). The pair MUST come from Snapshot(): separate State()/
+// CurrentWord() reads can straddle a transition and pair word N+1 with word
+// N's DICTATING, making the caller push next_word into the interim LISTENING
+// where the FSM drops it (the load-test TOCTOU of issue #29).
 func waitBatchWord(t *testing.T, manager *session.Manager, connID string, want database.SessionState, word string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if s := manager.Lookup(connID); s != nil && s.State() == want && s.CurrentWord() == word {
-			return
+		if s := manager.Lookup(connID); s != nil {
+			if state, cur := s.Snapshot(); state == want && cur == word {
+				return
+			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -174,6 +180,26 @@ func waitBatchState(t *testing.T, manager *session.Manager, connID string, want 
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("session never reached %s", want)
+}
+
+// waitRatings polls until UpdateRatings has captured exactly the wanted
+// ratings map (deterministic poll, ticket-02 convention). handleSubmitAnswers
+// deliberately sends batch_result BEFORE the server-side FSRS call (a slow
+// Python bridge must not delay the student's feedback), so the capture lands
+// AFTER the frame the test just read — snapshotting immediately races the
+// handler's continuation and can read a not-yet-written map (issue #29, run
+// 39125881424 attempt 3: `unanswered word rating = "", want again`).
+func waitRatings(t *testing.T, f *batchFSRS, want map[string]string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ratings, _ := f.snapshot(); reflect.DeepEqual(ratings, want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ratings, _ := f.snapshot()
+	t.Fatalf("UpdateRatings never captured %v within 5s (got %v)", want, ratings)
 }
 
 // readErrorUntil reads server frames until an ERROR frame whose payload
@@ -224,13 +250,11 @@ func TestSubmitAnswers_BatchToFeedback(t *testing.T) {
 
 	// The FSRS ratings were submitted server-side, one call, all words.
 	// 香蕉→香焦 is one edit away — a Ticket-06 near-miss, so it grades
-	// "hard" (the student almost had it), not "again".
-	ratings, calls := fakeFSRS.snapshot()
-	if calls != 1 {
+	// "hard" (the student almost had it), not "again". waitRatings (not a
+	// bare snapshot) because the handler submits AFTER sending batch_result.
+	waitRatings(t, fakeFSRS, map[string]string{"苹果": "good", "香蕉": "hard"})
+	if _, calls := fakeFSRS.snapshot(); calls != 1 {
 		t.Errorf("UpdateRatings calls = %d, want 1", calls)
-	}
-	if ratings["苹果"] != "good" || ratings["香蕉"] != "hard" {
-		t.Errorf("ratings = %v, want 苹果:good 香蕉:hard", ratings)
 	}
 
 	// The FSM spine: session_complete (FEEDBACK) follows.
@@ -265,10 +289,9 @@ func TestSubmitAnswers_PartialAnswers(t *testing.T) {
 		t.Errorf("unanswered word result = %+v, want empty heard / incorrect", result.Results[1])
 	}
 
-	ratings, _ := fakeFSRS.snapshot()
-	if ratings["香蕉"] != "again" {
-		t.Errorf("unanswered word rating = %q, want again", ratings["香蕉"])
-	}
+	// Unanswered words submit FSRS "again" (blank = wrong); the answered one
+	// "good". waitRatings — the FSRS call races the just-read batch_result.
+	waitRatings(t, fakeFSRS, map[string]string{"苹果": "good", "香蕉": "again"})
 
 	readControlUntil(t, conn, "session_complete")
 	if s := manager.Lookup(connID); s == nil || s.State() != database.StateFeedback {
