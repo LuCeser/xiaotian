@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ListReader is the seam the word-list pipeline uses to reach a vision API.
@@ -142,6 +143,7 @@ const wordlistSystemPromptEnglish = `你是家长端英语词表导入助手。�
 请只提取照片中明确的词表条目：以列表或表格排版、作为单词表出现的单词、短语和它们旁边的原文释义。
 不要把普通正文句子里出现的词、练习题、题目编号、页眉页脚或装饰文字当作词条；无需裁图，直接忽略这些内容。
 短语中的空格要保留，整个短语算一个条目；释义按照片原文转录（中文或英文都照抄），词表没有给释义就留空。
+word 只填单词或短语的文字本身，条目前后的 ★、☆、●、▲、※ 等排版装饰符一律剥离，不要写进 word。
 同时读取照片上明确印出的教材信息：版本（出版社或教材系列）、学段、年级、上下册、单元或模块、课次（如 Unit 3、第 5 课、Lesson 2）。
 教材信息只能报告照片上真实印着的内容；任何一项识别不出或照片上没有就填 null，不要根据单词难度、年级或文件名推测教材和课次。
 只输出一个 JSON 对象，格式：{"textbook":{"edition":"人教版PEP","stage":null,"grade":"三年级","volume":"上册","module":"Unit 3","lesson":"第5课"},"entries":[{"word":"ice cream","meaning":"冰激凌","lesson":"第5课","confidence":0.9}]}
@@ -163,7 +165,7 @@ confidence 是你对这一条识别正确性的把握，0 到 1 的数字。没�
 // semantically, same as English.
 const wordlistSystemPromptChinese = `你是家长端语文学习内容导入助手。家长上传一张语文材料的照片（PNG 或 JPEG），同一页可能混排词语表、古诗、课文和练习题；可能是印刷教材，也可能拍照略有倾斜。
 请把照片内容分成四类分别报告，页眉页脚、题目编号、装饰文字和页面上的英文单词、音标一律忽略：
-1. entries——明确的词语表条目：以词语表、字词表或词语栏排版出现的词语和它们旁边的拼音或注释。多字词语是一个完整条目，不要拆成单个汉字；词语按照片原文逐字转录，不要纠正错别字；拼音或注释按照片原文转录进 meaning，没有给就留空，不要求补写释义或例句。
+1. entries——明确的词语表条目：以词语表、字词表或词语栏排版出现的词语和它们旁边的拼音或注释。word 必须是由汉字构成的中文词语；英文单词、短语、音标一律不要放进 entries——整页是英语词表时 entries 填 []，英文内容可在 others 里用一句话概述（kind 填 "text"）或直接忽略。多字词语是一个完整条目，不要拆成单个汉字；词语按照片原文逐字转录，不要纠正错别字，词语前后的 ★、☆、●、▲、※ 等排版装饰符不要写进 word；拼音或注释按照片原文转录进 meaning，没有给就留空，不要求补写释义或例句。
 2. poems——完整的古诗：以诗题（如「静夜思」）开头、按行排列的诗。每首诗是一个条目，整首保存：title 是诗题；author 是作者，照片上没印就填 null；lines 按原文顺序逐行转录整首诗句，保留原有分行，不要合并成一行、不要拆散、不要纠正错别字、更不要凭记忆补写或生成照片上看不清的内容；required 填照片上明确印出的背诵或默写要求（如「背诵」「默写」），没有印就填 null；lesson 能从照片确定就填，不能确定填 null。古诗不要转成词语或句子放进 entries。
 3. passages——完整的课文：以课文标题（如「秋天的雨」）开头、由自然段组成的课文或短文。每篇课文是一个条目，整篇保存：title 是课文标题；author 是作者，照片上没印就填 null；paragraphs 按原文顺序逐段转录全部自然段，保留自然段的划分和先后顺序，不要合并、不要拆散、不要纠正错别字、更不要凭记忆补写或生成照片上看不清的内容；required 填照片上明确印出的整篇背诵或默写要求（如「背诵课文」「默写课文」），没有印就填 null；required_paragraphs 填照片上明确印出背诵或默写要求的自然段序号（从 1 开始数），没有单独要求某段就填 []；lesson 能从照片确定就填，不能确定填 null。课文后面的练习题、课后题不属于课文正文，不要并入 paragraphs，放进 others。课文不要转成词语或句子放进 entries。
 4. others——页面上的其他内容块，只用于展示、不会导入：练习题、课后题、既不属于词语表也不属于完整古诗或完整课文的其他文字块都放这里；练习题 kind 填 "exercise"，其他文字块 kind 填 "text"，summary 用一句话概述这块内容。
@@ -269,7 +271,12 @@ func (p *WordlistPipeline) MaxBytes() int {
 // the vision API decodes the right format. Error contract mirrors
 // Pipeline.Process: sentinels are detectable via errors.Is. A photo with
 // no recognizable word-list entries is a legal outcome — the caller shows
-// "nothing recognized", not an error.
+// "nothing recognized", not an error. Issue #47 adds the deterministic
+// backstop on top of the contract: typographic decoration marks around
+// word are trimmed for either subject, and under CategoryChinese an entry
+// whose word carries no Han character — and, since Issue #13 gave the
+// mis-selection a passage-shaped leak path, a passage whose title and
+// paragraphs carry none — never reaches the draft.
 func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte, category string) (*WordlistResult, error) {
 	if len(image) == 0 {
 		return nil, ErrEmptyImage
@@ -331,8 +338,27 @@ func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte, category
 
 	out := make([]WordlistEntry, 0, len(parsed.entries))
 	for _, e := range parsed.entries {
-		word := strings.TrimSpace(e.Word)
+		// Issue #47: word is the LANGUAGE unit only — the typographic marks
+		// a printed list sets around its words (★ key-word stars, ※,
+		// bullets…) are trimmed off both ends together with the whitespace
+		// interleaving them ("★ library " → "library"); a mark-only word
+		// ("★★") collapses into the empty-word case below.
+		word := trimWordDecorations(e.Word)
 		if word == "" {
+			continue
+		}
+		// Issue #47's isolation backstop: the 语文 contract admits only
+		// Han-carrying words into entries. A word with NO Han character is
+		// English leaking through a mis-selected category (or stray
+		// symbols) and is DROPPED, not re-shaped into others: OtherDraft
+		// is a display-block contract (kind text=课文正文 / exercise,
+		// summary a one-sentence block description) that an English word
+		// fits neither, and the pipeline's precedent for a miscontracted
+		// draft (empty word, untitled poem) is to drop it. The tightened
+		// prompt keeps the model summarizing English content in others
+		// itself — visible feedback stays the model's job, the guard
+		// stays dumb and deterministic.
+		if category == CategoryChinese && !containsHan(word) {
 			continue
 		}
 		lesson := strings.TrimSpace(e.Lesson)
@@ -349,11 +375,21 @@ func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte, category
 			Confidence: clamp01(e.Confidence),
 		})
 	}
+	passages := trimPassageDrafts(parsed.passages, meta)
+	if category == CategoryChinese {
+		// Issue #47's isolation backstop, covering the Issue #13 passage
+		// path: an English page's running text is exactly what a passage
+		// shape fits, so a passage whose title AND paragraphs carry no Han
+		// character is English prose leaking through the same mis-selected
+		// category as a Han-less entry word, and gets the same disposition
+		// (dropped, not re-shaped into others).
+		passages = dropNonHanPassages(passages)
+	}
 	return &WordlistResult{
 		Textbook: meta,
 		Entries:  out,
 		Poems:    trimPoemDrafts(parsed.poems, meta),
-		Passages: trimPassageDrafts(parsed.passages, meta),
+		Passages: passages,
 		Others:   trimOtherDrafts(parsed.others),
 	}, nil
 }
@@ -486,6 +522,79 @@ func trimOtherDrafts(others []OtherDraft) []OtherDraft {
 			Summary:    summary,
 			Confidence: clamp01(o.Confidence),
 		})
+	}
+	return out
+}
+
+// wordDecorationRunes are the typographic marks a printed word list sets
+// around its words — ★ key-word marks, asterisks, the ※ reference mark,
+// bullets, geometric shapes (Issue #47: a live 4A English list answered
+// "★library" because every key word on the page is starred). They are
+// layout, not language: none of these can be part of an English word or a
+// 词语, so trimming them off the ENDS of word cannot eat a real character.
+// The set is curated on purpose — extend it rune by rune, never widen to
+// "all symbols": the interpunct · stays out because transliterated names
+// carry it INSIDE a word, and hyphens/apostrophes are word characters.
+const wordDecorationRunes = "*＊※★☆✩✪✫✬✭✮✯✰✦✧" +
+	"•‧◦∘○●◎⊙" +
+	"▲△▼▽◇◆□■▣◈◐◑" +
+	"♠♣♥♦♪♫"
+
+// trimWordDecorations strips the decoration marks (and the whitespace
+// interleaved with them) off both ends of a word: "★ library " reads
+// "library", " ※美丽● " reads "美丽". Inner characters are never touched —
+// "ice cream" keeps its space, a mark inside a word stays where the model
+// put it.
+func trimWordDecorations(word string) string {
+	return strings.TrimFunc(word, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(wordDecorationRunes, r)
+	})
+}
+
+// containsHan reports whether s carries at least one Han character — the
+// writing system a 语文词语 is made of (Issue #47's chinese guard: pinyin,
+// digits and English never qualify; 汉字 does, so 「3D打印」 counts as a
+// 词语 while "library" does not).
+func containsHan(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// passageCarriesHan reports whether the passage carries at least one Han
+// character in its title or its paragraphs — the passage-side analogue of
+// containsHan(word): a Han clause anywhere marks a real 语文 课文 (mixed
+// pages may quote an English word inside Chinese prose), so only a passage
+// with NO Han at all reads as English text leaked through the mis-selected
+// category.
+func passageCarriesHan(p PassageDraft) bool {
+	if containsHan(p.Title) {
+		return true
+	}
+	for _, paragraph := range p.Paragraphs {
+		if containsHan(paragraph) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropNonHanPassages applies Issue #47's Chinese isolation backstop to the
+// Issue #13 passage drafts (Recognize's passages-side twin of the entry-word
+// guard): a passage with NO Han character anywhere is English prose that
+// leaked through the mis-selected category and is dropped — the same
+// disposition as a Han-less entry word. Titles keep their decorations
+// verbatim, unlike entry words: a passage is a whole transcribed work, and
+// #47's trimming rule is about the word field specifically.
+func dropNonHanPassages(passages []PassageDraft) []PassageDraft {
+	out := make([]PassageDraft, 0, len(passages))
+	for _, p := range passages {
+		if passageCarriesHan(p) {
+			out = append(out, p)
+		}
 	}
 	return out
 }

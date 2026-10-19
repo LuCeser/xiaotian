@@ -16,6 +16,8 @@ import (
 	_ "modernc.org/sqlite" // Pure-Go SQLite driver (CGO_ENABLED=0)
 
 	"github.com/gorilla/websocket"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
 // runMu serializes tests that invoke run() so two tests do not race for
@@ -41,7 +43,14 @@ func TestMainLoadsDefaultConfig(t *testing.T) {
 	done := make(chan int, 1)
 	go func() { done <- run(ctx, "config-does-not-exist.yaml", "") }()
 
-	time.Sleep(200 * time.Millisecond)
+	// Wait for boot readiness (health listener answering), NOT a fixed
+	// sleep: boot now runs four migration packages (database/lesson/poem/
+	// passage) against a fresh temp SQLite file, and the old 200ms sleep
+	// raced them on slow CI runners — cancel mid-migrate surfaced as
+	// "database/migrate: context canceled" and exit 1 (issue #47). The
+	// empty health override keeps the pure-defaults posture, so probe the
+	// default health addr.
+	waitReadyOrFatal(t, infra.DefaultConfig().Server.HealthAddr)
 	cancel()
 
 	select {
@@ -68,10 +77,15 @@ func TestMainHandlesCtxCancel(t *testing.T) {
 	defer cancel()
 
 	done := make(chan int, 1)
-	start := time.Now()
 	go func() { done <- run(ctx, "config-does-not-exist.yaml", "") }()
 
-	time.Sleep(300 * time.Millisecond)
+	// Readiness-gated cancel (see TestMainLoadsDefaultConfig): the old
+	// 300ms sleep raced boot's migrations on slow CI runners.
+	waitReadyOrFatal(t, infra.DefaultConfig().Server.HealthAddr)
+
+	// Measure shutdown only: arm the timer at the cancel, after boot is
+	// ready, so a slow CI boot cannot eat the 15s budget below.
+	start := time.Now()
 	cancel()
 
 	select {
@@ -329,7 +343,9 @@ func TestMainBootsWithNoWSConfigBlock(t *testing.T) {
 	done := make(chan int, 1)
 	go func() { done <- run(ctx, "config-does-not-exist.yaml", healthAddr) }()
 
-	time.Sleep(300 * time.Millisecond)
+	// Readiness-gated cancel (see TestMainLoadsDefaultConfig): the old
+	// 300ms sleep raced boot's migrations on slow CI runners.
+	waitReadyOrFatal(t, healthAddr)
 	cancel()
 
 	select {
@@ -369,7 +385,9 @@ func TestMainBootsWithVoiceEnabled(t *testing.T) {
 	done := make(chan int, 1)
 	go func() { done <- run(ctx, "config-does-not-exist.yaml", healthAddr) }()
 
-	time.Sleep(300 * time.Millisecond)
+	// Readiness-gated cancel (see TestMainLoadsDefaultConfig): the old
+	// 300ms sleep raced boot's migrations on slow CI runners.
+	waitReadyOrFatal(t, healthAddr)
 	cancel()
 
 	select {
@@ -451,6 +469,21 @@ func waitForOK(t *testing.T, url string, timeout time.Duration) bool {
 			return false
 		case <-time.After(50 * time.Millisecond):
 		}
+	}
+}
+
+// waitReadyOrFatal blocks until run()'s health endpoint answers, proving boot
+// (config load, all four migration packages, server start) finished. The
+// main-boot tests gate their ctx cancel on this instead of a fixed sleep —
+// sleeps raced boot's migrations on slow CI runners (issue #47: cancel
+// mid-migrate → "database/migrate: context canceled" → exit 1). 10s is a
+// generous ceiling for a loaded runner; a healthy boot answers in well under
+// a second, and a boot that never answers fails here with a clearer message
+// than a bare exit-code mismatch.
+func waitReadyOrFatal(t *testing.T, healthAddr string) {
+	t.Helper()
+	if !waitForOK(t, "http://"+healthAddr+"/health", 10*time.Second) {
+		t.Fatalf("health never responded at %s; run() may have failed to boot", healthAddr)
 	}
 }
 

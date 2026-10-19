@@ -84,6 +84,17 @@ func TestWordlistPipeline_Recognize(t *testing.T) {
 			wantConfs: []float64{1},
 		},
 		{
+			name:  "decoration marks around word are trimmed, mark-only word dropped",
+			image: jpegSoi,
+			reply: `[{"word":"★library ★","meaning":"图书馆","confidence":0.9},` +
+				`{"word":"● go for a walk ","meaning":"散步","confidence":0.8},` +
+				`{"word":"※★★","meaning":"只有装饰符","confidence":0.9}]`,
+			checkMime: "image/jpeg",
+			wantWords: []string{"library", "go for a walk"},
+			wantMeans: []string{"图书馆", "散步"},
+			wantConfs: []float64{0.9, 0.8},
+		},
+		{
 			name:      "fenced reply still parses",
 			image:     jpegSoi,
 			reply:     "```json\n[{\"word\":\"apple\",\"meaning\":\"苹果\",\"confidence\":0.9}]\n```",
@@ -360,7 +371,7 @@ func TestWordlistPromptsCarryTheContract(t *testing.T) {
 	if _, err := p.Recognize(context.Background(), jpegSoi, ""); err != nil {
 		t.Fatalf("Recognize: %v", err)
 	}
-	for _, want := range []string{"词表", "短语", "原文", "JSON", "教材", "课次", "null"} {
+	for _, want := range []string{"词表", "短语", "原文", "JSON", "教材", "课次", "null", "装饰符"} {
 		if !strings.Contains(fr.gotSystem, want) {
 			t.Errorf("system prompt lost clause %q:\n%s", want, fr.gotSystem)
 		}
@@ -413,31 +424,35 @@ func TestWordlistChinesePromptContract(t *testing.T) {
 
 	// The chinese clause set (AC2: 明确词语表, 不拆单字; AC6: 同页中英混排隔离;
 	// 保留材料给出的拼音, 不强制释义; #11: 古诗整首、原文不生成、练习题只展示;
-	// #13: 课文整篇按自然段、背诵标记段落、练习题不并入课文).
+	// #13: 课文整篇按自然段、背诵标记段落、练习题不并入课文; #47: word 必须
+	// 中文词语、英文不进 entries、装饰符剥离).
 	fr := &fakeListReader{reply: `[]`}
 	p := NewWordlistPipeline(fr.read, 1<<20)
 	if _, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese); err != nil {
 		t.Fatalf("Recognize chinese: %v", err)
 	}
 	for _, want := range []string{
-		"词语表",        // only clear word-list entries
-		"不要拆成单个汉字",   // multi-char words stay whole
-		"英文单词",       // mixed-page English content is ignored
-		"拼音",         // the material's own annotation is transcribed
-		"不要求补写释义",    // no forced English-style gloss
-		"完整的古诗",      // #11: whole poems are their own array
-		"整首保存",       // #11: a poem is saved as one work
-		"保留原有分行",     // #11: line breaks and order survive
-		"不要凭记忆补写或生成", // #11/#13: never generate the unclear原文
-		"背诵或默写要求",    // #11: the page's explicit mark rides required
-		"完整的课文",      // #13: whole passages are their own array
-		"整篇保存",       // #13: a passage is saved as one original
-		"保留自然段的划分",   // #13: paragraph boundaries and order survive
-		"自然段序号",      // #13: per-paragraph marks ride required_paragraphs
-		"不要并入",       // #13: exercises never merge into the passage
-		"不会导入",       // #11: others are display-only
-		"JSON",       // strict output contract
-		"教材",         // textbook header reading
+		"词语表",          // only clear word-list entries
+		"不要拆成单个汉字",     // multi-char words stay whole
+		"中文词语",         // #47: entries' word must be a Han-carrying word
+		"不要放进 entries", // #47: English words/phrases never enter entries
+		"装饰符",          // #47: ★-style layout marks stay out of word
+		"英文单词",         // mixed-page English content is ignored
+		"拼音",           // the material's own annotation is transcribed
+		"不要求补写释义",      // no forced English-style gloss
+		"完整的古诗",        // #11: whole poems are their own array
+		"整首保存",         // #11: a poem is saved as one work
+		"保留原有分行",       // #11: line breaks and order survive
+		"不要凭记忆补写或生成",   // #11/#13: never generate the unclear原文
+		"背诵或默写要求",      // #11: the page's explicit mark rides required
+		"完整的课文",        // #13: whole passages are their own array
+		"整篇保存",         // #13: a passage is saved as one original
+		"保留自然段的划分",     // #13: paragraph boundaries and order survive
+		"自然段序号",        // #13: per-paragraph marks ride required_paragraphs
+		"不要并入",         // #13: exercises never merge into the passage
+		"不会导入",         // #11: others are display-only
+		"JSON",         // strict output contract
+		"教材",           // textbook header reading
 	} {
 		if !strings.Contains(fr.gotSystem, want) {
 			t.Errorf("chinese system prompt lost clause %q:\n%s", want, fr.gotSystem)
@@ -473,6 +488,106 @@ func TestWordlistRecognizeChineseEntries(t *testing.T) {
 	// legal (词语表没有给注释).
 	if res.Entries[1].Word != "世界" || res.Entries[1].Meaning != "" || res.Entries[1].Lesson != "第5课" {
 		t.Errorf("entry[1] = %+v, want 世界/empty/第5课 (page-level lesson inherited)", res.Entries[1])
+	}
+}
+
+// TestWordlistRecognizeChineseGuardsNonHanEntries (Issue #47) — the 语文
+// contract's server-side isolation backstop. When the parent mis-selects
+// 中文 over an ENGLISH word list, the model's English entries — exactly what
+// a live 4A photo produced ("★library", "classroom"…) — are dropped from the
+// draft and can never be committed into a 语文 word list. Real 词语 survive
+// (a Han character anywhere in the word counts: 「3D打印」 is a 词语), and
+// the same reply under the english contract keeps every entry — the guard
+// is the chinese subject's only, not a global word filter.
+func TestWordlistRecognizeChineseGuardsNonHanEntries(t *testing.T) {
+	reply := `{"entries":[` +
+		`{"word":"★library","meaning":"图书馆","confidence":0.9},` +
+		`{"word":"classroom","meaning":"教室","confidence":0.85},` +
+		`{"word":"美丽","meaning":"měi lì","confidence":0.95},` +
+		`{"word":"78","meaning":"数字也不是词语","confidence":0.9},` +
+		`{"word":"3D打印","meaning":"sān dī dǎ yìn","confidence":0.9}` +
+		`]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize chinese over english list: %v", err)
+	}
+	if len(res.Entries) != 2 || res.Entries[0].Word != "美丽" || res.Entries[1].Word != "3D打印" {
+		t.Fatalf("entries = %+v, want only the Han-carrying 美丽/3D打印 (english leaks dropped)", res.Entries)
+	}
+
+	resEn, err := p.Recognize(context.Background(), jpegSoi, CategoryEnglish)
+	if err != nil {
+		t.Fatalf("Recognize english: %v", err)
+	}
+	if len(resEn.Entries) != 5 {
+		t.Fatalf("english entries = %d (%+v), want all 5 (the guard never filters english)", len(resEn.Entries), resEn.Entries)
+	}
+	if resEn.Entries[0].Word != "library" {
+		t.Errorf("english entries[0].Word = %q, want ★ stripped", resEn.Entries[0].Word)
+	}
+}
+
+// TestWordlistRecognizeChineseGuardsNonHanPassages (Issue #47, covering the
+// passage path Issue #13 opened) — the entry guard's twin: an English page's
+// running text is exactly what a passage shape fits, so when 中文 is
+// mis-selected over English prose the Han-less passage drafts are dropped
+// and can never be committed into 语文 content as 课文. A Han character
+// anywhere — title or one paragraph — keeps the passage (a 语文 page may
+// quote an English word inside its prose), and the same reply under the
+// english contract keeps every passage: the guard stays the chinese
+// subject's only.
+func TestWordlistRecognizeChineseGuardsNonHanPassages(t *testing.T) {
+	reply := `{"entries":[],"passages":[` +
+		`{"title":"Unit 1 Our School","paragraphs":["Welcome to our school.","This is my classroom."],"confidence":0.9},` +
+		`{"title":"小小的船","paragraphs":["弯弯的月儿小小的船。","小小的船儿两头尖。"],"confidence":0.92},` +
+		`{"title":"ABC Song","paragraphs":["A B C D E F G"],"confidence":0.85},` +
+		`{"title":"英语角","paragraphs":["Read and write."],"confidence":0.8}` +
+		`]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize chinese over english prose: %v", err)
+	}
+	if len(res.Passages) != 2 || res.Passages[0].Title != "小小的船" || res.Passages[1].Title != "英语角" {
+		t.Fatalf("passages = %+v, want only the Han-carrying 小小的船/英语角 (english leaks dropped)", res.Passages)
+	}
+
+	resEn, err := p.Recognize(context.Background(), jpegSoi, CategoryEnglish)
+	if err != nil {
+		t.Fatalf("Recognize english: %v", err)
+	}
+	if len(resEn.Passages) != 4 {
+		t.Fatalf("english passages = %d (%+v), want all 4 (the guard never filters english)", len(resEn.Passages), resEn.Passages)
+	}
+}
+
+// TestWordlistTrimWordDecorations pins the decoration trimmer itself: ends
+// only (an inner mark or space stays), whitespace interleaved with the marks
+// folds away, and normal word punctuation — hyphens, apostrophes, the
+// interpunct a transliterated name carries INSIDE itself — is never eaten.
+func TestWordlistTrimWordDecorations(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{"★library", "library"},
+		{" ※美丽● ", "美丽"},
+		{"☆ ice cream ★", "ice cream"},
+		{"ice cream", "ice cream"}, // spaces INSIDE a phrase stay
+		{"ice-cream", "ice-cream"}, // hyphen is a word character
+		{"it's", "it's"},           // apostrophe is a word character
+		{"阿·凡提", "阿·凡提"},           // interpunct inside a name stays
+		{"★★★", ""},                // mark-only collapses to empty
+		{"＊word＊", "word"},         // fullwidth asterisk is a mark too
+	} {
+		if got := trimWordDecorations(tc.in); got != tc.want {
+			t.Errorf("trimWordDecorations(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
