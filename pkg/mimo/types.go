@@ -264,6 +264,12 @@ type ChatRequest struct {
 	Tools []ToolDef `json:"tools,omitempty"`
 	// MaxTokens caps the completion length (0 = server default)
 	MaxTokens int `json:"max_tokens,omitempty"`
+	// MaxCompletionTokens is the OFFICIAL budget field (the OpenAI-compatible
+	// endpoint documents max_completion_tokens, not max_tokens). It covers
+	// reasoning + visible output together; WithMaxTokens mirrors its value
+	// here so both keys agree on the wire (issue #46). 0 = omitted = server
+	// default.
+	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// Temperature tunes sampling (0 = omitted; thinking mode
 	// ignores it server-side anyway per the official docs)
 	Temperature float64 `json:"temperature,omitempty"`
@@ -467,10 +473,14 @@ func WithChatModel(model string) ChatOption {
 	}
 }
 
-// WithMaxTokens caps the completion length
+// WithMaxTokens caps the completion length. The value lands on BOTH budget
+// fields — legacy max_tokens and the official max_completion_tokens (issue
+// #46) — so Chat-path callers send the documented key while the wire stays
+// backward compatible with servers that only know the old one.
 func WithMaxTokens(n int) ChatOption {
 	return func(req *ChatRequest) {
 		req.MaxTokens = n
+		req.MaxCompletionTokens = n
 	}
 }
 
