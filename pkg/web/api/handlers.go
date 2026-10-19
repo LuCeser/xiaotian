@@ -27,6 +27,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
+	"github.com/xiaotian/home-tutor-agent/pkg/passage"
 	"github.com/xiaotian/home-tutor-agent/pkg/poem"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 )
@@ -68,7 +69,10 @@ const maxStdoutDiagnosticRunes = 300
 // an LLM key — POST /words/meaning/generate answers 503
 // generation_unavailable instead of 404ing). Since Issue #11, poems is the
 // Go-owned whole-poem store behind the /poems routes (nil on a degraded
-// boot — they answer 503 poems_unavailable instead of 404ing).
+// boot — they answer 503 poems_unavailable instead of 404ing). Since
+// Issue #13, passages is the Go-owned structured-original store behind
+// the /passages routes (nil on a degraded boot — they answer 503
+// passages_unavailable instead of 404ing).
 type handler struct {
 	exec       pybridge.Executor
 	cards      database.CardRepository
@@ -80,6 +84,7 @@ type handler struct {
 	recognizer *ocr.WordlistPipeline
 	generator  *ocr.MeaningGenerator
 	poems      *poem.Store
+	passages   *passage.Store
 	cfg        infra.PythonConfig
 }
 
@@ -88,11 +93,11 @@ type handler struct {
 // tests can construct the handler cheaply. recognizer and generator may
 // be nil (photo recognition / meaning supplement unavailable — see the
 // handler struct comment).
-func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, generator *ocr.MeaningGenerator, poems *poem.Store, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
+func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, generator *ocr.MeaningGenerator, poems *poem.Store, passages *passage.Store, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}
-	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, generator: generator, poems: poems, cfg: cfg, logger: logger}
+	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, generator: generator, poems: poems, passages: passages, cfg: cfg, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /words", h.listWords)
@@ -125,6 +130,13 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks
 	mux.HandleFunc("POST /poems", h.commitPoems)
 	mux.HandleFunc("GET /poems", h.listPoems)
 	mux.HandleFunc("POST /poems/{id}/assign", h.assignPoem)
+	// Issue #13: the structured-passage content routes (commit / list /
+	// assign / practice-range selection). Same single-write-path rule.
+	mux.HandleFunc("POST /passages", h.commitPassages)
+	mux.HandleFunc("GET /passages", h.listPassages)
+	mux.HandleFunc("POST /passages/{id}/assign", h.assignPassage)
+	mux.HandleFunc("POST /passages/{id}/scopes", h.addPassageScope)
+	mux.HandleFunc("DELETE /passages/{id}/scopes/{sid}", h.removePassageScope)
 	return mux
 }
 

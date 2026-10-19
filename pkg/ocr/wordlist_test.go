@@ -371,15 +371,18 @@ func TestWordlistPromptsCarryTheContract(t *testing.T) {
 }
 
 // TestWordlistChinesePromptContract (Issue #10, widened by Issue #11 into
-// the MIXED-PAGE contract) pins the SUBJECT selection and the 语文 prompt's
-// own clauses: category=chinese routes the Chinese system+user prompts
-// (subject isolation starts at the seam), the clause set keeps 词语 whole
-// (不拆单字), keeps the material's own pinyin/annotation as the meaning (no
-// forced gloss), ignores English content on a mixed page, and — #11 —
+// the MIXED-PAGE contract and by Issue #13 with the passages class) pins
+// the SUBJECT selection and the 语文 prompt's own clauses:
+// category=chinese routes the Chinese system+user prompts (subject
+// isolation starts at the seam), the clause set keeps 词语 whole (不拆
+// 单字), keeps the material's own pinyin/annotation as the meaning (no
+// forced gloss), ignores English content on a mixed page, — #11 —
 // extracts WHOLE poems (title/author/ordered lines, verbatim, never
-// generated) while 课文正文 and 练习题 land in the display-only others
-// array (区分展示, 练习题不自动选入). The default ("" and "english") keeps
-// the Issue #3 English prompts.
+// generated), and — #13 — extracts WHOLE passages (natural-paragraph
+// boundaries and order, per-paragraph recitation marks, exercises never
+// merged into the text) while 练习题 stays display-only in others (区分
+// 展示, 练习题不自动选入). The default ("" and "english") keeps the
+// Issue #3 English prompts.
 func TestWordlistChinesePromptContract(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -409,7 +412,8 @@ func TestWordlistChinesePromptContract(t *testing.T) {
 	}
 
 	// The chinese clause set (AC2: 明确词语表, 不拆单字; AC6: 同页中英混排隔离;
-	// 保留材料给出的拼音, 不强制释义; #11: 古诗整首、原文不生成、练习题只展示).
+	// 保留材料给出的拼音, 不强制释义; #11: 古诗整首、原文不生成、练习题只展示;
+	// #13: 课文整篇按自然段、背诵标记段落、练习题不并入课文).
 	fr := &fakeListReader{reply: `[]`}
 	p := NewWordlistPipeline(fr.read, 1<<20)
 	if _, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese); err != nil {
@@ -424,8 +428,13 @@ func TestWordlistChinesePromptContract(t *testing.T) {
 		"完整的古诗",      // #11: whole poems are their own array
 		"整首保存",       // #11: a poem is saved as one work
 		"保留原有分行",     // #11: line breaks and order survive
-		"不要凭记忆补写或生成", // #11: never generate the unclear原文
+		"不要凭记忆补写或生成", // #11/#13: never generate the unclear原文
 		"背诵或默写要求",    // #11: the page's explicit mark rides required
+		"完整的课文",      // #13: whole passages are their own array
+		"整篇保存",       // #13: a passage is saved as one original
+		"保留自然段的划分",   // #13: paragraph boundaries and order survive
+		"自然段序号",      // #13: per-paragraph marks ride required_paragraphs
+		"不要并入",       // #13: exercises never merge into the passage
 		"不会导入",       // #11: others are display-only
 		"JSON",       // strict output contract
 		"教材",         // textbook header reading
@@ -601,5 +610,125 @@ func TestWordlistRecognizeEnglishReplyHasNoPoems(t *testing.T) {
 	}
 	if res.Others == nil || len(res.Others) != 0 {
 		t.Errorf("others = %+v, want empty non-nil", res.Others)
+	}
+	if res.Passages == nil || len(res.Passages) != 0 {
+		t.Errorf("passages = %+v, want empty non-nil", res.Passages)
+	}
+}
+
+// TestWordlistRecognizeMixedPagePassages (Issue #13) — a 语文 mixed-page
+// reply classifies its blocks: WHOLE passages (title/ordered 自然段/
+// per-paragraph marks/lesson) alongside 词语, poems and display-only
+// others. The paragraphs keep their boundaries and order, a null own
+// lesson inherits the page-level one, and the exercise block stays in
+// others — never inside the passage (练习题不自动选入).
+func TestWordlistRecognizeMixedPagePassages(t *testing.T) {
+	reply := `{"textbook":{"edition":"统编版","grade":"三年级","volume":"上册","lesson":"第6课"},
+		"entries":[{"word":"钥匙","meaning":"yào shi","lesson":"第6课","confidence":0.9}],
+		"passages":[
+			{"title":"秋天的雨","author":null,"paragraphs":["秋天的雨，是一把钥匙。","","秋天的雨，有一盒五彩缤纷的颜料。","秋天的雨，藏着非常好闻的气味。"],"lesson":null,"required":"背诵课文","required_paragraphs":[3,1,1],"confidence":0.9}
+		],
+		"poems":[],
+		"others":[{"kind":"exercise","summary":"课后题：你喜欢秋天的雨吗","confidence":0.85}]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize mixed page passages: %v", err)
+	}
+
+	if len(res.Passages) != 1 {
+		t.Fatalf("passages len = %d, want 1 (%+v)", len(res.Passages), res.Passages)
+	}
+	got := res.Passages[0]
+	// The empty middle paragraph is dropped; the three real paragraphs keep
+	// their order (段落边界和顺序保留).
+	if len(got.Paragraphs) != 3 || got.Paragraphs[0] != "秋天的雨，是一把钥匙。" || got.Paragraphs[2] != "秋天的雨，藏着非常好闻的气味。" {
+		t.Errorf("paragraphs = %q, want the three ordered 自然段", got.Paragraphs)
+	}
+	if got.Title != "秋天的雨" || got.Author != "" || got.Required != "背诵课文" {
+		t.Errorf("passage = %+v, want 秋天的雨/empty author/whole-text mark", got)
+	}
+	// A null own-lesson inherits the page-level lesson; the per-paragraph
+	// marks are sorted and deduplicated onto the KEPT paragraphs.
+	if got.Lesson != "第6课" {
+		t.Errorf("lesson = %q, want the page-level 第6课 inherited", got.Lesson)
+	}
+	if len(got.RequiredParagraphs) != 2 || got.RequiredParagraphs[0] != 1 || got.RequiredParagraphs[1] != 3 {
+		t.Errorf("required_paragraphs = %v, want [1 3]", got.RequiredParagraphs)
+	}
+	if len(res.Others) != 1 || res.Others[0].Kind != OtherKindExercise {
+		t.Errorf("others = %+v, want the exercise block display-only", res.Others)
+	}
+}
+
+// TestWordlistRecognizePassagesOnlyPage — a passages-only mixed page
+// (entries legitimately empty) still parses: the passage array alone is a
+// legal reply, exactly like a poems-only page.
+func TestWordlistRecognizePassagesOnlyPage(t *testing.T) {
+	reply := `{"textbook":null,"entries":[],"passages":[{"title":"雪孩子","paragraphs":["下了一天的大雪。","雪孩子回来了。"],"required":"朗读课文","required_paragraphs":[],"confidence":0.9}]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize passages-only page: %v", err)
+	}
+	if len(res.Passages) != 1 || res.Passages[0].Title != "雪孩子" || res.Passages[0].Required != "朗读课文" {
+		t.Errorf("passages = %+v, want the single 雪孩子 with its own mark", res.Passages)
+	}
+	if len(res.Passages[0].RequiredParagraphs) != 0 {
+		t.Errorf("required_paragraphs = %v, want empty (no per-paragraph mark printed)", res.Passages[0].RequiredParagraphs)
+	}
+}
+
+// TestWordlistRecognizeDropsBrokenPassages — a passage missing its title
+// or every paragraph is a misparse, not an original to salvage: it is
+// dropped so the preview never offers an empty shell for confirmation.
+func TestWordlistRecognizeDropsBrokenPassages(t *testing.T) {
+	reply := `{"entries":[],"passages":[
+		{"title":"","paragraphs":["有内容没有题目"],"confidence":0.9},
+		{"title":"只有题目","paragraphs":["","  "],"confidence":0.9}
+	]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize broken passages: %v", err)
+	}
+	if len(res.Passages) != 0 {
+		t.Errorf("passages = %+v, want both broken drafts dropped", res.Passages)
+	}
+}
+
+// TestWordlistRecognizePassageMarksClamped — a mark the model numbered
+// outside the real paragraphs (0, past the end) is noise: it is dropped,
+// never carried as a default-selection hint pointing at a paragraph that
+// does not exist.
+func TestWordlistRecognizePassageMarksClamped(t *testing.T) {
+	reply := `{"entries":[],"passages":[{"title":"黄山奇石","paragraphs":["一段。","二段。"],"required_paragraphs":[0,2,5,-1],"confidence":0.9}]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	res, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese)
+	if err != nil {
+		t.Fatalf("Recognize clamped marks: %v", err)
+	}
+	marks := res.Passages[0].RequiredParagraphs
+	if len(marks) != 1 || marks[0] != 2 {
+		t.Errorf("required_paragraphs = %v, want [2] only", marks)
+	}
+}
+
+// TestWordlistRecognizeTooManyPassages — the passages array obeys its own
+// runaway cap (ErrTooManyPassages), distinct from the entries/poems caps.
+func TestWordlistRecognizeTooManyPassages(t *testing.T) {
+	passages := make([]string, 0, maxWordlistPassages+1)
+	for i := 0; i <= maxWordlistPassages; i++ {
+		passages = append(passages, fmt.Sprintf(`{"title":"课文%d","paragraphs":["一段"],"confidence":0.9}`, i))
+	}
+	reply := `{"entries":[],"passages":[` + strings.Join(passages, ",") + `]}`
+	fr := &fakeListReader{reply: reply}
+	p := NewWordlistPipeline(fr.read, 1<<20)
+	if _, err := p.Recognize(context.Background(), jpegSoi, CategoryChinese); !errors.Is(err, ErrTooManyPassages) {
+		t.Fatalf("Recognize over-cap passages: err = %v, want ErrTooManyPassages", err)
 	}
 }

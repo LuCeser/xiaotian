@@ -144,6 +144,11 @@ func TestClient_ChatVision(t *testing.T) {
 				if got.MaxTokens != 128 {
 					t.Errorf("expected MaxTokens 128, got %d", got.MaxTokens)
 				}
+				// WithMaxTokens mirrors onto the official field, and the
+				// vision builder now maps it straight across (issue #46).
+				if got.MaxCompletionTokens != 128 {
+					t.Errorf("expected MaxCompletionTokens 128, got %d", got.MaxCompletionTokens)
+				}
 			},
 		},
 		{

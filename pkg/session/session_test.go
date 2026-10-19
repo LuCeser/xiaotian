@@ -736,7 +736,7 @@ func TestEventLoop_DictatingTimeoutSkipsWithoutSpin(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if s.State() == database.StateDictating && s.CurrentWord() == "banana" {
+		if state, word := s.Snapshot(); state == database.StateDictating && word == "banana" {
 			break
 		}
 		if s.State() == database.StateWaitingParent {
@@ -749,8 +749,8 @@ func TestEventLoop_DictatingTimeoutSkipsWithoutSpin(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	if s.State() != database.StateDictating || s.CurrentWord() != "banana" {
-		t.Fatalf("state=%s word=%q, want DICTATING banana", s.State(), s.CurrentWord())
+	if state, word := s.Snapshot(); state != database.StateDictating || word != "banana" {
+		t.Fatalf("state=%s word=%q, want DICTATING banana", state, word)
 	}
 	if !s.Deadline().After(time.Now().Add(50 * time.Millisecond)) {
 		t.Fatalf("deadline %v is not ahead of now; the timeout would refire immediately", s.Deadline())

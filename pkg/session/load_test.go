@@ -240,15 +240,20 @@ func waitLoadState(t *testing.T, s *session.Session, want database.SessionState,
 
 // waitLoadWord pins state AND current word — the load test's fake streams
 // complete instantly, so consecutive words pass through the same states and
-// only the word disambiguates them (ticket-05 lesson).
+// only the word disambiguates them (ticket-05 lesson). The pair MUST come from
+// Snapshot(): separate State()/CurrentWord() reads can straddle a transition
+// and pair word N+1 with word N's DICTATING, making the driver push next_word
+// into the interim LISTENING where the FSM drops it — the flaky DICTATING
+// stall of issue #29 (CI runs 39125881424 attempts 1-2).
 func waitLoadWord(t *testing.T, s *session.Session, want database.SessionState, word, connID string) {
 	t.Helper()
 	deadline := time.Now().Add(loadWaitBudget)
 	for time.Now().Before(deadline) {
-		if s.State() == want && s.CurrentWord() == word {
+		if state, cur := s.Snapshot(); state == want && cur == word {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Errorf("%s: never reached %s at %s (at %s/%s)", connID, want, word, s.State(), s.CurrentWord())
+	state, cur := s.Snapshot()
+	t.Errorf("%s: never reached %s at %s (at %s/%s)", connID, want, word, state, cur)
 }

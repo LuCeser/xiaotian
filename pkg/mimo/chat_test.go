@@ -107,6 +107,9 @@ func TestClient_Chat(t *testing.T) {
 				if req.MaxTokens != 64 {
 					t.Errorf("expected MaxTokens 64, got %d", req.MaxTokens)
 				}
+				if req.MaxCompletionTokens != 64 {
+					t.Errorf("expected MaxCompletionTokens mirrored to 64, got %d", req.MaxCompletionTokens)
+				}
 				if req.Temperature != 0.2 {
 					t.Errorf("expected Temperature 0.2, got %v", req.Temperature)
 				}
@@ -244,5 +247,90 @@ func TestClient_Chat_RetriesTransientErrors(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Errorf("expected 2 calls (1 failure + 1 success), got %d", got)
+	}
+}
+
+// TestClient_Chat_MaxTokensWireShape pins the dual budget-field contract
+// (issue #46): WithMaxTokens must put BOTH the legacy max_tokens and the
+// official max_completion_tokens on the wire with the same value, and with no
+// budget set both keys must be absent (omitempty). Raw-body assertions
+// matter because decoding cannot tell "key absent" from "key present as 0".
+func TestClient_Chat_MaxTokensWireShape(t *testing.T) {
+	const legacyKey = `"max_tokens":`
+	const officialKey = `"max_completion_tokens":`
+
+	tests := []struct {
+		name string
+		opts []ChatOption
+		want int // 0 = expect neither key on the wire
+	}{
+		{
+			name: "WithMaxTokens writes both budget fields with the same value",
+			opts: []ChatOption{WithMaxTokens(200)},
+			want: 200,
+		},
+		{
+			name: "no budget set omits both keys",
+			opts: []ChatOption{},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw []byte
+			wrapHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				raw = body
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				defaultChatHandler(w, r)
+			})
+
+			server, cleanup := mockTTSServer(wrapHandler)
+			defer cleanup()
+
+			config := ClientConfig{
+				APIKey:     "test-api-key",
+				BaseURL:    server.URL,
+				Timeout:    5 * time.Second,
+				MaxRetries: 1,
+				RetryDelay: 1 * time.Millisecond,
+			}
+			client, err := NewClient(config, newTestLogger())
+			if err != nil {
+				t.Fatalf("NewClient() failed: %v", err)
+			}
+			defer client.Close()
+
+			if _, err := client.Chat(context.Background(),
+				[]Message{{Role: "user", Content: "好了"}}, tt.opts...); err != nil {
+				t.Fatalf("Chat() unexpected error: %v", err)
+			}
+
+			var got struct {
+				MaxTokens           int `json:"max_tokens"`
+				MaxCompletionTokens int `json:"max_completion_tokens"`
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("captured request is not valid JSON: %v (%s)", err, raw)
+			}
+
+			if tt.want > 0 {
+				if !bytes.Contains(raw, []byte(legacyKey)) {
+					t.Errorf("serialized request missing %s: %s", legacyKey, raw)
+				}
+				if !bytes.Contains(raw, []byte(officialKey)) {
+					t.Errorf("serialized request missing %s: %s", officialKey, raw)
+				}
+				if got.MaxTokens != tt.want || got.MaxCompletionTokens != tt.want {
+					t.Errorf("budget fields = max_tokens:%d max_completion_tokens:%d, want both %d",
+						got.MaxTokens, got.MaxCompletionTokens, tt.want)
+				}
+			} else {
+				if bytes.Contains(raw, []byte(legacyKey)) || bytes.Contains(raw, []byte(officialKey)) {
+					t.Errorf("serialized request must not carry budget keys when unset: %s", raw)
+				}
+			}
+		})
 	}
 }
