@@ -170,8 +170,9 @@ func TestWordlistLive_RealVision(t *testing.T) {
 // category=chinese, the mis-click that used to import 39 English words into
 // a 语文 word list. Whatever the live model answers, the deterministic
 // server guard means a chinese draft can only carry Han words (typically
-// just a few misreads or nothing) — and never a decorated word. One more
-// vision call per run.
+// just a few misreads or nothing) — and never a decorated word; since #13
+// gave the page a passage class, the same guard keeps Han-less English
+// prose out of the passage drafts too. One more vision call per run.
 func TestWordlistLive_WrongSubjectIsolation(t *testing.T) {
 	pipeline := liveWordlistPipeline(t)
 
@@ -196,8 +197,13 @@ func TestWordlistLive_WrongSubjectIsolation(t *testing.T) {
 			t.Errorf("decoration mark survived in word: %q", e.Word)
 		}
 	}
-	t.Logf("live wrong-subject recognition: %d entries (guarded), %d poems, %d others",
-		len(res.Entries), len(res.Poems), len(res.Others))
+	for _, p := range res.Passages {
+		if !passageCarriesHan(p) {
+			t.Errorf("non-Han passage entered the chinese draft: %q (paragraphs: %v)", p.Title, p.Paragraphs)
+		}
+	}
+	t.Logf("live wrong-subject recognition: %d entries (guarded), %d poems, %d passages (guarded), %d others",
+		len(res.Entries), len(res.Poems), len(res.Passages), len(res.Others))
 }
 
 func formatEntries(entries []WordlistEntry) string {

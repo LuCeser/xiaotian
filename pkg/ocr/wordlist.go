@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -77,11 +78,13 @@ type PoemDraft struct {
 	Confidence float64  `json:"confidence"`
 }
 
-// OtherDraft is one non-entry, non-poem content block the Chinese prompt
-// reports so a mixed page can be 区分展示 (Issue #11): 课文正文段
-// (Kind text) and 练习题 (Kind exercise) never become dictation entries
-// or poems — the summary is a short verbatim-leaning description of what
-// the block is, for display only. Nothing in this slice is committable.
+// OtherDraft is one non-entry, non-poem, non-passage content block the
+// Chinese prompt reports so a mixed page can be 区分展示 (Issue #11,
+// narrowed by Issue #13): 练习题 (Kind exercise) and residual text that
+// belongs to no titled passage (Kind text) never become dictation
+// entries, poems or passages — the summary is a short verbatim-leaning
+// description of what the block is, for display only. Nothing in this
+// slice is committable.
 type OtherDraft struct {
 	Kind       string  `json:"kind"`
 	Summary    string  `json:"summary"`
@@ -95,14 +98,37 @@ const (
 	OtherKindExercise = "exercise"
 )
 
+// PassageDraft is one recognized structured 课文 original (Issue #13):
+// the work is ONE unit — title, optional author, and the ordered 自然段
+// with their boundaries. The paragraphs are the photo's own text
+// transcribed verbatim in reading order — 段落边界和顺序保留, never
+// merged, split, corrected or regenerated from memory (不以生成替代不
+// 清楚的原文). Required is the page's own passage-level 背诵/默写 mark
+// ("" when the page prints none) and RequiredParagraphs the 1-based
+// 自然段 numbers carrying explicit per-paragraph marks — the preview
+// derives its default practice range from them (有背诵标记的段落默认
+// 勾选); the server never invents either. Exercise questions NEVER
+// appear here (练习题不自动选入) — they stay in Others.
+type PassageDraft struct {
+	Title              string   `json:"title"`
+	Author             string   `json:"author"`
+	Lesson             string   `json:"lesson"`
+	Required           string   `json:"required"`
+	Paragraphs         []string `json:"paragraphs"`
+	RequiredParagraphs []int    `json:"required_paragraphs"`
+	Confidence         float64  `json:"confidence"`
+}
+
 // WordlistResult is one recognition's full draft: the textbook header (nil
 // when nothing was readable) plus the entries, plus — for a Chinese mixed
-// page (Issue #11) — the whole poems and the display-only other blocks.
+// page (Issue #11, widened by Issue #13) — the whole poems, the
+// structured passages and the display-only other blocks.
 // Draft only — nothing here reaches a database until the parent commits.
 type WordlistResult struct {
 	Textbook *WordlistTextbook `json:"textbook"`
 	Entries  []WordlistEntry   `json:"entries"`
 	Poems    []PoemDraft       `json:"poems"`
+	Passages []PassageDraft    `json:"passages"`
 	Others   []OtherDraft      `json:"others"`
 }
 
@@ -125,24 +151,27 @@ word 只填单词或短语的文字本身，条目前后的 ★、☆、●、�
 confidence 是你对这一条识别正确性的把握，0 到 1 的数字。没有识别到任何词表条目时 entries 为 []。不要输出对象以外的内容。`
 
 // wordlistSystemPromptChinese is the Issue #10 counterpart for 语文词语表
-// photos — widened by Issue #11 into the MIXED-PAGE contract: one 语文
-// photo may carry 词语表条目、完整古诗、课文正文段和练习题 side by
-// side, and the reply classifies each block into its own array so the
-// preview can 区分展示. AC mapping: 只提取明确词语表（词语/字词表排版），
-// 不把课文每个汉字拆成词条；古诗作为完整作品（标题、作者如有、分行
-// 顺序），不拆成互不关联的词语或句子，原文逐字转录、不以生成补写不清
-// 楚处；其他正文和练习题只概述进 others 展示，绝不自动选入；保留材料
-// 给出的拼音或注释（原样转录进 meaning），不强制英语式释义；英文内容
-// 不混入语文导入——subject selection stays the isolator, the model does
-// the cropping semantically, same as English.
-const wordlistSystemPromptChinese = `你是家长端语文学习内容导入助手。家长上传一张语文材料的照片（PNG 或 JPEG），同一页可能混排词语表、古诗、课文正文和练习题；可能是印刷教材，也可能拍照略有倾斜。
-请把照片内容分成三类分别报告，页眉页脚、题目编号、装饰文字和页面上的英文单词、音标一律忽略：
+// photos — widened by Issue #11 into the MIXED-PAGE contract and by
+// Issue #13 with the passages class: one 语文 photo may carry 词语表条
+// 目、完整古诗、完整课文和练习题 side by side, and the reply
+// classifies each block into its own array so the preview can 区分展
+// 示. AC mapping: 只提取明确词语表（词语/字词表排版），不把课文每个
+// 汉字拆成词条；古诗作为完整作品（标题、作者如有、分行顺序），课文
+// 作为完整原文（标题、自然段边界和顺序），都不拆成互不关联的词语或
+// 句子，原文逐字转录、不以生成补写不清楚处；练习题只概述进 others
+// 展示，绝不自动选入，也不并入课文；保留材料给出的拼音或注释（原样
+// 转录进 meaning），不强制英语式释义；英文内容不混入语文导入——
+// subject selection stays the isolator, the model does the cropping
+// semantically, same as English.
+const wordlistSystemPromptChinese = `你是家长端语文学习内容导入助手。家长上传一张语文材料的照片（PNG 或 JPEG），同一页可能混排词语表、古诗、课文和练习题；可能是印刷教材，也可能拍照略有倾斜。
+请把照片内容分成四类分别报告，页眉页脚、题目编号、装饰文字和页面上的英文单词、音标一律忽略：
 1. entries——明确的词语表条目：以词语表、字词表或词语栏排版出现的词语和它们旁边的拼音或注释。word 必须是由汉字构成的中文词语；英文单词、短语、音标一律不要放进 entries——整页是英语词表时 entries 填 []，英文内容可在 others 里用一句话概述（kind 填 "text"）或直接忽略。多字词语是一个完整条目，不要拆成单个汉字；词语按照片原文逐字转录，不要纠正错别字，词语前后的 ★、☆、●、▲、※ 等排版装饰符不要写进 word；拼音或注释按照片原文转录进 meaning，没有给就留空，不要求补写释义或例句。
 2. poems——完整的古诗：以诗题（如「静夜思」）开头、按行排列的诗。每首诗是一个条目，整首保存：title 是诗题；author 是作者，照片上没印就填 null；lines 按原文顺序逐行转录整首诗句，保留原有分行，不要合并成一行、不要拆散、不要纠正错别字、更不要凭记忆补写或生成照片上看不清的内容；required 填照片上明确印出的背诵或默写要求（如「背诵」「默写」），没有印就填 null；lesson 能从照片确定就填，不能确定填 null。古诗不要转成词语或句子放进 entries。
-3. others——页面上的其他内容块，只用于展示、不会导入：课文正文段落 kind 填 "text"，练习题 kind 填 "exercise"，summary 用一句话概述这块内容。
+3. passages——完整的课文：以课文标题（如「秋天的雨」）开头、由自然段组成的课文或短文。每篇课文是一个条目，整篇保存：title 是课文标题；author 是作者，照片上没印就填 null；paragraphs 按原文顺序逐段转录全部自然段，保留自然段的划分和先后顺序，不要合并、不要拆散、不要纠正错别字、更不要凭记忆补写或生成照片上看不清的内容；required 填照片上明确印出的整篇背诵或默写要求（如「背诵课文」「默写课文」），没有印就填 null；required_paragraphs 填照片上明确印出背诵或默写要求的自然段序号（从 1 开始数），没有单独要求某段就填 []；lesson 能从照片确定就填，不能确定填 null。课文后面的练习题、课后题不属于课文正文，不要并入 paragraphs，放进 others。课文不要转成词语或句子放进 entries。
+4. others——页面上的其他内容块，只用于展示、不会导入：练习题、课后题、既不属于词语表也不属于完整古诗或完整课文的其他文字块都放这里；练习题 kind 填 "exercise"，其他文字块 kind 填 "text"，summary 用一句话概述这块内容。
 同时读取照片上明确印出的教材信息：版本（出版社或教材系列）、学段、年级、上下册、单元或模块、课次（如 第 5 课、课文 8、Unit 3）。
 教材信息只能报告照片上真实印着的内容；任何一项识别不出或照片上没有就填 null，不要根据内容难度、年级或文件名推测教材和课次。
-只输出一个 JSON 对象，格式：{"textbook":{"edition":"统编版","stage":null,"grade":"二年级","volume":"下册","module":null,"lesson":"第5课"},"entries":[{"word":"美丽","meaning":"měi lì","lesson":"第5课","confidence":0.9}],"poems":[{"title":"静夜思","author":"李白","lines":["床前明月光，疑是地上霜。","举头望明月，低头思故乡。"],"lesson":"第8课","required":"背诵","confidence":0.9}],"others":[{"kind":"exercise","summary":"读一读，记一记","confidence":0.85}]}
+只输出一个 JSON 对象，格式：{"textbook":{"edition":"统编版","stage":null,"grade":"二年级","volume":"下册","module":null,"lesson":"第5课"},"entries":[{"word":"美丽","meaning":"měi lì","lesson":"第5课","confidence":0.9}],"poems":[{"title":"静夜思","author":"李白","lines":["床前明月光，疑是地上霜。","举头望明月，低头思故乡。"],"lesson":"第8课","required":"背诵","confidence":0.9}],"passages":[{"title":"秋天的雨","author":null,"paragraphs":["秋天的雨，是一把钥匙。","秋天的雨，有一盒五彩缤纷的颜料。"],"lesson":"第3课","required":"背诵课文第2自然段","required_paragraphs":[2],"confidence":0.9}],"others":[{"kind":"exercise","summary":"读一读，记一记","confidence":0.85}]}
 整个教材信息都识别不出时 textbook 为 null；某类内容照片上没有就填 []。
 confidence 是你对这一条识别正确性的把握，0 到 1 的数字。不要输出对象以外的内容。`
 
@@ -152,10 +181,11 @@ confidence 是你对这一条识别正确性的把握，0 到 1 的数字。不�
 // turn names the same subject so the two content parts cannot disagree.
 func wordlistUserPrompt(category string) string {
 	if category == CategoryChinese {
-		// Issue #11: the Chinese turn names the mixed-page job — 词语表
-		// entries AND whole poems AND the display-only other blocks — so
-		// the two content parts cannot disagree about the contract.
-		return `请按词语表条目、完整古诗和其他内容块分类提取这张照片，并读取教材信息。`
+		// Issue #11/#13: the Chinese turn names the mixed-page job — 词语
+		//表 entries AND whole poems AND whole passages AND the
+		// display-only other blocks — so the two content parts cannot
+		// disagree about the contract.
+		return `请按词语表条目、完整古诗、完整课文和其他内容块分类提取这张照片，并读取教材信息。`
 	}
 	return `请提取这张照片里的英语词表条目和教材信息。`
 }
@@ -180,12 +210,29 @@ const maxWordlistEntries = 100
 // (pkg/web/api maxPoems).
 const maxWordlistPoems = 20
 
+// maxWordlistPassages caps the passages array of one mixed-page
+// recognition (Issue #13): a photo page carries at most a couple of whole
+// passages; the cap bounds a runaway reply the same way maxWordlistPoems
+// bounds poems, and it matches the commit path's per-request cap
+// (pkg/web/api maxPassages).
+const maxWordlistPassages = 10
+
 // maxPoemLines / maxPoemLineRunes bound ONE poem (Issue #11): 古诗按整首
 // 保存 and no 长诗选段 exists, so a primary-school poem is a few short
 // lines; anything past these caps is a misparsed reply, not a poem.
 const (
 	maxPoemLines     = 64
 	maxPoemLineRunes = 200
+)
+
+// maxPassageParagraphs / maxPassageParagraphRunes bound ONE passage
+// (Issue #13): a primary-school 课文 is a few dozen 自然段 of prose;
+// anything past these caps is a misparsed reply, not a passage, and the
+// commit path enforces the same bounds again (pkg/web/api
+// maxPassageParagraphs / maxPassageParagraphRunes).
+const (
+	maxPassageParagraphs     = 60
+	maxPassageParagraphRunes = 1000
 )
 
 // WordlistPipeline reads one word-list photo end-to-end: sniff PNG/JPEG,
@@ -227,7 +274,9 @@ func (p *WordlistPipeline) MaxBytes() int {
 // "nothing recognized", not an error. Issue #47 adds the deterministic
 // backstop on top of the contract: typographic decoration marks around
 // word are trimmed for either subject, and under CategoryChinese an entry
-// whose word carries no Han character never reaches the draft.
+// whose word carries no Han character — and, since Issue #13 gave the
+// mis-selection a passage-shaped leak path, a passage whose title and
+// paragraphs carry none — never reaches the draft.
 func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte, category string) (*WordlistResult, error) {
 	if len(image) == 0 {
 		return nil, ErrEmptyImage
@@ -266,6 +315,10 @@ func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte, category
 	// the entries cap above).
 	if len(parsed.poems) > maxWordlistPoems {
 		return nil, ErrTooManyPoems
+	}
+	// Issue #13: the passages array obeys its own cap for the same reason.
+	if len(parsed.passages) > maxWordlistPassages {
+		return nil, ErrTooManyPassages
 	}
 
 	var meta *WordlistTextbook
@@ -322,10 +375,21 @@ func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte, category
 			Confidence: clamp01(e.Confidence),
 		})
 	}
+	passages := trimPassageDrafts(parsed.passages, meta)
+	if category == CategoryChinese {
+		// Issue #47's isolation backstop, covering the Issue #13 passage
+		// path: an English page's running text is exactly what a passage
+		// shape fits, so a passage whose title AND paragraphs carry no Han
+		// character is English prose leaking through the same mis-selected
+		// category as a Han-less entry word, and gets the same disposition
+		// (dropped, not re-shaped into others).
+		passages = dropNonHanPassages(passages)
+	}
 	return &WordlistResult{
 		Textbook: meta,
 		Entries:  out,
 		Poems:    trimPoemDrafts(parsed.poems, meta),
+		Passages: passages,
 		Others:   trimOtherDrafts(parsed.others),
 	}, nil
 }
@@ -370,6 +434,68 @@ func trimPoemDrafts(poems []PoemDraft, meta *WordlistTextbook) []PoemDraft {
 			Lesson:     lesson,
 			Required:   strings.TrimSpace(p.Required),
 			Confidence: clamp01(p.Confidence),
+		})
+	}
+	return out
+}
+
+// trimPassageDrafts projects the decoded passages onto the draft contract
+// (Recognize's passages-side twin of trimPoemDrafts): every field trimmed,
+// confidence clamped, empty paragraphs dropped, the passage's own missing
+// lesson falling back to the page-level one. A passage with no title or
+// no non-empty paragraph is DROPPED — the parent confirms complete
+// originals only (课文按整篇原文保存), and an untitled/empty shell is a
+// misparse, not a passage to salvage. Paragraphs past
+// maxPassageParagraphs are kept only up to the cap; RequiredParagraphs
+// keeps only the 1-based indexes that point at a KEPT paragraph, sorted
+// and deduplicated — a mark the model numbered outside the real text
+// (miscounted, 0-based) is noise, never a default-selection hint
+// pointing at a paragraph that does not exist.
+func trimPassageDrafts(passages []PassageDraft, meta *WordlistTextbook) []PassageDraft {
+	out := make([]PassageDraft, 0, len(passages))
+	for _, p := range passages {
+		title := strings.TrimSpace(p.Title)
+		if title == "" {
+			continue
+		}
+		paragraphs := make([]string, 0, len(p.Paragraphs))
+		for _, paragraph := range p.Paragraphs {
+			paragraph = strings.TrimSpace(paragraph)
+			if paragraph != "" {
+				paragraphs = append(paragraphs, paragraph)
+			}
+			if len(paragraphs) == maxPassageParagraphs {
+				break
+			}
+		}
+		if len(paragraphs) == 0 {
+			continue
+		}
+		lesson := strings.TrimSpace(p.Lesson)
+		if lesson == "" && meta != nil {
+			lesson = strings.TrimSpace(meta.Lesson)
+		}
+		marks := make([]int, 0, len(p.RequiredParagraphs))
+		for _, i := range p.RequiredParagraphs {
+			if i >= 1 && i <= len(paragraphs) {
+				marks = append(marks, i)
+			}
+		}
+		sort.Ints(marks)
+		deduped := marks[:0]
+		for _, i := range marks {
+			if len(deduped) == 0 || deduped[len(deduped)-1] != i {
+				deduped = append(deduped, i)
+			}
+		}
+		out = append(out, PassageDraft{
+			Title:              title,
+			Author:             strings.TrimSpace(p.Author),
+			Paragraphs:         paragraphs,
+			Lesson:             lesson,
+			Required:           strings.TrimSpace(p.Required),
+			RequiredParagraphs: deduped,
+			Confidence:         clamp01(p.Confidence),
 		})
 	}
 	return out
@@ -438,6 +564,41 @@ func containsHan(s string) bool {
 	return false
 }
 
+// passageCarriesHan reports whether the passage carries at least one Han
+// character in its title or its paragraphs — the passage-side analogue of
+// containsHan(word): a Han clause anywhere marks a real 语文 课文 (mixed
+// pages may quote an English word inside Chinese prose), so only a passage
+// with NO Han at all reads as English text leaked through the mis-selected
+// category.
+func passageCarriesHan(p PassageDraft) bool {
+	if containsHan(p.Title) {
+		return true
+	}
+	for _, paragraph := range p.Paragraphs {
+		if containsHan(paragraph) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropNonHanPassages applies Issue #47's Chinese isolation backstop to the
+// Issue #13 passage drafts (Recognize's passages-side twin of the entry-word
+// guard): a passage with NO Han character anywhere is English prose that
+// leaked through the mis-selected category and is dropped — the same
+// disposition as a Han-less entry word. Titles keep their decorations
+// verbatim, unlike entry words: a passage is a whole transcribed work, and
+// #47's trimming rule is about the word field specifically.
+func dropNonHanPassages(passages []PassageDraft) []PassageDraft {
+	out := make([]PassageDraft, 0, len(passages))
+	for _, p := range passages {
+		if passageCarriesHan(p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // sniffImage detects PNG and JPEG from their magic bytes and reports the
 // MIME type the vision API expects. Everything else is rejected (ErrNotImage
 // upstream): WebP/HEIC/PDF uploads fail fast with a clear reason instead of
@@ -460,12 +621,14 @@ func sniffImage(b []byte) (string, bool) {
 // treats them identically, 待确认), and Textbook is a pointer so a null
 // textbook stays distinguishable from an all-empty one at parse time
 // (Recognize collapses both to meta == nil). Issue #11 adds Poems/Others
-// (the Chinese mixed-page arrays); an English reply simply decodes them
-// as nil and Recognize normalizes both to empty slices.
+// and Issue #13 adds Passages (the Chinese mixed-page arrays); an
+// English reply simply decodes them as nil and Recognize normalizes both
+// to empty slices.
 type wordlistReplyJSON struct {
 	Textbook *WordlistTextbook `json:"textbook"`
 	Entries  []WordlistEntry   `json:"entries"`
 	Poems    []PoemDraft       `json:"poems"`
+	Passages []PassageDraft    `json:"passages"`
 	Others   []OtherDraft      `json:"others"`
 }
 
@@ -479,6 +642,7 @@ type parsedWordlist struct {
 	textbook *WordlistTextbook
 	entries  []WordlistEntry
 	poems    []PoemDraft
+	passages []PassageDraft
 	others   []OtherDraft
 }
 
@@ -486,9 +650,10 @@ type parsedWordlist struct {
 // reply (mirror of parseWordsJSON's most-to-least-trusting strategy):
 //  1. the Issue #5 object contract: the outermost {...} span (or any {...}
 //     from a decoder scan — thinking-model prose or fences still parse) as
-//     {"textbook":…,"entries":[…],"poems":[…],"others":[…]}; a
-//     textbook-less object is legal, and since Issue #11 a poems-only
-//     object is too (a page carrying just a poem answers entries:[]);
+//     {"textbook":…,"entries":[…],"poems":[…],"passages":[…],"others":[…]};
+//     a textbook-less object is legal, and since Issue #11 a poems-only
+//     object is too (a page carrying just a poem answers entries:[]), and
+//     since Issue #13 a passages-only object as well;
 //  2. the Issue #3 legacy contract: [...] as one JSON array (no meta);
 //  3. a regex for paired word+meaning fields (meaning may be empty), in
 //     order — the degraded object-less fallback.
@@ -496,10 +661,10 @@ func parseWordlistReply(reply string) (parsedWordlist, bool) {
 	if start, end := strings.Index(reply, "{"), strings.LastIndex(reply, "}"); start >= 0 && end > start {
 		var parsed wordlistReplyJSON
 		if err := json.Unmarshal([]byte(reply[start:end+1]), &parsed); err == nil &&
-			(parsed.Entries != nil || parsed.Textbook != nil || parsed.Poems != nil) {
+			(parsed.Entries != nil || parsed.Textbook != nil || parsed.Poems != nil || parsed.Passages != nil) {
 			return parsedWordlist{
 				textbook: parsed.Textbook, entries: parsed.Entries,
-				poems: parsed.Poems, others: parsed.Others,
+				poems: parsed.Poems, passages: parsed.Passages, others: parsed.Others,
 			}, true
 		}
 	}
@@ -509,10 +674,10 @@ func parseWordlistReply(reply string) (parsedWordlist, bool) {
 		}
 		var parsed wordlistReplyJSON
 		if err := json.NewDecoder(strings.NewReader(reply[i:])).Decode(&parsed); err == nil &&
-			(parsed.Entries != nil || parsed.Textbook != nil || parsed.Poems != nil) {
+			(parsed.Entries != nil || parsed.Textbook != nil || parsed.Poems != nil || parsed.Passages != nil) {
 			return parsedWordlist{
 				textbook: parsed.Textbook, entries: parsed.Entries,
-				poems: parsed.Poems, others: parsed.Others,
+				poems: parsed.Poems, passages: parsed.Passages, others: parsed.Others,
 			}, true
 		}
 	}

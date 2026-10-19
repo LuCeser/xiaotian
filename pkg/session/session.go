@@ -877,6 +877,24 @@ func (s *Session) CurrentWord() string {
 	return ""
 }
 
+// Snapshot returns the current state AND current word from one lock
+// acquisition — a pair that provably coexisted in a single FSM configuration.
+// Back-to-back State()/CurrentWord() calls are two separate critical sections:
+// a transition committing between them pairs word N+1 with word N's state, and
+// an observer pacing its next push on that chimera (load tests driving
+// next_word, issue #29) fires into the interim LISTENING where the FSM drops
+// the event as invalid — the session then sits in DICTATING until the deadline
+// backstop. Observers that act on the (state, word) combination MUST use this
+// accessor; State() or CurrentWord() alone remain fine for single-field reads.
+func (s *Session) Snapshot() (database.SessionState, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.wordIndex >= 0 && s.wordIndex < len(s.wordQueue) {
+		return s.state, s.wordQueue[s.wordIndex].Word
+	}
+	return s.state, ""
+}
+
 // Category returns the session's FSRS category.
 func (s *Session) Category() string {
 	return s.lockCategory

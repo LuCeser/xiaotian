@@ -2014,6 +2014,7 @@ body {
    in ONE textarea (one line per row — 分行和顺序 are the work's own
    structure); the bottom row carries the lesson input / status note. */
 .photo-poem-host,
+.photo-passage-host,
 .photo-others-host {
   margin-top: 8px;
 }
@@ -2107,6 +2108,168 @@ body {
 }
 
 .photo-poem-note {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* 课文 card (Issue #13, the poem card's prose kin): top row = 加入 +
+   title + author + mark badge + status; the scope toolbar (整篇 checkbox
+   + the live range summary); then ONE row per 自然段 (scope checkbox +
+   段号 + per-paragraph mark + the paragraph's own textarea); the bottom
+   row carries the lesson input / status note. */
+.photo-passage-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.photo-passage-invalid {
+  background: var(--background);
+}
+
+.photo-passage-invalid .form-input,
+.photo-passage-invalid .form-textarea {
+  background: var(--background);
+}
+
+.photo-passage-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.photo-passage-top .inline-check-hit {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.photo-passage-check {
+  width: 18px;
+  height: 18px;
+}
+
+.photo-passage-title {
+  flex: 1 1 140px;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.photo-passage-author {
+  flex: 0 1 120px;
+  min-width: 0;
+}
+
+.photo-passage-required {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-strong);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.photo-passage-status {
+  flex: 0 0 auto;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.photo-passage-status-invalid {
+  color: var(--danger-strong);
+}
+
+.photo-passage-scope-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+
+.photo-passage-scope-bar .inline-check-hit {
+  min-height: 44px;
+}
+
+.photo-passage-whole {
+  width: 18px;
+  height: 18px;
+}
+
+.photo-passage-scope-note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.photo-passage-paragraphs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.photo-passage-paragraph {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.photo-passage-paragraph-check {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin-top: 10px;
+}
+
+.photo-passage-paragraph-no {
+  flex: 0 0 auto;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.photo-passage-paragraph-required {
+  flex: 0 0 auto;
+  margin-top: 10px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-strong);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.photo-passage-paragraph-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.8;
+  font-family: inherit;
+}
+
+.photo-passage-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.photo-passage-lesson {
+  flex: 0 1 160px;
+  min-width: 0;
+}
+
+.photo-passage-note {
   font-size: 12px;
   color: var(--muted);
   overflow-wrap: anywhere;
@@ -2262,6 +2425,176 @@ body {
 .poem-line:last-child {
   margin-bottom: 0;
 }
+
+/* One whole passage card (Issue #13, the poem card's prose kin): head
+   (title/author/badge/scope/manage) + the ordered 自然段 rows + the
+   practice-range box + attribution chips. */
+.passage-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.passage-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.passage-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.passage-author {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.passage-scope {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.passage-scope-in,
+.passage-scope-included,
+.passage-scope-learned {
+  border-color: var(--success-border);
+  background: var(--success-bg);
+  color: var(--success-strong);
+}
+
+.passage-scope-progress_pending {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-strong);
+}
+
+.passage-manage-btn {
+  margin-left: auto;
+}
+
+.passage-paragraphs {
+  margin: 0;
+  padding-left: 4px;
+}
+
+.passage-paragraph {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--ink);
+}
+
+.passage-paragraph:last-child {
+  margin-bottom: 0;
+}
+
+.passage-paragraph-no {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.passage-paragraph-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A 自然段 inside a chosen practice range reads marked (选段不动其他段
+   — the others stay plainly visible). */
+.passage-paragraph-in-scope .passage-paragraph-text {
+  background: var(--success-bg);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.passage-scopes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+}
+
+.passage-scopes-label {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.passage-scope-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--success-border);
+  background: var(--success-bg);
+  font-size: 12px;
+  color: var(--success-strong);
+}
+
+.passage-scope-row-text {
+  white-space: nowrap;
+}
+
+.passage-scope-remove {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.passage-scope-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  padding-top: 2px;
+}
+
+.passage-scope-add .inline-check-hit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.passage-scope-add input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+}
+
+.passage-scope-add-btn {
+  margin-left: auto;
+}
+
 /* Issue #12: the whole-poem 背默 entry — one primary door per in-scope work;
    an out-of-scope poem shows the honest disabled state instead. */
 .poem-recite-row {
