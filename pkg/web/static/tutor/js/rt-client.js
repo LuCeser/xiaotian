@@ -299,6 +299,12 @@
     // sets it BEFORE connect(); absent/zero keeps the word classroom —
     // server-side the same deny-by-default normalization applies.
     this.initPoem = 0;
+    // Issue #14: passage 背默 classroom ids sent in session_init
+    // (passages.id + the passage_scopes.id the parent picked — the page
+    // sets both BEFORE connect(); absent/zero keeps the word classroom,
+    // and the server refuses a passage without its range honestly).
+    this.initPassage = 0;
+    this.initPassageScope = 0;
   }
 
   /**
@@ -346,6 +352,10 @@
       if (self.initCategory) initMsg.category = self.initCategory; // Issue #10
       if (self.initPractice === true) initMsg.practice = true; // 13.1-05 D-11
       if (self.initPoem > 0) initMsg.poem = self.initPoem; // Issue #12
+      if (self.initPassage > 0) { // Issue #14
+        initMsg.passage = self.initPassage;
+        initMsg.passage_scope = self.initPassageScope;
+      }
       self.sendJSON(initMsg);
     };
 

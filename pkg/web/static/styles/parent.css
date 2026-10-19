@@ -2558,6 +2558,46 @@ body {
   white-space: nowrap;
 }
 
+/* Issue #14: one range's OWN practice state (mastered / next review day) —
+   per range by design, rendered inside the scope row chip. */
+.passage-scope-practice {
+  white-space: nowrap;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.passage-scope-practiced {
+  color: var(--success-strong);
+}
+
+/* Issue #14: the per-range 背默 door inside the scope row. */
+.passage-scope-recite {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font-size: 12px;
+  color: var(--link, #4f8ef7);
+  cursor: pointer;
+  text-decoration: underline;
+  white-space: nowrap;
+}
+
+.passage-scope-recite:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+/* Issue #14: the record detail's original paragraph label on each judged
+   paragraph row. */
+.lesson-paragraph-no {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-right: 6px;
+}
+
 .passage-scope-remove {
   border: none;
   background: none;

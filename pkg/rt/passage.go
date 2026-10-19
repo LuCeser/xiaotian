@@ -224,14 +224,17 @@ func passageTaskView(p passage.Passage, scope passage.ScopeRow) *PassageTaskView
 		}
 	}
 	return &PassageTaskView{
-		ID:             p.ID,
-		ScopeID:        scope.ID,
-		Title:          p.Title,
-		Author:         p.Author,
-		Method:         "背默",
-		Whole:          scope.Whole,
+		ID:      p.ID,
+		ScopeID: scope.ID,
+		Title:   p.Title,
+		Author:  p.Author,
+		Method:  "背默",
+		Whole:   scope.Whole,
+		// ParagraphCount counts the PRACTICED range (== len(Paragraphs)) —
+		// the page's banner and unit copy speak this session's task, never
+		// the full work's length.
 		Paragraphs:     paragraphs,
-		ParagraphCount: len(p.Paragraphs),
+		ParagraphCount: len(paragraphs),
 	}
 }
 
