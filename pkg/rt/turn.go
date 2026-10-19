@@ -162,6 +162,11 @@ type TurnManagerConfig struct {
 	// PhotoConfig.MaxImageBytes semantics; T-13.1-06). Over-cap uploads are
 	// rejected AND cleared.
 	PhotoMaxBytes int
+	// PhotoRequestTimeout bounds one vision OCR call (0 → the photo config
+	// block's RequestTimeout default, PhotoConfig.RequestTimeout semantics):
+	// a wedged upstream must not pin the OCR goroutine forever. Issue #44:
+	// no second frozen literal — the fallback IS the config default.
+	PhotoRequestTimeout time.Duration
 	// VADEchoTailMs is the post-ack echo tail in milliseconds (0 → 500ms
 	// default): ordinary uplink stays gated this long after the VALID
 	// playback-completion ack of a teacher announcement. A real-device
@@ -436,6 +441,12 @@ func NewTurnManager(asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, exec L
 	}
 	if cfg.PhotoConfidence <= 0 {
 		cfg.PhotoConfidence = defaultPhotoConfidence
+	}
+	if cfg.PhotoRequestTimeout <= 0 {
+		// Issue #44: the fallback references the photo config block's own
+		// default instead of a second frozen literal here, so the /rt photo
+		// path follows the config (20s today, 60s once #48 lands).
+		cfg.PhotoRequestTimeout = infra.DefaultConfig().Photo.RequestTimeout
 	}
 	if logger == nil {
 		logger = infra.NewNoOpLogger()

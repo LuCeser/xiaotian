@@ -712,11 +712,14 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// a 0 config value would defer to the FSM's own 60s default).
 			WordTimeout: time.Duration(cfg.RT.WordTimeoutMs) * time.Millisecond,
 			// 13.1-03 photo check: the shared vision reader plus the existing
-			// photo config block's caps — no new env vars, no new config
-			// sections (nil reader degrades the check stage to manual-only).
-			OCR:             rtOCR,
-			PhotoMaxBytes:   cfg.Photo.MaxImageBytes,
-			PhotoConfidence: cfg.Photo.ConfidenceThreshold,
+			// photo config block's caps and request timeout — no new env
+			// vars, no new config sections (nil reader degrades the check
+			// stage to manual-only). Issue #44: the /rt OCR timeout follows
+			// the photo block instead of a frozen rt-layer literal.
+			OCR:                 rtOCR,
+			PhotoMaxBytes:       cfg.Photo.MaxImageBytes,
+			PhotoConfidence:     cfg.Photo.ConfidenceThreshold,
+			PhotoRequestTimeout: cfg.Photo.RequestTimeout,
 			// 13.1-05 再练一组 (D-11/D-12): the read-only vocabulary source is
 			// the SAME CardRepository instance the parent pages already use
 			// (zero new config keys); practice writes go to the Go-owned
