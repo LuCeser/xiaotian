@@ -79,12 +79,19 @@ func mimoTranscriber(mc mimo.Client) voice.Transcriber {
 
 // mimoChatter adapts the mimo Chat call onto the voice.Chatter seam. The
 // system prompt + user transcript shape matches what LLMClassifier sends.
+// Thinking MUST be explicitly disabled (issue #45): the server default is ON,
+// and a thinking model can spend the whole token budget on reasoning_content
+// and return content="" + finish_reason=length — the Text() fallback would
+// then feed half-formed reasoning to the classifier (#42 proved this failure
+// shape on the vision path). Both consumers — voice intent classification and
+// the ocr meaning generator (main.go shares this adapter) — want the fast,
+// deterministic no-thinking reply anyway.
 func mimoChatter(mc mimo.Client, model string) voice.Chatter {
 	return func(ctx context.Context, systemPrompt, userText string) (string, error) {
 		resp, err := mc.Chat(ctx, []mimo.Message{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userText},
-		}, mimo.WithChatModel(model))
+		}, mimo.WithChatModel(model), mimo.WithThinkingDisabled())
 		if err != nil {
 			return "", err
 		}
