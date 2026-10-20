@@ -144,6 +144,36 @@ body[data-page="tutor"] {
   color: #2f6b3c;
 }
 
+/* Issue #55: the subject clarify panel — both subjects hold due words and
+   the classroom asks the CHILD which one to dictate. The question mirrors
+   the teacher's spoken line; the two big buttons answer subject_pick. */
+.rt-subject-ask {
+  background: #f3f0fa;
+  border: 1px solid #d8cff0;
+  border-radius: 16px;
+  padding: 12px 16px;
+  text-align: center;
+}
+
+.rt-subject-ask-text {
+  margin: 0 0 10px;
+  font-size: 20px;
+  font-weight: 700;
+  color: #4a3a78;
+}
+
+.rt-subject-ask-buttons {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+
+.rt-subject-btn {
+  min-width: 120px;
+  min-height: 56px;
+  font-size: 20px;
+}
+
 .rt-progress {
   background: #ffffff;
   border-radius: 16px;

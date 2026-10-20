@@ -614,6 +614,11 @@ wss.on('connection', (ws, req, query) => {
     category: query.get('mock_category') === 'chinese' || query.get('mock_category') === 'english'
       ? query.get('mock_category')
       : '',
+    // Issue #55 rework: ?mock_subject_ask=1 makes an auto session_init park
+    // on the clarify question (subject_ask, no session_ready yet) and the
+    // page's subject_pick answer opens the classroom under the PICKED
+    // subject — the button-flow pin for the child-decides flow.
+    subjectAsk: query.get('mock_subject_ask') === '1',
     // 13.1-07 scripted OCR pass (?mock_ocr=): 'off' = no OCR reader
     // server-side (photo_unavailable degradation, manual-only check);
     // otherwise a ';' list of PER-UPLOAD specs — upload N's readings use
@@ -681,6 +686,11 @@ wss.on('connection', (ws, req, query) => {
     photoBuf: [],
     ocrResults: [],
     reviewResults: 0,
+    /** Issue #55 rework: the clarify state — subject_ask went out, and the
+        subject_pick answer that opened the classroom (server parity: a
+        stray pick with no clarify pending is a no-op). */
+    subjectAskSent: false,
+    subjectPicked: '',
     checkStartedReason: null,
     correctionDiff: null,
     closedMidCheck: false,
@@ -1133,6 +1143,17 @@ wss.on('connection', (ws, req, query) => {
             () => { send({ type: 'state', value: 'listening' }); });
           break;
         }
+        // Issue #55 rework: an auto entry under ?mock_subject_ask=1 parks on
+        // the clarify question — subject_ask out, NO session_ready until the
+        // page's subject_pick names the subject (startSubjectAsk parity).
+        if (mockMode.subjectAsk && msg.category === 'auto' && !state.subjectPicked) {
+          state.subjectAskSent = true;
+          send({
+            type: 'subject_ask',
+            question: '语文和英语今天都有要默写的词语。这次想先默写哪一科？'
+          });
+          break;
+        }
         // LessonView field-for-field (id / version / current_index / words).
         send({
           type: 'session_ready',
@@ -1140,7 +1161,28 @@ wss.on('connection', (ws, req, query) => {
           audio: { sampleRate: 16000, format: 's16le', channels: 1 },
           tts: { sampleRate: TTS_RATE },
           lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() },
-          ...(mockMode.category ? { category: mockMode.category } : {})
+          ...((state.subjectPicked || mockMode.category) ? { category: state.subjectPicked || mockMode.category } : {})
+        });
+        break;
+      }
+
+      case 'subject_pick': {
+        // Issue #55: the clarify's button answer. ParseControl parity —
+        // english/chinese only; and only a pending clarify consumes it
+        // (a stray pick with no clarify parked is a no-op server-side).
+        if (msg.category !== 'english' && msg.category !== 'chinese') {
+          send({ type: 'error', code: 'invalid_message', message: 'mock: subject_pick requires english or chinese', recoverable: true });
+          break;
+        }
+        if (!state.subjectAskSent || state.subjectPicked) break;
+        state.subjectPicked = msg.category;
+        send({
+          type: 'session_ready',
+          session_id: state.id,
+          audio: { sampleRate: 16000, format: 's16le', channels: 1 },
+          tts: { sampleRate: TTS_RATE },
+          lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() },
+          category: state.subjectPicked
         });
         break;
       }
