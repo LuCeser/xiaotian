@@ -10,6 +10,8 @@ package rt
 import (
 	"testing"
 	"time"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
 // TestDictationIntentContext: the turn context is captured under the lock at
@@ -99,11 +101,11 @@ func TestDictationIntentContext(t *testing.T) {
 	tm.mu.Unlock()
 
 	for name, snap := range map[string]dictationTurnContext{
-		"paused":    paused,
-		"checking":  checking,
+		"paused":     paused,
+		"checking":   checking,
 		"recitation": recite,
-		"completed": completed,
-		"past-end":  pastEnd,
+		"completed":  completed,
+		"past-end":   pastEnd,
 	} {
 		if snap.awaitingWord {
 			t.Errorf("awaitingWord = true for the %s classroom — the correction gate must stay shut", name)
@@ -184,4 +186,212 @@ func TestDictationIntentEvidence(t *testing.T) {
 			t.Errorf("field %q leaked text %q — T-13-06b boundary violated", f.Key, v)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue #56 step 3: the state-gated full-phrase correction.
+// ---------------------------------------------------------------------------
+
+// TestResolveDictationIntent: the pure resolver's whole-phrase table —
+// completion phrases correct to confirm with the reply cleared; explicit
+// not-done / waiting / re-read phrases outrank a model confirm; edge
+// normalization strips statement punctuation and space only (questions,
+// negations, and compound utterances never hit); everything else returns
+// the model's verdict untouched.
+func TestResolveDictationIntent(t *testing.T) {
+	const junk = "模型生成的回复"
+	cases := []struct {
+		name        string
+		transcript  string
+		modelIntent string
+		wantIntent  string
+		wantReply   string
+	}{
+		// The three acceptance phrases and the wider completion family —
+		// whatever the model made of them.
+		{"好了 misjudged repeat", "好了", intentRepeat, intentConfirm, ""},
+		{"好嘞 misjudged chat", "好嘞", intentChat, intentConfirm, ""},
+		{"下一个 misjudged repeat", "下一个", intentRepeat, intentConfirm, ""},
+		{"下一个词 misjudged chat", "下一个词", intentChat, intentConfirm, ""},
+		{"写好了 misjudged hint", "写好了", intentHint, intentConfirm, ""},
+		{"写完了 correct already", "写完了", intentConfirm, intentConfirm, ""},
+		{"可以了 with junk reply", "可以了", intentConfirm, intentConfirm, ""},
+		// Statement punctuation and surrounding space are edge-normalized.
+		{"好了。", "好了。", intentChat, intentConfirm, ""},
+		{" 好嘞，", " 好嘞，", intentChat, intentConfirm, ""},
+		{"下一个！", "下一个！", intentChat, intentConfirm, ""},
+		// Explicit not-done: a model confirm must not advance.
+		{"还没好 misjudged confirm", "还没好", intentConfirm, intentChat, notDoneAckText()},
+		{"还没写好 misjudged confirm", "还没写好", intentConfirm, intentChat, notDoneAckText()},
+		{"没写完。 misjudged confirm", "没写完。", intentConfirm, intentChat, notDoneAckText()},
+		{"不要下一个 misjudged confirm", "不要下一个", intentConfirm, intentChat, notDoneAckText()},
+		// Explicit waiting → the existing pause handling.
+		{"等一下 misjudged confirm", "等一下", intentConfirm, intentPause, ""},
+		// Explicit re-read outranks an affirmative reading.
+		{"再读一遍 misjudged confirm", "再读一遍", intentConfirm, intentRepeat, ""},
+		// Questions keep their mark and never hit the table.
+		{"好了？ stays model", "好了？", intentChat, intentChat, junk},
+		{"好了? stays model", "好了?", intentChat, intentChat, junk},
+		// Compound utterances keep interior structure — never substring
+		// matching, never an affirmative-word sweep.
+		{"好了，再读一遍 stays model", "好了，再读一遍", intentRepeat, intentRepeat, junk},
+		{"好了再叫你 stays model", "好了再叫你", intentChat, intentChat, junk},
+		{"我还没好呢 stays model", "我还没好呢", intentChat, intentChat, junk},
+		{"老师再读一遍这个词 stays model", "老师再读一遍这个词", intentRepeat, intentRepeat, junk},
+		{"下一个词是什么 stays model", "下一个词是什么", intentMeaning, intentMeaning, junk},
+		// Non-hit expressions keep the model verdict (and its reply).
+		{"plain chat", "老师你好", intentChat, intentChat, junk},
+		{"empty-ish", " ", intentChat, intentChat, junk},
+	}
+	for _, tc := range cases {
+		gotIntent, gotReply := resolveDictationIntent(tc.transcript, tc.modelIntent, junk)
+		if gotIntent != tc.wantIntent || gotReply != tc.wantReply {
+			t.Errorf("%s: resolveDictationIntent(%q, %s) = (%q, %q), want (%q, %q)",
+				tc.name, tc.transcript, tc.modelIntent, gotIntent, gotReply, tc.wantIntent, tc.wantReply)
+		}
+	}
+}
+
+// TestDictationConfirmationUtterances: the correction through the REAL
+// processTurn in a live word classroom — the model's misjudgement of the
+// acceptance phrases cannot swallow the advance (and the stale reply is
+// cleared), while a model confirm on explicit not-done / waiting / re-read
+// phrases never advances. A collapsed classification keeps the spoken
+// fallback with no correction.
+func TestDictationConfirmationUtterances(t *testing.T) {
+	confirmDrive := func(t *testing.T, phrase, modelIntent, modelReply string) (*fakeExecutor, *TurnManager, *captureSender, *captureLogger, int) {
+		t.Helper()
+		cards := ttCards("苹果", "香蕉", "橘子")
+		asr := newFakeASR(asrScript{text: phrase})
+		llm := newFakeLLM(intentScript(modelIntent, modelReply))
+		tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+		prev := s.countOf(TypeTeacherSentence)
+		ttRunIntentTurn(t, tm, s, prev)
+		return exec, tm, s, log, prev
+	}
+
+	t.Run("completion phrases advance one word whatever the model said", func(t *testing.T) {
+		for _, tc := range []struct{ phrase, modelIntent string }{
+			{"好了", intentRepeat}, {"好嘞", intentChat}, {"下一个", intentRepeat},
+		} {
+			exec, tm, s, log, prev := confirmDrive(t, tc.phrase, tc.modelIntent, "哎呀我再给你读一遍苹果")
+			if got := exec.advanceCount(); got != 1 {
+				t.Errorf("%q: advance calls = %d, want 1 (exactly one word)", tc.phrase, got)
+			}
+			if calls := exec.advanceCallsSnapshot(); len(calls) == 1 && calls[0].requestID != "L1-advance-0" {
+				t.Errorf("%q: request id = %q, want L1-advance-0 (the captured target)", tc.phrase, calls[0].requestID)
+			}
+			joined := ttSentencesSince(t, s, prev)
+			if !contains(joined, "第 2 个词") {
+				t.Errorf("%q: announcement = %q, want the next-word position", tc.phrase, joined)
+			}
+			if contains(joined, "哎呀我再给你读一遍") {
+				t.Errorf("%q: corrected confirm must clear the stale model reply: %q", tc.phrase, joined)
+			}
+			if spoken := tm.tts.(*fakeTTS).recordedTexts(); !contains(spoken[len(spoken)-1], "香蕉") {
+				t.Errorf("%q: tts must name the next word, got %v", tc.phrase, spoken)
+			}
+			// The evidence stream shows the correction: model verdict beside
+			// the final intent, on the same turn.
+			intent, model, _ := lastIntentClassified(t, log)
+			if intent != intentConfirm || model != tc.modelIntent {
+				t.Errorf("%q: intent_classified = (%q, %q), want final confirm over model %q",
+					tc.phrase, intent, model, tc.modelIntent)
+			}
+		}
+	})
+
+	t.Run("explicit not-done never advances despite model confirm", func(t *testing.T) {
+		for _, phrase := range []string{"还没好", "还没写好", "没写完", "不要下一个"} {
+			exec, _, s, log, prev := confirmDrive(t, phrase, intentConfirm, "")
+			if got := exec.advanceCount(); got != 0 {
+				t.Errorf("%q: advance calls = %d, want 0", phrase, got)
+			}
+			if joined := ttSentencesSince(t, s, prev); !contains(joined, "不着急，慢慢写") {
+				t.Errorf("%q: reply = %q, want the gentle not-done ack", phrase, joined)
+			}
+			intent, model, _ := lastIntentClassified(t, log)
+			if intent != intentChat || model != intentConfirm {
+				t.Errorf("%q: intent_classified = (%q, %q), want final chat over model confirm", phrase, intent, model)
+			}
+		}
+	})
+
+	t.Run("等一下 pauses instead of advancing despite model confirm", func(t *testing.T) {
+		exec, _, s, log, prev := confirmDrive(t, "等一下", intentConfirm, "")
+		if got := exec.advanceCount(); got != 0 {
+			t.Errorf("advance calls = %d, want 0", got)
+		}
+		if joined := ttSentencesSince(t, s, prev); !contains(joined, "先休息") {
+			t.Errorf("reply = %q, want the pause ack", joined)
+		}
+		intent, model, _ := lastIntentClassified(t, log)
+		if intent != intentPause || model != intentConfirm {
+			t.Errorf("intent_classified = (%q, %q), want final pause over model confirm", intent, model)
+		}
+	})
+
+	t.Run("再读一遍 re-reads the current word despite model confirm", func(t *testing.T) {
+		exec, tm, _, log, _ := confirmDrive(t, "再读一遍", intentConfirm, "")
+		if got := exec.advanceCount(); got != 0 {
+			t.Errorf("advance calls = %d, want 0", got)
+		}
+		if spoken := tm.tts.(*fakeTTS).recordedTexts(); !contains(spoken[len(spoken)-1], "苹果") {
+			t.Errorf("tts = %v, want the CURRENT word re-read", spoken)
+		}
+		intent, model, _ := lastIntentClassified(t, log)
+		if intent != intentRepeat || model != intentConfirm {
+			t.Errorf("intent_classified = (%q, %q), want final repeat over model confirm", intent, model)
+		}
+	})
+
+	t.Run("collapsed classification keeps the spoken fallback", func(t *testing.T) {
+		cards := ttCards("苹果", "香蕉")
+		garbage := llmScript{resp: wireChatResponse(t, `{"choices":[{"message":{"content":"不是JSON"}}]}`)}
+		asr := newFakeASR(asrScript{text: "好了"})
+		llm := newFakeLLM(garbage, garbage)
+		tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+		prev := s.countOf(TypeTeacherSentence)
+		ttRunIntentTurn(t, tm, s, prev)
+		if got := exec.advanceCount(); got != 0 {
+			t.Errorf("advance calls = %d, want 0 (correction never runs on a collapsed classification)", got)
+		}
+		if joined := ttSentencesSince(t, s, prev); !contains(joined, "老师没听清") {
+			t.Errorf("reply = %q, want the fixed fallback", joined)
+		}
+		intent, model, _ := lastIntentClassified(t, log)
+		if intent != intentChat || model != "" {
+			t.Errorf("intent_classified = (%q, %q), want the chat fallback with no model verdict", intent, model)
+		}
+	})
+}
+
+// lastIntentClassified extracts the newest intent_classified event's final
+// intent, model intent, and full field list.
+func lastIntentClassified(t *testing.T, log *captureLogger) (intent, model string, fields []infra.Field) {
+	t.Helper()
+	var found *captureEntry
+	entries := log.snapshot()
+	for i := range entries {
+		if entries[i].msg != "rt_event" {
+			continue
+		}
+		for _, f := range entries[i].fields {
+			if f.Key == "event" && f.Value == EventIntentClassified {
+				found = &entries[i]
+			}
+		}
+	}
+	if found == nil {
+		t.Fatal("no intent_classified event captured")
+	}
+	for _, f := range found.fields {
+		switch f.Key {
+		case "intent":
+			intent, _ = f.Value.(string)
+		case "model_intent":
+			model, _ = f.Value.(string)
+		}
+	}
+	return intent, model, found.fields
 }

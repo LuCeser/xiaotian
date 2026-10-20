@@ -325,6 +325,14 @@ func (f *fakeExecutor) advanceCount() int {
 	return len(f.advanceCalls)
 }
 
+// advanceCallsSnapshot copies the recorded AdvanceWord calls (call-site
+// assertions outside the executor's mutex).
+func (f *fakeExecutor) advanceCallsSnapshot() []fakeAdvanceCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeAdvanceCall(nil), f.advanceCalls...)
+}
+
 // --- 13.1-01 check-stage fakes (first-commit / replay / conflict, mirroring
 // the real executor's tool_requests semantics on the in-memory row) -------
 

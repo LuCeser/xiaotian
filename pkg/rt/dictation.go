@@ -818,6 +818,90 @@ func confirmPausedRejectText() string {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #56: state-gated full-phrase confirmation correction. The model
+// occasionally misreads a plain 「好了」 as repeat or chat, and a completion
+// phrase must advance exactly once — so AFTER a successful parse and BEFORE
+// dispatch, a small pure function corrects a FINITE table of unambiguous
+// whole phrases. The gate (awaitingWord: ordinary word dictation, writing
+// stage, unpaused, unfinished, valid target) is enforced by the caller;
+// every other expression keeps the model's verdict.
+// ---------------------------------------------------------------------------
+
+// isDictationPhraseEdge reports whether a rune may be stripped from the END
+// of an utterance during phrase normalization: surrounding whitespace plus
+// a finite set of STATEMENT terminators and soft pauses. Question marks are
+// deliberately absent — 「好了？」 is a question, not a completion — and
+// nothing inside the phrase is ever touched.
+func isDictationPhraseEdge(r rune) bool {
+	switch r {
+	case '。', '！', '，', '、', '；', ',', '.', '!', ';', ' ', '\t', '\n', '\r', '　':
+		return true
+	}
+	return unicode.IsSpace(r)
+}
+
+// normalizeDictationPhrase trims statement punctuation and whitespace from
+// both ends of an utterance, leaving question marks, negations, and all
+// interior structure intact.
+func normalizeDictationPhrase(s string) string {
+	return strings.TrimFunc(s, isDictationPhraseEdge)
+}
+
+// The finite whole-phrase tables (Issue #56). EXACT matches on the
+// normalized phrase — never a substring, never fuzzy, never a homophone
+// substitution. Compound utterances (「好了，再读一遍」「好了再叫你」) keep
+// their interior structure and therefore never hit.
+var (
+	dictationConfirmPhrases = map[string]bool{
+		"好了": true, "好嘞": true, "写好了": true, "写完了": true,
+		"可以了": true, "下一个": true, "下一个词": true,
+	}
+	dictationRepeatPhrases  = map[string]bool{"再读一遍": true}
+	dictationNotDonePhrases = map[string]bool{
+		"还没好": true, "还没写好": true, "没写完": true, "不要下一个": true,
+	}
+	dictationPausePhrases = map[string]bool{"等一下": true}
+)
+
+// notDoneAckText is the fixed gentle reply to an explicit not-yet-done
+// phrase: the classroom keeps waiting on the SAME word — no advance, no
+// re-read, just patience.
+func notDoneAckText() string {
+	return "不着急，慢慢写，写好了告诉老师就行。"
+}
+
+// resolveDictationIntent corrects the model's verdict for the finite
+// full-phrase table (Issue #56); everything else passes through untouched:
+//
+//   - completion phrases → confirm with the reply CLEARED — the state
+//     machine alone narrates the next word, so a stale model reply must
+//     never ride along (and a model misjudgement of repeat/chat cannot
+//     swallow the advance);
+//   - 再读一遍 → repeat (an explicit re-read outranks any affirmative
+//     reading — the current word is re-read, the cursor never moves);
+//   - explicit not-yet-done phrases → chat with the fixed gentle ack — a
+//     model confirm here must NOT advance;
+//   - 等一下 → pause, the existing pause handling (timer suspended, ack
+//     line spoken).
+//
+// The caller gates this on awaitingWord, so the correction can only ever
+// fire inside a live word-dictation writing stage.
+func resolveDictationIntent(transcript, modelIntent, modelReply string) (string, string) {
+	phrase := normalizeDictationPhrase(transcript)
+	switch {
+	case dictationConfirmPhrases[phrase]:
+		return intentConfirm, ""
+	case dictationRepeatPhrases[phrase]:
+		return intentRepeat, ""
+	case dictationNotDonePhrases[phrase]:
+		return intentChat, notDoneAckText()
+	case dictationPausePhrases[phrase]:
+		return intentPause, ""
+	}
+	return modelIntent, modelReply
+}
+
+// ---------------------------------------------------------------------------
 // Student-mode masked templates (13.1-02, D-10): the SCREEN copies of
 // word-bearing announcements. Voice is the answer channel — TTS always gets
 // the raw template — while the subtitle carries the masked variant so the
@@ -1255,6 +1339,15 @@ func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, turn
 		// correction retry, then the deterministic spoken fallback — the
 		// failure count rides the event fields like the ASR half's does.
 		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("attempts", 2))
+	} else if turnCtx.awaitingWord {
+		// Issue #56: in a live word-dictation writing stage, correct the
+		// finite table of unambiguous whole phrases AFTER a successful
+		// parse and BEFORE dispatch — a completion phrase advances whatever
+		// the model made of it, and an explicit not-yet-done / waiting /
+		// re-read phrase never advances. A collapsed classification keeps
+		// the fixed spoken fallback: the correction runs on verdicts, never
+		// on silence.
+		intent, reply = resolveDictationIntent(transcript, intent, reply)
 	}
 	// Desensitization boundary (T-13-06b): the intent label only — never
 	// the transcript text — reaches the event stream. Issue #56: the event
