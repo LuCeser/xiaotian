@@ -503,11 +503,15 @@ func TestFakesTTSStreamUntilCancel(t *testing.T) {
 // PeekDueWords answers from the static per-category snapshot peekByCat
 // (Issue #55: the subject judgment's content input — a READ, so it returns
 // the same batch on every call and never consumes the fetch script).
+// dueByCat (Issue #55 isolation regressions), once set, switches
+// FetchDueWords to per-category batches: a mixed vocabulary where the
+// english fetch can never see the chinese words and vice versa.
 type fakeWordSource struct {
 	fetchErr     error
 	reviewErr    error
 	reviewResult ReviewWriteResult
 	due          [][]lesson.Word
+	dueByCat     map[string][]lesson.Word
 	peekByCat    map[string][]lesson.Word
 	submitCalls  []map[string]string
 	submitCat    []string
@@ -529,6 +533,14 @@ func (f *fakeWordSource) FetchDueWords(_ context.Context, limit int, category st
 	f.fetchCats = append(f.fetchCats, category)
 	if f.fetchErr != nil {
 		return nil, f.fetchErr
+	}
+	if f.dueByCat != nil {
+		batch := f.dueByCat[category]
+		f.dueByCat[category] = nil // one due batch per category: the next fetch finds none
+		if limit > 0 && len(batch) > limit {
+			batch = batch[:limit]
+		}
+		return append([]lesson.Word(nil), batch...), nil
 	}
 	if len(f.due) == 0 {
 		return nil, nil
@@ -589,6 +601,17 @@ func (f *fakeWordSource) setPeek(category string, words []lesson.Word) {
 		f.peekByCat = map[string][]lesson.Word{}
 	}
 	f.peekByCat[category] = words
+}
+
+// setDue installs a per-subject fetch batch (the mixed-vocabulary switch:
+// once ANY subject is scripted this way, the global FIFO is dead).
+func (f *fakeWordSource) setDue(category string, words []lesson.Word) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dueByCat == nil {
+		f.dueByCat = map[string][]lesson.Word{}
+	}
+	f.dueByCat[category] = words
 }
 
 // fetchedCategories returns every FetchDueWords category, in call order.
