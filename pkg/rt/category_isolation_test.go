@@ -128,7 +128,7 @@ func TestSequentialSubjectSessionsIsolated(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
-	if err := lesson.Migrate(ctx, db); err != nil {
+	if err = lesson.Migrate(ctx, db); err != nil {
 		t.Fatalf("lesson migrate: %v", err)
 	}
 	store, err := lesson.NewStore(db, nil)
@@ -155,7 +155,7 @@ func TestSequentialSubjectSessionsIsolated(t *testing.T) {
 		t.Fatalf("english session_ready = %+v, want the english row %s", ready, ttLessonID)
 	}
 	for v := 1; v <= 2; v++ {
-		if _, err := exec.AdvanceWord(ctx, ttLessonID, v, fmt.Sprintf("seed-advance-%d", v)); err != nil {
+		if _, err = exec.AdvanceWord(ctx, ttLessonID, v, fmt.Sprintf("seed-advance-%d", v)); err != nil {
 			t.Fatalf("seed advance %d: %v", v, err)
 		}
 	}
