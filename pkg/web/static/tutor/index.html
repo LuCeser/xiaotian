@@ -886,7 +886,17 @@
         renderProgress();
       });
 
-      client.on('interrupt_ack', function () {
+      client.on('interrupt_ack', function (m) {
+        // The server bumped the epoch — either the receipt of this page's
+        // own interrupt, or a server-side termination (the subject-pick
+        // killing the clarify question mid-play). Stop the queued/live old
+        // audio NOW and adopt the new epoch: without the adopt, the next
+        // announcement's audio (announcements carry no turn_start) would be
+        // rejected as a stale epoch and the classroom would die on its
+        // playback-ack timeout.
+        if (m && typeof m.new_epoch === 'number') {
+          playback.onEpochBump(m.new_epoch);
+        }
         setStatus('listening');
       });
 

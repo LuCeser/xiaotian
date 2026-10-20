@@ -226,6 +226,23 @@
   };
 
   /**
+   * The SERVER moved the epoch and told us so (interrupt_ack — either the
+   * receipt of this page's own interrupt, or a server-side termination like
+   * the subject-pick killing the clarify question). Everything scheduled
+   * under the old epoch is dead: stop the queued/live sources NOW (the
+   * epoch gate only DROPS future old-epoch chunks — it never stops what is
+   * already scheduled), then adopt the new epoch — without the adopt, the
+   * next announcement's audio_start (announcements carry no turn_start)
+   * would be rejected as a stale epoch and the classroom would die on its
+   * playback-ack timeout.
+   * @param {number} epoch - the new epoch from interrupt_ack.new_epoch
+   */
+  RTCPlayback.prototype.onEpochBump = function (epoch) {
+    this.stopNow();
+    this._epoch = epoch;
+  };
+
+  /**
    * First audio chunk of one sentence announced. A stale epoch (older than
    * the current turn's) is ignored outright.
    */

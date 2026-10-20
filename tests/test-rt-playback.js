@@ -322,6 +322,50 @@ FakeTimers.prototype.pendingMs = function () {
 }
 
 {
+  // 5a-bis. Server-driven epoch bump (interrupt_ack): onEpochBump stops the
+  // OLD epoch's queued/live sources outright (the epoch gate alone only
+  // drops future chunks — it never stops what is already scheduled) and
+  // adopts the new epoch, so the NEXT announcement's audio_start — which,
+  // like every announcement, carries no turn_start — is accepted and can
+  // ack normally. Without the adopt the picked classroom's greeting would
+  // be rejected as a stale epoch and die on the playback-ack timeout.
+  const pb = makePlayback();
+  pb.onTurnStart(0, 0); // the clarify question rides the initial epoch
+  pb.onAudioStart(0, 'ask-s0');
+  pb.onAudioChunk(chunkBuffer(2400));
+  pb.onAudioChunk(chunkBuffer(2400));
+  assert.strictEqual(pb.audioCtx.sources.length, 2, 'ask chunks scheduled');
+
+  // The child taps a subject button: the server kills the ask and ships
+  // interrupt_ack(old=0, new=1).
+  pb.onEpochBump(1);
+  assert.ok(pb.audioCtx.sources.every((src) => src.stopped),
+    'queued ask sources stopped, the child does not sit through the rest of the question');
+  assert.strictEqual(pb.playing, false);
+  const staleOnEnded = pb.audioCtx.sources[0].onended;
+  staleOnEnded();
+  assert.strictEqual(pb.testClient.sends.filter((m) => m.type === 'sentence_ack').length, 0,
+    'a stopped ask source can never ack');
+
+  // Late chunk of the dead ask: dropped by the (still closed) acceptance gate.
+  const before = pb.audioCtx.sources.length;
+  pb.onAudioChunk(chunkBuffer(2400));
+  assert.strictEqual(pb.audioCtx.sources.length, before, 'dead ask chunk not scheduled');
+
+  // The picked classroom's greeting arrives WITHOUT a turn_start (server
+  // announcements never carry one) under the NEW epoch: accepted, plays,
+  // and acks — the classroom lives.
+  pb.onAudioStart(1, 'greet-s0');
+  pb.onAudioChunk(chunkBuffer(2400));
+  assert.strictEqual(pb.audioCtx.sources.length, before + 1, 'new-epoch greeting accepted without turn_start');
+  pb.onAudioEnd(1, 'greet-s0');
+  pb.audioCtx.sources[pb.audioCtx.sources.length - 1].onended();
+  const acks = pb.testClient.sends.filter((m) => m.type === 'sentence_ack');
+  assert.strictEqual(acks.length, 1, 'greeting acked under the new epoch');
+  assert.deepStrictEqual([acks[0].epoch, acks[0].sentence_id], [1, 'greet-s0']);
+}
+
+{
   // 5b. Happy path: valid onended after audio_end sends exactly one ack.
   const pb = makePlayback();
   pb.onTurnStart(1, 1);
