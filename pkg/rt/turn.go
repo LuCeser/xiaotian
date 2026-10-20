@@ -561,7 +561,8 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	// page's UI mode (13.1 D-08: "test" keeps today's full-reveal behavior;
 	// absent/invalid → student — the iPad bookmark must never leak words)
 	// and the classroom's subject (Issue #10: "chinese" opens the 语文
-	// classroom; absent/invalid → english, the pre-#10 landing).
+	// classroom; Issue #55: "auto" asks for the model judgment;
+	// absent/invalid → english, the pre-#10 landing).
 	// 13.3-05: the production force switch short-circuits the SAME single
 	// adjudication point — when cfg.ForceStudent is set, the client-supplied
 	// mode is ignored and every session runs the student projection (the
@@ -574,8 +575,22 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	} else {
 		tm.mode = normalizeSessionMode(m.Mode)
 	}
-	tm.category = normalizeSessionCategory(m.Category)
+	tm.category = sessionCategoryFromWire(m.Category)
 	tm.mu.Unlock()
+
+	// Issue #55: an unspecified subject on a WORD classroom (dictation or
+	// practice — never the 背默 branches, whose subject is the work's own)
+	// is judged ONCE by the model from the two subjects' due content, then
+	// binds this round exactly like an explicit declaration: the scoped
+	// fetch, the per-subject row, the review writes and the session_ready
+	// echo all ride the judged subject. A declared english/chinese never
+	// reaches the judgment — the user's specification is final (AC2).
+	if m.Poem == 0 && m.Passage == 0 && tm.sessionCategory() == CategoryAuto {
+		judged := tm.judgeSubjectCategory()
+		tm.mu.Lock()
+		tm.category = judged
+		tm.mu.Unlock()
+	}
 
 	if m.Practice {
 		tm.handlePracticeInit(s)
@@ -689,19 +704,9 @@ func normalizeSessionMode(mode string) string {
 	return ModeStudent
 }
 
-// normalizeSessionCategory normalizes the page-supplied subject (Issue #10):
-// only the exact "chinese" value opens a 语文 classroom; anything else —
-// including an absent field — is the English classroom, so every pre-#10
-// page that never sends the field lands exactly where it did. The same
-// deny-by-default shape as normalizeSessionMode: an off-enum value must
-// never open the wrong subject's classroom, it falls back to the legacy
-// subject.
-func normalizeSessionCategory(category string) string {
-	if category == lesson.CategoryChinese {
-		return lesson.CategoryChinese
-	}
-	return lesson.CategoryEnglish
-}
+// normalizeSessionCategory was widened into sessionCategoryFromWire
+// (subject.go, Issue #55): the deny-by-default english landing for
+// absent/off-enum values is unchanged — "auto" is the one addition.
 
 // startNoDueSession answers session_ready with an empty word table, lets
 // the teacher explain (zero due words — with the D-13 days variant when the

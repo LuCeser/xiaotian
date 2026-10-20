@@ -255,6 +255,17 @@ const (
 	CategoryChinese = "chinese"
 )
 
+// CategoryAuto (Issue #55) is the explicit "no subject declared" request:
+// the server judges the subject ONCE from the two subjects' due content
+// (one model call over the peek snapshot) and binds the round to the
+// judgment exactly like an explicit declaration — the confirmed default
+// 「默认由大模型根据内容判断，不强制每次先手动选择」. An explicit
+// english/chinese declaration skips the judgment entirely (the user's word
+// wins, never silently re-judged). Absent/off-enum values keep the pre-#55
+// deny-by-default english landing, so nothing that does not knowingly ask
+// for the judgment pays for it.
+const CategoryAuto = "auto"
+
 // UI mode values carried by SessionInitMsg.Mode (13.1 D-08). Anything else —
 // including an absent field — is student mode: the iPad bookmark must never
 // land the child on a full-reveal word table by accident.
