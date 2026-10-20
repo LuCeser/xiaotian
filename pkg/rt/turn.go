@@ -383,6 +383,14 @@ type TurnManager struct {
 	// timerFactory builds the countdown timers (test seam); nil means
 	// time.AfterFunc.
 	timerFactory func(time.Duration, func()) *time.Timer
+	// subjectTakeInterleave (test seam, PR #60 review; nil in production)
+	// fires between takeSubjectAsk's pendingAsk consumption and its epoch
+	// bump. The deterministic race tests probe the lock discipline from
+	// here — a TryLock on tm.mu succeeds only if the implementation dropped
+	// the hold between the two steps, and the probe then runs the ask's
+	// OLD-epoch timeout close synchronously in that gap, so a split
+	// implementation turns those tests red.
+	subjectTakeInterleave func()
 
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call

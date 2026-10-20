@@ -862,13 +862,16 @@ func TestSettledStaleAnnouncerCannotLiftNewClassroomGate(t *testing.T) {
 	ttWaitClarifyOpen(t, tm)
 }
 
-// TestMidBindingAskTimeoutCannotClosePickedClassroom — the review P2 pin:
+// TestMidBindingAskTimeoutCannotClosePickedClassroom — the review P2/P3 pin:
 // the pick's locked half consumes the pendingAsk AND bumps the epoch in ONE
-// lock hold. The review's interleaving — the consume+unlock lands, the ask's
-// ack timeout fires BEFORE the bump, orderlyCloseAt still sees the old epoch
-// current and closes the session, then the binding continues into a closed
-// classroom — must be unconstructible: by the time any post-take timeout
-// path runs, the old epoch is already stale and the close is refused.
+// lock hold. The seam (subjectTakeInterleave) fires between the two steps
+// and probes the discipline DIRECTLY: TryLock on tm.mu succeeds only if the
+// implementation dropped the hold between the steps — and the probe then
+// runs the ask's OLD-epoch ack timeout synchronously in that very gap, so a
+// split implementation (consume → unlock → bump) deterministically closes
+// the picked classroom and turns this red. While the hold is continuous the
+// probe can never interleave anything, and the post-take timeout below is
+// refused by the already-bumped epoch.
 func TestMidBindingAskTimeoutCannotClosePickedClassroom(t *testing.T) {
 	en := make([]lesson.Word, 0, 12)
 	for i := 0; i < 12; i++ {
@@ -888,15 +891,26 @@ func TestMidBindingAskTimeoutCannotClosePickedClassroom(t *testing.T) {
 	ttSubjectInit(t, tm, s)
 	ttAwaitAskSent(t, s, 0)
 	askSentences := s.countOf(TypeTeacherSentence)
+	tm.mu.Lock()
+	askEpoch := tm.epoch
+	tm.mu.Unlock()
 
-	// The pick's locked half: consume + bind + terminate, atomically.
-	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, 0, false)
+	// The ask's ack timeout, injected between the consumption and the bump:
+	// only runnable if the take dropped tm.mu in between.
+	tm.subjectTakeInterleave = func() {
+		if tm.mu.TryLock() {
+			tm.mu.Unlock()
+			tm.orderlyCloseAt(askEpoch)
+		}
+	}
+	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, askEpoch, true)
+	tm.subjectTakeInterleave = nil
 	if !ok {
 		t.Fatal("takeSubjectAsk refused a live clarify")
 	}
 
-	// The ask's ack timeout fires right here — with the OLD epoch. The bump
-	// already happened inside the take, so the close must be refused.
+	// And even a timeout landing only AFTER the take must find the old epoch
+	// stale — the bump belongs to the take's own lock hold.
 	tm.orderlyCloseAt(oldEpoch)
 	tm.mu.Lock()
 	closed := tm.closed
@@ -913,7 +927,7 @@ func TestMidBindingAskTimeoutCannotClosePickedClassroom(t *testing.T) {
 	}
 
 	// The unlocked half then opens the classroom, alive and well.
-	tm.finalizeSubjectAsk(s, m, oldEpoch, lesson.CategoryChinese, "button")
+	tm.finalizeSubjectAsk(s, m, oldEpoch, lesson.CategoryChinese, "voice")
 	if ready := s.controlsOf(t, TypeSessionReady); len(ready) != 1 {
 		t.Fatalf("session_ready count = %d, want 1", len(ready))
 	}

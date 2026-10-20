@@ -167,6 +167,12 @@ func (tm *TurnManager) takeSubjectAsk(category string, epoch uint64, fromTurn bo
 	m := *tm.pendingAsk
 	tm.pendingAsk = nil
 	tm.category = category
+	if tm.subjectTakeInterleave != nil {
+		// Still INSIDE the hold (PR #60 review): the seam fires between the
+		// consumption and the bump precisely so a test can probe — via
+		// TryLock — that no unlock ever separates them.
+		tm.subjectTakeInterleave()
+	}
 	old := tm.stopAskPlaybackLocked()
 	return m, old, true
 }
