@@ -148,8 +148,41 @@ func (tm *TurnManager) finishSubjectAsk(s Sender, category, via string, epoch ui
 	tm.pendingAsk = nil
 	tm.category = category
 	tm.mu.Unlock()
+
+	// The ask's own announcement must be FULLY terminated before the picked
+	// classroom starts speaking — otherwise the ask's runAnnouncement keeps
+	// racing the new greeting: its settleListening would lift the greeting's
+	// uplink gate early, its ack timeout would orderly-close the fresh
+	// classroom, and both announcements would share the playback
+	// bookkeeping and the unidentified binary audio stream.
+	tm.stopAskPlayback()
+
 	tm.recorder.Emit(EventSubjectPicked, infra.F("category", category), infra.F("via", via))
 	tm.continueSessionInit(s, m)
+}
+
+// stopAskPlayback kills the clarify question's announcement the same way an
+// interrupt kills a turn — minus the ack/trim ceremony (no tutor history
+// exists yet, and the client's own epoch gate drops the ask's remaining
+// audio once the epoch moves): bump the epoch (the ask goroutine's in-flight
+// chunks, playback waits and post-ack settle all turn stale), cancel its
+// provider stream, and drop its playback waits. Called only on the binding
+// path, with the clarify consumed and nothing else speaking.
+func (tm *TurnManager) stopAskPlayback() {
+	tm.mu.Lock()
+	tm.epoch++
+	if tm.turnCancel != nil {
+		tm.turnCancel()
+	}
+	tm.turnSentences = nil
+	tm.acked = map[string]bool{}
+	for _, p := range tm.pendingPlayback {
+		p.cancelWait()
+	}
+	tm.pendingPlayback = map[string]*pendingPlayback{}
+	tm.playbackPending = false
+	tm.mu.Unlock()
+	tm.vad.Reset()
 }
 
 // subjectFromAnswer maps one spoken answer onto a subject by keyword —

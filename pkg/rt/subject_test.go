@@ -497,3 +497,83 @@ func TestSubjectVoiceAnswerStaleAfterInterruptDoesNotBind(t *testing.T) {
 		t.Errorf("EnsureLessonCards ids = %v, want [%s-chinese]", ids, ttLessonID)
 	}
 }
+
+// TestSubjectPickDuringAskStopsAskPlayback — the P1 pin: tapping a pick
+// button while the ask question is STILL playing must fully terminate the
+// ask's announcement before the picked classroom starts. Concretely: the
+// epoch bumps (the ask's in-flight audio and waits all go stale), the ask's
+// playback wait is GONE (an ack for the ask's final sentence can no longer
+// settle-listening over the greeting's uplink gate, and the ask's ack
+// timeout can no longer orderly-close the fresh classroom), and the
+// greeting then plays and acks normally.
+func TestSubjectPickDuringAskStopsAskPlayback(t *testing.T) {
+	en := make([]lesson.Word, 0, 12)
+	for i := 0; i < 12; i++ {
+		en = append(en, lesson.Word{Word: "en" + string(rune('a'+i))})
+	}
+	zh := make([]lesson.Word, 0, 30)
+	for i := 0; i < 30; i++ {
+		zh = append(zh, lesson.Word{Word: "词" + string(rune('甲'+i%20)) + string(rune('0'+i%10))})
+	}
+	words := newFakeWords()
+	words.setPeek(lesson.CategoryEnglish, en)
+	words.setPeek(lesson.CategoryChinese, zh)
+	words.setDue(lesson.CategoryChinese, zh)
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(words), nil, nil)
+	s := &captureSender{}
+	ttSubjectInit(t, tm, s)
+
+	// The ask is mid-announcement: every sentence's audio went out, the ack
+	// has NOT landed — the ask goroutine is parked in its playback wait.
+	ttAwaitAskSent(t, s, 0)
+	askFinal, _ := s.controlsOf(t, TypeTeacherSentence)[s.countOf(TypeTeacherSentence)-1]["sentence_id"].(string)
+	askSentences := s.countOf(TypeTeacherSentence)
+	if askFinal == "" {
+		t.Fatal("no ask sentence to probe with")
+	}
+
+	// The child taps 默写语文 while the question is still out.
+	tm.HandleControl(s, mustJSON(t, SubjectPickMsg{Type: TypeSubjectPick, Category: lesson.CategoryChinese}))
+	if !waitFor(t, 5*time.Second, func() bool { return len(s.controlsOf(t, TypeSessionReady)) == 1 }) {
+		t.Fatal("session_ready never arrived after the pick")
+	}
+
+	// The epoch bumped and the ask's playback wait is gone: a stale ack for
+	// the ask's final sentence must be REJECTED (unknown_or_stale), leaving
+	// the greeting's own uplink gate untouched.
+	tm.mu.Lock()
+	epoch := tm.epoch
+	tm.mu.Unlock()
+	if epoch == 0 {
+		t.Error("epoch never bumped — the ask announcement was not terminated")
+	}
+	tm.HandleControl(s, mustJSON(t, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: askFinal, Epoch: 0}))
+	time.Sleep(150 * time.Millisecond)
+
+	// The greeting is out now; its gate must still hold (only ITS final ack
+	// may settle listening).
+	ttAwaitAskSent(t, s, askSentences)
+	tm.mu.Lock()
+	gate := tm.playbackPending
+	_, askWaitAlive := tm.pendingPlayback[pendingKey(0, askFinal)]
+	closed := tm.closed
+	tm.mu.Unlock()
+	if askWaitAlive {
+		t.Error("the ask's playback wait survived the pick — its ack/timeout still races the new classroom")
+	}
+	if !gate {
+		t.Error("the stale ask ack lifted the greeting's uplink gate")
+	}
+	if closed {
+		t.Error("the pick closed the session")
+	}
+
+	// The fresh classroom is healthy: the greeting's own final ack settles
+	// listening normally.
+	ttAckLast(t, tm, s, epoch)
+	ttWaitClarifyOpen(t, tm)
+	if ended := s.controlsOf(t, TypeSessionEnded); len(ended) != 0 {
+		t.Errorf("session_ended = %v, want none (the ask's timeout must not orderly-close the classroom)", ended)
+	}
+}
