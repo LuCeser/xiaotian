@@ -178,14 +178,18 @@
       var pageQuery = new URLSearchParams(window.location.search);
       var mode = pageQuery.get('mode') === 'test' ? 'test' : 'student';
       client.initMode = mode;
-      // ----- classroom subject (Issue #10) -------------------------------------
-      // Only the exact value "chinese" opens the 语文词语 classroom; anything
-      // else — including absent — stays the English classroom (the server
-      // normalizes the same way, the same deny-by-default shape as mode).
-      // The subject rides session_init via client.initCategory and scopes
-      // the due fetch, the review writes and the lesson row; session_ready
-      // echoes the row's subject back.
-      client.initCategory = pageQuery.get('category') === 'chinese' ? 'chinese' : 'english';
+      // ----- classroom subject (Issue #10 + #55) --------------------------------
+      // "english"/"chinese" are EXPLICIT declarations forwarded as-is; the
+      // absent param (开始默写 door, plain bookmark) sends "auto" — the
+      // server's model judgment then picks the subject from the due
+      // content, so starting never forces a manual pre-selection. The
+      // subject rides session_init via client.initCategory and scopes the
+      // due fetch, the review writes and the lesson row; session_ready
+      // echoes the RESOLVED subject back (adopted below for re-inits).
+      var declaredCategory = pageQuery.get('category');
+      client.initCategory = (declaredCategory === 'chinese' || declaredCategory === 'english')
+        ? declaredCategory
+        : 'auto';
       // ----- whole-poem 背默 classroom (Issue #12) ------------------------------
       // ?poem=<poems.id> opens the poem classroom for THAT work (the parent
       // content view's 背默这首 entry). Absent/non-numeric stays 0 = the word
@@ -682,6 +686,14 @@
       client.on('session_ready', function (m) {
         courseEnded = false;
         readPending = false;
+        // Issue #55: adopt the RESOLVED subject — an auto entry's judgment
+        // lands here as a concrete english/chinese, never "auto". The next
+        // in-page re-init (再练一组) rides it, so practice stays on the
+        // subject this classroom actually ran under instead of being
+        // re-judged to the other one.
+        if (m.category === 'chinese' || m.category === 'english') {
+          client.initCategory = m.category;
+        }
         lesson.words = (m.lesson && m.lesson.words) || [];
         lesson.currentIndex = (m.lesson && m.lesson.current_index) || 0;
         lesson.version = (m.lesson && m.lesson.version) || 0;

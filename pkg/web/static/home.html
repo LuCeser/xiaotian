@@ -52,15 +52,18 @@
         exceeding the 48px iPad minimum (tutor-page parity). No PIN, no
         session, no permission element of any kind.
 
-        Issue #10: the student door splits by SUBJECT — 英语单词默写 keeps
-        the legacy /tutor/ (the pre-#10 bookmark lands exactly where it
-        did), 语文词语默写 rides /tutor/?category=chinese (the tutor page
-        forwards the subject through session_init; the server normalizes
-        anything but "chinese" back to english). Both are the SAME
-        classroom, one row per subject per day.
+        Issue #10: the student door splits by SUBJECT — one row per subject
+        per day, the tutor page forwarding the subject through session_init.
+        Issue #55: 开始默写 is the UNSPECIFIED entry (the plain /tutor/ the
+        pre-#10 bookmark always meant) — the page sends category=auto and
+        the server's model judgment picks the subject from the due content,
+        so the child never has to pre-select. The two subject doors stay
+        EXPLICIT declarations (?category=english / ?category=chinese): a
+        picked subject is the user's word and is never re-judged.
       -->
       <nav class="home-doors" aria-label="家庭入口">
-        <a class="home-door home-door-primary" href="/tutor/">英语单词默写</a>
+        <a class="home-door home-door-primary" href="/tutor/">开始默写</a>
+        <a class="home-door home-door-primary" href="/tutor/?category=english">英语单词默写</a>
         <a class="home-door home-door-primary" href="/tutor/?category=chinese">语文词语默写</a>
         <a class="home-door home-door-secondary" href="/parent.html">家长：记录与词库</a>
       </nav>

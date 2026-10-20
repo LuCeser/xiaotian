@@ -8,7 +8,11 @@ const { test, expect } = require('@playwright/test');
 
 test('UAT-8/10: /home.html doors, no gate; / stays degraded', async ({ page }) => {
   await page.goto('/home.html');
-  await expect(page.locator('a[href="/tutor/"]')).toHaveText('英语单词默写');
+  // Issue #55: the generic door (开始默写 → /tutor/) is the unspecified
+  // entry (server-side judgment); both subject doors are explicit
+  // declarations and must carry their category param.
+  await expect(page.locator('a[href="/tutor/"]')).toHaveText('开始默写');
+  await expect(page.locator('a[href="/tutor/?category=english"]')).toHaveText('英语单词默写');
   await expect(page.locator('a[href="/tutor/?category=chinese"]')).toHaveText('语文词语默写');
   await expect(page.locator('a[href="/parent.html"]')).toHaveText('家长：记录与词库');
   expect(await page.locator('input').count()).toBe(0);

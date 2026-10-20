@@ -284,10 +284,11 @@
     // sets it BEFORE connect(); absent/invalid normalizes server-side to
     // student, so a page that never sets it stays safe by default.
     this.initMode = null;
-    // Issue #10: classroom subject sent in session_init
-    // ("english"|"chinese"). The page sets it BEFORE connect(); absent
-    // normalizes server-side to english, so every pre-#10 bookmark stays
-    // on the English classroom.
+    // Issue #10 + #55: classroom subject sent in session_init
+    // ("english"|"chinese"|"auto"). The page sets it BEFORE connect();
+    // "auto" (the unspecified entry) asks the server's model judgment to
+    // pick the subject from the due content, and an absent field keeps the
+    // pre-#10 server-side english landing.
     this.initCategory = null;
     // 13.1-05 D-11: practice flag sent in session_init (「再练一组」). The
     // page sets it BEFORE connect() for ONE practice session; the field is

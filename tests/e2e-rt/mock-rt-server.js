@@ -608,6 +608,12 @@ wss.on('connection', (ws, req, query) => {
     ackTimeout: query.get('mock_ack_timeout') === '1',
     partialSave: query.get('mock_partial_save') === '1',
     voiceVerdict: query.get('mock_voice_verdict') === '1',
+    // Issue #55: an optional session_ready.category echo ('english'|
+    // 'chinese') for the page's subject-adoption pin — the mock never
+    // judges anything, it just mirrors what the spec asks it to claim.
+    category: query.get('mock_category') === 'chinese' || query.get('mock_category') === 'english'
+      ? query.get('mock_category')
+      : '',
     // 13.1-07 scripted OCR pass (?mock_ocr=): 'off' = no OCR reader
     // server-side (photo_unavailable degradation, manual-only check);
     // otherwise a ';' list of PER-UPLOAD specs — upload N's readings use
@@ -1068,7 +1074,8 @@ wss.on('connection', (ws, req, query) => {
             session_id: state.id,
             audio: { sampleRate: 16000, format: 's16le', channels: 1 },
             tts: { sampleRate: TTS_RATE },
-            lesson: { id: state.lessonId, version: state.version, current_index: 0, words: lessonWordsForMode() }
+            lesson: { id: state.lessonId, version: state.version, current_index: 0, words: lessonWordsForMode() },
+            ...(mockMode.category ? { category: mockMode.category } : {})
           });
           break;
         }
@@ -1085,7 +1092,8 @@ wss.on('connection', (ws, req, query) => {
             session_id: state.id,
             audio: { sampleRate: 16000, format: 's16le', channels: 1 },
             tts: { sampleRate: TTS_RATE },
-            lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() }
+            lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() },
+            ...(mockMode.category ? { category: mockMode.category } : {})
           });
           state.ended = true;
           state.sessionEndedSent = true;
@@ -1112,7 +1120,8 @@ wss.on('connection', (ws, req, query) => {
             session_id: state.id,
             audio: { sampleRate: 16000, format: 's16le', channels: 1 },
             tts: { sampleRate: TTS_RATE },
-            lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() }
+            lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() },
+            ...(mockMode.category ? { category: mockMode.category } : {})
           });
           send({ type: 'check_started', words: state.words.slice(), reason: state.checkStartedReason });
           send({ type: 'check_verdicts', verdicts: initial });
@@ -1130,7 +1139,8 @@ wss.on('connection', (ws, req, query) => {
           session_id: state.id,
           audio: { sampleRate: 16000, format: 's16le', channels: 1 },
           tts: { sampleRate: TTS_RATE },
-          lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() }
+          lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() },
+          ...(mockMode.category ? { category: mockMode.category } : {})
         });
         break;
       }
