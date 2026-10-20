@@ -175,6 +175,13 @@ func (tm *TurnManager) takeSubjectAsk(category string, epoch uint64, fromTurn bo
 // aftermath of the termination (VAD reset + the interrupt_ack epoch notice)
 // and the handoff to the picked classroom. An end_session that closed the
 // session between the halves must not receive session_ready or a greeting.
+// The stillOpen check here is only the fast path (it also spares the picked
+// event); the REAL gates live at the classroom init's outward points — the
+// starters (session_ready, tutor bind), the row creation and the
+// announcement entry checks — because this half runs on the ANSWER TURN's
+// goroutine and an end_session can close the session under any of that IO
+// (PR #60 review: an entry-only check passes and still ships a classroom
+// that outlives its own session_ended).
 func (tm *TurnManager) finalizeSubjectAsk(s Sender, m SessionInitMsg, oldEpoch uint64, category, via string) {
 	tm.vad.Reset()
 	_ = s.SendControl(InterruptAckMsg{

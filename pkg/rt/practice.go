@@ -213,6 +213,12 @@ func (tm *TurnManager) noDueWordsTextForNow() string {
 // the practice flag set. Runs on the transport read loop — DB calls are the
 // same short-transaction class as the main init.
 func (tm *TurnManager) handlePracticeInit(s Sender) {
+	if !tm.stillOpen() {
+		// PR #60 review: a practice init resumed after a subject pick runs on
+		// the answer turn's goroutine — a session closed under that handoff
+		// answers nothing.
+		return
+	}
 	if tm.cfg.Practice == nil || tm.cfg.PracticeStore == nil {
 		// Honest degraded answer (lesson_unavailable class) — never a
 		// silent fallback into a due-word lesson.
@@ -283,6 +289,11 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 		// Honest empty answer: ready + spoken notice + ack-gated ending.
 		// No new reason — the client_end-style explicit end (plan).
 		tm.mu.Lock()
+		if tm.closed {
+			// PR #60 review: same gate as every other starter.
+			tm.mu.Unlock()
+			return
+		}
 		tm.state = StateListening
 		tm.sessionReadyAt = time.Now()
 		tm.mu.Unlock()
@@ -298,12 +309,21 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 
 		nctx, cancel := context.WithCancel(context.Background())
 		tm.mu.Lock()
+		if tm.closed {
+			tm.mu.Unlock()
+			cancel()
+			return
+		}
 		tm.turnCancel = cancel
 		tm.mu.Unlock()
 		go tm.runNaturalEnding(s, nctx, cancel, practiceAllPracticedNotice, purposeNoDue, ReasonClientEnd)
 		return
 	}
 
+	// PR #60 review: a closed session creates no practice row either.
+	if !tm.stillOpen() {
+		return
+	}
 	l, err := tm.exec.EnsureLessonCards(ctx, lessonID, picked, category)
 	if err != nil {
 		tm.failLessonInit(s)

@@ -676,6 +676,13 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 			tm.startNoDueSession(s, lessonID)
 			return
 		}
+		// PR #60 review: the picked classroom's init runs on the ANSWER
+		// turn's goroutine, so an end_session can close the session under
+		// this very IO — a closed session creates no row (the starters
+		// below re-check at their own send points for the same reason).
+		if !tm.stillOpen() {
+			return
+		}
 		l, err = tm.exec.EnsureLessonCards(ctx, lessonID, cards, category)
 		if err != nil {
 			// RunDue succeeded but the lesson row did not materialize; the
@@ -711,8 +718,13 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 }
 
 // failLessonInit is the single classroom-init failure egress: a coded,
-// fixed-wording ErrorMsg plus the server-side error event (T-13-14).
+// fixed-wording ErrorMsg plus the server-side error event (T-13-14). PR #60
+// review: a session that closed under the init IO gets no failure message
+// either — nothing follows its session_ended.
 func (tm *TurnManager) failLessonInit(s Sender) {
+	if !tm.stillOpen() {
+		return
+	}
 	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable))
 	tm.sendError(s, ErrCodeLessonUnavailable, lessonUnavailableNotice, false)
 }
@@ -739,6 +751,13 @@ func normalizeSessionMode(mode string) string {
 // after the explanation's actual playback ack (or its bounded timeout).
 func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 	tm.mu.Lock()
+	if tm.closed {
+		// PR #60 review: the session may have closed under the init IO that
+		// led here — a closed session gets no session_ready and no spoken
+		// explanation (nothing may follow its session_ended).
+		tm.mu.Unlock()
+		return
+	}
 	tm.state = StateListening
 	tm.sessionReadyAt = time.Now()
 	tm.mu.Unlock()
@@ -755,6 +774,11 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	if tm.closed {
+		tm.mu.Unlock()
+		cancel()
+		return
+	}
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
 	go tm.runNaturalEnding(s, ctx, cancel, tm.noDueWordsTextForNow(), purposeNoDue, ReasonNoDueWords)
@@ -765,6 +789,12 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 // — no summary replay, no second SubmitReview.
 func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
 	tm.mu.Lock()
+	if tm.closed {
+		// PR #60 review: same gate as the other starters — a closed session
+		// replays neither session_ready nor the completion session_ended.
+		tm.mu.Unlock()
+		return
+	}
 	tm.state = StateListening
 	tm.sessionReadyAt = time.Now()
 	tm.mu.Unlock()
@@ -789,6 +819,15 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
 // submit-path flag; pacing, the check stage and the D-05 gate are identical.
 func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice bool) {
 	tm.mu.Lock()
+	if tm.closed {
+		// PR #60 review: the subject-picked classroom's init runs on the
+		// answer turn's goroutine, so an end_session may have closed the
+		// session under the fetch/row IO — the closed check shares the hold
+		// that binds the tutor, so a closed session binds nothing, sends no
+		// session_ready and never greets.
+		tm.mu.Unlock()
+		return
+	}
 	tm.tutor = newDictationTutor(l)
 	tm.tutor.practice = practice
 	tm.state = StateListening
@@ -810,6 +849,14 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	if tm.closed {
+		// A close that landed after the session_ready send still gets no
+		// greeting: the entry gates (runAnnouncementDisplayAt) kill the
+		// goroutine even if it launches, but refusing here is the fast path.
+		tm.mu.Unlock()
+		cancel()
+		return
+	}
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
 	spoken := greetingText(total, first.Word)
@@ -959,12 +1006,15 @@ func (tm *TurnManager) currentEpoch() uint64 {
 // dead, not resurrected under the NEW epoch. speakTurn mutates playback
 // state, registers waits and ships subtitles BEFORE any TTS call, so a
 // cancelled context alone cannot stop a late ask from clobbering the new
-// classroom's bookkeeping; only the epoch comparison can.
+// classroom's bookkeeping; only the epoch comparison can. The closed refusal
+// (PR #60 review) rides the same hold: an announcement goroutine launched
+// just before an end_session but scheduled after it must die here too — a
+// close does not bump the epoch, so the epoch comparison alone would pass it.
 func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
 	defer cancel()
 
 	tm.mu.Lock()
-	if tm.epoch != epoch {
+	if tm.epoch != epoch || tm.closed {
 		// Stale before the first sound: nothing registered, nothing spoken.
 		tm.mu.Unlock()
 		return
@@ -992,11 +1042,17 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 // the completion summary) and finishes with session_ended carrying the
 // ORIGINAL reason — after the valid ack, or after the bounded ack timeout
 // (ErrorMsg first, reason second — the protocol.go degraded order; never a
-// fabricated completion and never a timeout reason).
+// fabricated completion and never a timeout reason). PR #60 review: a
+// no-due/explanation goroutine scheduled only after the session closed dies
+// at entry — no sentences, no ack-timeout theater, no second session_ended.
 func (tm *TurnManager) runNaturalEnding(s Sender, ctx context.Context, cancel context.CancelFunc, text, purpose, reason string) {
 	defer cancel()
 
 	tm.mu.Lock()
+	if tm.closed {
+		tm.mu.Unlock()
+		return
+	}
 	epoch := tm.epoch
 	turnID := tm.nextTurnIDLocked()
 	tm.mu.Unlock()

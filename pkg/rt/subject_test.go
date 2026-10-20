@@ -958,3 +958,91 @@ func TestFinalizeSkipsClosedSession(t *testing.T) {
 		t.Errorf("EnsureLessonCards ids = %v, want none", ids)
 	}
 }
+
+// TestEndSessionDuringPickedInitIOSendsNoClassroom — PR #60 review P2: the
+// voice answer's finalizeSubjectAsk passes its stillOpen gate, then runs the
+// picked classroom's init IO (due fetch → row creation → session_ready →
+// greeting). An end_session the read loop processes DURING that IO must end
+// the story: no lesson row, no session_ready, no greeting — nothing on the
+// wire after session_ended. The interleave is deterministic: end_session
+// fires from INSIDE the due fetch (a real IO point of the picked init),
+// never from a sleep. An entry-only stillOpen check passes this test's
+// ordering and still ships the classroom — the gates must sit at the sends.
+func TestEndSessionDuringPickedInitIOSendsNoClassroom(t *testing.T) {
+	en := make([]lesson.Word, 0, 12)
+	for i := 0; i < 12; i++ {
+		en = append(en, lesson.Word{Word: "en" + string(rune('a'+i))})
+	}
+	zh := make([]lesson.Word, 0, 30)
+	for i := 0; i < 30; i++ {
+		zh = append(zh, lesson.Word{Word: "词" + string(rune('甲'+i%20)) + string(rune('0'+i%10))})
+	}
+	words := newFakeWords()
+	words.setPeek(lesson.CategoryEnglish, en)
+	words.setPeek(lesson.CategoryChinese, zh)
+	words.setDue(lesson.CategoryChinese, zh)
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(words), nil, nil)
+	s := &captureSender{}
+	ttSubjectInit(t, tm, s)
+	ttAwaitAskSent(t, s, 0)
+	sentences := s.countOf(TypeTeacherSentence)
+	ttAckLast(t, tm, s, 0) // settle the ask so its goroutine is done interfering
+
+	// The spoken answer's locked half binds 语文 (epoch 0 = the answer turn's).
+	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, 0, true)
+	if !ok {
+		t.Fatal("takeSubjectAsk refused a live clarify")
+	}
+
+	// end_session lands while the picked classroom's due fetch is running —
+	// AFTER finalizeSubjectAsk's stillOpen gate has already passed.
+	words.onFetch = func() { tm.handleEndSession(s) }
+
+	tm.finalizeSubjectAsk(s, m, oldEpoch, lesson.CategoryChinese, "voice")
+
+	if ready := s.controlsOf(t, TypeSessionReady); len(ready) != 0 {
+		t.Errorf("session_ready after mid-init end_session = %d, want 0", len(ready))
+	}
+	if got := s.countOf(TypeTeacherSentence); got != sentences {
+		t.Errorf("teacher sentences after mid-init end_session = %d, want still %d (no greeting)", got, sentences)
+	}
+	if ids := exec.ensureIDCalls(); len(ids) != 0 {
+		t.Errorf("EnsureLessonCards ids = %v, want none (a closed session creates no row)", ids)
+	}
+	if ended := s.controlsOf(t, TypeSessionEnded); len(ended) != 1 {
+		t.Fatalf("session_ended count = %d, want exactly the end_session's own 1", len(ended))
+	}
+	if order := s.typeOrder(); order[len(order)-1] != TypeSessionEnded {
+		t.Errorf("last wire message = %q, want session_ended (nothing may follow it)", order[len(order)-1])
+	}
+}
+
+// TestClosedSessionRefusesLateAnnouncementEntries — the second half of the
+// review P2: a greeting/no-due goroutine launched just before an end_session
+// but not yet scheduled must die AT ENTRY, not speak into the closed session.
+// The closed refusal rides the SAME lock hold as runAnnouncementDisplayAt's
+// epoch check, and runNaturalEnding gets its own entry gate — a close that
+// does not bump the epoch must still kill a not-yet-started announcement.
+func TestClosedSessionRefusesLateAnnouncementEntries(t *testing.T) {
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords()), nil, nil)
+	s := &captureSender{}
+	tm.handleEndSession(s) // session_ended out; the session is closed
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tm.runAnnouncementDisplayAt(s, 0, ctx, cancel, "同学们好，我们开始听写", "同学们好，我们开始听写", purposeGreeting, nil)
+	if got := s.countOf(TypeTeacherSentence); got != 0 {
+		t.Errorf("teacher sentences from a late greeting entry = %d, want 0", got)
+	}
+	tm.runNaturalEnding(s, ctx, cancel, "今天没有要默写的词语", purposeNoDue, ReasonNoDueWords)
+	if got := s.countOf(TypeTeacherSentence); got != 0 {
+		t.Errorf("teacher sentences from a late no-due entry = %d, want 0", got)
+	}
+	if got := s.countOf(TypeError); got != 0 {
+		t.Errorf("error messages from a late no-due entry = %d, want 0 (no ack-timeout theater)", got)
+	}
+	if got := s.countOf(TypeSessionEnded); got != 1 {
+		t.Errorf("session_ended count = %d, want 1 (only the end_session's own)", got)
+	}
+}

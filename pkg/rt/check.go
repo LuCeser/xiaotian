@@ -239,6 +239,13 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	}
 
 	tm.mu.Lock()
+	if tm.closed {
+		// PR #60 review: the subject-picked classroom reaches this resume
+		// branch on the answer turn's goroutine — an end_session that closed
+		// the session under the row IO gets no panel replay at all.
+		tm.mu.Unlock()
+		return
+	}
 	tm.tutor = newDictationTutor(l)
 	tm.tutor.completed = true // word pacing is over; the countdown stays disarmed
 	tm.tutor.checking = true  // the check panel owns the input surface
@@ -285,6 +292,13 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	if tm.closed {
+		// A close that landed after the panel replay still gets no spoken
+		// bridge (runAnnouncementDisplayAt's entry gate is the backstop).
+		tm.mu.Unlock()
+		cancel()
+		return
+	}
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
 	bridge := checkResumeBridgeText(len(words))
