@@ -119,15 +119,16 @@ func (tm *TurnManager) handleSubjectPick(s Sender, m SubjectPickMsg) {
 // — keyword matching only, never an LLM call (the subject decision belongs
 // to the child). A clean 语文/英语 binds and resumes the parked init; an
 // unusable answer (neither subject named, or both) re-asks with the short
-// retry wording and the clarify holds.
+// retry wording and the clarify holds. The retry rides the ANSWER TURN's
+// captured epoch (runAnnouncementDisplayAt's entry check is the gate): a
+// pick that lands between the check and the announcement must find the
+// retry dead too — it must never re-read the bumped epoch and speak over
+// the classroom the pick just opened.
 func (tm *TurnManager) handleSubjectAnswerTurn(s Sender, transcript string, epoch uint64, ctx context.Context, cancel context.CancelFunc) {
 	category, ok := subjectFromAnswer(transcript)
 	if !ok {
 		tm.recorder.Emit(EventSubjectAsk, infra.F("retry", true))
-		if !tm.epochCurrent(epoch) {
-			return
-		}
-		tm.runAnnouncement(s, ctx, cancel, subjectAskRetryText, purposeSubjectAsk, nil)
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, subjectAskRetryText, subjectAskRetryText, purposeSubjectAsk, nil)
 		return
 	}
 	tm.finishSubjectAsk(s, category, "voice", epoch, true)

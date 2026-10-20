@@ -701,3 +701,159 @@ func TestAskGoroutineRefusesBumpedEpoch(t *testing.T) {
 		t.Errorf("state after the dead ask = %q, want listening untouched", state)
 	}
 }
+
+// ttArmAsk parks the clarify exactly as startSubjectAsk does — pendingAsk
+// set, listening, the ask's epoch fixed at its pre-bump value — WITHOUT
+// launching the announcement goroutine, so a test can interleave the pick
+// BEFORE the ask (or its retry) first runs, deterministically.
+func ttArmAsk(tm *TurnManager) uint64 {
+	initMsg := SessionInitMsg{Type: TypeSessionInit, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1}, Category: CategoryAuto}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.pendingAsk = &initMsg
+	tm.state = StateListening
+	return tm.epoch
+}
+
+// TestAskRetryRidesAnswerTurnEpoch — the review P2 pin: a spoken answer's
+// retry announcement must carry the ANSWER TURN's captured epoch. If a pick
+// lands between the answer's epoch check and the retry's announcement
+// start, the bumped current epoch must NOT be re-read — the retry would
+// otherwise pass runAnnouncementDisplay's fresh snapshot and speak "老师
+// 没听清" over the classroom the pick just opened.
+func TestAskRetryRidesAnswerTurnEpoch(t *testing.T) {
+	words := newFakeWords()
+	words.setPeek(lesson.CategoryEnglish, ttCards("en1", "en2", "en3"))
+	words.setPeek(lesson.CategoryChinese, ttCards("词1", "词2", "词3"))
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(words), nil, nil)
+	s := &captureSender{}
+
+	answerEpoch := ttArmAsk(tm) // the child's answer turn captured epoch 0
+
+	// The pick is processed BEFORE the retry announcement starts: full
+	// termination, epoch bump, everything.
+	tm.stopAskPlayback(s)
+
+	// The retry finally launches, carrying the answer turn's epoch.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tm.runAnnouncementDisplayAt(s, answerEpoch, ctx, cancel, subjectAskRetryText, subjectAskRetryText, purposeSubjectAsk, nil)
+
+	if got := s.countOf(TypeTeacherSentence); got != 0 {
+		t.Errorf("teacher sentences from the dead retry = %d, want 0 (a bumped retry must never speak)", got)
+	}
+	tm.mu.Lock()
+	waits := len(tm.pendingPlayback)
+	state := tm.state
+	pending := tm.playbackPending
+	tm.mu.Unlock()
+	if waits != 0 {
+		t.Errorf("pendingPlayback entries after the dead retry = %d, want 0", waits)
+	}
+	if state == StateSpeaking {
+		t.Error("the dead retry drove the FSM to speaking")
+	}
+	if pending {
+		t.Error("the dead retry raised a playback gate")
+	}
+
+	// The REAL call path pin: handleSubjectAnswerTurn itself, answering with
+	// the (now stale) turn epoch, must stay equally dead. If the call site
+	// ever regresses to runAnnouncement's fresh-epoch snapshot, the retry
+	// speaks over the picked classroom and this goes red.
+	words2 := newFakeWords()
+	words2.setPeek(lesson.CategoryEnglish, ttCards("en1", "en2", "en3"))
+	words2.setPeek(lesson.CategoryChinese, ttCards("词1", "词2", "词3"))
+	tm2 := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(words2), nil, nil)
+	s2 := &captureSender{}
+	answerEpoch2 := ttArmAsk(tm2)
+	tm2.stopAskPlayback(s2)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	tm2.handleSubjectAnswerTurn(s2, "今天天气不错", answerEpoch2, ctx2, cancel2)
+	if got := s2.countOf(TypeTeacherSentence); got != 0 {
+		t.Errorf("teacher sentences from the dead retry call path = %d, want 0", got)
+	}
+}
+
+// TestSettledStaleAnnouncerCannotLiftNewClassroomGate — the review P2 pin:
+// when the ask's FINAL ack lands just BEFORE a pick bumps the epoch and
+// opens the new classroom, the ask goroutine's late recovery from its
+// playback wait still sees completed=true — its settle (and its timeout
+// twin) must be epoch-gated ATOMICALLY with the state update, or it lifts
+// the fresh greeting's playbackPending gate / closes the classroom.
+func TestSettledStaleAnnouncerCannotLiftNewClassroomGate(t *testing.T) {
+	en := make([]lesson.Word, 0, 12)
+	for i := 0; i < 12; i++ {
+		en = append(en, lesson.Word{Word: "en" + string(rune('a'+i))})
+	}
+	zh := make([]lesson.Word, 0, 30)
+	for i := 0; i < 30; i++ {
+		zh = append(zh, lesson.Word{Word: "词" + string(rune('甲'+i%20)) + string(rune('0'+i%10))})
+	}
+	words := newFakeWords()
+	words.setPeek(lesson.CategoryEnglish, en)
+	words.setPeek(lesson.CategoryChinese, zh)
+	words.setDue(lesson.CategoryChinese, zh)
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(words), nil, nil)
+	s := &captureSender{}
+	ttSubjectInit(t, tm, s)
+
+	// The ask plays out and its FINAL ack lands: the ask goroutine is
+	// released from its wait with completed=true — but suppose it has not
+	// gotten any further yet (the pick is processed first).
+	ttAwaitAskSent(t, s, 0)
+	askEpoch := uint64(0)
+	ttAckLast(t, tm, s, askEpoch)
+
+	// The pick: full termination + the new classroom, whose greeting gate
+	// is now pending under epoch 1.
+	tm.HandleControl(s, mustJSON(t, SubjectPickMsg{Type: TypeSubjectPick, Category: lesson.CategoryChinese}))
+	if !waitFor(t, 5*time.Second, func() bool { return len(s.controlsOf(t, TypeSessionReady)) == 1 }) {
+		t.Fatal("session_ready never arrived after the pick")
+	}
+	if !waitFor(t, 5*time.Second, func() bool {
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		return tm.playbackPending
+	}) {
+		t.Fatal("the greeting's playback gate never armed")
+	}
+
+	// The ask goroutine finally recovers: settle under its OWN (now stale)
+	// epoch must be refused — the greeting's gate stays down.
+	if tm.settleListeningAt(s, askEpoch) {
+		t.Error("the stale announcer's settle took effect over the new classroom")
+	}
+	tm.mu.Lock()
+	gate := tm.playbackPending
+	closed := tm.closed
+	tm.mu.Unlock()
+	if !gate {
+		t.Error("the stale announcer's settle lifted the greeting's uplink gate")
+	}
+	if closed {
+		t.Error("the settle path closed the fresh classroom")
+	}
+
+	// The timeout twin: a stale orderlyClose must not close it either.
+	tm.orderlyCloseAt(askEpoch)
+	tm.mu.Lock()
+	closed = tm.closed
+	tm.mu.Unlock()
+	if closed {
+		t.Error("the stale announcer's timeout closed the fresh classroom")
+	}
+	if ended := s.controlsOf(t, TypeSessionEnded); len(ended) != 0 {
+		t.Errorf("session_ended = %v, want none from a stale announcer", ended)
+	}
+
+	// The greeting's own final ack (epoch 1) settles normally — the healthy
+	// path is untouched.
+	tm.mu.Lock()
+	current := tm.epoch
+	tm.mu.Unlock()
+	ttAckLast(t, tm, s, current)
+	ttWaitClarifyOpen(t, tm)
+}

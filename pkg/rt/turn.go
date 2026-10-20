@@ -976,12 +976,14 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
 	if !completed {
 		if timedOut {
-			tm.orderlyClose()
+			tm.orderlyCloseAt(epoch)
 		}
 		return
 	}
-	tm.settleListening(s)
-	if onAck != nil {
+	// The settle, and the onAck work it licenses (timer arms, word events),
+	// ride the SAME epoch gate: a stale announcer must not lift the new
+	// classroom's gate or arm timers over it.
+	if tm.settleListeningAt(s, epoch) && onAck != nil {
 		onAck()
 	}
 }
@@ -1137,6 +1139,15 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 // photo never outlives its session).
 func (tm *TurnManager) internalClose() {
 	tm.mu.Lock()
+	tm.internalCloseLocked()
+	tm.mu.Unlock()
+	tm.vad.Reset()
+}
+
+// internalCloseLocked is internalClose's locked half (caller holds tm.mu),
+// shared with the epoch-gated orderlyCloseAt so the epoch check and the
+// close itself are one atomic step.
+func (tm *TurnManager) internalCloseLocked() {
 	if tm.turnCancel != nil {
 		tm.turnCancel()
 	}
@@ -1150,8 +1161,6 @@ func (tm *TurnManager) internalClose() {
 	tm.closed = true
 	tm.photo = nil
 	tm.pendingAsk = nil
-	tm.mu.Unlock()
-	tm.vad.Reset()
 }
 
 // orderlyClose is the bounded-timeout degraded ending of an ordinary
@@ -1160,6 +1169,23 @@ func (tm *TurnManager) internalClose() {
 // timer arm, no word advance, and no new timeout end reason.
 func (tm *TurnManager) orderlyClose() {
 	tm.internalClose()
+}
+
+// orderlyCloseAt is orderlyClose gated on the announcement's own epoch
+// (PR #59 review): a timeout reported by an announcement the FSM has since
+// moved past — an ask terminated by a subject pick — must never close the
+// classroom that replaced it. The gate and the close are one lock hold, so
+// the interleaving "timeout fires → pick bumps the epoch and opens the new
+// classroom → the stale close lands" cannot happen.
+func (tm *TurnManager) orderlyCloseAt(epoch uint64) {
+	tm.mu.Lock()
+	if tm.epoch != epoch || tm.closed {
+		tm.mu.Unlock()
+		return
+	}
+	tm.internalCloseLocked()
+	tm.mu.Unlock()
+	tm.vad.Reset()
 }
 
 // Close implements SessionManager: the transport read loop exited for any
@@ -1274,7 +1300,7 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		// and the per-word countdown is NOT reset (hearing nothing is not an
 		// interaction). A server-side marker event only.
 		tm.recorder.Emit(EventSpeechEnded, infra.F("turn_id", turnID), infra.F("empty", true))
-		tm.settleListening(s)
+		tm.settleListeningAt(s, epoch)
 		return
 	}
 	if err != nil && errors.Is(err, mimo.ErrInvalidResponse) {
@@ -1291,7 +1317,7 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	if transcript == "" {
 		// Nothing usable recognized: back to listening. (13-09 refines the
 		// silent tolerance of legal-empty ASR results.)
-		tm.settleListening(s)
+		tm.settleListeningAt(s, epoch)
 		return
 	}
 	if asking {
@@ -1525,7 +1551,7 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 				tm.tutor.align(l.CurrentIndex, l.Version)
 				tm.mu.Unlock()
 			}
-			tm.settleListening(s)
+			tm.settleListeningAt(s, epoch)
 			return
 		}
 		tm.failTurn(s, epoch, ErrCodeProviderFailed, "课堂进度更新失败，请再试一次")
@@ -1538,7 +1564,7 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		tm.mu.Lock()
 		tm.tutor.align(res.NewIndex, res.NewVersion)
 		tm.mu.Unlock()
-		tm.settleListening(s)
+		tm.settleListeningAt(s, epoch)
 		return
 	}
 
@@ -1746,17 +1772,24 @@ func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpos
 	}
 }
 
-// settleListening returns the FSM to listening after a valid final ack —
+// settleListeningAt returns the FSM to listening after a valid final ack —
 // the ONLY place an announcement hands control back, and the ONLY place the
 // echo tail starts: lastPlaybackCompletedAt is stamped here and ordinary
 // uplink stays gated through VADEchoTailMs. The broadcast carries the
 // EFFECTIVE client state: while the classroom pause bit holds, the student
 // sees paused, never a silent resume to listening (13-09).
-func (tm *TurnManager) settleListening(s Sender) {
+//
+// The settle is gated on the ANNOUNCEMENT'S OWN epoch, atomically with the
+// state update (PR #59 review): a stale announcer — the ask whose final ack
+// landed just before a pick bumped the epoch and opened the new classroom —
+// must not lift the fresh greeting's playbackPending gate or start an echo
+// tail over it. Returns whether the settle actually took effect (callers
+// gate their onAck work on it).
+func (tm *TurnManager) settleListeningAt(s Sender, epoch uint64) bool {
 	tm.mu.Lock()
-	if tm.state == "" || tm.closed {
+	if tm.state == "" || tm.closed || tm.epoch != epoch {
 		tm.mu.Unlock()
-		return
+		return false
 	}
 	tm.state = StateListening
 	tm.playbackPending = false
@@ -1766,6 +1799,7 @@ func (tm *TurnManager) settleListening(s Sender) {
 	value := tm.effectiveClientStateLocked()
 	tm.mu.Unlock()
 	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
+	return true
 }
 
 // failTurn reports a turn-level failure and returns the FSM to listening —

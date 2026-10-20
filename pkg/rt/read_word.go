@@ -42,10 +42,15 @@ func (tm *TurnManager) handleReadWord(s Sender, m ReadWordMsg) {
 		ref := tm.speakTurn(s, turnID, epoch, spoken, display, purposeChat, ctx, cancel)
 		completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purposeChat)
 		if timedOut {
-			tm.orderlyClose()
+			// The epoch gate keeps a stale re-read's timeout from closing a
+			// classroom the FSM has since moved on to.
+			tm.orderlyCloseAt(epoch)
 		} else if completed {
-			tm.settleListening(s)
-			tm.armWordTimer()
+			// The timer re-arms only if the settle actually landed — a
+			// stale re-read must not arm over a newer announcement.
+			if tm.settleListeningAt(s, epoch) {
+				tm.armWordTimer()
+			}
 		}
 	}()
 }
