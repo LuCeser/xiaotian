@@ -1163,20 +1163,16 @@ func (tm *TurnManager) internalCloseLocked() {
 	tm.pendingAsk = nil
 }
 
-// orderlyClose is the bounded-timeout degraded ending of an ordinary
+// orderlyCloseAt is the bounded-timeout degraded ending of an ordinary
 // announcement: the ErrorMsg(playback_ack_timeout) already went out in the
 // await; this closes the session in order — no fabricated completion, no
-// timer arm, no word advance, and no new timeout end reason.
-func (tm *TurnManager) orderlyClose() {
-	tm.internalClose()
-}
-
-// orderlyCloseAt is orderlyClose gated on the announcement's own epoch
-// (PR #59 review): a timeout reported by an announcement the FSM has since
-// moved past — an ask terminated by a subject pick — must never close the
-// classroom that replaced it. The gate and the close are one lock hold, so
-// the interleaving "timeout fires → pick bumps the epoch and opens the new
-// classroom → the stale close lands" cannot happen.
+// timer arm, no word advance, and no new timeout end reason — gated on the
+// announcement's OWN epoch (PR #59 review): a timeout reported by an
+// announcement the FSM has since moved past — an ask terminated by a
+// subject pick — must never close the classroom that replaced it. The gate
+// and the close are one lock hold, so the interleaving "timeout fires →
+// pick bumps the epoch and opens the new classroom → the stale close
+// lands" cannot happen.
 func (tm *TurnManager) orderlyCloseAt(epoch uint64) {
 	tm.mu.Lock()
 	if tm.epoch != epoch || tm.closed {

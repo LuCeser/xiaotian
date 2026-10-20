@@ -804,6 +804,7 @@ func TestSettledStaleAnnouncerCannotLiftNewClassroomGate(t *testing.T) {
 	// released from its wait with completed=true — but suppose it has not
 	// gotten any further yet (the pick is processed first).
 	ttAwaitAskSent(t, s, 0)
+	askSentences := s.countOf(TypeTeacherSentence)
 	askEpoch := uint64(0)
 	ttAckLast(t, tm, s, askEpoch)
 
@@ -850,7 +851,10 @@ func TestSettledStaleAnnouncerCannotLiftNewClassroomGate(t *testing.T) {
 	}
 
 	// The greeting's own final ack (epoch 1) settles normally — the healthy
-	// path is untouched.
+	// path is untouched. Wait for the greeting's sentences to be fully out
+	// first, so the ack lands on ITS final sentence, not on a leftover ask
+	// sentence the slower (-race) scheduling has not yet replaced.
+	ttAwaitAskSent(t, s, askSentences)
 	tm.mu.Lock()
 	current := tm.epoch
 	tm.mu.Unlock()
