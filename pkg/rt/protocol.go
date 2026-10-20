@@ -49,6 +49,7 @@ const (
 	TypeCheckSubmit  = "check_submit"  // 13.1-01: the unified-submit request
 	TypePhotoChunk   = "photo_chunk"   // 13.1-03: one base64 image chunk (check stage)
 	TypePhotoCancel  = "photo_cancel"  // 13.1-03: discard the in-flight upload
+	TypeSubjectPick  = "subject_pick"  // Issue #55: the child answered the subject clarify (button)
 )
 
 // Server → client control message type constants.
@@ -70,6 +71,7 @@ const (
 	TypeReviewResult    = "review_result"  // 13.1-01: honest unified-submit result (S-05)
 	TypeWordRevealed    = "word_revealed"  // 13.1-01: one word's plaintext reveal
 	TypeOcrResult       = "ocr_result"     // 13.1-03: per-word OCR recognition entries
+	TypeSubjectAsk      = "subject_ask"    // Issue #55: both subjects have due words — ask the child
 )
 
 // StateMsg.Value vocabulary for the student-facing connection state.
@@ -255,15 +257,16 @@ const (
 	CategoryChinese = "chinese"
 )
 
-// CategoryAuto (Issue #55) is the explicit "no subject declared" request:
-// the server judges the subject ONCE from the two subjects' due content
-// (one model call over the peek snapshot) and binds the round to the
-// judgment exactly like an explicit declaration — the confirmed default
-// 「默认由大模型根据内容判断，不强制每次先手动选择」. An explicit
-// english/chinese declaration skips the judgment entirely (the user's word
-// wins, never silently re-judged). Absent/off-enum values keep the pre-#55
-// deny-by-default english landing, so nothing that does not knowingly ask
-// for the judgment pays for it.
+// CategoryAuto (Issue #55) is the explicit "no subject declared" request.
+// The server NEVER lets a model guess the subject: with only ONE subject
+// holding due words the classroom opens under that subject directly; with
+// BOTH subjects holding due words the server asks the CHILD which one to
+// dictate (the subject_ask question + screen buttons; the spoken or tapped
+// answer binds the round) and the round then runs under the picked subject
+// only; with neither subject due, the english classroom opens and ends
+// through the ordinary no-due path. An explicit english/chinese declaration
+// skips all of this — the user's word wins. Absent/off-enum values keep the
+// pre-#55 deny-by-default english landing.
 const CategoryAuto = "auto"
 
 // UI mode values carried by SessionInitMsg.Mode (13.1 D-08). Anything else —
@@ -318,6 +321,27 @@ type PingMsg struct {
 // session (RT-10/SC7 server half) and answers SessionEndedMsg.
 type EndSessionMsg struct {
 	Type string `json:"type"`
+}
+
+// SubjectAskMsg (Issue #55) is the server's subject clarify question: an
+// auto (unspecified-subject) word classroom where BOTH subjects hold due
+// words asks the CHILD which one to dictate instead of guessing. Question
+// carries the same text the teacher speaks; the page also renders two pick
+// buttons. The classroom has NOT started yet — no lesson row exists until
+// the answer arrives (subject_pick control or the spoken answer), and the
+// round then runs under the picked subject only.
+type SubjectAskMsg struct {
+	Type     string `json:"type"`
+	Question string `json:"question"`
+}
+
+// SubjectPickMsg (Issue #55) is the page's answer to SubjectAskMsg: the
+// subject button the child tapped. Category must be exactly english or
+// chinese (ParseControl rejects anything else); the picked subject binds
+// the round exactly like an explicit declaration.
+type SubjectPickMsg struct {
+	Type     string `json:"type"`
+	Category string `json:"category"`
 }
 
 // SessionReadyMsg answers a valid SessionInitMsg. Audio echoes the confirmed
@@ -716,6 +740,21 @@ func ParseControl(data []byte) (any, error) {
 		return m, nil
 	case TypeEndSession:
 		var m EndSessionMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		return m, nil
+	case TypeSubjectPick:
+		var m SubjectPickMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
+		}
+		if m.Category != CategoryEnglish && m.Category != CategoryChinese {
+			return nil, errors.Wrap(ErrInvalidControlMessage, "subject_pick requires category english or chinese")
+		}
+		return m, nil
+	case TypeSubjectAsk:
+		var m SubjectAskMsg
 		if err := json.Unmarshal(data, &m); err != nil {
 			return nil, errors.Wrap(ErrInvalidControlMessage, err.Error())
 		}
