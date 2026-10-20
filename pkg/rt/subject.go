@@ -119,15 +119,16 @@ func (tm *TurnManager) handleSubjectPick(s Sender, m SubjectPickMsg) {
 // — keyword matching only, never an LLM call (the subject decision belongs
 // to the child). A clean 语文/英语 binds and resumes the parked init; an
 // unusable answer (neither subject named, or both) re-asks with the short
-// retry wording and the clarify holds.
+// retry wording and the clarify holds. The retry rides the ANSWER TURN's
+// captured epoch (runAnnouncementDisplayAt's entry check is the gate): a
+// pick that lands between the check and the announcement must find the
+// retry dead too — it must never re-read the bumped epoch and speak over
+// the classroom the pick just opened.
 func (tm *TurnManager) handleSubjectAnswerTurn(s Sender, transcript string, epoch uint64, ctx context.Context, cancel context.CancelFunc) {
 	category, ok := subjectFromAnswer(transcript)
 	if !ok {
 		tm.recorder.Emit(EventSubjectAsk, infra.F("retry", true))
-		if !tm.epochCurrent(epoch) {
-			return
-		}
-		tm.runAnnouncement(s, ctx, cancel, subjectAskRetryText, purposeSubjectAsk, nil)
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, subjectAskRetryText, subjectAskRetryText, purposeSubjectAsk, nil)
 		return
 	}
 	tm.finishSubjectAsk(s, category, "voice", epoch, true)
@@ -135,32 +136,77 @@ func (tm *TurnManager) handleSubjectAnswerTurn(s Sender, transcript string, epoc
 
 // finishSubjectAsk binds the child's answer and resumes the parked init —
 // exactly once, and (the voice channel) only from a turn that is STILL
-// current: the epoch validation and the pendingAsk consumption share one
-// lock hold, so a reply recognized before an interrupt can never bind
-// after it (a stale turn never starts a classroom — the same contract
-// processTurn enforces everywhere else). The button channel passes
+// current. The binding's locked half (takeSubjectAsk) validates the epoch,
+// consumes the pendingAsk, binds the category AND terminates the ask's
+// playback in ONE lock hold: until the epoch moves inside that same hold, a
+// timed-out ask's orderlyCloseAt still sees its epoch current and could
+// close the session mid-binding — leaving a closed classroom to receive
+// session_ready and a greeting it can never ack. The button channel passes
 // fromTurn=false: a tap is not bound to any turn's epoch.
 func (tm *TurnManager) finishSubjectAsk(s Sender, category, via string, epoch uint64, fromTurn bool) {
-	tm.mu.Lock()
-	if tm.pendingAsk == nil || tm.closed || (fromTurn && tm.epoch != epoch) {
-		tm.mu.Unlock()
+	m, oldEpoch, ok := tm.takeSubjectAsk(category, epoch, fromTurn)
+	if !ok {
 		return
+	}
+	tm.finalizeSubjectAsk(s, m, oldEpoch, category, via)
+}
+
+// takeSubjectAsk is the binding's locked half, atomic under one tm.mu hold:
+// epoch validation (voice channel), pendingAsk consumption, category
+// binding, and the ask's full playback termination (stopAskPlaybackLocked).
+// Split out from finishSubjectAsk so the deterministic race tests can drive
+// the locked half and interleave a timeout against it, exactly as the
+// scheduler could. Returns the parked init message and the PRE-bump epoch;
+// ok=false when there is nothing to bind.
+func (tm *TurnManager) takeSubjectAsk(category string, epoch uint64, fromTurn bool) (SessionInitMsg, uint64, bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.pendingAsk == nil || tm.closed || (fromTurn && tm.epoch != epoch) {
+		return SessionInitMsg{}, 0, false
 	}
 	m := *tm.pendingAsk
 	tm.pendingAsk = nil
 	tm.category = category
-	tm.mu.Unlock()
+	if tm.subjectTakeInterleave != nil {
+		// Still INSIDE the hold (PR #60 review): the seam fires between the
+		// consumption and the bump precisely so a test can probe — via
+		// TryLock — that no unlock ever separates them.
+		tm.subjectTakeInterleave()
+	}
+	old := tm.stopAskPlaybackLocked()
+	return m, old, true
+}
 
-	// The ask's own announcement must be FULLY terminated before the picked
-	// classroom starts speaking — otherwise the ask's runAnnouncement keeps
-	// racing the new greeting: its settleListening would lift the greeting's
-	// uplink gate early, its ack timeout would orderly-close the fresh
-	// classroom, and both announcements would share the playback
-	// bookkeeping and the unidentified binary audio stream.
-	tm.stopAskPlayback(s)
-
+// finalizeSubjectAsk is the binding's unlocked half: the client-facing
+// aftermath of the termination (VAD reset + the interrupt_ack epoch notice)
+// and the handoff to the picked classroom. An end_session that closed the
+// session between the halves must not receive session_ready or a greeting.
+// The stillOpen check here is only the fast path (it also spares the picked
+// event); the REAL gates live at the classroom init's outward points — the
+// starters (session_ready, tutor bind), the row creation and the
+// announcement entry checks — because this half runs on the ANSWER TURN's
+// goroutine and an end_session can close the session under any of that IO
+// (PR #60 review: an entry-only check passes and still ships a classroom
+// that outlives its own session_ended).
+func (tm *TurnManager) finalizeSubjectAsk(s Sender, m SessionInitMsg, oldEpoch uint64, category, via string) {
+	tm.vad.Reset()
+	_ = s.SendControl(InterruptAckMsg{
+		Type:     TypeInterruptAck,
+		OldEpoch: oldEpoch,
+		NewEpoch: oldEpoch + 1,
+	})
+	if !tm.stillOpen() {
+		return
+	}
 	tm.recorder.Emit(EventSubjectPicked, infra.F("category", category), infra.F("via", via))
 	tm.continueSessionInit(s, m)
+}
+
+// stillOpen reports whether the session is still live.
+func (tm *TurnManager) stillOpen() bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return !tm.closed
 }
 
 // stopAskPlayback kills the clarify question's announcement the same way an
@@ -173,11 +219,27 @@ func (tm *TurnManager) finishSubjectAsk(s Sender, category, via string, epoch ui
 // queued), and it adopts the new epoch, without which the picked classroom's
 // greeting — which, like every announcement, carries no turn_start — would
 // be rejected as a stale epoch and the classroom would die on its
-// playback-ack timeout. Called only on the binding path, with the clarify
-// consumed and nothing else speaking (no tutor history exists yet, so no
-// trim ceremony).
+// playback-ack timeout. The production binding path runs the locked half
+// INSIDE takeSubjectAsk's hold; this standalone form serves the
+// deterministic race tests (no tutor history exists yet, so no trim
+// ceremony).
 func (tm *TurnManager) stopAskPlayback(s Sender) {
 	tm.mu.Lock()
+	old := tm.stopAskPlaybackLocked()
+	tm.mu.Unlock()
+	tm.vad.Reset()
+	_ = s.SendControl(InterruptAckMsg{
+		Type:     TypeInterruptAck,
+		OldEpoch: old,
+		NewEpoch: old + 1,
+	})
+}
+
+// stopAskPlaybackLocked is the termination's locked half (caller holds
+// tm.mu): epoch bump, provider cancel, playback-wait invalidation. Also
+// called INSIDE the binding's own hold so the consumption and the bump can
+// never be observed apart. Returns the pre-bump epoch.
+func (tm *TurnManager) stopAskPlaybackLocked() uint64 {
 	old := tm.epoch
 	tm.epoch++
 	if tm.turnCancel != nil {
@@ -190,13 +252,7 @@ func (tm *TurnManager) stopAskPlayback(s Sender) {
 	}
 	tm.pendingPlayback = map[string]*pendingPlayback{}
 	tm.playbackPending = false
-	tm.mu.Unlock()
-	tm.vad.Reset()
-	_ = s.SendControl(InterruptAckMsg{
-		Type:     TypeInterruptAck,
-		OldEpoch: old,
-		NewEpoch: old + 1,
-	})
+	return old
 }
 
 // subjectFromAnswer maps one spoken answer onto a subject by keyword —
