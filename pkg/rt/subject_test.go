@@ -973,6 +973,24 @@ func TestFinalizeSkipsClosedSession(t *testing.T) {
 	}
 }
 
+// fetchHookWords wraps a fakeWordSource and fires a hook at the top of
+// FetchDueWords — the picked classroom's real IO point, where the
+// deterministic race tests land an end_session exactly as the transport read
+// loop could interleave one (PR #60 review). No sleep: the close happens
+// strictly between the fetch's start and its return.
+type fetchHookWords struct {
+	*fakeWordSource
+	onFetch func()
+}
+
+// FetchDueWords implements WordSource (the hook rides ahead of the delegate).
+func (f *fetchHookWords) FetchDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error) {
+	if f.onFetch != nil {
+		f.onFetch()
+	}
+	return f.fakeWordSource.FetchDueWords(ctx, limit, category)
+}
+
 // TestEndSessionDuringPickedInitIOSendsNoClassroom — PR #60 review P2: the
 // voice answer's finalizeSubjectAsk passes its stillOpen gate, then runs the
 // picked classroom's init IO (due fetch → row creation → session_ready →
@@ -991,10 +1009,11 @@ func TestEndSessionDuringPickedInitIOSendsNoClassroom(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		zh = append(zh, lesson.Word{Word: "词" + string(rune('甲'+i%20)) + string(rune('0'+i%10))})
 	}
-	words := newFakeWords()
-	words.setPeek(lesson.CategoryEnglish, en)
-	words.setPeek(lesson.CategoryChinese, zh)
-	words.setDue(lesson.CategoryChinese, zh)
+	inner := newFakeWords()
+	inner.setPeek(lesson.CategoryEnglish, en)
+	inner.setPeek(lesson.CategoryChinese, zh)
+	inner.setDue(lesson.CategoryChinese, zh)
+	words := &fetchHookWords{fakeWordSource: inner}
 	exec := newFakeExecutorNoRow(ttLessonID)
 	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(words), nil, nil)
 	s := &captureSender{}

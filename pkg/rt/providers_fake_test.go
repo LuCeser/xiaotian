@@ -529,7 +529,6 @@ type fakeWordSource struct {
 	fetchCats    []string
 	peekCats     []string
 	fetchCalls   int
-	onFetch      func()
 	mu           sync.Mutex
 }
 
@@ -543,12 +542,6 @@ func (f *fakeWordSource) FetchDueWords(_ context.Context, limit int, category st
 	defer f.mu.Unlock()
 	f.fetchCalls++
 	f.fetchCats = append(f.fetchCats, category)
-	if f.onFetch != nil {
-		// Test seam (PR #60 review): the due fetch is the picked classroom's
-		// real IO point — the deterministic race tests land an end_session
-		// HERE, exactly where the transport read loop could interleave one.
-		f.onFetch()
-	}
 	if f.fetchErr != nil {
 		return nil, f.fetchErr
 	}
