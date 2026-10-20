@@ -10,6 +10,8 @@
 package rt
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -575,5 +577,127 @@ func TestSubjectPickDuringAskStopsAskPlayback(t *testing.T) {
 	ttWaitClarifyOpen(t, tm)
 	if ended := s.controlsOf(t, TypeSessionEnded); len(ended) != 0 {
 		t.Errorf("session_ended = %v, want none (the ask's timeout must not orderly-close the classroom)", ended)
+	}
+}
+
+// TestSubjectPickSendsEpochBumpToFrontend — the P1 wire pin: a pick during
+// the ask must ship an interrupt_ack carrying the epoch bump to the client
+// BEFORE the classroom's session_ready/greeting. The client's playback
+// adopts the epoch ONLY from turn_start/interrupt_ack, and every
+// announcement (the greeting included) carries no turn_start — without this
+// ack the greeting's audio_start would be rejected as a stale epoch, no
+// playback ack would ever come back, and the fresh classroom would die on
+// its playback-ack timeout.
+func TestSubjectPickSendsEpochBumpToFrontend(t *testing.T) {
+	en := make([]lesson.Word, 0, 12)
+	for i := 0; i < 12; i++ {
+		en = append(en, lesson.Word{Word: "en" + string(rune('a'+i))})
+	}
+	zh := make([]lesson.Word, 0, 30)
+	for i := 0; i < 30; i++ {
+		zh = append(zh, lesson.Word{Word: "词" + string(rune('甲'+i%20)) + string(rune('0'+i%10))})
+	}
+	words := newFakeWords()
+	words.setPeek(lesson.CategoryEnglish, en)
+	words.setPeek(lesson.CategoryChinese, zh)
+	words.setDue(lesson.CategoryChinese, zh)
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(words), nil, nil)
+	s := &captureSender{}
+	ttSubjectInit(t, tm, s)
+	ttAwaitAskSent(t, s, 0) // the ask is out, unacked
+
+	tm.HandleControl(s, mustJSON(t, SubjectPickMsg{Type: TypeSubjectPick, Category: lesson.CategoryChinese}))
+	if !waitFor(t, 5*time.Second, func() bool { return len(s.controlsOf(t, TypeSessionReady)) == 1 }) {
+		t.Fatal("session_ready never arrived after the pick")
+	}
+
+	acks := s.controlsOf(t, TypeInterruptAck)
+	if len(acks) != 1 {
+		t.Fatalf("interrupt_ack count = %d, want 1 (the epoch bump must reach the client)", len(acks))
+	}
+	if got := acks[0]["old_epoch"]; got != float64(0) {
+		t.Errorf("interrupt_ack.old_epoch = %v, want 0", got)
+	}
+	if got := acks[0]["new_epoch"]; got != float64(1) {
+		t.Errorf("interrupt_ack.new_epoch = %v, want 1", got)
+	}
+	// Order matters: the client must have adopted the new epoch BEFORE the
+	// greeting's sentences start arriving.
+	s.mu.Lock()
+	order := append([][]byte(nil), s.controls...)
+	s.mu.Unlock()
+	firstAck, firstReady := -1, -1
+	for i, raw := range order {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &probe) != nil {
+			continue
+		}
+		if probe.Type == TypeInterruptAck && firstAck < 0 {
+			firstAck = i
+		}
+		if probe.Type == TypeSessionReady && firstReady < 0 {
+			firstReady = i
+		}
+	}
+	if firstAck < 0 || firstReady < 0 || firstAck > firstReady {
+		t.Errorf("interrupt_ack index = %d, session_ready index = %d, want the ack first", firstAck, firstReady)
+	}
+}
+
+// TestAskGoroutineRefusesBumpedEpoch — the P3 scheduling pin: a pick
+// processed BEFORE the ask goroutine first runs must leave the ask dead.
+// The sequence is deterministic here: arm the clarify (parking epoch 0),
+// process the pick's stopAskPlayback (epoch 0→1), and only THEN let the ask
+// goroutine enter with the epoch it fixed at arm time — it must refuse
+// (speakTurn mutates playback state and registers waits BEFORE any TTS
+// call, so a cancelled context alone would not have stopped it).
+func TestAskGoroutineRefusesBumpedEpoch(t *testing.T) {
+	en := make([]lesson.Word, 0, 12)
+	for i := 0; i < 12; i++ {
+		en = append(en, lesson.Word{Word: "en" + string(rune('a'+i))})
+	}
+	zh := make([]lesson.Word, 0, 30)
+	for i := 0; i < 30; i++ {
+		zh = append(zh, lesson.Word{Word: "词" + string(rune('甲'+i%20)) + string(rune('0'+i%10))})
+	}
+	words := newFakeWords()
+	words.setPeek(lesson.CategoryEnglish, en)
+	words.setPeek(lesson.CategoryChinese, zh)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(words), nil, nil)
+	s := &captureSender{}
+
+	// Arm the clarify exactly as startSubjectAsk does, WITHOUT launching the
+	// announcement goroutine: pendingAsk parked, state listening, ask epoch
+	// fixed at the (pre-bump) value 0.
+	initMsg := SessionInitMsg{Type: TypeSessionInit, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1}, Category: CategoryAuto}
+	tm.mu.Lock()
+	tm.pendingAsk = &initMsg
+	tm.state = StateListening
+	askEpoch := tm.epoch
+	tm.mu.Unlock()
+
+	// The pick lands first: its full termination bumps the epoch.
+	tm.stopAskPlayback(s)
+
+	// The ask goroutine finally enters, carrying the epoch fixed at arm time.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tm.runAnnouncementDisplayAt(s, askEpoch, ctx, cancel, subjectAskText, subjectAskText, purposeSubjectAsk, nil)
+
+	if got := s.countOf(TypeTeacherSentence); got != 0 {
+		t.Errorf("teacher sentences from the dead ask = %d, want 0 (a bumped ask must never speak)", got)
+	}
+	tm.mu.Lock()
+	waits := len(tm.pendingPlayback)
+	state := tm.state
+	tm.mu.Unlock()
+	if waits != 0 {
+		t.Errorf("pendingPlayback entries after the dead ask = %d, want 0", waits)
+	}
+	if state != StateListening {
+		t.Errorf("state after the dead ask = %q, want listening untouched", state)
 	}
 }

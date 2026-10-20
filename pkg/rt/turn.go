@@ -941,10 +941,34 @@ func (tm *TurnManager) runAnnouncement(s Sender, ctx context.Context, cancel con
 // texts (13.1-02 student masking): spoken feeds TTS, the LLM history, and the
 // interrupt trim; display rides the teacher_sentence subtitle only.
 func (tm *TurnManager) runAnnouncementDisplay(s Sender, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
+	tm.runAnnouncementDisplayAt(s, tm.currentEpoch(), ctx, cancel, spoken, display, purpose, onAck)
+}
+
+// currentEpoch snapshots the FSM epoch under the lock.
+func (tm *TurnManager) currentEpoch() uint64 {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.epoch
+}
+
+// runAnnouncementDisplayAt is runAnnouncementDisplay with the epoch FIXED by
+// the caller instead of snapshot at goroutine entry (PR #59 review): the
+// subject ask parks its epoch BEFORE its goroutine is launched, and this
+// entry check refuses an announcement whose epoch has since been bumped —
+// a pick processed before the ask goroutine first runs must find the ask
+// dead, not resurrected under the NEW epoch. speakTurn mutates playback
+// state, registers waits and ships subtitles BEFORE any TTS call, so a
+// cancelled context alone cannot stop a late ask from clobbering the new
+// classroom's bookkeeping; only the epoch comparison can.
+func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
 	defer cancel()
 
 	tm.mu.Lock()
-	epoch := tm.epoch
+	if tm.epoch != epoch {
+		// Stale before the first sound: nothing registered, nothing spoken.
+		tm.mu.Unlock()
+		return
+	}
 	turnID := tm.nextTurnIDLocked()
 	tm.mu.Unlock()
 

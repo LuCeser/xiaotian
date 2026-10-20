@@ -94,6 +94,8 @@ func (tm *TurnManager) startSubjectAsk(s Sender, m SessionInitMsg) {
 	tm.mu.Lock()
 	tm.pendingAsk = &m
 	tm.state = StateListening
+	askEpoch := tm.epoch // fixed NOW: a pick processed before the goroutine
+	// first runs bumps the epoch, and the ask's entry check must refuse it.
 	tm.mu.Unlock()
 
 	_ = s.SendControl(SubjectAskMsg{Type: TypeSubjectAsk, Question: subjectAskText})
@@ -103,7 +105,7 @@ func (tm *TurnManager) startSubjectAsk(s Sender, m SessionInitMsg) {
 	tm.mu.Lock()
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
-	go tm.runAnnouncement(s, ctx, cancel, subjectAskText, purposeSubjectAsk, nil)
+	go tm.runAnnouncementDisplayAt(s, askEpoch, ctx, cancel, subjectAskText, subjectAskText, purposeSubjectAsk, nil)
 }
 
 // handleSubjectPick consumes the page's button answer to the clarify. A
@@ -155,21 +157,28 @@ func (tm *TurnManager) finishSubjectAsk(s Sender, category, via string, epoch ui
 	// uplink gate early, its ack timeout would orderly-close the fresh
 	// classroom, and both announcements would share the playback
 	// bookkeeping and the unidentified binary audio stream.
-	tm.stopAskPlayback()
+	tm.stopAskPlayback(s)
 
 	tm.recorder.Emit(EventSubjectPicked, infra.F("category", category), infra.F("via", via))
 	tm.continueSessionInit(s, m)
 }
 
 // stopAskPlayback kills the clarify question's announcement the same way an
-// interrupt kills a turn — minus the ack/trim ceremony (no tutor history
-// exists yet, and the client's own epoch gate drops the ask's remaining
-// audio once the epoch moves): bump the epoch (the ask goroutine's in-flight
-// chunks, playback waits and post-ack settle all turn stale), cancel its
-// provider stream, and drop its playback waits. Called only on the binding
-// path, with the clarify consumed and nothing else speaking.
-func (tm *TurnManager) stopAskPlayback() {
+// interrupt kills a turn, and TELLS the client: bump the epoch (the ask
+// goroutine's in-flight chunks, playback waits and post-ack settle all turn
+// stale), cancel its provider stream, drop its playback waits, then ship an
+// interrupt_ack carrying the bump. The ack matters twice over on the wire:
+// the client's playback stops its already-scheduled ask audio (its own
+// epoch gate only DROPS future old-epoch chunks — it never stops what is
+// queued), and it adopts the new epoch, without which the picked classroom's
+// greeting — which, like every announcement, carries no turn_start — would
+// be rejected as a stale epoch and the classroom would die on its
+// playback-ack timeout. Called only on the binding path, with the clarify
+// consumed and nothing else speaking (no tutor history exists yet, so no
+// trim ceremony).
+func (tm *TurnManager) stopAskPlayback(s Sender) {
 	tm.mu.Lock()
+	old := tm.epoch
 	tm.epoch++
 	if tm.turnCancel != nil {
 		tm.turnCancel()
@@ -183,6 +192,11 @@ func (tm *TurnManager) stopAskPlayback() {
 	tm.playbackPending = false
 	tm.mu.Unlock()
 	tm.vad.Reset()
+	_ = s.SendControl(InterruptAckMsg{
+		Type:     TypeInterruptAck,
+		OldEpoch: old,
+		NewEpoch: old + 1,
+	})
 }
 
 // subjectFromAnswer maps one spoken answer onto a subject by keyword —
