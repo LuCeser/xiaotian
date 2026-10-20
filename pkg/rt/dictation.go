@@ -284,6 +284,7 @@ type historyRound struct {
 // below assumes the caller already holds that lock.
 type DictationTutor struct {
 	poem           *poemRef
+	passage        *passageRef
 	perWordHints   map[int]int
 	perWordOutcome map[int]string
 	lessonID       string
@@ -302,6 +303,14 @@ type DictationTutor struct {
 	practice       bool
 }
 
+// recitation reports whether this classroom is a STRUCTURED 背默 task (a
+// poem or a passage range — Issue #12/#14): the original must never reach
+// the child before check_started, in any mode, and the writing stage
+// classifies through its own prompt instead of the per-word pacing switch.
+func (t *DictationTutor) recitation() bool {
+	return t.poem != nil || t.passage != nil
+}
+
 // poemRef is the poem classroom's work identity (Issue #12): what the child
 // is writing from memory. The lines themselves live in words (one line = one
 // card, the check stage's word_index space); this ref carries only the
@@ -311,6 +320,22 @@ type poemRef struct {
 	Title  string
 	Author string
 	ID     int64
+}
+
+// passageRef is the passage classroom's work + range identity (Issue #14):
+// what the child is writing from memory and WHICH range this attempt covers.
+// The paragraphs themselves live in words (one paragraph = one card, the
+// check stage's word_index space); Paragraphs here carries the ORIGINAL
+// 1-based 自然段号 of those cards in the same order (display numbering —
+// the SAVE identity stays whole + the canonical set, zeroed for whole by
+// the submit path).
+type passageRef struct {
+	Title      string
+	Author     string
+	Paragraphs []int
+	ID         int64
+	ScopeID    int64
+	Whole      bool
 }
 
 // newDictationTutor binds the FSM to a lesson row read back from the

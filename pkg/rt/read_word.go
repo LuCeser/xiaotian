@@ -5,12 +5,17 @@ import "context"
 func (tm *TurnManager) handleReadWord(s Sender, m ReadWordMsg) {
 	tm.mu.Lock()
 	t := tm.tutor
-	// Issue #12: a poem classroom NEVER re-reads — read_word would speak the
-	// original line (背默任务，老师不念原文). The check stage included: the
-	// panel's rows show the text for comparison, the voice stays silent.
-	if t != nil && t.poem != nil {
+	// Issue #12/#14: a 背默 classroom (poem or passage) NEVER re-reads —
+	// read_word would speak the original (背默任务，老师不念原文). The check
+	// stage included: the panel's rows show the text for comparison, the
+	// voice stays silent.
+	if t != nil && t.recitation() {
 		tm.mu.Unlock()
-		tm.sendError(s, ErrCodeInvalidMessage, "背默练习不能重读诗句哦，先凭记忆写", true)
+		if t.poem != nil {
+			tm.sendError(s, ErrCodeInvalidMessage, "背默练习不能重读诗句哦，先凭记忆写", true)
+		} else {
+			tm.sendError(s, ErrCodeInvalidMessage, "背默练习不能重读课文哦，先凭记忆写", true)
+		}
 		return
 	}
 	if tm.closed || t == nil || (t.completed && !t.checking) || tm.state != StateListening || tm.playbackPending ||

@@ -44,8 +44,14 @@
       (session_ready.poem) — the work's identity (title·author·line count)
       and the practice way. The poem's TEXT never renders here; the chips
       below stay line-number placeholders until check_started reveals them.
+
+      Passage task banner (Issue #14): the twin for a passage-range 背默
+      session (session_ready.passage) — the work plus WHICH range this
+      session covers (整篇 or the paragraph numbers). The text itself never
+      renders here either.
     -->
     <section class="rt-poem" id="rt-poem" hidden aria-label="古诗背默任务"></section>
+    <section class="rt-poem rt-passage" id="rt-passage" hidden aria-label="课文背默任务"></section>
 
     <!-- Lesson progress: words + current_index from session_ready / lesson_update -->
     <section class="rt-progress" aria-label="课堂进度">
@@ -185,6 +191,12 @@
       // content view's 背默这首 entry). Absent/non-numeric stays 0 = the word
       // classroom; the server applies the same deny-by-default rule.
       client.initPoem = parseInt(pageQuery.get('poem'), 10) || 0;
+      // ----- passage-range 背默 classroom (Issue #14) ---------------------------
+      // ?passage=<passages.id>&scope=<passage_scopes.id> opens the passage
+      // classroom for that stored RANGE (the content view's per-range 背默
+      // entry). Absent/non-numeric stays 0 = the word classroom.
+      client.initPassage = parseInt(pageQuery.get('passage'), 10) || 0;
+      client.initPassageScope = parseInt(pageQuery.get('scope'), 10) || 0;
 
       // poemTask mirrors session_ready.poem (display-only identity: title /
       // author / line count / method). The poem's lines themselves arrive
@@ -205,6 +217,34 @@
           ' · 共 ' + poemTask.line_count + ' 句 · ' + poemTask.method;
         poemEl.appendChild(title);
         poemEl.hidden = false;
+      }
+
+      // passageTask mirrors session_ready.passage (Issue #14): the work PLUS
+      // the practiced range (whole or the original paragraph numbers). The
+      // paragraphs themselves arrive ONLY with check_started.
+      var passageTask = null;
+      var passageEl = $('rt-passage');
+
+      function passageRangeText() {
+        if (!passageTask) return '';
+        return passageTask.whole
+          ? '整篇'
+          : '第 ' + (passageTask.paragraphs || []).join('、') + ' 段';
+      }
+
+      function renderPassageBanner() {
+        clearChildren(passageEl);
+        if (!passageTask) {
+          passageEl.hidden = true;
+          return;
+        }
+        var title = document.createElement('p');
+        title.className = 'rt-poem-title';
+        title.textContent = '《' + passageTask.title + '》' +
+          (passageTask.author ? ' · ' + passageTask.author : '') +
+          ' · ' + passageRangeText() + '共 ' + passageTask.paragraph_count + ' 段 · ' + passageTask.method;
+        passageEl.appendChild(title);
+        passageEl.hidden = false;
       }
 
       // ----- check-stage state (13.1-01) --------------------------------------
@@ -300,16 +340,21 @@
             // judged line count, and the honest save result.
             p.textContent = '《' + poemTask.title + '》背默完成！' +
               (check.resultText || '真棒！');
+          } else if (passageTask) {
+            // Issue #14: the passage's own ending copy — the work + the
+            // practiced range, and the honest save result.
+            p.textContent = '《' + passageTask.title + '》' + passageRangeText() + '背默完成！' +
+              (check.resultText || '真棒！');
           } else {
             // N from the check state (the panel's rows = the checked words).
             p.textContent = '今天的 ' + check.words.length + ' 个词都默写完了！' +
               (check.resultText || '真棒！');
           }
           bannerEl.appendChild(p);
-          // Issue #12: a poem session never offers 再练一组 — that button
-          // starts a WORD practice; re-practicing the poem is a fresh 背默
-          // entry from the parent page.
-          if (!poemTask) addPracticeButton(bannerEl);
+          // Issue #12/#14: a 背默 session never offers 再练一组 — that
+          // button starts a WORD practice; re-practicing the work is a
+          // fresh 背默 entry from the parent page.
+          if (!poemTask && !passageTask) addPracticeButton(bannerEl);
         } else if (reason === 'practice_complete') {
           p.textContent = '这组练习完成啦，真棒！想再练就点「开始上课」。';
           bannerEl.appendChild(p); // no practice button — bounded loop by design
@@ -344,10 +389,14 @@
 
         var title = document.createElement('p');
         title.className = 'rt-check-title';
-        // Issue #12: a poem check compares against the work's own lines.
+        // Issue #12: a poem check compares against the work's own lines;
+        // Issue #14: a passage check compares against the range's own
+        // paragraphs, labeled by the ORIGINAL 自然段号.
         title.textContent = poemTask
           ? '对照原文：每一句点「对」还是「错」'
-          : '检查时间：每个词点「对」还是「错」';
+          : (passageTask
+            ? '对照原文：每一段点「对」还是「错」'
+            : '检查时间：每个词点「对」还是「错」');
         panel.appendChild(title);
 
         check.words.forEach(function (word, i) {
@@ -360,7 +409,12 @@
 
           var w = document.createElement('span');
           w.className = 'rt-check-word';
-          w.textContent = (i + 1) + '. ' + word;
+          if (passageTask) {
+            var no = (passageTask.paragraphs || [])[i] || (i + 1);
+            w.textContent = '第 ' + no + ' 段. ' + word;
+          } else {
+            w.textContent = (i + 1) + '. ' + word;
+          }
           row.appendChild(w);
 
           // The recognized text rides ocr_result (display-only context);
@@ -455,16 +509,22 @@
           chip.type = 'button';
           // Issue #12: a poem classroom labels the chips 句 (line numbers);
           // the read_word re-reading stays disabled there pre-check — a
-          // poem's lines are never read aloud (背默红线).
-          var unit = poemTask ? '句' : '词';
-          chip.setAttribute('aria-label', '第 ' + (i + 1) + ' ' + unit);
-          chip.title = poemTask ? '第 ' + (i + 1) + ' 句' : '点击重读第 ' + (i + 1) + ' 个词';
+          // poem's lines are never read aloud (背默红线). Issue #14: a
+          // passage classroom labels them with the ORIGINAL 段号.
+          var unit = poemTask ? '句' : (passageTask ? '段' : '词');
+          var chipNo = passageTask && !passageTask.whole
+            ? ((passageTask.paragraphs || [])[i] || (i + 1))
+            : (i + 1);
+          chip.setAttribute('aria-label', '第 ' + chipNo + ' ' + unit);
+          chip.title = poemTask || passageTask
+            ? '第 ' + chipNo + ' ' + unit
+            : '点击重读第 ' + (i + 1) + ' 个词';
           chip.disabled = !canReadWord(i);
           chip.addEventListener('click', sendReadWord.bind(null, i));
-          if (mode === 'test' && !poemTask) {
+          if (mode === 'test' && !poemTask && !passageTask) {
             // Test mode keeps the pre-13.1 full-reveal rendering — except a
-            // poem classroom: its lines stay masked in EVERY mode until the
-            // check stage reveals them (Issue #12).
+            // 背默 classroom: its lines/paragraphs stay masked in EVERY mode
+            // until the check stage reveals them (Issue #12/#14).
             chip.className = 'rt-word-chip' + (i === lesson.currentIndex ? ' rt-word-current' : '');
             chip.textContent = lesson.words[i];
           } else if (lesson.words[i] === '') {
@@ -496,15 +556,21 @@
           progressText.textContent = '整首 ' + total + ' 句 · 凭记忆默写';
           return;
         }
-        progressText.textContent = '第 ' + (lesson.currentIndex + 1) + ' / ' + (total > 0 ? total : '-') + (poemTask ? ' 句' : ' 个词');
+        if (passageTask && !check.active) {
+          // Issue #14: the same single-task shape for a passage range —
+          // the banner names WHICH range this session covers.
+          progressText.textContent = passageRangeText() + ' ' + total + ' 段 · 凭记忆默写';
+          return;
+        }
+        progressText.textContent = '第 ' + (lesson.currentIndex + 1) + ' / ' + (total > 0 ? total : '-') + (poemTask ? ' 句' : (passageTask ? ' 段' : ' 个词'));
       }
 
       function canReadWord(index) {
         var state = statusEl.getAttribute('data-state');
-        // Issue #12: a poem classroom has NO re-reading — read_word would
-        // speak the original line (背默任务，老师不念原文); the server
+        // Issue #12/#14: a 背默 classroom has NO re-reading — read_word
+        // would speak the original (背默任务，老师不念原文); the server
         // refuses it too, this keeps the chip honestly disabled.
-        if (poemTask) return false;
+        if (poemTask || passageTask) return false;
         return started && !courseEnded && !terminalDraining && !readPending &&
           !check.submitPending && !check.resultText &&
           connEl.getAttribute('data-conn') === 'connected' &&
@@ -623,6 +689,10 @@
         // resumed check panel included); a word session clears it.
         poemTask = (m && m.poem) || null;
         renderPoemBanner();
+        // Issue #14: the passage task + range identity rides every passage
+        // session the same way.
+        passageTask = (m && m.passage) || null;
+        renderPassageBanner();
         // Fresh session: the previous ending's banner/notice step aside.
         bannerEl.hidden = true;
         noticeEl.hidden = true;
@@ -747,6 +817,10 @@
           // Issue #12: the poem's save scope is ONE whole work — never
           // per-line wording.
           check.resultText = '整首背默结果保存好啦。';
+        } else if (m.requested > 0 && passageTask) {
+          // Issue #14: the passage's save scope is ONE range — never
+          // per-paragraph wording.
+          check.resultText = '这次的背默结果保存好啦。';
         } else if (m.requested > 0) {
           check.resultText = '学习记录保存好了，' + m.requested + ' 个词都记上啦。';
         } else {
@@ -966,6 +1040,12 @@
             pendingSources: playback._sources ? playback._sources.length : 0,
             mode: mode,
             poem: poemTask ? { title: poemTask.title, lineCount: poemTask.line_count } : null,
+            passage: passageTask ? {
+              title: passageTask.title,
+              whole: !!passageTask.whole,
+              paragraphs: (passageTask.paragraphs || []).slice(),
+              paragraphCount: passageTask.paragraph_count
+            } : null,
             check: {
               active: check.active,
               rows: check.words.length,

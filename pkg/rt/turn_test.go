@@ -230,6 +230,45 @@ func (f *fakeExecutor) LatestPoemLessonID(_ context.Context, poemID int64) (stri
 	return "", nil
 }
 
+// EnsurePassageLesson (Issue #14): mirrors the real store's
+// first-content-wins insert — the in-memory row adopts the passage shape
+// (range identity included) and exists from now on.
+func (f *fakeExecutor) EnsurePassageLesson(_ context.Context, lessonID string, passageID, scopeID int64, whole bool, paragraphs []int, texts []string, category string) (lesson.Lesson, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensureCalls++
+	f.ensureIDs = append(f.ensureIDs, lessonID)
+	cards := make([]lesson.Word, 0, len(texts))
+	for _, text := range texts {
+		cards = append(cards, lesson.Word{Word: text})
+	}
+	if !f.exists {
+		// First content wins: a fresh row adopts the passage shape wholesale.
+		f.lesson = lesson.Lesson{
+			LessonID: lessonID, Words: texts, Cards: cards,
+			Category:  lesson.NormalizeCategory(category),
+			PassageID: passageID, PassageScopeID: scopeID,
+			PassageWhole: whole, PassageParagraphs: append([]int(nil), paragraphs...),
+			Version: 1,
+		}
+		f.exists = true
+	}
+	return f.lesson, nil
+}
+
+// LatestPassageLessonID (Issue #14): the resume probe — answers the single
+// passage row this fake knows (when it is one AND the range identity
+// matches), else "".
+func (f *fakeExecutor) LatestPassageLessonID(_ context.Context, passageID int64, whole bool, paragraphs []int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if passageID > 0 && f.exists && f.lesson.PassageID == passageID &&
+		f.lesson.PassageWhole == whole && passageIndexesEqual(f.lesson.PassageParagraphs, paragraphs) {
+		return f.lesson.LessonID, nil
+	}
+	return "", nil
+}
+
 func (f *fakeExecutor) GetLessonState(_ context.Context, lessonID string) (lesson.Lesson, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

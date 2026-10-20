@@ -739,7 +739,7 @@
       var selfP = this;
       var passageNote = document.createElement('p');
       passageNote.className = 'list-note';
-      passageNote.textContent = '课文按整篇保存，练习范围可选整篇或指定自然段、随时调整而不用重新导入；学习范围随教材已学进度或手动加入生效，课文课堂将在后续更新开放。';
+      passageNote.textContent = '课文按整篇保存，练习范围可选整篇或指定自然段、随时调整而不用重新导入；每个范围可单独背默，掌握与复习安排按范围分别记录，互不代替。';
       this.listHost.appendChild(passageNote);
       this.passages.forEach(function (passage) {
         selfP.listHost.appendChild(selfP.buildPassageCard(passage));
@@ -1135,6 +1135,29 @@
   }
 
   /**
+   * passageScopeReciteCopy — the per-range 背默 entry's copy (Issue #14):
+   * the parent picks WHICH range this session covers; each stored range is
+   * an independent practice target.
+   */
+  function passageScopeReciteCopy(scope) {
+    return scope.whole ? '背默整篇' : ('背默' + passageScopeText(scope));
+  }
+
+  /**
+   * passageScopePracticeLine — one range's OWN practice state (Issue #14):
+   * mastered/not plus the persisted next-review day. Per range by design —
+   * 第 2、3 段's state never reads as the whole passage's.
+   */
+  function passageScopePracticeLine(scope) {
+    if (!scope || !scope.has_practice) {
+      return '';
+    }
+    return scope.last_mastered
+      ? '上次已掌握 · ' + scope.next_review_day + ' 再巩固'
+      : '上次尚未掌握 · ' + scope.next_review_day + ' 再练';
+  }
+
+  /**
    * buildPoemCard — one whole poem: title + author header, the ordered
    * verse lines as one block (分行和顺序是作品本身的结构), the category
    * badge, attribution chips and the scope verdict. The single action is
@@ -1514,6 +1537,35 @@
         text.className = 'passage-scope-row-text';
         text.textContent = passageScopeText(s);
         row.appendChild(text);
+        // Issue #14: the range's OWN practice state — mastered and the next
+        // review day stay per range, never borrowed across ranges.
+        var practiceLine = passageScopePracticeLine(s);
+        if (practiceLine) {
+          var state = document.createElement('span');
+          state.className = 'passage-scope-practice' + (s.last_mastered ? ' passage-scope-practiced' : '');
+          state.textContent = practiceLine;
+          row.appendChild(state);
+        }
+        // Issue #14: the per-range 背默 door — each stored range is an
+        // independent practice entry; an out-of-scope passage keeps the
+        // honest disabled reason (the same gate the classroom enforces).
+        var reciteBtn = document.createElement('button');
+        reciteBtn.type = 'button';
+        reciteBtn.className = 'row-action passage-scope-recite';
+        if (passage.in_scope) {
+          reciteBtn.textContent = passageScopeReciteCopy(s);
+          reciteBtn.title = '打开学生页，凭记忆默写' + passageScopeText(s);
+          reciteBtn.addEventListener('click', function () {
+            global.open('/tutor/?passage=' + encodeURIComponent(passage.id) +
+              '&scope=' + encodeURIComponent(s.id) +
+              '&category=' + (passage.category === 'chinese' ? 'chinese' : 'english'), '_blank');
+          });
+        } else {
+          reciteBtn.textContent = '暂不在学习范围';
+          reciteBtn.disabled = true;
+          reciteBtn.title = '课次尚未学到且未手动加入，暂不能开始背默';
+        }
+        row.appendChild(reciteBtn);
         if (self.removePassageScope) {
           var removeBtn = document.createElement('button');
           removeBtn.type = 'button';

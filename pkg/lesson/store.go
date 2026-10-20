@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -94,6 +95,21 @@ var (
 	// the SAVE, so a failed save must not lose the poem identity either —
 	// hence the column lives on this row, not only the log.
 	alterLessonsAddPoemID = `ALTER TABLE lessons ADD COLUMN poem_id INTEGER NOT NULL DEFAULT 0`
+
+	// alterLessonsAddPassage (Issue #14): a passage 背默 classroom stamps the
+	// practiced work's passages.id here plus the RANGE identity it practiced
+	// — passage_scope_id (traceability to the passage_scopes row, which the
+	// parent may later remove and re-create) and the range's own identity
+	// columns (whole + the canonical paragraph set), mirroring the
+	// passage_practice_logs identity. 0/'[]' on every non-passage row. The
+	// lesson row is the attempt + per-paragraph judgment; the range columns
+	// must survive independently of the scope row so resume, the records
+	// projection and a later submit all read the SAME range the child
+	// practiced (原文范围对应关系), never a re-derived guess.
+	alterLessonsAddPassageID      = `ALTER TABLE lessons ADD COLUMN passage_id INTEGER NOT NULL DEFAULT 0`
+	alterLessonsAddPassageScopeID = `ALTER TABLE lessons ADD COLUMN passage_scope_id INTEGER NOT NULL DEFAULT 0`
+	alterLessonsAddPassageWhole   = `ALTER TABLE lessons ADD COLUMN passage_whole INTEGER NOT NULL DEFAULT 0`
+	alterLessonsAddPassageParas   = `ALTER TABLE lessons ADD COLUMN passage_paragraphs TEXT NOT NULL DEFAULT '[]'`
 )
 
 // Word is one vocabulary card carried with the lesson row: the surface word,
@@ -175,6 +191,10 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		{"unchecked", alterLessonsAddUnchecked},
 		{"category", alterLessonsAddCategory},
 		{"poem_id", alterLessonsAddPoemID},
+		{"passage_id", alterLessonsAddPassageID},
+		{"passage_scope_id", alterLessonsAddPassageScopeID},
+		{"passage_whole", alterLessonsAddPassageWhole},
+		{"passage_paragraphs", alterLessonsAddPassageParas},
 	} {
 		has, err := lessonsHasColumn(ctx, db, col.name)
 		if err != nil {
@@ -240,20 +260,34 @@ func lessonsHasColumn(ctx context.Context, db *sql.DB, name string) (bool, error
 // stage's word_index space). It is the records projection's join key — the
 // poem's title/author are read from the poems table at projection time, never
 // duplicated into the row.
+//
+// Passage fields (Issue #14) are set only on passage 背默 rows: the practiced
+// passages.id whose selected PARAGRAPHS ride in Words/Cards (one paragraph =
+// one card, in the original's own order). The range identity (Whole +
+// Paragraphs, canonical 1-based) travels WITH the attempt — the records
+// projection shows the range without re-deriving it, and the submit saves
+// under the same content + range identity the practice store keys on.
+// PassageScopeID is traceability only (the scope row may be removed and
+// re-created under a new id while this row's range stays what the child
+// practiced).
 type Lesson struct {
-	Outcomes     map[string]WordOutcome
-	LessonID     string
-	Stage        string
-	CreatedAt    string
-	UpdatedAt    string
-	Category     string
-	Words        []string
-	Cards        []Word
-	Verdicts     []CheckVerdict
-	CurrentIndex int
-	Version      int
-	PoemID       int64
-	Unchecked    bool
+	Outcomes          map[string]WordOutcome
+	LessonID          string
+	Stage             string
+	CreatedAt         string
+	UpdatedAt         string
+	Category          string
+	PassageParagraphs []int
+	Verdicts          []CheckVerdict
+	Cards             []Word
+	Words             []string
+	CurrentIndex      int
+	Version           int
+	PoemID            int64
+	PassageID         int64
+	PassageScopeID    int64
+	Unchecked         bool
+	PassageWhole      bool
 }
 
 // Vocabulary-category values the lessons row can carry (Issue #10). The
@@ -471,6 +505,174 @@ func (s *Store) LatestPoemLessonID(ctx context.Context, poemID int64) (string, e
 	return lessonID, nil
 }
 
+// EnsurePassageLesson creates the lessons row for ONE passage-range 背默
+// attempt (Issue #14): the range's own ordered PARAGRAPHS ride as the cards
+// (one paragraph = one card, the check stage's word_index space — 按所选段
+// 落的原文顺序组织), the row carries the passage's own subject, and the
+// passage id plus the FULL range identity (scope id for traceability, whole +
+// canonical paragraphs as the identity) are stamped so the attempt's judgment,
+// its resume and its save all reference the range the child actually
+// practiced. INSERT OR IGNORE semantics identical to EnsurePoemLesson: first
+// content wins, the store never rebuilds a row — a re-attempt resolves a
+// FRESH lesson id from the caller instead.
+func (s *Store) EnsurePassageLesson(ctx context.Context, lessonID string, passageID, scopeID int64, whole bool, paragraphs []int, texts []string, category string) (Lesson, error) {
+	if lessonID == "" || passageID <= 0 || len(texts) == 0 {
+		return Lesson{}, errors.Wrap(ErrInvalidLesson, "ensure passage lesson: lesson_id, passage_id and paragraphs must be non-empty")
+	}
+	// The range identity is canonicalized exactly like the passage store's
+	// scope columns: sorted, deduplicated, and EMPTY iff whole (选择第 2、3
+	// 段 must land as exactly 2 and 3).
+	canonical, err := CanonicalParagraphs(paragraphs)
+	if err != nil {
+		return Lesson{}, errors.Wrap(ErrInvalidLesson, "ensure passage lesson: "+err.Error())
+	}
+	if !whole && len(canonical) == 0 {
+		return Lesson{}, errors.Wrap(ErrInvalidLesson, "ensure passage lesson: a paragraph range must name at least one paragraph")
+	}
+	if whole && len(canonical) > 0 {
+		return Lesson{}, errors.Wrap(ErrInvalidLesson, "ensure passage lesson: a whole range carries no paragraph set")
+	}
+	if whole {
+		// A whole range stores the canonical EMPTY set — a non-nil empty
+		// slice so the JSON column reads "[]" (never "null"), exactly the
+		// passage store's own whole-scope row shape.
+		canonical = []int{}
+	}
+	paragraphsJSON, err := json.Marshal(canonical)
+	if err != nil {
+		return Lesson{}, errors.Wrap(err, "ensure passage lesson: marshal paragraphs")
+	}
+
+	cards := make([]Word, 0, len(texts))
+	words := make([]string, 0, len(texts))
+	for _, text := range texts {
+		cards = append(cards, Word{Word: text})
+		words = append(words, text)
+	}
+	cardsJSON, err := json.Marshal(cards)
+	if err != nil {
+		return Lesson{}, errors.Wrap(err, "ensure passage lesson: marshal cards")
+	}
+	wordsJSON, err := json.Marshal(words)
+	if err != nil {
+		return Lesson{}, errors.Wrap(err, "ensure passage lesson: marshal words")
+	}
+
+	wholeFlag := 0
+	if whole {
+		wholeFlag = 1
+	}
+	if _, err = s.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO lessons (lesson_id, words, cards, category, passage_id, passage_scope_id, passage_whole, passage_paragraphs) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		lessonID,
+		string(wordsJSON),
+		string(cardsJSON),
+		NormalizeCategory(category),
+		passageID,
+		scopeID,
+		wholeFlag,
+		string(paragraphsJSON),
+	); err != nil {
+		s.logger.Error("lesson ensure passage: insert failed",
+			infra.F("component", "lesson/store"),
+			infra.F("lesson_id", lessonID),
+			infra.F("passage_id", passageID),
+			infra.ErrField(err),
+		)
+		return Lesson{}, errors.Wrap(err, "ensure passage lesson: insert")
+	}
+
+	created, err := s.GetLesson(ctx, lessonID)
+	if err != nil {
+		return Lesson{}, errors.Wrap(err, "ensure passage lesson: read back")
+	}
+	return created, nil
+}
+
+// CanonicalParagraphs sorts, deduplicates and validates a 1-based paragraph
+// index set (Issue #14's shared range form): every index must be a positive
+// int (the passage store re-validates against the real paragraph count — this
+// gate only rejects shapes that can never name a range).
+func CanonicalParagraphs(paragraphs []int) ([]int, error) {
+	sorted := append([]int(nil), paragraphs...)
+	sort.Ints(sorted)
+	out := make([]int, 0, len(sorted))
+	for _, i := range sorted {
+		if i < 1 {
+			return nil, fmt.Errorf("paragraph index %d is not positive", i)
+		}
+		if len(out) == 0 || out[len(out)-1] != i {
+			out = append(out, i)
+		}
+	}
+	return out, nil
+}
+
+// LatestPassageLessonID returns the lesson id of the passage RANGE's most
+// recent attempt row ("" when never practiced) — the passage classroom's
+// resume probe (Issue #14). The lookup keys on the content + range identity
+// (passage_id + whole + canonical paragraphs), NOT the scope row id: a range
+// the parent removed and re-added keeps resuming under its in-flight attempt.
+// Same ORDER BY shape as ListLessons (created_at DESC, lesson_id DESC as the
+// same-second tiebreak).
+func (s *Store) LatestPassageLessonID(ctx context.Context, passageID int64, whole bool, paragraphs []int) (string, error) {
+	if passageID <= 0 {
+		return "", errors.Wrap(ErrInvalidLesson, "latest passage lesson: passage_id must be positive")
+	}
+	canonical, err := CanonicalParagraphs(paragraphs)
+	if err != nil {
+		return "", errors.Wrap(ErrInvalidLesson, "latest passage lesson: "+err.Error())
+	}
+	wholeFlag := 0
+	encoded := "[]"
+	if whole {
+		wholeFlag = 1
+	} else {
+		if len(canonical) == 0 {
+			return "", errors.Wrap(ErrInvalidLesson, "latest passage lesson: a paragraph range must name at least one paragraph")
+		}
+		blob, merr := json.Marshal(canonical)
+		if merr != nil {
+			return "", errors.Wrap(merr, "latest passage lesson: marshal paragraphs")
+		}
+		encoded = string(blob)
+	}
+	var lessonID string
+	err = s.db.QueryRowContext(ctx,
+		"SELECT lesson_id FROM lessons WHERE passage_id = ? AND passage_whole = ? AND passage_paragraphs = ? ORDER BY created_at DESC, lesson_id DESC LIMIT 1",
+		passageID, wholeFlag, encoded,
+	).Scan(&lessonID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		s.logger.Error("latest passage lesson failed",
+			infra.F("component", "lesson/store"),
+			infra.F("passage_id", passageID),
+			infra.ErrField(err),
+		)
+		return "", errors.Wrap(err, "latest passage lesson")
+	}
+	return lessonID, nil
+}
+
+// decodeParagraphsJSON decodes the lessons passage_paragraphs column with
+// legacy-default tolerance (empty/invalid raw → the empty set — a
+// non-passage row never carries one).
+func decodeParagraphsJSON(raw string) []int {
+	if strings.TrimSpace(raw) == "" {
+		return []int{}
+	}
+	var indexes []int
+	if err := json.Unmarshal([]byte(raw), &indexes); err != nil {
+		return []int{}
+	}
+	if indexes == nil {
+		indexes = []int{}
+	}
+	return indexes
+}
+
 // decodeOutcomesJSON decodes the lessons outcomes column with legacy-default
 // tolerance: an empty raw value (a row written before the column's backfill)
 // decodes to the empty map, corrupted non-empty JSON surfaces as an error.
@@ -512,17 +714,19 @@ func decodeVerdictsJSON(raw string) ([]CheckVerdict, error) {
 // failing, so historical rows keep reading as stageless/unchecked.
 func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) {
 	var (
-		l            Lesson
-		wordsJSON    string
-		cardsJSON    string
-		stage        string
-		outcomesJSON string
-		verdictsJSON string
-		unchecked    int
+		l                Lesson
+		wordsJSON        string
+		cardsJSON        string
+		stage            string
+		outcomesJSON     string
+		verdictsJSON     string
+		unchecked        int
+		passageWhole     int
+		passageParasJSON string
 	)
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT lesson_id, words, cards, stage, outcomes, verdicts, unchecked, current_index, version, created_at, updated_at, category, poem_id FROM lessons WHERE lesson_id = ?",
+		"SELECT lesson_id, words, cards, stage, outcomes, verdicts, unchecked, current_index, version, created_at, updated_at, category, poem_id, passage_id, passage_scope_id, passage_whole, passage_paragraphs FROM lessons WHERE lesson_id = ?",
 		lessonID,
 	).Scan(
 		&l.LessonID,
@@ -538,6 +742,10 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 		&l.UpdatedAt,
 		&l.Category,
 		&l.PoemID,
+		&l.PassageID,
+		&l.PassageScopeID,
+		&passageWhole,
+		&passageParasJSON,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -575,6 +783,12 @@ func (s *Store) GetLesson(ctx context.Context, lessonID string) (Lesson, error) 
 	// could double-submit FSRS reviews).
 	l.Stage = stage
 	l.Unchecked = unchecked != 0
+	// Passage range columns (Issue #14): the whole flag plus the canonical
+	// paragraph set, with the same legacy-default tolerance (a non-passage
+	// row reads PassageID 0 and the empty set — the projection keys off the
+	// id, never off the paragraphs alone).
+	l.PassageWhole = passageWhole == 1
+	l.PassageParagraphs = decodeParagraphsJSON(passageParasJSON)
 	outcomes, err := decodeOutcomesJSON(outcomesJSON)
 	if err != nil {
 		s.logger.Error("lesson get: unmarshal outcomes failed",
@@ -613,6 +827,12 @@ func SummarizeLesson(l Lesson) LessonSummary {
 		WordCount:    len(l.Cards),
 		Category:     NormalizeCategory(l.Category),
 		PoemID:       l.PoemID,
+		// Issue #14: the passage range identity rides the summary verbatim —
+		// the records view shows the range the child actually practiced, and
+		// the passage title/author resolve through PassageID's own join.
+		PassageID:         l.PassageID,
+		PassageWhole:      l.PassageWhole,
+		PassageParagraphs: l.PassageParagraphs,
 	}
 	for _, v := range l.Verdicts {
 		if !v.Manual {
@@ -658,18 +878,27 @@ type LessonSummary struct {
 	Stage     string
 	// Category is the row's subject, already normalized ('' → english) —
 	// the parent records view renders a subject badge from it (Issue #10).
-	Category     string
-	CurrentIndex int
+	Category string
+	// PassageID is non-zero only on passage 背默 rows (Issue #14) — the
+	// records projection's join key for the passage's title/author.
+	// PassageWhole/PassageParagraphs carry the practiced RANGE identity so
+	// the parent view shows the range the child actually practiced (实际范
+	// 围), and a paragraph attempt never reads as a whole-passage one.
+	PassageParagraphs []int
+	PassageID         int64
 	// PoemID is non-zero only on whole-poem 背默 rows (Issue #12) — the
 	// records projection's join key for the poem's title/author. The summary
 	// carries the id ONLY; the title never rides a per-row round trip.
-	PoemID      int64
-	WordCount   int
-	Correct     int
-	Wrong       int
-	Unconfirmed int
-	Unchecked   bool
-	Completed   bool
+	PoemID       int64
+	CurrentIndex int
+	WordCount    int
+	Correct      int
+	Wrong        int
+	Unconfirmed  int
+	// PassageWhole: see the Passage fields above (Issue #14).
+	PassageWhole bool
+	Unchecked    bool
+	Completed    bool
 }
 
 // ListLessons limit normalization — the bounds live HERE, in the store, so a
@@ -703,7 +932,7 @@ func normalizeListLessonsLimit(limit int) int {
 // wrapped error — a silently-empty verdict list would misstate the counts.
 func (s *Store) ListLessons(ctx context.Context, limit int) ([]LessonSummary, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT lesson_id, stage, unchecked, current_index, cards, verdicts, created_at, category, poem_id FROM lessons ORDER BY created_at DESC, lesson_id DESC LIMIT ?",
+		"SELECT lesson_id, stage, unchecked, current_index, cards, verdicts, created_at, category, poem_id, passage_id, passage_scope_id, passage_whole, passage_paragraphs FROM lessons ORDER BY created_at DESC, lesson_id DESC LIMIT ?",
 		normalizeListLessonsLimit(limit),
 	)
 	if err != nil {
@@ -718,15 +947,19 @@ func (s *Store) ListLessons(ctx context.Context, limit int) ([]LessonSummary, er
 	var summaries []LessonSummary
 	for rows.Next() {
 		var (
-			row          Lesson
-			cardsJSON    string
-			verdictsJSON string
-			unchecked    int
+			row              Lesson
+			cardsJSON        string
+			verdictsJSON     string
+			unchecked        int
+			passageWhole     int
+			passageParasJSON string
 		)
-		if err := rows.Scan(&row.LessonID, &row.Stage, &unchecked, &row.CurrentIndex, &cardsJSON, &verdictsJSON, &row.CreatedAt, &row.Category, &row.PoemID); err != nil {
+		if err := rows.Scan(&row.LessonID, &row.Stage, &unchecked, &row.CurrentIndex, &cardsJSON, &verdictsJSON, &row.CreatedAt, &row.Category, &row.PoemID, &row.PassageID, &row.PassageScopeID, &passageWhole, &passageParasJSON); err != nil {
 			return nil, errors.Wrap(err, "list lessons: scan")
 		}
 		row.Unchecked = unchecked != 0
+		row.PassageWhole = passageWhole == 1
+		row.PassageParagraphs = decodeParagraphsJSON(passageParasJSON)
 
 		cards, err := decodeCardsJSON(cardsJSON)
 		if err != nil {

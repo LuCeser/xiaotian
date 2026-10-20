@@ -133,6 +133,17 @@ body[data-page="tutor"] {
   text-align: center;
 }
 
+/* Issue #14: the passage-range 背默 banner — the poem banner's twin with a
+   calmer green palette (课文, not 诗). Same shape: identity + range only. */
+.rt-passage {
+  background: #edf7ef;
+  border-color: #cfe6d4;
+}
+
+.rt-passage .rt-poem-title {
+  color: #2f6b3c;
+}
+
 .rt-progress {
   background: #ffffff;
   border-radius: 16px;

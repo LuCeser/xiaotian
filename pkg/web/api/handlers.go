@@ -567,11 +567,11 @@ func (h *handler) listUnits(w http.ResponseWriter, r *http.Request) {
 // serialization-layer white-list — "not in the JSON" is the only "not
 // leaked", RESEARCH Pattern 2).
 type lessonListItem struct {
-	LessonID   string `json:"lesson_id"`
-	CreatedAt  string `json:"created_at"`
-	Stage      string `json:"stage"`
-	Kind       string `json:"kind"`
-	SaveStatus string `json:"save_status"`
+	PassageAuthor string `json:"passage_author,omitempty"`
+	LessonID      string `json:"lesson_id"`
+	Stage         string `json:"stage"`
+	Kind          string `json:"kind"`
+	SaveStatus    string `json:"save_status"`
 	// Category is the lesson's subject ("english"/"chinese", Issue #10) —
 	// the records view renders its subject badge from this field, never by
 	// parsing the lesson id.
@@ -580,16 +580,26 @@ type lessonListItem struct {
 	// empty otherwise): the records view distinguishes 古诗作品、练习方式 and
 	// the per-line judgment from the same row. PoemID is the join key the
 	// projection filled the title through.
-	PoemTitle   string `json:"poem_title,omitempty"`
-	PoemAuthor  string `json:"poem_author,omitempty"`
-	Method      string `json:"method,omitempty"`
-	WordCount   int    `json:"word_count"`
-	Correct     int    `json:"correct"`
-	Wrong       int    `json:"wrong"`
-	Unconfirmed int    `json:"unconfirmed"`
-	PoemID      int64  `json:"poem_id,omitempty"`
-	Completed   bool   `json:"completed"`
-	Unchecked   bool   `json:"unchecked"`
+	PoemTitle    string `json:"poem_title,omitempty"`
+	PoemAuthor   string `json:"poem_author,omitempty"`
+	Method       string `json:"method,omitempty"`
+	PassageTitle string `json:"passage_title,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	// Passage fields ride ONLY passage 背默 rows (Issue #14): the work
+	// identity (title/author joined through PassageID) plus the practiced
+	// RANGE carried by the lesson row itself — the records view shows 作
+	// 品、实际范围、结果、保存状态 from one row, and a paragraph attempt
+	// never renders as a whole-passage one.
+	PassageParagraphs []int `json:"passage_paragraphs,omitempty"`
+	PassageID         int64 `json:"passage_id,omitempty"`
+	WordCount         int   `json:"word_count"`
+	Correct           int   `json:"correct"`
+	Wrong             int   `json:"wrong"`
+	Unconfirmed       int   `json:"unconfirmed"`
+	PoemID            int64 `json:"poem_id,omitempty"`
+	PassageWhole      bool  `json:"passage_whole,omitempty"`
+	Completed         bool  `json:"completed"`
+	Unchecked         bool  `json:"unchecked"`
 }
 
 // lessonsResponse is the GET /lessons response envelope.
@@ -646,10 +656,13 @@ type lessonDetailResponse struct {
 }
 
 // lessonKind classifies a lesson id for the parent view's type badge:
-// r0p- whole-poem 背默 attempts (Issue #12), r0x- extra-practice sessions,
-// r0- classroom lessons, anything else unknown.
+// r0w- passage 背默 attempts (Issue #14), r0p- whole-poem 背默 attempts
+// (Issue #12), r0x- extra-practice sessions, r0- classroom lessons,
+// anything else unknown.
 func lessonKind(lessonID string) string {
 	switch {
+	case strings.HasPrefix(lessonID, "r0w-"):
+		return "passage"
 	case strings.HasPrefix(lessonID, "r0p-"):
 		return "poem"
 	case strings.HasPrefix(lessonID, "r0x-"):
@@ -701,6 +714,54 @@ func (h *handler) resolvePoemsForSummaries(ctx context.Context, summaries []less
 		return map[int64]poem.Poem{}
 	}
 	out := make(map[int64]poem.Poem, len(rows))
+	for _, p := range rows {
+		out[p.ID] = p
+	}
+	return out
+}
+
+// applyPassageProjection fills a passage row's work identity from the
+// resolved passage map; the RANGE always comes from the lesson row's own
+// summary (what the child actually practiced — the poem projection's same
+// degraded-join discipline: a passage the store can no longer serve keeps
+// its id and range, only the title reads empty).
+func applyPassageProjection(item *lessonListItem, passages map[int64]passage.Passage, summary lesson.LessonSummary) {
+	if summary.PassageID <= 0 {
+		return
+	}
+	item.PassageID = summary.PassageID
+	item.PassageWhole = summary.PassageWhole
+	item.PassageParagraphs = summary.PassageParagraphs
+	item.Method = "背默"
+	if p, ok := passages[summary.PassageID]; ok {
+		item.PassageTitle = p.Title
+		item.PassageAuthor = p.Author
+	}
+}
+
+// resolvePassagesForSummaries bulk-resolves the page's passage rows into
+// one map (ONE store round trip). A nil passage store or a lookup error
+// degrades to the empty map — the title is presentational, the range and
+// the judgment never depended on the join.
+func (h *handler) resolvePassagesForSummaries(ctx context.Context, summaries []lesson.LessonSummary) map[int64]passage.Passage {
+	ids := make([]int64, 0, 4)
+	for _, s := range summaries {
+		if s.PassageID > 0 {
+			ids = append(ids, s.PassageID)
+		}
+	}
+	if len(ids) == 0 || h.passages == nil {
+		return map[int64]passage.Passage{}
+	}
+	rows, err := h.passages.PassagesByIDs(ctx, ids)
+	if err != nil {
+		h.logger.Warn("passage projection failed",
+			infra.F("component", "web/api"),
+			infra.ErrField(err),
+		)
+		return map[int64]passage.Passage{}
+	}
+	out := make(map[int64]passage.Passage, len(rows))
 	for _, p := range rows {
 		out[p.ID] = p
 	}
@@ -800,10 +861,12 @@ func (h *handler) listLessons(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]lessonListItem, 0, len(summaries))
 	poems := h.resolvePoemsForSummaries(r.Context(), summaries)
+	passages := h.resolvePassagesForSummaries(r.Context(), summaries)
 	for _, s := range summaries {
 		receipt, hasReceipt := latest[s.LessonID]
 		item := newLessonListItem(s, receipt, hasReceipt)
 		applyPoemProjection(&item, poems, s.PoemID)
+		applyPassageProjection(&item, passages, s)
 		items = append(items, item)
 	}
 	writeJSON(w, lessonsResponse{Lessons: items})
@@ -857,6 +920,8 @@ func (h *handler) getLesson(w http.ResponseWriter, r *http.Request) {
 	item := newLessonListItem(summary, receipt, hasReceipt)
 	poems := h.resolvePoemsForSummaries(r.Context(), []lesson.LessonSummary{summary})
 	applyPoemProjection(&item, poems, summary.PoemID)
+	passages := h.resolvePassagesForSummaries(r.Context(), []lesson.LessonSummary{summary})
+	applyPassageProjection(&item, passages, summary)
 
 	if !lesson.LessonCompleted(l.Stage, l.CurrentIndex, len(l.Cards)) {
 		// In-progress: the summary row IS the whole response — the word

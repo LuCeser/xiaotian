@@ -159,6 +159,17 @@ func (t *LessonTools) LatestPoemLessonID(ctx context.Context, poemID int64) (str
 	return t.store.LatestPoemLessonID(ctx, poemID)
 }
 
+// EnsurePassageLesson creates the passage-range 背默 attempt row (Issue #14).
+func (t *LessonTools) EnsurePassageLesson(ctx context.Context, lessonID string, passageID, scopeID int64, whole bool, paragraphs []int, texts []string, category string) (lesson.Lesson, error) {
+	return t.store.EnsurePassageLesson(ctx, lessonID, passageID, scopeID, whole, paragraphs, texts, category)
+}
+
+// LatestPassageLessonID returns the passage RANGE's most recent attempt row
+// id (Issue #14's resume probe, keyed by content + range).
+func (t *LessonTools) LatestPassageLessonID(ctx context.Context, passageID int64, whole bool, paragraphs []int) (string, error) {
+	return t.store.LatestPassageLessonID(ctx, passageID, whole, paragraphs)
+}
+
 // AdvanceWord moves the cursor forward one word, idempotently by requestID
 // under the expectedVersion optimistic lock (advance_word tool).
 func (t *LessonTools) AdvanceWord(ctx context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error) {

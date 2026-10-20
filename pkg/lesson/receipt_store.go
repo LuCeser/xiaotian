@@ -77,6 +77,13 @@ const (
 	// expresses the poem_practice_logs storage result, never an FSRS write
 	// (poems are not cards, the same D-11 isolation).
 	ReceiptKindPoem = "poem"
+	// ReceiptKindPassage marks the passage-range 背默 submission (Issue
+	// #14). Its requested/updated sets carry ONE entry — the work + the
+	// practiced range (《题》整篇 / 《题》第 2、3 段) — because the save scope
+	// is exactly that content + range identity (never one entry per
+	// paragraph); saved/failed expresses the passage_practice_logs storage
+	// result, never an FSRS write (passages are not cards).
+	ReceiptKindPassage = "passage"
 )
 
 // Receipt status values — the two-phase lifecycle. pending = Begin landed

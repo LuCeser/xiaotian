@@ -71,11 +71,13 @@
     unknown: '保存状态未知'
   };
 
-  /** Verbatim kind badge copy. Issue #12: poem = whole-poem 背默 attempts. */
+  /** Verbatim kind badge copy. Issue #12: poem = whole-poem 背默 attempts;
+   * Issue #14: passage = passage-range 背默 attempts. */
   var KIND_COPY = {
     lesson: '到期复习',
     practice: '加练',
     poem: '古诗背默',
+    passage: '课文背默',
     unknown: '类型待核实'
   };
 
@@ -85,13 +87,25 @@
     chinese: '中文'
   };
 
-  /** Verbatim receipt-kind copy (the submission endpoints + Issue #12). */
+  /** passageRangeLabel — one passage attempt's practiced range as parent
+   * copy (Issue #14): 整篇 or the original paragraph numbers. Same wording
+   * discipline as the classroom's greeting/receipt. */
+  function passageRangeLabel(item) {
+    if (!item) return '？';
+    if (item.passage_whole) return '整篇';
+    var nos = item.passage_paragraphs || [];
+    if (!nos.length) return '？';
+    return '第 ' + nos.join('、') + ' 段';
+  }
+
+  /** Verbatim receipt-kind copy (the submission endpoints + Issue #12/#14). */
   var RECEIPT_KIND_COPY = {
     check: '检查提交',
     correction: '事后修正',
     unchecked_fallback: '未核对兜底',
     practice: '加练记录',
-    poem: '古诗背默记录'
+    poem: '古诗背默记录',
+    passage: '课文背默记录'
   };
 
   /** In-progress stage summary; anything unmapped reads 进行中. */
@@ -299,6 +313,16 @@
         (item.poem_author ? ' · ' + item.poem_author : '') +
         ' · ' + (item.method || '背默');
       mid.appendChild(work);
+    } else if (item.kind === 'passage') {
+      // Issue #14: a passage row names the work AND the practiced range —
+      // the paragraph attempt and the whole attempt stay distinguishable,
+      // and the range always reads from the record row itself.
+      var passageWork = document.createElement('span');
+      passageWork.className = 'lesson-words';
+      passageWork.textContent = '《' + (item.passage_title || '课文') + '》' +
+        (item.passage_author ? ' · ' + item.passage_author : '') +
+        ' · ' + passageRangeLabel(item) + ' · ' + (item.method || '背默');
+      mid.appendChild(passageWork);
     } else {
       var words = document.createElement('span');
       words.className = 'lesson-words';
@@ -313,6 +337,10 @@
         counts.textContent = (item.word_count || 0) === (item.correct || 0)
           ? '整首 ' + (item.word_count || 0) + ' 句全对，已掌握'
           : '共 ' + (item.word_count || 0) + ' 句，对 ' + (item.correct || 0) + ' 句';
+      } else if (item.kind === 'passage') {
+        counts.textContent = (item.word_count || 0) === (item.correct || 0)
+          ? passageRangeLabel(item) + ' ' + (item.word_count || 0) + ' 段全对，已掌握'
+          : passageRangeLabel(item) + '共 ' + (item.word_count || 0) + ' 段，对 ' + (item.correct || 0) + ' 段';
       } else {
         counts.textContent = '已核对 ' + (item.correct || 0) + ' 对 / ' +
           (item.wrong || 0) + ' 错 / ' + (item.unconfirmed || 0) + ' 未确认';
@@ -516,6 +544,18 @@
         ' · ' + (detail.method || '背默') + '：按整首记录掌握，不进入单词复习计划';
       head.appendChild(poemNote);
     }
+    if (detail.kind === 'passage') {
+      // Issue #14: the passage attempt's own identity + range — the record
+      // names WHICH range was practiced, and the mastery verdict never
+      // spreads beyond it (第 2、3 段掌握不算全文掌握).
+      var passageNote = document.createElement('p');
+      passageNote.className = 'lesson-practice-note';
+      passageNote.textContent = '《' + (detail.passage_title || '课文') + '》' +
+        (detail.passage_author ? ' · ' + detail.passage_author : '') +
+        ' · ' + passageRangeLabel(detail) + ' · ' + (detail.method || '背默') +
+        '：按本次范围记录掌握，不代表整篇课文';
+      head.appendChild(passageNote);
+    }
 
     if (completed) {
       var counts = document.createElement('p');
@@ -524,6 +564,10 @@
         counts.textContent = (detail.word_count || 0) === (detail.correct || 0)
           ? '整首 ' + (detail.word_count || 0) + ' 句全对，已掌握'
           : '共 ' + (detail.word_count || 0) + ' 句，对 ' + (detail.correct || 0) + ' 句';
+      } else if (detail.kind === 'passage') {
+        counts.textContent = (detail.word_count || 0) === (detail.correct || 0)
+          ? passageRangeLabel(detail) + ' ' + (detail.word_count || 0) + ' 段全对，已掌握'
+          : passageRangeLabel(detail) + '共 ' + (detail.word_count || 0) + ' 段，对 ' + (detail.correct || 0) + ' 段';
       } else {
         counts.textContent = '已核对 ' + (detail.correct || 0) + ' 对 / ' +
           (detail.wrong || 0) + ' 错 / ' + (detail.unconfirmed || 0) + ' 未确认';
@@ -565,11 +609,27 @@
     list.className = 'lesson-words';
     var results = Array.isArray(detail.results) ? detail.results : [];
     var self = this;
-    results.forEach(function (r) {
+    // Issue #14: a passage attempt's rows carry the ORIGINAL 自然段号 of the
+    // practiced paragraphs (the range's own order) so the parent checks the
+    // record against the text's own numbering.
+    var paragraphNos = detail.kind === 'passage'
+      ? (detail.passage_whole
+        ? results.map(function (_, i) { return i + 1; })
+        : (detail.passage_paragraphs || []))
+      : null;
+    results.forEach(function (r, i) {
       if (!r || !r.word) {
         return;
       }
-      list.appendChild(self.buildWordRow(r, meanings[r.word] || ''));
+      var row = self.buildWordRow(r, meanings[r.word] || '');
+      var no = paragraphNos ? paragraphNos[i] : 0;
+      if (no) {
+        var label = document.createElement('span');
+        label.className = 'lesson-paragraph-no';
+        label.textContent = '第 ' + no + ' 段';
+        row.insertBefore(label, row.firstChild);
+      }
+      list.appendChild(row);
     });
     return list;
   };

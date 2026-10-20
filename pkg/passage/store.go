@@ -118,6 +118,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		passagesDDL, idxPassagesFingerprint,
 		passageAssignmentsDDL, idxPassageAssignmentsTextbook,
 		passageScopesDDL, idxPassageScopesPassage,
+		passagePracticeDDL, idxPassagePracticeRange, // Issue #14: per-range 背默 records + scheduling
+		passageReviewScheduleDDL,
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("passage/migrate: %w", err)
@@ -171,12 +173,19 @@ type Scope struct {
 }
 
 // ScopeRow is one STORED practice range with its identity — the shape the
-// content view renders and later mastery records (#14) will reference.
+// content view renders and the mastery records (#14) reference. The practice
+// projection (Issue #14) is PER RANGE: HasPractice/LastMastered/
+// NextReviewDay describe THIS range's own history only — 第 2 段掌握 never
+// reads as the whole passage's mastery, and a whole range starts unpracticed
+// however often its paragraphs were practiced.
 type ScopeRow struct {
-	CreatedAt  string `json:"created_at"`
-	Paragraphs []int  `json:"paragraphs"`
-	ID         int64  `json:"id"`
-	Whole      bool   `json:"whole"`
+	CreatedAt     string `json:"created_at"`
+	NextReviewDay string `json:"next_review_day,omitempty"`
+	Paragraphs    []int  `json:"paragraphs"`
+	ID            int64  `json:"id"`
+	Whole         bool   `json:"whole"`
+	HasPractice   bool   `json:"has_practice"`
+	LastMastered  bool   `json:"last_mastered"`
 }
 
 // Passage is one stored text plus its management projection: the ordered
@@ -646,12 +655,12 @@ type ListFilter struct {
 
 // List returns the stored passages (newest first — the content view's
 // newest-first convention) with their attribution projection, practice
-// ranges and scope verdict. The attribution join is a LEFT JOIN against
-// the Python-owned textbooks table through database.Open's shared
-// *sql.DB; on a pre-migration database (no textbooks table yet) the join
-// degrades to nameless assignments and progress-pending scope, never an
-// error: the passages still render (the card/poem repo's same
-// degraded-read discipline).
+// ranges, scope verdict and per-range practice state (Issue #14). The
+// attribution join is a LEFT JOIN against the Python-owned textbooks table
+// through database.Open's shared *sql.DB; on a pre-migration database (no
+// textbooks table yet) the join degrades to nameless assignments and
+// progress-pending scope, never an error: the passages still render (the
+// card/poem repo's same degraded-read discipline).
 func (s *Store) List(ctx context.Context, filter ListFilter) ([]Passage, error) {
 	query := `SELECT p.id, p.title, p.author, p.paragraphs, p.category, p.created_at FROM passages p`
 	args := []any{}
@@ -682,7 +691,6 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Passage, error) 
 	defer rows.Close()
 
 	passages := []Passage{}
-	byID := map[int64]*Passage{}
 	for rows.Next() {
 		var p Passage
 		var paragraphsJSON string
@@ -700,6 +708,87 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Passage, error) 
 	if len(passages) == 0 {
 		return passages, nil
 	}
+	if err = s.hydrate(ctx, passages); err != nil {
+		return nil, err
+	}
+	return passages, nil
+}
+
+// Get returns ONE stored passage by id with the same attribution, range,
+// scope-verdict and practice projection as List — the passage classroom's
+// fetch (Issue #14: the session must start from an in-scope passage and a
+// REAL stored range, so the caller branches on InScope and finds the scope
+// row by id). ErrPassageNotFound is the honest miss for an unknown or
+// deleted id.
+func (s *Store) Get(ctx context.Context, id int64) (Passage, error) {
+	passages, err := s.PassagesByIDs(ctx, []int64{id})
+	if err != nil {
+		return Passage{}, err
+	}
+	if len(passages) == 0 || passages[0].ID != id {
+		return Passage{}, errors.Wrap(ErrPassageNotFound, fmt.Sprintf("passage get: passage %d", id))
+	}
+	return passages[0], nil
+}
+
+// PassagesByIDs returns the stored passages for the given ids (arbitrary
+// order — the caller keys by id; passages missing from the store are simply
+// absent from the result). One shared read backs the parent records
+// projection (Issue #14: the records view needs the passage's title/author
+// per lesson row without a per-row round trip).
+func (s *Store) PassagesByIDs(ctx context.Context, ids []int64) ([]Passage, error) {
+	if len(ids) == 0 {
+		return []Passage{}, nil
+	}
+	placeholders := make([]string, 0, len(ids))
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, title, author, paragraphs, category, created_at FROM passages WHERE id IN ("+strings.Join(placeholders, ",")+")", //nolint:gosec // G202: placeholders are '?', ids are bound parameters
+		args...)
+	if err != nil {
+		s.logger.Error("passage get by ids failed",
+			infra.F("component", "passage/store"),
+			infra.F("count", len(ids)),
+			infra.ErrField(err),
+		)
+		return nil, errors.Wrap(err, "passage get by ids")
+	}
+	defer rows.Close()
+
+	passages := []Passage{}
+	for rows.Next() {
+		var p Passage
+		var paragraphsJSON string
+		if err = rows.Scan(&p.ID, &p.Title, &p.Author, &paragraphsJSON, &p.Category, &p.CreatedAt); err != nil {
+			return nil, errors.Wrap(err, "passage get by ids: scan")
+		}
+		p.Paragraphs = decodeParagraphs(paragraphsJSON)
+		p.Assignments = []Assignment{}
+		p.Scopes = []ScopeRow{}
+		passages = append(passages, p)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, errors.Wrap(err, "passage get by ids: iteration")
+	}
+	if len(passages) == 0 {
+		return passages, nil
+	}
+	if err = s.hydrate(ctx, passages); err != nil {
+		return nil, err
+	}
+	return passages, nil
+}
+
+// hydrate loads the management/practice projections onto already-scanned
+// passage rows: attributions (with the Issue #4 scope verdict), practice
+// ranges, and each range's own practice state (Issue #14) — the shared body
+// of List and PassagesByIDs so the two reads cannot drift.
+func (s *Store) hydrate(ctx context.Context, passages []Passage) error {
+	byID := make(map[int64]*Passage, len(passages))
 	for i := range passages {
 		byID[passages[i].ID] = &passages[i]
 	}
@@ -721,12 +810,12 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Passage, error) 
 				infra.F("component", "passage/store"),
 				infra.ErrField(aerr),
 			)
-			return nil, errors.Wrap(aerr, "passage list: assignments")
+			return errors.Wrap(aerr, "passage list: assignments")
 		}
 	} else {
 		defer assignRows.Close()
-		if err = scanAssignments(assignRows, byID, assignments, books); err != nil {
-			return nil, err
+		if err := scanAssignments(assignRows, byID, assignments, books); err != nil {
+			return err
 		}
 	}
 
@@ -734,15 +823,15 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Passage, error) 
 	if scopeRows, serr := s.db.QueryContext(ctx,
 		`SELECT id, passage_id, whole, paragraphs, created_at
 		 FROM passage_scopes ORDER BY passage_id, id`); serr != nil {
-		return nil, errors.Wrap(serr, "passage list: scopes")
+		return errors.Wrap(serr, "passage list: scopes")
 	} else {
 		defer scopeRows.Close()
 		for scopeRows.Next() {
 			var passageID, whole int64
 			var row ScopeRow
 			var paragraphsJSON string
-			if err = scopeRows.Scan(&row.ID, &passageID, &whole, &paragraphsJSON, &row.CreatedAt); err != nil {
-				return nil, errors.Wrap(err, "passage list: scopes scan")
+			if err := scopeRows.Scan(&row.ID, &passageID, &whole, &paragraphsJSON, &row.CreatedAt); err != nil {
+				return errors.Wrap(err, "passage list: scopes scan")
 			}
 			if _, wanted := byID[passageID]; !wanted {
 				continue // a range for a passage outside this page
@@ -751,8 +840,8 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Passage, error) 
 			row.Paragraphs = decodeIndexes(paragraphsJSON)
 			scopes[passageID] = append(scopes[passageID], row)
 		}
-		if err = scopeRows.Err(); err != nil {
-			return nil, errors.Wrap(err, "passage list: scopes iteration")
+		if err := scopeRows.Err(); err != nil {
+			return errors.Wrap(err, "passage list: scopes iteration")
 		}
 	}
 
@@ -765,7 +854,84 @@ func (s *Store) List(ctx context.Context, filter ListFilter) ([]Passage, error) 
 		}
 		applyScope(&passages[i], books)
 	}
-	return passages, nil
+	s.attachScopePractice(ctx, passages)
+	return nil
+}
+
+// attachScopePractice fills every scope row's practice projection from the
+// per-range schedule table (written atomically with each practice log, so
+// its presence IS the has_practice verdict). The join key is the same
+// content + range identity the records carry: a removed-and-re-added range
+// re-links its own history, while a whole range and a paragraph set never
+// borrow each other's state (第 2 段掌握不能算全文掌握). A read failure
+// degrades to the un-practiced projection (the poem attachReviewSchedules
+// discipline: presentational state never fails the page).
+func (s *Store) attachScopePractice(ctx context.Context, passages []Passage) {
+	if len(passages) == 0 {
+		return
+	}
+	type scheduleRow struct {
+		nextReviewDay string
+		whole         bool
+		lastMastered  bool
+	}
+	byRange := map[string]scheduleRow{}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT passage_id, whole, paragraphs, last_mastered, next_review_day FROM passage_review_schedule`)
+	if err != nil {
+		s.logger.Error("passage scope practice read failed",
+			infra.F("component", "passage/store"),
+			infra.ErrField(err),
+		)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var passageID, whole, mastered int64
+		var paragraphs, next string
+		if err := rows.Scan(&passageID, &whole, &paragraphs, &mastered, &next); err != nil {
+			continue // defensive: a bad row must not sink the page
+		}
+		byRange[rangeKey(passageID, whole == 1, paragraphs)] = scheduleRow{
+			whole: whole == 1, lastMastered: mastered != 0, nextReviewDay: next,
+		}
+	}
+
+	for i := range passages {
+		for j := range passages[i].Scopes {
+			scope := &passages[i].Scopes[j]
+			row, ok := byRange[scopeKeyOf(passages[i].ID, scope)]
+			if !ok {
+				continue
+			}
+			scope.HasPractice = true
+			scope.LastMastered = row.lastMastered
+			scope.NextReviewDay = row.nextReviewDay
+		}
+	}
+}
+
+// rangeKey builds the map key of one STORED range (passage id + whole flag +
+// the canonical paragraphs JSON the columns already carry — callers pass the
+// column verbatim, never raw client input).
+func rangeKey(passageID int64, whole bool, canonicalParagraphs string) string {
+	wholeFlag := 0
+	if whole {
+		wholeFlag = 1
+	}
+	return fmt.Sprintf("%d|%d|%s", passageID, wholeFlag, canonicalParagraphs)
+}
+
+// scopeKeyOf projects one ScopeRow onto the practice-state map key. The
+// paragraph list is re-canonicalized (sorted + deduplicated, empty set for
+// whole) so a scope row always matches its own stored range identity.
+func scopeKeyOf(passageID int64, scope *ScopeRow) string {
+	indexes := scope.Paragraphs
+	if scope.Whole {
+		indexes = nil
+	}
+	_, encoded, _ := canonicalParagraphs(indexes, 1<<30)
+	return rangeKey(passageID, scope.Whole, encoded)
 }
 
 // scanAssignments drains the attribution join into the per-passage

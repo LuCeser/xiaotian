@@ -229,13 +229,23 @@ type LessonView struct {
 // read the poem aloud), and the submit records the whole-poem scope. A
 // non-positive value (absent) keeps the word classroom — the same
 // deny-by-default shape as Practice/Category.
+//
+// Passage/PassageScope (Issue #14) request a PASSAGE 背默 classroom for the
+// passages.id and the passage_scopes.id the parent picked: the RANGE's own
+// paragraphs (整篇 or the explicit paragraph set, in the original's own
+// order) become the task and the check rows, and the submit records exactly
+// that content + range identity (第 2、3 段掌握不算全文掌握). A non-positive
+// passage (absent) keeps the word classroom; a passage without a scope id is
+// refused honestly — a passage classroom ALWAYS names its range.
 type SessionInitMsg struct {
-	Type     string    `json:"type"`
-	Mode     string    `json:"mode,omitempty"`
-	Category string    `json:"category,omitempty"`
-	Audio    AudioSpec `json:"audio"`
-	Practice bool      `json:"practice,omitempty"`
-	Poem     int64     `json:"poem,omitempty"`
+	Type         string    `json:"type"`
+	Mode         string    `json:"mode,omitempty"`
+	Category     string    `json:"category,omitempty"`
+	Audio        AudioSpec `json:"audio"`
+	Practice     bool      `json:"practice,omitempty"`
+	Poem         int64     `json:"poem,omitempty"`
+	Passage      int64     `json:"passage,omitempty"`
+	PassageScope int64     `json:"passage_scope,omitempty"`
 }
 
 // Classroom category values (Issue #10). The literals match the vocabulary
@@ -311,14 +321,21 @@ type EndSessionMsg struct {
 // practiced work's identity the page renders (title/author/line count) —
 // the poem's TEXT itself never rides here; Lesson.Words stays masked (""
 // per line) until check_started, in every mode.
+//
+// Passage (Issue #14) is non-nil only for a passage 背默 classroom: the
+// practiced work's identity plus the RANGE actually practiced (整篇 or the
+// 1-based paragraph set in original order). The passage's TEXT never rides
+// here either; Lesson.Words stays masked ("" per paragraph) until
+// check_started, in every mode.
 type SessionReadyMsg struct {
-	Poem      *PoemTaskView `json:"poem,omitempty"`
-	Type      string        `json:"type"`
-	SessionID string        `json:"session_id"`
-	Category  string        `json:"category,omitempty"`
-	Audio     AudioSpec     `json:"audio"`
-	Lesson    LessonView    `json:"lesson"`
-	TTS       TTSSpec       `json:"tts"`
+	Poem      *PoemTaskView    `json:"poem,omitempty"`
+	Passage   *PassageTaskView `json:"passage,omitempty"`
+	Type      string           `json:"type"`
+	SessionID string           `json:"session_id"`
+	Category  string           `json:"category,omitempty"`
+	Audio     AudioSpec        `json:"audio"`
+	Lesson    LessonView       `json:"lesson"`
+	TTS       TTSSpec          `json:"tts"`
 }
 
 // PoemTaskView is the whole-poem 背默 task's identity on session_ready
@@ -331,6 +348,23 @@ type PoemTaskView struct {
 	Method    string `json:"method"`
 	ID        int64  `json:"id"`
 	LineCount int    `json:"line_count"`
+}
+
+// PassageTaskView is the passage 背默 task's identity on session_ready
+// (Issue #14): WHAT the child is writing from memory and WHICH range —
+// never the text itself. Paragraphs carries the 1-based ORIGINAL paragraph
+// indexes in original order (equal to [1..ParagraphCount] when Whole), so
+// the page and the parent records label the practiced rows by the text's
+// own numbering, never by a re-derived sequence.
+type PassageTaskView struct {
+	Title          string `json:"title"`
+	Author         string `json:"author,omitempty"`
+	Method         string `json:"method"`
+	Paragraphs     []int  `json:"paragraphs"`
+	ID             int64  `json:"id"`
+	ScopeID        int64  `json:"scope_id"`
+	ParagraphCount int    `json:"paragraph_count"`
+	Whole          bool   `json:"whole"`
 }
 
 // TurnStartMsg announces a new turn (one student utterance → one teacher
@@ -509,6 +543,11 @@ const (
 	// the poem's own ordered LINES (Issue #12; the same D-10 unmask point:
 	// before this message the poem's text never reached the client).
 	CheckStartedReasonPoemDone = "poem_done"
+	// CheckStartedReasonPassageDone: the passage-range 背默 task finished
+	// its writing stage — the panel opens against the RANGE's own ordered
+	// PARAGRAPHS only (Issue #14; the same D-10 unmask point, and the rows
+	// never include paragraphs outside the practiced range).
+	CheckStartedReasonPassageDone = "passage_done"
 )
 
 // CheckStartedMsg opens the check stage (server → client). Words is the
