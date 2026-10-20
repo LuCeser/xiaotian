@@ -861,3 +861,100 @@ func TestSettledStaleAnnouncerCannotLiftNewClassroomGate(t *testing.T) {
 	ttAckLast(t, tm, s, current)
 	ttWaitClarifyOpen(t, tm)
 }
+
+// TestMidBindingAskTimeoutCannotClosePickedClassroom — the review P2 pin:
+// the pick's locked half consumes the pendingAsk AND bumps the epoch in ONE
+// lock hold. The review's interleaving — the consume+unlock lands, the ask's
+// ack timeout fires BEFORE the bump, orderlyCloseAt still sees the old epoch
+// current and closes the session, then the binding continues into a closed
+// classroom — must be unconstructible: by the time any post-take timeout
+// path runs, the old epoch is already stale and the close is refused.
+func TestMidBindingAskTimeoutCannotClosePickedClassroom(t *testing.T) {
+	en := make([]lesson.Word, 0, 12)
+	for i := 0; i < 12; i++ {
+		en = append(en, lesson.Word{Word: "en" + string(rune('a'+i))})
+	}
+	zh := make([]lesson.Word, 0, 30)
+	for i := 0; i < 30; i++ {
+		zh = append(zh, lesson.Word{Word: "词" + string(rune('甲'+i%20)) + string(rune('0'+i%10))})
+	}
+	words := newFakeWords()
+	words.setPeek(lesson.CategoryEnglish, en)
+	words.setPeek(lesson.CategoryChinese, zh)
+	words.setDue(lesson.CategoryChinese, zh)
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(words), nil, nil)
+	s := &captureSender{}
+	ttSubjectInit(t, tm, s)
+	ttAwaitAskSent(t, s, 0)
+	askSentences := s.countOf(TypeTeacherSentence)
+
+	// The pick's locked half: consume + bind + terminate, atomically.
+	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, 0, false)
+	if !ok {
+		t.Fatal("takeSubjectAsk refused a live clarify")
+	}
+
+	// The ask's ack timeout fires right here — with the OLD epoch. The bump
+	// already happened inside the take, so the close must be refused.
+	tm.orderlyCloseAt(oldEpoch)
+	tm.mu.Lock()
+	closed := tm.closed
+	epoch := tm.epoch
+	tm.mu.Unlock()
+	if closed {
+		t.Fatal("the mid-binding timeout closed the picked classroom")
+	}
+	if epoch != oldEpoch+1 {
+		t.Fatalf("epoch = %d, want %d (the bump belongs to the take's own lock hold)", epoch, oldEpoch+1)
+	}
+	if ended := s.controlsOf(t, TypeSessionEnded); len(ended) != 0 {
+		t.Errorf("session_ended = %v, want none from the refused timeout", ended)
+	}
+
+	// The unlocked half then opens the classroom, alive and well.
+	tm.finalizeSubjectAsk(s, m, oldEpoch, lesson.CategoryChinese, "button")
+	if ready := s.controlsOf(t, TypeSessionReady); len(ready) != 1 {
+		t.Fatalf("session_ready count = %d, want 1", len(ready))
+	}
+	if got := s.controlsOf(t, TypeSessionReady)[0]["category"]; got != lesson.CategoryChinese {
+		t.Errorf("session_ready.category = %v, want chinese", got)
+	}
+	// And the greeting plays and settles normally under the new epoch.
+	ttAwaitAskSent(t, s, askSentences)
+	ttAckLast(t, tm, s, epoch)
+	ttWaitClarifyOpen(t, tm)
+}
+
+// TestFinalizeSkipsClosedSession — an end_session that closes the session
+// between the binding's locked and unlocked halves must not be answered
+// with session_ready or a greeting: a closed classroom can never be acked.
+func TestFinalizeSkipsClosedSession(t *testing.T) {
+	words := newFakeWords()
+	words.setPeek(lesson.CategoryEnglish, ttCards("en1", "en2", "en3"))
+	words.setPeek(lesson.CategoryChinese, ttCards("词1", "词2", "词3"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, ttConfig(words), nil, nil)
+	s := &captureSender{}
+	ttSubjectInit(t, tm, s)
+	ttAwaitAskSent(t, s, 0)
+	sentences := s.countOf(TypeTeacherSentence)
+
+	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryEnglish, 0, false)
+	if !ok {
+		t.Fatal("takeSubjectAsk refused a live clarify")
+	}
+	// An end_session wins the race between the halves.
+	tm.internalClose()
+
+	tm.finalizeSubjectAsk(s, m, oldEpoch, lesson.CategoryEnglish, "button")
+	if ready := s.controlsOf(t, TypeSessionReady); len(ready) != 0 {
+		t.Errorf("session_ready after close = %d, want 0 (a closed session must not open a classroom)", len(ready))
+	}
+	if got := s.countOf(TypeTeacherSentence); got != sentences {
+		t.Errorf("teacher sentences after close = %d, want still %d (no greeting for a closed session)", got, sentences)
+	}
+	if ids := exec.ensureIDCalls(); len(ids) != 0 {
+		t.Errorf("EnsureLessonCards ids = %v, want none", ids)
+	}
+}
