@@ -242,13 +242,20 @@ func e2eBridge(t *testing.T, mutate func(*infra.PythonConfig)) (*Bridge, *fakeLo
 // "new cards have due=now, so always due").
 func seedWords(t *testing.T, cfg infra.PythonConfig, words map[string]string) {
 	t.Helper()
+	seedWordsCategory(t, cfg, "english", words)
+}
+
+// seedWordsCategory is seedWords under an explicit vocabulary category
+// (Issue #55: the mixed-vocabulary isolation e2e seeds BOTH subjects).
+func seedWordsCategory(t *testing.T, cfg infra.PythonConfig, category string, words map[string]string) {
+	t.Helper()
 	payload, err := json.Marshal(words)
 	if err != nil {
 		t.Fatalf("marshal seed words: %v", err)
 	}
 	cmd := exec.CommandContext(context.Background(), cfg.Interpreter,
 		cfg.VocabScript, "--db", cfg.VocabDBPath,
-		"add", "--category", "english", "--words", string(payload))
+		"add", "--category", category, "--words", string(payload))
 	cmd.Env = utf8ChildEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -329,6 +336,48 @@ func TestE2E_RunDueRealPython(t *testing.T) {
 			t.Errorf("malformed card %+v: want non-empty Word/State/Due and ID>0", c)
 		}
 	}
+}
+
+// TestE2E_RunDueCategoryIsolationRealPython — Issue #55 (AC3/AC4 data
+// layer): a vocabulary holding BOTH subjects' words answers each subject's
+// due fetch with ONLY that subject's words. This is the vendored SQL
+// category filter (cmd_due's WHERE c.category = ?) the classroom's scoped
+// fetch rides on — the exact seam that would have to break for one round
+// to mix subjects.
+func TestE2E_RunDueCategoryIsolationRealPython(t *testing.T) {
+	b, _, cfg := e2eBridge(t, nil)
+	seedWordsCategory(t, cfg, "english", map[string]string{"apple": "苹果", "banana": "香蕉"})
+	seedWordsCategory(t, cfg, "chinese", map[string]string{"美丽": "漂亮", "世界": "世间"})
+
+	for _, tc := range []struct {
+		category string
+		want     map[string]bool
+	}{
+		{"english", map[string]bool{"apple": true, "banana": true}},
+		{"chinese", map[string]bool{"美丽": true, "世界": true}},
+	} {
+		res, err := b.RunDue(context.Background(), DueOpts{Category: tc.category, Peek: true})
+		if err != nil {
+			t.Fatalf("RunDue(%s): %v", tc.category, err)
+		}
+		if len(res.Cards) != len(tc.want) {
+			t.Fatalf("RunDue(%s) = %d cards (%v), want exactly %d", tc.category, len(res.Cards), dueCardWords(res.Cards), len(tc.want))
+		}
+		for _, c := range res.Cards {
+			if !tc.want[c.Word] {
+				t.Errorf("RunDue(%s) returned %q — the OTHER subject's word joined the round", tc.category, c.Word)
+			}
+		}
+	}
+}
+
+// dueCardWords lists a DueResult's words for failure messages.
+func dueCardWords(cards []DueCard) []string {
+	words := make([]string, 0, len(cards))
+	for _, c := range cards {
+		words = append(words, c.Word)
+	}
+	return words
 }
 
 // TestE2E_RunReviewRealPython proves the review path: seed words, then RunReview

@@ -224,11 +224,12 @@ const (
 // endings (timeout → the original lesson_complete/no_due_words reason still
 // ships; protocol.go sequencing contract).
 const (
-	purposeGreeting = "greeting"     // opening + first word
-	purposeAnnounce = "announce"     // next-word announcement
-	purposeChat     = "chat"         // classification reply
-	purposeSummary  = "summary"      // completion wrap-up
-	purposeNoDue    = "no_due_words" // zero-due explanation
+	purposeGreeting   = "greeting"     // opening + first word
+	purposeAnnounce   = "announce"     // next-word announcement
+	purposeChat       = "chat"         // classification reply
+	purposeSummary    = "summary"      // completion wrap-up
+	purposeNoDue      = "no_due_words" // zero-due explanation
+	purposeSubjectAsk = "subject_ask"  // Issue #55: which-subject clarify question
 )
 
 // maxReplyRunes bounds an LLM reply before it enters TTS and subtitles
@@ -406,6 +407,12 @@ type TurnManager struct {
 	// grounds on English cards and a 语文 word degrades honestly to the
 	// classification fallback, per AC2's 不强制英语式例句.)
 	category string
+	// pendingAsk (Issue #55): the parked session_init of an auto word
+	// classroom whose TWO subjects both hold due words — the clarify is
+	// out, and the child's answer (subject_pick or spoken 语文/英语)
+	// binds category and resumes through continueSessionInit. Non-nil ONLY
+	// while the ask is live; the classroom has no lesson row yet.
+	pendingAsk *SessionInitMsg
 	// turnSentences are the sentences sent for the current announcement, in
 	// order (the interrupt-trim source).
 	turnSentences []sentenceInfo
@@ -529,6 +536,8 @@ func (tm *TurnManager) HandleControl(s Sender, data []byte) {
 		tm.handlePhotoChunk(s, m) // 13.1-03 photo check (photo.go)
 	case PhotoCancelMsg:
 		tm.handlePhotoCancel(s, m) // 13.1-03 retake discipline (photo.go)
+	case SubjectPickMsg:
+		tm.handleSubjectPick(s, m) // Issue #55: the clarify's button answer
 	default:
 		// Server→client types parse but are not accepted from a client;
 		// the transport only moves bytes — this is the enforcement point.
@@ -561,7 +570,8 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	// page's UI mode (13.1 D-08: "test" keeps today's full-reveal behavior;
 	// absent/invalid → student — the iPad bookmark must never leak words)
 	// and the classroom's subject (Issue #10: "chinese" opens the 语文
-	// classroom; absent/invalid → english, the pre-#10 landing).
+	// classroom; Issue #55: "auto" enters the child-asks clarify flow;
+	// absent/invalid → english, the pre-#10 landing).
 	// 13.3-05: the production force switch short-circuits the SAME single
 	// adjudication point — when cfg.ForceStudent is set, the client-supplied
 	// mode is ignored and every session runs the student projection (the
@@ -574,9 +584,39 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	} else {
 		tm.mode = normalizeSessionMode(m.Mode)
 	}
-	tm.category = normalizeSessionCategory(m.Category)
+	tm.category = sessionCategoryFromWire(m.Category)
 	tm.mu.Unlock()
 
+	// Issue #55: an unspecified subject on a WORD classroom (dictation or
+	// practice — never the 背默 branches, whose subject is the work's own)
+	// is settled by the CHILD, never a model: the one subject holding due
+	// words opens directly; both subjects holding due words asks the child
+	// and the classroom parks until the answer; neither holds due words
+	// keeps the english landing and its ordinary no-due ending. A declared
+	// english/chinese never reaches the ask — the user's specification is
+	// final (AC2).
+	if m.Poem == 0 && m.Passage == 0 && tm.sessionCategory() == CategoryAuto {
+		resolved, ask := tm.resolveAutoSubject()
+		if ask {
+			tm.startSubjectAsk(s, m)
+			return
+		}
+		tm.mu.Lock()
+		tm.category = resolved
+		tm.mu.Unlock()
+	}
+
+	tm.continueSessionInit(s, m)
+}
+
+// continueSessionInit runs everything session_init does once the classroom's
+// subject is settled: the practice / poem / passage branches, then the
+// due-word classroom itself (row resume vs. fresh fetch). It is ALSO the
+// resume point after a subject clarify answer (Issue #55) — an auto
+// classroom whose two subjects both hold due words asks the child first,
+// then re-enters here under the picked subject with the ORIGINAL init
+// message, so the answered round binds exactly like an explicit declaration.
+func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 	if m.Practice {
 		tm.handlePracticeInit(s)
 		return
@@ -689,19 +729,9 @@ func normalizeSessionMode(mode string) string {
 	return ModeStudent
 }
 
-// normalizeSessionCategory normalizes the page-supplied subject (Issue #10):
-// only the exact "chinese" value opens a 语文 classroom; anything else —
-// including an absent field — is the English classroom, so every pre-#10
-// page that never sends the field lands exactly where it did. The same
-// deny-by-default shape as normalizeSessionMode: an off-enum value must
-// never open the wrong subject's classroom, it falls back to the legacy
-// subject.
-func normalizeSessionCategory(category string) string {
-	if category == lesson.CategoryChinese {
-		return lesson.CategoryChinese
-	}
-	return lesson.CategoryEnglish
-}
+// normalizeSessionCategory was widened into sessionCategoryFromWire
+// (subject.go, Issue #55): the deny-by-default english landing for
+// absent/off-enum values is unchanged — "auto" is the one addition.
 
 // startNoDueSession answers session_ready with an empty word table, lets
 // the teacher explain (zero due words — with the D-13 days variant when the
@@ -911,10 +941,34 @@ func (tm *TurnManager) runAnnouncement(s Sender, ctx context.Context, cancel con
 // texts (13.1-02 student masking): spoken feeds TTS, the LLM history, and the
 // interrupt trim; display rides the teacher_sentence subtitle only.
 func (tm *TurnManager) runAnnouncementDisplay(s Sender, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
+	tm.runAnnouncementDisplayAt(s, tm.currentEpoch(), ctx, cancel, spoken, display, purpose, onAck)
+}
+
+// currentEpoch snapshots the FSM epoch under the lock.
+func (tm *TurnManager) currentEpoch() uint64 {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.epoch
+}
+
+// runAnnouncementDisplayAt is runAnnouncementDisplay with the epoch FIXED by
+// the caller instead of snapshot at goroutine entry (PR #59 review): the
+// subject ask parks its epoch BEFORE its goroutine is launched, and this
+// entry check refuses an announcement whose epoch has since been bumped —
+// a pick processed before the ask goroutine first runs must find the ask
+// dead, not resurrected under the NEW epoch. speakTurn mutates playback
+// state, registers waits and ships subtitles BEFORE any TTS call, so a
+// cancelled context alone cannot stop a late ask from clobbering the new
+// classroom's bookkeeping; only the epoch comparison can.
+func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
 	defer cancel()
 
 	tm.mu.Lock()
-	epoch := tm.epoch
+	if tm.epoch != epoch {
+		// Stale before the first sound: nothing registered, nothing spoken.
+		tm.mu.Unlock()
+		return
+	}
 	turnID := tm.nextTurnIDLocked()
 	tm.mu.Unlock()
 
@@ -1095,6 +1149,7 @@ func (tm *TurnManager) internalClose() {
 	tm.state = ""
 	tm.closed = true
 	tm.photo = nil
+	tm.pendingAsk = nil
 	tm.mu.Unlock()
 	tm.vad.Reset()
 }
@@ -1177,7 +1232,11 @@ func (tm *TurnManager) IngestAudio(s Sender, data []byte) {
 // mismatch aborts the whole turn without issuing further calls.
 func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	tm.mu.Lock()
-	if tm.state != StateListening || tm.closed || tm.tutor == nil {
+	// Issue #55: while the subject clarify is parked the classroom has no
+	// tutor yet — the utterance is the child's ANSWER to the clarify and
+	// flows through that branch below, never the lesson FSM.
+	asking := tm.pendingAsk != nil
+	if tm.state != StateListening || tm.closed || (tm.tutor == nil && !asking) {
 		tm.mu.Unlock()
 		return
 	}
@@ -1186,14 +1245,14 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	// same ApplyVerdict write as the screen buttons (RT-07). The advance
 	// target below must NOT be captured here: the cursor sits at
 	// len(words) in the check stage and turnTarget would panic.
-	checking := tm.tutor.checking
+	checking := tm.tutor != nil && tm.tutor.checking
 	epoch := tm.epoch
 	turnID := tm.nextTurnIDLocked()
 	tm.state = StateProcessing
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.turnCancel = cancel
 	var target TurnTarget
-	if !checking {
+	if !checking && tm.tutor != nil {
 		// Immutable advance target captured BEFORE classification
 		// (T-13-15c): a late confirm may only ever act on this word/version
 		// pair.
@@ -1235,6 +1294,15 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		tm.settleListening(s)
 		return
 	}
+	if asking {
+		// Issue #55: the child's answer to the subject clarify. Shown
+		// verbatim (no tutor yet means no masking set), then bound by
+		// keyword — never an LLM classification.
+		_ = s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: transcript})
+		tm.handleSubjectAnswerTurn(s, transcript, epoch, ctx, cancel)
+		return
+	}
+
 	// Transcript desensitization (13.1-02 D-10, Pitfall 4 red line): the
 	// OUTBOUND copy masks still-unrevealed words; the history and the
 	// classification input keep the raw transcript. In the check stage the

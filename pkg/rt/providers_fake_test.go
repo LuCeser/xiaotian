@@ -22,10 +22,13 @@ import (
 // fakeASR
 // ---------------------------------------------------------------------------
 
-// asrScript is one scripted Transcribe outcome: exactly one of text / err.
+// asrScript is one scripted Transcribe outcome: exactly one of text / err,
+// optionally delayed before the outcome lands (simulating a provider reply
+// that arrives AFTER an interrupt bumped the epoch — the stale-turn races).
 type asrScript struct {
-	err  error
-	text string
+	err   error
+	text  string
+	delay time.Duration
 }
 
 // fakeASR answers Transcribe calls from a FIFO script queue and records the
@@ -43,13 +46,20 @@ func newFakeASR(script ...asrScript) *fakeASR {
 // Transcribe implements ASRProvider.
 func (f *fakeASR) Transcribe(_ context.Context, pcm []byte) (string, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.fedBytes = append(f.fedBytes, len(pcm))
 	if len(f.script) == 0 {
+		f.mu.Unlock()
 		return "", fmt.Errorf("fakeASR: script exhausted")
 	}
 	head := f.script[0]
 	f.script = f.script[1:]
+	f.mu.Unlock()
+	// The delay sleeps OUTSIDE the mutex (a second scripted call must not
+	// block on the sleeper) and ignores ctx on purpose: the point is a reply
+	// that arrives after cancellation.
+	if head.delay > 0 {
+		time.Sleep(head.delay)
+	}
 	if head.err != nil {
 		return "", head.err
 	}
@@ -500,14 +510,24 @@ func TestFakesTTSStreamUntilCancel(t *testing.T) {
 // the next due batch (empty batch = the no-due ending); SubmitReview
 // records every submission and answers with the scripted result/error.
 // Both record the category the classroom passed (Issue #10 assertions).
+// PeekDueWords answers from the static per-category snapshot peekByCat
+// (Issue #55: the subject resolution's presence probe — a READ, so it
+// returns the same batch on every call and never consumes the fetch
+// script).
+// dueByCat (Issue #55 isolation regressions), once set, switches
+// FetchDueWords to per-category batches: a mixed vocabulary where the
+// english fetch can never see the chinese words and vice versa.
 type fakeWordSource struct {
 	fetchErr     error
 	reviewErr    error
 	reviewResult ReviewWriteResult
 	due          [][]lesson.Word
+	dueByCat     map[string][]lesson.Word
+	peekByCat    map[string][]lesson.Word
 	submitCalls  []map[string]string
 	submitCat    []string
 	fetchCats    []string
+	peekCats     []string
 	fetchCalls   int
 	mu           sync.Mutex
 }
@@ -524,6 +544,14 @@ func (f *fakeWordSource) FetchDueWords(_ context.Context, limit int, category st
 	f.fetchCats = append(f.fetchCats, category)
 	if f.fetchErr != nil {
 		return nil, f.fetchErr
+	}
+	if f.dueByCat != nil {
+		batch := f.dueByCat[category]
+		f.dueByCat[category] = nil // one due batch per category: the next fetch finds none
+		if limit > 0 && len(batch) > limit {
+			batch = batch[:limit]
+		}
+		return append([]lesson.Word(nil), batch...), nil
 	}
 	if len(f.due) == 0 {
 		return nil, nil
@@ -553,6 +581,48 @@ func (f *fakeWordSource) submittedCategories() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.submitCat...)
+}
+
+// PeekDueWords implements the lock-free half of WordSource (Issue #55): the
+// per-category snapshot from peekByCat, empty when unscripted — the honest
+// "no due content" answer, never an error.
+func (f *fakeWordSource) PeekDueWords(_ context.Context, limit int, category string) ([]lesson.Word, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.peekCats = append(f.peekCats, category)
+	batch := f.peekByCat[category]
+	if limit > 0 && len(batch) > limit {
+		batch = batch[:limit]
+	}
+	return append([]lesson.Word(nil), batch...), nil
+}
+
+// peekedCategories returns every PeekDueWords category, in call order.
+func (f *fakeWordSource) peekedCategories() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.peekCats...)
+}
+
+// setPeek installs the per-subject due-content snapshot (the judgment input).
+func (f *fakeWordSource) setPeek(category string, words []lesson.Word) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.peekByCat == nil {
+		f.peekByCat = map[string][]lesson.Word{}
+	}
+	f.peekByCat[category] = words
+}
+
+// setDue installs a per-subject fetch batch (the mixed-vocabulary switch:
+// once ANY subject is scripted this way, the global FIFO is dead).
+func (f *fakeWordSource) setDue(category string, words []lesson.Word) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dueByCat == nil {
+		f.dueByCat = map[string][]lesson.Word{}
+	}
+	f.dueByCat[category] = words
 }
 
 // fetchedCategories returns every FetchDueWords category, in call order.

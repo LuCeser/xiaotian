@@ -113,6 +113,45 @@ func TestProtocolSessionInitRoundTrip(t *testing.T) {
 	}
 }
 
+// TestProtocolSubjectAskRoundTrip — the Issue #55 clarify question rides
+// the wire with its question text (the same line the teacher speaks).
+func TestProtocolSubjectAskRoundTrip(t *testing.T) {
+	msg := SubjectAskMsg{Type: TypeSubjectAsk, Question: "这次想先默写哪一科？"}
+	got := roundTrip(t, msg, SubjectAskMsg{}).(SubjectAskMsg)
+	if got != msg {
+		t.Errorf("round trip = %+v, want %+v", got, msg)
+	}
+	w := wireKeys(t, msg)
+	if got := wantString(t, w, "type"); got != TypeSubjectAsk {
+		t.Errorf("wire type = %q, want %q", got, TypeSubjectAsk)
+	}
+	if got := wantString(t, w, "question"); got != msg.Question {
+		t.Errorf("wire question = %q, want %q", got, msg.Question)
+	}
+}
+
+// TestProtocolSubjectPickRoundTrip — the button answer parses under the
+// english/chinese whitelist; anything else is an invalid control message
+// (the pick can never smuggle a third subject or a re-auto onto the wire).
+func TestProtocolSubjectPickRoundTrip(t *testing.T) {
+	for _, category := range []string{CategoryEnglish, CategoryChinese} {
+		msg := SubjectPickMsg{Type: TypeSubjectPick, Category: category}
+		got := roundTrip(t, msg, SubjectPickMsg{}).(SubjectPickMsg)
+		if got != msg {
+			t.Errorf("round trip = %+v, want %+v", got, msg)
+		}
+	}
+	for _, category := range []string{"", "auto", "france", "CHINESE"} {
+		data, err := json.Marshal(SubjectPickMsg{Type: TypeSubjectPick, Category: category})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if _, perr := ParseControl(data); perr == nil {
+			t.Errorf("ParseControl(subject_pick category=%q) = nil error, want rejected", category)
+		}
+	}
+}
+
 func TestProtocolInterruptRoundTrip(t *testing.T) {
 	msg := InterruptMsg{
 		Type:           TypeInterrupt,

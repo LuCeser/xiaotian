@@ -270,15 +270,41 @@ func (p *PyFSRS) FetchDueWords(ctx context.Context, limit int, category string) 
 	if err != nil {
 		return nil, errors.Wrap(err, "rt: pyfsrs fetch due words")
 	}
-	words := make([]lesson.Word, 0, len(res.Cards))
-	for _, card := range res.Cards {
+	return dueCardsToWords(res.Cards), nil
+}
+
+// PeekDueWords implements the lock-free half of the WordSource seam (Issue
+// #55): the same due read as FetchDueWords but with Peek set, so the auto
+// subject resolution's presence probe never locks cards away from a live
+// classroom. Zero cards is a legal result, not an error.
+func (p *PyFSRS) PeekDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error) {
+	if limit <= 0 {
+		limit = dueWordsLimit
+	}
+	res, err := p.exec.RunDue(ctx, pybridge.DueOpts{
+		Limit:    limit,
+		Peek:     true,
+		Category: lesson.NormalizeCategory(category),
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "rt: pyfsrs peek due words")
+	}
+	return dueCardsToWords(res.Cards), nil
+}
+
+// dueCardsToWords maps pybridge DueCards onto lesson.Word field-for-field
+// (word/meaning/example — the json tags were aligned losslessly in 13-07),
+// keeping the script's order.
+func dueCardsToWords(cards []pybridge.DueCard) []lesson.Word {
+	words := make([]lesson.Word, 0, len(cards))
+	for _, card := range cards {
 		words = append(words, lesson.Word{
 			Word:    card.Word,
 			Meaning: card.Meaning,
 			Example: card.Example,
 		})
 	}
-	return words, nil
+	return words
 }
 
 // SubmitReview writes one review batch (word → good/hard/again/easy rating)

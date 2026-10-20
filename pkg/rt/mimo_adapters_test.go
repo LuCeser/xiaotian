@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 )
 
@@ -167,6 +168,54 @@ func TestPyFSRSFetchDueMapsCards(t *testing.T) {
 // lessonWordCheck keeps the mapping assertion table above readable without
 // importing the lesson struct literally in the want literals.
 type lessonWordCheck struct{ Word, Meaning, Example string }
+
+// TestPyFSRSPeekDueMapsCardsLockFree pins the Issue #55 peek contract: the
+// subject resolution's presence probe carries Peek=true and
+// FetchLockHours=0 (the script's lock-free path — reading must never lock
+// cards away from a live classroom), keeps the same lossless card mapping,
+// and normalizes the category exactly like the fetch.
+func TestPyFSRSPeekDueMapsCardsLockFree(t *testing.T) {
+	fake := &fakePyBridge{
+		dueResults: []pybridge.DueResult{{Cards: []pybridge.DueCard{
+			{ID: 1, Word: "美丽", Meaning: "beautiful", Example: "美丽的花。", Unit: "u1"},
+		}}},
+	}
+	ad, err := NewPyFSRS(fake, infra.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewPyFSRS: %v", err)
+	}
+	words, err := ad.PeekDueWords(context.Background(), 0, lesson.CategoryChinese)
+	if err != nil {
+		t.Fatalf("PeekDueWords: %v", err)
+	}
+	if len(words) != 1 || words[0].Word != "美丽" || words[0].Meaning != "beautiful" {
+		t.Fatalf("words = %+v, want the lossless 美丽 mapping", words)
+	}
+	if len(fake.dueCalls) != 1 {
+		t.Fatalf("RunDue calls = %d, want 1", len(fake.dueCalls))
+	}
+	opts := fake.dueCalls[0]
+	if !opts.Peek {
+		t.Error("RunDue opts.Peek = false, want true (the judgment's read never locks)")
+	}
+	if opts.FetchLockHours != 0 {
+		t.Errorf("RunDue opts.FetchLockHours = %v, want 0 (peek must not take the fetch lock)", opts.FetchLockHours)
+	}
+	if opts.Category != lesson.CategoryChinese {
+		t.Errorf("RunDue opts.Category = %q, want chinese", opts.Category)
+	}
+	if opts.Limit != dueWordsLimit {
+		t.Errorf("RunDue opts.Limit = %d, want %d (0 → FSM cap)", opts.Limit, dueWordsLimit)
+	}
+
+	// A peek failure propagates like a fetch failure — the caller degrades
+	// the judgment input honestly instead of mistaking it for "no content".
+	fake2 := &fakePyBridge{dueErrs: []error{errors.New("python exit")}}
+	ad2, _ := NewPyFSRS(fake2, infra.NewNoOpLogger())
+	if _, err := ad2.PeekDueWords(context.Background(), 5, ""); err == nil {
+		t.Fatal("PeekDueWords = nil error, want the python failure propagated")
+	}
+}
 
 // TestPyFSRSFetchDueErrorPropagates proves a python-side failure (timeout,
 // exit error, parse failure — whatever pybridge classifies) surfaces from

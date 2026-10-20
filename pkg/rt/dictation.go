@@ -45,6 +45,12 @@ type WordSource interface {
 	// FetchDueWords returns up to limit due vocabulary cards in category.
 	// Zero cards is a legal result (no due words today), not an error.
 	FetchDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error)
+	// PeekDueWords returns up to limit due vocabulary cards in category
+	// WITHOUT taking the fetch lock (Issue #55: the auto subject
+	// resolution's presence probe — reading must never lock cards away from
+	// a live classroom, so it rides the script's --peek). Zero cards and
+	// errors degrade the resolution's input, never the classroom itself.
+	PeekDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error)
 	// SubmitReview writes one review batch in category (word →
 	// good/hard/again/easy rating, the pybridge ReviewOpts.Results
 	// vocabulary) and reports what ACTUALLY happened: partial and zero

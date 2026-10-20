@@ -608,6 +608,17 @@ wss.on('connection', (ws, req, query) => {
     ackTimeout: query.get('mock_ack_timeout') === '1',
     partialSave: query.get('mock_partial_save') === '1',
     voiceVerdict: query.get('mock_voice_verdict') === '1',
+    // Issue #55: an optional session_ready.category echo ('english'|
+    // 'chinese') for the page's subject-adoption pin — the mock never
+    // judges anything, it just mirrors what the spec asks it to claim.
+    category: query.get('mock_category') === 'chinese' || query.get('mock_category') === 'english'
+      ? query.get('mock_category')
+      : '',
+    // Issue #55 rework: ?mock_subject_ask=1 makes an auto session_init park
+    // on the clarify question (subject_ask, no session_ready yet) and the
+    // page's subject_pick answer opens the classroom under the PICKED
+    // subject — the button-flow pin for the child-decides flow.
+    subjectAsk: query.get('mock_subject_ask') === '1',
     // 13.1-07 scripted OCR pass (?mock_ocr=): 'off' = no OCR reader
     // server-side (photo_unavailable degradation, manual-only check);
     // otherwise a ';' list of PER-UPLOAD specs — upload N's readings use
@@ -675,6 +686,11 @@ wss.on('connection', (ws, req, query) => {
     photoBuf: [],
     ocrResults: [],
     reviewResults: 0,
+    /** Issue #55 rework: the clarify state — subject_ask went out, and the
+        subject_pick answer that opened the classroom (server parity: a
+        stray pick with no clarify pending is a no-op). */
+    subjectAskSent: false,
+    subjectPicked: '',
     checkStartedReason: null,
     correctionDiff: null,
     closedMidCheck: false,
@@ -761,14 +777,19 @@ wss.on('connection', (ws, req, query) => {
   // One scripted announcement: subtitle-first, then chunked PCM, then
   // audio_end. Registers the (epoch, sentence_id) entry for ack gating.
   // `done` fires after audio_end is on the wire (unless cancelled).
-  function announce(sid, text, plan, chunkBase, done) {
+  function announce(sid, text, plan, chunkBase, done, opts) {
     if (state.ended) return;
     const epoch = state.epoch;
     state.turn += 1;
     const turnId = state.turn;
     state.announced.set(epoch + ':' + sid, { epoch, sentence_id: sid, acked: false });
 
-    send({ type: 'turn_start', turn_id: turnId, epoch });
+    // turnStart=false mirrors the REAL server: announcements (greetings,
+    // word readings) carry no turn_start — only student voice turns do. The
+    // client must adopt the epoch from interrupt_ack alone.
+    if (!opts || opts.turnStart !== false) {
+      send({ type: 'turn_start', turn_id: turnId, epoch });
+    }
     send({ type: 'state', value: 'speaking' });
     send({ type: 'teacher_sentence', turn_id: turnId, epoch, sentence_id: sid, text });
     send({ type: 'audio_start', turn_id: turnId, epoch, sentence_id: sid });
@@ -1068,7 +1089,8 @@ wss.on('connection', (ws, req, query) => {
             session_id: state.id,
             audio: { sampleRate: 16000, format: 's16le', channels: 1 },
             tts: { sampleRate: TTS_RATE },
-            lesson: { id: state.lessonId, version: state.version, current_index: 0, words: lessonWordsForMode() }
+            lesson: { id: state.lessonId, version: state.version, current_index: 0, words: lessonWordsForMode() },
+            ...(mockMode.category ? { category: mockMode.category } : {})
           });
           break;
         }
@@ -1085,7 +1107,8 @@ wss.on('connection', (ws, req, query) => {
             session_id: state.id,
             audio: { sampleRate: 16000, format: 's16le', channels: 1 },
             tts: { sampleRate: TTS_RATE },
-            lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() }
+            lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() },
+            ...(mockMode.category ? { category: mockMode.category } : {})
           });
           state.ended = true;
           state.sessionEndedSent = true;
@@ -1112,7 +1135,8 @@ wss.on('connection', (ws, req, query) => {
             session_id: state.id,
             audio: { sampleRate: 16000, format: 's16le', channels: 1 },
             tts: { sampleRate: TTS_RATE },
-            lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() }
+            lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() },
+            ...(mockMode.category ? { category: mockMode.category } : {})
           });
           send({ type: 'check_started', words: state.words.slice(), reason: state.checkStartedReason });
           send({ type: 'check_verdicts', verdicts: initial });
@@ -1124,14 +1148,72 @@ wss.on('connection', (ws, req, query) => {
             () => { send({ type: 'state', value: 'listening' }); });
           break;
         }
+        // Issue #55 rework: an auto entry under ?mock_subject_ask=1 parks on
+        // the clarify question — subject_ask out, NO session_ready until the
+        // page's subject_pick names the subject (startSubjectAsk parity).
+        if (mockMode.subjectAsk && msg.category === 'auto' && !state.subjectPicked) {
+          state.subjectAskSent = true;
+          send({
+            type: 'subject_ask',
+            question: '语文和英语今天都有要默写的词语。这次想先默写哪一科？'
+          });
+          // The teacher SPEAKS the question too (announce parity): the pick
+          // buttons are live WHILE the audio is still out, so the spec taps
+          // mid-announcement — the wire shape the server-side epoch-gated
+          // termination has to survive.
+          announce('ask', '语文和英语今天都有要默写的词语。这次想先默写哪一科？', PLAN_NOTICE, 320,
+            () => { send({ type: 'state', value: 'listening' }); });
+          break;
+        }
         // LessonView field-for-field (id / version / current_index / words).
         send({
           type: 'session_ready',
           session_id: state.id,
           audio: { sampleRate: 16000, format: 's16le', channels: 1 },
           tts: { sampleRate: TTS_RATE },
-          lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() }
+          lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() },
+          ...((state.subjectPicked || mockMode.category) ? { category: state.subjectPicked || mockMode.category } : {})
         });
+        break;
+      }
+
+      case 'subject_pick': {
+        // Issue #55: the clarify's button answer. ParseControl parity —
+        // english/chinese only; and only a pending clarify consumes it
+        // (a stray pick with no clarify parked is a no-op server-side).
+        if (msg.category !== 'english' && msg.category !== 'chinese') {
+          send({ type: 'error', code: 'invalid_message', message: 'mock: subject_pick requires english or chinese', recoverable: true });
+          break;
+        }
+        if (!state.subjectAskSent || state.subjectPicked) break;
+        state.subjectPicked = msg.category;
+        // stopAskPlayback parity: the pick terminates the ask mid-play —
+        // bump the epoch AND tell the client (interrupt_ack), so its
+        // playback stops the queued ask audio and adopts the new epoch.
+        const askOldEpoch = state.epoch;
+        state.epoch += 1;
+        send({
+          type: 'interrupt_ack',
+          old_epoch: askOldEpoch,
+          new_epoch: state.epoch,
+          last_sentence_id: '',
+          played_until_ms: 0
+        });
+        send({
+          type: 'session_ready',
+          session_id: state.id,
+          audio: { sampleRate: 16000, format: 's16le', channels: 1 },
+          tts: { sampleRate: TTS_RATE },
+          lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() },
+          category: state.subjectPicked
+        });
+        // The picked classroom's greeting — announced WITHOUT a turn_start
+        // (server parity: announcements never carry one). A page that
+        // failed to adopt the epoch from the interrupt_ack above would drop
+        // this audio as a stale epoch and never send its sentence_ack.
+        announce('greet', '好，那我们先默写这一科。', PLAN_NOTICE, 320,
+          function () { send({ type: 'state', value: 'listening' }); },
+          { turnStart: false });
         break;
       }
 

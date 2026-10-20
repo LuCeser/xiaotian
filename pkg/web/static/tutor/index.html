@@ -53,6 +53,22 @@
     <section class="rt-poem" id="rt-poem" hidden aria-label="古诗背默任务"></section>
     <section class="rt-poem rt-passage" id="rt-passage" hidden aria-label="课文背默任务"></section>
 
+    <!--
+      Subject clarify panel (Issue #55): shown when an auto (unspecified-
+      subject) entry finds BOTH subjects holding due words — the server asks
+      the CHILD which one to dictate (subject_ask), the same question the
+      teacher speaks. The two buttons answer with subject_pick; a spoken
+      语文/英语 works interchangeably (the buttons just mirror the voice
+      path). Hidden again when the picked classroom's session_ready arrives.
+    -->
+    <section class="rt-subject-ask" id="rt-subject-ask" hidden aria-label="选择默写学科">
+      <p class="rt-subject-ask-text" id="rt-subject-ask-text"></p>
+      <div class="rt-subject-ask-buttons">
+        <button id="rt-subject-zh" class="rt-btn rt-subject-btn" type="button">默写语文</button>
+        <button id="rt-subject-en" class="rt-btn rt-subject-btn" type="button">默写英语</button>
+      </div>
+    </section>
+
     <!-- Lesson progress: words + current_index from session_ready / lesson_update -->
     <section class="rt-progress" aria-label="课堂进度">
       <div class="rt-words" id="rt-words"></div>
@@ -178,14 +194,43 @@
       var pageQuery = new URLSearchParams(window.location.search);
       var mode = pageQuery.get('mode') === 'test' ? 'test' : 'student';
       client.initMode = mode;
-      // ----- classroom subject (Issue #10) -------------------------------------
-      // Only the exact value "chinese" opens the 语文词语 classroom; anything
-      // else — including absent — stays the English classroom (the server
-      // normalizes the same way, the same deny-by-default shape as mode).
-      // The subject rides session_init via client.initCategory and scopes
-      // the due fetch, the review writes and the lesson row; session_ready
-      // echoes the row's subject back.
-      client.initCategory = pageQuery.get('category') === 'chinese' ? 'chinese' : 'english';
+      // ----- classroom subject (Issue #10 + #55) --------------------------------
+      // "english"/"chinese" are EXPLICIT declarations forwarded as-is; the
+      // absent param (开始默写 door, plain bookmark) sends "auto" — the
+      // server then settles it WITH the child (never a model): the one
+      // subject holding due words opens directly, both subjects holding due
+      // words brings the subject_ask panel (subject_pick below), neither
+      // keeps the english no-due landing. The subject rides session_init
+      // via client.initCategory and scopes the due fetch, the review writes
+      // and the lesson row; session_ready echoes the RESOLVED subject back
+      // (adopted below for re-inits).
+      var declaredCategory = pageQuery.get('category');
+      client.initCategory = (declaredCategory === 'chinese' || declaredCategory === 'english')
+        ? declaredCategory
+        : 'auto';
+
+      // ----- subject clarify (Issue #55) ----------------------------------------
+      // The subject_ask panel answers by button (subject_pick) — the spoken
+      // 语文/英语 answer rides the audio path server-side, the buttons just
+      // mirror it for kids who'd rather tap. Both disable on the first tap
+      // (the server binds exactly once; a second pick is a no-op there).
+      var subjectAskEl = $('rt-subject-ask');
+      var subjectAskTextEl = $('rt-subject-ask-text');
+      var subjectZhBtn = $('rt-subject-zh');
+      var subjectEnBtn = $('rt-subject-en');
+      client.on('subject_ask', function (m) {
+        subjectAskTextEl.textContent = (m && m.question) || '';
+        subjectZhBtn.disabled = false;
+        subjectEnBtn.disabled = false;
+        subjectAskEl.hidden = false;
+      });
+      function pickSubject(category) {
+        subjectZhBtn.disabled = true;
+        subjectEnBtn.disabled = true;
+        client.sendJSON({ type: 'subject_pick', category: category });
+      }
+      subjectZhBtn.addEventListener('click', function () { pickSubject('chinese'); });
+      subjectEnBtn.addEventListener('click', function () { pickSubject('english'); });
       // ----- whole-poem 背默 classroom (Issue #12) ------------------------------
       // ?poem=<poems.id> opens the poem classroom for THAT work (the parent
       // content view's 背默这首 entry). Absent/non-numeric stays 0 = the word
@@ -682,6 +727,17 @@
       client.on('session_ready', function (m) {
         courseEnded = false;
         readPending = false;
+        // Issue #55: adopt the RESOLVED subject — an auto entry's outcome
+        // (single-subject direct open, or the child's clarify answer) lands
+        // here as a concrete english/chinese, never "auto". The next in-page
+        // re-init (再练一组) rides it, so practice stays on the subject this
+        // classroom actually ran under instead of being re-asked.
+        if (m.category === 'chinese' || m.category === 'english') {
+          client.initCategory = m.category;
+        }
+        // The clarify panel has served its purpose: the classroom under the
+        // picked subject is now open.
+        subjectAskEl.hidden = true;
         lesson.words = (m.lesson && m.lesson.words) || [];
         lesson.currentIndex = (m.lesson && m.lesson.current_index) || 0;
         lesson.version = (m.lesson && m.lesson.version) || 0;
@@ -830,7 +886,17 @@
         renderProgress();
       });
 
-      client.on('interrupt_ack', function () {
+      client.on('interrupt_ack', function (m) {
+        // The server bumped the epoch — either the receipt of this page's
+        // own interrupt, or a server-side termination (the subject-pick
+        // killing the clarify question mid-play). Stop the queued/live old
+        // audio NOW and adopt the new epoch: without the adopt, the next
+        // announcement's audio (announcements carry no turn_start) would be
+        // rejected as a stale epoch and the classroom would die on its
+        // playback-ack timeout.
+        if (m && typeof m.new_epoch === 'number') {
+          playback.onEpochBump(m.new_epoch);
+        }
         setStatus('listening');
       });
 
