@@ -500,14 +500,19 @@ func TestFakesTTSStreamUntilCancel(t *testing.T) {
 // the next due batch (empty batch = the no-due ending); SubmitReview
 // records every submission and answers with the scripted result/error.
 // Both record the category the classroom passed (Issue #10 assertions).
+// PeekDueWords answers from the static per-category snapshot peekByCat
+// (Issue #55: the subject judgment's content input — a READ, so it returns
+// the same batch on every call and never consumes the fetch script).
 type fakeWordSource struct {
 	fetchErr     error
 	reviewErr    error
 	reviewResult ReviewWriteResult
 	due          [][]lesson.Word
+	peekByCat    map[string][]lesson.Word
 	submitCalls  []map[string]string
 	submitCat    []string
 	fetchCats    []string
+	peekCats     []string
 	fetchCalls   int
 	mu           sync.Mutex
 }
@@ -553,6 +558,37 @@ func (f *fakeWordSource) submittedCategories() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.submitCat...)
+}
+
+// PeekDueWords implements the lock-free half of WordSource (Issue #55): the
+// per-category snapshot from peekByCat, empty when unscripted — the honest
+// "no due content" answer, never an error.
+func (f *fakeWordSource) PeekDueWords(_ context.Context, limit int, category string) ([]lesson.Word, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.peekCats = append(f.peekCats, category)
+	batch := f.peekByCat[category]
+	if limit > 0 && len(batch) > limit {
+		batch = batch[:limit]
+	}
+	return append([]lesson.Word(nil), batch...), nil
+}
+
+// peekedCategories returns every PeekDueWords category, in call order.
+func (f *fakeWordSource) peekedCategories() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.peekCats...)
+}
+
+// setPeek installs the per-subject due-content snapshot (the judgment input).
+func (f *fakeWordSource) setPeek(category string, words []lesson.Word) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.peekByCat == nil {
+		f.peekByCat = map[string][]lesson.Word{}
+	}
+	f.peekByCat[category] = words
 }
 
 // fetchedCategories returns every FetchDueWords category, in call order.
