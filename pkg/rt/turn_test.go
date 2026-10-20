@@ -577,7 +577,7 @@ func TestClassifyRetriesOnceOnInvalidJSON(t *testing.T) {
 	tm := NewTurnManager(newFakeASR(), llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
 	ttBindTutor(tm, cards)
 
-	intent, reply := tm.classifyTurn(context.Background(), "不会写", TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+	intent, reply := tm.classifyTurn(context.Background(), "不会写", dictationTurnContext{target: TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"}})
 	if intent != intentHint {
 		t.Errorf("intent = %q, want hint", intent)
 	}
@@ -607,7 +607,7 @@ func TestClassifyFallsBackToChatAfterSecondFailure(t *testing.T) {
 	tm := NewTurnManager(newFakeASR(), llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), NewEventRecorder(log, "t"), nil)
 	ttBindTutor(tm, cards)
 
-	intent, reply := tm.classifyTurn(context.Background(), "嗯嗯", TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+	intent, reply := tm.classifyTurn(context.Background(), "嗯嗯", dictationTurnContext{target: TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"}})
 	if intent != intentChat {
 		t.Errorf("intent = %q, want chat", intent)
 	}

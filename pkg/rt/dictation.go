@@ -283,6 +283,47 @@ type historyRound struct {
 	teacherText string
 }
 
+// dictationTurnContext is the immutable snapshot of the classroom's task
+// state captured under tm.mu BEFORE a turn enters processing (Issue #56):
+// what the classifier — and the full-phrase confirmation correction — may
+// assume about the classroom as it stood when the child started speaking.
+// It is a local per-turn view, never a second copy of classroom state:
+// execution still re-checks the live epoch, close flag, and pause bit at
+// dispatch time.
+type dictationTurnContext struct {
+	turnID uint64
+	epoch  uint64
+	target TurnTarget
+	// awaitingWord: an ordinary WORD dictation in its writing stage — the
+	// teacher announced the current word and the classroom is waiting for
+	// the child to finish writing it. The ONLY state where #56's
+	// completion-phrase correction may override the model's intent.
+	awaitingWord bool
+	paused       bool
+	checking     bool
+}
+
+// captureDictationTurnContextLocked snapshots the turn's task context.
+// Caller holds tm.mu; checking and target are the caller's turn-entry
+// values (already computed under the same hold — the capture adds the
+// stage bits the classifier needs, judging the classroom at turn START).
+func (tm *TurnManager) captureDictationTurnContextLocked(turnID, epoch uint64, checking bool, target TurnTarget) dictationTurnContext {
+	snap := dictationTurnContext{
+		turnID:   turnID,
+		epoch:    epoch,
+		target:   target,
+		checking: checking,
+	}
+	if tm.tutor == nil {
+		return snap
+	}
+	snap.paused = tm.tutor.paused
+	snap.awaitingWord = !checking && !tm.tutor.recitation() && !tm.tutor.paused &&
+		!tm.tutor.completed &&
+		target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words)
+	return snap
+}
+
 // DictationTutor holds the classroom-side state of one dictation lesson.
 //
 // SINGLE-LOCK DISCIPLINE: every field here is guarded by the owning
@@ -1147,8 +1188,11 @@ func (tm *TurnManager) buildClassifyMessages(transcript string, target TurnTarge
 // "JSON only" nudge. A second failure collapses deterministically to chat
 // with the fixed fallback wording: the teacher asks again out loud (no
 // user-visible ErrorMsg), while the server records the provider failure.
-func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, target TurnTarget) (string, string) {
-	msgs := tm.buildClassifyMessages(transcript, target)
+// turnCtx (Issue #56) carries the captured target plus the turn's task
+// context; the emitted event correlates this turn's identity and target
+// with the model's verdict.
+func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, turnCtx dictationTurnContext) (string, string) {
+	msgs := tm.buildClassifyMessages(transcript, turnCtx.target)
 	intent, reply, ok := tm.classifyOnce(ctx, msgs)
 	if !ok {
 		msgs = append(msgs, mimo.Message{
@@ -1157,6 +1201,7 @@ func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, targ
 		})
 		intent, reply, ok = tm.classifyOnce(ctx, msgs)
 	}
+	modelIntent := intent
 	if !ok {
 		intent, reply = intentChat, classifyFallbackReply
 		// The LLM half of the invalid-response discipline: exactly one
@@ -1165,8 +1210,22 @@ func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, targ
 		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("attempts", 2))
 	}
 	// Desensitization boundary (T-13-06b): the intent label only — never
-	// the transcript text — reaches the event stream.
-	tm.recorder.Emit(EventIntentClassified, infra.F("intent", intent))
+	// the transcript text — reaches the event stream. Issue #56: the event
+	// also carries the turn identity and the CAPTURED target (word index +
+	// version, count-class values) plus the MODEL's intent beside the final
+	// one, so a confirmation the classifier misjudged stays diagnosable
+	// from the evidence stream alone; a collapsed classification has no
+	// model verdict to report and omits model_intent.
+	fields := []infra.Field{
+		infra.F("intent", intent),
+		infra.F("turn_id", turnCtx.turnID),
+		infra.F("word_index", turnCtx.target.WordIndex),
+		infra.F("version", turnCtx.target.ExpectedVersion),
+	}
+	if ok {
+		fields = append(fields, infra.F("model_intent", modelIntent))
+	}
+	tm.recorder.Emit(EventIntentClassified, fields...)
 	return intent, reply
 }
 

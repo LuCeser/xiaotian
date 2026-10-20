@@ -1329,21 +1329,31 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	// 13.1-06 (D-06②): the check stage has a VOICE input now — per-word
 	// verdict commands classify through the CHECK prompt and converge on the
 	// same ApplyVerdict write as the screen buttons (RT-07). The advance
-	// target below must NOT be captured here: the cursor sits at
-	// len(words) in the check stage and turnTarget would panic.
+	// target below must NOT be captured for the check stage: the cursor sits
+	// at len(words) there and turnTarget would panic. The no-target marker
+	// (WordIndex -1) also covers a classroom whose cursor ran past the end
+	// without the checking bit (an EnterCheck write failure leaves
+	// index=len) — turnTarget must never be asked for a word that does not
+	// exist, and an invalid-marker target can never drive an advance.
 	checking := tm.tutor != nil && tm.tutor.checking
 	epoch := tm.epoch
 	turnID := tm.nextTurnIDLocked()
 	tm.state = StateProcessing
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.turnCancel = cancel
-	var target TurnTarget
-	if !checking && tm.tutor != nil {
+	target := TurnTarget{WordIndex: -1}
+	if !checking && tm.tutor != nil &&
+		tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
 		// Immutable advance target captured BEFORE classification
 		// (T-13-15c): a late confirm may only ever act on this word/version
 		// pair.
 		target = tm.tutor.turnTarget()
 	}
+	// Issue #56: the turn's task context (waiting on the current word,
+	// pause, stage) is snapshot in the SAME locked section, before the
+	// processing flip — classification judges the classroom as it stood
+	// when the child spoke, never mid-turn state.
+	turnCtx := tm.captureDictationTurnContextLocked(turnID, epoch, checking, target)
 	tm.mu.Unlock()
 	defer cancel()
 
@@ -1439,11 +1449,11 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		return
 	}
 
-	intent, reply := tm.classifyTurn(ctx, transcript, target)
+	intent, reply := tm.classifyTurn(ctx, transcript, turnCtx)
 	if !tm.epochCurrent(epoch) {
 		return // interrupted mid-classification: abort the whole turn silently
 	}
-	tm.dispatchTurn(s, ctx, cancel, turnID, epoch, intent, reply, target)
+	tm.dispatchTurn(s, ctx, cancel, turnID, epoch, intent, reply, turnCtx.target)
 }
 
 // dispatchTurn routes a whitelisted intent into the FSM. The switch covers
