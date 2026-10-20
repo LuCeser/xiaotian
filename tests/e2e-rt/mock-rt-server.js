@@ -777,14 +777,19 @@ wss.on('connection', (ws, req, query) => {
   // One scripted announcement: subtitle-first, then chunked PCM, then
   // audio_end. Registers the (epoch, sentence_id) entry for ack gating.
   // `done` fires after audio_end is on the wire (unless cancelled).
-  function announce(sid, text, plan, chunkBase, done) {
+  function announce(sid, text, plan, chunkBase, done, opts) {
     if (state.ended) return;
     const epoch = state.epoch;
     state.turn += 1;
     const turnId = state.turn;
     state.announced.set(epoch + ':' + sid, { epoch, sentence_id: sid, acked: false });
 
-    send({ type: 'turn_start', turn_id: turnId, epoch });
+    // turnStart=false mirrors the REAL server: announcements (greetings,
+    // word readings) carry no turn_start — only student voice turns do. The
+    // client must adopt the epoch from interrupt_ack alone.
+    if (!opts || opts.turnStart !== false) {
+      send({ type: 'turn_start', turn_id: turnId, epoch });
+    }
     send({ type: 'state', value: 'speaking' });
     send({ type: 'teacher_sentence', turn_id: turnId, epoch, sentence_id: sid, text });
     send({ type: 'audio_start', turn_id: turnId, epoch, sentence_id: sid });
@@ -1182,11 +1187,18 @@ wss.on('connection', (ws, req, query) => {
         }
         if (!state.subjectAskSent || state.subjectPicked) break;
         state.subjectPicked = msg.category;
-        // stopAskPlayback parity: the pick terminates the ask mid-play by
-        // bumping the epoch — the ask's already-scheduled chunks ride the
-        // OLD epoch and the client's epoch gate drops them, while the
-        // classroom that answers here speaks under the new one.
+        // stopAskPlayback parity: the pick terminates the ask mid-play —
+        // bump the epoch AND tell the client (interrupt_ack), so its
+        // playback stops the queued ask audio and adopts the new epoch.
+        const askOldEpoch = state.epoch;
         state.epoch += 1;
+        send({
+          type: 'interrupt_ack',
+          old_epoch: askOldEpoch,
+          new_epoch: state.epoch,
+          last_sentence_id: '',
+          played_until_ms: 0
+        });
         send({
           type: 'session_ready',
           session_id: state.id,
@@ -1195,6 +1207,13 @@ wss.on('connection', (ws, req, query) => {
           lesson: { id: LESSON_ID, version: state.version, current_index: state.currentIndex, words: lessonWordsForMode() },
           category: state.subjectPicked
         });
+        // The picked classroom's greeting — announced WITHOUT a turn_start
+        // (server parity: announcements never carry one). A page that
+        // failed to adopt the epoch from the interrupt_ack above would drop
+        // this audio as a stale epoch and never send its sentence_ack.
+        announce('greet', '好，那我们先默写这一科。', PLAN_NOTICE, 320,
+          function () { send({ type: 'state', value: 'listening' }); },
+          { turnStart: false });
         break;
       }
 

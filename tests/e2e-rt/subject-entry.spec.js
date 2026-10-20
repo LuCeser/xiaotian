@@ -69,6 +69,7 @@ test('#55: the page adopts the resolved subject for later re-inits', async ({ pa
 
 test('#55: both subjects due — the clarify buttons answer subject_pick and bind the round', async ({ page }) => {
   const picks = [];
+  const acks = [];
   page.on('websocket', (ws) => {
     ws.on('framesent', (frame) => {
       const payload = frame.payload;
@@ -76,6 +77,7 @@ test('#55: both subjects due — the clarify buttons answer subject_pick and bin
       try {
         const msg = JSON.parse(payload.toString());
         if (msg && msg.type === 'subject_pick') picks.push(msg);
+        if (msg && msg.type === 'sentence_ack') acks.push(msg);
       } catch (parseErr) { /* binary audio frames are not JSON */ }
     });
   });
@@ -93,8 +95,9 @@ test('#55: both subjects due — the clarify buttons answer subject_pick and bin
   await expect(page.locator('#rt-subject-en')).toBeEnabled();
 
   // The child taps 语文: subject_pick(chinese) rides the wire, the mock
-  // bumps the epoch (stopAskPlayback parity), opens the classroom under the
-  // picked subject, and the page adopts it (never re-auto) for re-inits.
+  // bumps the epoch and ships interrupt_ack (stopAskPlayback parity), opens
+  // the classroom under the picked subject, and the page adopts it (never
+  // re-auto) for re-inits.
   await page.click('#rt-subject-zh');
   await expect
     .poll(() => picks.length, { timeout: 20_000 })
@@ -104,4 +107,13 @@ test('#55: both subjects due — the clarify buttons answer subject_pick and bin
     .poll(() => page.evaluate(() => window.__rtTutor.client.initCategory), { timeout: 20_000 })
     .toBe('chinese');
   await expect(ask).toBeHidden();
+
+  // The greeting must actually PLAY: its audio carries the NEW epoch (2 —
+  // the bump the interrupt_ack announced) and NO turn_start (server parity
+  // for announcements), so a page that failed to adopt the epoch would drop
+  // it as stale and never ack — the real-browser sentence_ack below is the
+  // proof the picked classroom lives instead of dying on its ack timeout.
+  await expect
+    .poll(() => acks.filter((a) => a.sentence_id === 'greet' && a.epoch === 2).length, { timeout: 20_000 })
+    .toBeGreaterThanOrEqual(1);
 });
