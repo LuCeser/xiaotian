@@ -1152,6 +1152,12 @@ wss.on('connection', (ws, req, query) => {
             type: 'subject_ask',
             question: '语文和英语今天都有要默写的词语。这次想先默写哪一科？'
           });
+          // The teacher SPEAKS the question too (announce parity): the pick
+          // buttons are live WHILE the audio is still out, so the spec taps
+          // mid-announcement — the wire shape the server-side epoch-gated
+          // termination has to survive.
+          announce('ask', '语文和英语今天都有要默写的词语。这次想先默写哪一科？', PLAN_NOTICE, 320,
+            () => { send({ type: 'state', value: 'listening' }); });
           break;
         }
         // LessonView field-for-field (id / version / current_index / words).
@@ -1176,6 +1182,11 @@ wss.on('connection', (ws, req, query) => {
         }
         if (!state.subjectAskSent || state.subjectPicked) break;
         state.subjectPicked = msg.category;
+        // stopAskPlayback parity: the pick terminates the ask mid-play by
+        // bumping the epoch — the ask's already-scheduled chunks ride the
+        // OLD epoch and the client's epoch gate drops them, while the
+        // classroom that answers here speaks under the new one.
+        state.epoch += 1;
         send({
           type: 'session_ready',
           session_id: state.id,

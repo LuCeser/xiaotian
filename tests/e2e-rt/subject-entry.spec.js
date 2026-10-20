@@ -82,7 +82,10 @@ test('#55: both subjects due — the clarify buttons answer subject_pick and bin
   await page.goto(`/tutor/?${QUIET}&mock_step_ms=5000&mock_subject_ask=1`);
   await page.click('#rt-start');
 
-  // The clarify question arrives and the panel turns on with both buttons.
+  // The clarify question arrives (the mock SPEAKS it too — teacher audio
+  // chunks are still in flight) and the panel turns on with both buttons
+  // live DURING the playback: the tap lands mid-announcement, the exact
+  // shape the server-side epoch-gated termination must survive.
   const ask = page.locator('#rt-subject-ask');
   await expect(ask).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('#rt-subject-ask-text')).not.toBeEmpty();
@@ -90,8 +93,8 @@ test('#55: both subjects due — the clarify buttons answer subject_pick and bin
   await expect(page.locator('#rt-subject-en')).toBeEnabled();
 
   // The child taps 语文: subject_pick(chinese) rides the wire, the mock
-  // opens the classroom under it, and the page adopts the picked subject
-  // (never re-auto) for later re-inits.
+  // bumps the epoch (stopAskPlayback parity), opens the classroom under the
+  // picked subject, and the page adopts it (never re-auto) for re-inits.
   await page.click('#rt-subject-zh');
   await expect
     .poll(() => picks.length, { timeout: 20_000 })
