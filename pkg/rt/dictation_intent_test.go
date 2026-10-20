@@ -395,3 +395,228 @@ func lastIntentClassified(t *testing.T, log *captureLogger) (intent, model strin
 	}
 	return intent, model, found.fields
 }
+
+// ---------------------------------------------------------------------------
+// Issue #56 step 4: state boundaries and the stale-turn races around the
+// corrected confirmation.
+// ---------------------------------------------------------------------------
+
+// TestDictationConfirmationStateGuard: the completion-phrase correction (and
+// confirm dispatch generally) only ever fires inside a live word-dictation
+// writing stage — a paused classroom, a parked subject clarify, the check
+// stage, and a closed session all leave a spoken 「好了」 with zero advances.
+func TestDictationConfirmationStateGuard(t *testing.T) {
+	t.Run("paused classroom rejects the phrase without advancing", func(t *testing.T) {
+		cards := ttCards("苹果", "香蕉")
+		asr := newFakeASR(asrScript{text: "休息一下"}, asrScript{text: "好了"})
+		llm := newFakeLLM(intentScript(intentPause, ""), intentScript(intentConfirm, ""))
+		tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+		ttRunIntentTurn(t, tm, s, 3) // pause
+		ttRunIntentTurn(t, tm, s, 4) // 「好了」 while paused
+		if got := exec.advanceCount(); got != 0 {
+			t.Errorf("advance calls = %d, want 0 (paused confirm never advances)", got)
+		}
+		if got := ttSentencesSince(t, s, 4); got != confirmPausedRejectText() {
+			t.Errorf("paused reply = %q, want the gentle rejection", got)
+		}
+	})
+
+	t.Run("subject clarify answers never touch the lesson classifier", func(t *testing.T) {
+		cards := ttCards("苹果", "香蕉")
+		asr := newFakeASR(asrScript{text: "好了"})
+		llm := newFakeLLM(intentScript(intentConfirm, ""))
+		tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+		// Park the clarify exactly like startSubjectAsk: no tutor, ask live.
+		tm.mu.Lock()
+		initMsg := SessionInitMsg{Type: TypeSessionInit, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1}}
+		tm.pendingAsk = &initMsg
+		tm.tutor = nil
+		tm.mu.Unlock()
+
+		prev := s.countOf(TypeTeacherSentence)
+		done := make(chan struct{})
+		go func() {
+			tm.processTurn(s, []byte("pcm"))
+			close(done)
+		}()
+		if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > prev }) {
+			t.Fatal("the clarify retry never spoke")
+		}
+		ttAckLast(t, tm, s, 0)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("clarify answer turn never settled")
+		}
+		if got := llm.callCount(); got != 0 {
+			t.Errorf("llm calls = %d, want 0 (the clarify binds by keyword, never a classification)", got)
+		}
+		if got := exec.advanceCount(); got != 0 {
+			t.Errorf("advance calls = %d, want 0", got)
+		}
+		if got := ttSentencesSince(t, s, prev); got != subjectAskRetryText {
+			t.Errorf("clarify retry = %q, want %q", got, subjectAskRetryText)
+		}
+		tm.mu.Lock()
+		stillAsking := tm.pendingAsk != nil
+		tm.mu.Unlock()
+		if !stillAsking {
+			t.Error("「好了」 consumed the pending clarify — it binds nothing")
+		}
+	})
+
+	t.Run("check stage classifies through its own prompt and never advances", func(t *testing.T) {
+		cards := ttCards("苹果", "香蕉")
+		asr := newFakeASR(asrScript{text: "好了"})
+		llm := newFakeLLM(intentScript(intentConfirm, ""))
+		tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+		tm.mu.Lock()
+		tm.tutor.checking = true
+		tm.mu.Unlock()
+
+		prev := s.countOf(TypeTeacherSentence)
+		ttRunIntentTurn(t, tm, s, prev)
+		if got := llm.callCount(); got != 1 {
+			t.Fatalf("llm calls = %d, want 1", got)
+		}
+		if sys := llm.calls[0].messages[0].Content; !contains(sys, "检查阶段") {
+			t.Errorf("check-stage system prompt = %q, want the check prompt (Pitfall 8)", sys)
+		}
+		if got := exec.advanceCount(); got != 0 {
+			t.Errorf("advance calls = %d, want 0 (the check stage has no target)", got)
+		}
+	})
+
+	t.Run("closed session ignores the utterance entirely", func(t *testing.T) {
+		cards := ttCards("苹果", "香蕉")
+		asr := newFakeASR(asrScript{text: "好了"})
+		llm := newFakeLLM(intentScript(intentConfirm, ""))
+		tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+		ended := s.countOf(TypeSessionEnded)
+		tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+		if got := s.countOf(TypeSessionEnded); got != ended+1 {
+			t.Fatalf("session_ended count = %d, want %d", got, ended+1)
+		}
+
+		done := make(chan struct{})
+		go func() {
+			tm.processTurn(s, []byte("pcm"))
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("closed turn never returned")
+		}
+		if got := asr.fedCount(); got != 0 {
+			t.Errorf("asr calls = %d, want 0 (a closed session processes nothing)", got)
+		}
+		if got := exec.advanceCount(); got != 0 {
+			t.Errorf("advance calls = %d, want 0", got)
+		}
+	})
+}
+
+// TestDictationConfirmStaleTurn: a confirmation that classifies while the
+// session moves under it must never execute — an interrupt mid-classification
+// aborts the whole turn (epoch bump), and a close during classification must
+// not let the late confirm commit an advance (close does not bump the epoch;
+// the advance gate itself refuses a closed classroom).
+func TestDictationConfirmStaleTurn(t *testing.T) {
+	staleDrive := func(t *testing.T, interrupt bool) (*fakeExecutor, *captureSender, *captureLogger, int) {
+		t.Helper()
+		cards := ttCards("苹果", "香蕉")
+		asr := newFakeASR(asrScript{text: "好了", delay: 400 * time.Millisecond})
+		llm := newFakeLLM(intentScript(intentConfirm, ""))
+		tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+		sentBefore := s.countOf(TypeTeacherSentence)
+		endedBefore := s.countOf(TypeSessionEnded)
+
+		done := make(chan struct{})
+		go func() {
+			tm.processTurn(s, []byte("pcm"))
+			close(done)
+		}()
+		if !waitFor(t, 5*time.Second, func() bool {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			return tm.state == StateProcessing
+		}) {
+			t.Fatal("turn never entered processing")
+		}
+		if interrupt {
+			tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
+		} else {
+			tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+		}
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("stale turn never returned")
+		}
+		if !interrupt && s.countOf(TypeSessionEnded) != endedBefore+1 {
+			t.Fatalf("session_ended count = %d, want exactly one", s.countOf(TypeSessionEnded))
+		}
+		return exec, s, log, sentBefore
+	}
+
+	t.Run("interrupt mid-classification aborts the turn", func(t *testing.T) {
+		exec, s, _, sentBefore := staleDrive(t, true)
+		if got := exec.advanceCount(); got != 0 {
+			t.Errorf("advance calls = %d, want 0 (interrupted confirm never executes)", got)
+		}
+		if got := s.countOf(TypeLessonUpdate); got != 0 {
+			t.Errorf("lesson_update count = %d, want 0", got)
+		}
+		if got := s.countOf(TypeTeacherSentence); got != sentBefore {
+			t.Errorf("teacher sentences = %d, want %d (no announcement after the interrupt)", got, sentBefore)
+		}
+	})
+
+	t.Run("close mid-classification never commits the advance", func(t *testing.T) {
+		exec, s, _, sentBefore := staleDrive(t, false)
+		if got := exec.advanceCount(); got != 0 {
+			t.Errorf("advance calls = %d, want 0 (a closed classroom never advances)", got)
+		}
+		if got := s.countOf(TypeLessonUpdate); got != 0 {
+			t.Errorf("lesson_update count = %d, want 0 (nothing follows session_ended)", got)
+		}
+		if got := s.countOf(TypeTeacherSentence); got != sentBefore {
+			t.Errorf("teacher sentences = %d, want %d (nothing speaks after the close)", got, sentBefore)
+		}
+	})
+}
+
+// TestDictationDoubleConfirmNewTargetAdvances: after the NEXT word's
+// announcement settled, a NEW spoken 「好了」 belongs to the NEW target — the
+// per-target idempotency key must not swallow it as a duplicate of the first
+// confirm, and each confirm advances exactly one word.
+func TestDictationDoubleConfirmNewTargetAdvances(t *testing.T) {
+	cards := ttCards("苹果", "香蕉", "橘子")
+	asr := newFakeASR(asrScript{text: "好了"}, asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""), intentScript(intentConfirm, ""))
+	tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+
+	prev := s.countOf(TypeTeacherSentence)
+	ttRunIntentTurn(t, tm, s, prev) // confirm word 1 → announce word 2
+	mid := s.countOf(TypeTeacherSentence)
+	ttRunIntentTurn(t, tm, s, mid) // confirm word 2 → announce word 3
+
+	if got := exec.advanceCount(); got != 2 {
+		t.Fatalf("advance calls = %d, want 2 (each confirm drives its own target)", got)
+	}
+	calls := exec.advanceCallsSnapshot()
+	if calls[0].requestID != "L1-advance-0" || calls[1].requestID != "L1-advance-1" {
+		t.Errorf("request ids = [%s %s], want per-target keys [L1-advance-0 L1-advance-1]",
+			calls[0].requestID, calls[1].requestID)
+	}
+	if got := s.countOf(TypeLessonUpdate); got != 2 {
+		t.Errorf("lesson_update count = %d, want 2", got)
+	}
+	tm.mu.Lock()
+	idx := tm.tutor.currentIndex
+	tm.mu.Unlock()
+	if idx != 2 {
+		t.Errorf("currentIndex = %d, want 2", idx)
+	}
+}

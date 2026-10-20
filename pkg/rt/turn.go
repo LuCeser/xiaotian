@@ -1598,7 +1598,13 @@ func (tm *TurnManager) confirmTarget(s Sender, ctx context.Context, cancel conte
 func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, target TurnTarget, outcome, reply string, onFirstCommit func()) {
 	tm.mu.Lock()
 	lessonID := tm.tutor.lessonID
-	valid := !tm.tutor.completed && target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words)
+	// Issue #56: a closed session refuses the advance too — a close during
+	// classification does NOT bump the epoch (unlike an interrupt), so the
+	// processTurn epoch gate alone would pass a late confirm through to the
+	// executor after session_ended already shipped. The epoch comparison
+	// stays upstream; this is the advance's own closed check.
+	valid := !tm.tutor.completed && !tm.closed &&
+		target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words)
 	tm.mu.Unlock()
 	if !valid {
 		// Completed or out-of-range target: pacing owns the cursor — a
