@@ -592,6 +592,17 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 		tm.mu.Unlock()
 	}
 
+	tm.continueSessionInit(s, m)
+}
+
+// continueSessionInit runs everything session_init does once the classroom's
+// subject is settled: the practice / poem / passage branches, then the
+// due-word classroom itself (row resume vs. fresh fetch). It is ALSO the
+// resume point after a subject clarify answer (Issue #55) — an auto
+// classroom whose two subjects both hold due words asks the child first,
+// then re-enters here under the picked subject with the ORIGINAL init
+// message, so the answered round binds exactly like an explicit declaration.
+func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 	if m.Practice {
 		tm.handlePracticeInit(s)
 		return
