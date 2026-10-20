@@ -274,8 +274,8 @@ func (p *PyFSRS) FetchDueWords(ctx context.Context, limit int, category string) 
 }
 
 // PeekDueWords implements the lock-free half of the WordSource seam (Issue
-// #55): the same due read as FetchDueWords but with Peek set, so the
-// subject judgment's content snapshot never locks cards away from a live
+// #55): the same due read as FetchDueWords but with Peek set, so the auto
+// subject resolution's presence probe never locks cards away from a live
 // classroom. Zero cards is a legal result, not an error.
 func (p *PyFSRS) PeekDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error) {
 	if limit <= 0 {

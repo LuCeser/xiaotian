@@ -501,8 +501,9 @@ func TestFakesTTSStreamUntilCancel(t *testing.T) {
 // records every submission and answers with the scripted result/error.
 // Both record the category the classroom passed (Issue #10 assertions).
 // PeekDueWords answers from the static per-category snapshot peekByCat
-// (Issue #55: the subject judgment's content input — a READ, so it returns
-// the same batch on every call and never consumes the fetch script).
+// (Issue #55: the subject resolution's presence probe — a READ, so it
+// returns the same batch on every call and never consumes the fetch
+// script).
 // dueByCat (Issue #55 isolation regressions), once set, switches
 // FetchDueWords to per-category batches: a mixed vocabulary where the
 // english fetch can never see the chinese words and vice versa.

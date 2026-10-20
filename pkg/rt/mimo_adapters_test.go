@@ -170,10 +170,10 @@ func TestPyFSRSFetchDueMapsCards(t *testing.T) {
 type lessonWordCheck struct{ Word, Meaning, Example string }
 
 // TestPyFSRSPeekDueMapsCardsLockFree pins the Issue #55 peek contract: the
-// judgment's content read carries Peek=true and FetchLockHours=0 (the
-// script's lock-free path — reading must never lock cards away from a live
-// classroom), keeps the same lossless card mapping, and normalizes the
-// category exactly like the fetch.
+// subject resolution's presence probe carries Peek=true and
+// FetchLockHours=0 (the script's lock-free path — reading must never lock
+// cards away from a live classroom), keeps the same lossless card mapping,
+// and normalizes the category exactly like the fetch.
 func TestPyFSRSPeekDueMapsCardsLockFree(t *testing.T) {
 	fake := &fakePyBridge{
 		dueResults: []pybridge.DueResult{{Cards: []pybridge.DueCard{

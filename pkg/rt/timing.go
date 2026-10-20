@@ -66,6 +66,14 @@ const (
 	EventSessionEnd = "session_end"
 	// EventError: a visible failure occurred (RT-10 evidence).
 	EventError = "error"
+	// EventSubjectAsk (Issue #55): an auto word classroom found BOTH
+	// subjects holding due words and the clarify question went out; the
+	// retry=true field marks a re-ask after an unusable spoken answer.
+	EventSubjectAsk = "subject_ask"
+	// EventSubjectPicked (Issue #55): the child's clarify answer (via
+	// button or voice) bound the round's subject. Fields carry the picked
+	// category and the channel only — never the transcript text.
+	EventSubjectPicked = "subject_picked"
 )
 
 // EventRecorder emits the server-side timing event stream for one session
