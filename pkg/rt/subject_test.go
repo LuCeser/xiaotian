@@ -405,3 +405,95 @@ func TestSubjectFromAnswer(t *testing.T) {
 		}
 	}
 }
+
+// TestSubjectVoiceAnswerStaleAfterInterruptDoesNotBind — the P2 pin: a
+// spoken answer recognized under an epoch the child has since INTERRUPTED
+// must never bind the subject. The delayed ASR reply ("英语") lands after
+// the interrupt bumped the epoch; the stale turn may not consume the parked
+// clarify (no classroom, no english binding). The clarify itself survives
+// the interrupt — the child says 语文 on the fresh epoch and THAT answer
+// opens the classroom.
+func TestSubjectVoiceAnswerStaleAfterInterruptDoesNotBind(t *testing.T) {
+	en := make([]lesson.Word, 0, 11)
+	for i := 0; i < 11; i++ {
+		en = append(en, lesson.Word{Word: "en" + string(rune('a'+i))})
+	}
+	zh := make([]lesson.Word, 0, 25)
+	for i := 0; i < 25; i++ {
+		zh = append(zh, lesson.Word{Word: "字" + string(rune('甲'+i%20)) + string(rune('0'+i%10))})
+	}
+	words := newFakeWords()
+	words.setPeek(lesson.CategoryEnglish, en)
+	words.setPeek(lesson.CategoryChinese, zh)
+	words.setDue(lesson.CategoryChinese, zh)
+	exec := newFakeExecutorNoRow(ttLessonID)
+	asr := newFakeASR(
+		asrScript{text: "英语", delay: 400 * time.Millisecond}, // lands AFTER the interrupt
+		asrScript{text: "我想默写语文"},                            // the fresh-epoch retry
+	)
+	tm := NewTurnManager(asr, newFakeLLM(), newFakeTTS(1, 320), exec,
+		ttConfigWith(words, func(c *TurnManagerConfig) {
+			c.VADStartGraceMs = 1
+			c.VADEchoTailMs = 1
+		}), nil, nil)
+	s := &captureSender{}
+	ttSubjectInit(t, tm, s)
+	ttAwaitAskSent(t, s, 0)
+	ttAckLast(t, tm, s, 0)
+	ttWaitClarifyOpen(t, tm)
+	tm.mu.Lock()
+	tm.echoTailUntil = time.Now().Add(-time.Millisecond)
+	tm.mu.Unlock()
+
+	// The child starts speaking ("英语" is in the provider pipeline), then
+	// interrupts: wait until the turn is mid-ASR (processing), bump the
+	// epoch through the real interrupt path, then let the stale reply land.
+	tm.IngestAudio(s, ttUtterance())
+	if !waitFor(t, 5*time.Second, func() bool {
+		tm.mu.Lock()
+		processing := tm.state == StateProcessing
+		tm.mu.Unlock()
+		return processing
+	}) {
+		t.Fatal("the answer turn never reached processing")
+	}
+	tm.HandleControl(s, mustJSON(t, InterruptMsg{
+		Type: TypeInterrupt, LastSentenceID: "", Epoch: 1,
+	}))
+	// Let the stale "英语" reply arrive and settle before asserting.
+	time.Sleep(700 * time.Millisecond)
+
+	if ready := s.controlsOf(t, TypeSessionReady); len(ready) != 0 {
+		t.Fatalf("session_ready after a stale answer = %d, want 0 (an interrupted turn never starts a classroom)", len(ready))
+	}
+	tm.mu.Lock()
+	parked := tm.pendingAsk != nil
+	closed := tm.closed
+	tm.mu.Unlock()
+	if !parked {
+		t.Fatal("the stale answer consumed the parked clarify")
+	}
+	if closed {
+		t.Fatal("the stale answer closed the session")
+	}
+	if ids := exec.ensureIDCalls(); len(ids) != 0 {
+		t.Errorf("EnsureLessonCards ids = %v, want none (nothing bound)", ids)
+	}
+
+	// The clarify survives: on the fresh epoch the child's 语文 binds and
+	// the classroom opens chinese-only.
+	ttWaitClarifyOpen(t, tm)
+	tm.mu.Lock()
+	tm.echoTailUntil = time.Now().Add(-time.Millisecond)
+	tm.mu.Unlock()
+	tm.IngestAudio(s, ttUtterance())
+	if !waitFor(t, 5*time.Second, func() bool { return len(s.controlsOf(t, TypeSessionReady)) == 1 }) {
+		t.Fatal("session_ready never arrived after the fresh-epoch answer")
+	}
+	if got := s.controlsOf(t, TypeSessionReady)[0]["category"]; got != lesson.CategoryChinese {
+		t.Errorf("session_ready.category = %v, want the freshly answered chinese", got)
+	}
+	if ids := exec.ensureIDCalls(); len(ids) != 1 || ids[0] != ttLessonID+"-chinese" {
+		t.Errorf("EnsureLessonCards ids = %v, want [%s-chinese]", ids, ttLessonID)
+	}
+}

@@ -110,7 +110,7 @@ func (tm *TurnManager) startSubjectAsk(s Sender, m SessionInitMsg) {
 // pick with no clarify parked is a no-op — the classroom is already under
 // a subject, and a stray pick can never re-open one.
 func (tm *TurnManager) handleSubjectPick(s Sender, m SubjectPickMsg) {
-	tm.finishSubjectAsk(s, m.Category, "button")
+	tm.finishSubjectAsk(s, m.Category, "button", 0, false)
 }
 
 // handleSubjectAnswerTurn digests the child's SPOKEN answer to the clarify
@@ -128,15 +128,19 @@ func (tm *TurnManager) handleSubjectAnswerTurn(s Sender, transcript string, epoc
 		tm.runAnnouncement(s, ctx, cancel, subjectAskRetryText, purposeSubjectAsk, nil)
 		return
 	}
-	tm.finishSubjectAsk(s, category, "voice")
+	tm.finishSubjectAsk(s, category, "voice", epoch, true)
 }
 
 // finishSubjectAsk binds the child's answer and resumes the parked init —
-// exactly once: the FIRST answer to land (button or voice) takes the
-// parked message; a later duplicate finds nothing parked and no-ops.
-func (tm *TurnManager) finishSubjectAsk(s Sender, category, via string) {
+// exactly once, and (the voice channel) only from a turn that is STILL
+// current: the epoch validation and the pendingAsk consumption share one
+// lock hold, so a reply recognized before an interrupt can never bind
+// after it (a stale turn never starts a classroom — the same contract
+// processTurn enforces everywhere else). The button channel passes
+// fromTurn=false: a tap is not bound to any turn's epoch.
+func (tm *TurnManager) finishSubjectAsk(s Sender, category, via string, epoch uint64, fromTurn bool) {
 	tm.mu.Lock()
-	if tm.pendingAsk == nil {
+	if tm.pendingAsk == nil || tm.closed || (fromTurn && tm.epoch != epoch) {
 		tm.mu.Unlock()
 		return
 	}

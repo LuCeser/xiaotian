@@ -22,10 +22,13 @@ import (
 // fakeASR
 // ---------------------------------------------------------------------------
 
-// asrScript is one scripted Transcribe outcome: exactly one of text / err.
+// asrScript is one scripted Transcribe outcome: exactly one of text / err,
+// optionally delayed before the outcome lands (simulating a provider reply
+// that arrives AFTER an interrupt bumped the epoch — the stale-turn races).
 type asrScript struct {
-	err  error
-	text string
+	err   error
+	text  string
+	delay time.Duration
 }
 
 // fakeASR answers Transcribe calls from a FIFO script queue and records the
@@ -43,13 +46,20 @@ func newFakeASR(script ...asrScript) *fakeASR {
 // Transcribe implements ASRProvider.
 func (f *fakeASR) Transcribe(_ context.Context, pcm []byte) (string, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.fedBytes = append(f.fedBytes, len(pcm))
 	if len(f.script) == 0 {
+		f.mu.Unlock()
 		return "", fmt.Errorf("fakeASR: script exhausted")
 	}
 	head := f.script[0]
 	f.script = f.script[1:]
+	f.mu.Unlock()
+	// The delay sleeps OUTSIDE the mutex (a second scripted call must not
+	// block on the sleeper) and ignores ctx on purpose: the point is a reply
+	// that arrives after cancellation.
+	if head.delay > 0 {
+		time.Sleep(head.delay)
+	}
 	if head.err != nil {
 		return "", head.err
 	}
