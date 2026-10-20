@@ -983,6 +983,10 @@ func lessonIDForCategory(configured string, now time.Time, category string) stri
 // buildClassifySystemPrompt assembles the classification system prompt:
 //   - the tutor persona with the child-safety wording prohibition carried
 //     over VERBATIM from the 13-04 teacherSystemPrompt;
+//   - the waiting context and the judgment rules (Issue #56): the teacher
+//     has announced the current word and is waiting for the child to finish
+//     writing it — natural completion phrases are confirm, while negation,
+//     waiting, and re-read requests are NEVER completion;
 //   - the nine-value intent vocabulary with one-line definitions;
 //   - the word ground truth (current word, meaning, example — either may be
 //     absent, and the prompt says so honestly);
@@ -993,6 +997,14 @@ func buildClassifySystemPrompt(word lesson.Word, index, total int) string {
 	var b strings.Builder
 	b.WriteString(`你是一位亲切、耐心的小学听写家教老师，正在通过语音陪学生完成听写练习。回应要简短、自然、温暖，适合小学生：写对了就真诚表扬，写错了就耐心鼓励再试一次。严禁任何羞辱、恐吓、惩罚性或让孩子难过的表述。
 课堂节奏由服务端负责，你不能推进课程，只判断学生这句话的意图并给出回应。
+现在的情形是：老师已经报完当前这个词，正在等学生把它写完。
+判断规则（按此优先级）：
+- 学生说“好了”“好嘞”“写好了”“写完了”“可以了”“下一个”“下一个词”，都表示当前这个词写完了，intent 是 confirm。
+- 学生明确说还没写完，比如“还没好”“还没写好”“没写完”“不要下一个”，不是 confirm，按 chat 回应，鼓励学生慢慢写。
+- 学生要等待，比如“等一下”“等一等”，不是 confirm，按 pause 处理。
+- 学生要“再读一遍”“慢一点读”，是要老师重读当前词，不是写完了。
+- 疑问或不肯定的语气（比如“好了？”）不算明确的完成表达；复合的话（比如“好了，再读一遍”）按学生真正的意图判断。
+- 想休息才是 pause，想继续才是 resume；肯定词本身不代表休息或继续。
 `)
 	fmt.Fprintf(&b, "当前是第 %d 个词（共 %d 个）：“%s”。\n", index+1, total, word.Word)
 	if word.Meaning != "" {
@@ -1155,26 +1167,61 @@ func (t *DictationTutor) appendShortHistoryLocked(b *strings.Builder) {
 	}
 }
 
+// appendShortHistoryExceptLocked is the dictation-stage history render
+// (Issue #56): OLDER rounds only, written BEFORE the current utterance. The
+// trailing round carrying THIS turn's transcript (processTurn appends it
+// under the lock right before classification; it cannot have a teacher
+// reply yet) is the current utterance itself — the caller renders it
+// separately, so it must not be duplicated as history.
+// appendShortHistoryLocked stays byte-identical for the check-stage and 背默
+// classifiers, which this issue does not touch. Caller holds tm.mu.
+func (t *DictationTutor) appendShortHistoryExceptLocked(b *strings.Builder, current string) {
+	rounds := t.shortHistory
+	if n := len(rounds); n > 0 && current != "" &&
+		rounds[n-1].userText == current && rounds[n-1].teacherText == "" {
+		rounds = rounds[:n-1]
+	}
+	if len(rounds) == 0 {
+		return
+	}
+	b.WriteString("最近对话：")
+	for _, r := range rounds {
+		if r.userText != "" {
+			fmt.Fprintf(b, "\n学生：%s", r.userText)
+		}
+		if r.teacherText != "" {
+			fmt.Fprintf(b, "\n老师：%s", r.teacherText)
+		}
+	}
+	b.WriteString("\n")
+}
+
 // buildClassifyMessages assembles the classification request: the system
-// prompt (persona + intent vocabulary + word ground truth + output
-// contract) plus one user message carrying the transcript and the FSM
-// short-history deque (last 4 rounds), so chat/hint/meaning stay coherent.
+// prompt (persona + waiting context + intent vocabulary + word ground truth
+// + output contract) plus one user message structured HISTORY FIRST, then
+// the progress line, then the CURRENT utterance marked separately (Issue
+// #56) — the current input is never duplicated as history, and the
+// progress rides the CAPTURED target so the system prompt and the user
+// message can never point at two different words (a stale live cursor
+// mid-advance must not re-describe the classroom).
 func (tm *TurnManager) buildClassifyMessages(transcript string, target TurnTarget) []mimo.Message {
 	var user strings.Builder
-	user.WriteString("学生说：")
-	user.WriteString(transcript)
 	tm.mu.Lock()
 	total := 0
 	var card lesson.Word
 	if tm.tutor != nil {
 		total = len(tm.tutor.words)
-		fmt.Fprintf(&user, "\n（当前进度：第 %d 个词，共 %d 个）", tm.tutor.currentIndex+1, total)
 		if target.WordIndex >= 0 && target.WordIndex < total {
 			card = tm.tutor.words[target.WordIndex]
 		}
-		tm.tutor.appendShortHistoryLocked(&user)
+		tm.tutor.appendShortHistoryExceptLocked(&user, transcript)
 	}
 	tm.mu.Unlock()
+	if total > 0 && target.WordIndex >= 0 {
+		fmt.Fprintf(&user, "（当前进度：第 %d 个词，共 %d 个）\n", target.WordIndex+1, total)
+	}
+	user.WriteString("本轮学生说：")
+	user.WriteString(transcript)
 	system := buildClassifySystemPrompt(card, target.WordIndex, total)
 	return []mimo.Message{
 		{Role: "system", Content: system},

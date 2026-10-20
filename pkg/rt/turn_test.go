@@ -533,9 +533,13 @@ func ttEventCount(t *testing.T, log *captureLogger, event string) int {
 // the classification request carries the eight-value intent vocabulary, the
 // word ground truth (meaning/example), the position, the strict JSON output
 // contract, the child-safety wording prohibition, the hint no-leak rule and
-// the meaning honesty rule.
+// the meaning honesty rule. Issue #56 additions: the waiting-context
+// judgment rules (completion phrases vs. negation/waiting/re-read), history
+// rendered BEFORE the separately-marked current utterance (the current
+// input is never duplicated as history), and the progress line riding the
+// CAPTURED target — never the live cursor.
 func TestClassifyMessagesCarryVocabGroundTruthAndSafety(t *testing.T) {
-	cards := ttCards("苹果")
+	cards := ttCards("苹果", "香蕉")
 	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
 	ttBindTutor(tm, cards)
 	tm.mu.Lock()
@@ -551,6 +555,9 @@ func TestClassifyMessagesCarryVocabGroundTruthAndSafety(t *testing.T) {
 		"confirm", "repeat", "slow", "hint", "meaning", "example", "pause", "resume", "chat",
 		"JSON", "严禁任何羞辱", "苹果", "释义-苹果", "例句-苹果", "第 1 个词",
 		"部分提示", "凭印象写",
+		// Issue #56: the waiting context and the judgment-priority rules.
+		"正在等学生把它写完", "好了", "下一个", "还没好", "不是 confirm", "等一下",
+		"再读一遍", "好了？",
 	} {
 		if !contains(system, want) {
 			t.Errorf("classify system prompt missing %q", want)
@@ -561,6 +568,42 @@ func TestClassifyMessagesCarryVocabGroundTruthAndSafety(t *testing.T) {
 	}
 	if !contains(user, "学生：你好老师") {
 		t.Errorf("classify user message missing the short-history deque: %q", user)
+	}
+	if !contains(user, "本轮学生说：这个字不会写") {
+		t.Errorf("classify user message missing the current-utterance mark: %q", user)
+	}
+	// History precedes the current utterance.
+	if strings.Index(user, "学生：你好老师") > strings.Index(user, "本轮学生说：") {
+		t.Errorf("classify user message renders history AFTER the current utterance: %q", user)
+	}
+
+	// Issue #56: a history holding a re-read request, this turn's
+	// completion phrase already appended as the current round (exactly what
+	// processTurn does), and a live cursor that has drifted past the
+	// captured target — the request must ground on the TARGET and never
+	// duplicate the current input as history.
+	tm.mu.Lock()
+	tm.tutor.appendUserRound("再读一遍")
+	tm.tutor.shortHistory[len(tm.tutor.shortHistory)-1].teacherText = "好，我再读一遍。苹果。"
+	tm.tutor.appendUserRound("好了") // the current round, teacher reply pending
+	tm.tutor.currentIndex = 1      // a drifted live cursor (word 2) ...
+	tm.mu.Unlock()
+	msgs = tm.buildClassifyMessages("好了", TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+	system, user = msgs[0].Content, msgs[1].Content
+	if !contains(system, "第 1 个词") || contains(system, "第 2 个词") {
+		t.Errorf("system prompt grounds on the captured target: %q", system)
+	}
+	if !contains(user, "（当前进度：第 1 个词，共 2 个）") || contains(user, "第 2 个词") {
+		t.Errorf("progress line must ride the captured target, not the live cursor: %q", user)
+	}
+	if !contains(user, "本轮学生说：好了") {
+		t.Errorf("current utterance not separately marked: %q", user)
+	}
+	if contains(user, "学生：好了") {
+		t.Errorf("current utterance duplicated as history: %q", user)
+	}
+	if !contains(user, "学生：再读一遍") {
+		t.Errorf("older re-read round missing from history: %q", user)
 	}
 }
 
