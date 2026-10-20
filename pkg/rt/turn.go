@@ -224,12 +224,12 @@ const (
 // endings (timeout → the original lesson_complete/no_due_words reason still
 // ships; protocol.go sequencing contract).
 const (
-	purposeGreeting  = "greeting"     // opening + first word
-	purposeAnnounce  = "announce"     // next-word announcement
-	purposeChat      = "chat"         // classification reply
-	purposeSummary   = "summary"      // completion wrap-up
-	purposeNoDue     = "no_due_words" // zero-due explanation
-	purposeSubjectAsk = "subject_ask" // Issue #55: which-subject clarify question
+	purposeGreeting   = "greeting"     // opening + first word
+	purposeAnnounce   = "announce"     // next-word announcement
+	purposeChat       = "chat"         // classification reply
+	purposeSummary    = "summary"      // completion wrap-up
+	purposeNoDue      = "no_due_words" // zero-due explanation
+	purposeSubjectAsk = "subject_ask"  // Issue #55: which-subject clarify question
 )
 
 // maxReplyRunes bounds an LLM reply before it enters TTS and subtitles
