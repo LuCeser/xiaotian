@@ -217,9 +217,9 @@ func TestDictationConfirmationOverConn(t *testing.T) {
 			t.Fatal("battle summary never fully streamed")
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(remaining))
-		mt, data, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("summary read: %v", err)
+		mt, data, readErr := conn.ReadMessage()
+		if readErr != nil {
+			t.Fatalf("summary read: %v", readErr)
 		}
 		m := itProbe(mt, data)
 		switch m.typ {

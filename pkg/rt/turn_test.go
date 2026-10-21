@@ -3270,6 +3270,55 @@ func TestWordTimerResetInvalidatesQueuedCallbackSameEpochAndIndex(t *testing.T) 
 	}
 }
 
+// TestWordTimeoutFiresInsideLastWordAdvanceWindow: the countdown can fire in
+// the window between the LAST word's first-commit align and enterCheck's
+// markCompleted/stop — the cursor already sits at len(words) while completed
+// is still false. The firing must be a silent version-mismatch drop, never a
+// turnTarget() index past the word list (Issue #56 最后一词越界 red line;
+// found by the full -race suite, pre-existing on main).
+func TestWordTimeoutFiresInsideLastWordAdvanceWindow(t *testing.T) {
+	cards := ttCards("苹果") // one word: its confirm is the last-word advance
+	log := &captureLogger{}
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) { c.WordTimeout = time.Hour }),
+		NewEventRecorder(log, "t"), nil)
+	tm.mu.Lock()
+	var queued func()
+	tm.timerFactory = func(_ time.Duration, cb func()) *time.Timer {
+		queued = cb // invoked under tm.mu by armWordTimerLocked
+		return time.NewTimer(time.Hour)
+	}
+	tm.mu.Unlock()
+
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0) // arms the countdown (target: word 0 at v1)
+	ttWaitListening(t, s)
+	tm.mu.Lock()
+	fire := queued
+	// The advance's first commit landed; enterCheck has not run yet: cursor
+	// at len(words), version bumped, completed still false.
+	tm.tutor.align(len(cards), 2)
+	tm.mu.Unlock()
+	if fire == nil {
+		t.Fatal("arm never captured the queued callback")
+	}
+
+	fire() // must not panic; a silent drop with zero side effects
+
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0 (a stale firing never re-advances)", exec.advanceCount())
+	}
+	if ttEventCount(t, log, EventTimeoutFired) != 0 {
+		t.Error("timeout_fired emitted inside the last-word advance window")
+	}
+	if s.countOf(TypeLessonUpdate) != 0 {
+		t.Error("lesson_update sent inside the last-word advance window")
+	}
+}
+
 // TestWordTimerEmptyTranscriptionDoesNotReset: an ASR empty transcription
 // is tolerated silently — no classification, no user-visible error, and the
 // countdown (generation AND handle) is untouched: hearing silence is not an

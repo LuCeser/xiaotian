@@ -291,9 +291,9 @@ type historyRound struct {
 // execution still re-checks the live epoch, close flag, and pause bit at
 // dispatch time.
 type dictationTurnContext struct {
+	target TurnTarget
 	turnID uint64
 	epoch  uint64
-	target TurnTarget
 	// awaitingWord: an ordinary WORD dictation in its writing stage — the
 	// teacher announced the current word and the classroom is waiting for
 	// the child to finish writing it. The ONLY state where #56's
@@ -672,13 +672,16 @@ func (tm *TurnManager) stopTimerHandleLocked() {
 
 // onWordTimeout is the countdown firing (its own goroutine). It re-acquires
 // the lock and validates in order: generation, session close, epoch, tutor
-// liveness, the pause bit, and the FULL TurnTarget (word/index/version — a
-// late confirm that already advanced bumps the version, so a stale target
-// mismatches). The processing branch is handled BEFORE the generic
-// state-rejection drop: a student reply being classified must not swallow
-// the timeout — that firing is discarded and a fresh countdown re-armed.
-// speaking is ack-driven and never advances early; anything else is
-// dropped.
+// liveness, the pause bit, and the captured target's index+version (a late
+// confirm that already advanced bumps the version, so a stale target
+// mismatches). The target is compared by index+version, NEVER through
+// turnTarget(): in the window between the last word's first-commit align and
+// enterCheck's markCompleted/stop the cursor already sits at len(words) —
+// turnTarget would index past the word list (the #56 最后一词越界 red line).
+// The processing branch is handled BEFORE the generic state-rejection drop:
+// a student reply being classified must not swallow the timeout — that
+// firing is discarded and a fresh countdown re-armed. speaking is
+// ack-driven and never advances early; anything else is dropped.
 func (tm *TurnManager) onWordTimeout(gen uint64, epoch uint64, target TurnTarget) {
 	tm.mu.Lock()
 	if gen != tm.timerGen || tm.closed || tm.epoch != epoch ||
@@ -686,7 +689,7 @@ func (tm *TurnManager) onWordTimeout(gen uint64, epoch uint64, target TurnTarget
 		tm.mu.Unlock()
 		return
 	}
-	if tm.tutor.turnTarget() != target {
+	if tm.tutor.currentIndex != target.WordIndex || tm.tutor.version != target.ExpectedVersion {
 		tm.mu.Unlock()
 		return
 	}
