@@ -106,13 +106,13 @@ type llmCall struct {
 // fakeLLM answers Chat calls from a FIFO script queue and records every
 // received messages slice (deep-copied) plus the option count.
 type fakeLLM struct {
-	script []llmScript
-	calls  []llmCall
 	// holdEntered/holdRelease: the one-shot classification hold armed by
 	// gateNextChat (PR #61 review) — nil when disarmed.
-	holdEntered  chan struct{}
-	holdRelease  chan struct{}
-	mu           sync.Mutex
+	holdEntered chan struct{}
+	holdRelease chan struct{}
+	script      []llmScript
+	calls       []llmCall
+	mu          sync.Mutex
 }
 
 func newFakeLLM(script ...llmScript) *fakeLLM {

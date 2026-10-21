@@ -121,13 +121,21 @@ func (c *captureSender) listeningCount() int {
 // duplicate requestID (Idempotent=true), mirroring the tool_requests table.
 // The 13.1 check-stage methods follow the same first-commit/replay/conflict
 // shape on the in-memory row (checkResults holds their stored results).
+//
+// The four chan fields are the one-shot commit-vs-return holds armed by
+// gateAdvance/gateEnterCheck (PR #61 review) — nil when disarmed. The exact
+// order is govet fieldalignment's own suggestion; don't hand-resort.
 type fakeExecutor struct {
-	requestResults   map[string]lesson.AdvanceResult
+	advanceEntered   chan struct{}
 	checkResults     map[string]any
-	stateIDs         []string // the lesson ids GetLessonState was asked for (Issue #10)
-	advanceCalls     []fakeAdvanceCall
+	checkRelease     chan struct{}
+	checkEntered     chan struct{}
+	requestResults   map[string]lesson.AdvanceResult
+	advanceRelease   chan struct{}
 	checkCalls       []fakeCheckCall
-	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
+	ensureIDs        []string
+	advanceCalls     []fakeAdvanceCall
+	stateIDs         []string
 	lesson           lesson.Lesson
 	ensureCalls      int
 	ensureCardsCalls int
@@ -135,13 +143,6 @@ type fakeExecutor struct {
 	conflictVersion  int
 	mu               sync.Mutex
 	exists           bool
-	// advanceEntered/advanceRelease and checkEntered/checkRelease: one-shot
-	// commit-vs-return holds armed by gateAdvance/gateEnterCheck (PR #61
-	// review) — nil when disarmed.
-	advanceEntered  chan struct{}
-	advanceRelease  chan struct{}
-	checkEntered    chan struct{}
-	checkRelease    chan struct{}
 }
 
 type fakeAdvanceCall struct {

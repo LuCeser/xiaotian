@@ -1,12 +1,19 @@
-// dictation_confirmation_integration_test.go — Issue #56 end-to-end: the
-// natural confirmation phrases drive the REAL voice loop (websocket frames →
-// VAD → ASR → classification) over a REAL lesson store (temp SQLite through
-// LessonTools), with the model deliberately misjudging every dictation-turn
-// phrase so the chain proves the correction — not the fake model's
-// cooperation. The last word opens the check stage exactly once, the confirm
-// itself writes no FSRS, the existing manual-verdict/submit messages finish
-// the lesson, and duplicates (a repeated 「好了」 in the check stage, a
-// repeated check_submit) write nothing extra.
+// dictation_confirmation_integration_test.go — Issue #56, PROTOCOL layer
+// (协议层): the natural confirmation phrases drive the REAL voice loop
+// (websocket frames → VAD → ASR → classification) over a REAL lesson store
+// (temp SQLite through LessonTools), with the model deliberately misjudging
+// every dictation-turn phrase so the chain proves the correction — not the
+// fake model's cooperation. The last word opens the check stage exactly
+// once, the confirm itself writes no FSRS, the existing manual-verdict/
+// submit messages finish the lesson, and duplicates (a repeated 「好了」 in
+// the check stage, a repeated check_submit) write nothing extra.
+//
+// Scope boundary (PR #61 review): every sentence_ack below is sent by this
+// TEST DRIVER acting as a protocol-conforming client — these tests prove
+// the server's ack-gated behavior GIVEN conforming acks, never that a real
+// browser played the audio and produced them. Playback-driven ACK
+// verification belongs to #58's B-layer browser e2e (confirmation.spec.js
+// 等); nothing here counts as browser playback acceptance.
 package rt
 
 import (
@@ -80,16 +87,17 @@ func dcConfirmStack(t *testing.T, asr ASRProvider, llm LLMProvider, tts TTSSynth
 	return srv, &captured, exec
 }
 
-// TestDictationConfirmationOverConn: 「好了」「好嘞」「下一个」 — each one
-// misjudged by the model (repeat / chat / hint) — advance the classroom one
-// word at a time over the real transport and store: indexes arrive in order
-// with no gaps or repeats, the last word opens check_started(
+// TestDictationConfirmationProtocolOverConn: 「好了」「好嘞」「下一个」 — each
+// one misjudged by the model (repeat / chat / hint) — advance the classroom
+// one word at a time over the real transport and store: indexes arrive in
+// order with no gaps or repeats, the last word opens check_started(
 // reason=dictation_done) exactly once with the per-word countdown stopped,
 // the confirmation itself writes no FSRS, the manual verdicts and the
 // unified submit finish the lesson with the summary held for its ack, and
 // neither a repeated 「好了」 in the check stage nor a repeated check_submit
-// writes anything extra.
-func TestDictationConfirmationOverConn(t *testing.T) {
+// writes anything extra. Protocol layer (协议层) only: the acks come from
+// the driver, not a playing browser — see the file header's scope boundary.
+func TestDictationConfirmationProtocolOverConn(t *testing.T) {
 	cards := ttCards("苹果", "香蕉", "橘子")
 	words := newFakeWords(cards)
 	words.reviewResult = ReviewWriteResult{
@@ -237,7 +245,7 @@ func TestDictationConfirmationOverConn(t *testing.T) {
 			lastAckID, lastAckEpoch = ae.SentenceID, ae.Epoch
 			summaryAudioEnd++
 		case TypeSessionEnded:
-			t.Fatal("session_ended arrived before the summary ack (ack gate broken)")
+			t.Fatal("session_ended arrived before the DRIVER sent the summary sentence_ack (protocol-layer ack gate broken)")
 		}
 	}
 	if resultCount != 1 {
@@ -301,14 +309,15 @@ func joinAny(ss []string) string {
 	return out
 }
 
-// TestDictationConfirmationRestart: after a confirmation-driven lesson ends
-// the honest way, the existing entry points open the next rounds correctly:
-// re-initializing the SAME daily classroom short-circuits on its submitted
-// row (never an implicit reset), a same-subject practice round opens its own
-// r0x- row with its own list, and a different subject opens its own row —
-// neither inherits the finished classroom's target, history, timer, or
-// cancellation state, and the submitted row is never rewritten.
-func TestDictationConfirmationRestart(t *testing.T) {
+// TestDictationConfirmationProtocolRestart: after a confirmation-driven
+// lesson ends the honest way, the existing entry points open the next rounds
+// correctly: re-initializing the SAME daily classroom short-circuits on its
+// submitted row (never an implicit reset), a same-subject practice round
+// opens its own r0x- row with its own list, and a different subject opens
+// its own row — neither inherits the finished classroom's target, history,
+// timer, or cancellation state, and the submitted row is never rewritten.
+// Same protocol-layer scope as the flow test above (file header).
+func TestDictationConfirmationProtocolRestart(t *testing.T) {
 	words := mixedVocabulary(ttCards("苹果", "香蕉"), ttCards("美丽", "世界"))
 	words.reviewResult = ReviewWriteResult{
 		Requested: []string{"苹果", "香蕉"},
