@@ -25,12 +25,18 @@ const repoRoot = path.resolve(__dirname, '..', '..', '..');
 const template = path.join(repoRoot, 'tests', 'e2e', 'config.parent-e2e.yaml');
 
 let binary;
+let binDir;
 before(() => {
-  binary = process.env.HTA_E2E_SERVICE_BIN
-    || buildServiceBinary(repoRoot, path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-m1-bin-')), 'service'));
+  if (process.env.HTA_E2E_SERVICE_BIN) {
+    binary = process.env.HTA_E2E_SERVICE_BIN;
+    return;
+  }
+  // binDir must be assigned BEFORE the build: a failed build still leaves
+  // the mkdtemp dir, and after() runs even when before() throws.
+  binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-m1-bin-'));
+  binary = buildServiceBinary(repoRoot, path.join(binDir, 'service'));
 });
 
-let binDir;
 after(() => {
   if (binDir) fs.rmSync(binDir, { recursive: true, force: true });
 });
