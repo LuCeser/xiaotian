@@ -106,8 +106,9 @@ async function wsView(page) {
 
 /**
  * Poll the log until pred(view) is true. pred runs in NODE over the compact
- * wsView — plain closures allowed, no arg threading. On timeout, throws
- * with the view tail and the production playback trace.
+ * wsView — plain closures allowed, no arg threading; it may return a promise
+ * (e.g. polling the stub's control plane). On timeout, throws with the view
+ * tail and the production playback trace.
  */
 async function waitWs(page, pred, { timeoutMs = 20000, label = 'ws condition' } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -116,7 +117,7 @@ async function waitWs(page, pred, { timeoutMs = 20000, label = 'ws condition' } 
     let tail = [];
     try {
       tail = await wsView(page);
-      ok = !!pred(tail);
+      ok = !!(await pred(tail));
     } catch (_) { /* page navigating or pred not yet satisfiable */ }
     if (ok) return;
     if (Date.now() > deadline) {
@@ -144,4 +145,18 @@ async function playbackTrace(page) {
     : []);
 }
 
-module.exports = { installRtObserver, wsView, waitWs, controls, playbackTrace };
+/** Aggregate binary-frame counters (uplink freeze/release evidence). */
+async function wsStats(page) {
+  return page.evaluate(() => {
+    const out = { inBinaryFrames: 0, inBinaryBytes: 0, outBinaryFrames: 0, outBinaryBytes: 0 };
+    for (const e of window.__rtWsLog || []) {
+      if (e.kind !== 'binary') continue;
+      const k = e.dir === 'in' ? 'inBinary' : 'outBinary';
+      out[k + 'Frames'] += 1;
+      out[k + 'Bytes'] += e.bytes || 0;
+    }
+    return out;
+  });
+}
+
+module.exports = { installRtObserver, wsView, waitWs, controls, playbackTrace, wsStats };
