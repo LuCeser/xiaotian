@@ -201,6 +201,23 @@ test('TTS streams the SSE shape with a stop terminator and [DONE]', async (t) =>
   assert.equal(stub.state.requests[0].text, '请写：苹果');
 });
 
+// The PRODUCTION wire shape: mimo.PresetDictationTeacher's StyleTeacher
+// PREPENDS a user style instruction (WithStyleInstruction unshifts), so
+// messages[0] is the style and the sentence rides LAST. The stub must read
+// the sentence from the tail — surfaced by step 11's match-pinned TTS
+// scripts, which mismatched when the stub matched against the style text.
+test('TTS sentence extraction survives the prepended style instruction (production preset shape)', async (t) => {
+  const { stub, port } = await withStub(t, { tts: [{ ms: 600, match: '都有要默写的词语' }] });
+  const style = 'Use a clear, teacher-like tone suitable for classroom instruction. Speak distinctly and at a moderate pace.';
+  const res = await json(port, 'POST', '/v1/chat/completions', {
+    ...ttsBody('语文和英语今天都有要默写的词语。'),
+    messages: [{ role: 'user', content: style }, ttsBody('语文和英语今天都有要默写的词语。').messages[0]],
+  });
+  assert.equal(res.status, 200);
+  assert.equal(stub.state.violations.length, 0);
+  assert.equal(stub.state.requests[0].text, '语文和英语今天都有要默写的词语。');
+});
+
 test('control plane installs scripts, reports state and resets', async (t) => {
   const { stub, port } = await withStub(t);
   const install = await json(port, 'POST', '/__strict/scripts', { llm: [{ content: 'ok' }] });
