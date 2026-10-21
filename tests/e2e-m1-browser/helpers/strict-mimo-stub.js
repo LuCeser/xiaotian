@@ -149,18 +149,62 @@ function createStrictMimoStub(options = {}) {
     };
   }
 
-  // Step-2 TTS shape: the single-silence-chunk SSE format reused verbatim
-  // from mimo-stub.js streamTTSChunks (step 3 replaces it with chunked
-  // non-zero 24kHz PCM driven by the script entry).
-  function sseSilenceTTS() {
-    const pcm = Buffer.alloc(2 * 2400); // 100ms of 24kHz s16le silence
-    const data = JSON.stringify({
-      choices: [{ index: 0, delta: { audio: { data: pcm.toString('base64') } } }],
+  // Step-3 TTS output: chunked NON-ZERO 24kHz s16le PCM (plan §2 rule 5 —
+  // pure silence or one tiny chunk cannot carry playback acceptance).
+  // synthTonePCM is deterministic (same ms → same bytes) so later corpus
+  // steps can key caches on it.
+  function synthTonePCM(ms, sampleRateHz = 24000, freq = 440) {
+    const n = Math.round((ms * sampleRateHz) / 1000);
+    const buf = Buffer.alloc(n * 2);
+    for (let i = 0; i < n; i++) {
+      buf.writeInt16LE(Math.round(Math.sin((2 * Math.PI * freq * i) / sampleRateHz) * 12000), i * 2);
+    }
+    return buf;
+  }
+
+  // streamTTS writes the SSE reply one chunk at a time so a disconnecting
+  // client can really interrupt mid-stream (record.interrupted) and the
+  // {cut} entry can destroy the socket after the first chunk — the
+  // provider-interruption shape the client must surface as an error.
+  function streamTTS(res, record, entry) {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+    let finished = false;
+    res.on('close', () => {
+      if (!finished) record.interrupted = true;
     });
-    const fin = JSON.stringify({
-      choices: [{ index: 0, delta: { audio: { data: '' } }, finish_reason: 'stop' }],
-    });
-    return 'data: ' + data + '\n\ndata: ' + fin + '\n\ndata: [DONE]\n\n';
+    const pcm = synthTonePCM(Math.max(1, entry.ms || 600));
+    const bytesPerChunk = Math.max(20, entry.chunkMs || 150) * 48; // 24kHz·s16·mono
+    let offset = 0;
+    let chunkIndex = 0;
+    const writeNext = () => {
+      if (res.destroyed) return;
+      const end = Math.min(offset + bytesPerChunk, pcm.length);
+      const data = JSON.stringify({
+        choices: [{ index: 0, delta: { audio: { data: pcm.subarray(offset, end).toString('base64') } } }],
+      });
+      const frame = 'data: ' + data + '\n\n';
+      offset = end;
+      chunkIndex += 1;
+      if (entry.cut) {
+        record.cut = true;
+        // Destroy only after the chunk has flushed, so the client really
+        // receives chunk 1 and then the truncation.
+        res.write(frame, () => res.destroy());
+        return;
+      }
+      res.write(frame);
+      if (offset < pcm.length) {
+        setTimeout(writeNext, 5);
+        return;
+      }
+      finished = true;
+      const fin = JSON.stringify({
+        choices: [{ index: 0, delta: { audio: { data: '' } }, finish_reason: 'stop' }],
+      });
+      res.write('data: ' + fin + '\n\ndata: [DONE]\n\n');
+      res.end();
+    };
+    setImmediate(writeNext);
   }
 
   function handle(req, res) {
@@ -259,8 +303,7 @@ function createStrictMimoStub(options = {}) {
         return;
       }
       if (verdict.category === 'tts') {
-        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
-        res.end(sseSilenceTTS());
+        streamTTS(res, record, entry);
         return;
       }
       if (verdict.category === 'asr' && entry.empty) {

@@ -158,10 +158,10 @@ test('TTS streams the SSE shape with a stop terminator and [DONE]', async (t) =>
   const res = await json(port, 'POST', '/v1/chat/completions', ttsBody('请写：苹果'));
   assert.equal(res.status, 200);
   const events = res.text.split('\n\n').filter(Boolean).map((l) => l.replace(/^data: /, ''));
-  assert.equal(events.length, 3);
-  const fin = JSON.parse(events[1]);
+  const fin = JSON.parse(events[events.length - 2]);
   assert.equal(fin.choices[0].finish_reason, 'stop');
-  assert.equal(events[2], '[DONE]');
+  assert.equal(fin.choices[0].delta.audio.data, '');
+  assert.equal(events[events.length - 1], '[DONE]');
   assert.equal(stub.state.requests[0].category, 'tts');
   assert.equal(stub.state.requests[0].text, '请写：苹果');
 });
