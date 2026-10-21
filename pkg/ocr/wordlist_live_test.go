@@ -10,11 +10,13 @@ package ocr
 // contract: the clear word-list entries come back with their photo meanings
 // (phrases intact), and the noise does not become entries.
 //
-// Gated on MIMO_API_KEY (repo .env is read the same way cmd/service's live
-// tests do); without a key the test skips so offline runs stay green. Each
-// run costs ONE vision call. Run:
+// Gated on the shared explicit live switch (internal/livetest):
+// XIAOTIAN_LIVE_TESTS=1 plus MIMO_API_KEY in the real environment; either
+// missing means skip, so offline runs — and key-bearing machines that never
+// asked for live tests — stay green without spending vision quota. Each run
+// costs ONE vision call. Run:
 //
-//	go test ./pkg/ocr/ -run TestWordlistLive -v
+//	XIAOTIAN_LIVE_TESTS=1 go test ./pkg/ocr/ -run TestWordlistLive -v
 //
 // Boundary (the student-photo live test's same 口径): the fixture is a
 // cleanly rendered printed-style page — no camera skew, shadows or paper
@@ -22,7 +24,6 @@ package ocr
 // real 6-12 handwriting accuracy does for the student-answer pipeline.
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -31,41 +32,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaotian/home-tutor-agent/internal/livetest"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 )
 
-// liveWordlistKey loads MIMO_API_KEY from the env or the repo-root .env
-// (cmd/service liveAPIKey twin — pkg/ocr cannot import package main).
+// liveWordlistKey gates the live wordlist tests on the shared explicit
+// switch — the .env file is never read implicitly (cmd/service liveAPIKey
+// twin; pkg/ocr cannot import package main).
 func liveWordlistKey(t *testing.T) string {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("live test requires the real vision service; skipped in -short mode")
-	}
-	if f, err := os.Open(filepath.Join("..", "..", ".env")); err == nil {
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			key, value, ok := strings.Cut(line, "=")
-			if !ok {
-				continue
-			}
-			key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-			value = strings.Trim(value, `"'`)
-			if key == "MIMO_API_KEY" && os.Getenv(key) == "" {
-				os.Setenv(key, value)
-			}
-		}
-	}
-	apiKey := os.Getenv("MIMO_API_KEY")
-	if apiKey == "" {
-		t.Skip("MIMO_API_KEY not set — live wordlist test skipped")
-	}
-	return apiKey
+	return livetest.RequireKey(t, livetest.KeyEnv)
 }
 
 // liveWordlistPipeline wires the production adapter shape (cmd/service

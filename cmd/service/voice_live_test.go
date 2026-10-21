@@ -10,61 +10,34 @@ package main
 //	TTS("暂停") → PCM chunks over the socket → real ASR → rule fast path
 //	TTS("老师我觉得这个有点难") → real ASR → real LLM classification
 //
-// Gated on MIMO_API_KEY (repo-root .env is loaded the same way pkg/mimo's
-// TestMain does); without a key the test skips, so offline runs stay green.
-// Each run costs ~3 API calls per case (1 TTS + 1 ASR + optionally 1 LLM).
+// Gated on the shared explicit live switch (internal/livetest):
+// XIAOTIAN_LIVE_TESTS=1 plus MIMO_API_KEY in the real environment; either
+// missing means skip, so offline runs stay green and a key-bearing machine
+// never spends quota unasked. Each run costs ~3 API calls per case
+// (1 TTS + 1 ASR + optionally 1 LLM).
 
 import (
-	"bufio"
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"github.com/xiaotian/home-tutor-agent/internal/livetest"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/voice"
 	"github.com/xiaotian/home-tutor-agent/pkg/ws"
 )
 
-// liveAPIKey loads the repo-root .env and returns the Mimo key, or "" when
-// absent — the caller skips. Twin of pkg/mimo's TestMain loader (live env
-// wins), diverging only on empty-set vars: overridden here (Getenv == ""),
-// kept by that loader (LookupEnv).
+// liveAPIKey gates every live voice test in this package on the shared
+// explicit switch — the repo .env is never read implicitly; credentials come
+// from the real environment only.
 func liveAPIKey(t *testing.T) string {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("live test requires real services; skipped in -short mode")
-	}
-	if f, err := os.Open("../../.env"); err == nil {
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			key, value, ok := strings.Cut(line, "=")
-			if !ok {
-				continue
-			}
-			key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-			value = strings.Trim(value, `"'`)
-			if key == "MIMO_API_KEY" && os.Getenv(key) == "" {
-				os.Setenv(key, value)
-			}
-		}
-	}
-	apiKey := os.Getenv("MIMO_API_KEY")
-	if apiKey == "" {
-		t.Skip("MIMO_API_KEY not set — live voice-pipeline test skipped")
-	}
-	return apiKey
+	return livetest.RequireKey(t, livetest.KeyEnv)
 }
 
 // synthesizeCommandPCM synthesizes spoken command audio via the real TTS and
