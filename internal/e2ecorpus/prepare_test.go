@@ -238,8 +238,10 @@ func TestPrepareFailsOnDamagedCache(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw[len(raw)-10] ^= 0xFF // flip a sample — Hit still sees three files
-		if err := os.WriteFile(path, raw, 0o600); err != nil { //nolint:gosec // G703: path is built from t.TempDir() + a Save-returned key
+		// Flip a sample — all three files still exist, so presence checks alone stay true.
+		raw[len(raw)-10] ^= 0xFF
+		err = os.WriteFile(path, raw, 0o600) //nolint:gosec // G703: path is built from t.TempDir() + a Save-returned key
+		if err != nil {
 			t.Fatal(err)
 		}
 
