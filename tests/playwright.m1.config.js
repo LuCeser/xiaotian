@@ -66,12 +66,20 @@ process.env.no_proxy = process.env.NO_PROXY;
 module.exports = defineConfig({
   testDir: './e2e-m1-browser',
   // Explicit per-spec match: each plan step appends its spec file here, so
-  // the m1 line never silently picks up another suite's specs. ONE service
-  // instance + ONE temp DB serve the whole run (workers=1), and the files
-  // run in this list's alphabetical order — smoke first (its fresh-DB
-  // assertion holds only before any classroom spec created rows), the
-  // classroom specs after, each cleaning its own seeded units.
-  testMatch: /(smoke|subject-playback|voice-input)\.spec\.js$/,
+  // the m1 line never silently picks up another suite's specs. Files run in
+  // ALPHABETICAL order (workers=1): manual-entry, photo-entry, smoke,
+  // subject-playback, subject-scope, voice-input.
+  //   - steps 11–13 files (manual-entry, photo-entry, subject-scope) launch
+  //     PER-TEST isolated services via spec-service.js (plan §2 每用例独立
+  //     数据库; the shared instance's lesson rows are first-content-wins per
+  //     subject, so classroom specs must not share them). They touch ONLY
+  //     the shared strict stub — and stubReset() it in their finally blocks
+  //     so smoke's zero-requests assertion still holds despite running
+  //     after them alphabetically.
+  //   - smoke + subject-playback + voice-input keep using the shared 18290
+  //     instance below (its temp DB is still fresh when smoke runs: the
+  //     earlier files never touch it), each cleaning its own seeded units.
+  testMatch: /(smoke|subject-playback|voice-input|manual-entry|subject-scope|photo-entry)\.spec\.js$/,
   timeout: 60_000,
   retries: 0,
   // One isolated instance + one vocabulary DB: serialize (two actors
