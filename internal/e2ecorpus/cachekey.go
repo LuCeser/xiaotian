@@ -76,16 +76,50 @@ func SourcePath(dir, key string) string { return filepath.Join(dir, key+".src.wa
 func InputPath(dir, key string) string  { return filepath.Join(dir, key+".in16k.wav") }
 func MetaPath(dir, key string) string   { return filepath.Join(dir, key+".json") }
 
+// cacheEntryState classifies what the cache dir holds for one key.
+type cacheEntryState int
+
+const (
+	cacheAbsent  cacheEntryState = iota // nothing on disk — a fresh miss
+	cacheHit                            // all three files present
+	cachePartial                        // some but not all files present — torn or damaged
+)
+
 // Hit reports whether a cache entry is present (all three files exist).
-// Presence is the cheap pre-check before synthesis; integrity (hashes,
-// parseable WAV, duration consistency) is verified when the entry is read
-// back, and a damaged entry is reported rather than silently regenerated
-// (计划第 4 节：默认只读缓存，prepare-missing 只补缺失项).
+// Presence alone proves nothing about integrity: Prepare verifies present
+// entries with Load and treats partial or damaged ones as hard errors, so a
+// damaged entry is reported rather than silently regenerated (计划第 4 节：
+// 默认只读缓存，prepare-missing 只补缺失项).
 func Hit(dir, key string) bool {
-	for _, p := range []string{SourcePath(dir, key), InputPath(dir, key), MetaPath(dir, key)} {
-		if _, err := os.Stat(p); err != nil {
-			return false
+	return classifyCacheEntry(dir, key) == cacheHit
+}
+
+// classifyCacheEntry counts the entry's files on disk.
+func classifyCacheEntry(dir, key string) cacheEntryState {
+	present, _ := entryFileNames(dir, key)
+	switch len(present) {
+	case 0:
+		return cacheAbsent
+	case 3:
+		return cacheHit
+	default:
+		return cachePartial
+	}
+}
+
+// entryFileNames splits the entry's three file names into present/missing
+// lists for error messages about torn entries.
+func entryFileNames(dir, key string) (present, missing []string) {
+	for _, f := range []struct{ name, path string }{
+		{key + ".src.wav", SourcePath(dir, key)},
+		{key + ".in16k.wav", InputPath(dir, key)},
+		{key + ".json", MetaPath(dir, key)},
+	} {
+		if _, err := os.Stat(f.path); err == nil {
+			present = append(present, f.name)
+		} else {
+			missing = append(missing, f.name)
 		}
 	}
-	return true
+	return present, missing
 }

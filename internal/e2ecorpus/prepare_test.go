@@ -196,3 +196,87 @@ type garbageSynth struct{}
 func (garbageSynth) SynthesizeWAV(_ context.Context, _ string, _ SynthParams) ([]byte, error) {
 	return []byte("not audio at all"), nil
 }
+
+// prepareAgainst runs Prepare against a caller-owned cache dir, so tests can
+// pre-seed or tamper with entries before the run.
+func prepareAgainst(t *testing.T, dir string, synth Synthesizer) (PrepareReport, error) {
+	t.Helper()
+	entries, err := LoadManifest(writeManifest(t, "a", "好了"))
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	return Prepare(context.Background(), entries, FirstBatchParams(), synth, PrepareOptions{Dir: dir})
+}
+
+// saveOneInto saves a single "好了" entry into dir and returns its key.
+func saveOneInto(t *testing.T, dir string) string {
+	t.Helper()
+	entry := Entry{ID: "a", Group: GroupConfirm, Text: "好了", Scene: SceneDictation, Expect: ExpectAdvance}
+	key, err := Save(dir, entry, FirstBatchParams(), fakeSourceWAV(0.1), time.Now())
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	return key
+}
+
+// TestPrepareFailsOnDamagedCache: an existing entry that no longer verifies
+// must fail the run loudly — never reported as a cached hit (假绿), never
+// silently re-synthesized over the evidence. Refreshing an entry is an
+// explicit act, not something prepare-missing does (计划第 4 节：默认只读
+// 缓存；第 6 节：硬失败保留证据).
+func TestPrepareFailsOnDamagedCache(t *testing.T) {
+	t.Run("damaged content is not a hit", func(t *testing.T) {
+		dir := t.TempDir()
+		key := saveOneInto(t, dir)
+		path := InputPath(dir, key)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw[len(raw)-10] ^= 0xFF // flip a sample — Hit still sees three files
+		if err := os.WriteFile(path, raw, 0o600); err != nil { //nolint:gosec // G703: path is built from t.TempDir() + a Save-returned key
+			t.Fatal(err)
+		}
+
+		synth := &fakeSynth{}
+		report, err := prepareAgainst(t, dir, synth)
+		if err == nil {
+			t.Fatalf("Prepare counted a damaged entry as cached: %+v", report)
+		}
+		if !strings.Contains(err.Error(), "a") || !strings.Contains(err.Error(), "好了") {
+			t.Errorf("error %q does not identify the damaged entry", err)
+		}
+		if !strings.Contains(err.Error(), "damaged") {
+			t.Errorf("error %q does not say the entry is damaged", err)
+		}
+		if len(synth.calls) != 0 {
+			t.Errorf("damaged entry re-synthesized %d time(s), want 0 — refresh must be explicit", len(synth.calls))
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("damaged input file was deleted — evidence must be kept for inspection")
+		}
+	})
+
+	t.Run("incomplete entry is not a fresh miss", func(t *testing.T) {
+		dir := t.TempDir()
+		key := saveOneInto(t, dir)
+		if err := os.Remove(MetaPath(dir, key)); err != nil {
+			t.Fatal(err)
+		}
+
+		synth := &fakeSynth{}
+		report, err := prepareAgainst(t, dir, synth)
+		if err == nil {
+			t.Fatalf("Prepare treated a torn entry as a fresh miss and re-synthesized: %+v", report)
+		}
+		if !strings.Contains(err.Error(), "incomplete") {
+			t.Errorf("error %q does not say the entry is incomplete", err)
+		}
+		if len(synth.calls) != 0 {
+			t.Errorf("torn entry re-synthesized %d time(s), want 0", len(synth.calls))
+		}
+		if _, statErr := os.Stat(SourcePath(dir, key)); statErr != nil {
+			t.Errorf("surviving files were deleted — evidence must be kept for inspection")
+		}
+	})
+}
