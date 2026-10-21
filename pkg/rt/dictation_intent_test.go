@@ -8,10 +8,12 @@
 package rt
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 )
 
 // TestDictationIntentContext: the turn context is captured under the lock at
@@ -593,6 +595,148 @@ func TestDictationConfirmStaleTurn(t *testing.T) {
 			t.Errorf("control order = %v, want session_ended last", order)
 		}
 	})
+}
+
+// TestDictationConfirmAdvanceCommitReturnRace: the executor's commit-vs-return
+// window — the row is ALREADY committed when the session moves, and the
+// executor returns into the moved session (PR #61 review asked for this race
+// separately from the classification one: neither the upstream epoch check
+// nor the cancelled context can undo a committed write, and a close does not
+// bump the epoch). The store keeps the commit — the durable truth a
+// reconnect reads — but the dead turn must not align the tutor, ship
+// lesson_update, or open the check stage; session_ended stays terminal.
+func TestDictationConfirmAdvanceCommitReturnRace(t *testing.T) {
+	raceDrive := func(t *testing.T, interrupt bool) (*fakeExecutor, *TurnManager, *captureSender, int) {
+		t.Helper()
+		cards := ttCards("苹果", "香蕉")
+		asr := newFakeASR(asrScript{text: "好了"})
+		llm := newFakeLLM(intentScript(intentConfirm, ""))
+		tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+		entered, release := exec.gateAdvance()
+		sentBefore := s.countOf(TypeTeacherSentence)
+
+		done := make(chan struct{})
+		go func() {
+			tm.processTurn(s, []byte("pcm"))
+			close(done)
+		}()
+		select {
+		case <-entered: // AdvanceWord committed the row; it has not returned
+		case <-time.After(5 * time.Second):
+			t.Fatal("advance never committed")
+		}
+		if interrupt {
+			tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
+		} else {
+			tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+		}
+		close(release) // the executor returns into the moved session
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("raced turn never returned")
+		}
+		return exec, tm, s, sentBefore
+	}
+
+	assertSuppressed := func(t *testing.T, exec *fakeExecutor, tm *TurnManager, s *captureSender, sentBefore int) {
+		t.Helper()
+		if got := exec.advanceCount(); got != 1 {
+			t.Fatalf("advance calls = %d, want 1 (the commit itself stands in the store)", got)
+		}
+		row, err := exec.GetLessonState(context.Background(), ttLessonID)
+		if err != nil {
+			t.Fatalf("row read: %v", err)
+		}
+		if row.CurrentIndex != 1 || row.Version != 2 {
+			t.Errorf("stored row = index %d version %d, want 1/2 (the commit survives the move)", row.CurrentIndex, row.Version)
+		}
+		if got := s.countOf(TypeLessonUpdate); got != 0 {
+			t.Errorf("lesson_update count = %d, want 0 (a dead turn ships no progress)", got)
+		}
+		if got := s.countOf(TypeTeacherSentence); got != sentBefore {
+			t.Errorf("teacher sentences = %d, want %d (nothing narrates after the move)", got, sentBefore)
+		}
+		tm.mu.Lock()
+		idx, checking := tm.tutor.currentIndex, tm.tutor.checking
+		tm.mu.Unlock()
+		if idx != 0 || checking {
+			t.Errorf("tutor = index %d checking %v, want 0/false (a dead session aligns nothing)", idx, checking)
+		}
+	}
+
+	t.Run("close under a mid-lesson advance", func(t *testing.T) {
+		exec, tm, s, sentBefore := raceDrive(t, false)
+		assertSuppressed(t, exec, tm, s, sentBefore)
+		if order := s.typeOrder(); len(order) == 0 || order[len(order)-1] != TypeSessionEnded {
+			t.Errorf("control order = %v, want session_ended last", order)
+		}
+	})
+
+	t.Run("interrupt under a mid-lesson advance", func(t *testing.T) {
+		exec, tm, s, sentBefore := raceDrive(t, true)
+		assertSuppressed(t, exec, tm, s, sentBefore)
+	})
+}
+
+// TestDictationConfirmCloseUnderEnterCheck: the LAST word's stage write — the
+// advance committed and returned, EnterCheck's row write is IN FLIGHT when
+// the session closes. The row keeps stage='checking' (a reconnect resumes
+// the panel from it), but the dead classroom opens no panel: no
+// check_started, no bridge, tutor never flips to checking, session_ended
+// stays last.
+func TestDictationConfirmCloseUnderEnterCheck(t *testing.T) {
+	cards := ttCards("苹果") // one word: the first advance is the last
+	asr := newFakeASR(asrScript{text: "好了"})
+	llm := newFakeLLM(intentScript(intentConfirm, ""))
+	tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+	entered, release := exec.gateEnterCheck()
+	sentBefore := s.countOf(TypeTeacherSentence)
+	endedBefore := s.countOf(TypeSessionEnded)
+
+	done := make(chan struct{})
+	go func() {
+		tm.processTurn(s, []byte("pcm"))
+		close(done)
+	}()
+	select {
+	case <-entered: // EnterCheck committed stage='checking'; not returned
+	case <-time.After(5 * time.Second):
+		t.Fatal("enter_check never committed")
+	}
+	tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+	close(release) // the stage write returns into the closed session
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("enter-check turn never returned")
+	}
+
+	if got := s.countOf(TypeSessionEnded); got != endedBefore+1 {
+		t.Fatalf("session_ended count = %d, want exactly one", got)
+	}
+	if got := s.countOf(TypeCheckStarted); got != 0 {
+		t.Errorf("check_started count = %d, want 0 (a closed classroom opens no panel)", got)
+	}
+	if got := s.countOf(TypeTeacherSentence); got != sentBefore {
+		t.Errorf("teacher sentences = %d, want %d (no bridge after the close)", got, sentBefore)
+	}
+	if order := s.typeOrder(); len(order) == 0 || order[len(order)-1] != TypeSessionEnded {
+		t.Errorf("control order = %v, want session_ended last", order)
+	}
+	row, err := exec.GetLessonState(context.Background(), ttLessonID)
+	if err != nil {
+		t.Fatalf("row read: %v", err)
+	}
+	if row.Stage != lesson.StageChecking {
+		t.Errorf("stored stage = %q, want checking (the committed write survives the close)", row.Stage)
+	}
+	tm.mu.Lock()
+	checking := tm.tutor.checking
+	tm.mu.Unlock()
+	if checking {
+		t.Error("the dead tutor entered the check stage")
+	}
 }
 
 // TestDictationDoubleConfirmNewTargetAdvances: after the NEXT word's

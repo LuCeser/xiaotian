@@ -135,6 +135,13 @@ type fakeExecutor struct {
 	conflictVersion  int
 	mu               sync.Mutex
 	exists           bool
+	// advanceEntered/advanceRelease and checkEntered/checkRelease: one-shot
+	// commit-vs-return holds armed by gateAdvance/gateEnterCheck (PR #61
+	// review) — nil when disarmed.
+	advanceEntered  chan struct{}
+	advanceRelease  chan struct{}
+	checkEntered    chan struct{}
+	checkRelease    chan struct{}
 }
 
 type fakeAdvanceCall struct {
@@ -303,20 +310,43 @@ func (f *fakeExecutor) rowCategory() string {
 
 func (f *fakeExecutor) AdvanceWord(_ context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.advanceCalls = append(f.advanceCalls, fakeAdvanceCall{lessonID: lessonID, expectedVersion: expectedVersion, requestID: requestID})
 	if stored, ok := f.requestResults[requestID]; ok {
 		stored.Idempotent = true
+		f.mu.Unlock()
 		return stored, nil
 	}
 	if f.conflictVersion > 0 {
+		f.mu.Unlock()
 		return lesson.AdvanceResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
 	}
 	f.lesson.CurrentIndex++
 	f.lesson.Version++
 	res := lesson.AdvanceResult{NewIndex: f.lesson.CurrentIndex, NewVersion: f.lesson.Version}
 	f.requestResults[requestID] = res
+	entered, release := f.advanceEntered, f.advanceRelease
+	f.advanceEntered, f.advanceRelease = nil, nil
+	f.mu.Unlock()
+	if entered != nil {
+		// The row is COMMITTED (a reconnect would read it) but the caller
+		// has not seen the result — the executor's commit-vs-return window
+		// (PR #61 review).
+		close(entered)
+		<-release
+	}
 	return res, nil
+}
+
+// gateAdvance arms a one-shot hold on the next first-commit AdvanceWord: the
+// call fires entered after the row mutation is stored and then waits for
+// release before returning — the DB write stands while the session can move
+// under the in-flight call (PR #61 review's commit-vs-return race).
+func (f *fakeExecutor) gateAdvance() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.advanceEntered = make(chan struct{})
+	f.advanceRelease = make(chan struct{})
+	return f.advanceEntered, f.advanceRelease
 }
 
 func (f *fakeExecutor) advanceCount() int {
@@ -338,17 +368,19 @@ func (f *fakeExecutor) advanceCallsSnapshot() []fakeAdvanceCall {
 
 func (f *fakeExecutor) EnterCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, outcomes map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "enter_check", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.EnterCheckResult)
 		res.Idempotent = true
+		f.mu.Unlock()
 		return res, nil
 	}
 	if f.conflictVersion > 0 {
+		f.mu.Unlock()
 		return lesson.EnterCheckResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
 	}
 	if !f.exists {
+		f.mu.Unlock()
 		return lesson.EnterCheckResult{}, lesson.ErrLessonNotFound
 	}
 	f.lesson.Version++
@@ -356,7 +388,25 @@ func (f *fakeExecutor) EnterCheck(_ context.Context, lessonID string, expectedVe
 	f.lesson.Outcomes = outcomes
 	res := lesson.EnterCheckResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Outcomes: outcomes, Verdicts: f.lesson.Verdicts}
 	f.checkResults[requestID] = res
+	entered, release := f.checkEntered, f.checkRelease
+	f.checkEntered, f.checkRelease = nil, nil
+	f.mu.Unlock()
+	if entered != nil {
+		// Same commit-vs-return window as gateAdvance, on the stage write.
+		close(entered)
+		<-release
+	}
 	return res, nil
+}
+
+// gateEnterCheck is gateAdvance for the next first-commit EnterCheck (the
+// stage='checking' write of the last word's advance).
+func (f *fakeExecutor) gateEnterCheck() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkEntered = make(chan struct{})
+	f.checkRelease = make(chan struct{})
+	return f.checkEntered, f.checkRelease
 }
 
 func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
