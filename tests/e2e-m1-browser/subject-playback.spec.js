@@ -145,6 +145,15 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
   await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ended'),
     { label: 'session_ended after explicit end' });
 
+  // Test-data hygiene (the later specs share this run's DB): drop the
+  // seeded units so a later classroom's due fetch sees only its own words.
+  const drop = async (category, unit) => {
+    const res = await request.delete('/api/v1/words', { data: { category, unit } });
+    expect(res.ok(), 'cleanup ' + unit).toBeTruthy();
+  };
+  await drop('chinese', 'e2e-m1-subject');
+  await drop('english', 'e2e-m1-subject-en');
+
   const state = await stubState();
   expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
 });
