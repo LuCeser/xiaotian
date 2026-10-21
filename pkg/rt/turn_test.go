@@ -122,8 +122,8 @@ func (c *captureSender) listeningCount() int {
 // The 13.1 check-stage methods follow the same first-commit/replay/conflict
 // shape on the in-memory row (checkResults holds their stored results).
 //
-// The four chan fields are the one-shot commit-vs-return holds armed by
-// gateAdvance/gateEnterCheck (PR #61 review) — nil when disarmed. The exact
+// The chan fields are one-shot holds armed by gateAdvance/gateEnterCheck
+// (PR #61 review) and gateGetState (round 2) — nil when disarmed. The exact
 // order is govet fieldalignment's own suggestion; don't hand-resort.
 type fakeExecutor struct {
 	advanceEntered   chan struct{}
@@ -132,6 +132,8 @@ type fakeExecutor struct {
 	checkEntered     chan struct{}
 	requestResults   map[string]lesson.AdvanceResult
 	advanceRelease   chan struct{}
+	stateRelease     chan struct{}
+	stateEntered     chan struct{}
 	checkCalls       []fakeCheckCall
 	ensureIDs        []string
 	advanceCalls     []fakeAdvanceCall
@@ -279,13 +281,39 @@ func (f *fakeExecutor) LatestPassageLessonID(_ context.Context, passageID int64,
 
 func (f *fakeExecutor) GetLessonState(_ context.Context, lessonID string) (lesson.Lesson, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.stateCalls++
 	f.stateIDs = append(f.stateIDs, lessonID)
-	if !f.exists {
+	entered, release := f.stateEntered, f.stateRelease
+	f.stateEntered, f.stateRelease = nil, nil
+	exists := f.exists
+	f.mu.Unlock()
+	if entered != nil {
+		// The read-back is IN FLIGHT: the call is out, the caller has not
+		// seen the row — enterCheck's conflict read-back is the one hookable
+		// provider call between its liveness check and its tutor mutation
+		// (PR #61 review round 2). The row is read at RETURN time so a test
+		// moving the row mid-hold is visible to the released read.
+		close(entered)
+		<-release
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !exists {
 		return lesson.Lesson{}, lesson.ErrLessonNotFound
 	}
 	return f.lesson, nil
+}
+
+// gateGetState arms a one-shot hold on the next GetLessonState: the call
+// fires entered after the row is read and waits for release before
+// returning, so a test can move the session inside enterCheck's
+// post-liveness-check window.
+func (f *fakeExecutor) gateGetState() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stateEntered = make(chan struct{})
+	f.stateRelease = make(chan struct{})
+	return f.stateEntered, f.stateRelease
 }
 
 // stateIDCalls returns every GetLessonState lesson id, in call order.

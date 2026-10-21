@@ -804,6 +804,106 @@ func TestDictationConfirmCloseUnderEnterCheck(t *testing.T) {
 	}
 }
 
+// TestDictationConfirmMoveAfterEnterCheckPassed: PR #61 review round 2 — the
+// ordering TestDictationConfirmCloseUnderEnterCheck cannot reach: EnterCheck's
+// liveness check has already PASSED and the move lands in the unlocked gap
+// before the tutor mutation and the check_started send. The conflict
+// read-back (GetLessonState) is the one hookable provider call inside that
+// window, so the one-shot gate pins it in flight: EnterCheck conflicts, its
+// liveness check passes, the read-back is held, the session moves, the read
+// returns — and the fixed enterCheck refuses at the mutation lock: no panel,
+// no bridge, the tutor never flips to checking, session_ended stays last.
+func TestDictationConfirmMoveAfterEnterCheckPassed(t *testing.T) {
+	drive := func(t *testing.T, interrupt bool) (*fakeExecutor, *TurnManager, *captureSender, int) {
+		t.Helper()
+		cards := ttCards("苹果") // one word: the first advance is the last
+		asr := newFakeASR(asrScript{text: "好了"})
+		llm := newFakeLLM(intentScript(intentConfirm, ""))
+		tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+		advEntered, advRelease := exec.gateAdvance()
+		stateEntered, stateRelease := exec.gateGetState()
+		sentBefore := s.countOf(TypeTeacherSentence)
+
+		done := make(chan struct{})
+		go func() {
+			tm.processTurn(s, []byte("pcm"))
+			close(done)
+		}()
+		select {
+		case <-advEntered: // the advance committed; hold its return
+		case <-time.After(5 * time.Second):
+			t.Fatal("advance never committed")
+		}
+		// Force the stage write to CONFLICT so enterCheck takes the read-back
+		// branch — the hookable window under test.
+		exec.mu.Lock()
+		exec.conflictVersion = 2
+		exec.mu.Unlock()
+		close(advRelease)
+		select {
+		case <-stateEntered: // liveness check passed; the read-back is in flight
+		case <-time.After(5 * time.Second):
+			t.Fatal("conflict read-back never started")
+		}
+		// The stored row reads as mid-check, so the OLD code's resyncCheck
+		// would flip the dead tutor into the check state (the fixed code
+		// never reaches it).
+		exec.mu.Lock()
+		exec.lesson.Stage = lesson.StageChecking
+		exec.mu.Unlock()
+		if interrupt {
+			tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
+		} else {
+			tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+		}
+		close(stateRelease) // the read returns into the moved session
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("enter-check turn never returned")
+		}
+		return exec, tm, s, sentBefore
+	}
+
+	t.Run("close after the check passed opens no panel", func(t *testing.T) {
+		_, tm, s, sentBefore := drive(t, false)
+		if got := s.countOf(TypeSessionEnded); got != 1 {
+			t.Fatalf("session_ended count = %d, want exactly one", got)
+		}
+		if got := s.countOf(TypeCheckStarted); got != 0 {
+			t.Errorf("check_started count = %d, want 0 (nothing follows session_ended)", got)
+		}
+		if got := s.countOf(TypeTeacherSentence); got != sentBefore {
+			t.Errorf("teacher sentences = %d, want %d (no bridge after the close)", got, sentBefore)
+		}
+		if order := s.typeOrder(); len(order) == 0 || order[len(order)-1] != TypeSessionEnded {
+			t.Errorf("control order = %v, want session_ended last", order)
+		}
+		tm.mu.Lock()
+		checking := tm.tutor.checking
+		tm.mu.Unlock()
+		if checking {
+			t.Error("the dead tutor entered the check stage")
+		}
+	})
+
+	t.Run("interrupt after the check passed never plays the bridge", func(t *testing.T) {
+		_, tm, s, sentBefore := drive(t, true)
+		if got := s.countOf(TypeCheckStarted); got != 0 {
+			t.Errorf("check_started count = %d, want 0 (a stale turn opens no panel)", got)
+		}
+		if got := s.countOf(TypeTeacherSentence); got != sentBefore {
+			t.Errorf("teacher sentences = %d, want %d (the bridge never plays over the next classroom)", got, sentBefore)
+		}
+		tm.mu.Lock()
+		checking := tm.tutor.checking
+		tm.mu.Unlock()
+		if checking {
+			t.Error("a stale turn flipped the tutor into the check stage")
+		}
+	})
+}
+
 // TestDictationDoubleConfirmNewTargetAdvances: after the NEXT word's
 // announcement settled, a NEW spoken 「好了」 belongs to the NEW target — the
 // per-target idempotency key must not swallow it as a duplicate of the first
