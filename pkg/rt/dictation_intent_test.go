@@ -679,6 +679,71 @@ func TestDictationConfirmAdvanceCommitReturnRace(t *testing.T) {
 	})
 }
 
+// TestDictationConfirmAdvanceEntryEpochGate: PR #61 review round 2 — the one
+// ordering the executor-gated race above cannot reach: processTurn's
+// post-classification epoch check PASSES and an interrupt lands in the
+// unlocked gap before advanceTarget's entry. The gap holds no provider call a
+// test gate could hold, so the test reproduces the gap's exit state directly:
+// the classification returned its confirm verdict, the FSM epoch has since
+// been bumped (interrupt). The entry gate must refuse BEFORE AdvanceWord —
+// unlike the commit-vs-return race, the store keeps NO commit at all — and
+// the dead turn must not speak its degraded chat reply either.
+func TestDictationConfirmAdvanceEntryEpochGate(t *testing.T) {
+	newTurn := func(t *testing.T) (*fakeExecutor, *TurnManager, *captureSender, int) {
+		cards := ttCards("苹果", "香蕉")
+		asr := newFakeASR(asrScript{text: "好了"})
+		llm := newFakeLLM(intentScript(intentConfirm, "这就给你下一个词。"))
+		tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
+		return exec, tm, s, s.countOf(TypeTeacherSentence)
+	}
+
+	t.Run("interrupt before the executor never commits", func(t *testing.T) {
+		exec, tm, s, sentBefore := newTurn(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		tm.mu.Lock()
+		tm.epoch++ // the interrupt's bump: the turn's captured epoch is stale now
+		tm.mu.Unlock()
+		tm.confirmTarget(s, ctx, cancel, 0, 0, "这就给你下一个词。", TurnTarget{WordIndex: 0, ExpectedVersion: 1})
+
+		if got := exec.advanceCount(); got != 0 {
+			t.Errorf("advance calls = %d, want 0 (a stale-epoch dispatch never reaches the executor)", got)
+		}
+		row, err := exec.GetLessonState(context.Background(), ttLessonID)
+		if err != nil {
+			t.Fatalf("row read: %v", err)
+		}
+		if row.CurrentIndex != 0 || row.Version != 1 {
+			t.Errorf("stored row = index %d version %d, want 0/1 (no commit at all)", row.CurrentIndex, row.Version)
+		}
+		if got := s.countOf(TypeLessonUpdate); got != 0 {
+			t.Errorf("lesson_update count = %d, want 0", got)
+		}
+		if got := s.countOf(TypeTeacherSentence); got != sentBefore {
+			t.Errorf("teacher sentences = %d, want %d (the degraded reply stays silent on a stale turn)", got, sentBefore)
+		}
+	})
+
+	t.Run("closed before the executor stays silent", func(t *testing.T) {
+		_, tm, s, sentBefore := newTurn(t)
+		tm.handleEndSession(s)
+		ended := s.countOf(TypeSessionEnded)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		tm.confirmTarget(s, ctx, cancel, 0, tm.currentEpoch(), "这就给你下一个词。", TurnTarget{WordIndex: 0, ExpectedVersion: 1})
+
+		if got := s.countOf(TypeTeacherSentence); got != sentBefore {
+			t.Errorf("teacher sentences = %d, want %d (nothing speaks after the close)", got, sentBefore)
+		}
+		if got := s.countOf(TypeSessionEnded); got != ended {
+			t.Errorf("session_ended count = %d, want %d", got, ended)
+		}
+		if order := s.typeOrder(); len(order) == 0 || order[len(order)-1] != TypeSessionEnded {
+			t.Errorf("control order = %v, want session_ended last", order)
+		}
+	})
+}
+
 // TestDictationConfirmCloseUnderEnterCheck: the LAST word's stage write — the
 // advance committed and returned, EnterCheck's row write is IN FLIGHT when
 // the session closes. The row keeps stage='checking' (a reconnect resumes

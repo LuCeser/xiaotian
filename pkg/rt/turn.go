@@ -1605,19 +1605,23 @@ func (tm *TurnManager) confirmTarget(s Sender, ctx context.Context, cancel conte
 func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, target TurnTarget, outcome, reply string, onFirstCommit func()) {
 	tm.mu.Lock()
 	lessonID := tm.tutor.lessonID
-	// Issue #56 / PR #61 review: a closed session refuses the advance at
-	// BOTH ends of the executor call. A close during classification does
-	// NOT bump the epoch (unlike an interrupt), so the processTurn epoch
-	// gate alone would pass a late confirm through — this ENTRY refusal
-	// covers a close that landed before the call; the liveness gate after
-	// the executor returns covers a close that landed UNDER it.
-	valid := !tm.tutor.completed && !tm.closed &&
+	// Issue #56 / PR #61 review: a dead driver refuses the advance at BOTH
+	// ends of the executor call, and "dead" is all three of closed, completed
+	// and STALE EPOCH. The entry gate re-validates the epoch under the lock
+	// because processTurn's post-classification check can pass and an
+	// interrupt can still land BEFORE the executor is reached — a late
+	// confirm in that window would otherwise commit the advance to the store
+	// (the post-return check suppresses messages but can never undo a write).
+	current := tm.epoch == epoch && !tm.closed
+	valid := current && !tm.tutor.completed &&
 		target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words)
 	tm.mu.Unlock()
 	if !valid {
 		// Completed or out-of-range target: pacing owns the cursor — a
-		// confirm degrades to a plain chat reply; a timeout just stops.
-		if reply != "" {
+		// confirm degrades to a plain chat reply; a timeout just stops. A
+		// stale or closed turn never speaks the degraded reply: its classroom
+		// has moved on (runAnnouncement's own gate would kill it anyway).
+		if reply != "" && current {
 			tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, nil)
 		}
 		return
