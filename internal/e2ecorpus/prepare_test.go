@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -176,7 +177,8 @@ func TestPrepareStopsAtFirstFailure(t *testing.T) {
 }
 
 // TestPrepareRejectsProviderGarbage: a fake provider returning non-audio
-// bytes must fail the run via Save's validation, leaving no cache files.
+// bytes must fail the run via Save's validation, leaving no cache files
+// (the permanent .prepare.lock infrastructure file does not count).
 func TestPrepareRejectsProviderGarbage(t *testing.T) {
 	dir := t.TempDir()
 	entries := []Entry{{ID: "a", Group: GroupConfirm, Text: "好了", Scene: SceneDictation, Expect: ExpectAdvance}}
@@ -186,8 +188,11 @@ func TestPrepareRejectsProviderGarbage(t *testing.T) {
 		t.Fatal("Prepare accepted non-audio provider output")
 	}
 	left, _ := os.ReadDir(dir)
-	if len(left) != 0 {
-		t.Fatalf("rejected synthesis left %d files behind", len(left))
+	for _, f := range left {
+		if f.Name() == cacheLockName {
+			continue
+		}
+		t.Fatalf("rejected synthesis left %s behind", f.Name())
 	}
 }
 
@@ -279,4 +284,79 @@ func TestPrepareFailsOnDamagedCache(t *testing.T) {
 			t.Errorf("surviving files were deleted — evidence must be kept for inspection")
 		}
 	})
+}
+
+// slowCountingSynth is a race-safe fake synthesizer whose first call pauses
+// briefly, widening the window in which a concurrent unserialized run can
+// finish its own missing-entry decision and start synthesizing too.
+type slowCountingSynth struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *slowCountingSynth) SynthesizeWAV(_ context.Context, _ string, _ SynthParams) ([]byte, error) {
+	s.mu.Lock()
+	s.calls++
+	first := s.calls == 1
+	s.mu.Unlock()
+	if first {
+		time.Sleep(100 * time.Millisecond)
+	}
+	pcm := make([]byte, 4800) // 100ms of 24kHz audio
+	for i := 0; i < len(pcm)/2; i++ {
+		putSample(pcm, i, int16(i%100))
+	}
+	return BuildWAV(pcm, FirstBatchParams().SampleRate), nil
+}
+
+func (s *slowCountingSynth) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+// TestPrepareConcurrentRunsSynthesizeOnce: two prepare runs sharing one
+// cache dir must serialize on the cache lock — the entry is synthesized
+// exactly once, one run sees it cached, and the published files verify
+// (PR #63 review：两个准备进程不得同时判定缺失后交错覆盖三个文件).
+func TestPrepareConcurrentRunsSynthesizeOnce(t *testing.T) {
+	dir := t.TempDir()
+	entries := []Entry{{ID: "a", Group: GroupConfirm, Text: "好了", Scene: SceneDictation, Expect: ExpectAdvance}}
+	synth := &slowCountingSynth{}
+
+	// Both runs start together, so both face the same missing entry.
+	var start, done sync.WaitGroup
+	start.Add(2)
+	done.Add(2)
+	reports := make([]PrepareReport, 2)
+	errs := make([]error, 2)
+	for i := range reports {
+		go func(i int) {
+			defer done.Done()
+			start.Done()
+			start.Wait()
+			reports[i], errs[i] = Prepare(context.Background(), entries, FirstBatchParams(), synth, PrepareOptions{Dir: dir})
+		}(i)
+	}
+	done.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent run %d: %v", i+1, err)
+		}
+	}
+	if got := synth.count(); got != 1 {
+		t.Fatalf("synthesized %d times across concurrent runs, want exactly 1", got)
+	}
+	// Exactly one run synthesized the entry; the other found it cached.
+	if synthRuns := len(reports[0].Synthesized) + len(reports[1].Synthesized); synthRuns != 1 {
+		t.Fatalf("reports %+v disagree about who synthesized the entry", reports)
+	}
+	if cachedRuns := reports[0].Cached + reports[1].Cached; cachedRuns != 1 {
+		t.Fatalf("reports %+v disagree about who found the entry cached", reports)
+	}
+	key := Key(entries[0], FirstBatchParams())
+	if _, err := Load(dir, key); err != nil {
+		t.Fatalf("entry published by the winning run does not verify: %v", err)
+	}
 }

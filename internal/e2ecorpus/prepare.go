@@ -3,6 +3,8 @@ package e2ecorpus
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -32,6 +34,33 @@ type PrepareReport struct {
 	Chars         int      // characters actually synthesized this run
 }
 
+// cacheLockName is the advisory lock file a prepare run holds inside the
+// cache dir for its whole lifetime. It is permanent infrastructure, not a
+// cache entry, and never counts as leftover synthesis output.
+const cacheLockName = ".prepare.lock"
+
+// withCacheDirLock runs fn while holding the cache dir's cross-process
+// prepare lock, acquired BEFORE any missing-entry decision and held through
+// the last publish, so two prepare runs sharing the user cache dir can never
+// both decide the same entry is missing and interleave their three-file
+// publishes (整体原子性：单文件 Rename 只保证单文件，三文件同源由这把锁
+// 保证). The lock is advisory and auto-releases if the holder dies.
+func withCacheDirLock(ctx context.Context, dir string, fn func() error) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("e2ecorpus: create cache dir: %w", err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("e2ecorpus: open %s: %w", cacheLockName, err)
+	}
+	defer f.Close() //nolint:gosec // G104: best-effort close of a lock file
+	if err := lockCacheFile(ctx, f); err != nil {
+		return err
+	}
+	defer func() { _ = unlockCacheFile(f) }()
+	return fn()
+}
+
 // Prepare synthesizes only the manifest entries whose cache key misses, in
 // manifest order, stopping at the first item that would exceed the item or
 // character cap (predictable order: the next run picks up where this one
@@ -39,9 +68,22 @@ type PrepareReport struct {
 // are never re-synthesized: a present entry must also verify (Load), and a
 // damaged or torn one is a hard error that keeps the files as evidence —
 // prepare never overwrites existing entries; refreshing one is an explicit
-// act outside this command (计划第 4 节：命中不生成、默认只读缓存；第 6 节：
-// 遇到首个硬失败停止新增并保留证据).
+// act outside this command. The whole decide→synthesize→publish run happens
+// under the cache dir's cross-process lock, so concurrent runs against a
+// shared user cache dir serialize instead of racing (计划第 4 节：命中不生
+// 成、默认只读缓存；第 6 节：遇到首个硬失败停止新增并保留证据).
 func Prepare(ctx context.Context, entries []Entry, p SynthParams, synth Synthesizer, opts PrepareOptions) (PrepareReport, error) {
+	var report PrepareReport
+	err := withCacheDirLock(ctx, opts.Dir, func() error {
+		var lockedErr error
+		report, lockedErr = prepareLocked(ctx, entries, p, synth, opts)
+		return lockedErr
+	})
+	return report, err
+}
+
+// prepareLocked is Prepare's body; the caller holds the cache dir lock.
+func prepareLocked(ctx context.Context, entries []Entry, p SynthParams, synth Synthesizer, opts PrepareOptions) (PrepareReport, error) {
 	var report PrepareReport
 	now := time.Now
 	if opts.Now != nil {
