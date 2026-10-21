@@ -8,8 +8,8 @@
 //      database.path is empty, D-12) and the TTS session dir live inside.
 //      Inherited HTA_* env is scrubbed so a stray exported
 //      HTA_DATABASE_PATH (or any other override) can't redirect state
-//      outside the root. stop() removes ONLY this mkdtemp-created root
-//      (path-guarded).
+//      outside the root. stop() — and every launch failure path —
+//      removes ONLY this mkdtemp-created root (path-guarded).
 //   2. dual loopback ports — explicit args or auto-allocated free ports;
 //      never the dev 8080 pair or another suite's ports.
 //   3. no real secrets — MIMO_API_KEY is ALWAYS the local dummy value
@@ -86,10 +86,14 @@ function httpGet(url, timeoutMs) {
 }
 
 // waitForReady polls the public root until it answers 2xx; bails out
-// early with the captured stderr when the child dies first.
-async function waitForReady(url, proc, tail, timeoutMs) {
+// early with the captured stderr when the child dies first, and fast on
+// a spawn failure (e.g. binary missing — exitCode stays null there).
+async function waitForReady(url, proc, tail, timeoutMs, spawnErr) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (spawnErr && spawnErr.error) {
+      throw new Error('service failed to spawn: ' + spawnErr.error.message);
+    }
     if (proc.exitCode !== null) {
       throw new Error('service exited before ready (code ' + proc.exitCode + '):\n' + tail.join(''));
     }
@@ -105,60 +109,6 @@ async function launchService(options) {
   const template = path.resolve(repoRoot, options.template);
   if (!fs.existsSync(template)) throw new Error('config template not found: ' + template);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-m1-e2e-'));
-  const binary = options.binary || path.join(root, 'service');
-  if (!options.binary) buildServiceBinary(repoRoot, binary);
-
-  const addr = options.addr || ('127.0.0.1:' + (await freePort()));
-  const healthAddr = options.healthAddr || ('127.0.0.1:' + (await freePort()));
-  // No inherited HTA_* rides along (review PR #62 P1): a stray exported
-  // HTA_DATABASE_PATH would otherwise make the Go side open that file at
-  // boot (database.path beats python.vocabDBPath in cmd/service) while
-  // Python keeps the temp one — touching real data and splitting the
-  // shared DB. Scrub case-insensitively (Windows env lookup ignores
-  // case), then set every launcher-owned value explicitly below.
-  const env = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (!key.toUpperCase().startsWith('HTA_')) env[key] = value;
-  }
-  Object.assign(env, {
-    HTA_SERVER_ADDR: addr,
-    HTA_SERVER_HEALTHADDR: healthAddr,
-    HTA_PYTHON_INTERPRETER: resolvePython(repoRoot),
-    // One temp SQLite for BOTH sides (D-03): Go reads database.path
-    // (HTA_DATABASE_PATH), Python reads python.vocabDBPath. Both MUST
-    // name the same file, so pin them together.
-    HTA_DATABASE_PATH: path.join(root, 'vocab.db'),
-    HTA_PYTHON_VOCABDBPATH: path.join(root, 'vocab.db'),
-    HTA_PYTHON_DATADIR: root,
-    HTA_PYTHON_CACHEDIR: path.join(root, 'cache', 'audio'),
-    HTA_PYTHON_MANIFESTDIR: path.join(root, 'cache'),
-    HTA_PYTHON_ENVFILE: path.join(root, 'dictation.env'),
-    HTA_TTS_SESSIONDIR: path.join(root, 'sessions'),
-    // Always the local dummy — a real inherited key must never ride along.
-    MIMO_API_KEY: DUMMY_MIMO_KEY,
-  });
-  // voice.baseUrl is pinned by the config template unless explicitly
-  // overridden; any inherited HTA_VOICE_BASEURL was scrubbed above.
-  if (options.voiceBaseUrl) env.HTA_VOICE_BASEURL = options.voiceBaseUrl;
-
-  const tail = [];
-  const proc = spawn(binary, ['-config', template], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const forward = (stream, tag) => stream.on('data', (c) => {
-    const text = c.toString('utf8');
-    tail.push(text);
-    if (tail.length > 200) tail.shift();
-    process.stderr.write('[' + tag + '] ' + text);
-  });
-  forward(proc.stderr, 'm1-service');
-  forward(proc.stdout, 'm1-service:out');
-  proc.on('exit', (code, signal) => {
-    if (!stopping) console.error('[m1-launcher] service exited: code=%s signal=%s', code, signal);
-  });
-
-  const url = 'http://' + addr + '/';
-  let stopping = false;
-  await waitForReady(url, proc, tail, options.readyTimeoutMs || 30000);
-
   // removeRoot deletes ONLY the mkdtemp-created root (path-guarded) and is
   // safe to call repeatedly.
   const removeRoot = () => {
@@ -167,14 +117,98 @@ async function launchService(options) {
       fs.rmSync(root, { recursive: true, force: true });
     }
   };
+
+  // EVERY failure path after mkdtemp must tear down (review PR #62 P2):
+  // build failure, spawn failure, early exit and ready-timeout all throw
+  // from this try block; the catch kills the (possibly still running)
+  // child and removes the root before rethrowing. The exit hook covers
+  // launcher exits without stop() (e.g. the CLI's failure exit calling
+  // process.exit(1)): it is registered right after spawn — BEFORE the
+  // ready wait — and removed again on the catch path so a failed launch
+  // leaves no dangling listener behind.
+  let proc = null;
+  let stopping = false;
+  const exitHook = () => {
+    if (proc && proc.exitCode === null) proc.kill('SIGKILL');
+    removeRoot();
+  };
+  let addr;
+  let healthAddr;
+  try {
+    const binary = options.binary || path.join(root, 'service');
+    if (!options.binary) buildServiceBinary(repoRoot, binary);
+
+    addr = options.addr || ('127.0.0.1:' + (await freePort()));
+    healthAddr = options.healthAddr || ('127.0.0.1:' + (await freePort()));
+    // No inherited HTA_* rides along (review PR #62 P1): a stray exported
+    // HTA_DATABASE_PATH would otherwise make the Go side open that file at
+    // boot (database.path beats python.vocabDBPath in cmd/service) while
+    // Python keeps the temp one — touching real data and splitting the
+    // shared DB. Scrub case-insensitively (Windows env lookup ignores
+    // case), then set every launcher-owned value explicitly below.
+    const env = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (!key.toUpperCase().startsWith('HTA_')) env[key] = value;
+    }
+    Object.assign(env, {
+      HTA_SERVER_ADDR: addr,
+      HTA_SERVER_HEALTHADDR: healthAddr,
+      HTA_PYTHON_INTERPRETER: resolvePython(repoRoot),
+      // One temp SQLite for BOTH sides (D-03): Go reads database.path
+      // (HTA_DATABASE_PATH), Python reads python.vocabDBPath. Both MUST
+      // name the same file, so pin them together.
+      HTA_DATABASE_PATH: path.join(root, 'vocab.db'),
+      HTA_PYTHON_VOCABDBPATH: path.join(root, 'vocab.db'),
+      HTA_PYTHON_DATADIR: root,
+      HTA_PYTHON_CACHEDIR: path.join(root, 'cache', 'audio'),
+      HTA_PYTHON_MANIFESTDIR: path.join(root, 'cache'),
+      HTA_PYTHON_ENVFILE: path.join(root, 'dictation.env'),
+      HTA_TTS_SESSIONDIR: path.join(root, 'sessions'),
+      // Always the local dummy — a real inherited key must never ride along.
+      MIMO_API_KEY: DUMMY_MIMO_KEY,
+    });
+    // voice.baseUrl is pinned by the config template unless explicitly
+    // overridden; any inherited HTA_VOICE_BASEURL was scrubbed above.
+    if (options.voiceBaseUrl) env.HTA_VOICE_BASEURL = options.voiceBaseUrl;
+
+    const tail = [];
+    const spawnErr = { error: null };
+    proc = spawn(binary, ['-config', template], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    proc.on('error', (e) => { spawnErr.error = e; }); // ENOENT etc. — exitCode stays null
+    process.on('exit', exitHook);
+    const forward = (stream, tag) => stream.on('data', (c) => {
+      const text = c.toString('utf8');
+      tail.push(text);
+      if (tail.length > 200) tail.shift();
+      process.stderr.write('[' + tag + '] ' + text);
+    });
+    forward(proc.stderr, 'm1-service');
+    forward(proc.stdout, 'm1-service:out');
+    proc.on('exit', (code, signal) => {
+      if (!stopping) console.error('[m1-launcher] service exited: code=%s signal=%s', code, signal);
+    });
+
+    const url = 'http://' + addr + '/';
+    await waitForReady(url, proc, tail, options.readyTimeoutMs || 30000, spawnErr);
+  } catch (err) {
+    process.removeListener('exit', exitHook);
+    if (proc && proc.exitCode === null) {
+      stopping = true; // never-ready child: nothing to flush, die fast
+      if (proc.kill('SIGKILL')) {
+        // Bounded wait so removeRoot can't race a dying child's open files.
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 2000);
+          proc.once('exit', () => { clearTimeout(timer); resolve(); });
+        });
+      }
+    }
+    removeRoot();
+    throw err;
+  }
   // The exit hook matters when the runner kills the whole tree (Playwright's
   // tree-kill also signals the service child directly): the child can be
   // gone by the time stop() runs, and the root must STILL be removed. Only
   // a SIGKILL of the launcher itself can leave the root behind.
-  process.on('exit', () => {
-    if (proc.exitCode === null) proc.kill('SIGKILL');
-    removeRoot();
-  });
   let stopped = false;
   const stop = async () => {
     if (stopped) return;
@@ -189,10 +223,10 @@ async function launchService(options) {
     }
     removeRoot();
   };
-  return { proc, root, addr, healthAddr, url, healthUrl: 'http://' + healthAddr + '/health', stop };
+  return { proc, root, addr, healthAddr, url: 'http://' + addr + '/', healthUrl: 'http://' + healthAddr + '/health', stop };
 }
 
-module.exports = { buildServiceBinary, launchService, resolvePython, DUMMY_MIMO_KEY };
+module.exports = { buildServiceBinary, launchService, resolvePython, freePort, DUMMY_MIMO_KEY };
 
 if (require.main === module) {
   const args = process.argv.slice(2);

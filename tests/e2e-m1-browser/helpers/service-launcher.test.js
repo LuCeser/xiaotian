@@ -15,7 +15,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { before, after, test } = require('node:test');
-const { buildServiceBinary, launchService } = require('./service-launcher.js');
+const { buildServiceBinary, launchService, freePort } = require('./service-launcher.js');
 
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
 // Step 4 reuses the parent suite's committed template: every port/path it
@@ -117,5 +117,47 @@ test('relaunch after stop gets a fresh root and serves again', async () => {
     assert.equal(fs.existsSync(firstRoot), false);
   } finally {
     await second.stop();
+  }
+});
+
+// Review PR #62 P2: every failure path after mkdtemp must clean up — no
+// leftover temp root, and no still-running service child on ready-timeout.
+function m1Roots() {
+  return new Set(fs.readdirSync(os.tmpdir())
+    .filter((name) => name.startsWith('xiaotian-m1-e2e-'))
+    .map((name) => path.join(os.tmpdir(), name)));
+}
+
+test('launch failure: child exiting before ready throws and leaves no root', async () => {
+  const before = m1Roots();
+  // process.execPath as the "binary": node rejects the -config option and
+  // exits immediately — no build needed, deterministic early exit.
+  await assert.rejects(
+    launchService({ repoRoot, template, binary: process.execPath, readyTimeoutMs: 60000 }),
+    /exited before ready/
+  );
+  assert.deepEqual([...m1Roots()], [...before]);
+});
+
+test('launch failure: ready timeout kills the still-running child and removes the root', async () => {
+  const before = m1Roots();
+  // The real binary stays healthy, but readyTimeoutMs=1 expires the wait
+  // while the child is still booting — the exact path that used to leak
+  // both the temp root and the service process.
+  const addr = '127.0.0.1:' + (await freePort());
+  await assert.rejects(
+    launchService({ repoRoot, template, binary, addr, readyTimeoutMs: 1 }),
+    /service not ready/
+  );
+  assert.deepEqual([...m1Roots()], [...before]);
+  // The killed child must never come up on its port (a leaked one binds
+  // within ~a second and would answer here).
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    try {
+      await getJson('http://' + addr + '/');
+      assert.fail('service survived the ready-timeout cleanup');
+    } catch { /* connection refused — child is gone */ }
+    await new Promise((r) => setTimeout(r, 250));
   }
 });
