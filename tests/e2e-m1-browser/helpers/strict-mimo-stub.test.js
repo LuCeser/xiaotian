@@ -10,21 +10,27 @@ const http = require('node:http');
 const { test } = require('node:test');
 const { createStrictMimoStub } = require('./strict-mimo-stub.js');
 
-// makeWav builds a minimal RIFF/WAVE container around pcm (mirrors the
-// 16kHz s16le mono the /rt ASR adapter wraps via voice.WrapWAV).
-function makeWav(pcm, sampleRateHz = 16000, channels = 1) {
+// makeWav builds a minimal RIFF/WAVE container around pcm, byte-for-byte
+// the 44-byte header pkg/voice.WrapWAV writes (16kHz s16le mono on the
+// /rt ASR path). overrides crafts deliberately-invalid variants for the
+// rejection test (review PR #62 P2): the old fixture wrote blockAlign=16
+// and bitsPerSample=channels, so the "positive" case was itself invalid.
+function makeWav(pcm, sampleRateHz = 16000, channels = 1, overrides = {}) {
+  const bitsPerSample = overrides.bitsPerSample !== undefined ? overrides.bitsPerSample : 16;
+  const blockAlign = overrides.blockAlign !== undefined ? overrides.blockAlign : (channels * bitsPerSample) / 8;
+  const byteRate = overrides.byteRate !== undefined ? overrides.byteRate : sampleRateHz * blockAlign;
   const header = Buffer.alloc(44);
   header.write('RIFF', 0, 'ascii');
   header.writeUInt32LE(36 + pcm.length, 4);
   header.write('WAVE', 8, 'ascii');
   header.write('fmt ', 12, 'ascii');
   header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(overrides.audioFormat !== undefined ? overrides.audioFormat : 1, 20); // PCM
   header.writeUInt16LE(channels, 22);
   header.writeUInt32LE(sampleRateHz, 24);
-  header.writeUInt32LE(sampleRateHz * 2 * channels, 28);
-  header.writeUInt16LE(16, 32);
-  header.writeUInt16LE(channels, 34);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
   header.write('data', 36, 'ascii');
   header.writeUInt32LE(pcm.length, 40);
   return Buffer.concat([header, pcm]);
@@ -89,6 +95,9 @@ test('scripted ASR reply requires a valid WAV and records its facts', async (t) 
   assert.deepEqual(stub.state.violations, []);
   assert.equal(stub.state.requests[0].category, 'asr');
   assert.equal(stub.state.requests[0].sampleRateHz, 16000);
+  assert.equal(stub.state.requests[0].bitsPerSample, 16);
+  assert.equal(stub.state.requests[0].blockAlign, 2);
+  assert.equal(stub.state.requests[0].byteRate, 32000);
   assert.equal(stub.state.requests[0].durationMs, 100);
 });
 
@@ -100,6 +109,32 @@ test('ASR input that is not a WAV fails and is recorded as a violation', async (
   assert.equal(stub.state.violations.length, 1);
   assert.match(stub.state.violations[0].reason, /valid WAV/);
   assert.equal(stub.state.requests.length, 0); // failed input is never answered
+});
+
+test('ASR input with a lying fmt header is rejected, not waved through', async (t) => {
+  const { stub, port } = await withStub(t, { asr: [{ text: '好了' }] });
+  // The review's false-green repro plus one variant per fmt invariant:
+  // plausible sample rate and channels alone must NOT count as a valid
+  // WAV — the old check gave these HTTP 200 with zero violations.
+  const bogus = [
+    makeWav(Buffer.alloc(3200), 16000, 1, { audioFormat: 99, bitsPerSample: 1, blockAlign: 16 }), // the repro
+    makeWav(Buffer.alloc(3200), 16000, 1, { audioFormat: 99 }), // non-PCM encoding
+    makeWav(Buffer.alloc(3200), 16000, 1, { bitsPerSample: 8 }), // 8-bit samples
+    makeWav(Buffer.alloc(3200), 16000, 1, { blockAlign: 4 }), // blockAlign ≠ channels·bits/8
+    makeWav(Buffer.alloc(3200), 16000, 1, { byteRate: 12345 }), // byteRate ≠ rate·blockAlign
+    makeWav(Buffer.alloc(3001), 16000, 1), // data not a whole number of frames
+  ];
+  for (const wav of bogus) {
+    const res = await json(port, 'POST', '/v1/chat/completions', asrBody(wav));
+    assert.equal(res.status, 500);
+    assert.match(res.text, /not a valid WAV/);
+  }
+  assert.equal(stub.state.requests.length, 0); // never answered, never consumed the script
+  assert.equal(stub.state.violations.length, bogus.length);
+  assert.equal(stub.state.scripts.asr.length, 1); // still queued for a real WAV
+  const good = await json(port, 'POST', '/v1/chat/completions', asrBody(makeWav(Buffer.alloc(3200))));
+  assert.equal(good.status, 200);
+  assert.equal(JSON.parse(good.text).choices[0].message.content, '好了');
 });
 
 test('scripted llm and image replies, and the match guard catches wrong order', async (t) => {

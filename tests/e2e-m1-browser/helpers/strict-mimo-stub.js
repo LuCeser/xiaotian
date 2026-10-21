@@ -54,13 +54,18 @@ function promptText(body) {
     .join('\n');
 }
 
-// parseWavMeta mirrors pkg/mimo parseWAV: walk RIFF chunks; ok only when a
-// fmt chunk declares a sample rate and a non-empty data chunk exists.
+// parseWavMeta is a STRICTER sibling of pkg/mimo parseWAV (which only
+// needs lenient rate/duration hints for playback metadata): the stub must
+// prove the ASR input really is the container the production path wraps
+// via pkg/voice.WrapWAV — plain PCM encoding, 16-bit samples, and a fmt
+// header whose blockAlign/byteRate agree with channels × rate. A lying
+// header (encoding 99, 1-bit samples, misaligned blockAlign…) must fail
+// here so the spec sees a violation instead of a false green (review PR
+// #62 P2).
 function parseWavMeta(b) {
   if (!Buffer.isBuffer(b) || b.length < 12) return null;
   if (b.slice(0, 4).toString('ascii') !== 'RIFF' || b.slice(8, 12).toString('ascii') !== 'WAVE') return null;
-  let sampleRateHz = 0;
-  let channels = 0;
+  let fmt = null;
   let dataBytes = 0;
   let pos = 12;
   while (pos + 8 <= b.length) {
@@ -68,16 +73,35 @@ function parseWavMeta(b) {
     const size = b.readUInt32LE(pos + 4);
     const body = pos + 8;
     if (body + size > b.length) break; // truncated/corrupt chunk
-    if (id === 'fmt ' && size >= 16) {
-      channels = b.readUInt16LE(body + 2);
-      sampleRateHz = b.readUInt32LE(body + 4);
+    if (id === 'fmt ' && size >= 16 && !fmt) {
+      fmt = {
+        audioFormat: b.readUInt16LE(body),
+        channels: b.readUInt16LE(body + 2),
+        sampleRateHz: b.readUInt32LE(body + 4),
+        byteRate: b.readUInt32LE(body + 8),
+        blockAlign: b.readUInt16LE(body + 12),
+        bitsPerSample: b.readUInt16LE(body + 14),
+      };
     } else if (id === 'data') {
       dataBytes = size;
     }
     pos = body + size + (size & 1); // chunks are word-aligned
   }
-  if (!sampleRateHz || !channels || !dataBytes) return null;
-  return { sampleRateHz, channels, dataBytes, durationMs: Math.round(dataBytes * 1000 / (sampleRateHz * 2 * channels)) };
+  if (!fmt || !fmt.sampleRateHz || !fmt.channels || !dataBytes) return null;
+  if (fmt.audioFormat !== 1) return null; // plain PCM, as WrapWAV writes
+  if (fmt.bitsPerSample !== 16) return null; // s16le capture path
+  if (fmt.blockAlign !== (fmt.channels * fmt.bitsPerSample) / 8) return null;
+  if (fmt.byteRate !== fmt.sampleRateHz * fmt.blockAlign) return null;
+  if (dataBytes % fmt.blockAlign !== 0) return null; // whole frames only
+  return {
+    sampleRateHz: fmt.sampleRateHz,
+    channels: fmt.channels,
+    bitsPerSample: fmt.bitsPerSample,
+    blockAlign: fmt.blockAlign,
+    byteRate: fmt.byteRate,
+    dataBytes,
+    durationMs: Math.round((dataBytes * 1000) / fmt.byteRate),
+  };
 }
 
 function createStrictMimoStub(options = {}) {
