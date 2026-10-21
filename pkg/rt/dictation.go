@@ -823,11 +823,13 @@ func confirmPausedRejectText() string {
 // ---------------------------------------------------------------------------
 // Issue #56: state-gated full-phrase confirmation correction. The model
 // occasionally misreads a plain 「好了」 as repeat or chat, and a completion
-// phrase must advance exactly once — so AFTER a successful parse and BEFORE
-// dispatch, a small pure function corrects a FINITE table of unambiguous
-// whole phrases. The gate (awaitingWord: ordinary word dictation, writing
-// stage, unpaused, unfinished, valid target) is enforced by the caller;
-// every other expression keeps the model's verdict.
+// phrase must advance exactly once — so BEFORE dispatch, a small pure
+// function corrects a FINITE table of unambiguous whole phrases. The gate
+// (awaitingWord: ordinary word dictation, writing stage, unpaused,
+// unfinished, valid target) is enforced by the caller; every other
+// expression keeps the model's verdict — and a collapsed classification
+// keeps its fixed spoken fallback, the exact-phrase table excepted (the
+// transcript is the input, never the model output).
 // ---------------------------------------------------------------------------
 
 // isDictationPhraseEdge reports whether a rune may be stripped from the END
@@ -1342,14 +1344,17 @@ func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, turn
 		// correction retry, then the deterministic spoken fallback — the
 		// failure count rides the event fields like the ASR half's does.
 		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("attempts", 2))
-	} else if turnCtx.awaitingWord {
+	}
+	if turnCtx.awaitingWord {
 		// Issue #56: in a live word-dictation writing stage, correct the
-		// finite table of unambiguous whole phrases AFTER a successful
-		// parse and BEFORE dispatch — a completion phrase advances whatever
-		// the model made of it, and an explicit not-yet-done / waiting /
-		// re-read phrase never advances. A collapsed classification keeps
-		// the fixed spoken fallback: the correction runs on verdicts, never
-		// on silence.
+		// finite table of unambiguous whole phrases BEFORE dispatch — a
+		// completion phrase advances whatever the model made of it, and an
+		// explicit not-yet-done / waiting / re-read phrase never advances.
+		// The correction keys on the TRANSCRIPT alone, so it also runs on a
+		// collapsed classification (PR #61 review round 2): an exact 「好了」
+		// advances even when the model never produced legal JSON — the
+		// reliable transcript needs no model verdict to be recognized; every
+		// other utterance keeps the fixed spoken fallback.
 		intent, reply = resolveDictationIntent(transcript, intent, reply)
 	}
 	// Desensitization boundary (T-13-06b): the intent label only — never

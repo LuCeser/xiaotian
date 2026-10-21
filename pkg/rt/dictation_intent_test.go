@@ -259,7 +259,8 @@ func TestResolveDictationIntent(t *testing.T) {
 // acceptance phrases cannot swallow the advance (and the stale reply is
 // cleared), while a model confirm on explicit not-done / waiting / re-read
 // phrases never advances. A collapsed classification keeps the spoken
-// fallback with no correction.
+// fallback EXCEPT an exact table phrase, which advances on the transcript
+// alone (PR #61 review round 2).
 func TestDictationConfirmationUtterances(t *testing.T) {
 	confirmDrive := func(t *testing.T, phrase, modelIntent, modelReply string) (*fakeExecutor, *TurnManager, *captureSender, *captureLogger, int) {
 		t.Helper()
@@ -347,7 +348,10 @@ func TestDictationConfirmationUtterances(t *testing.T) {
 		}
 	})
 
-	t.Run("collapsed classification keeps the spoken fallback", func(t *testing.T) {
+	// PR #61 review round 2: the correction keys on the transcript, so two
+	// garbage model hops cannot swallow an exact completion phrase — issue
+	// #56's "明确完成表达能推进" holds with NO model verdict at all.
+	t.Run("collapsed classification still advances an exact completion phrase", func(t *testing.T) {
 		cards := ttCards("苹果", "香蕉")
 		garbage := llmScript{resp: wireChatResponse(t, `{"choices":[{"message":{"content":"不是JSON"}}]}`)}
 		asr := newFakeASR(asrScript{text: "好了"})
@@ -355,8 +359,28 @@ func TestDictationConfirmationUtterances(t *testing.T) {
 		tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
 		prev := s.countOf(TypeTeacherSentence)
 		ttRunIntentTurn(t, tm, s, prev)
+		if got := exec.advanceCount(); got != 1 {
+			t.Errorf("advance calls = %d, want 1 (an exact completion phrase advances on the transcript alone)", got)
+		}
+		if spoken := tm.tts.(*fakeTTS).recordedTexts(); !contains(spoken[len(spoken)-1], "香蕉") {
+			t.Errorf("tts = %v, want the next word narrated", spoken)
+		}
+		intent, model, _ := lastIntentClassified(t, log)
+		if intent != intentConfirm || model != "" {
+			t.Errorf("intent_classified = (%q, %q), want confirm with no model verdict", intent, model)
+		}
+	})
+
+	t.Run("collapsed classification without a table phrase keeps the spoken fallback", func(t *testing.T) {
+		cards := ttCards("苹果", "香蕉")
+		garbage := llmScript{resp: wireChatResponse(t, `{"choices":[{"message":{"content":"不是JSON"}}]}`)}
+		asr := newFakeASR(asrScript{text: "我想吃苹果"})
+		llm := newFakeLLM(garbage, garbage)
+		tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+		prev := s.countOf(TypeTeacherSentence)
+		ttRunIntentTurn(t, tm, s, prev)
 		if got := exec.advanceCount(); got != 0 {
-			t.Errorf("advance calls = %d, want 0 (correction never runs on a collapsed classification)", got)
+			t.Errorf("advance calls = %d, want 0 (no table phrase, no advance)", got)
 		}
 		if joined := ttSentencesSince(t, s, prev); !contains(joined, "老师没听清") {
 			t.Errorf("reply = %q, want the fixed fallback", joined)
