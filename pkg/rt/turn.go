@@ -1075,8 +1075,10 @@ func (tm *TurnManager) runNaturalEnding(s Sender, ctx context.Context, cancel co
 	if purpose == purposeSummary {
 		tm.recorder.Emit(EventLessonComplete, infra.F("reason", reason))
 	}
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
+	// PR #61 review: same ordering as handleEndSession — closed first, then
+	// the goodbye, so no lock-disciplined sender can follow session_ended.
 	tm.internalClose()
+	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
 }
 
 // handleInterrupt is the epoch bump + provider cancellation + short-history
@@ -1188,12 +1190,17 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 
 // handleEndSession is the explicit goodbye (RT-10/SC7 server half). The D-03
 // fallback (13.1-04) runs BEFORE the state reset: a session ended mid-check
-// persists its downgraded ratings once (the write needs the live tutor).
+// persists its downgraded ratings once (the write needs the live tutor). PR
+// #61 review: closed is set BEFORE session_ended ships — the flag (under
+// tm.mu) is what every advance-side gate checks, and the lesson_update
+// enqueue in advanceTarget shares that lock, so a racing advance's wire
+// output lands strictly before the goodbye, or (when it lost the race) is
+// suppressed entirely. session_ended stays the terminal control message.
 func (tm *TurnManager) handleEndSession(s Sender) {
 	tm.uncheckedCloseFallback()
+	tm.internalClose()
 	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonClientEnd})
 	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-	tm.internalClose()
 }
 
 // internalClose cancels in-flight work, invalidates playback waits,
@@ -1598,11 +1605,12 @@ func (tm *TurnManager) confirmTarget(s Sender, ctx context.Context, cancel conte
 func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, target TurnTarget, outcome, reply string, onFirstCommit func()) {
 	tm.mu.Lock()
 	lessonID := tm.tutor.lessonID
-	// Issue #56: a closed session refuses the advance too — a close during
-	// classification does NOT bump the epoch (unlike an interrupt), so the
-	// processTurn epoch gate alone would pass a late confirm through to the
-	// executor after session_ended already shipped. The epoch comparison
-	// stays upstream; this is the advance's own closed check.
+	// Issue #56 / PR #61 review: a closed session refuses the advance at
+	// BOTH ends of the executor call. A close during classification does
+	// NOT bump the epoch (unlike an interrupt), so the processTurn epoch
+	// gate alone would pass a late confirm through — this ENTRY refusal
+	// covers a close that landed before the call; the liveness gate after
+	// the executor returns covers a close that landed UNDER it.
 	valid := !tm.tutor.completed && !tm.closed &&
 		target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words)
 	tm.mu.Unlock()
@@ -1617,6 +1625,14 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 
 	requestID := fmt.Sprintf("%s-advance-%d", lessonID, target.WordIndex)
 	res, err := tm.exec.AdvanceWord(ctx, lessonID, target.ExpectedVersion, requestID)
+	// PR #61 review: the close (or an interrupt — same predicate) may land
+	// UNDER the executor call. The store commit stands — it is the durable
+	// truth a reconnect reads — but nothing after the return may touch the
+	// dead session: no tutor mutation, no lesson_update, no check stage, no
+	// error message.
+	if !tm.epochCurrent(epoch) {
+		return
+	}
 	if err != nil {
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
@@ -1624,7 +1640,9 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 			// no completion — the store already holds the truth.
 			if l, gerr := tm.exec.GetLessonState(ctx, lessonID); gerr == nil {
 				tm.mu.Lock()
-				tm.tutor.align(l.CurrentIndex, l.Version)
+				if tm.epoch == epoch && !tm.closed {
+					tm.tutor.align(l.CurrentIndex, l.Version)
+				}
 				tm.mu.Unlock()
 			}
 			tm.settleListeningAt(s, epoch)
@@ -1638,22 +1656,29 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		// reverse): align to the first result and do NOTHING else — the
 		// first outcome is never overwritten.
 		tm.mu.Lock()
-		tm.tutor.align(res.NewIndex, res.NewVersion)
+		if tm.epoch == epoch && !tm.closed {
+			tm.tutor.align(res.NewIndex, res.NewVersion)
+		}
 		tm.mu.Unlock()
 		tm.settleListeningAt(s, epoch)
 		return
 	}
 
-	// First commit: outcome + wire update + narration (or completion).
+	// First commit: outcome + wire update + narration (or completion). The
+	// liveness re-check, the tutor mutation, and the lesson_update enqueue
+	// share ONE lock hold (the speakTurn pattern — atomic against the close
+	// paths): a close that races this window either sets closed first (the
+	// branch dies here) or blocks on tm.mu until the update is queued, and
+	// the close paths send session_ended only AFTER closed is set — so
+	// lesson_update can never trail the goodbye on the wire.
 	tm.mu.Lock()
+	if tm.epoch != epoch || tm.closed {
+		tm.mu.Unlock()
+		return
+	}
 	tm.tutor.align(res.NewIndex, res.NewVersion)
 	tm.tutor.commitOutcome(target.WordIndex, outcome)
 	finished := res.NewIndex >= len(tm.tutor.words)
-	tm.mu.Unlock()
-	if onFirstCommit != nil {
-		onFirstCommit()
-	}
-
 	_ = s.SendControl(LessonUpdateMsg{
 		Type:         TypeLessonUpdate,
 		LessonID:     lessonID,
@@ -1661,6 +1686,10 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		CurrentIndex: res.NewIndex,
 		RequestID:    requestID,
 	})
+	tm.mu.Unlock()
+	if onFirstCommit != nil {
+		onFirstCommit()
+	}
 	// Progress carries positions only. Answers arrive together in check_started.
 	tm.recorder.Emit(EventWordAdvanced,
 		infra.F("word_index", target.WordIndex),
@@ -1747,9 +1776,12 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		// Subtitle first (字幕先行) + pending registration BEFORE
 		// audio_start is queued — atomic against interrupt handling: after
 		// an interrupt is acknowledged, no further subtitle/chunk of the
-		// interrupted announcement can go out.
+		// interrupted announcement can go out. The closed flag rides the
+		// same check (epochCurrent's predicate): a close does not bump the
+		// epoch, so the comparison alone would let a sentence of a dead
+		// session register and ship (PR #61 review).
 		tm.mu.Lock()
-		if tm.epoch != epoch {
+		if tm.epoch != epoch || tm.closed {
 			tm.mu.Unlock()
 			return ref
 		}
@@ -1766,7 +1798,7 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		var sentSamples int
 		_, err := tm.tts.SynthesizeStream(ctx, sentence, func(pcm []byte, isFinal bool) error {
 			tm.mu.Lock()
-			if tm.epoch != epoch {
+			if tm.epoch != epoch || tm.closed {
 				tm.mu.Unlock()
 				cancel() // late chunk: abort the provider stream too
 				return ErrStaleEpoch
@@ -1786,7 +1818,7 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		if p, ok := tm.pendingPlayback[pendingKey(epoch, sentID)]; ok {
 			p.pcmSamples = sentSamples
 		}
-		stale := tm.epoch != epoch
+		stale := tm.epoch != epoch || tm.closed
 		if !stale {
 			_ = s.SendControl(AudioEndMsg{Type: TypeAudioEnd, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
 		}
@@ -1915,10 +1947,16 @@ func (tm *TurnManager) sendError(s Sender, code, message string, recoverable boo
 // Small locked helpers
 // ---------------------------------------------------------------------------
 
+// epochCurrent reports whether a turn launched at the given epoch may still
+// act: the epoch must match AND the session must be open. A close does NOT
+// bump the epoch (unlike an interrupt), so the closed flag rides here — PR
+// #61 review: the epoch comparison alone waved late provider returns through
+// after session_ended already shipped; folding the flag into the one
+// predicate every turn gate shares closes that class at the root.
 func (tm *TurnManager) epochCurrent(launch uint64) bool {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	return tm.epoch == launch
+	return tm.epoch == launch && !tm.closed
 }
 
 // nextTurnIDLocked allocates the next turn/announcement identity (sentence

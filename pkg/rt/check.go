@@ -338,6 +338,12 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	tm.mu.Unlock()
 
 	res, err := tm.exec.EnterCheck(ctx, lessonID, expected, lessonID+"-enter-check", outcomes)
+	// PR #61 review: the stage write may commit UNDER a close or interrupt —
+	// the row stands (a reconnect resumes from it), but a dead classroom
+	// opens no panel: no tutor mutation, no check_started, no bridge.
+	if !tm.epochCurrent(epoch) {
+		return
+	}
 	switch err {
 	case nil:
 		tm.mu.Lock()
