@@ -1,0 +1,198 @@
+package e2ecorpus
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// fakeSynth stands in for the real MIMO TTS: it counts calls, returns a
+// deterministic valid WAV per text, and can fail selected texts. No real
+// provider is ever contacted from these tests (计划步骤 22：迭代时只用
+// fake provider 验证，不真实合成).
+type fakeSynth struct {
+	errOn map[string]error
+	calls []string
+}
+
+func (f *fakeSynth) SynthesizeWAV(_ context.Context, text string, _ SynthParams) ([]byte, error) {
+	f.calls = append(f.calls, text)
+	if err, ok := f.errOn[text]; ok {
+		return nil, err
+	}
+	n := 24000 / 10 // 100ms of audio
+	pcm := make([]byte, n*2)
+	for i := 0; i < n; i++ {
+		putSample(pcm, i, int16(i%100))
+	}
+	return BuildWAV(pcm, FirstBatchParams().SampleRate), nil
+}
+
+// writeManifest writes a small manifest with the given (id, text) pairs and
+// returns its path.
+func writeManifest(t *testing.T, idText ...string) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString(`{"version":1,"entries":[`)
+	for i := 0; i+1 < len(idText); i += 2 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"id":%q,"group":"confirm","text":%q,"scene":"dictation","expect":"advance"}`, idText[i], idText[i+1])
+	}
+	b.WriteString(`]}`)
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func runPrepare(t *testing.T, manifest string, synth *fakeSynth, limit, maxChars int) (PrepareReport, error) {
+	t.Helper()
+	entries, err := LoadManifest(manifest)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	return Prepare(context.Background(), entries, FirstBatchParams(), synth, PrepareOptions{
+		Dir:      t.TempDir(),
+		Limit:    limit,
+		MaxChars: maxChars,
+		Now:      func() time.Time { return time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC) },
+	})
+}
+
+// TestPrepareOnlyMissing: everything missing is synthesized once; the second
+// run over the same dir synthesizes nothing (命中不生成).
+func TestPrepareOnlyMissing(t *testing.T) {
+	dir := t.TempDir()
+	manifest := writeManifest(t, "a", "好了", "b", "等一下", "c", "下一个")
+	entries, err := LoadManifest(manifest)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	opts := PrepareOptions{Dir: dir, Now: func() time.Time { return time.Now() }}
+	synth := &fakeSynth{}
+
+	report, err := Prepare(context.Background(), entries, FirstBatchParams(), synth, opts)
+	if err != nil {
+		t.Fatalf("first Prepare: %v", err)
+	}
+	if len(report.Synthesized) != 3 || report.Cached != 0 || len(report.BudgetSkipped) != 0 {
+		t.Fatalf("first report = %+v, want 3 synthesized", report)
+	}
+	if len(synth.calls) != 3 {
+		t.Fatalf("fake synthesizer called %d times, want 3", len(synth.calls))
+	}
+
+	second, err := Prepare(context.Background(), entries, FirstBatchParams(), synth, opts)
+	if err != nil {
+		t.Fatalf("second Prepare: %v", err)
+	}
+	if len(second.Synthesized) != 0 || second.Cached != 3 {
+		t.Fatalf("second report = %+v, want 0 synthesized / 3 cached", second)
+	}
+	if len(synth.calls) != 3 {
+		t.Fatalf("second run synthesized again: %d total calls, want still 3 (命中不生成)", len(synth.calls))
+	}
+}
+
+// TestPrepareSharedTextOneCall: two entries with identical text must cost
+// one synthesis — same key, one cache entry.
+func TestPrepareSharedTextOneCall(t *testing.T) {
+	manifest := writeManifest(t, "a", "嗯", "b", "嗯")
+	synth := &fakeSynth{}
+	report, err := runPrepareWith(manifest, synth)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(synth.calls) != 1 {
+		t.Fatalf("synthesized %d times for shared text, want 1", len(synth.calls))
+	}
+	if report.Cached != 0 || len(report.Synthesized) != 1 {
+		t.Fatalf("report = %+v, want 1 synthesized", report)
+	}
+}
+
+func runPrepareWith(manifest string, synth *fakeSynth) (PrepareReport, error) {
+	entries, err := LoadManifest(manifest)
+	if err != nil {
+		return PrepareReport{}, err
+	}
+	return Prepare(context.Background(), entries, FirstBatchParams(), synth, PrepareOptions{
+		Dir:      filepath.Dir(manifest),
+		MaxChars: 1000,
+	})
+}
+
+// TestPrepareBudgetCaps: the item cap and the character cap each stop the
+// run and record what they left behind.
+func TestPrepareBudgetCaps(t *testing.T) {
+	t.Run("item limit", func(t *testing.T) {
+		manifest := writeManifest(t, "a", "好了", "b", "好嘞", "c", "下一个")
+		report, err := runPrepare(t, manifest, &fakeSynth{}, 2, 0)
+		if err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		if len(report.Synthesized) != 2 || len(report.BudgetSkipped) != 1 || report.BudgetSkipped[0] != "c" {
+			t.Fatalf("report = %+v, want a/b synthesized and c skipped", report)
+		}
+	})
+
+	t.Run("char limit", func(t *testing.T) {
+		// Each text is 3 runes; a 7-char cap fits two items (6) but not three.
+		manifest := writeManifest(t, "a", "好了呀", "b", "好嘞呀", "c", "下一个")
+		report, err := runPrepare(t, manifest, &fakeSynth{}, 0, 7)
+		if err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		if len(report.Synthesized) != 2 || report.Chars != 6 || len(report.BudgetSkipped) != 1 {
+			t.Fatalf("report = %+v, want 2 synthesized (6 chars) and 1 skipped", report)
+		}
+	})
+}
+
+// TestPrepareStopsAtFirstFailure: a provider error halts the run with the
+// already-saved items intact — no further quota is spent after a hard
+// failure (计划第 6 节).
+func TestPrepareStopsAtFirstFailure(t *testing.T) {
+	manifest := writeManifest(t, "a", "好了", "b", "等一下", "c", "下一个")
+	synth := &fakeSynth{errOn: map[string]error{"等一下": errors.New("provider 429")}}
+	report, err := runPrepare(t, manifest, synth, 0, 0)
+	if err == nil {
+		t.Fatal("Prepare hid the provider error, want it surfaced")
+	}
+	if !strings.Contains(err.Error(), "provider 429") || !strings.Contains(err.Error(), "b") {
+		t.Errorf("error %q does not identify the failing entry/cause", err)
+	}
+	if len(report.Synthesized) != 1 || len(synth.calls) != 2 {
+		t.Fatalf("report = %+v with %d calls, want 1 saved then stop", report, len(synth.calls))
+	}
+}
+
+// TestPrepareRejectsProviderGarbage: a fake provider returning non-audio
+// bytes must fail the run via Save's validation, leaving no cache files.
+func TestPrepareRejectsProviderGarbage(t *testing.T) {
+	dir := t.TempDir()
+	entries := []Entry{{ID: "a", Group: GroupConfirm, Text: "好了", Scene: SceneDictation, Expect: ExpectAdvance}}
+	synth := garbageSynth{}
+	_, err := Prepare(context.Background(), entries, FirstBatchParams(), synth, PrepareOptions{Dir: dir})
+	if err == nil {
+		t.Fatal("Prepare accepted non-audio provider output")
+	}
+	left, _ := os.ReadDir(dir)
+	if len(left) != 0 {
+		t.Fatalf("rejected synthesis left %d files behind", len(left))
+	}
+}
+
+type garbageSynth struct{}
+
+func (garbageSynth) SynthesizeWAV(_ context.Context, _ string, _ SynthParams) ([]byte, error) {
+	return []byte("not audio at all"), nil
+}
