@@ -1755,8 +1755,12 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 	}
 
 	tm.mu.Lock()
-	if tm.epoch != epoch {
+	if tm.epoch != epoch || tm.closed {
 		// Stale before the first sound: nothing registered, nothing spoken.
+		// The closed flag rides the entry check (PR #61 review round 2): a
+		// close does not bump the epoch, so the comparison alone let a dead
+		// session's announcement record history, drive the FSM to speaking
+		// and ship state=speaking past session_ended.
 		tm.mu.Unlock()
 		return PlaybackRef{}
 	}
@@ -1768,9 +1772,12 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 	tm.acked = map[string]bool{}
 	tm.state = StateSpeaking
 	tm.playbackPending = true
-	tm.mu.Unlock()
-
+	// state=speaking rides the SAME lock hold (the lesson_update pattern):
+	// the close paths set closed under this lock and ship session_ended only
+	// after — a send after the unlock could land between the two and put a
+	// state change behind the goodbye on the wire.
 	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateSpeaking})
+	tm.mu.Unlock()
 
 	var ref PlaybackRef
 	ref.Epoch = epoch

@@ -2368,6 +2368,64 @@ func TestTurnInterruptStopsAudioAndBumpsEpoch(t *testing.T) {
 	}
 }
 
+// TestSpeakTurnClosedSessionRefused: PR #61 review round 2 — speakTurn's
+// INITIAL section only compared the epoch, and the state=speaking send ran
+// after the unlock: a close landing in either gap recorded LLM history, drove
+// the dead FSM to speaking and shipped state=speaking AFTER session_ended.
+// The gap before the entry lock holds no hookable provider call (the callers'
+// gates end one lock earlier), so the test drives speakTurn directly in
+// exactly the post-close state the gap produces.
+func TestSpeakTurnClosedSessionRefused(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR()
+	llm := newFakeLLM()
+	tm, s, _, _ := ttIntentFixture(t, cards, asr, llm)
+	tm.mu.Lock()
+	epoch := tm.epoch
+	histBefore := len(tm.tutor.shortHistory)
+	sentsBefore := len(tm.turnSentences)
+	tm.mu.Unlock()
+	speakingBefore := s.stateCount(StateSpeaking)
+	sentBefore := s.countOf(TypeTeacherSentence)
+	endedBefore := s.countOf(TypeSessionEnded)
+
+	tm.handleEndSession(s) // closed=true under the lock, session_ended shipped
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ref := tm.speakTurn(s, 99, epoch, "我们来看下一个词。", "我们来看下一个词。", purposeAnnounce, ctx, cancel)
+
+	if ref.FinalSentenceID != "" || len(ref.SentenceIDs) != 0 {
+		t.Errorf("ref = %+v, want the zero ref (nothing scheduled)", ref)
+	}
+	if got := s.stateCount(StateSpeaking); got != speakingBefore {
+		t.Errorf("state=speaking count = %d, want %d (a dead session never enters speaking)", got, speakingBefore)
+	}
+	if got := s.countOf(TypeTeacherSentence); got != sentBefore {
+		t.Errorf("teacher sentences = %d, want %d (no subtitle on a dead session)", got, sentBefore)
+	}
+	if got := s.countOf(TypeSessionEnded); got != endedBefore+1 {
+		t.Errorf("session_ended count = %d, want %d", got, endedBefore+1)
+	}
+	if order := s.typeOrder(); len(order) == 0 || order[len(order)-1] != TypeSessionEnded {
+		t.Errorf("control order = %v, want session_ended last", order)
+	}
+	tm.mu.Lock()
+	histAfter := len(tm.tutor.shortHistory)
+	sentsAfter := len(tm.turnSentences)
+	state, pending := tm.state, tm.playbackPending
+	tm.mu.Unlock()
+	if histAfter != histBefore {
+		t.Errorf("short history %d → %d rounds, want unchanged (a dead session records no reply)", histBefore, histAfter)
+	}
+	if sentsAfter != sentsBefore {
+		t.Errorf("turn sentences %d → %d, want unchanged (nothing registers)", sentsBefore, sentsAfter)
+	}
+	if state == StateSpeaking || pending {
+		t.Errorf("state = %q playbackPending = %v, want the closed reset", state, pending)
+	}
+}
+
 // TestTurnHalfDuplexGatesUplinkWhileSpeaking: while the teacher speaks —
 // including the playback-pending window — uplink audio is dropped; the ASR
 // must not be called for it.
