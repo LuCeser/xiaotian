@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "photos": [
+    {
+      "id": "4a-unit2-reading-sheet",
+      "file": "4A-unit2-reading-sheet.jpg",
+      "sha256": "f40d408f94ce8b23ab6251e4a7216da4bc56d59d6f12bd6909b4b53ff621c45d",
+      "subject": "english",
+      "entries": [
+        {"word": "helpful", "kind": "word"},
+        {"word": "friendly", "kind": "word"},
+        {"word": "lovely", "kind": "word"},
+        {"word": "different", "kind": "word"},
+        {"word": "great", "kind": "word"},
+        {"word": "interesting", "kind": "word"},
+        {"word": "writer", "kind": "word"},
+        {"word": "painter", "kind": "word"},
+        {"word": "smile", "kind": "word"},
+        {"word": "duck", "kind": "word", "meaning": "躲避"},
+        {"word": "skip", "kind": "word", "meaning": "跳绳"},
+        {"word": "afraid", "kind": "word"},
+        {"word": "often", "kind": "word"},
+        {"word": "always", "kind": "word"},
+        {"word": "excited", "kind": "word"},
+        {"word": "hard", "kind": "word"},
+        {"word": "easy", "kind": "word"},
+        {"word": "be good at", "kind": "phrase"},
+        {"word": "help … (do) …", "kind": "phrase", "aliases": ["help…(do)…"]},
+        {"word": "learn English", "kind": "phrase"},
+        {"word": "cheer for them", "kind": "phrase"},
+        {"word": "want to be …", "kind": "phrase", "aliases": ["want to be…"]},
+        {"word": "jump over", "kind": "phrase"},
+        {"word": "slow down", "kind": "phrase"},
+        {"word": "paint pictures", "kind": "phrase"},
+        {"word": "play a guessing game", "kind": "phrase"},
+        {"word": "clean the blackboard", "kind": "phrase"},
+        {"word": "share … with each other", "kind": "phrase", "aliases": ["share…with each other"]},
+        {"word": "tell interesting stories", "kind": "phrase"},
+        {"word": "skip with a long rope", "kind": "phrase"}
+      ],
+      "mustHit": ["helpful", "duck", "clean the blackboard", "skip with a long rope"],
+      "noiseSubstrings": ["class", "name", "no.", "unit", "小贴士"],
+      "rules": {"minWordHits": 16, "minPhraseHits": 12, "minPrecision": 0.95}
+    }
+  ]
+}
