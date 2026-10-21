@@ -141,19 +141,35 @@ async function launchService(options) {
   let stopping = false;
   await waitForReady(url, proc, tail, options.readyTimeoutMs || 30000);
 
-  const stop = async () => {
-    if (proc.exitCode !== null) return;
-    stopping = true;
-    proc.kill('SIGTERM');
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => { proc.kill('SIGKILL'); resolve(); }, 5000);
-      proc.once('exit', () => { clearTimeout(timer); resolve(); });
-    });
-    // Remove only the launcher-created temp root, never anything else.
+  // removeRoot deletes ONLY the mkdtemp-created root (path-guarded) and is
+  // safe to call repeatedly.
+  const removeRoot = () => {
     const guard = path.join(os.tmpdir(), 'xiaotian-m1-e2e-');
     if (path.resolve(root).startsWith(path.resolve(guard))) {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  };
+  // The exit hook matters when the runner kills the whole tree (Playwright's
+  // tree-kill also signals the service child directly): the child can be
+  // gone by the time stop() runs, and the root must STILL be removed. Only
+  // a SIGKILL of the launcher itself can leave the root behind.
+  process.on('exit', () => {
+    if (proc.exitCode === null) proc.kill('SIGKILL');
+    removeRoot();
+  });
+  let stopped = false;
+  const stop = async () => {
+    if (stopped) return;
+    stopped = true;
+    if (proc.exitCode === null) {
+      stopping = true;
+      proc.kill('SIGTERM');
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => { proc.kill('SIGKILL'); resolve(); }, 5000);
+        proc.once('exit', () => { clearTimeout(timer); resolve(); });
+      });
+    }
+    removeRoot();
   };
   return { proc, root, addr, healthAddr, url, healthUrl: 'http://' + healthAddr + '/health', stop };
 }
