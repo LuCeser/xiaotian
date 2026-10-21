@@ -517,18 +517,24 @@ func TestDictationConfirmationStateGuard(t *testing.T) {
 	})
 }
 
-// TestDictationConfirmStaleTurn: a confirmation that classifies while the
-// session moves under it must never execute — an interrupt mid-classification
-// aborts the whole turn (epoch bump), and a close during classification must
-// not let the late confirm commit an advance (close does not bump the epoch;
-// the advance gate itself refuses a closed classroom).
+// TestDictationConfirmStaleTurn: a confirmation whose classification is IN
+// FLIGHT when the session moves under it must never execute. The hold sits
+// in the LLM, not the ASR (PR #61 review): the classification request has
+// been SENT — gateNextChat fires only once the model call is recorded — and
+// the interrupt/close lands before the model answers; release then delivers
+// the LATE 「confirm」 verdict. Waiting for StateProcessing (the old proof)
+// only showed the turn had started, and an ASR-side delay never reached the
+// classification phase at all. The interrupt aborts via the epoch bump; the
+// close does not bump anything — epochCurrent's folded closed flag is what
+// kills it.
 func TestDictationConfirmStaleTurn(t *testing.T) {
-	staleDrive := func(t *testing.T, interrupt bool) (*fakeExecutor, *captureSender, *captureLogger, int) {
+	staleDrive := func(t *testing.T, interrupt bool) (*fakeExecutor, *captureSender, int) {
 		t.Helper()
 		cards := ttCards("苹果", "香蕉")
-		asr := newFakeASR(asrScript{text: "好了", delay: 400 * time.Millisecond})
+		asr := newFakeASR(asrScript{text: "好了"}) // prompt: the race is not in the ASR
 		llm := newFakeLLM(intentScript(intentConfirm, ""))
-		tm, s, log, exec := ttIntentFixture(t, cards, asr, llm)
+		entered, release := llm.gateNextChat()
+		tm, s, _, exec := ttIntentFixture(t, cards, asr, llm)
 		sentBefore := s.countOf(TypeTeacherSentence)
 		endedBefore := s.countOf(TypeSessionEnded)
 
@@ -537,18 +543,17 @@ func TestDictationConfirmStaleTurn(t *testing.T) {
 			tm.processTurn(s, []byte("pcm"))
 			close(done)
 		}()
-		if !waitFor(t, 5*time.Second, func() bool {
-			tm.mu.Lock()
-			defer tm.mu.Unlock()
-			return tm.state == StateProcessing
-		}) {
-			t.Fatal("turn never entered processing")
+		select {
+		case <-entered: // the classification request is out; the model is silent
+		case <-time.After(5 * time.Second):
+			t.Fatal("classification never started")
 		}
 		if interrupt {
 			tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
 		} else {
 			tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
 		}
+		close(release) // the model's LATE confirm verdict
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
@@ -557,11 +562,11 @@ func TestDictationConfirmStaleTurn(t *testing.T) {
 		if !interrupt && s.countOf(TypeSessionEnded) != endedBefore+1 {
 			t.Fatalf("session_ended count = %d, want exactly one", s.countOf(TypeSessionEnded))
 		}
-		return exec, s, log, sentBefore
+		return exec, s, sentBefore
 	}
 
 	t.Run("interrupt mid-classification aborts the turn", func(t *testing.T) {
-		exec, s, _, sentBefore := staleDrive(t, true)
+		exec, s, sentBefore := staleDrive(t, true)
 		if got := exec.advanceCount(); got != 0 {
 			t.Errorf("advance calls = %d, want 0 (interrupted confirm never executes)", got)
 		}
@@ -574,7 +579,7 @@ func TestDictationConfirmStaleTurn(t *testing.T) {
 	})
 
 	t.Run("close mid-classification never commits the advance", func(t *testing.T) {
-		exec, s, _, sentBefore := staleDrive(t, false)
+		exec, s, sentBefore := staleDrive(t, false)
 		if got := exec.advanceCount(); got != 0 {
 			t.Errorf("advance calls = %d, want 0 (a closed classroom never advances)", got)
 		}
@@ -583,6 +588,9 @@ func TestDictationConfirmStaleTurn(t *testing.T) {
 		}
 		if got := s.countOf(TypeTeacherSentence); got != sentBefore {
 			t.Errorf("teacher sentences = %d, want %d (nothing speaks after the close)", got, sentBefore)
+		}
+		if order := s.typeOrder(); len(order) == 0 || order[len(order)-1] != TypeSessionEnded {
+			t.Errorf("control order = %v, want session_ended last", order)
 		}
 	})
 }

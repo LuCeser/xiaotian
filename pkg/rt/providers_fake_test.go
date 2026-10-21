@@ -108,11 +108,29 @@ type llmCall struct {
 type fakeLLM struct {
 	script []llmScript
 	calls  []llmCall
-	mu     sync.Mutex
+	// holdEntered/holdRelease: the one-shot classification hold armed by
+	// gateNextChat (PR #61 review) — nil when disarmed.
+	holdEntered  chan struct{}
+	holdRelease  chan struct{}
+	mu           sync.Mutex
 }
 
 func newFakeLLM(script ...llmScript) *fakeLLM {
 	return &fakeLLM{script: append([]llmScript(nil), script...)}
+}
+
+// gateNextChat arms a one-shot hold on the NEXT Chat call: the call is
+// recorded, entered closes, and the scripted reply waits until release
+// closes. This pins the classification request IN FLIGHT — sent, unanswered
+// — which is the race PR #61's review asked to cover: an ASR-side delay
+// proves nothing about the classification phase, and waiting for
+// StateProcessing only proves the turn started.
+func (f *fakeLLM) gateNextChat() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holdEntered = make(chan struct{})
+	f.holdRelease = make(chan struct{})
+	return f.holdEntered, f.holdRelease
 }
 
 // Chat implements LLMProvider.
@@ -127,7 +145,14 @@ func (f *fakeLLM) Chat(_ context.Context, messages []mimo.Message, opts ...mimo.
 	cp := make([]mimo.Message, len(messages))
 	copy(cp, messages)
 	f.calls = append(f.calls, llmCall{messages: cp, opts: len(opts)})
+	entered, release := f.holdEntered, f.holdRelease
+	f.holdEntered, f.holdRelease = nil, nil
 	f.mu.Unlock()
+
+	if entered != nil {
+		close(entered) // the request is out; the model stays silent for now
+		<-release      // the verdict arrives only after the test lets it
+	}
 
 	if head.err != nil {
 		return mimo.ChatResponse{}, head.err
