@@ -170,7 +170,12 @@ func (p Photo) validate() error {
 // the pinned digest is a hard failure and must never be downgraded to a
 // skip.
 func (p Photo) Verify(dir string) error {
-	raw, err := os.ReadFile(filepath.Join(dir, p.File))
+	// Guard here too, not only in validate: Verify may be called on a
+	// Photo built in code rather than loaded through Load.
+	if p.File == "" || filepath.IsAbs(p.File) || strings.Contains(p.File, "..") {
+		return fmt.Errorf("e2ephoto: photo %s: file %q must be a plain relative name", p.ID, p.File)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, p.File)) // #nosec G703 -- File is traversal-guarded just above and validated at Load
 	if err != nil {
 		return fmt.Errorf("e2ephoto: photo %s: read material: %w", p.ID, err)
 	}
