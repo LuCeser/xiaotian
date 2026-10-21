@@ -106,6 +106,7 @@ func TestParseWAVRejects(t *testing.T) {
 			"fmt ", fmtChunk(24000, 1, 16)), "data", []byte{1, 0, 3})},
 		{"eight-bit samples", "16", appendChunk(appendChunk(append([]byte(nil), riffHeader...),
 			"fmt ", fmtChunk(24000, 1, 8)), "data", []byte{1, 2, 3, 4})},
+		{"zero sample rate", "sample rate", buildTestWAV(0, 1, []byte{1, 0, 2, 0})},
 		{"empty data", "empty", buildTestWAV(24000, 1, nil)},
 	}
 	for _, tc := range cases {

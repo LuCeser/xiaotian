@@ -68,6 +68,8 @@ func ParseWAV(b []byte) (WAVInfo, error) {
 		return WAVInfo{}, fmt.Errorf("wav: %d bits per sample, want 16", info.BitsPerSample)
 	case info.Channels < 1:
 		return WAVInfo{}, fmt.Errorf("wav: %d channels", info.Channels)
+	case info.SampleRate < 1:
+		return WAVInfo{}, fmt.Errorf("wav: %d Hz sample rate — duration would divide by zero", info.SampleRate)
 	case len(info.PCM) == 0:
 		return WAVInfo{}, fmt.Errorf("wav: empty data chunk")
 	}
