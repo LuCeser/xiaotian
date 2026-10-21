@@ -6,7 +6,10 @@
 //   1. temp state root — one OS-temp dir per launch; every python.*Dir,
 //      the shared SQLite DB (Go falls back to python.vocabDBPath when
 //      database.path is empty, D-12) and the TTS session dir live inside.
-//      stop() removes ONLY this mkdtemp-created root (path-guarded).
+//      Inherited HTA_* env is scrubbed so a stray exported
+//      HTA_DATABASE_PATH (or any other override) can't redirect state
+//      outside the root. stop() removes ONLY this mkdtemp-created root
+//      (path-guarded).
 //   2. dual loopback ports — explicit args or auto-allocated free ports;
 //      never the dev 8080 pair or another suite's ports.
 //   3. no real secrets — MIMO_API_KEY is ALWAYS the local dummy value
@@ -107,11 +110,24 @@ async function launchService(options) {
 
   const addr = options.addr || ('127.0.0.1:' + (await freePort()));
   const healthAddr = options.healthAddr || ('127.0.0.1:' + (await freePort()));
-  const env = {
-    ...process.env,
+  // No inherited HTA_* rides along (review PR #62 P1): a stray exported
+  // HTA_DATABASE_PATH would otherwise make the Go side open that file at
+  // boot (database.path beats python.vocabDBPath in cmd/service) while
+  // Python keeps the temp one — touching real data and splitting the
+  // shared DB. Scrub case-insensitively (Windows env lookup ignores
+  // case), then set every launcher-owned value explicitly below.
+  const env = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.toUpperCase().startsWith('HTA_')) env[key] = value;
+  }
+  Object.assign(env, {
     HTA_SERVER_ADDR: addr,
     HTA_SERVER_HEALTHADDR: healthAddr,
     HTA_PYTHON_INTERPRETER: resolvePython(repoRoot),
+    // One temp SQLite for BOTH sides (D-03): Go reads database.path
+    // (HTA_DATABASE_PATH), Python reads python.vocabDBPath. Both MUST
+    // name the same file, so pin them together.
+    HTA_DATABASE_PATH: path.join(root, 'vocab.db'),
     HTA_PYTHON_VOCABDBPATH: path.join(root, 'vocab.db'),
     HTA_PYTHON_DATADIR: root,
     HTA_PYTHON_CACHEDIR: path.join(root, 'cache', 'audio'),
@@ -120,7 +136,9 @@ async function launchService(options) {
     HTA_TTS_SESSIONDIR: path.join(root, 'sessions'),
     // Always the local dummy — a real inherited key must never ride along.
     MIMO_API_KEY: DUMMY_MIMO_KEY,
-  };
+  });
+  // voice.baseUrl is pinned by the config template unless explicitly
+  // overridden; any inherited HTA_VOICE_BASEURL was scrubbed above.
   if (options.voiceBaseUrl) env.HTA_VOICE_BASEURL = options.voiceBaseUrl;
 
   const tail = [];

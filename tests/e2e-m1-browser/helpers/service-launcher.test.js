@@ -78,6 +78,33 @@ test('launch boots the real service isolated; stop tears process and root down',
   assert.equal(fs.existsSync(handle.root), false); // root really removed
 });
 
+test('inherited HTA_DATABASE_PATH cannot bypass the shared temp DB', async (t) => {
+  // Hostile inherited env, as if a dev shell exported HTA_DATABASE_PATH:
+  // the launch must keep BOTH sides on the temp root's vocab.db and never
+  // touch the outside path (cmd/service opens database.path at boot, so a
+  // leaked value would create the sentinel file immediately).
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-m1-env-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const sentinel = path.join(outside, 'must-not-exist.db');
+  const prev = process.env.HTA_DATABASE_PATH;
+  process.env.HTA_DATABASE_PATH = sentinel;
+  try {
+    const handle = await launchService({ repoRoot, template, binary, readyTimeoutMs: 60000 });
+    try {
+      const lessons = await getJson('http://' + handle.addr + '/api/v1/lessons');
+      assert.equal(lessons.status, 200); // the Go DB layer really served a read
+      const db = fs.readFileSync(path.join(handle.root, 'vocab.db'));
+      assert.equal(db.subarray(0, 15).toString('ascii'), 'SQLite format 3');
+    } finally {
+      await handle.stop();
+    }
+    assert.equal(fs.existsSync(sentinel), false); // hostile path never opened
+  } finally {
+    if (prev === undefined) delete process.env.HTA_DATABASE_PATH;
+    else process.env.HTA_DATABASE_PATH = prev;
+  }
+});
+
 test('relaunch after stop gets a fresh root and serves again', async () => {
   const first = await launchService({ repoRoot, template, binary, readyTimeoutMs: 60000 });
   const firstRoot = first.root;
