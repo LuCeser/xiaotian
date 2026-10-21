@@ -14,7 +14,7 @@ const realManifest = "../../tests/e2e-m1/corpus/manifest.json"
 // first batch is represented, so a group accidentally dropped from the
 // manifest cannot silently shrink the suite.
 func TestLoadRealManifest(t *testing.T) {
-	entries, err := Load(realManifest)
+	entries, err := LoadManifest(realManifest)
 	if err != nil {
 		t.Fatalf("Load(real manifest): %v", err)
 	}
@@ -38,7 +38,7 @@ func TestLoadRealManifest(t *testing.T) {
 // twice with different expects, and “好了” must appear in dictation (advance)
 // and non-dictation (no-plain-advance) scenes.
 func TestLoadRealManifest_SceneDecidesExpectation(t *testing.T) {
-	entries, err := Load(realManifest)
+	entries, err := LoadManifest(realManifest)
 	if err != nil {
 		t.Fatalf("Load(real manifest): %v", err)
 	}
@@ -83,7 +83,7 @@ func TestLoadValidation(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.json), 0o600); err != nil {
 				t.Fatalf("write fixture: %v", err)
 			}
-			if entries, err := Load(path); err == nil {
+			if entries, err := LoadManifest(path); err == nil {
 				t.Fatalf("Load() = %v entries, want an error", len(entries))
 			}
 		})
@@ -94,7 +94,7 @@ func TestLoadValidation(t *testing.T) {
 		if err := os.WriteFile(path, []byte(valid), 0o600); err != nil {
 			t.Fatalf("write fixture: %v", err)
 		}
-		entries, err := Load(path)
+		entries, err := LoadManifest(path)
 		if err != nil {
 			t.Fatalf("Load(): %v", err)
 		}
@@ -104,8 +104,8 @@ func TestLoadValidation(t *testing.T) {
 	})
 
 	t.Run("missing file", func(t *testing.T) {
-		if _, err := Load(filepath.Join(t.TempDir(), "absent.json")); err == nil {
-			t.Fatal("Load(missing file) succeeded, want error")
+		if _, err := LoadManifest(filepath.Join(t.TempDir(), "absent.json")); err == nil {
+			t.Fatal("LoadManifest(missing file) succeeded, want error")
 		}
 	})
 }

@@ -79,7 +79,7 @@ type Entry struct {
 // Load reads and validates a corpus manifest ({"version":1,"entries":[...]}).
 // Validation fails the whole file on the first bad entry — a typo in the
 // manifest must never silently drop a case from the suite.
-func Load(path string) ([]Entry, error) {
+func LoadManifest(path string) ([]Entry, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("e2ecorpus: read manifest: %w", err)
