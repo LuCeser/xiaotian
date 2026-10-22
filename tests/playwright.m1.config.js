@@ -66,16 +66,15 @@ process.env.no_proxy = process.env.NO_PROXY;
 module.exports = defineConfig({
   testDir: './e2e-m1-browser',
   // Explicit per-spec match: each plan step appends its spec file here, so
-  // the m1 line never silently picks up another suite's specs. ONE service
-  // instance + ONE temp DB serve the whole run (workers=1), and the files
-  // run in this list's alphabetical order — smoke first (its fresh-DB
-  // assertion holds only before any classroom spec created rows), the
-  // classroom specs after, each cleaning its own seeded units.
+  // the m1 line never silently picks up another suite's specs. The run-level
+  // service below serves the single read-only smoke test. Every stateful
+  // classroom test starts its own service, temp DB and data root through
+  // helpers/spec-service.js; no assertion depends on file execution order.
   testMatch: /(smoke|subject-playback|voice-input)\.spec\.js$/,
   timeout: 60_000,
   retries: 0,
-  // One isolated instance + one vocabulary DB: serialize (two actors
-  // mutating the same unit would interleave asserts).
+  // The strict vendor stub is shared, so its independently reset scripts
+  // remain serialized even though classroom databases are per test.
   workers: 1,
   maxFailures: process.env.CI ? undefined : 1,
   reporter: [['list']],

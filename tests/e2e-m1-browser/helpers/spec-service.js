@@ -13,10 +13,8 @@
 //
 // The strict stub (127.0.0.1:18285) stays SHARED for the whole run — the
 // per-test services all point voice.baseUrl at it via the config template.
-// Because smoke.spec.js (alphabetically between the new files) asserts the
-// stub recorded ZERO requests, every spec using this helper must
-// stubReset() when it ends: reset clears requests/violations/scripts so the
-// next spec starts from a clean, strictly-scripted slate.
+// Specs reset its requests, violations and scripts at both boundaries, so
+// no test depends on file execution order or an earlier test's cleanup.
 //
 // Node test: spec-service.test.js (stub-control roundtrip against an
 // in-process stub — the Go boot path is covered by service-launcher tests

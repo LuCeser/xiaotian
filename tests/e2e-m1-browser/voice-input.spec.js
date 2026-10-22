@@ -26,7 +26,10 @@ const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 const stub = makeStubControl();
 let svc;
 
-test.beforeEach(async () => { svc = await startSpecService(); });
+test.beforeEach(async () => {
+  await stub.reset();
+  svc = await startSpecService();
+});
 test.afterEach(async () => {
   try { if (svc) await svc.stop(); } finally {
     svc = null;
