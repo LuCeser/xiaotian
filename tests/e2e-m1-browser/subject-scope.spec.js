@@ -25,6 +25,7 @@
 const { test, expect } = require('@playwright/test');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 const { installRtObserver, waitWs, controls } = require('./helpers/rt-observe');
+const { installFakeMic, playPcm16, tonePcm16Base64 } = require('./helpers/fake-mic');
 
 const stub = makeStubControl();
 
@@ -184,6 +185,91 @@ test('J07 no due words: honest no_due_words end, no empty row, no cross-subject 
       { timeoutMs: 30000, label: 'second session_ended(no_due_words)' });
     expect((await svc.listLessons()).body.lessons).toHaveLength(0);
     expect((await stub.state()).violations).toEqual([]);
+  } finally {
+    await stub.reset();
+    await svc.stop();
+  }
+});
+
+// J06 — both subjects hold due words and the child answers the REAL ask by
+// VOICE (the synthetic mic replaces only the capture source; the production
+// RTCapture → VAD → ASR → keyword-binding chain runs untouched). The
+// subject decision belongs to the child's words, matched mechanically —
+// NEVER a classification LLM: an ambiguous answer (都可以) keeps the ask
+// parked (re-asks, no lesson row), a clean 英语 binds the english
+// classroom through the same interrupt_ack handshake as a button pick.
+test('J06 voice subject answer: ambiguous keeps asking (no LLM), 英语 binds english', async ({ page }) => {
+  test.setTimeout(90_000);
+  const svc = await startSpecService();
+  await installRtObserver(page);
+  await installFakeMic(page);
+  try {
+    expect((await svc.seedWords({ category: 'chinese', unit: 'e2e-m1-j06-zh', entries: [{ word: '晨光' }, { word: '暮色' }] })).ok).toBe(true);
+    expect((await svc.seedWords({ category: 'english', unit: 'e2e-m1-j06-en', entries: [{ word: 'e2e-m1-j06-a' }, { word: 'e2e-m1-j06-b' }] })).ok).toBe(true);
+    // Ask (3) → retry after the ambiguous answer (2) → greeting (3), each
+    // match-pinned; the ASR replies carry the child's two answers.
+    expect((await stub.scripts({
+      asr: [{ content: '都可以' }, { content: '英语' }],
+      llm: [], image: [],
+      tts: [
+        { ms: 1200, match: '都有要默写的词语' },
+        { ms: 1200, match: '哪一科' },
+        { ms: 1200, match: '也可以点屏幕上的按钮' },
+        { ms: 1200, match: '没听清' },
+        { ms: 1200, match: '请说语文，或者英语' },
+        ...greetingScripts(),
+      ],
+    })).ok).toBe(true);
+
+    await page.goto(svc.url + 'tutor/');
+    await page.locator('#rt-start').click();
+    await expect(page.locator('#rt-subject-ask')).toBeVisible();
+    await waitAnnouncedAndListening(page, 'ask');
+
+    // The child's FIRST answer — ambiguous. Respect the production echo
+    // tail (500 ms) before speaking; then the production capture graph
+    // carries the tone to the server VAD and ONE scripted ASR call runs.
+    await page.waitForTimeout(700);
+    await playPcm16(page, tonePcm16Base64(2000), 16000);
+    await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'transcript' && e.msg.text === '都可以'),
+      { timeoutMs: 20000, label: "transcript of the ambiguous answer" });
+    // The retry rides the SAME epoch (no interrupt handshake for a re-ask),
+    // plays fully and hands control back; the ask stays parked.
+    await waitAnnouncedAndListening(page, 'retry');
+    const [askEpoch] = (await controls(page)).filter((e) => e.dir === 'in' && e.type === 'audio_start')
+      .map((e) => e.msg.epoch);
+    expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'interrupt_ack')).toHaveLength(0);
+    expect((await svc.listLessons()).body.lessons, 'ambiguous answer creates no classroom').toHaveLength(0);
+    await expect(page.locator('#rt-subject-ask')).toBeVisible();
+
+    // The SECOND answer — 英语 — binds through the real voice path.
+    await page.waitForTimeout(700);
+    await playPcm16(page, tonePcm16Base64(2000), 16000);
+    await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'transcript' && e.msg.text === '英语'),
+      { timeoutMs: 20000, label: 'transcript of the 英语 answer' });
+    await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'interrupt_ack'
+      && e.msg.old_epoch === askEpoch && e.msg.new_epoch === askEpoch + 1),
+    { timeoutMs: 20000, label: 'interrupt_ack epoch switch after the voice pick' });
+    await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ready'
+      && e.msg.category === 'english'
+      && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2
+      && e.msg.lesson.words.every((w) => w === '')),
+    { timeoutMs: 30000, label: 'session_ready for the voice-picked english classroom' });
+    await waitAnnouncedAndListening(page, 'greeting');
+
+    // The binding was mechanical: two turns (one turn_start per utterance),
+    // exactly two ASR calls, ZERO classification-LLM calls.
+    const all = await controls(page);
+    expect(all.filter((e) => e.type === 'turn_start')).toHaveLength(2);
+    const state = await stub.state();
+    expect(state.requests.filter((q) => q.category === 'asr')).toHaveLength(2);
+    expect(state.requests.filter((q) => q.category === 'llm'), '选科从不调用分类 LLM').toHaveLength(0);
+
+    await expect(page.locator('#rt-subject-ask')).toBeHidden();
+    const rows = (await svc.listLessons()).body.lessons;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ category: 'english', word_count: 2 });
+    expect(state.violations).toEqual([]);
   } finally {
     await stub.reset();
     await svc.stop();
