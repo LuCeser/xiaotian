@@ -391,6 +391,9 @@ type TurnManager struct {
 	// OLD-epoch timeout close synchronously in that gap, so a split
 	// implementation turns those tests red.
 	subjectTakeInterleave func()
+	// dispatchInterleave is a narrow test probe after classification's
+	// liveness check and before intent dispatch.
+	dispatchInterleave func()
 
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
@@ -1479,6 +1482,9 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	if !tm.epochCurrent(epoch) {
 		return // interrupted mid-classification: abort the whole turn silently
 	}
+	if tm.dispatchInterleave != nil {
+		tm.dispatchInterleave()
+	}
 	tm.dispatchTurn(s, ctx, cancel, turnID, epoch, intent, reply, turnCtx.target)
 }
 
@@ -1495,9 +1501,13 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, intent, reply string, target TurnTarget) {
 	switch intent {
 	case intentConfirm:
-		tm.mu.Lock()
-		paused := tm.tutor != nil && tm.tutor.paused
-		tm.mu.Unlock()
+		paused := false
+		if !tm.applyTurnAt(epoch, func() error {
+			paused = tm.tutor != nil && tm.tutor.paused
+			return nil
+		}) {
+			return
+		}
 		if paused {
 			// Gentle rejection while paused: pacing stays suspended — no
 			// advance, no lesson_update, no outcome write; the classroom
@@ -1507,9 +1517,9 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		}
 		tm.confirmTarget(s, ctx, cancel, turnID, epoch, reply, target)
 	case intentRepeat:
-		tm.speakCurrentWordReading(s, ctx, cancel, repeatText, repeatMaskedText)
+		tm.speakCurrentWordReading(s, ctx, cancel, epoch, repeatText, repeatMaskedText)
 	case intentSlow:
-		tm.speakCurrentWordReading(s, ctx, cancel, slowReadText, slowMaskedText)
+		tm.speakCurrentWordReading(s, ctx, cancel, epoch, slowReadText, slowMaskedText)
 	case intentHint:
 		// U-9 ruling (2026-10-06): every hint request increments the word's
 		// hint count and pre-records the hint outcome. The pre-record is
@@ -1519,12 +1529,17 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		// completion. The event carries count-class fields only
 		// (word_index + hint_count; T-13-06b boundary) and is emitted
 		// outside the lock.
-		tm.mu.Lock()
 		n := 0
-		if tm.tutor != nil && target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words) {
-			n = tm.tutor.recordHint(target.WordIndex)
+		if !tm.applyTurnAt(epoch, func() error {
+			if tm.tutor != nil && tm.tutor.currentIndex == target.WordIndex &&
+				tm.tutor.version == target.ExpectedVersion &&
+				target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words) {
+				n = tm.tutor.recordHint(target.WordIndex)
+			}
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
 		if n > 0 {
 			tm.recorder.Emit(EventHintGiven,
 				infra.F("word_index", target.WordIndex),
@@ -1549,22 +1564,29 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		}
 		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	case intentPause:
-		tm.mu.Lock()
-		if tm.tutor != nil {
-			tm.tutor.paused = true
+		if !tm.applyTurnAt(epoch, func() error {
+			if tm.tutor != nil {
+				tm.tutor.paused = true
+			}
+			tm.stopWordTimerLocked()
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
-		tm.stopWordTimer() // suspend the countdown; only resume re-arms it
 		tm.runAnnouncement(s, ctx, cancel, pauseAckText(), purposeChat, nil)
 	case intentResume:
-		tm.mu.Lock()
-		idx, word, mode := 0, "", tm.mode
-		if tm.tutor != nil {
-			tm.tutor.paused = false
-			idx = tm.tutor.currentIndex + 1
-			word = tm.tutor.words[tm.tutor.currentIndex].Word
+		idx, word, mode := 0, "", ""
+		if !tm.applyTurnAt(epoch, func() error {
+			mode = tm.mode
+			if tm.tutor != nil && tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
+				tm.tutor.paused = false
+				idx = tm.tutor.currentIndex + 1
+				word = tm.tutor.words[tm.tutor.currentIndex].Word
+			}
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
 		spoken := resumeAckText(idx, word)
 		display := spoken
 		if mode != ModeTest {
@@ -1581,14 +1603,18 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 // (voice is the answer channel, D-10); the masked variant rides the subtitle
 // in student mode. Re-arms the per-word countdown after the reading's valid
 // final ack.
-func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, cancel context.CancelFunc, template func(string) string, masked func(int) string) {
-	tm.mu.Lock()
-	word, mode, idx := "", tm.mode, 0
-	if tm.tutor != nil && tm.tutor.currentIndex < len(tm.tutor.words) {
-		word = tm.tutor.words[tm.tutor.currentIndex].Word
-		idx = tm.tutor.currentIndex + 1
+func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, template func(string) string, masked func(int) string) {
+	word, mode, idx := "", "", 0
+	if !tm.applyTurnAt(epoch, func() error {
+		mode = tm.mode
+		if tm.tutor != nil && tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
+			word = tm.tutor.words[tm.tutor.currentIndex].Word
+			idx = tm.tutor.currentIndex + 1
+		}
+		return nil
+	}) {
+		return
 	}
-	tm.mu.Unlock()
 	spoken := template(word)
 	display := spoken
 	if mode != ModeTest {
