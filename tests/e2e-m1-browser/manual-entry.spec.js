@@ -18,9 +18,26 @@
 
 const { test, expect } = require('@playwright/test');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
-const { installRtObserver, waitWs, controls } = require('./helpers/rt-observe');
+const {
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
+} = require('./helpers/rt-observe');
 
 const stub = makeStubControl();
+
+/** Player-side evidence (#66's helpers): every sentence announced so far on
+ *  this page load really played — the production player's own onended
+ *  precedes each ack and it discarded no chunk (wire counts alone accept
+ *  audio dropped before it ever played). */
+async function expectReallyPlayed(page, label) {
+  const [playback, all] = await Promise.all([playbackState(page), controls(page)]);
+  const starts = all.filter((e) => e.dir === 'in' && e.type === 'audio_start');
+  expect(starts.length, label + ': sentences were announced').toBeGreaterThan(0);
+  for (const s of starts) {
+    expect(playedBeforeAck(playback.trace, s.msg.epoch, s.msg.sentence_id),
+      label + ': onended before ack for ' + s.msg.epoch + ':' + s.msg.sentence_id).toBe(true);
+  }
+  expect(playback.droppedChunks, label + ': no audio chunk was discarded by the production player').toBe(0);
+}
 
 const ZH_UNIT = 'e2e-m1-entry-zh';
 const EN_UNIT = 'e2e-m1-entry-en';
@@ -107,9 +124,16 @@ test('J01 manual entry: save→refresh→query correct, no lesson row pre-seeded
       const starts = log.filter((e) => e.dir === 'in' && e.type === 'audio_start');
       const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
       const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack');
-      return starts.length === 3 && ends.length === 3 && acks.length === 3
+      if (starts.length !== 3 || ends.length !== 3 || acks.length !== 3) return false;
+      const ackedAfterEnd = starts.every((s) => {
+        const end = ends.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+        const ack = acks.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+        return !!end && !!ack && ack.i > end.i;
+      });
+      return ackedAfterEnd
         && log.some((e) => e.i > (ends.at(-1) ? ends.at(-1).i : -1) && e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening');
     }, { timeoutMs: 30000, label: 'ask fully acked then listening' });
+    await expectReallyPlayed(page, 'ask');
     expect((await svc.listLessons()).body.lessons, 'still no lesson row while parked on the ask').toHaveLength(0);
 
     // The child answers 语文 — a REAL pick through the real page.
@@ -129,13 +153,21 @@ test('J01 manual entry: save→refresh→query correct, no lesson row pre-seeded
       && e.msg.lesson.words.every((w) => w === '')),
     { label: 'session_ready for the entered chinese words' });
 
-    // 真实播放: every greeting sentence acks through the production player.
+    // 真实播放: every greeting sentence acks through the production player —
+    // exactly the 3 scripted ones, each acked after its own end.
     await waitWs(page, (log) => {
       const at = (dir, type) => (e) => e.dir === dir && e.type === type && e.msg.epoch === nextEpoch;
-      return log.filter(at('in', 'audio_start')).length > 0
-        && log.filter(at('in', 'audio_end')).length === log.filter(at('in', 'audio_start')).length
-        && log.filter(at('out', 'sentence_ack')).length === log.filter(at('in', 'audio_start')).length;
+      const starts = log.filter(at('in', 'audio_start'));
+      const ends = log.filter(at('in', 'audio_end'));
+      const acks = log.filter(at('out', 'sentence_ack'));
+      if (starts.length !== 3 || ends.length !== 3 || acks.length !== 3) return false;
+      return starts.every((s) => {
+        const end = ends.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+        const ack = acks.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+        return !!end && !!ack && ack.i > end.i;
+      });
     }, { timeoutMs: 30000, label: 'greeting fully acked by the production player' });
+    await expectReallyPlayed(page, 'greeting');
 
     // 真实课堂能选到: the greeting's first-word sentence names an ENTERED
     // word (the stub saw the real TTS text the server synthesized).
