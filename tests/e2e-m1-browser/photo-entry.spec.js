@@ -26,6 +26,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { test, expect } = require('@playwright/test');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
+const { installRtObserver, waitWs, controls } = require('./helpers/rt-observe');
 
 const stub = makeStubControl();
 
@@ -160,6 +161,64 @@ test('J03 recognition failure is honest; retry on the same form succeeds and nev
     expect(suns).toHaveLength(1);
     expect(suns[0].meaning).toBe('太阳');
     expect(words.filter((w) => w.word === 'moon')).toHaveLength(1);
+    expect((await stub.state()).violations).toEqual([]);
+  } finally {
+    await stub.reset();
+    await svc.stop();
+  }
+});
+
+// J02c — the journey's classroom half: the words imported from the photo
+// actually FEED a real dictation. Import sun/moon (photo-wordlist2), then
+// open the student classroom on the SAME service: english is the only
+// subject with due words, so the generic entry opens it directly (J04's
+// rule), the greeting streams through the production player with natural
+// ACKs, and its first-word sentence names an imported word — 导入后真正
+// 播放, nothing borrowed from another subject.
+test('J02c imported words feed the real classroom and actually play', async ({ page }) => {
+  test.setTimeout(90_000);
+  const svc = await startSpecService();
+  await installRtObserver(page);
+  try {
+    expect((await stub.scripts({
+      asr: [], llm: [], tts: [
+        { ms: 1200, match: '你好呀' },
+        { ms: 1200, match: '个词要写' },
+        { ms: 1200, match: '第 1 个词' },
+      ],
+      image: [{ content: fixtureReply('photo-wordlist2.reply.json') }],
+    })).ok).toBe(true);
+
+    await openPhotoTab(page, svc);
+    await recognize(page, WORDLIST2_PNG);
+    await page.getByRole('button', { name: '确认添加（2 个）' }).click();
+    await expect(page.locator('.result-banner .result-summary')).toContainText('已添加 2 个', { timeout: 30_000 });
+
+    // The classroom: generic entry, english-only due words → direct open.
+    await page.goto(svc.url + 'tutor/');
+    await page.locator('#rt-start').click();
+    await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ready'
+      && e.msg.category === 'english'
+      && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2
+      && e.msg.lesson.words.every((w) => w === '')),
+    { timeoutMs: 30000, label: 'session_ready for the imported words' });
+    expect((await controls(page)).filter((e) => e.type === 'subject_ask')).toHaveLength(0);
+
+    // 真正播放: every greeting sentence acks through the production player,
+    // and the first dictated word is one of the IMPORTED words.
+    await waitWs(page, (log) => {
+      const starts = log.filter((e) => e.dir === 'in' && e.type === 'audio_start');
+      const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
+      const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack');
+      return starts.length > 0 && ends.length === starts.length && acks.length === starts.length;
+    }, { timeoutMs: 30000, label: 'greeting fully acked by the production player' });
+    const ttsTexts = (await stub.state()).requests.filter((q) => q.category === 'tts').map((q) => q.text);
+    expect(ttsTexts.some((t) => /第 1 个词，(sun|moon)。/.test(t)), 'first dictated word is an imported word').toBe(true);
+
+    await expect(page.locator('#rt-progress-text')).toHaveText(/第 1 \/ 2 个词/);
+    const rows = (await svc.listLessons()).body.lessons;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ category: 'english', word_count: 2 });
     expect((await stub.state()).violations).toEqual([]);
   } finally {
     await stub.reset();
