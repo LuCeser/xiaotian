@@ -1411,8 +1411,14 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	if asking {
 		// Issue #55: the child's answer to the subject clarify. Shown
 		// verbatim (no tutor yet means no masking set), then bound by
-		// keyword — never an LLM classification.
-		_ = s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: transcript})
+		// keyword — never an LLM classification. The verbatim transcript
+		// still goes through the turn effect entry: a session that ended
+		// while ASR was out must not receive a stale transcript.
+		if !tm.applyTurnAt(epoch, func() error {
+			return s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: transcript})
+		}) {
+			return
+		}
 		tm.handleSubjectAnswerTurn(s, transcript, epoch, ctx, cancel)
 		return
 	}
@@ -1425,14 +1431,16 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	// Issue #12/#14: a 背默 classroom (poem or passage) masks in EVERY mode
 	// pre-check — the child reciting the original back must not put it on
 	// screen before the check reveals it.
-	display := transcript
-	tm.mu.Lock()
-	tm.tutor.appendUserRound(transcript)
-	if tm.mode != ModeTest || (tm.tutor.recitation() && !tm.tutor.checking) {
-		display = maskTranscript(transcript, tm.tutor.maskedWords())
+	if !tm.applyTurnAt(epoch, func() error {
+		display := transcript
+		tm.tutor.appendUserRound(transcript)
+		if tm.mode != ModeTest || (tm.tutor.recitation() && !tm.tutor.checking) {
+			display = maskTranscript(transcript, tm.tutor.maskedWords())
+		}
+		return s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: display})
+	}) {
+		return
 	}
-	tm.mu.Unlock()
-	_ = s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: display})
 
 	if checking {
 		// 13.1-06: the check stage's classification runs against the CHECK
