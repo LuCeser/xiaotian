@@ -33,10 +33,11 @@ const (
 
 // Entry is one human-annotated expected item. Meaning is the photo's OWN
 // meaning as read off the image (图片证据, e.g. duck=躲避 — never replaced
-// by a dictionary sense); empty means not yet annotated, in which case
-// the comparator leaves that meaning unchecked. Aliases are the
-// pre-declared accepted surfaces (the ellipsis template phrases);
-// MeaningAliases are pre-declared equivalent expressions.
+// by a dictionary sense) and is REQUIRED: an unannotated entry would let
+// a recognition pass on surface alone (PR #65 复审 P1), so Load rejects
+// it. Aliases are the pre-declared accepted surfaces (the ellipsis
+// template phrases); MeaningAliases are pre-declared equivalent
+// expressions (e.g. the photo's own bracketed senses 躲避（闪避）).
 type Entry struct {
 	Word           string   `json:"word"`
 	Kind           string   `json:"kind"`
@@ -124,6 +125,9 @@ func (p Photo) validate() error {
 		}
 		if e.Word == "" {
 			return fmt.Errorf("photo %s: entry with empty word", p.ID)
+		}
+		if e.Meaning == "" {
+			return fmt.Errorf("photo %s: entry %q has no picture-verified meaning", p.ID, e.Word)
 		}
 		byWord[e.Word] = true
 		// bySurface mirrors Compare's hit surface: entries are keyed by

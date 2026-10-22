@@ -85,6 +85,14 @@ func TestCompareWrongMeaning(t *testing.T) {
 	if len(rep.WrongMeanings) != 1 || rep.WrongMeanings[0].Word != "duck" {
 		t.Errorf("empty meaning for annotated duck: %+v, want one duck mismatch", rep.WrongMeanings)
 	}
+
+	// 照片印刷原文带括注义（躲避（闪避）／跳绳（跳过）），已事先列为
+	// 等义表达：识别按原文照抄也必须通过。
+	rows = withMeaning(baseline(p), "duck", "躲避（闪避）")
+	rows = withMeaning(rows, "skip", "跳绳（跳过）")
+	if rep := Compare(p, rows); !rep.OK(p.Rules) {
+		t.Fatalf("photo-printed bracketed meanings must pass via declared aliases: %+v", rep)
+	}
 }
 
 // TestCompareEllipsisAliases: only the pre-declared compact alias (and

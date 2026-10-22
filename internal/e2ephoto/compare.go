@@ -135,7 +135,12 @@ func Compare(p Photo, rows []Recognized) Report {
 			continue
 		}
 		if e.Meaning == "" {
-			continue // 未标注释义：暂不检查，留给人工补标
+			// 未标注释义不允许静默跳过（PR #65 复审 P1）：词面全对也
+			// 必须失败 —— Load 同样拒绝缺标注的 manifest。
+			r.WrongMeanings = append(r.WrongMeanings, WrongMeaning{
+				Word: e.Word, Want: "（图片释义未标注）", Got: rows[hitRow[i]].Meaning,
+			})
+			continue
 		}
 		have := NormalizeMeaning(rows[hitRow[i]].Meaning)
 		if have != NormalizeMeaning(e.Meaning) && !meaningAliased(e.MeaningAliases, have) {

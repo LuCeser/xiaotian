@@ -73,11 +73,32 @@ func TestNormalizeMeaning(t *testing.T) {
 		{"跳绳。", "跳绳"},
 		{" 躲避 ", "躲避"},
 		{"Duck!", "duck"},
+		{"想成为…", "想成为"}, // 尾部省略号是排版，不参与比较
 	}
 	for _, tc := range cases {
 		if got := NormalizeMeaning(tc.in); got != tc.want {
 			t.Errorf("NormalizeMeaning(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestCompareUnannotatedMeaningFails: a hit entry whose annotation lacks a
+// picture meaning must NOT be silently skipped — with every surface right
+// the run still fails, so an incomplete annotation can never假绿 (PR #65
+// 复审 P1).
+func TestCompareUnannotatedMeaningFails(t *testing.T) {
+	p := Photo{
+		ID: "synthetic", Subject: SubjectEnglish,
+		Entries: []Entry{{Word: "helpful", Kind: KindWord}}, // 释义未标注
+		MustHit: []string{"helpful"}, NoiseSubstrings: []string{"class"},
+		Rules: Rules{MinWordHits: 1, MinPhraseHits: 0, MinPrecision: 1},
+	}
+	rep := Compare(p, []Recognized{{Word: "helpful", Meaning: "有帮助的；有益的"}})
+	if rep.OK(p.Rules) {
+		t.Fatalf("hit with unannotated meaning must not pass: %+v", rep)
+	}
+	if len(rep.WrongMeanings) != 1 || rep.WrongMeanings[0].Word != "helpful" {
+		t.Errorf("wrong meanings = %+v, want exactly one helpful mismatch", rep.WrongMeanings)
 	}
 }
 

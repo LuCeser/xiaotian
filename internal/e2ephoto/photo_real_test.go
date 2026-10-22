@@ -2,6 +2,7 @@ package e2ephoto
 
 import (
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -20,8 +21,10 @@ func mustLoadReal(t *testing.T) []Photo {
 }
 
 // TestLoadRealManifest pins the plan §5 baseline for the one annotated
-// photo: 17 单词 + 13 词组, the two picture-verified meanings (duck=躲避,
-// skip=跳绳 — never a dictionary sense), the ellipsis alias table and the
+// photo: 17 单词 + 13 词组, EVERY entry's picture-verified meaning read off
+// the real photo (释义按图片人工标注 — never a dictionary sense; duck=躲避,
+// skip=跳绳 stay the pinned key senses with the photo's printed bracketed
+// forms declared as equivalents), the ellipsis alias table and the
 // first-acceptance rules fixed BEFORE any real recognition ran. A silent
 // edit to any of these must fail here rather than re-anchor expectations
 // to a recognition result.
@@ -35,7 +38,7 @@ func TestLoadRealManifest(t *testing.T) {
 		t.Errorf("subject = %q, want %q", p.Subject, SubjectEnglish)
 	}
 	words, phrases := 0, 0
-	meanings := map[string]string{}
+	seen := map[string]bool{}
 	for _, e := range p.Entries {
 		switch e.Kind {
 		case KindWord:
@@ -43,20 +46,36 @@ func TestLoadRealManifest(t *testing.T) {
 		case KindPhrase:
 			phrases++
 		}
-		if e.Meaning != "" {
-			meanings[e.Word] = e.Meaning
+		want, ok := wantMeanings[e.Word]
+		if !ok {
+			t.Errorf("entry %q is not in the pinned picture-verified meaning table", e.Word)
+			continue
+		}
+		seen[e.Word] = true
+		if e.Meaning != want {
+			t.Errorf("meaning[%s] = %q, want the picture-verified %q", e.Word, e.Meaning, want)
 		}
 	}
 	if words != 17 || phrases != 13 {
 		t.Errorf("annotation counts = %d words / %d phrases, want 17/13", words, phrases)
 	}
-	for w, m := range map[string]string{"duck": "躲避", "skip": "跳绳"} {
-		if meanings[w] != m {
-			t.Errorf("meaning[%s] = %q, want the picture-verified %q", w, meanings[w], m)
-		}
+	if len(seen) != len(wantMeanings) {
+		t.Errorf("%d entries matched the pin table, want all %d (missing entries are pinned below)",
+			len(seen), len(wantMeanings))
 	}
-	if len(meanings) != 2 {
-		t.Errorf("%d meanings annotated, want exactly the two picture-verified ones", len(meanings))
+	// 括注义等价表：照片印刷原文带括号，识别照抄原文也必须算对。
+	for w, want := range map[string][]string{
+		"duck": {"躲避（闪避）"},
+		"skip": {"跳绳（跳过）"},
+	} {
+		for _, e := range p.Entries {
+			if e.Word != w {
+				continue
+			}
+			if !reflect.DeepEqual(e.MeaningAliases, want) {
+				t.Errorf("meaningAliases[%s] = %v, want the photo-printed %v", w, e.MeaningAliases, want)
+			}
+		}
 	}
 	aliases := 0
 	for _, e := range p.Entries {
@@ -68,6 +87,42 @@ func TestLoadRealManifest(t *testing.T) {
 	if p.Rules != (Rules{MinWordHits: 16, MinPhraseHits: 12, MinPrecision: 0.95}) {
 		t.Errorf("rules = %+v, want the pinned 16/17, 12/13, 0.95", p.Rules)
 	}
+}
+
+// wantMeanings is the full human annotation read off the real photo
+// (照片人工标注): 17 单词 + 13 词组, each with the meaning PRINTED beside it
+// on the sheet — 括注／分号双义按原文照录，duck/skip 按计划钉定主要义.
+var wantMeanings = map[string]string{
+	"helpful":                  "有帮助的；有益的",
+	"friendly":                 "友好的",
+	"lovely":                   "可爱的",
+	"different":                "不同的",
+	"great":                    "好极了；很好",
+	"interesting":              "有趣的",
+	"writer":                   "作家",
+	"painter":                  "画家",
+	"smile":                    "微笑",
+	"duck":                     "躲避",
+	"skip":                     "跳绳",
+	"afraid":                   "害怕的；担心的",
+	"often":                    "经常；常常",
+	"always":                   "总是；一直",
+	"excited":                  "兴奋的；激动的",
+	"hard":                     "困难的；努力的",
+	"easy":                     "容易的",
+	"be good at":               "擅长于",
+	"help … (do) …":            "帮助（某人）做某事",
+	"learn English":            "学习英语",
+	"cheer for them":           "为他们喝彩",
+	"want to be …":             "想成为…",
+	"jump over":                "跳过",
+	"slow down":                "慢下来；减速",
+	"paint pictures":           "画画",
+	"play a guessing game":     "玩猜谜游戏",
+	"clean the blackboard":     "擦黑板",
+	"share … with each other":  "互相分享",
+	"tell interesting stories": "讲有趣的故事",
+	"skip with a long rope":    "跳长绳",
 }
 
 // TestVerifyRealMaterial checks the pinned material hash against the

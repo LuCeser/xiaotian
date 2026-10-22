@@ -23,7 +23,7 @@ const validPhoto = `{"version":1,"photos":[{` +
 
 // secondPhoto is another valid block, used to build duplicate-key cases.
 const secondPhoto = `{"id":"p2","file":"b.jpg","sha256":"` + hex64 + `","subject":"english",` +
-	`"entries":[{"word":"duck","kind":"word"}],"mustHit":["duck"],` +
+	`"entries":[{"word":"duck","kind":"word","meaning":"躲避"}],"mustHit":["duck"],` +
 	`"noiseSubstrings":["x"],"rules":{"minWordHits":1,"minPhraseHits":0,"minPrecision":1}}`
 
 func TestLoadValidation(t *testing.T) {
@@ -44,6 +44,7 @@ func TestLoadValidation(t *testing.T) {
 		{"unknown subject", strings.Replace(validPhoto, `"subject":"english"`, `"subject":"math"`, 1), "unknown subject"},
 		{"unknown kind", strings.Replace(validPhoto, `"kind":"word"`, `"kind":"line"`, 1), "unknown kind"},
 		{"empty word", strings.Replace(validPhoto, `"word":"duck"`, `"word":""`, 1), "empty word"},
+		{"entry without meaning", strings.Replace(validPhoto, `,"meaning":"躲避"`, ``, 1), "no picture-verified meaning"},
 		// normalization collisions: Compare keys entries by NormalizeWord,
 		// so Load must reject surfaces that would overwrite each other.
 		{"case-fold duplicate word", strings.Replace(validPhoto,
