@@ -40,6 +40,8 @@ function toneEntries(count) {
 
 test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-opening ack', async ({ page, request }) => {
   await installRtObserver(page);
+  const chineseWords = ['晨光', '暮色'];
+  const englishWords = ['e2e-m1-english-a', 'e2e-m1-english-b'];
 
   // Seed BOTH subjects through the real REST → Python → SQLite path (the
   // ask's precondition); a fresh per-run DB guarantees due-now cards.
@@ -49,8 +51,8 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
     });
     expect(res.ok(), 'seed ' + category).toBeTruthy();
   };
-  await seed('chinese', 'e2e-m1-subject', ['晨光', '暮色']);
-  await seed('english', 'e2e-m1-subject-en', ['e2e-m1-english-a', 'e2e-m1-english-b']);
+  await seed('chinese', 'e2e-m1-subject', chineseWords);
+  await seed('english', 'e2e-m1-subject-en', englishWords);
 
   // Ask announcement = 3 sentences, greeting = 3; click timing makes the
   // ask consume 1..3, so install 6 and assert zero stub violations at the end.
@@ -102,8 +104,28 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
     const starts = log.filter(at('in', 'audio_start', nextEpoch));
     const ends = log.filter(at('in', 'audio_end', nextEpoch));
     const acks = log.filter(at('out', 'sentence_ack', nextEpoch));
-    return starts.length > 0 && ends.length === starts.length && acks.length === starts.length;
+    if (starts.length !== 3 || ends.length !== 3 || acks.length !== 3) return false;
+    const ids = starts.map((e) => e.msg.sentence_id);
+    return new Set(ids).size === 3 && ids.every((sid) => {
+      const end = ends.find((e) => e.msg.sentence_id === sid);
+      const ack = acks.find((e) => e.msg.sentence_id === sid);
+      return end && ack && ack.i > end.i;
+    });
   }, { timeoutMs: 30000, label: 'new opening fully acked by the production player' });
+
+  // Vendor-side evidence ties those three naturally played sentences to
+  // the selected subject. The greeting must speak one of the actual Chinese
+  // fixture words; picking an English card or stopping after only the hello
+  // sentence cannot pass on the coincidental two-word count.
+  const ttsTexts = (await stubState()).requests
+    .filter((r) => r.category === 'tts').map((r) => r.text);
+  const greetingTts = ttsTexts.filter((text) => text.includes('你好呀')
+    || text.includes('个词要写') || text.includes('第 1 个词'));
+  expect(greetingTts, 'the selected classroom emits its complete three-sentence greeting').toHaveLength(3);
+  expect(greetingTts.some((text) => chineseWords.some((word) => text.includes(word))),
+    'the first dictated word comes from the selected Chinese fixture').toBe(true);
+  expect(ttsTexts.some((text) => englishWords.some((word) => text.includes(word))),
+    'no English fixture word reaches TTS').toBe(false);
 
   // The server ACCEPTED those acks: it settles listening only after the
   // opening's real playback completion (audio_end ≠ completion).

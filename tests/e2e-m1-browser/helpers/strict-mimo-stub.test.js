@@ -201,6 +201,19 @@ test('TTS streams the SSE shape with a stop terminator and [DONE]', async (t) =>
   assert.equal(stub.state.requests[0].text, '请写：苹果');
 });
 
+test('TTS sentence extraction survives a prepended production style instruction', async (t) => {
+  const { stub, port } = await withStub(t, { tts: [{ ms: 600, match: '都有要默写的词语' }] });
+  const style = 'Use a clear, teacher-like tone suitable for classroom instruction.';
+  const sentence = '语文和英语今天都有要默写的词语。';
+  const res = await json(port, 'POST', '/v1/chat/completions', {
+    ...ttsBody(sentence),
+    messages: [{ role: 'user', content: style }, ttsBody(sentence).messages[0]],
+  });
+  assert.equal(res.status, 200);
+  assert.equal(stub.state.violations.length, 0);
+  assert.equal(stub.state.requests[0].text, sentence);
+});
+
 test('control plane installs scripts, reports state and resets', async (t) => {
   const { stub, port } = await withStub(t);
   const install = await json(port, 'POST', '/__strict/scripts', { llm: [{ content: 'ok' }] });
