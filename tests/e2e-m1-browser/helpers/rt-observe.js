@@ -31,9 +31,10 @@ const RT_OBSERVE_INIT = String.raw`
   'use strict';
   if (window.__rtWsLog) return;
   var log = [];
+  var nextIndex = 0;
   window.__rtWsLog = log;
   function push(rec) {
-    rec.i = log.length;
+    rec.i = nextIndex++;
     rec.t = performance.now();
     log.push(rec);
     if (log.length > 8000) log.splice(0, 4000); // bounded, index keeps growing
@@ -159,4 +160,4 @@ async function wsStats(page) {
   });
 }
 
-module.exports = { installRtObserver, wsView, waitWs, controls, playbackTrace, wsStats };
+module.exports = { installRtObserver, wsView, waitWs, controls, playbackTrace, wsStats, RT_OBSERVE_INIT };
