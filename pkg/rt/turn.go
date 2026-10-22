@@ -1866,16 +1866,17 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		// encoding is digested by the 13-06 adapter, never here (M-1).
 		var sentSamples int
 		_, err := tm.tts.SynthesizeStream(ctx, sentence, func(pcm []byte, isFinal bool) error {
-			tm.mu.Lock()
-			if tm.epoch != epoch || tm.closed {
-				tm.mu.Unlock()
-				cancel() // late chunk: abort the provider stream too
+			if !tm.applyTurnAt(epoch, func() error {
+				sentSamples += len(pcm) / 2 // s16le mono: 2 bytes per sample
+				return s.SendAudio(pcm)
+			}) {
+				// Late chunk (the turn lost its epoch or the session closed)
+				// or a dead audio queue: abort the provider stream too — no
+				// partial sentence keeps flowing at a dead identity.
+				cancel()
 				return ErrStaleEpoch
 			}
-			sentSamples += len(pcm) / 2 // s16le mono: 2 bytes per sample
-			err := s.SendAudio(pcm)
-			tm.mu.Unlock()
-			return err
+			return nil
 		})
 		if err != nil && !errors.Is(err, ErrStaleEpoch) && tm.epochCurrent(epoch) {
 			// A genuine provider failure on a still-live announcement.
@@ -1883,16 +1884,15 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 			return ref
 		}
 
-		tm.mu.Lock()
-		if p, ok := tm.pendingPlayback[pendingKey(epoch, sentID)]; ok {
-			p.pcmSamples = sentSamples
-		}
-		stale := tm.epoch != epoch || tm.closed
-		if !stale {
-			_ = s.SendControl(AudioEndMsg{Type: TypeAudioEnd, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
-		}
-		tm.mu.Unlock()
-		if stale {
+		// The sample count and audio_end ride ONE turn effect: a late
+		// audio_end is refused whole, so a dead turn's pending entry never
+		// carries a phantom sample count either.
+		if !tm.applyTurnAt(epoch, func() error {
+			if p, ok := tm.pendingPlayback[pendingKey(epoch, sentID)]; ok {
+				p.pcmSamples = sentSamples
+			}
+			return s.SendControl(AudioEndMsg{Type: TypeAudioEnd, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
+		}) {
 			return ref // interrupted mid-announcement: the interrupt branch trims
 		}
 		ref.SentenceIDs = append(ref.SentenceIDs, sentID)
@@ -1907,7 +1907,10 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 // from the last short sentence alone. On timeout ONLY the timeout is
 // reported (ErrorMsg code=playback_ack_timeout, recoverable) plus the
 // desensitized event: no fabricated ack, no lastPlaybackCompletedAt, no
-// timer arm, no word advance.
+// timer arm, no word advance. The timeout RESULT rides the announcement's
+// own epoch through the unified turn entry: a close or interrupt that
+// cancels the wait first wins outright, and one racing the timer branch
+// suppresses the notice instead of shipping it past session_ended.
 func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpose string) (completed, timedOut bool) {
 	if ref.FinalSentenceID == "" {
 		return false, false // nothing scheduled (stale before the first sound)
@@ -1935,16 +1938,26 @@ func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpos
 		tm.mu.Unlock()
 		return done, false
 	case <-timer.C:
+		// The timeout observation is logged regardless (desensitized
+		// evidence); the RESULT — the degraded-playback notice and the
+		// timed-out report — applies only while the announcement's own
+		// epoch still owns the FSM: a close or interrupt that won the race
+		// to this branch must not ship a playback complaint for a session
+		// that already ended or moved on.
 		tm.recorder.Emit(EventPlaybackAckTimeout,
 			infra.F("purpose", purpose),
 			infra.F("wait_ms", wait.Milliseconds()),
 		)
-		_ = s.SendControl(ErrorMsg{
-			Type:        TypeError,
-			Code:        ErrCodePlaybackAckTimeout,
-			Message:     playbackAckTimeoutNotice,
-			Recoverable: true,
-		})
+		if !tm.applyTurnAt(ref.Epoch, func() error {
+			return s.SendControl(ErrorMsg{
+				Type:        TypeError,
+				Code:        ErrCodePlaybackAckTimeout,
+				Message:     playbackAckTimeoutNotice,
+				Recoverable: true,
+			})
+		}) {
+			return false, false
+		}
 		return false, true
 	}
 }
