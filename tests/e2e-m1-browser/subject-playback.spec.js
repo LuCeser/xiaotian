@@ -15,52 +15,66 @@
 'use strict';
 
 const { test, expect } = require('@playwright/test');
-const { installRtObserver, waitWs, controls, playbackTrace } = require('./helpers/rt-observe');
+const {
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
+} = require('./helpers/rt-observe');
+const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 
-const STUB = 'http://127.0.0.1:18285';
+const stub = makeStubControl();
+let svc;
+
+test.beforeEach(async () => {
+  await stub.reset();
+  svc = await startSpecService();
+});
+test.afterEach(async () => {
+  try { if (svc) await svc.stop(); } finally {
+    svc = null;
+    await stub.reset();
+  }
+});
 
 async function stubScripts(def) {
-  const res = await fetch(STUB + '/__strict/scripts', {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(def),
-  });
+  const res = await stub.scripts(def);
   expect(res.ok, 'strict stub scripts install').toBeTruthy();
 }
 
 function stubState() {
-  return fetch(STUB + '/__strict/state').then((r) => r.json());
+  return stub.state();
 }
 
 // Both sentences families get the SAME tone length: FIFO + a mid-playback
 // click make the ask's consumed count nondeterministic (1..3), so the
-// leftover ask entries must serve the greeting harmlessly. 2.5 s each keeps
-// the click ~6x inside the first ask sentence's playback.
+// leftover ask entries must serve the greeting harmlessly. The click waits
+// for a real binary frame, so 1.2 s still guarantees mid-playback selection
+// while all three greeting sentences remain well inside the ACK deadline.
 function toneEntries(count) {
-  return Array.from({ length: count }, () => ({ ms: 2500 }));
+  return Array.from({ length: count }, () => ({ ms: 1200 }));
 }
 
-test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-opening ack', async ({ page, request }) => {
+test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-opening ack', async ({ page }) => {
   await installRtObserver(page);
+  const chineseWords = ['晨光', '暮色'];
+  const englishWords = ['e2e-m1-english-a', 'e2e-m1-english-b'];
 
   // Seed BOTH subjects through the real REST → Python → SQLite path (the
   // ask's precondition); a fresh per-run DB guarantees due-now cards.
   const seed = async (category, unit, words) => {
-    const res = await request.post('/api/v1/words', {
-      data: { category, unit, entries: words.map((word) => ({ word })) },
-    });
-    expect(res.ok(), 'seed ' + category).toBeTruthy();
+    const res = await svc.seedWords({ category, unit, entries: words.map((word) => ({ word })) });
+    expect(res.ok, 'seed ' + category).toBeTruthy();
   };
-  await seed('chinese', 'e2e-m1-subject', ['晨光', '暮色']);
-  await seed('english', 'e2e-m1-subject-en', ['e2e-m1-english-a', 'e2e-m1-english-b']);
+  await seed('chinese', 'e2e-m1-subject', chineseWords);
+  await seed('english', 'e2e-m1-subject-en', englishWords);
 
   // Ask announcement = 3 sentences, greeting = 3; click timing makes the
   // ask consume 1..3, so install 6 and assert zero stub violations at the end.
   await stubScripts({ asr: [], llm: [], image: [], tts: toneEntries(6) });
   expect((await stubState()).violations).toEqual([]);
 
-  const lessonsNow = async () => (await (await request.get('/api/v1/lessons')).json()).lessons;
+  const lessonsNow = async () => (await svc.listLessons()).body.lessons;
   expect(await lessonsNow(), 'no classroom row before the session').toHaveLength(0);
 
-  await page.goto('/tutor/');
+  await page.goto(svc.url + 'tutor/');
   await page.locator('#rt-start').click();
 
   // The teacher is ASKING: subject_ask arrived and its audio is really
@@ -102,8 +116,28 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
     const starts = log.filter(at('in', 'audio_start', nextEpoch));
     const ends = log.filter(at('in', 'audio_end', nextEpoch));
     const acks = log.filter(at('out', 'sentence_ack', nextEpoch));
-    return starts.length > 0 && ends.length === starts.length && acks.length === starts.length;
+    if (starts.length !== 3 || ends.length !== 3 || acks.length !== 3) return false;
+    const ids = starts.map((e) => e.msg.sentence_id);
+    return new Set(ids).size === 3 && ids.every((sid) => {
+      const end = ends.find((e) => e.msg.sentence_id === sid);
+      const ack = acks.find((e) => e.msg.sentence_id === sid);
+      return end && ack && ack.i > end.i;
+    });
   }, { timeoutMs: 30000, label: 'new opening fully acked by the production player' });
+
+  // Vendor-side evidence ties those three naturally played sentences to
+  // the selected subject. The greeting must speak one of the actual Chinese
+  // fixture words; picking an English card or stopping after only the hello
+  // sentence cannot pass on the coincidental two-word count.
+  const ttsTexts = (await stubState()).requests
+    .filter((r) => r.category === 'tts').map((r) => r.text);
+  const greetingTts = ttsTexts.filter((text) => text.includes('你好呀')
+    || text.includes('个词要写') || text.includes('第 1 个词'));
+  expect(greetingTts, 'the selected classroom emits its complete three-sentence greeting').toHaveLength(3);
+  expect(greetingTts.some((text) => chineseWords.some((word) => text.includes(word))),
+    'the first dictated word comes from the selected Chinese fixture').toBe(true);
+  expect(ttsTexts.some((text) => englishWords.some((word) => text.includes(word))),
+    'no English fixture word reaches TTS').toBe(false);
 
   // The server ACCEPTED those acks: it settles listening only after the
   // opening's real playback completion (audio_end ≠ completion).
@@ -124,12 +158,16 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
 
   // Player-side evidence: the epoch bump stopped the old queue (stopNow),
   // the old epoch never acks, and every new-epoch sentence does.
-  const trace = await playbackTrace(page);
+  const playback = await playbackState(page);
+  const trace = playback.trace;
   expect(trace).toContain('stopNow');
   expect(trace.filter((t) => t.startsWith('ack:' + askEpoch + ':'))).toHaveLength(0);
   const newSids = after.filter(at('in', 'audio_start', nextEpoch)).map((e) => e.msg.sentence_id);
-  expect(newSids.length).toBeGreaterThan(0);
-  for (const sid of newSids) expect(trace, 'ack ' + sid).toContain('ack:' + nextEpoch + ':' + sid);
+  expect(newSids).toHaveLength(3);
+  for (const sid of newSids) {
+    expect(playedBeforeAck(trace, nextEpoch, sid), 'onended before ack for ' + sid).toBe(true);
+  }
+  expect(playback.droppedChunks, 'no audio chunk was discarded by the production player').toBe(0);
 
   // UI + persistence together (plan rule 7): the ask panel is gone, the
   // picked classroom renders its progress, and exactly ONE lesson row
@@ -144,15 +182,6 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
   await page.locator('#rt-end').click();
   await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ended'),
     { label: 'session_ended after explicit end' });
-
-  // Test-data hygiene (the later specs share this run's DB): drop the
-  // seeded units so a later classroom's due fetch sees only its own words.
-  const drop = async (category, unit) => {
-    const res = await request.delete('/api/v1/words', { data: { category, unit } });
-    expect(res.ok(), 'cleanup ' + unit).toBeTruthy();
-  };
-  await drop('chinese', 'e2e-m1-subject');
-  await drop('english', 'e2e-m1-subject-en');
 
   const state = await stubState();
   expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);

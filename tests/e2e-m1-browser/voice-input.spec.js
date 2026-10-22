@@ -19,10 +19,25 @@
 'use strict';
 
 const { test, expect } = require('@playwright/test');
-const { installRtObserver, waitWs, controls, playbackTrace, wsStats } = require('./helpers/rt-observe');
+const {
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, wsStats,
+} = require('./helpers/rt-observe');
 const { installFakeMic, micInfo, playPcm16 } = require('./helpers/fake-mic');
+const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 
-const STUB = 'http://127.0.0.1:18285';
+const stub = makeStubControl();
+let svc;
+
+test.beforeEach(async () => {
+  await stub.reset();
+  svc = await startSpecService();
+});
+test.afterEach(async () => {
+  try { if (svc) await svc.stop(); } finally {
+    svc = null;
+    await stub.reset();
+  }
+});
 
 // One deterministic corpus clip: 2 s of 440 Hz s16le @16 kHz — loud enough
 // for the server VAD, long enough for one segment (+700 ms hangover).
@@ -35,27 +50,26 @@ function tonePcm16Base64(ms = 2000, freq = 440, rate = 16000, amp = 0.6) {
   return buf.toString('base64');
 }
 
-test('synthetic mic rides the production capture path: format, silence, isolation, release', async ({ page, request }) => {
+test('synthetic mic rides the production capture path: format, silence, isolation, release', async ({ page }) => {
   await installRtObserver(page);
   await installFakeMic(page);
 
   // Single-subject vocabulary → the auto entry opens english directly (no
   // subject ask): the classroom under test is a plain dictation opening.
-  const seed = await request.post('/api/v1/words', {
-    data: { category: 'english', unit: 'e2e-m1-mic', entries: [{ word: 'e2e-m1-mic-a' }, { word: 'e2e-m1-mic-b' }] },
+  const seed = await svc.seedWords({
+    category: 'english', unit: 'e2e-m1-mic', entries: [{ word: 'e2e-m1-mic-a' }, { word: 'e2e-m1-mic-b' }],
   });
-  expect(seed.ok(), 'english seed').toBeTruthy();
+  expect(seed.ok, 'english seed').toBeTruthy();
 
   // Greeting = 3 sentences. ONE asr answer: empty transcription — silence
   // that DID segment must settle cleanly with no classification LLM call.
-  const install = await fetch(STUB + '/__strict/scripts', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ asr: [{ empty: true }], llm: [], image: [], tts: [{ ms: 1200 }, { ms: 1200 }, { ms: 1200 }] }),
+  const install = await stub.scripts({
+    asr: [{ empty: true }], llm: [], image: [], tts: [{ ms: 1200 }, { ms: 1200 }, { ms: 1200 }],
   });
   expect(install.ok, 'stub scripts install').toBeTruthy();
-  const stubState = () => fetch(STUB + '/__strict/state').then((r) => r.json());
+  const stubState = () => stub.state();
 
-  await page.goto('/tutor/');
+  await page.goto(svc.url + 'tutor/');
   await page.locator('#rt-start').click();
 
   // Format (client half): the production client declares the uplink spec.
@@ -76,7 +90,13 @@ test('synthetic mic rides the production capture path: format, silence, isolatio
     const starts = log.filter((e) => e.dir === 'in' && e.type === 'audio_start');
     const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
     const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack');
-    return starts.length > 0 && ends.length === starts.length && acks.length === starts.length;
+    if (starts.length !== 3 || ends.length !== 3 || acks.length !== 3) return false;
+    const ids = starts.map((e) => e.msg.sentence_id);
+    return new Set(ids).size === 3 && ids.every((sid) => {
+      const end = ends.find((e) => e.msg.sentence_id === sid);
+      const ack = acks.find((e) => e.msg.sentence_id === sid);
+      return end && ack && ack.i > end.i;
+    });
   }, { timeoutMs: 30000, label: 'greeting fully acked by the production player' });
   await waitWs(page, (log) => {
     const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
@@ -88,6 +108,15 @@ test('synthetic mic rides the production capture path: format, silence, isolatio
   // RMS detector (fed by PRODUCTION capture frames) must never have fired.
   await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening'));
   const controlsNow = await controls(page);
+  const openingEpoch = controlsNow.find((e) => e.dir === 'in' && e.type === 'audio_start').msg.epoch;
+  const openingSids = controlsNow.filter((e) => e.dir === 'in' && e.type === 'audio_start')
+    .map((e) => e.msg.sentence_id);
+  expect(openingSids).toHaveLength(3);
+  const playback = await playbackState(page);
+  for (const sid of openingSids) {
+    expect(playedBeforeAck(playback.trace, openingEpoch, sid), 'onended before ack for ' + sid).toBe(true);
+  }
+  expect(playback.droppedChunks, 'no audio chunk was discarded by the production player').toBe(0);
   expect(controlsNow.filter((e) => e.dir === 'out' && e.type === 'interrupt'),
     'teacher audio never leaked into the capture frames').toHaveLength(0);
   // Isolation, input→playback half: production mutes its capture graph.
@@ -130,7 +159,7 @@ test('synthetic mic rides the production capture path: format, silence, isolatio
     ctxState: window.__rtTutor.capture.audioCtx ? window.__rtTutor.capture.audioCtx.state : 'none',
   }));
   expect(teardown.capturing, 'production capture stopped').toBe(false);
-  expect(teardown.ctxState, 'the shared AudioContext survives (D-06)').not.toBe('closed');
+  expect(teardown.ctxState, 'the shared AudioContext survives in the expected state (D-06)').toBe('running');
   const info = await micInfo(page);
   expect(info.tracks.length).toBeGreaterThan(0);
   for (const t of info.tracks) expect(t.state, 'production stopped every synthetic track').toBe('ended');
@@ -142,11 +171,6 @@ test('synthetic mic rides the production capture path: format, silence, isolatio
   const second = await wsStats(page);
   expect(second.outBinaryFrames, 'no audio leaves the device after stop (privacy boundary)')
     .toBe(first.outBinaryFrames);
-
-  // Test-data hygiene: drop the seeded unit (later specs in this run share
-  // the DB and fetch due words themselves).
-  const drop = await request.delete('/api/v1/words', { data: { category: 'english', unit: 'e2e-m1-mic' } });
-  expect(drop.ok(), 'cleanup e2e-m1-mic').toBeTruthy();
 
   state = await stubState();
   expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);

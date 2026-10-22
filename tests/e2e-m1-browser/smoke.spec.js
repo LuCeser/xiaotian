@@ -21,22 +21,21 @@ function stubState() {
   });
 }
 
-test('real tutor page loads from the isolated real service', async ({ page }) => {
+test('real pages and REST use one fresh isolated service without vendor traffic', async ({ page, request }) => {
+  const reset = await fetch('http://127.0.0.1:18285/__strict/reset', { method: 'POST' });
+  expect(reset.ok, 'strict stub reset').toBeTruthy();
+
   await page.goto('/tutor/');
   await expect(page).toHaveTitle(/听说小老师/);
   await expect(page.locator('#rt-status')).toBeVisible();
   await expect(page.locator('#rt-conn')).toHaveAttribute('data-conn', 'idle');
-});
 
-test('read-only REST answers on the fresh isolated database', async ({ request }) => {
   const res = await request.get('/api/v1/lessons');
   expect(res.status()).toBe(200);
   const body = await res.json();
   expect(Array.isArray(body.lessons)).toBeTruthy(); // lessonsResponse shape
   expect(body.lessons).toHaveLength(0); // fresh temp DB: no seeded rows
-});
 
-test('page load makes no vendor traffic and the strict stub stays clean', async ({ page }) => {
   await page.goto('/');
   await page.goto('/parent.html');
   const state = await stubState();

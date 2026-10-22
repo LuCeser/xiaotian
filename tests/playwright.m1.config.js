@@ -66,24 +66,20 @@ process.env.no_proxy = process.env.NO_PROXY;
 module.exports = defineConfig({
   testDir: './e2e-m1-browser',
   // Explicit per-spec match: each plan step appends its spec file here, so
-  // the m1 line never silently picks up another suite's specs. Files run in
-  // ALPHABETICAL order (workers=1): manual-entry, photo-entry, smoke,
-  // subject-playback, subject-scope, voice-input.
-  //   - steps 11–13 files (manual-entry, photo-entry, subject-scope) launch
-  //     PER-TEST isolated services via spec-service.js (plan §2 每用例独立
-  //     数据库; the shared instance's lesson rows are first-content-wins per
-  //     subject, so classroom specs must not share them). They touch ONLY
-  //     the shared strict stub — and stubReset() it in their finally blocks
-  //     so smoke's zero-requests assertion still holds despite running
-  //     after them alphabetically.
-  //   - smoke + subject-playback + voice-input keep using the shared 18290
-  //     instance below (its temp DB is still fresh when smoke runs: the
-  //     earlier files never touch it), each cleaning its own seeded units.
+  // the m1 line never silently picks up another suite's specs (manual-entry,
+  // photo-entry, smoke, subject-playback, subject-scope, voice-input).
+  // The run-level service below serves the single read-only smoke test.
+  // Every stateful classroom test — steps 11–13 included — starts its own
+  // service, temp DB and data root through helpers/spec-service.js (plan §2
+  // 每用例独立数据库; the shared instance's lesson rows are first-content-wins
+  // per subject, so classroom specs must not share them). Specs reset the
+  // shared strict stub at their boundaries, so no assertion depends on file
+  // execution order or an earlier test's cleanup.
   testMatch: /(smoke|subject-playback|voice-input|manual-entry|subject-scope|photo-entry)\.spec\.js$/,
   timeout: 60_000,
   retries: 0,
-  // One isolated instance + one vocabulary DB: serialize (two actors
-  // mutating the same unit would interleave asserts).
+  // The strict vendor stub is shared, so its independently reset scripts
+  // remain serialized even though classroom databases are per test.
   workers: 1,
   maxFailures: process.env.CI ? undefined : 1,
   reporter: [['list']],
