@@ -397,6 +397,10 @@ type TurnManager struct {
 	// turnAnnouncementInterleave is a narrow test probe immediately before
 	// an ordinary classroom announcement checks its original epoch.
 	turnAnnouncementInterleave func()
+	// speakTurnInterleave and speakRegistrationInterleave are narrow test
+	// probes around speakTurn's initial registration.
+	speakTurnInterleave         func()
+	speakRegistrationInterleave func()
 
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
@@ -1046,6 +1050,9 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 	}
 	turnID := tm.nextTurnIDLocked()
 	tm.mu.Unlock()
+	if tm.speakTurnInterleave != nil {
+		tm.speakTurnInterleave()
+	}
 
 	ref := tm.speakTurn(s, turnID, epoch, spoken, display, purpose, ctx, cancel)
 	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
@@ -1813,30 +1820,22 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		displaySents = spokenSents
 	}
 
-	tm.mu.Lock()
-	if tm.epoch != epoch || tm.closed {
-		// Stale before the first sound: nothing registered, nothing spoken.
-		// The closed flag rides the entry check (PR #61 review round 2): a
-		// close does not bump the epoch, so the comparison alone let a dead
-		// session's announcement record history, drive the FSM to speaking
-		// and ship state=speaking past session_ended.
-		tm.mu.Unlock()
+	if !tm.applyTurnAt(epoch, func() error {
+		if tm.tutor != nil {
+			// RAW: the LLM context never sees the masked copies (Pitfall 4).
+			tm.tutor.recordTeacherReply(spoken)
+		}
+		tm.turnSentences = nil
+		tm.acked = map[string]bool{}
+		tm.state = StateSpeaking
+		tm.playbackPending = true
+		return s.SendControl(StateMsg{Type: TypeState, Value: StateSpeaking})
+	}) {
 		return PlaybackRef{}
 	}
-	if tm.tutor != nil {
-		// RAW: the LLM context never sees the masked copies (Pitfall 4).
-		tm.tutor.recordTeacherReply(spoken)
+	if tm.speakRegistrationInterleave != nil {
+		tm.speakRegistrationInterleave()
 	}
-	tm.turnSentences = nil
-	tm.acked = map[string]bool{}
-	tm.state = StateSpeaking
-	tm.playbackPending = true
-	// state=speaking rides the SAME lock hold (the lesson_update pattern):
-	// the close paths set closed under this lock and ship session_ended only
-	// after — a send after the unlock could land between the two and put a
-	// state change behind the goodbye on the wire.
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateSpeaking})
-	tm.mu.Unlock()
 
 	var ref PlaybackRef
 	ref.Epoch = epoch
@@ -1850,18 +1849,18 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		// same check (epochCurrent's predicate): a close does not bump the
 		// epoch, so the comparison alone would let a sentence of a dead
 		// session register and ship (PR #61 review).
-		tm.mu.Lock()
-		if tm.epoch != epoch || tm.closed {
-			tm.mu.Unlock()
+		if !tm.applyTurnAt(epoch, func() error {
+			tm.pendingPlayback[pendingKey(epoch, sentID)] = &pendingPlayback{purpose: purpose, done: make(chan struct{})}
+			tm.turnSentences = append(tm.turnSentences, sentenceInfo{id: sentID, text: sentence})
+			if err := s.SendControl(TeacherSentenceMsg{
+				Type: TypeTeacherSentence, TurnID: turnID, Epoch: epoch, SentenceID: sentID, Text: displaySents[i],
+			}); err != nil {
+				return err
+			}
+			return s.SendControl(AudioStartMsg{Type: TypeAudioStart, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
+		}) {
 			return ref
 		}
-		tm.pendingPlayback[pendingKey(epoch, sentID)] = &pendingPlayback{purpose: purpose, done: make(chan struct{})}
-		tm.turnSentences = append(tm.turnSentences, sentenceInfo{id: sentID, text: sentence})
-		_ = s.SendControl(TeacherSentenceMsg{
-			Type: TypeTeacherSentence, TurnID: turnID, Epoch: epoch, SentenceID: sentID, Text: displaySents[i],
-		})
-		_ = s.SendControl(AudioStartMsg{Type: TypeAudioStart, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
-		tm.mu.Unlock()
 
 		// pcm arrives as bare s16le bytes (AudioChunkFunc); the wire
 		// encoding is digested by the 13-06 adapter, never here (M-1).
