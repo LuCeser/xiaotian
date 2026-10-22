@@ -44,6 +44,25 @@ func TestLoadValidation(t *testing.T) {
 		{"unknown subject", strings.Replace(validPhoto, `"subject":"english"`, `"subject":"math"`, 1), "unknown subject"},
 		{"unknown kind", strings.Replace(validPhoto, `"kind":"word"`, `"kind":"line"`, 1), "unknown kind"},
 		{"empty word", strings.Replace(validPhoto, `"word":"duck"`, `"word":""`, 1), "empty word"},
+		// normalization collisions: Compare keys entries by NormalizeWord,
+		// so Load must reject surfaces that would overwrite each other.
+		{"case-fold duplicate word", strings.Replace(validPhoto,
+			`"entries":[{"word":"duck","kind":"word","meaning":"躲避"}]`,
+			`"entries":[{"word":"duck","kind":"word","meaning":"躲避"},`+
+				`{"word":"Duck","kind":"word","meaning":"躲避"}]`, 1), "collides"},
+		{"fullwidth duplicate word", strings.Replace(validPhoto,
+			`"entries":[{"word":"duck","kind":"word","meaning":"躲避"}]`,
+			`"entries":[{"word":"duck","kind":"word","meaning":"躲避"},`+
+				`{"word":"ｄｕｃｋ","kind":"word","meaning":"躲避"}]`, 1), "collides"},
+		{"alias collides with word", strings.Replace(validPhoto,
+			`"entries":[{"word":"duck","kind":"word","meaning":"躲避"}]`,
+			`"entries":[{"word":"duck","kind":"word","meaning":"躲避"},`+
+				`{"word":"goose","kind":"word","meaning":"鹅","aliases":["duck"]}]`, 1), "collides"},
+		{"alias collides with alias", strings.Replace(validPhoto,
+			`"entries":[{"word":"duck","kind":"word","meaning":"躲避"}]`,
+			`"entries":[{"word":"duck","kind":"word","meaning":"躲避","aliases":["fowl"]},`+
+				`{"word":"goose","kind":"word","meaning":"鹅","aliases":["fowl"]}]`, 1), "collides"},
+		{"whitespace-only word", strings.Replace(validPhoto, `"word":"duck"`, `"word":"　"`, 1), "empty surface"},
 		{"no entries", strings.Replace(validPhoto, `"entries":[{"word":"duck","kind":"word","meaning":"躲避"}],`, `"entries":[],`, 1), "no annotated entries"},
 		{"empty mustHit", strings.Replace(validPhoto, `"mustHit":["duck"]`, `"mustHit":[]`, 1), "mustHit is empty"},
 		{"mustHit not annotated", strings.Replace(validPhoto, `"mustHit":["duck"]`, `"mustHit":["goose"]`, 1), "not an annotated word"},

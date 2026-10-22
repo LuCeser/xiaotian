@@ -111,6 +111,7 @@ func Load(path string) ([]Photo, error) {
 // validate checks one photo against the enums and its own rules.
 func (p Photo) validate() error {
 	byWord := make(map[string]bool, len(p.Entries))
+	bySurface := make(map[string]string, 2*len(p.Entries))
 	words, phrases := 0, 0
 	for _, e := range p.Entries {
 		switch e.Kind {
@@ -124,10 +125,22 @@ func (p Photo) validate() error {
 		if e.Word == "" {
 			return fmt.Errorf("photo %s: entry with empty word", p.ID)
 		}
-		if byWord[e.Word] {
-			return fmt.Errorf("photo %s: duplicate word %q", p.ID, e.Word)
-		}
 		byWord[e.Word] = true
+		// bySurface mirrors Compare's hit surface: entries are keyed by
+		// NormalizeWord (word and aliases alike), so two declarations that
+		// normalize alike would silently overwrite each other's hits —
+		// reject them before one recognition row can be miscounted.
+		for _, decl := range append([]string{e.Word}, e.Aliases...) {
+			surface := NormalizeWord(decl)
+			if surface == "" {
+				return fmt.Errorf("photo %s: %q normalizes to an empty surface", p.ID, decl)
+			}
+			if prev, dup := bySurface[surface]; dup {
+				return fmt.Errorf("photo %s: %q collides with %q after normalization (both %q)",
+					p.ID, decl, prev, surface)
+			}
+			bySurface[surface] = e.Word
+		}
 	}
 	switch {
 	case p.ID == "":
