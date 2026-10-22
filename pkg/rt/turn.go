@@ -1413,7 +1413,9 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		// and the per-word countdown is NOT reset (hearing nothing is not an
 		// interaction). A server-side marker event only.
 		tm.recorder.Emit(EventSpeechEnded, infra.F("turn_id", turnID), infra.F("empty", true))
-		tm.settleListeningAt(s, epoch)
+		// Silence is not playback: the recovery lifts no playback-completion
+		// time and starts no echo tail (resumeListeningAt).
+		tm.resumeListeningAt(s, epoch)
 		return
 	}
 	if err != nil && errors.Is(err, mimo.ErrInvalidResponse) {
@@ -1428,9 +1430,10 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		return
 	}
 	if transcript == "" {
-		// Nothing usable recognized: back to listening. (13-09 refines the
-		// silent tolerance of legal-empty ASR results.)
-		tm.settleListeningAt(s, epoch)
+		// Nothing usable recognized: back to listening — without inventing a
+		// playback-completion time. (13-09 refines the silent tolerance of
+		// legal-empty ASR results.)
+		tm.resumeListeningAt(s, epoch)
 		return
 	}
 	if asking {
@@ -1998,6 +2001,26 @@ func (tm *TurnManager) settleListeningAt(s Sender, epoch uint64) bool {
 	})
 }
 
+// resumeListeningAt returns the FSM to listening after a turn that produced
+// nothing to play back (an ASR empty transcription, an unusable transcript):
+// the same protected shape as settleListeningAt, but NO playback-completion
+// stamp and no echo tail — silence must never masquerade as played audio,
+// because the 13-09 playback-relative gates key on the real thing.
+func (tm *TurnManager) resumeListeningAt(s Sender, epoch uint64) bool {
+	var value string
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.state == "" {
+		return false
+	}
+	return tm.applyTurnLocked(epoch, func() error {
+		tm.state = StateListening
+		tm.playbackPending = false
+		value = tm.effectiveClientStateLocked()
+		return s.SendControl(StateMsg{Type: TypeState, Value: value})
+	})
+}
+
 // settleAnnouncementAt is the announcement's protected ACK post-processing:
 // the settle and the onAck work it licenses (word events, timer arms) run
 // as ONE turn effect on the announcement's own epoch. onAck executes INSIDE
@@ -2029,24 +2052,35 @@ func (tm *TurnManager) settleAnnouncementAt(s Sender, epoch uint64, onAck func()
 
 // failTurn reports a turn-level failure and returns the FSM to listening —
 // but only if the turn is still current: an interrupted turn must not emit a
-// spurious error on top of the interrupt ack. Any playback waits the failed
-// announcement left behind are invalidated. Optional fields ride the error
-// event (e.g. the retry-attempts count of the invalid-response discipline).
+// spurious error on top of the interrupt ack. The error message, the
+// playback-wait invalidation, the listening recovery and the state message
+// ride ONE turn effect on the failing turn's own epoch: a close that races
+// the report either refuses it outright or lands behind the accepted pair —
+// the failure notice and the listening state can never trail session_ended.
+// Optional fields ride the error event (e.g. the retry-attempts count of
+// the invalid-response discipline), which is recorded only when the report
+// was actually accepted.
 func (tm *TurnManager) failTurn(s Sender, epoch uint64, code, message string, fields ...infra.Field) {
-	if !tm.epochCurrent(epoch) {
+	var value string
+	if !tm.applyTurnAt(epoch, func() error {
+		for _, p := range tm.pendingPlayback {
+			p.cancelWait()
+		}
+		tm.pendingPlayback = map[string]*pendingPlayback{}
+		tm.playbackPending = false
+		tm.state = StateListening
+		value = tm.effectiveClientStateLocked()
+		if err := s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: true}); err != nil {
+			return err
+		}
+		return s.SendControl(StateMsg{Type: TypeState, Value: value})
+	}) {
 		return
 	}
-	tm.sendError(s, code, message, true, fields...)
-	tm.mu.Lock()
-	for _, p := range tm.pendingPlayback {
-		p.cancelWait()
-	}
-	tm.pendingPlayback = map[string]*pendingPlayback{}
-	tm.playbackPending = false
-	tm.state = StateListening
-	value := tm.effectiveClientStateLocked()
-	tm.mu.Unlock()
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
+	all := make([]infra.Field, 0, 1+len(fields))
+	all = append(all, infra.F("code", code))
+	all = append(all, fields...)
+	tm.recorder.Emit(EventError, all...)
 }
 
 // sendError is the single error egress: coded ErrorMsg + error event. The
