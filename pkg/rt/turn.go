@@ -394,6 +394,9 @@ type TurnManager struct {
 	// dispatchInterleave is a narrow test probe after classification's
 	// liveness check and before intent dispatch.
 	dispatchInterleave func()
+	// turnAnnouncementInterleave is a narrow test probe immediately before
+	// an ordinary classroom announcement checks its original epoch.
+	turnAnnouncementInterleave func()
 
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
@@ -995,11 +998,22 @@ func (tm *TurnManager) runAnnouncement(s Sender, ctx context.Context, cancel con
 	tm.runAnnouncementDisplay(s, ctx, cancel, text, text, purpose, onAck)
 }
 
+func (tm *TurnManager) runAnnouncementAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, text, purpose string, onAck func()) {
+	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purpose, onAck)
+}
+
 // runAnnouncementDisplay is runAnnouncement with SEPARATE spoken and display
 // texts (13.1-02 student masking): spoken feeds TTS, the LLM history, and the
 // interrupt trim; display rides the teacher_sentence subtitle only.
 func (tm *TurnManager) runAnnouncementDisplay(s Sender, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
 	tm.runAnnouncementDisplayAt(s, tm.currentEpoch(), ctx, cancel, spoken, display, purpose, onAck)
+}
+
+func (tm *TurnManager) runTurnAnnouncementDisplayAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
+	if tm.turnAnnouncementInterleave != nil {
+		tm.turnAnnouncementInterleave()
+	}
+	tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purpose, onAck)
 }
 
 // currentEpoch snapshots the FSM epoch under the lock.
@@ -1512,7 +1526,7 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 			// Gentle rejection while paused: pacing stays suspended — no
 			// advance, no lesson_update, no outcome write; the classroom
 			// keeps showing paused after the reply settles.
-			tm.runAnnouncement(s, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
+			tm.runAnnouncementAt(s, epoch, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
 			return
 		}
 		tm.confirmTarget(s, ctx, cancel, turnID, epoch, reply, target)
@@ -1548,7 +1562,7 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		}
 		// LLM replies mask on screen in student mode (a leaking hint is still
 		// masked); TTS speaks the reply as generated (D-10).
-		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	case intentMeaning, intentExample:
 		// Issue #9 (ADR-0006): in the DICTATION stage these two intents
 		// may augment the classification reply with one on-demand example
@@ -1562,7 +1576,7 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 			}
 			reply = augmented
 		}
-		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	case intentPause:
 		if !tm.applyTurnAt(epoch, func() error {
 			if tm.tutor != nil {
@@ -1573,7 +1587,7 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		}) {
 			return
 		}
-		tm.runAnnouncement(s, ctx, cancel, pauseAckText(), purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, pauseAckText(), purposeChat, nil)
 	case intentResume:
 		idx, word, mode := 0, "", ""
 		if !tm.applyTurnAt(epoch, func() error {
@@ -1592,9 +1606,9 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		if mode != ModeTest {
 			display = resumeMaskedText(idx)
 		}
-		tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
 	case intentChat:
-		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	}
 }
 
@@ -1620,7 +1634,7 @@ func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, ca
 	if mode != ModeTest {
 		display = masked(idx)
 	}
-	tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
+	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
 }
 
 // confirmTarget advances the classroom through the target captured at
@@ -1667,7 +1681,7 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		// stale or closed turn never speaks the degraded reply: its classroom
 		// has moved on (runAnnouncement's own gate would kill it anyway).
 		if reply != "" && current {
-			tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, nil)
+			tm.runAnnouncementAt(s, epoch, ctx, cancel, reply, purposeChat, nil)
 		}
 		return
 	}
@@ -1766,7 +1780,7 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		// masked position; TTS still announces the word itself.
 		display = announceMaskedText(res.NewIndex+1, total)
 	}
-	tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeAnnounce, func() {
+	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeAnnounce, func() {
 		tm.announceAcked(s)
 	})
 }
