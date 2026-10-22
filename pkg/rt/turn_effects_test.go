@@ -13,8 +13,8 @@ import (
 type closeAtControlSender struct {
 	*captureSender
 	tm        *TurnManager
-	target    string
 	closeDone chan struct{}
+	target    string
 	once      sync.Once
 }
 
@@ -100,8 +100,8 @@ func TestTurnEffects(t *testing.T) {
 			t.Fatal("close did not finish")
 		}
 
-		s.captureSender.mu.Lock()
-		defer s.captureSender.mu.Unlock()
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		if len(s.controls) != 2 || string(s.controls[0]) == "" {
 			t.Fatalf("controls = %q, want state then session_ended", s.controls)
 		}
