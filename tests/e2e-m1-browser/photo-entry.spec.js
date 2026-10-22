@@ -26,7 +26,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { test, expect } = require('@playwright/test');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
-const { installRtObserver, waitWs, controls } = require('./helpers/rt-observe');
+const {
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
+} = require('./helpers/rt-observe');
 
 const stub = makeStubControl();
 
@@ -133,7 +135,16 @@ test('J03 recognition failure is honest; retry on the same form succeeds and nev
   test.setTimeout(90_000);
   const svc = await startSpecService();
   try {
+    // 旧词条保护 (review P2): a pre-existing entry UNRELATED to the photo
+    // recognition — on an empty library the「失败不落库」check below could
+    // never fail (empty vs empty); with a real row it catches a failure
+    // path that deletes or overwrites existing library content.
+    expect((await svc.seedWords({
+      category: 'english', unit: 'e2e-m1-j03-keep',
+      entries: [{ word: 'lantern', meaning: '灯笼' }],
+    })).ok).toBe(true);
     const before = await library(svc);
+    expect(before.get('lantern')).toBe('灯笼');
     await openPhotoTab(page, svc);
 
     // The provider fails through the whole client retry ladder (mimo
@@ -146,7 +157,7 @@ test('J03 recognition failure is honest; retry on the same form succeeds and nev
     await startRecognize(page, WORDLIST2_PNG);
     await expect(page.locator('.photo-row')).toHaveCount(0);
     await expect(page.locator('#parent-photo-form-error')).toContainText('识别失败', { timeout: 30_000 });
-    expect(await library(svc), '失败不产生任何写入').toEqual(before);
+    expect(await library(svc), '失败不产生任何写入、旧词条不受损').toEqual(before);
 
     // The SAME form retries with a working provider.
     expect((await stub.scripts({ asr: [], llm: [], tts: [], image: [{ content: fixtureReply('photo-wordlist2.reply.json') }] })).ok).toBe(true);
@@ -155,12 +166,16 @@ test('J03 recognition failure is honest; retry on the same form succeeds and nev
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
     await expect(page.locator('.result-banner .result-summary')).toContainText('已添加 2 个', { timeout: 30_000 });
 
-    // 不重复写入: each retried word exists exactly once with its meaning.
+    // 不重复写入: each retried word exists exactly once with its meaning,
+    // and the unrelated old entry survived both the failure and the retry
+    // commit byte-for-byte (旧词条保护, second half).
     const words = (await svc.listWords({ category: 'english' })).body.words;
     const suns = words.filter((w) => w.word === 'sun');
     expect(suns).toHaveLength(1);
     expect(suns[0].meaning).toBe('太阳');
     expect(words.filter((w) => w.word === 'moon')).toHaveLength(1);
+    expect(words.filter((w) => w.word === 'lantern').map((w) => [w.word, w.meaning]),
+      '重试提交后旧词条仍恰好一条且内容不变').toEqual([['lantern', '灯笼']]);
     expect((await stub.state()).violations).toEqual([]);
   } finally {
     await stub.reset();
@@ -204,14 +219,30 @@ test('J02c imported words feed the real classroom and actually play', async ({ p
     { timeoutMs: 30000, label: 'session_ready for the imported words' });
     expect((await controls(page)).filter((e) => e.type === 'subject_ask')).toHaveLength(0);
 
-    // 真正播放: every greeting sentence acks through the production player,
-    // and the first dictated word is one of the IMPORTED words.
+    // 真正播放: every greeting sentence acks through the production player
+    // — exactly the 3 scripted sentences, each acked after its own end on
+    // the wire — and the first dictated word is one of the IMPORTED words.
     await waitWs(page, (log) => {
       const starts = log.filter((e) => e.dir === 'in' && e.type === 'audio_start');
       const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
       const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack');
-      return starts.length > 0 && ends.length === starts.length && acks.length === starts.length;
+      if (starts.length !== 3 || ends.length !== 3 || acks.length !== 3) return false;
+      return starts.every((s) => {
+        const end = ends.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+        const ack = acks.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+        return !!end && !!ack && ack.i > end.i;
+      });
     }, { timeoutMs: 30000, label: 'greeting fully acked by the production player' });
+    // Player-side evidence (#66's helpers): the real onended of every
+    // sentence precedes its ack, and the player discarded no chunk — wire
+    // counts alone accept audio dropped before it ever played.
+    const playback = await playbackState(page);
+    const announced = (await controls(page)).filter((e) => e.dir === 'in' && e.type === 'audio_start');
+    for (const s of announced) {
+      expect(playedBeforeAck(playback.trace, s.msg.epoch, s.msg.sentence_id),
+        'onended before ack for ' + s.msg.epoch + ':' + s.msg.sentence_id).toBe(true);
+    }
+    expect(playback.droppedChunks, 'no audio chunk was discarded by the production player').toBe(0);
     const ttsTexts = (await stub.state()).requests.filter((q) => q.category === 'tts').map((q) => q.text);
     expect(ttsTexts.some((t) => /第 1 个词，(sun|moon)。/.test(t)), 'first dictated word is an imported word').toBe(true);
 
