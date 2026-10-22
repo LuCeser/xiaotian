@@ -46,11 +46,11 @@ func (tm *TurnManager) handleReadWord(s Sender, m ReadWordMsg) {
 			// classroom the FSM has since moved on to.
 			tm.orderlyCloseAt(epoch)
 		} else if completed {
-			// The timer re-arms only if the settle actually landed — a
-			// stale re-read must not arm over a newer announcement.
-			if tm.settleListeningAt(s, epoch) {
-				tm.armWordTimer()
-			}
+			// The settle and the timer re-arm are ONE protected ack
+			// post-processing on the re-read's own epoch — a stale re-read
+			// must neither settle nor arm over a newer announcement, and the
+			// arm must not re-read the epoch the FSM has moved on to.
+			tm.settleAnnouncementAt(s, epoch, tm.armWordTimerLocked)
 		}
 	}()
 }

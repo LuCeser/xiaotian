@@ -401,6 +401,9 @@ type TurnManager struct {
 	// probes around speakTurn's initial registration.
 	speakTurnInterleave         func()
 	speakRegistrationInterleave func()
+	// settleInterleave is a narrow test probe between an announcement's
+	// valid final ack (await returned) and its protected settle.
+	settleInterleave func()
 
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
@@ -885,7 +888,7 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 		display = greetingMaskedText(total)
 	}
 	go tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeGreeting, func() {
-		tm.announceAcked(s)
+		tm.announceAckedLocked()
 	})
 }
 
@@ -971,19 +974,15 @@ func (tm *TurnManager) replyDisplay(reply string) string {
 	return maskTranscript(reply, tm.tutor.maskedWords())
 }
 
-// announceAcked is the ack-armed callback of word announcements: mark the
-// announced word event and arm the (13-09) per-word timer slot.
-func (tm *TurnManager) announceAcked(s Sender) {
-	tm.mu.Lock()
-	idx := -1
+// announceAckedLocked is the word announcement's ack post-processing: the
+// announced-word event and the (13-09) per-word timer arm. Caller holds
+// tm.mu — it runs INSIDE the settle effect, so the arm reads the epoch the
+// ack belonged to instead of re-reading whatever the FSM moved on to.
+func (tm *TurnManager) announceAckedLocked() {
 	if tm.tutor != nil && tm.tutor.currentIndex < len(tm.tutor.words) {
-		idx = tm.tutor.currentIndex
+		tm.recorder.Emit(EventWordAnnounced, infra.F("word_index", tm.tutor.currentIndex))
 	}
-	tm.mu.Unlock()
-	if idx >= 0 {
-		tm.recorder.Emit(EventWordAnnounced, infra.F("word_index", idx))
-	}
-	tm.armWordTimer()
+	tm.armWordTimerLocked()
 }
 
 // armWordTimer arms the per-word confirm countdown; the implementation
@@ -1062,12 +1061,14 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 		}
 		return
 	}
-	// The settle, and the onAck work it licenses (timer arms, word events),
-	// ride the SAME epoch gate: a stale announcer must not lift the new
-	// classroom's gate or arm timers over it.
-	if tm.settleListeningAt(s, epoch) && onAck != nil {
-		onAck()
+	if tm.settleInterleave != nil {
+		tm.settleInterleave()
 	}
+	// The settle, and the onAck work it licenses (timer arms, word events),
+	// ride the SAME epoch gate as ONE effect: a close or interrupt landing
+	// between the final ack and this processing suppresses the lot — no
+	// listening revival, no timer armed at a re-read epoch.
+	tm.settleAnnouncementAt(s, epoch, onAck)
 }
 
 // runNaturalEnding speaks a natural-ending announcement (no-due words, or
@@ -1569,7 +1570,7 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		}
 		// LLM replies mask on screen in student mode (a leaking hint is still
 		// masked); TTS speaks the reply as generated (D-10).
-		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimerLocked)
 	case intentMeaning, intentExample:
 		// Issue #9 (ADR-0006): in the DICTATION stage these two intents
 		// may augment the classification reply with one on-demand example
@@ -1583,7 +1584,7 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 			}
 			reply = augmented
 		}
-		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimerLocked)
 	case intentPause:
 		if !tm.applyTurnAt(epoch, func() error {
 			if tm.tutor != nil {
@@ -1613,9 +1614,9 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		if mode != ModeTest {
 			display = resumeMaskedText(idx)
 		}
-		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimerLocked)
 	case intentChat:
-		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimerLocked)
 	}
 }
 
@@ -1641,7 +1642,7 @@ func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, ca
 	if mode != ModeTest {
 		display = masked(idx)
 	}
-	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
+	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimerLocked)
 }
 
 // confirmTarget advances the classroom through the target captured at
@@ -1788,7 +1789,7 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		display = announceMaskedText(res.NewIndex+1, total)
 	}
 	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeAnnounce, func() {
-		tm.announceAcked(s)
+		tm.announceAckedLocked()
 	})
 }
 
@@ -1973,23 +1974,57 @@ func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpos
 // state update (PR #59 review): a stale announcer — the ask whose final ack
 // landed just before a pick bumped the epoch and opened the new classroom —
 // must not lift the fresh greeting's playbackPending gate or start an echo
-// tail over it. Returns whether the settle actually took effect (callers
-// gate their onAck work on it).
+// tail over it. The state change and the state message ride ONE turn effect
+// (the lesson_update pattern): a close that races the settle either wins
+// the lock and refuses it outright or blocks until the state message is
+// queued — the message can never trail session_ended on the wire. Returns
+// whether the settle actually took effect (callers gate their onAck work on
+// it).
 func (tm *TurnManager) settleListeningAt(s Sender, epoch uint64) bool {
+	var value string
 	tm.mu.Lock()
-	if tm.state == "" || tm.closed || tm.epoch != epoch {
-		tm.mu.Unlock()
+	defer tm.mu.Unlock()
+	if tm.state == "" {
 		return false
 	}
-	tm.state = StateListening
-	tm.playbackPending = false
-	now := time.Now()
-	tm.lastPlaybackCompletedAt = now
-	tm.echoTailUntil = now.Add(time.Duration(tm.cfg.VADEchoTailMs) * time.Millisecond)
-	value := tm.effectiveClientStateLocked()
-	tm.mu.Unlock()
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
-	return true
+	return tm.applyTurnLocked(epoch, func() error {
+		tm.state = StateListening
+		tm.playbackPending = false
+		now := time.Now()
+		tm.lastPlaybackCompletedAt = now
+		tm.echoTailUntil = now.Add(time.Duration(tm.cfg.VADEchoTailMs) * time.Millisecond)
+		value = tm.effectiveClientStateLocked()
+		return s.SendControl(StateMsg{Type: TypeState, Value: value})
+	})
+}
+
+// settleAnnouncementAt is the announcement's protected ACK post-processing:
+// the settle and the onAck work it licenses (word events, timer arms) run
+// as ONE turn effect on the announcement's own epoch. onAck executes INSIDE
+// the effect — it must not take tm.mu (the locked timer/arm helpers), which
+// is what keeps the arm from re-reading an epoch the FSM has moved on to.
+func (tm *TurnManager) settleAnnouncementAt(s Sender, epoch uint64, onAck func()) bool {
+	var value string
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.state == "" {
+		return false
+	}
+	return tm.applyTurnLocked(epoch, func() error {
+		tm.state = StateListening
+		tm.playbackPending = false
+		now := time.Now()
+		tm.lastPlaybackCompletedAt = now
+		tm.echoTailUntil = now.Add(time.Duration(tm.cfg.VADEchoTailMs) * time.Millisecond)
+		value = tm.effectiveClientStateLocked()
+		if err := s.SendControl(StateMsg{Type: TypeState, Value: value}); err != nil {
+			return err
+		}
+		if onAck != nil {
+			onAck()
+		}
+		return nil
+	})
 }
 
 // failTurn reports a turn-level failure and returns the FSM to listening —
