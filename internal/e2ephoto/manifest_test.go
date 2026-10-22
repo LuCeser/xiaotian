@@ -39,6 +39,8 @@ func TestLoadValidation(t *testing.T) {
 		{"absolute file", strings.Replace(validPhoto, `"file":"a.jpg"`, `"file":"/etc/a.jpg"`, 1), "relative name"},
 		{"escaping file", strings.Replace(validPhoto, `"file":"a.jpg"`, `"file":"../a.jpg"`, 1), "relative name"},
 		{"short sha256", strings.Replace(validPhoto, hex64, "abc", 1), "64-hex"},
+		{"non-hex sha256", strings.Replace(validPhoto, hex64, strings.Repeat("z", 64), 1), "64-hex"},
+		{"sha256 with punctuation", strings.Replace(validPhoto, hex64, strings.Repeat("a-", 32), 1), "64-hex"},
 		{"unknown subject", strings.Replace(validPhoto, `"subject":"english"`, `"subject":"math"`, 1), "unknown subject"},
 		{"unknown kind", strings.Replace(validPhoto, `"kind":"word"`, `"kind":"line"`, 1), "unknown kind"},
 		{"empty word", strings.Replace(validPhoto, `"word":"duck"`, `"word":""`, 1), "empty word"},
@@ -86,6 +88,17 @@ func TestLoadValidation(t *testing.T) {
 		}
 		if len(photos) != 1 || photos[0].ID != "p" || len(photos[0].Entries) != 1 {
 			t.Fatalf("Load() = %+v, want the single photo p with one entry", photos)
+		}
+	})
+
+	t.Run("uppercase hex sha256 loads", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "manifest.json")
+		json := strings.Replace(validPhoto, hex64, strings.ToUpper(hex64), 1)
+		if err := os.WriteFile(path, []byte(json), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		if _, err := Load(path); err != nil {
+			t.Fatalf("Load(uppercase hex digest) = %v, want nil: Verify compares case-insensitively", err)
 		}
 	})
 

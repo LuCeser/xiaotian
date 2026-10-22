@@ -134,7 +134,7 @@ func (p Photo) validate() error {
 		return fmt.Errorf("empty id")
 	case p.File == "" || filepath.IsAbs(p.File) || strings.Contains(p.File, ".."):
 		return fmt.Errorf("photo %s: file %q must be a plain relative name", p.ID, p.File)
-	case len(p.SHA256) != 64:
+	case len(p.SHA256) != 64 || !isHex(p.SHA256):
 		return fmt.Errorf("photo %s: sha256 %q is not a 64-hex digest", p.ID, p.SHA256)
 	case p.Subject != SubjectEnglish && p.Subject != SubjectChinese:
 		return fmt.Errorf("photo %s: unknown subject %q", p.ID, p.Subject)
@@ -162,6 +162,19 @@ func (p Photo) validate() error {
 		}
 	}
 	return nil
+}
+
+// isHex reports whether s consists solely of hex digits, so a pinned
+// digest must be a real 64-hex SHA-256 — not any 64-character string.
+func isHex(s string) bool {
+	for _, c := range s {
+		switch {
+		case '0' <= c && c <= '9', 'a' <= c && c <= 'f', 'A' <= c && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Verify resolves File under dir and checks the material hash. A missing
