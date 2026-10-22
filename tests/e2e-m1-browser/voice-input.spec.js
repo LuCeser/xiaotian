@@ -21,8 +21,18 @@
 const { test, expect } = require('@playwright/test');
 const { installRtObserver, waitWs, controls, playbackTrace, wsStats } = require('./helpers/rt-observe');
 const { installFakeMic, micInfo, playPcm16 } = require('./helpers/fake-mic');
+const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 
-const STUB = 'http://127.0.0.1:18285';
+const stub = makeStubControl();
+let svc;
+
+test.beforeEach(async () => { svc = await startSpecService(); });
+test.afterEach(async () => {
+  try { if (svc) await svc.stop(); } finally {
+    svc = null;
+    await stub.reset();
+  }
+});
 
 // One deterministic corpus clip: 2 s of 440 Hz s16le @16 kHz — loud enough
 // for the server VAD, long enough for one segment (+700 ms hangover).
@@ -35,27 +45,26 @@ function tonePcm16Base64(ms = 2000, freq = 440, rate = 16000, amp = 0.6) {
   return buf.toString('base64');
 }
 
-test('synthetic mic rides the production capture path: format, silence, isolation, release', async ({ page, request }) => {
+test('synthetic mic rides the production capture path: format, silence, isolation, release', async ({ page }) => {
   await installRtObserver(page);
   await installFakeMic(page);
 
   // Single-subject vocabulary → the auto entry opens english directly (no
   // subject ask): the classroom under test is a plain dictation opening.
-  const seed = await request.post('/api/v1/words', {
-    data: { category: 'english', unit: 'e2e-m1-mic', entries: [{ word: 'e2e-m1-mic-a' }, { word: 'e2e-m1-mic-b' }] },
+  const seed = await svc.seedWords({
+    category: 'english', unit: 'e2e-m1-mic', entries: [{ word: 'e2e-m1-mic-a' }, { word: 'e2e-m1-mic-b' }],
   });
-  expect(seed.ok(), 'english seed').toBeTruthy();
+  expect(seed.ok, 'english seed').toBeTruthy();
 
   // Greeting = 3 sentences. ONE asr answer: empty transcription — silence
   // that DID segment must settle cleanly with no classification LLM call.
-  const install = await fetch(STUB + '/__strict/scripts', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ asr: [{ empty: true }], llm: [], image: [], tts: [{ ms: 1200 }, { ms: 1200 }, { ms: 1200 }] }),
+  const install = await stub.scripts({
+    asr: [{ empty: true }], llm: [], image: [], tts: [{ ms: 1200 }, { ms: 1200 }, { ms: 1200 }],
   });
   expect(install.ok, 'stub scripts install').toBeTruthy();
-  const stubState = () => fetch(STUB + '/__strict/state').then((r) => r.json());
+  const stubState = () => stub.state();
 
-  await page.goto('/tutor/');
+  await page.goto(svc.url + 'tutor/');
   await page.locator('#rt-start').click();
 
   // Format (client half): the production client declares the uplink spec.
@@ -142,11 +151,6 @@ test('synthetic mic rides the production capture path: format, silence, isolatio
   const second = await wsStats(page);
   expect(second.outBinaryFrames, 'no audio leaves the device after stop (privacy boundary)')
     .toBe(first.outBinaryFrames);
-
-  // Test-data hygiene: drop the seeded unit (later specs in this run share
-  // the DB and fetch due words themselves).
-  const drop = await request.delete('/api/v1/words', { data: { category: 'english', unit: 'e2e-m1-mic' } });
-  expect(drop.ok(), 'cleanup e2e-m1-mic').toBeTruthy();
 
   state = await stubState();
   expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
