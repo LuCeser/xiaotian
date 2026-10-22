@@ -24,7 +24,9 @@
 
 const { test, expect } = require('@playwright/test');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
-const { installRtObserver, waitWs, controls } = require('./helpers/rt-observe');
+const {
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
+} = require('./helpers/rt-observe');
 const { installFakeMic, playPcm16, tonePcm16Base64 } = require('./helpers/fake-mic');
 
 const stub = makeStubControl();
@@ -46,29 +48,70 @@ async function openClassroom(page, svc, readyPred, label) {
     { timeoutMs: 30000, label });
 }
 
-/** Every announcement sentence acked naturally (production onended → ack). */
-async function waitFullyAcked(page, label, timeoutMs = 30000) {
+/** The log's next insertion index — a round's waits match ONLY entries at
+ *  or after its mark, so a later round can never be satisfied by an
+ *  earlier round's messages (review P1: cumulative matching let a
+ *  still-playing or never-played round pass as "fully acked"). */
+async function logMark(page) {
+  const view = await controls(page);
+  return view.length ? view[view.length - 1].i + 1 : 0;
+}
+
+/** Every announcement sentence acked naturally (production onended → ack),
+ *  round-scoped by `from`: only entries at/after the mark belong to this
+ *  round, each acked after its own audio_end on the wire. `sentences` (when
+ *  > 0) pins the round's sentence count, so the wait completes exactly when
+ *  the WHOLE round played — never after its first sentence.
+ *  @param {{from?: number, sentences?: number, timeoutMs?: number}} [opts] */
+async function waitFullyAcked(page, label, opts = {}) {
+  const { from = 0, sentences = 0, timeoutMs = 30000 } = opts;
   await waitWs(page, (log) => {
-    const starts = log.filter((e) => e.dir === 'in' && e.type === 'audio_start');
-    const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
-    const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack');
-    return starts.length > 0 && ends.length === starts.length && acks.length === starts.length;
+    const at = (dir, type) => (e) => e.i >= from && e.dir === dir && e.type === type;
+    const starts = log.filter(at('in', 'audio_start'));
+    const ends = log.filter(at('in', 'audio_end'));
+    const acks = log.filter(at('out', 'sentence_ack'));
+    if (sentences > 0 ? starts.length !== sentences : starts.length === 0) return false;
+    if (ends.length !== starts.length || acks.length !== starts.length) return false;
+    return starts.every((s) => {
+      const end = ends.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+      const ack = acks.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+      return !!end && !!ack && ack.i > end.i;
+    });
   }, { timeoutMs, label: label + ' (fully acked)' });
 }
 
-/** After a fully-acked announcement the FSM settles listening (echo tail starts). */
-async function waitSettledListening(page, label) {
+/** After a fully-acked announcement the FSM settles listening (echo tail
+ *  starts) — the settle must follow THIS round's last audio_end, never an
+ *  earlier round's. */
+async function waitSettledListening(page, label, opts = {}) {
+  const { from = 0 } = opts;
   await waitWs(page, (log) => {
-    const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
-    const lastEnd = ends.length ? ends[ends.length - 1].i : -1;
+    const ends = log.filter((e) => e.i >= from && e.dir === 'in' && e.type === 'audio_end');
+    if (!ends.length) return false;
+    const lastEnd = ends[ends.length - 1].i;
     return log.some((e) => e.i > lastEnd && e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening');
   }, { label: label + ' (settled listening)' });
 }
 
 /** Announcement that hands control back: fully acked AND listening settled. */
-async function waitAnnouncedAndListening(page, label) {
-  await waitFullyAcked(page, label);
-  await waitSettledListening(page, label);
+async function waitAnnouncedAndListening(page, label, opts = {}) {
+  await waitFullyAcked(page, label, opts);
+  await waitSettledListening(page, label, opts);
+}
+
+/** Real-playback acceptance (#66's helpers): every sentence announced so
+ *  far on THIS page load really played — the production player's own
+ *  onended precedes each ack and it discarded no chunk (wire counts alone
+ *  accept audio that was dropped before it ever played). */
+async function expectReallyPlayed(page, label) {
+  const [playback, all] = await Promise.all([playbackState(page), controls(page)]);
+  const starts = all.filter((e) => e.dir === 'in' && e.type === 'audio_start');
+  expect(starts.length, label + ': sentences were announced').toBeGreaterThan(0);
+  for (const s of starts) {
+    expect(playedBeforeAck(playback.trace, s.msg.epoch, s.msg.sentence_id),
+      label + ': onended before ack for ' + s.msg.epoch + ':' + s.msg.sentence_id).toBe(true);
+  }
+  expect(playback.droppedChunks, label + ': no audio chunk was discarded by the production player').toBe(0);
 }
 
 test('J04 chinese-only due words: auto entry opens chinese directly, no ask, plays the first word', async ({ page }) => {
@@ -90,7 +133,8 @@ test('J04 chinese-only due words: auto entry opens chinese directly, no ask, pla
 
     // 实际播放首词: the greeting acks through the production player, and
     // its first-word sentence names a SEEDED word (科目和词表一致).
-    await waitAnnouncedAndListening(page, 'greeting');
+    await waitAnnouncedAndListening(page, 'greeting', { sentences: 3 });
+    await expectReallyPlayed(page, 'greeting');
     const ttsTexts = (await stub.state()).requests.filter((q) => q.category === 'tts').map((q) => q.text);
     expect(ttsTexts.some((t) => /第 1 个词，(晨曦|暮霭)。/.test(t)), 'first word is a seeded chinese word').toBe(true);
 
@@ -129,7 +173,8 @@ test('J07 explicit chinese entry: never overridden, no ask, only the 3 existing 
 
     // 上限 10 而只有 3 个 → 只练 3 个: no ask appeared, exactly 3 words.
     expect((await controls(page)).filter((e) => e.type === 'subject_ask')).toHaveLength(0);
-    await waitAnnouncedAndListening(page, 'greeting');
+    await waitAnnouncedAndListening(page, 'greeting', { sentences: 3 });
+    await expectReallyPlayed(page, 'greeting');
     const rows = (await svc.listLessons()).body.lessons;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ category: 'chinese', word_count: 3 });
@@ -160,7 +205,8 @@ test('J07 no due words: honest no_due_words end, no empty row, no cross-subject 
     // The explanation plays and acks naturally, THEN the session ends with
     // the no-due reason (a natural ending never settles listening — the
     // session is over) — 不建空课堂, 不跨科借词.
-    await waitFullyAcked(page, 'no-due explanation');
+    await waitFullyAcked(page, 'no-due explanation', { sentences: 1 });
+    await expectReallyPlayed(page, 'no-due explanation');
     await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ended' && e.msg.reason === 'no_due_words'),
       { timeoutMs: 30000, label: 'session_ended(no_due_words) after the acked explanation' });
     expect((await svc.listLessons()).body.lessons, 'no empty lesson row').toHaveLength(0);
@@ -180,7 +226,8 @@ test('J07 no due words: honest no_due_words end, no empty row, no cross-subject 
     await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ready'
       && e.msg.category === 'english' && e.msg.lesson.words.length === 0),
     { timeoutMs: 30000, label: 'auto with nothing due lands on the english no-due end' });
-    await waitFullyAcked(page, 'second no-due explanation');
+    await waitFullyAcked(page, 'second no-due explanation', { sentences: 1 });
+    await expectReallyPlayed(page, 'second no-due explanation');
     await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ended' && e.msg.reason === 'no_due_words'),
       { timeoutMs: 30000, label: 'second session_ended(no_due_words)' });
     expect((await svc.listLessons()).body.lessons).toHaveLength(0);
@@ -224,25 +271,37 @@ test('J06 voice subject answer: ambiguous keeps asking (no LLM), 英语 binds en
     await page.goto(svc.url + 'tutor/');
     await page.locator('#rt-start').click();
     await expect(page.locator('#rt-subject-ask')).toBeVisible();
-    await waitAnnouncedAndListening(page, 'ask');
+    await waitAnnouncedAndListening(page, 'ask', { sentences: 3 });
+    await expectReallyPlayed(page, 'ask');
 
-    // The child's FIRST answer — ambiguous. Respect the production echo
-    // tail (500 ms) before speaking; then the production capture graph
-    // carries the tone to the server VAD and ONE scripted ASR call runs.
+    // The child's FIRST answer — ambiguous. The round mark is taken BEFORE
+    // the answer plays: everything announced after it is the retry (the ask
+    // round already settled), and the retry wait matches ONLY from there —
+    // the ask's messages can never satisfy it, so an unplayed or
+    // still-playing retry goes red. Respect the production echo tail
+    // (500 ms) before speaking; the capture graph carries the tone to the
+    // server VAD and ONE scripted ASR call runs.
+    const retryFrom = await logMark(page);
     await page.waitForTimeout(700);
     await playPcm16(page, tonePcm16Base64(2000), 16000);
     await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'transcript' && e.msg.text === '都可以'),
       { timeoutMs: 20000, label: "transcript of the ambiguous answer" });
     // The retry rides the SAME epoch (no interrupt handshake for a re-ask),
-    // plays fully and hands control back; the ask stays parked.
-    await waitAnnouncedAndListening(page, 'retry');
+    // plays fully — both sentences — and hands control back; the ask stays
+    // parked.
+    await waitAnnouncedAndListening(page, 'retry', { from: retryFrom, sentences: 2 });
+    await expectReallyPlayed(page, 'retry');
     const [askEpoch] = (await controls(page)).filter((e) => e.dir === 'in' && e.type === 'audio_start')
       .map((e) => e.msg.epoch);
     expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'interrupt_ack')).toHaveLength(0);
     expect((await svc.listLessons()).body.lessons, 'ambiguous answer creates no classroom').toHaveLength(0);
     await expect(page.locator('#rt-subject-ask')).toBeVisible();
 
-    // The SECOND answer — 英语 — binds through the real voice path.
+    // The SECOND answer — 英语 — binds through the real voice path. The
+    // mark is taken BEFORE speaking: everything announced after it is the
+    // english greeting, so the greeting wait below cannot race past the
+    // first sentence nor borrow an earlier round's evidence.
+    const greetingFrom = await logMark(page);
     await page.waitForTimeout(700);
     await playPcm16(page, tonePcm16Base64(2000), 16000);
     await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'transcript' && e.msg.text === '英语'),
@@ -255,15 +314,23 @@ test('J06 voice subject answer: ambiguous keeps asking (no LLM), 英语 binds en
       && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2
       && e.msg.lesson.words.every((w) => w === '')),
     { timeoutMs: 30000, label: 'session_ready for the voice-picked english classroom' });
-    await waitAnnouncedAndListening(page, 'greeting');
+    await waitAnnouncedAndListening(page, 'greeting', { from: greetingFrom, sentences: 3 });
+    await expectReallyPlayed(page, 'greeting');
 
     // The binding was mechanical: two turns (one turn_start per utterance),
-    // exactly two ASR calls, ZERO classification-LLM calls.
+    // exactly two ASR calls, ZERO classification-LLM calls. Every answer
+    // waited for a settled round, so the child NEVER interrupted the
+    // teacher; and all 8 scripted TTS sentences (ask 3 + retry 2 + greeting
+    // 3) were really spoken — none left unconsumed.
     const all = await controls(page);
     expect(all.filter((e) => e.type === 'turn_start')).toHaveLength(2);
+    expect(all.filter((e) => e.dir === 'out' && e.type === 'interrupt'),
+      '每轮回答都等到 listening，客户端从未打断').toHaveLength(0);
     const state = await stub.state();
     expect(state.requests.filter((q) => q.category === 'asr')).toHaveLength(2);
     expect(state.requests.filter((q) => q.category === 'llm'), '选科从不调用分类 LLM').toHaveLength(0);
+    expect(state.requests.filter((q) => q.category === 'tts'),
+      '询问3句+重问2句+开场3句的 TTS 脚本全部真实消费').toHaveLength(8);
 
     await expect(page.locator('#rt-subject-ask')).toBeHidden();
     const rows = (await svc.listLessons()).body.lessons;
