@@ -34,13 +34,26 @@ type asrScript struct {
 // fakeASR answers Transcribe calls from a FIFO script queue and records the
 // byte counts it was fed.
 type fakeASR struct {
-	script   []asrScript
-	fedBytes []int // len(pcm) per call, in call order
-	mu       sync.Mutex
+	holdEntered chan struct{}
+	holdRelease chan struct{}
+	script      []asrScript
+	fedBytes    []int // len(pcm) per call, in call order
+	mu          sync.Mutex
 }
 
 func newFakeASR(script ...asrScript) *fakeASR {
 	return &fakeASR{script: append([]asrScript(nil), script...)}
+}
+
+// gateNextTranscribe holds the next provider result after the request has
+// entered Transcribe. Tests release the actual ASR return after moving the
+// session, instead of approximating that ordering with a sleep.
+func (f *fakeASR) gateNextTranscribe() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holdEntered = make(chan struct{})
+	f.holdRelease = make(chan struct{})
+	return f.holdEntered, f.holdRelease
 }
 
 // Transcribe implements ASRProvider.
@@ -53,7 +66,13 @@ func (f *fakeASR) Transcribe(_ context.Context, pcm []byte) (string, error) {
 	}
 	head := f.script[0]
 	f.script = f.script[1:]
+	entered, release := f.holdEntered, f.holdRelease
+	f.holdEntered, f.holdRelease = nil, nil
 	f.mu.Unlock()
+	if entered != nil {
+		close(entered)
+		<-release
+	}
 	// The delay sleeps OUTSIDE the mutex (a second scripted call must not
 	// block on the sleeper) and ignores ctx on purpose: the point is a reply
 	// that arrives after cancellation.

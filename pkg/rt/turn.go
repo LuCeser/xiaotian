@@ -1345,9 +1345,7 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	checking := tm.tutor != nil && tm.tutor.checking
 	epoch := tm.epoch
 	turnID := tm.nextTurnIDLocked()
-	tm.state = StateProcessing
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.turnCancel = cancel
 	target := TurnTarget{WordIndex: -1}
 	if !checking && tm.tutor != nil &&
 		tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
@@ -1361,13 +1359,26 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	// processing flip — classification judges the classroom as it stood
 	// when the child spoke, never mid-turn state.
 	turnCtx := tm.captureDictationTurnContextLocked(turnID, epoch, checking, target)
+	started := tm.applyTurnLocked(epoch, func() error {
+		if err := s.SendControl(StateMsg{Type: TypeState, Value: StateProcessing}); err != nil {
+			return err
+		}
+		if err := s.SendControl(TurnStartMsg{Type: TypeTurnStart, TurnID: turnID, Epoch: epoch}); err != nil {
+			return err
+		}
+		tm.state = StateProcessing
+		tm.turnCancel = cancel
+		return nil
+	})
 	tm.mu.Unlock()
+	if !started {
+		cancel()
+		return
+	}
 	defer cancel()
 
 	tm.recorder.Emit(EventSpeechStarted, infra.F("turn_id", turnID))
 	tm.recorder.Emit(EventSpeechEnded, infra.F("turn_id", turnID))
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateProcessing})
-	_ = s.SendControl(TurnStartMsg{Type: TypeTurnStart, TurnID: turnID, Epoch: epoch})
 
 	attempts := 1
 	transcript, err := tm.asr.Transcribe(ctx, segment)
