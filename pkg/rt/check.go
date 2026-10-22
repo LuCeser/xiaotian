@@ -1077,31 +1077,51 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 // "never checked" and a later session can reopen the correction path.
 // ---------------------------------------------------------------------------
 
-// uncheckedCloseFallback runs synchronously in the CLOSE path's goroutine
-// (the server-side write completes after the connection is gone); it sends
-// NO client messages — the connection is going away. Idempotency (T-13.1-09):
-// CompleteCheck's first-commit branch is the ONLY write point — the DB latch
-// refuses any second submission, and replay/conflict branches do nothing, so
-// repeated closes never double-write the review. A failed write is logged as
-// an error event, never retried blindly (S-05): the row keeps
-// stage='checking' and the next session's resume path still finds it intact.
-func (tm *TurnManager) uncheckedCloseFallback() {
+// uncheckedCloseSnapshot is the immutable input of the D-03 close-path
+// fallback: copied under tm.mu while the classroom is still open, so the
+// lock-free persistence never reads or mutates the closed session's tutor.
+type uncheckedCloseSnapshot struct {
+	lessonID string
+	version  int
+	category string
+	poem     bool
+	words    []lesson.Word
+}
+
+// ownUncheckedFallback grants the ONE-TIME close-path fallback ownership to
+// this caller (the first closer wins) and snapshots its immutable input in
+// the same lock hold. false means another close already owns the fallback,
+// the session is already closed, or the classroom was never eligible (no
+// tutor, or not in checking).
+func (tm *TurnManager) ownUncheckedFallback() (uncheckedCloseSnapshot, bool) {
 	tm.mu.Lock()
-	eligible := tm.tutor != nil && !tm.closed && tm.tutor.checking
-	isPoem := eligible && tm.tutor.poem != nil
-	var lessonID string
-	var version int
-	var category string
-	if eligible {
-		lessonID = tm.tutor.lessonID
-		version = tm.tutor.version
-		category = tm.tutor.category
+	defer tm.mu.Unlock()
+	if tm.closeOwned || tm.closed || tm.tutor == nil || !tm.tutor.checking {
+		return uncheckedCloseSnapshot{}, false
 	}
-	tm.mu.Unlock()
-	if !eligible {
-		return
-	}
-	if isPoem {
+	tm.closeOwned = true
+	t := tm.tutor
+	return uncheckedCloseSnapshot{
+		lessonID: t.lessonID,
+		version:  t.version,
+		category: t.category,
+		poem:     t.poem != nil,
+		words:    append([]lesson.Word(nil), t.words...),
+	}, true
+}
+
+// persistUncheckedFallback runs the OWNED fallback OUTSIDE tm.mu once the
+// session is already marked closed (the server-side write completes after
+// the connection is gone); it sends NO client messages, and the dead tutor
+// is neither read nor written — the snapshot plus the STORED row are the
+// authority. Idempotency (T-13.1-09): CompleteCheck's first-commit branch is
+// the ONLY write point — the DB latch refuses any second submission, and
+// replay/conflict branches do nothing, so repeated closes never double-write
+// the review. A failed write is logged as an error event, never retried
+// blindly (S-05): the row keeps stage='checking' and the next session's
+// resume path still finds it intact.
+func (tm *TurnManager) persistUncheckedFallback(snap uncheckedCloseSnapshot) {
+	if snap.poem {
 		// A poem has no behavior-derived fallback. Keep stage=checking so a
 		// refresh or disconnect reopens the same ordered lines and preserves
 		// the human confirmation work already stored on the lesson row.
@@ -1110,7 +1130,7 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 	}
 
 	ctx := context.Background()
-	res, err := tm.exec.CompleteCheck(ctx, lessonID, version, lessonID+"-complete-check", true)
+	res, err := tm.exec.CompleteCheck(ctx, snap.lessonID, snap.version, snap.lessonID+"-complete-check", true)
 	if err != nil {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeProviderFailed),
@@ -1118,12 +1138,6 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 		)
 		return
 	}
-	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checking = false
-	tm.tutor.completed = true
-	words := append([]lesson.Word(nil), tm.tutor.words...)
-	tm.mu.Unlock()
 	if res.Idempotent {
 		// The latch already fell (a racing check_submit or a prior close
 		// wrote first): never a second SubmitReview (T-13.1-09).
@@ -1132,7 +1146,7 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 
 	// First commit: the fallback batch derives from the STORED outcomes
 	// readback — never from session memory (the row is the authority).
-	ratings := uncheckedRatings(words, res.Outcomes)
+	ratings := uncheckedRatings(snap.words, res.Outcomes)
 	requested, updated := len(ratings), 0
 	if len(ratings) > 0 {
 		// 13.3-01 receipt: the fallback's own kind, keyed by the CompleteCheck
@@ -1143,8 +1157,8 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 		requestedSet := sortedWordSet(ratings)
 		if tm.cfg.Receipts != nil {
 			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
-				LessonID:  lessonID,
-				RequestID: lessonID + "-complete-check",
+				LessonID:  snap.lessonID,
+				RequestID: snap.lessonID + "-complete-check",
 				Kind:      lesson.ReceiptKindUncheckedFallback,
 				Requested: requestedSet,
 			})
@@ -1155,7 +1169,7 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 			}
 		}
 
-		wres, werr := tm.cfg.Words.SubmitReview(ctx, ratings, category)
+		wres, werr := tm.cfg.Words.SubmitReview(ctx, ratings, snap.category)
 		switch {
 		case werr != nil:
 			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))

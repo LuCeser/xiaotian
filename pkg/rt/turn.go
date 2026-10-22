@@ -405,6 +405,10 @@ type TurnManager struct {
 	// valid final ack (await returned) and its protected settle.
 	settleInterleave func()
 
+	// closeOwned marks the close path that won the ONE-TIME D-03 fallback
+	// ownership (uncheckedCloseFallback). Guarded by mu.
+	closeOwned bool
+
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
 	// consumes them; close/cancel/over-cap/new-upload all discard.
@@ -1213,19 +1217,25 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 	})
 }
 
-// handleEndSession is the explicit goodbye (RT-10/SC7 server half). The D-03
-// fallback (13.1-04) runs BEFORE the state reset: a session ended mid-check
-// persists its downgraded ratings once (the write needs the live tutor). PR
-// #61 review: closed is set BEFORE session_ended ships — the flag (under
-// tm.mu) is what every advance-side gate checks, and the lesson_update
-// enqueue in advanceTarget shares that lock, so a racing advance's wire
-// output lands strictly before the goodbye, or (when it lost the race) is
-// suppressed entirely. session_ended stays the terminal control message.
+// handleEndSession is the explicit goodbye (RT-10/SC7 server half). The
+// close owns the D-03 fallback (13.1-04) ONCE: the immutable snapshot is
+// taken under tm.mu first, then the session is marked closed and the
+// goodbye ships, and only afterwards does the lock-free persistence run —
+// every in-flight callback that returns during that write finds closed set
+// and stays silent, and the dead tutor is never touched again. PR #61
+// review: closed is set BEFORE session_ended ships — the flag (under tm.mu)
+// is what every advance-side gate checks, and the lesson_update enqueue in
+// advanceTarget shares that lock, so a racing advance's wire output lands
+// strictly before the goodbye, or (when it lost the race) is suppressed
+// entirely. session_ended stays the terminal control message.
 func (tm *TurnManager) handleEndSession(s Sender) {
-	tm.uncheckedCloseFallback()
+	snap, owned := tm.ownUncheckedFallback()
 	tm.internalClose()
 	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonClientEnd})
 	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+	if owned {
+		tm.persistUncheckedFallback(snap)
+	}
 }
 
 // internalClose cancels in-flight work, invalidates playback waits,
@@ -1282,19 +1292,29 @@ func (tm *TurnManager) orderlyCloseAt(epoch uint64) {
 
 // Close implements SessionManager: the transport read loop exited for any
 // reason (disconnect, deadline, read error). Idempotent — an end_session
-// path already closed the session. The D-03 fallback (13.1-04) runs BEFORE
-// the state reset: a disconnect mid-check persists its downgraded ratings
-// once (the write needs the live tutor).
+// path already closed the session. The D-03 fallback (13.1-04) rides the
+// same ONE-TIME close ownership as handleEndSession: this closer snapshots
+// before marking closed, and persists afterwards even when a concurrent
+// goodbye won the race to set the flag — ownership, not the flag, decides
+// who persists.
 func (tm *TurnManager) Close(Sender) {
+	snap, owned := tm.ownUncheckedFallback()
 	tm.mu.Lock()
 	already := tm.closed
 	tm.mu.Unlock()
 	if already {
+		if owned {
+			// A concurrent goodbye closed first but did not own the
+			// fallback: the snapshot is still this closer's to persist.
+			tm.persistUncheckedFallback(snap)
+		}
 		return
 	}
-	tm.uncheckedCloseFallback()
 	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 	tm.internalClose()
+	if owned {
+		tm.persistUncheckedFallback(snap)
+	}
 }
 
 // ---------------------------------------------------------------------------
