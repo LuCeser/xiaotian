@@ -20,7 +20,7 @@
 
 const { test, expect } = require('@playwright/test');
 const {
-  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, wsStats,
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, wsStats, wsView,
 } = require('./helpers/rt-observe');
 const { installFakeMic, micInfo, playPcm16 } = require('./helpers/fake-mic');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
@@ -134,18 +134,29 @@ test('synthetic mic rides the production capture path: format, silence, isolatio
   // declared container to the vendor — the strict stub validates fmt/data
   // invariants itself, so a lying format fails there, not here.
   const clipMs = 2000;
+  // clipAnchor (the last log index before the clip plays) scopes the turn
+  // assertions below to THIS spoken turn: an event with i > anchor was
+  // recorded after the audio went out, so the opening's own listening can
+  // never stand in for the spoken turn (review #66: with no processing at
+  // all, a lastProc of -1 let the historical listening "settle" a turn that
+  // never happened server-side).
+  const preClip = await wsView(page);
+  const clipAnchor = preClip.length ? preClip[preClip.length - 1].i : -1;
   await playPcm16(page, tonePcm16Base64(clipMs), 16000);
 
   const wavOk = (r) => r.category === 'asr' && r.sampleRateHz === 16000 && r.channels === 1
     && r.bitsPerSample === 16 && r.durationMs >= clipMs && r.durationMs <= clipMs + 2500;
   await waitWs(page, () => stubState().then((s) => s.requests.some(wavOk)), { timeoutMs: 15000, label: 'asr saw valid 16k/1ch/s16 WAV' });
-  // The turn was real server-side (processing → the empty answer settles
-  // listening again), and it never needed the classification LLM.
+  // The turn was real server-side: a processing state AFTER the clip must
+  // exist, and only a listening after that processing settles the turn —
+  // no fallback to a pre-clip state. It never needed the classification
+  // LLM either.
   await waitWs(page, (log) => {
-    const proc = log.filter((e) => e.dir === 'in' && e.type === 'state' && e.msg.value === 'processing');
-    const lastProc = proc.length ? proc[proc.length - 1].i : -1;
-    return log.some((e) => e.i > lastProc && e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening');
-  }, { label: 'the spoken turn settled back to listening' });
+    const proc = log.find((e) => e.i > clipAnchor && e.dir === 'in' && e.type === 'state'
+      && e.msg.value === 'processing');
+    if (!proc) return false;
+    return log.some((e) => e.i > proc.i && e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening');
+  }, { label: 'the spoken turn reached processing, then settled back to listening' });
   state = await stubState();
   expect(state.requests.filter((r) => r.category === 'asr')).toHaveLength(1);
   expect(state.requests.filter((r) => r.category === 'llm'), 'empty transcription never classifies').toHaveLength(0);
