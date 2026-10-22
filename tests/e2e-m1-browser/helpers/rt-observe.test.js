@@ -11,7 +11,7 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { test } = require('node:test');
-const { RT_OBSERVE_INIT } = require('./rt-observe.js');
+const { playedBeforeAck, RT_OBSERVE_INIT } = require('./rt-observe.js');
 
 // Boot the observer init script in a bare sandbox with a fake NATIVE
 // WebSocket: just enough surface for the wrapper to install (constructor,
@@ -55,4 +55,23 @@ test('entry numbers stay strictly monotonic across log truncation', () => {
   assert.equal(log[log.length - 1].i, N - 1, 'youngest entry carries the global counter');
   // Read-only wrapper: every frame really reached the native socket.
   assert.equal(ws.sent.length, N);
+});
+
+test('WS counts alone accept missing playback, but natural-playback evidence rejects it', () => {
+  const sid = 'opening-1';
+  const wire = [
+    { dir: 'in', type: 'audio_start', msg: { epoch: 4, sentence_id: sid } },
+    { dir: 'in', type: 'audio_end', msg: { epoch: 4, sentence_id: sid } },
+    { dir: 'out', type: 'sentence_ack', msg: { epoch: 4, sentence_id: sid } },
+  ];
+  const oldCountAcceptance = wire.filter((e) => e.type === 'audio_start').length > 0
+    && wire.filter((e) => e.type === 'audio_end').length === wire.filter((e) => e.type === 'audio_start').length
+    && wire.filter((e) => e.type === 'sentence_ack').length === wire.filter((e) => e.type === 'audio_start').length;
+
+  assert.equal(oldCountAcceptance, true, '旧验收会把完全未播放的句子判为通过');
+  assert.equal(playedBeforeAck(['ack:4:' + sid], 4, sid), false,
+    '缺少 onended 时新验收必须失败');
+  assert.equal(playedBeforeAck(['ack:4:' + sid, 'onended:4:' + sid], 4, sid), false,
+    'onended 晚于 ack 时新验收必须失败');
+  assert.equal(playedBeforeAck(['onended:4:' + sid, 'ack:4:' + sid], 4, sid), true);
 });

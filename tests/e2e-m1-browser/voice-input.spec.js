@@ -19,7 +19,9 @@
 'use strict';
 
 const { test, expect } = require('@playwright/test');
-const { installRtObserver, waitWs, controls, playbackTrace, wsStats } = require('./helpers/rt-observe');
+const {
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, wsStats,
+} = require('./helpers/rt-observe');
 const { installFakeMic, micInfo, playPcm16 } = require('./helpers/fake-mic');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 
@@ -88,7 +90,13 @@ test('synthetic mic rides the production capture path: format, silence, isolatio
     const starts = log.filter((e) => e.dir === 'in' && e.type === 'audio_start');
     const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
     const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack');
-    return starts.length > 0 && ends.length === starts.length && acks.length === starts.length;
+    if (starts.length !== 3 || ends.length !== 3 || acks.length !== 3) return false;
+    const ids = starts.map((e) => e.msg.sentence_id);
+    return new Set(ids).size === 3 && ids.every((sid) => {
+      const end = ends.find((e) => e.msg.sentence_id === sid);
+      const ack = acks.find((e) => e.msg.sentence_id === sid);
+      return end && ack && ack.i > end.i;
+    });
   }, { timeoutMs: 30000, label: 'greeting fully acked by the production player' });
   await waitWs(page, (log) => {
     const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
@@ -100,6 +108,15 @@ test('synthetic mic rides the production capture path: format, silence, isolatio
   // RMS detector (fed by PRODUCTION capture frames) must never have fired.
   await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening'));
   const controlsNow = await controls(page);
+  const openingEpoch = controlsNow.find((e) => e.dir === 'in' && e.type === 'audio_start').msg.epoch;
+  const openingSids = controlsNow.filter((e) => e.dir === 'in' && e.type === 'audio_start')
+    .map((e) => e.msg.sentence_id);
+  expect(openingSids).toHaveLength(3);
+  const playback = await playbackState(page);
+  for (const sid of openingSids) {
+    expect(playedBeforeAck(playback.trace, openingEpoch, sid), 'onended before ack for ' + sid).toBe(true);
+  }
+  expect(playback.droppedChunks, 'no audio chunk was discarded by the production player').toBe(0);
   expect(controlsNow.filter((e) => e.dir === 'out' && e.type === 'interrupt'),
     'teacher audio never leaked into the capture frames').toHaveLength(0);
   // Isolation, input→playback half: production mutes its capture graph.
@@ -142,7 +159,7 @@ test('synthetic mic rides the production capture path: format, silence, isolatio
     ctxState: window.__rtTutor.capture.audioCtx ? window.__rtTutor.capture.audioCtx.state : 'none',
   }));
   expect(teardown.capturing, 'production capture stopped').toBe(false);
-  expect(teardown.ctxState, 'the shared AudioContext survives (D-06)').not.toBe('closed');
+  expect(teardown.ctxState, 'the shared AudioContext survives in the expected state (D-06)').toBe('running');
   const info = await micInfo(page);
   expect(info.tracks.length).toBeGreaterThan(0);
   for (const t of info.tracks) expect(t.state, 'production stopped every synthetic track').toBe('ended');

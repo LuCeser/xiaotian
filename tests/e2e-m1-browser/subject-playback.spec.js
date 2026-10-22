@@ -15,7 +15,9 @@
 'use strict';
 
 const { test, expect } = require('@playwright/test');
-const { installRtObserver, waitWs, controls, playbackTrace } = require('./helpers/rt-observe');
+const {
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
+} = require('./helpers/rt-observe');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 
 const stub = makeStubControl();
@@ -156,12 +158,16 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
 
   // Player-side evidence: the epoch bump stopped the old queue (stopNow),
   // the old epoch never acks, and every new-epoch sentence does.
-  const trace = await playbackTrace(page);
+  const playback = await playbackState(page);
+  const trace = playback.trace;
   expect(trace).toContain('stopNow');
   expect(trace.filter((t) => t.startsWith('ack:' + askEpoch + ':'))).toHaveLength(0);
   const newSids = after.filter(at('in', 'audio_start', nextEpoch)).map((e) => e.msg.sentence_id);
-  expect(newSids.length).toBeGreaterThan(0);
-  for (const sid of newSids) expect(trace, 'ack ' + sid).toContain('ack:' + nextEpoch + ':' + sid);
+  expect(newSids).toHaveLength(3);
+  for (const sid of newSids) {
+    expect(playedBeforeAck(trace, nextEpoch, sid), 'onended before ack for ' + sid).toBe(true);
+  }
+  expect(playback.droppedChunks, 'no audio chunk was discarded by the production player').toBe(0);
 
   // UI + persistence together (plan rule 7): the ask panel is gone, the
   // picked classroom renders its progress, and exactly ONE lesson row

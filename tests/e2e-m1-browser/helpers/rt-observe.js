@@ -16,8 +16,8 @@
 //     (plain closures allowed); on timeout it dumps the view tail + the
 //     production playback trace for diagnosis.
 //   - controls(page) fetches the non-binary entries with text controls
-//     parsed into .msg; playbackTrace(page) reads the production player's
-//     own ordered trace (rt-playback.js — the only legitimate ACK evidence).
+//     parsed into .msg; playbackState(page) reads the production player's
+//     ordered trace and dropped-chunk counter.
 //
 // The log lives on window.__rtWsLog; entries are
 //   {i, t, dir:'in'|'out'|'evt', kind:'text'|'binary'|'open'|'close',
@@ -146,6 +146,27 @@ async function playbackTrace(page) {
     : []);
 }
 
+/** Production playback evidence needed by browser acceptance assertions. */
+async function playbackState(page) {
+  return page.evaluate(() => {
+    const playback = window.__rtTutor && window.__rtTutor.playback;
+    return {
+      trace: playback && Array.isArray(playback.trace) ? playback.trace.slice() : [],
+      droppedChunks: playback && Number.isFinite(playback.droppedChunks)
+        ? playback.droppedChunks : -1,
+    };
+  });
+}
+
+/** True only when one sentence's real source completion precedes its ACK. */
+function playedBeforeAck(trace, epoch, sentenceId) {
+  const onended = 'onended:' + epoch + ':' + sentenceId;
+  const ack = 'ack:' + epoch + ':' + sentenceId;
+  const lastOnended = trace.lastIndexOf(onended);
+  const ackAt = trace.indexOf(ack);
+  return lastOnended >= 0 && ackAt > lastOnended;
+}
+
 /** Aggregate binary-frame counters (uplink freeze/release evidence). */
 async function wsStats(page) {
   return page.evaluate(() => {
@@ -160,4 +181,7 @@ async function wsStats(page) {
   });
 }
 
-module.exports = { installRtObserver, wsView, waitWs, controls, playbackTrace, wsStats, RT_OBSERVE_INIT };
+module.exports = {
+  installRtObserver, wsView, waitWs, controls, playbackTrace, playbackState,
+  playedBeforeAck, wsStats, RT_OBSERVE_INIT,
+};
