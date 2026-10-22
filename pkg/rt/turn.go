@@ -391,6 +391,12 @@ type TurnManager struct {
 	// OLD-epoch timeout close synchronously in that gap, so a split
 	// implementation turns those tests red.
 	subjectTakeInterleave func()
+	// dispatchInterleave is a narrow test probe after classification's
+	// liveness check and before intent dispatch.
+	dispatchInterleave func()
+	// turnAnnouncementInterleave is a narrow test probe immediately before
+	// an ordinary classroom announcement checks its original epoch.
+	turnAnnouncementInterleave func()
 
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
@@ -992,11 +998,22 @@ func (tm *TurnManager) runAnnouncement(s Sender, ctx context.Context, cancel con
 	tm.runAnnouncementDisplay(s, ctx, cancel, text, text, purpose, onAck)
 }
 
+func (tm *TurnManager) runAnnouncementAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, text, purpose string, onAck func()) {
+	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purpose, onAck)
+}
+
 // runAnnouncementDisplay is runAnnouncement with SEPARATE spoken and display
 // texts (13.1-02 student masking): spoken feeds TTS, the LLM history, and the
 // interrupt trim; display rides the teacher_sentence subtitle only.
 func (tm *TurnManager) runAnnouncementDisplay(s Sender, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
 	tm.runAnnouncementDisplayAt(s, tm.currentEpoch(), ctx, cancel, spoken, display, purpose, onAck)
+}
+
+func (tm *TurnManager) runTurnAnnouncementDisplayAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
+	if tm.turnAnnouncementInterleave != nil {
+		tm.turnAnnouncementInterleave()
+	}
+	tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purpose, onAck)
 }
 
 // currentEpoch snapshots the FSM epoch under the lock.
@@ -1075,8 +1092,10 @@ func (tm *TurnManager) runNaturalEnding(s Sender, ctx context.Context, cancel co
 	if purpose == purposeSummary {
 		tm.recorder.Emit(EventLessonComplete, infra.F("reason", reason))
 	}
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
+	// PR #61 review: same ordering as handleEndSession — closed first, then
+	// the goodbye, so no lock-disciplined sender can follow session_ended.
 	tm.internalClose()
+	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
 }
 
 // handleInterrupt is the epoch bump + provider cancellation + short-history
@@ -1188,12 +1207,17 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 
 // handleEndSession is the explicit goodbye (RT-10/SC7 server half). The D-03
 // fallback (13.1-04) runs BEFORE the state reset: a session ended mid-check
-// persists its downgraded ratings once (the write needs the live tutor).
+// persists its downgraded ratings once (the write needs the live tutor). PR
+// #61 review: closed is set BEFORE session_ended ships — the flag (under
+// tm.mu) is what every advance-side gate checks, and the lesson_update
+// enqueue in advanceTarget shares that lock, so a racing advance's wire
+// output lands strictly before the goodbye, or (when it lost the race) is
+// suppressed entirely. session_ended stays the terminal control message.
 func (tm *TurnManager) handleEndSession(s Sender) {
 	tm.uncheckedCloseFallback()
+	tm.internalClose()
 	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonClientEnd})
 	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-	tm.internalClose()
 }
 
 // internalClose cancels in-flight work, invalidates playback waits,
@@ -1329,28 +1353,49 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	// 13.1-06 (D-06②): the check stage has a VOICE input now — per-word
 	// verdict commands classify through the CHECK prompt and converge on the
 	// same ApplyVerdict write as the screen buttons (RT-07). The advance
-	// target below must NOT be captured here: the cursor sits at
-	// len(words) in the check stage and turnTarget would panic.
+	// target below must NOT be captured for the check stage: the cursor sits
+	// at len(words) there and turnTarget would panic. The no-target marker
+	// (WordIndex -1) also covers a classroom whose cursor ran past the end
+	// without the checking bit (an EnterCheck write failure leaves
+	// index=len) — turnTarget must never be asked for a word that does not
+	// exist, and an invalid-marker target can never drive an advance.
 	checking := tm.tutor != nil && tm.tutor.checking
 	epoch := tm.epoch
 	turnID := tm.nextTurnIDLocked()
-	tm.state = StateProcessing
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.turnCancel = cancel
-	var target TurnTarget
-	if !checking && tm.tutor != nil {
+	target := TurnTarget{WordIndex: -1}
+	if !checking && tm.tutor != nil &&
+		tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
 		// Immutable advance target captured BEFORE classification
 		// (T-13-15c): a late confirm may only ever act on this word/version
 		// pair.
 		target = tm.tutor.turnTarget()
 	}
+	// Issue #56: the turn's task context (waiting on the current word,
+	// pause, stage) is snapshot in the SAME locked section, before the
+	// processing flip — classification judges the classroom as it stood
+	// when the child spoke, never mid-turn state.
+	turnCtx := tm.captureDictationTurnContextLocked(turnID, epoch, checking, target)
+	started := tm.applyTurnLocked(epoch, func() error {
+		if err := s.SendControl(StateMsg{Type: TypeState, Value: StateProcessing}); err != nil {
+			return err
+		}
+		if err := s.SendControl(TurnStartMsg{Type: TypeTurnStart, TurnID: turnID, Epoch: epoch}); err != nil {
+			return err
+		}
+		tm.state = StateProcessing
+		tm.turnCancel = cancel
+		return nil
+	})
 	tm.mu.Unlock()
+	if !started {
+		cancel()
+		return
+	}
 	defer cancel()
 
 	tm.recorder.Emit(EventSpeechStarted, infra.F("turn_id", turnID))
 	tm.recorder.Emit(EventSpeechEnded, infra.F("turn_id", turnID))
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateProcessing})
-	_ = s.SendControl(TurnStartMsg{Type: TypeTurnStart, TurnID: turnID, Epoch: epoch})
 
 	attempts := 1
 	transcript, err := tm.asr.Transcribe(ctx, segment)
@@ -1383,8 +1428,14 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	if asking {
 		// Issue #55: the child's answer to the subject clarify. Shown
 		// verbatim (no tutor yet means no masking set), then bound by
-		// keyword — never an LLM classification.
-		_ = s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: transcript})
+		// keyword — never an LLM classification. The verbatim transcript
+		// still goes through the turn effect entry: a session that ended
+		// while ASR was out must not receive a stale transcript.
+		if !tm.applyTurnAt(epoch, func() error {
+			return s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: transcript})
+		}) {
+			return
+		}
 		tm.handleSubjectAnswerTurn(s, transcript, epoch, ctx, cancel)
 		return
 	}
@@ -1397,14 +1448,16 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	// Issue #12/#14: a 背默 classroom (poem or passage) masks in EVERY mode
 	// pre-check — the child reciting the original back must not put it on
 	// screen before the check reveals it.
-	display := transcript
-	tm.mu.Lock()
-	tm.tutor.appendUserRound(transcript)
-	if tm.mode != ModeTest || (tm.tutor.recitation() && !tm.tutor.checking) {
-		display = maskTranscript(transcript, tm.tutor.maskedWords())
+	if !tm.applyTurnAt(epoch, func() error {
+		display := transcript
+		tm.tutor.appendUserRound(transcript)
+		if tm.mode != ModeTest || (tm.tutor.recitation() && !tm.tutor.checking) {
+			display = maskTranscript(transcript, tm.tutor.maskedWords())
+		}
+		return s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: display})
+	}) {
+		return
 	}
-	tm.mu.Unlock()
-	_ = s.SendControl(TranscriptMsg{Type: TypeTranscript, TurnID: turnID, Text: display})
 
 	if checking {
 		// 13.1-06: the check stage's classification runs against the CHECK
@@ -1439,11 +1492,14 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		return
 	}
 
-	intent, reply := tm.classifyTurn(ctx, transcript, target)
+	intent, reply := tm.classifyTurn(ctx, transcript, turnCtx)
 	if !tm.epochCurrent(epoch) {
 		return // interrupted mid-classification: abort the whole turn silently
 	}
-	tm.dispatchTurn(s, ctx, cancel, turnID, epoch, intent, reply, target)
+	if tm.dispatchInterleave != nil {
+		tm.dispatchInterleave()
+	}
+	tm.dispatchTurn(s, ctx, cancel, turnID, epoch, intent, reply, turnCtx.target)
 }
 
 // dispatchTurn routes a whitelisted intent into the FSM. The switch covers
@@ -1459,21 +1515,25 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, intent, reply string, target TurnTarget) {
 	switch intent {
 	case intentConfirm:
-		tm.mu.Lock()
-		paused := tm.tutor != nil && tm.tutor.paused
-		tm.mu.Unlock()
+		paused := false
+		if !tm.applyTurnAt(epoch, func() error {
+			paused = tm.tutor != nil && tm.tutor.paused
+			return nil
+		}) {
+			return
+		}
 		if paused {
 			// Gentle rejection while paused: pacing stays suspended — no
 			// advance, no lesson_update, no outcome write; the classroom
 			// keeps showing paused after the reply settles.
-			tm.runAnnouncement(s, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
+			tm.runAnnouncementAt(s, epoch, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
 			return
 		}
 		tm.confirmTarget(s, ctx, cancel, turnID, epoch, reply, target)
 	case intentRepeat:
-		tm.speakCurrentWordReading(s, ctx, cancel, repeatText, repeatMaskedText)
+		tm.speakCurrentWordReading(s, ctx, cancel, epoch, repeatText, repeatMaskedText)
 	case intentSlow:
-		tm.speakCurrentWordReading(s, ctx, cancel, slowReadText, slowMaskedText)
+		tm.speakCurrentWordReading(s, ctx, cancel, epoch, slowReadText, slowMaskedText)
 	case intentHint:
 		// U-9 ruling (2026-10-06): every hint request increments the word's
 		// hint count and pre-records the hint outcome. The pre-record is
@@ -1483,12 +1543,17 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		// completion. The event carries count-class fields only
 		// (word_index + hint_count; T-13-06b boundary) and is emitted
 		// outside the lock.
-		tm.mu.Lock()
 		n := 0
-		if tm.tutor != nil && target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words) {
-			n = tm.tutor.recordHint(target.WordIndex)
+		if !tm.applyTurnAt(epoch, func() error {
+			if tm.tutor != nil && tm.tutor.currentIndex == target.WordIndex &&
+				tm.tutor.version == target.ExpectedVersion &&
+				target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words) {
+				n = tm.tutor.recordHint(target.WordIndex)
+			}
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
 		if n > 0 {
 			tm.recorder.Emit(EventHintGiven,
 				infra.F("word_index", target.WordIndex),
@@ -1497,7 +1562,7 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		}
 		// LLM replies mask on screen in student mode (a leaking hint is still
 		// masked); TTS speaks the reply as generated (D-10).
-		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	case intentMeaning, intentExample:
 		// Issue #9 (ADR-0006): in the DICTATION stage these two intents
 		// may augment the classification reply with one on-demand example
@@ -1511,32 +1576,39 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 			}
 			reply = augmented
 		}
-		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	case intentPause:
-		tm.mu.Lock()
-		if tm.tutor != nil {
-			tm.tutor.paused = true
+		if !tm.applyTurnAt(epoch, func() error {
+			if tm.tutor != nil {
+				tm.tutor.paused = true
+			}
+			tm.stopWordTimerLocked()
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
-		tm.stopWordTimer() // suspend the countdown; only resume re-arms it
-		tm.runAnnouncement(s, ctx, cancel, pauseAckText(), purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, pauseAckText(), purposeChat, nil)
 	case intentResume:
-		tm.mu.Lock()
-		idx, word, mode := 0, "", tm.mode
-		if tm.tutor != nil {
-			tm.tutor.paused = false
-			idx = tm.tutor.currentIndex + 1
-			word = tm.tutor.words[tm.tutor.currentIndex].Word
+		idx, word, mode := 0, "", ""
+		if !tm.applyTurnAt(epoch, func() error {
+			mode = tm.mode
+			if tm.tutor != nil && tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
+				tm.tutor.paused = false
+				idx = tm.tutor.currentIndex + 1
+				word = tm.tutor.words[tm.tutor.currentIndex].Word
+			}
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
 		spoken := resumeAckText(idx, word)
 		display := spoken
 		if mode != ModeTest {
 			display = resumeMaskedText(idx)
 		}
-		tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
 	case intentChat:
-		tm.runAnnouncementDisplay(s, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
 	}
 }
 
@@ -1545,20 +1617,24 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 // (voice is the answer channel, D-10); the masked variant rides the subtitle
 // in student mode. Re-arms the per-word countdown after the reading's valid
 // final ack.
-func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, cancel context.CancelFunc, template func(string) string, masked func(int) string) {
-	tm.mu.Lock()
-	word, mode, idx := "", tm.mode, 0
-	if tm.tutor != nil && tm.tutor.currentIndex < len(tm.tutor.words) {
-		word = tm.tutor.words[tm.tutor.currentIndex].Word
-		idx = tm.tutor.currentIndex + 1
+func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, template func(string) string, masked func(int) string) {
+	word, mode, idx := "", "", 0
+	if !tm.applyTurnAt(epoch, func() error {
+		mode = tm.mode
+		if tm.tutor != nil && tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
+			word = tm.tutor.words[tm.tutor.currentIndex].Word
+			idx = tm.tutor.currentIndex + 1
+		}
+		return nil
+	}) {
+		return
 	}
-	tm.mu.Unlock()
 	spoken := template(word)
 	display := spoken
 	if mode != ModeTest {
 		display = masked(idx)
 	}
-	tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
+	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
 }
 
 // confirmTarget advances the classroom through the target captured at
@@ -1588,19 +1664,38 @@ func (tm *TurnManager) confirmTarget(s Sender, ctx context.Context, cancel conte
 func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, target TurnTarget, outcome, reply string, onFirstCommit func()) {
 	tm.mu.Lock()
 	lessonID := tm.tutor.lessonID
-	valid := !tm.tutor.completed && target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words)
+	// Issue #56 / PR #61 review: a dead driver refuses the advance at BOTH
+	// ends of the executor call, and "dead" is all three of closed, completed
+	// and STALE EPOCH. The entry gate re-validates the epoch under the lock
+	// because processTurn's post-classification check can pass and an
+	// interrupt can still land BEFORE the executor is reached — a late
+	// confirm in that window would otherwise commit the advance to the store
+	// (the post-return check suppresses messages but can never undo a write).
+	current := tm.epoch == epoch && !tm.closed
+	valid := current && !tm.tutor.completed &&
+		target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words)
 	tm.mu.Unlock()
 	if !valid {
 		// Completed or out-of-range target: pacing owns the cursor — a
-		// confirm degrades to a plain chat reply; a timeout just stops.
-		if reply != "" {
-			tm.runAnnouncement(s, ctx, cancel, reply, purposeChat, nil)
+		// confirm degrades to a plain chat reply; a timeout just stops. A
+		// stale or closed turn never speaks the degraded reply: its classroom
+		// has moved on (runAnnouncement's own gate would kill it anyway).
+		if reply != "" && current {
+			tm.runAnnouncementAt(s, epoch, ctx, cancel, reply, purposeChat, nil)
 		}
 		return
 	}
 
 	requestID := fmt.Sprintf("%s-advance-%d", lessonID, target.WordIndex)
 	res, err := tm.exec.AdvanceWord(ctx, lessonID, target.ExpectedVersion, requestID)
+	// PR #61 review: the close (or an interrupt — same predicate) may land
+	// UNDER the executor call. The store commit stands — it is the durable
+	// truth a reconnect reads — but nothing after the return may touch the
+	// dead session: no tutor mutation, no lesson_update, no check stage, no
+	// error message.
+	if !tm.epochCurrent(epoch) {
+		return
+	}
 	if err != nil {
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
@@ -1608,7 +1703,9 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 			// no completion — the store already holds the truth.
 			if l, gerr := tm.exec.GetLessonState(ctx, lessonID); gerr == nil {
 				tm.mu.Lock()
-				tm.tutor.align(l.CurrentIndex, l.Version)
+				if tm.epoch == epoch && !tm.closed {
+					tm.tutor.align(l.CurrentIndex, l.Version)
+				}
 				tm.mu.Unlock()
 			}
 			tm.settleListeningAt(s, epoch)
@@ -1622,22 +1719,29 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		// reverse): align to the first result and do NOTHING else — the
 		// first outcome is never overwritten.
 		tm.mu.Lock()
-		tm.tutor.align(res.NewIndex, res.NewVersion)
+		if tm.epoch == epoch && !tm.closed {
+			tm.tutor.align(res.NewIndex, res.NewVersion)
+		}
 		tm.mu.Unlock()
 		tm.settleListeningAt(s, epoch)
 		return
 	}
 
-	// First commit: outcome + wire update + narration (or completion).
+	// First commit: outcome + wire update + narration (or completion). The
+	// liveness re-check, the tutor mutation, and the lesson_update enqueue
+	// share ONE lock hold (the speakTurn pattern — atomic against the close
+	// paths): a close that races this window either sets closed first (the
+	// branch dies here) or blocks on tm.mu until the update is queued, and
+	// the close paths send session_ended only AFTER closed is set — so
+	// lesson_update can never trail the goodbye on the wire.
 	tm.mu.Lock()
+	if tm.epoch != epoch || tm.closed {
+		tm.mu.Unlock()
+		return
+	}
 	tm.tutor.align(res.NewIndex, res.NewVersion)
 	tm.tutor.commitOutcome(target.WordIndex, outcome)
 	finished := res.NewIndex >= len(tm.tutor.words)
-	tm.mu.Unlock()
-	if onFirstCommit != nil {
-		onFirstCommit()
-	}
-
 	_ = s.SendControl(LessonUpdateMsg{
 		Type:         TypeLessonUpdate,
 		LessonID:     lessonID,
@@ -1645,6 +1749,10 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		CurrentIndex: res.NewIndex,
 		RequestID:    requestID,
 	})
+	tm.mu.Unlock()
+	if onFirstCommit != nil {
+		onFirstCommit()
+	}
 	// Progress carries positions only. Answers arrive together in check_started.
 	tm.recorder.Emit(EventWordAdvanced,
 		infra.F("word_index", target.WordIndex),
@@ -1672,7 +1780,7 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		// masked position; TTS still announces the word itself.
 		display = announceMaskedText(res.NewIndex+1, total)
 	}
-	tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeAnnounce, func() {
+	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeAnnounce, func() {
 		tm.announceAcked(s)
 	})
 }
@@ -1706,8 +1814,12 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 	}
 
 	tm.mu.Lock()
-	if tm.epoch != epoch {
+	if tm.epoch != epoch || tm.closed {
 		// Stale before the first sound: nothing registered, nothing spoken.
+		// The closed flag rides the entry check (PR #61 review round 2): a
+		// close does not bump the epoch, so the comparison alone let a dead
+		// session's announcement record history, drive the FSM to speaking
+		// and ship state=speaking past session_ended.
 		tm.mu.Unlock()
 		return PlaybackRef{}
 	}
@@ -1719,9 +1831,12 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 	tm.acked = map[string]bool{}
 	tm.state = StateSpeaking
 	tm.playbackPending = true
-	tm.mu.Unlock()
-
+	// state=speaking rides the SAME lock hold (the lesson_update pattern):
+	// the close paths set closed under this lock and ship session_ended only
+	// after — a send after the unlock could land between the two and put a
+	// state change behind the goodbye on the wire.
 	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateSpeaking})
+	tm.mu.Unlock()
 
 	var ref PlaybackRef
 	ref.Epoch = epoch
@@ -1731,9 +1846,12 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		// Subtitle first (字幕先行) + pending registration BEFORE
 		// audio_start is queued — atomic against interrupt handling: after
 		// an interrupt is acknowledged, no further subtitle/chunk of the
-		// interrupted announcement can go out.
+		// interrupted announcement can go out. The closed flag rides the
+		// same check (epochCurrent's predicate): a close does not bump the
+		// epoch, so the comparison alone would let a sentence of a dead
+		// session register and ship (PR #61 review).
 		tm.mu.Lock()
-		if tm.epoch != epoch {
+		if tm.epoch != epoch || tm.closed {
 			tm.mu.Unlock()
 			return ref
 		}
@@ -1750,7 +1868,7 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		var sentSamples int
 		_, err := tm.tts.SynthesizeStream(ctx, sentence, func(pcm []byte, isFinal bool) error {
 			tm.mu.Lock()
-			if tm.epoch != epoch {
+			if tm.epoch != epoch || tm.closed {
 				tm.mu.Unlock()
 				cancel() // late chunk: abort the provider stream too
 				return ErrStaleEpoch
@@ -1770,7 +1888,7 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		if p, ok := tm.pendingPlayback[pendingKey(epoch, sentID)]; ok {
 			p.pcmSamples = sentSamples
 		}
-		stale := tm.epoch != epoch
+		stale := tm.epoch != epoch || tm.closed
 		if !stale {
 			_ = s.SendControl(AudioEndMsg{Type: TypeAudioEnd, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
 		}
@@ -1899,10 +2017,16 @@ func (tm *TurnManager) sendError(s Sender, code, message string, recoverable boo
 // Small locked helpers
 // ---------------------------------------------------------------------------
 
+// epochCurrent reports whether a turn launched at the given epoch may still
+// act: the epoch must match AND the session must be open. A close does NOT
+// bump the epoch (unlike an interrupt), so the closed flag rides here — PR
+// #61 review: the epoch comparison alone waved late provider returns through
+// after session_ended already shipped; folding the flag into the one
+// predicate every turn gate shares closes that class at the root.
 func (tm *TurnManager) epochCurrent(launch uint64) bool {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	return tm.epoch == launch
+	return tm.epoch == launch && !tm.closed
 }
 
 // nextTurnIDLocked allocates the next turn/announcement identity (sentence

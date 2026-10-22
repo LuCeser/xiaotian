@@ -121,13 +121,23 @@ func (c *captureSender) listeningCount() int {
 // duplicate requestID (Idempotent=true), mirroring the tool_requests table.
 // The 13.1 check-stage methods follow the same first-commit/replay/conflict
 // shape on the in-memory row (checkResults holds their stored results).
+//
+// The chan fields are one-shot holds armed by gateAdvance/gateEnterCheck
+// (PR #61 review) and gateGetState (round 2) — nil when disarmed. The exact
+// order is govet fieldalignment's own suggestion; don't hand-resort.
 type fakeExecutor struct {
-	requestResults   map[string]lesson.AdvanceResult
+	advanceEntered   chan struct{}
 	checkResults     map[string]any
-	stateIDs         []string // the lesson ids GetLessonState was asked for (Issue #10)
-	advanceCalls     []fakeAdvanceCall
+	checkRelease     chan struct{}
+	checkEntered     chan struct{}
+	requestResults   map[string]lesson.AdvanceResult
+	advanceRelease   chan struct{}
+	stateRelease     chan struct{}
+	stateEntered     chan struct{}
 	checkCalls       []fakeCheckCall
-	ensureIDs        []string // the lesson ids EnsureLessonCards was called with
+	ensureIDs        []string
+	advanceCalls     []fakeAdvanceCall
+	stateIDs         []string
 	lesson           lesson.Lesson
 	ensureCalls      int
 	ensureCardsCalls int
@@ -271,13 +281,39 @@ func (f *fakeExecutor) LatestPassageLessonID(_ context.Context, passageID int64,
 
 func (f *fakeExecutor) GetLessonState(_ context.Context, lessonID string) (lesson.Lesson, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.stateCalls++
 	f.stateIDs = append(f.stateIDs, lessonID)
-	if !f.exists {
+	entered, release := f.stateEntered, f.stateRelease
+	f.stateEntered, f.stateRelease = nil, nil
+	exists := f.exists
+	f.mu.Unlock()
+	if entered != nil {
+		// The read-back is IN FLIGHT: the call is out, the caller has not
+		// seen the row — enterCheck's conflict read-back is the one hookable
+		// provider call between its liveness check and its tutor mutation
+		// (PR #61 review round 2). The row is read at RETURN time so a test
+		// moving the row mid-hold is visible to the released read.
+		close(entered)
+		<-release
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !exists {
 		return lesson.Lesson{}, lesson.ErrLessonNotFound
 	}
 	return f.lesson, nil
+}
+
+// gateGetState arms a one-shot hold on the next GetLessonState: the call
+// fires entered after the row is read and waits for release before
+// returning, so a test can move the session inside enterCheck's
+// post-liveness-check window.
+func (f *fakeExecutor) gateGetState() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stateEntered = make(chan struct{})
+	f.stateRelease = make(chan struct{})
+	return f.stateEntered, f.stateRelease
 }
 
 // stateIDCalls returns every GetLessonState lesson id, in call order.
@@ -303,20 +339,43 @@ func (f *fakeExecutor) rowCategory() string {
 
 func (f *fakeExecutor) AdvanceWord(_ context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.advanceCalls = append(f.advanceCalls, fakeAdvanceCall{lessonID: lessonID, expectedVersion: expectedVersion, requestID: requestID})
 	if stored, ok := f.requestResults[requestID]; ok {
 		stored.Idempotent = true
+		f.mu.Unlock()
 		return stored, nil
 	}
 	if f.conflictVersion > 0 {
+		f.mu.Unlock()
 		return lesson.AdvanceResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
 	}
 	f.lesson.CurrentIndex++
 	f.lesson.Version++
 	res := lesson.AdvanceResult{NewIndex: f.lesson.CurrentIndex, NewVersion: f.lesson.Version}
 	f.requestResults[requestID] = res
+	entered, release := f.advanceEntered, f.advanceRelease
+	f.advanceEntered, f.advanceRelease = nil, nil
+	f.mu.Unlock()
+	if entered != nil {
+		// The row is COMMITTED (a reconnect would read it) but the caller
+		// has not seen the result — the executor's commit-vs-return window
+		// (PR #61 review).
+		close(entered)
+		<-release
+	}
 	return res, nil
+}
+
+// gateAdvance arms a one-shot hold on the next first-commit AdvanceWord: the
+// call fires entered after the row mutation is stored and then waits for
+// release before returning — the DB write stands while the session can move
+// under the in-flight call (PR #61 review's commit-vs-return race).
+func (f *fakeExecutor) gateAdvance() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.advanceEntered = make(chan struct{})
+	f.advanceRelease = make(chan struct{})
+	return f.advanceEntered, f.advanceRelease
 }
 
 func (f *fakeExecutor) advanceCount() int {
@@ -325,22 +384,32 @@ func (f *fakeExecutor) advanceCount() int {
 	return len(f.advanceCalls)
 }
 
+// advanceCallsSnapshot copies the recorded AdvanceWord calls (call-site
+// assertions outside the executor's mutex).
+func (f *fakeExecutor) advanceCallsSnapshot() []fakeAdvanceCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeAdvanceCall(nil), f.advanceCalls...)
+}
+
 // --- 13.1-01 check-stage fakes (first-commit / replay / conflict, mirroring
 // the real executor's tool_requests semantics on the in-memory row) -------
 
 func (f *fakeExecutor) EnterCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, outcomes map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "enter_check", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.EnterCheckResult)
 		res.Idempotent = true
+		f.mu.Unlock()
 		return res, nil
 	}
 	if f.conflictVersion > 0 {
+		f.mu.Unlock()
 		return lesson.EnterCheckResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
 	}
 	if !f.exists {
+		f.mu.Unlock()
 		return lesson.EnterCheckResult{}, lesson.ErrLessonNotFound
 	}
 	f.lesson.Version++
@@ -348,7 +417,25 @@ func (f *fakeExecutor) EnterCheck(_ context.Context, lessonID string, expectedVe
 	f.lesson.Outcomes = outcomes
 	res := lesson.EnterCheckResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Outcomes: outcomes, Verdicts: f.lesson.Verdicts}
 	f.checkResults[requestID] = res
+	entered, release := f.checkEntered, f.checkRelease
+	f.checkEntered, f.checkRelease = nil, nil
+	f.mu.Unlock()
+	if entered != nil {
+		// Same commit-vs-return window as gateAdvance, on the stage write.
+		close(entered)
+		<-release
+	}
 	return res, nil
+}
+
+// gateEnterCheck is gateAdvance for the next first-commit EnterCheck (the
+// stage='checking' write of the last word's advance).
+func (f *fakeExecutor) gateEnterCheck() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkEntered = make(chan struct{})
+	f.checkRelease = make(chan struct{})
+	return f.checkEntered, f.checkRelease
 }
 
 func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
@@ -533,9 +620,13 @@ func ttEventCount(t *testing.T, log *captureLogger, event string) int {
 // the classification request carries the eight-value intent vocabulary, the
 // word ground truth (meaning/example), the position, the strict JSON output
 // contract, the child-safety wording prohibition, the hint no-leak rule and
-// the meaning honesty rule.
+// the meaning honesty rule. Issue #56 additions: the waiting-context
+// judgment rules (completion phrases vs. negation/waiting/re-read), history
+// rendered BEFORE the separately-marked current utterance (the current
+// input is never duplicated as history), and the progress line riding the
+// CAPTURED target — never the live cursor.
 func TestClassifyMessagesCarryVocabGroundTruthAndSafety(t *testing.T) {
-	cards := ttCards("苹果")
+	cards := ttCards("苹果", "香蕉")
 	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
 	ttBindTutor(tm, cards)
 	tm.mu.Lock()
@@ -551,6 +642,9 @@ func TestClassifyMessagesCarryVocabGroundTruthAndSafety(t *testing.T) {
 		"confirm", "repeat", "slow", "hint", "meaning", "example", "pause", "resume", "chat",
 		"JSON", "严禁任何羞辱", "苹果", "释义-苹果", "例句-苹果", "第 1 个词",
 		"部分提示", "凭印象写",
+		// Issue #56: the waiting context and the judgment-priority rules.
+		"正在等学生把它写完", "好了", "下一个", "还没好", "不是 confirm", "等一下",
+		"再读一遍", "好了？",
 	} {
 		if !contains(system, want) {
 			t.Errorf("classify system prompt missing %q", want)
@@ -561,6 +655,42 @@ func TestClassifyMessagesCarryVocabGroundTruthAndSafety(t *testing.T) {
 	}
 	if !contains(user, "学生：你好老师") {
 		t.Errorf("classify user message missing the short-history deque: %q", user)
+	}
+	if !contains(user, "本轮学生说：这个字不会写") {
+		t.Errorf("classify user message missing the current-utterance mark: %q", user)
+	}
+	// History precedes the current utterance.
+	if strings.Index(user, "学生：你好老师") > strings.Index(user, "本轮学生说：") {
+		t.Errorf("classify user message renders history AFTER the current utterance: %q", user)
+	}
+
+	// Issue #56: a history holding a re-read request, this turn's
+	// completion phrase already appended as the current round (exactly what
+	// processTurn does), and a live cursor that has drifted past the
+	// captured target — the request must ground on the TARGET and never
+	// duplicate the current input as history.
+	tm.mu.Lock()
+	tm.tutor.appendUserRound("再读一遍")
+	tm.tutor.shortHistory[len(tm.tutor.shortHistory)-1].teacherText = "好，我再读一遍。苹果。"
+	tm.tutor.appendUserRound("好了") // the current round, teacher reply pending
+	tm.tutor.currentIndex = 1      // a drifted live cursor (word 2) ...
+	tm.mu.Unlock()
+	msgs = tm.buildClassifyMessages("好了", TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+	system, user = msgs[0].Content, msgs[1].Content
+	if !contains(system, "第 1 个词") || contains(system, "第 2 个词") {
+		t.Errorf("system prompt grounds on the captured target: %q", system)
+	}
+	if !contains(user, "（当前进度：第 1 个词，共 2 个）") || contains(user, "第 2 个词") {
+		t.Errorf("progress line must ride the captured target, not the live cursor: %q", user)
+	}
+	if !contains(user, "本轮学生说：好了") {
+		t.Errorf("current utterance not separately marked: %q", user)
+	}
+	if contains(user, "学生：好了") {
+		t.Errorf("current utterance duplicated as history: %q", user)
+	}
+	if !contains(user, "学生：再读一遍") {
+		t.Errorf("older re-read round missing from history: %q", user)
 	}
 }
 
@@ -577,7 +707,7 @@ func TestClassifyRetriesOnceOnInvalidJSON(t *testing.T) {
 	tm := NewTurnManager(newFakeASR(), llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), nil, nil)
 	ttBindTutor(tm, cards)
 
-	intent, reply := tm.classifyTurn(context.Background(), "不会写", TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+	intent, reply := tm.classifyTurn(context.Background(), "不会写", dictationTurnContext{target: TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"}})
 	if intent != intentHint {
 		t.Errorf("intent = %q, want hint", intent)
 	}
@@ -607,7 +737,7 @@ func TestClassifyFallsBackToChatAfterSecondFailure(t *testing.T) {
 	tm := NewTurnManager(newFakeASR(), llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID), ttConfig(newFakeWords(cards)), NewEventRecorder(log, "t"), nil)
 	ttBindTutor(tm, cards)
 
-	intent, reply := tm.classifyTurn(context.Background(), "嗯嗯", TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"})
+	intent, reply := tm.classifyTurn(context.Background(), "嗯嗯", dictationTurnContext{target: TurnTarget{WordIndex: 0, ExpectedVersion: 1, Word: "苹果"}})
 	if intent != intentChat {
 		t.Errorf("intent = %q, want chat", intent)
 	}
@@ -2238,6 +2368,64 @@ func TestTurnInterruptStopsAudioAndBumpsEpoch(t *testing.T) {
 	}
 }
 
+// TestSpeakTurnClosedSessionRefused: PR #61 review round 2 — speakTurn's
+// INITIAL section only compared the epoch, and the state=speaking send ran
+// after the unlock: a close landing in either gap recorded LLM history, drove
+// the dead FSM to speaking and shipped state=speaking AFTER session_ended.
+// The gap before the entry lock holds no hookable provider call (the callers'
+// gates end one lock earlier), so the test drives speakTurn directly in
+// exactly the post-close state the gap produces.
+func TestSpeakTurnClosedSessionRefused(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	asr := newFakeASR()
+	llm := newFakeLLM()
+	tm, s, _, _ := ttIntentFixture(t, cards, asr, llm)
+	tm.mu.Lock()
+	epoch := tm.epoch
+	histBefore := len(tm.tutor.shortHistory)
+	sentsBefore := len(tm.turnSentences)
+	tm.mu.Unlock()
+	speakingBefore := s.stateCount(StateSpeaking)
+	sentBefore := s.countOf(TypeTeacherSentence)
+	endedBefore := s.countOf(TypeSessionEnded)
+
+	tm.handleEndSession(s) // closed=true under the lock, session_ended shipped
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ref := tm.speakTurn(s, 99, epoch, "我们来看下一个词。", "我们来看下一个词。", purposeAnnounce, ctx, cancel)
+
+	if ref.FinalSentenceID != "" || len(ref.SentenceIDs) != 0 {
+		t.Errorf("ref = %+v, want the zero ref (nothing scheduled)", ref)
+	}
+	if got := s.stateCount(StateSpeaking); got != speakingBefore {
+		t.Errorf("state=speaking count = %d, want %d (a dead session never enters speaking)", got, speakingBefore)
+	}
+	if got := s.countOf(TypeTeacherSentence); got != sentBefore {
+		t.Errorf("teacher sentences = %d, want %d (no subtitle on a dead session)", got, sentBefore)
+	}
+	if got := s.countOf(TypeSessionEnded); got != endedBefore+1 {
+		t.Errorf("session_ended count = %d, want %d", got, endedBefore+1)
+	}
+	if order := s.typeOrder(); len(order) == 0 || order[len(order)-1] != TypeSessionEnded {
+		t.Errorf("control order = %v, want session_ended last", order)
+	}
+	tm.mu.Lock()
+	histAfter := len(tm.tutor.shortHistory)
+	sentsAfter := len(tm.turnSentences)
+	state, pending := tm.state, tm.playbackPending
+	tm.mu.Unlock()
+	if histAfter != histBefore {
+		t.Errorf("short history %d → %d rounds, want unchanged (a dead session records no reply)", histBefore, histAfter)
+	}
+	if sentsAfter != sentsBefore {
+		t.Errorf("turn sentences %d → %d, want unchanged (nothing registers)", sentsBefore, sentsAfter)
+	}
+	if state == StateSpeaking || pending {
+		t.Errorf("state = %q playbackPending = %v, want the closed reset", state, pending)
+	}
+}
+
 // TestTurnHalfDuplexGatesUplinkWhileSpeaking: while the teacher speaks —
 // including the playback-pending window — uplink audio is dropped; the ASR
 // must not be called for it.
@@ -3216,6 +3404,55 @@ func TestWordTimerResetInvalidatesQueuedCallbackSameEpochAndIndex(t *testing.T) 
 	}
 	if gen, h := ttTimerState(tm); gen != gen2 || h == nil {
 		t.Error("the stale callback disturbed the new handle")
+	}
+}
+
+// TestWordTimeoutFiresInsideLastWordAdvanceWindow: the countdown can fire in
+// the window between the LAST word's first-commit align and enterCheck's
+// markCompleted/stop — the cursor already sits at len(words) while completed
+// is still false. The firing must be a silent version-mismatch drop, never a
+// turnTarget() index past the word list (Issue #56 最后一词越界 red line;
+// found by the full -race suite, pre-existing on main).
+func TestWordTimeoutFiresInsideLastWordAdvanceWindow(t *testing.T) {
+	cards := ttCards("苹果") // one word: its confirm is the last-word advance
+	log := &captureLogger{}
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) { c.WordTimeout = time.Hour }),
+		NewEventRecorder(log, "t"), nil)
+	tm.mu.Lock()
+	var queued func()
+	tm.timerFactory = func(_ time.Duration, cb func()) *time.Timer {
+		queued = cb // invoked under tm.mu by armWordTimerLocked
+		return time.NewTimer(time.Hour)
+	}
+	tm.mu.Unlock()
+
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0) // arms the countdown (target: word 0 at v1)
+	ttWaitListening(t, s)
+	tm.mu.Lock()
+	fire := queued
+	// The advance's first commit landed; enterCheck has not run yet: cursor
+	// at len(words), version bumped, completed still false.
+	tm.tutor.align(len(cards), 2)
+	tm.mu.Unlock()
+	if fire == nil {
+		t.Fatal("arm never captured the queued callback")
+	}
+
+	fire() // must not panic; a silent drop with zero side effects
+
+	if exec.advanceCount() != 0 {
+		t.Errorf("advance calls = %d, want 0 (a stale firing never re-advances)", exec.advanceCount())
+	}
+	if ttEventCount(t, log, EventTimeoutFired) != 0 {
+		t.Error("timeout_fired emitted inside the last-word advance window")
+	}
+	if s.countOf(TypeLessonUpdate) != 0 {
+		t.Error("lesson_update sent inside the last-word advance window")
 	}
 }
 

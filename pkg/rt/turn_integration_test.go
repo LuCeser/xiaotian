@@ -248,6 +248,13 @@ func itAnnounceAck(t *testing.T, conn *websocket.Conn) []string {
 
 // itAnnounceAckCounted is itAnnounceAck, also returning the number of
 // binary PCM frames delivered for the announcement (报词音频字节 evidence).
+//
+// Protocol-layer scope (PR #61 review): the acks below come from this TEST
+// DRIVER playing a protocol-conforming client — audio_end in, sentence_ack
+// out. They prove the server's ack-gated FSM GIVEN conforming acks, never
+// that a real browser played the audio; playback-driven ACK verification is
+// #58's B-layer browser e2e (confirmation.spec.js 等). Same scope applies to
+// every driver helper that acks (itAckEnding, itHoldThenAck).
 func itAnnounceAckCounted(t *testing.T, conn *websocket.Conn) ([]string, int) {
 	t.Helper()
 	var texts []string
@@ -289,7 +296,9 @@ func itAnnounceAckCounted(t *testing.T, conn *websocket.Conn) ([]string, int) {
 
 // itHoldThenAck schedules the sentence ack after holdDelay while the caller
 // keeps reading: if the server ends the session BEFORE the ack was sent,
-// the test fails (the natural-end ack gate, observed over the real wire).
+// the test fails (the natural-end ack gate, observed over the real wire —
+// the withholding client is the driver; see itAnnounceAckCounted's scope
+// note).
 func itHoldThenAck(t *testing.T, conn *websocket.Conn, holdDelay time.Duration, sentenceID string, epoch uint64) *atomic.Bool {
 	t.Helper()
 	var ackSent atomic.Bool
@@ -303,12 +312,12 @@ func itHoldThenAck(t *testing.T, conn *websocket.Conn, holdDelay time.Duration, 
 
 // itReadUntilSessionEnded reads until session_ended, failing if it arrives
 // before ackSent flipped true (any earlier arrival = the FSM ended without
-// the matching playback ack).
+// the driver's matching protocol-level ack).
 func itReadUntilSessionEnded(t *testing.T, conn *websocket.Conn, ackSent *atomic.Bool) SessionEndedMsg {
 	t.Helper()
 	m := itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeSessionEnded })
 	if !ackSent.Load() {
-		t.Fatal("session_ended arrived before the matching sentence_ack was sent")
+		t.Fatal("session_ended arrived before the driver sent the matching sentence_ack")
 	}
 	var ended SessionEndedMsg
 	if err := json.Unmarshal(m.raw, &ended); err != nil {
@@ -469,7 +478,7 @@ func TestDictationOverConnHappyPath(t *testing.T) {
 			lastAckID, lastAckEpoch = ae.SentenceID, ae.Epoch
 			summaryAudioEnd++
 		case TypeSessionEnded:
-			t.Fatal("session_ended arrived before the summary ack (ack gate broken)")
+			t.Fatal("session_ended arrived before the driver sent the summary sentence_ack (protocol-layer ack gate broken)")
 		}
 	}
 	if len(summaryTexts) < 1 || !strings.Contains(strings.Join(summaryTexts, ""), "对了 3 个") {
@@ -683,7 +692,8 @@ func TestDictationOverConnNoDueWaitsForAck(t *testing.T) {
 // itAckEnding reads through a natural-ending announcement, acks every
 // sentence as its audio_end arrives, and returns the session_ended message
 // (asserting its reason). session_ended before ANY ack fails the test (the
-// ack gate).
+// ack gate; the acking client is the driver — itAnnounceAckCounted's scope
+// note applies).
 func itAckEnding(t *testing.T, conn *websocket.Conn, wantReason string) SessionEndedMsg {
 	t.Helper()
 	acks := 0
@@ -707,7 +717,7 @@ func itAckEnding(t *testing.T, conn *websocket.Conn, wantReason string) SessionE
 			acks++
 		case TypeSessionEnded:
 			if acks == 0 {
-				t.Fatal("session_ended arrived before any sentence_ack (ack gate broken)")
+				t.Fatal("session_ended arrived before any driver sentence_ack (protocol-layer ack gate broken)")
 			}
 			var ended SessionEndedMsg
 			if err := json.Unmarshal(data, &ended); err != nil {

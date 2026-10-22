@@ -338,9 +338,24 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	tm.mu.Unlock()
 
 	res, err := tm.exec.EnterCheck(ctx, lessonID, expected, lessonID+"-enter-check", outcomes)
+	// PR #61 review: the stage write may commit UNDER a close or interrupt —
+	// the row stands (a reconnect resumes from it), but a dead classroom
+	// opens no panel: no tutor mutation, no check_started, no bridge.
+	if !tm.epochCurrent(epoch) {
+		return
+	}
 	switch err {
 	case nil:
+		// PR #61 review round 2: the liveness re-check above only covered the
+		// executor's return moment. A close/interrupt landing between that
+		// check and this mutation would flip a dead classroom into the check
+		// stage — so the check rides the SAME lock hold as the mutation (the
+		// advanceTarget first-commit pattern).
 		tm.mu.Lock()
+		if tm.epoch != epoch || tm.closed {
+			tm.mu.Unlock()
+			return
+		}
 		tm.tutor.version = res.NewVersion
 		tm.tutor.checking = true
 		tm.tutor.checkVerdicts = res.Verdicts
@@ -361,6 +376,10 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 			return
 		}
 		tm.mu.Lock()
+		if tm.epoch != epoch || tm.closed {
+			tm.mu.Unlock()
+			return
+		}
 		tm.tutor.align(l.CurrentIndex, l.Version)
 		tm.tutor.resyncCheck(l)
 		alreadySubmitted := l.Stage == lesson.StageSubmitted && !tm.tutor.correction
@@ -389,7 +408,6 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 		}
 	}
 
-	tm.recorder.Emit(EventCheckStarted, infra.F("total", total))
 	reason := CheckStartedReasonDictationDone
 	bridge := checkBridgeText(total)
 	if isPoem {
@@ -405,13 +423,30 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 		}
 		tm.mu.Unlock()
 	}
+	// The panel open rides ONE lock hold with the liveness re-check and the
+	// enqueue (the speakTurn / lesson_update pattern): a close that races this
+	// window either sets closed first (the branch dies here) or blocks on
+	// tm.mu until check_started is queued — the close paths ship session_ended
+	// only AFTER closed is set, so check_started can never trail the goodbye
+	// on the wire (PR #61 review round 2).
+	tm.mu.Lock()
+	if tm.epoch != epoch || tm.closed {
+		tm.mu.Unlock()
+		return
+	}
 	_ = s.SendControl(CheckStartedMsg{
 		Type:   TypeCheckStarted,
 		Words:  words,
 		Reason: reason,
 	})
+	tm.mu.Unlock()
+	tm.recorder.Emit(EventCheckStarted, infra.F("total", total))
 
-	tm.runAnnouncement(s, ctx, cancel, bridge, purposeCheckBridge, nil)
+	// The bridge speaks under the TURN'S OWN epoch (runAnnouncementDisplayAt,
+	// the subject-ask pattern): snapshotting the live epoch here would let an
+	// interrupt that already bumped it play the check bridge over whatever
+	// classroom comes next.
+	tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, bridge, bridge, purposeCheckBridge, nil)
 }
 
 // handleCheckVerdict applies one screen verdict (the check_verdict control
