@@ -18,6 +18,13 @@ func TestCompareNoiseHardFails(t *testing.T) {
 		{"class name row", "Class 3  Name Li Ming  No. 12", "表头"},
 		{"tips box", "小贴士：遇到不会的单词可以先跳过", "小贴士"},
 		{"sheet title", "4A Unit 2 Reading Sheet", "unit"},
+		// 照片上真实存在的中文标题／分区标题（英语朗读纸、一、单词、
+		// 二、词组、三、句子）混入词条同样必须硬失败（PR #65 复审 P1：
+		// 单词／词组等两字标题既不命中噪声子串也不足例句阈值）。
+		{"chinese sheet title", "英语朗读纸", "朗读纸"},
+		{"chinese word-section header", "单词", "单词"},
+		{"chinese phrase-section header", "二、词组", "词组"},
+		{"chinese sentence-section header", "三、句子", "句子"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
