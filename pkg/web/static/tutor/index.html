@@ -137,7 +137,7 @@
   -->
   <script src="js/rt-client.js?v=20261016a"></script>
   <script src="js/rt-capture.js?v=20261012capture-fix"></script>
-  <script src="js/rt-playback.js?v=20261008a"></script>
+  <script src="js/rt-playback.js?v=20261024reset"></script>
   <script src="js/rt-photo.js?v=20261008a"></script>
   <script>
     (function () {
@@ -1045,6 +1045,13 @@
         // a never-reset latch made the second lesson's drain callback
         // early-return, swallowing that lesson's 「回首页」 append.
         playbackResourceReleased = false;
+        // J15/J16 (finish.spec.js found it): a NEW connection must not keep
+        // the PREVIOUS session's player epoch — a page that picked a subject
+        // (interrupt_ack bump) then restarted dropped the new classroom's
+        // announcement audio as "stale epoch" and died on
+        // playback_ack_timeout. resetSession adopts the next connection's
+        // fresh epoch space at its first audio_start.
+        playback.resetSession();
         setConn('connecting', '连接中…');
 
         // ONE user gesture (RT-02): RTCapture.start synchronously runs the
