@@ -97,12 +97,14 @@ async function installRtObserver(page) {
 /**
  * Compact log view for node-side assertions: every control/open/close entry
  * plus DOWNLINK binary frames — only the ~50 Hz uplink-silence frames are
- * dropped (they'd dominate the payload; no assertion needs them).
+ * dropped (they'd dominate the payload; no assertion needs them). Carries
+ * each entry's t (performance.now() at record time) so specs can order ws
+ * evidence against audio-observe's same-clock timestamps.
  */
 async function wsView(page) {
   return page.evaluate(() => (window.__rtWsLog || [])
     .filter((e) => !(e.dir === 'out' && e.kind === 'binary'))
-    .map((e) => ({ i: e.i, dir: e.dir, kind: e.kind, type: e.type, msg: e.msg || null, bytes: e.bytes || 0, code: e.code })));
+    .map((e) => ({ i: e.i, t: e.t, dir: e.dir, kind: e.kind, type: e.type, msg: e.msg || null, bytes: e.bytes || 0, code: e.code })));
 }
 
 /**
@@ -136,7 +138,7 @@ async function waitWs(page, pred, { timeoutMs = 20000, label = 'ws condition' } 
 async function controls(page) {
   return page.evaluate(() => (window.__rtWsLog || [])
     .filter((e) => e.kind !== 'binary')
-    .map((e) => ({ i: e.i, dir: e.dir, kind: e.kind, type: e.type, msg: e.msg || null, code: e.code })));
+    .map((e) => ({ i: e.i, t: e.t, dir: e.dir, kind: e.kind, type: e.type, msg: e.msg || null, code: e.code })));
 }
 
 /** The production player's ordered trace (rt-playback.js). */
