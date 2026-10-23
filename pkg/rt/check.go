@@ -461,11 +461,11 @@ func (tm *TurnManager) handleCheckVerdict(s Sender, m CheckVerdictMsg) {
 	}
 	tm.mu.Unlock()
 	if !alive {
-		tm.sendError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
 		return
 	}
 	if m.RequestID == "" || m.WordIndex < 0 || m.WordIndex >= total {
-		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
 		return
 	}
 
@@ -483,25 +483,39 @@ func (tm *TurnManager) handleCheckVerdict(s Sender, m CheckVerdictMsg) {
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
 			// Align from the stored truth and re-echo: the button state
-			// re-renders from the server's authoritative list.
+			// re-renders from the server's authoritative list. Nothing was
+			// written — the whole presentation rides the stage effect, so
+			// an ended session re-echoes nothing.
 			if l, gerr := tm.exec.GetLessonState(context.Background(), lessonID); gerr == nil {
-				tm.mu.Lock()
-				tm.tutor.align(l.CurrentIndex, l.Version)
-				tm.tutor.resyncCheck(l)
-				tm.mu.Unlock()
-				tm.broadcastCheckVerdicts(s, l.Verdicts)
+				tm.applyCheckStageEffect(func() error {
+					tm.tutor.align(l.CurrentIndex, l.Version)
+					tm.tutor.resyncCheck(l)
+					return s.SendControl(CheckVerdictsMsg{
+						Type:     TypeCheckVerdicts,
+						Verdicts: wireVerdicts(l.Verdicts),
+					})
+				})
 			}
 			return
 		}
-		tm.sendError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		tm.sendOpenError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
 		return
 	}
 
-	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checkVerdicts = res.Verdicts
-	tm.mu.Unlock()
-	tm.broadcastCheckVerdicts(s, res.Verdicts)
+	// The write landed (the accepted save). Present it only while the stage
+	// — and the session — is still the one that admitted the frame: the
+	// memory update and the authoritative echo are ONE hold, and the event
+	// records only when the echo shipped (applyVoiceVerdict's discipline).
+	if !tm.applyCheckStageEffect(func() error {
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checkVerdicts = res.Verdicts
+		return s.SendControl(CheckVerdictsMsg{
+			Type:     TypeCheckVerdicts,
+			Verdicts: wireVerdicts(res.Verdicts),
+		})
+	}) {
+		return
+	}
 	if !res.Idempotent {
 		tm.recorder.Emit(EventVerdictApplied,
 			infra.F("word_index", m.WordIndex),

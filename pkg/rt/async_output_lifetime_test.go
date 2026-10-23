@@ -126,4 +126,82 @@ func TestAsyncOutputAfterClose(t *testing.T) {
 			t.Fatalf("OCR calls = %d, want 0", got)
 		}
 	})
+
+	t.Run("manual verdict returned after end is saved but not presented", func(t *testing.T) {
+		cards := ttCards("苹果")
+		tm, s, _, exec := ttDriveToCheck(t, cards, newFakeWords(cards))
+		entered, release := exec.gateApplyVerdict()
+		tm.mu.Lock()
+		versionBefore, verdictsBefore := tm.tutor.version, len(tm.tutor.checkVerdicts)
+		tm.mu.Unlock()
+		echoesBefore := s.countOf(TypeCheckVerdicts)
+
+		done := make(chan struct{})
+		go func() {
+			tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+				Type: TypeCheckVerdict, RequestID: "req-manual-end",
+				WordIndex: 0, Correct: true,
+			}))
+			close(done)
+		}()
+		ttAwaitGate(t, entered, "the verdict write was not entered")
+		tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+		close(release)
+		ttAwaitGate(t, done, "the verdict turn did not finish")
+
+		// The accepted save survived the end: the manual verdict is on the row.
+		exec.mu.Lock()
+		stored := len(exec.lesson.Verdicts)
+		manual := stored == 1 && exec.lesson.Verdicts[0].Manual
+		exec.mu.Unlock()
+		if !manual {
+			t.Fatalf("stored verdicts = %d manual=%v, want 1 manual — the write must complete", stored, manual)
+		}
+		if got := s.countOf(TypeCheckVerdicts); got != echoesBefore {
+			t.Fatalf("check_verdicts echoes = %d, want %d (nothing past session_ended)", got, echoesBefore)
+		}
+		tm.mu.Lock()
+		version, verdicts := tm.tutor.version, len(tm.tutor.checkVerdicts)
+		tm.mu.Unlock()
+		if version != versionBefore || verdicts != verdictsBefore {
+			t.Fatalf("tutor version/verdicts = %d/%d, want %d/%d — the closed tutor must stay untouched",
+				version, verdicts, versionBefore, verdictsBefore)
+		}
+	})
+
+	t.Run("conflict read-back returned after end is not echoed", func(t *testing.T) {
+		cards := ttCards("苹果")
+		tm, s, _, exec := ttDriveToCheck(t, cards, newFakeWords(cards))
+		exec.mu.Lock()
+		exec.conflictVersion = 1
+		exec.mu.Unlock()
+		entered, release := exec.gateGetState()
+		tm.mu.Lock()
+		versionBefore := tm.tutor.version
+		tm.mu.Unlock()
+		echoesBefore := s.countOf(TypeCheckVerdicts)
+
+		done := make(chan struct{})
+		go func() {
+			tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+				Type: TypeCheckVerdict, RequestID: "req-conflict-end",
+				WordIndex: 0, Correct: true,
+			}))
+			close(done)
+		}()
+		ttAwaitGate(t, entered, "the conflict read-back was not entered")
+		tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+		close(release)
+		ttAwaitGate(t, done, "the conflict turn did not finish")
+
+		if got := s.countOf(TypeCheckVerdicts); got != echoesBefore {
+			t.Fatalf("check_verdicts echoes = %d, want %d — no late echo past session_ended", got, echoesBefore)
+		}
+		tm.mu.Lock()
+		version := tm.tutor.version
+		tm.mu.Unlock()
+		if version != versionBefore {
+			t.Fatalf("tutor version = %d, want %d — the closed tutor must not align", version, versionBefore)
+		}
+	})
 }
