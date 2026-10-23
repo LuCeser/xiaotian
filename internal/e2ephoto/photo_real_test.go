@@ -1,6 +1,8 @@
 package e2ephoto
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"testing"
 )
@@ -104,15 +106,21 @@ func TestRealPhotoMeaningsRejectDictionarySubstitutions(t *testing.T) {
 }
 
 // TestVerifyRealMaterial checks the pinned material hash against the
-// real photo when XIAOTIAN_E2E_PHOTO_DIR is set; without it the photo
-// (repo-external) is simply absent, so the check skips.
+// real photo when XIAOTIAN_E2E_PHOTO_DIR is set. Without the variable,
+// or with the variable set but the material file missing (计划第 5 节:
+// 文件缺失只 skip 照片用例), the check skips; a PRESENT file that is
+// corrupted or hashes wrong stays a hard failure.
 func TestVerifyRealMaterial(t *testing.T) {
 	dir := os.Getenv("XIAOTIAN_E2E_PHOTO_DIR")
 	if dir == "" {
 		t.Skip("XIAOTIAN_E2E_PHOTO_DIR 未设置：实拍素材在仓库外，跳过哈希核对")
 	}
 	for _, p := range mustLoadReal(t) {
-		if err := p.Verify(dir); err != nil {
+		err := p.Verify(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Skipf("素材文件缺失，按计划第 5 节 skip 照片哈希核对：%v", err)
+		}
+		if err != nil {
 			t.Errorf("Verify(%s/%s): %v", dir, p.File, err)
 		}
 	}
