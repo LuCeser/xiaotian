@@ -76,8 +76,8 @@ type Photo struct {
 // Validation fails the whole file on the first bad photo — a typo must
 // never silently drop a photo from the live suite. Decoding is strict:
 // unknown fields are rejected (a "minWordHit" typo must fail loudly, not
-// silently lower the bar), and the threshold keys must be present even
-// when their value is 0 (PR #70 复审 P2).
+// silently lower the bar), and the threshold keys must be present as
+// numbers even when their value is 0 (PR #70 复审 P2).
 func Load(path string) ([]Photo, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -119,9 +119,11 @@ func Load(path string) ([]Photo, error) {
 }
 
 // requireRulesKeys rejects a photo whose rules object is missing any of
-// the three threshold keys. A missing key would decode to the zero value
-// and silently lower that bar to 0 (a wholly omitted minWordHits keeps
-// loading today), while an explicit "minWordHits":0 stays legal — 0 is a
+// the three threshold keys or writes a non-number in one of them. A
+// missing key would decode to the zero value and silently lower that bar
+// to 0 (a wholly omitted minWordHits keeps loading today), and so does a
+// null one: Go's decoder accepts null into numeric fields and leaves the
+// zero value, while an explicit "minWordHits":0 stays legal — 0 is a
 // meaningful threshold when declared (PR #70 复审 P2).
 func requireRulesKeys(raw []byte) error {
 	var probe struct {
@@ -134,8 +136,15 @@ func requireRulesKeys(raw []byte) error {
 	}
 	for i, p := range probe.Photos {
 		for _, key := range []string{"minWordHits", "minPhraseHits", "minPrecision"} {
-			if _, ok := p.Rules[key]; !ok {
+			v, ok := p.Rules[key]
+			if !ok {
 				return fmt.Errorf("photos[%d]: rules is missing %q", i, key)
+			}
+			// A JSON value opening with '-' or a digit is a number; anything
+			// else — null, "1", true, {} — is not a numeric threshold.
+			t := strings.TrimSpace(string(v))
+			if t == "" || t[0] != '-' && (t[0] < '0' || t[0] > '9') {
+				return fmt.Errorf("photos[%d]: rules.%s = %s: threshold must be a number", i, key, t)
 			}
 		}
 	}

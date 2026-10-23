@@ -89,6 +89,13 @@ func TestLoadValidation(t *testing.T) {
 		{"omitted minWordHits key", strings.Replace(validPhoto, `"minWordHits":1,`, ``, 1), `rules is missing "minWordHits"`},
 		{"omitted minPrecision key", strings.Replace(validPhoto, `,"minPrecision":0.95}`, `}`, 1), `rules is missing "minPrecision"`},
 		{"omitted rules object", strings.Replace(validPhoto, `,"rules":{"minWordHits":1,"minPhraseHits":0,"minPrecision":0.95}`, ``, 1), `rules is missing "minWordHits"`},
+		// …and the written value must be a NUMBER: Go decodes null into
+		// numeric fields without error (leaving the zero value), which is
+		// the same silent lowering as a missing key.
+		{"null minWordHits", strings.Replace(validPhoto, `"minWordHits":1`, `"minWordHits":null`, 1), "must be a number"},
+		{"null minPhraseHits", strings.Replace(validPhoto, `"minPhraseHits":0`, `"minPhraseHits":null`, 1), "must be a number"},
+		{"null minPrecision", strings.Replace(validPhoto, `"minPrecision":0.95`, `"minPrecision":null`, 1), "must be a number"},
+		{"string minWordHits", strings.Replace(validPhoto, `"minWordHits":1`, `"minWordHits":"1"`, 1), "cannot unmarshal"},
 		// duplicate id / file need a second photo block in the same file
 		{"duplicate id", strings.Replace(
 			strings.Replace(validPhoto, `}]}`, `},`+secondPhoto+`]}`, 1),
