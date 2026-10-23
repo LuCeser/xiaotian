@@ -393,12 +393,16 @@ func (tm *TurnManager) classifyPoemTurn(ctx context.Context, transcript string) 
 func (tm *TurnManager) dispatchPoemTurn(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, p intentPayload) {
 	switch p.Intent {
 	case intentConfirm:
-		tm.mu.Lock()
-		paused := tm.tutor != nil && tm.tutor.paused
-		checking := tm.tutor != nil && tm.tutor.checking
-		tm.mu.Unlock()
+		paused, checking := false, false
+		if !tm.applyTurnAt(epoch, func() error {
+			paused = tm.tutor != nil && tm.tutor.paused
+			checking = tm.tutor != nil && tm.tutor.checking
+			return nil
+		}) {
+			return
+		}
 		if paused {
-			tm.runAnnouncement(s, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
+			tm.runAnnouncementAt(s, epoch, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
 			return
 		}
 		if checking {
@@ -407,32 +411,34 @@ func (tm *TurnManager) dispatchPoemTurn(s Sender, ctx context.Context, cancel co
 		}
 		tm.enterCheck(s, ctx, cancel, epoch)
 	case intentRepeat, intentSlow:
-		tm.runAnnouncement(s, ctx, cancel, poemNoReadNotice, purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, poemNoReadNotice, purposeChat, nil)
 	case intentHint:
-		tm.poemHint(s, ctx, cancel, p)
+		tm.poemHint(s, ctx, cancel, epoch, p)
 	case intentMeaning, intentExample:
-		tm.runAnnouncement(s, ctx, cancel, poemMeaningNotice, purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, poemMeaningNotice, purposeChat, nil)
 	case intentPause:
-		tm.mu.Lock()
-		if tm.tutor != nil {
+		if !tm.applyTurnAt(epoch, func() error {
 			tm.tutor.paused = true
+			tm.stopWordTimerLocked()
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
-		tm.stopWordTimer()
-		tm.runAnnouncement(s, ctx, cancel, pauseAckText(), purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, pauseAckText(), purposeChat, nil)
 	case intentResume:
-		tm.mu.Lock()
 		title := ""
-		if tm.tutor != nil {
+		if !tm.applyTurnAt(epoch, func() error {
 			tm.tutor.paused = false
 			if tm.tutor.poem != nil {
 				title = tm.tutor.poem.Title
 			}
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
-		tm.runAnnouncement(s, ctx, cancel, poemResumeAckText(title), purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, poemResumeAckText(title), purposeChat, nil)
 	case intentChat:
-		tm.runAnnouncementDisplay(s, ctx, cancel, p.Reply, tm.replyDisplay(p.Reply), purposeChat, nil)
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, p.Reply, tm.replyDisplay(p.Reply), purposeChat, nil)
 	}
 	_ = turnID
 }
@@ -441,27 +447,28 @@ func (tm *TurnManager) dispatchPoemTurn(s Sender, ctx context.Context, cancel co
 // gets its OPENING characters and length — never the verse; an unnamed or
 // out-of-range ask gets the which-line question. The hint count lands on
 // that line's outcome (the same U-9 accounting the word classroom keeps).
-func (tm *TurnManager) poemHint(s Sender, ctx context.Context, cancel context.CancelFunc, p intentPayload) {
-	tm.mu.Lock()
+func (tm *TurnManager) poemHint(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, p intentPayload) {
 	total := 0
 	var cue string
-	if tm.tutor != nil {
+	hintCount := 0
+	if !tm.applyTurnAt(epoch, func() error {
 		total = len(tm.tutor.words)
+		if p.Index >= 1 && p.Index <= total {
+			line := tm.tutor.words[p.Index-1].Word
+			cue = poemHintCueText(p.Index, total, line)
+			hintCount = tm.tutor.recordHint(p.Index - 1)
+		}
+		return nil
+	}) {
+		return
 	}
-	if p.Index >= 1 && p.Index <= total {
-		line := tm.tutor.words[p.Index-1].Word
-		cue = poemHintCueText(p.Index, total, line)
-		n := tm.tutor.recordHint(p.Index - 1)
-		tm.recorder.Emit(EventHintGiven,
-			infra.F("word_index", p.Index-1),
-			infra.F("hint_count", n),
-		)
-	}
-	tm.mu.Unlock()
 	if cue == "" {
 		cue = poemHintAskLineNotice
+	} else {
+		tm.recorder.Emit(EventHintGiven,
+			infra.F("word_index", p.Index-1), infra.F("hint_count", hintCount))
 	}
-	tm.runAnnouncement(s, ctx, cancel, cue, purposeChat, nil)
+	tm.runAnnouncementAt(s, epoch, ctx, cancel, cue, purposeChat, nil)
 }
 
 // submitPoem is the poem check_submit: the SAME per-line manual gate (D-05)
