@@ -1,6 +1,12 @@
 package rt
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
+)
 
 func TestPracticePresentationLifetime(t *testing.T) {
 	practice := &fakePracticeSource{}
@@ -23,4 +29,49 @@ func TestPracticePresentationLifetime(t *testing.T) {
 	}
 	ttReadyBeforeEnd(t, captured, TypeSessionReady)
 	ttAssertNothingAfterEnd(t, captured)
+}
+
+func TestPracticeSubmitPresentationLifetime(t *testing.T) {
+	store := newTestPracticeStore(t)
+	tm, s, _, _ := ttDriveToCheckCfg(t, ttCards("苹果"), newFakeWords(ttCards("苹果")), func(cfg *TurnManagerConfig) {
+		cfg.PracticeStore = store
+	})
+	tm.mu.Lock()
+	tm.tutor.checking = false
+	epoch := tm.epoch
+	tm.mu.Unlock()
+	resultsBefore := s.countOf(TypeReviewResult)
+	sentBefore := s.countOf(TypeTeacherSentence)
+	hit := make(chan struct{})
+	tm.checkSubmitPresentationInterleave = func() {
+		tm.checkSubmitPresentationInterleave = nil
+		tm.handleEndSession(s)
+		close(hit)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		tm.finishPracticeSubmit(s, ctx, cancel, epoch, ttLessonID, ttCards("苹果"), lesson.CompleteCheckResult{
+			Verdicts: []lesson.CheckVerdict{{WordIndex: 0, Correct: true, Manual: true}},
+			Outcomes: map[string]lesson.WordOutcome{"0": {Outcome: outcomeConfirmed}},
+		}, "practice-race")
+		close(done)
+	}()
+	ttAwaitGate(t, hit, "practice presentation probe was not reached")
+	ttAwaitGate(t, done, "stale practice presentation did not finish")
+
+	stored, err := store.ListPracticeWordsOn(context.Background(), beijingDay(time.Now()))
+	if err != nil || len(stored) != 1 || stored[0] != "苹果" {
+		t.Fatalf("stored practice words = %v, err=%v; want [苹果]", stored, err)
+	}
+	if s.countOf(TypeReviewResult) != resultsBefore || s.countOf(TypeTeacherSentence) != sentBefore {
+		t.Fatalf("review results=%d sentences=%d, want %d/%d",
+			s.countOf(TypeReviewResult), s.countOf(TypeTeacherSentence), resultsBefore, sentBefore)
+	}
+	tm.mu.Lock()
+	reviewSeen, closed := tm.tutor.reviewSeen, tm.closed
+	tm.mu.Unlock()
+	if reviewSeen || !closed {
+		t.Fatalf("reviewSeen=%v closed=%v, want false/true", reviewSeen, closed)
+	}
 }
