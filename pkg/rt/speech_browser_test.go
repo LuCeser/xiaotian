@@ -39,15 +39,30 @@ import (
 )
 
 // speechPageAck is one sentence_ack the real page sent (observed read-only).
+// PlayedBeforeAck is the driver's per-sentence verdict that the page's native
+// onended preceded that ack — an empty-play (dropped PCM) or fabricated ack
+// answers false here.
 type speechPageAck struct {
-	Epoch      uint64 `json:"epoch"`
-	SentenceID string `json:"sentenceId"`
+	Epoch           uint64 `json:"epoch"`
+	SentenceID      string `json:"sentenceId"`
+	PlayedBeforeAck bool   `json:"playedBeforeAck"`
 }
 
 // speechPlaybackObservation mirrors rt-observe.js playbackState (subset).
 type speechPlaybackObservation struct {
 	Trace         []string `json:"trace"`
 	DroppedChunks int      `json:"droppedChunks"`
+}
+
+// speechMicObservation mirrors fake-mic.js micInfo: the synthetic source the
+// production capture actually adopted.
+type speechMicObservation struct {
+	ContextState string `json:"contextState"`
+	PCMPlays     int    `json:"pcmPlays"`
+	Tracks       []struct {
+		Kind  string `json:"kind"`
+		State string `json:"state"`
+	} `json:"tracks"`
 }
 
 // speechDriverResult is the JSON contract of driver.js's SPEECH_RESULT line.
@@ -61,6 +76,7 @@ type speechDriverResult struct {
 	DownBinaryBytes  int64                     `json:"downBinaryBytes"`
 	PageAcks         []speechPageAck           `json:"pageAcks"`
 	Playback         speechPlaybackObservation `json:"playback"`
+	Mic              speechMicObservation      `json:"mic"`
 }
 
 // speechManagerTracker wraps one connection's real TurnManager: it counts
@@ -348,6 +364,50 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration)
 	return res
 }
 
+// runDriverCheck executes the driver's --check self-check (计划步骤 3「辅助
+// 器检查」)：机械验证驱动器没有代发 ACK／替服务器发消息／执行任意页面 JS
+// 的接口，scenario 只是固定枚举。
+func (f *speechBrowserFixture) runDriverCheck() {
+	f.t.Helper()
+	root := speechRepoRoot(f.t)
+	driver := filepath.Join(root, "pkg", "rt", "testdata", "speech-browser", "driver.js")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var out, errOut bytes.Buffer
+	cmd := exec.CommandContext(ctx, "node", driver, "--check")
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		f.t.Fatalf("driver --check run: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
+	}
+	line := lastSpeechResultLine(out.String())
+	if line == "" {
+		f.t.Fatalf("driver --check produced no SPEECH_RESULT line\nstdout:\n%s", out.String())
+	}
+	var res struct {
+		OK    bool `json:"ok"`
+		Check struct {
+			Scenarios  []string `json:"scenarios"`
+			Violations []string `json:"violations"`
+		} `json:"selfCheck"`
+	}
+	if err := json.Unmarshal([]byte(line), &res); err != nil {
+		f.t.Fatalf("driver --check decode: %v\nline: %s", err, line)
+	}
+	if !res.OK {
+		f.t.Fatalf("driver self-check violations: %v", res.Check.Violations)
+	}
+	found := false
+	for _, s := range res.Check.Scenarios {
+		if s == "fixture" {
+			found = true
+		}
+	}
+	if !found {
+		f.t.Fatalf("driver scenarios %v lack the fixture scenario", res.Check.Scenarios)
+	}
+}
+
 // lastSpeechResultLine extracts the final "SPEECH_RESULT " JSON payload.
 func lastSpeechResultLine(out string) string {
 	trimmed := strings.TrimRight(out, "\n")
@@ -393,6 +453,7 @@ func (f *speechBrowserFixture) watchAnnouncementSettled(timeout time.Duration) <
 // sentence_ack，服务器侧门控解除、计时启动），销毁后无遗留连接与进程。
 func TestSpeechBrowserFixture(t *testing.T) {
 	f := newSpeechBrowserFixture(t)
+	f.runDriverCheck()
 
 	// The server-side settle evidence must be observed WHILE the page is
 	// alive: handleSentenceAck only wakes the announcement goroutine, and
@@ -411,16 +472,18 @@ func TestSpeechBrowserFixture(t *testing.T) {
 	if len(res.PageAcks) == 0 {
 		t.Fatal("the real page sent no sentence_ack (natural playback did not complete)")
 	}
-	onended := false
-	for _, tr := range res.Playback.Trace {
-		if strings.HasPrefix(tr, "onended:") {
-			t.Logf("native playback completion observed: %s", tr)
-			onended = true
-			break
+	// 步骤 3 验收：观察到原生播放结束和生产 ACK——每句 ACK 都必须由该句的
+	// 原生 onended 先行（丢块空播 ACK 在 playedBeforeAck 上必为 false，开发
+	// 期间已在零延迟 fakeTTS 的乱序时序下实测变红）。
+	for _, ack := range res.PageAcks {
+		if !ack.PlayedBeforeAck {
+			t.Fatalf("sentence_ack for %q (epoch %d) did not follow its native onended — trace %v",
+				ack.SentenceID, ack.Epoch, res.Playback.Trace)
 		}
 	}
-	if !onended {
-		t.Fatalf("no native onended in playback trace %v (droppedChunks=%d)", res.Playback.Trace, res.Playback.DroppedChunks)
+	// 复用的合成麦克风被页面生产 capture 真实采用（fake-mic.js 工具的验收）。
+	if len(res.Mic.Tracks) == 0 || res.Mic.Tracks[0].State != "live" {
+		t.Fatalf("synthetic mic not adopted by the production capture: %+v", res.Mic)
 	}
 	if res.Playback.DroppedChunks != 0 {
 		t.Fatalf("playback dropped %d chunks — the fixture PCM must play whole", res.Playback.DroppedChunks)
