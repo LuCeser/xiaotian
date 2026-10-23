@@ -182,7 +182,17 @@ func (e *Executor) AdvanceDictation(ctx context.Context, in AdvanceDictationInpu
 		)
 		return AdvanceDictationResult{}, err
 	}
-	return e.advanceDictationTx(ctx, in)
+	res, err := e.advanceDictationTx(ctx, in, false)
+	var stale *staleRecordError
+	if !errors.As(err, &stale) {
+		return res, err
+	}
+	// U-2 self-heal, the existing stale-record rule (AdvanceWord's): the
+	// record belongs to a dead generation of the row — purge it and
+	// re-execute ONCE. The single-connection pool serializes write
+	// transactions, so nothing can re-create a stale record between
+	// detection and retry.
+	return e.advanceDictationTx(ctx, in, true)
 }
 
 // advanceDictationTx is the whole advance in one SQLite transaction:
@@ -194,7 +204,11 @@ func (e *Executor) AdvanceDictation(ctx context.Context, in AdvanceDictationInpu
 // (d) the guarded write — optimistic version lock plus the cursor guard
 //     (defense in depth: within one generation the two move together);
 // (e) read back, persist the typed result, commit — all atomic.
-func (e *Executor) advanceDictationTx(ctx context.Context, in AdvanceDictationInput) (AdvanceDictationResult, error) {
+// purgeStale is the U-2 retry switch: the stale record is DELETEd by
+// primary key BEFORE the INSERT re-claims the request_id, atomically with
+// the re-executed advance (a failed purge never destroys a record a
+// legitimate replay would have used — the 0-rows paths unwind everything).
+func (e *Executor) advanceDictationTx(ctx context.Context, in AdvanceDictationInput, purgeStale bool) (AdvanceDictationResult, error) {
 	tx, err := e.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		e.logger.Error("advance dictation: begin tx failed",
@@ -206,6 +220,23 @@ func (e *Executor) advanceDictationTx(ctx context.Context, in AdvanceDictationIn
 		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: begin tx")
 	}
 	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	// U-2 retry: delete the stale dedupe record inside THIS transaction,
+	// before the claim below re-claims the request_id.
+	if purgeStale {
+		if _, err = tx.ExecContext(ctx,
+			"DELETE FROM tool_requests WHERE request_id = ?",
+			in.RequestID,
+		); err != nil {
+			e.logger.Error("advance dictation: purge stale dedupe record failed",
+				infra.F("component", "lesson/executor"),
+				infra.F("lesson_id", in.LessonID),
+				infra.F("request_id", in.RequestID),
+				infra.ErrField(err),
+			)
+			return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: purge stale dedupe record")
+		}
+	}
 
 	// (a) Claim the request_id (typed constraint detection, review L-2).
 	if _, err = tx.ExecContext(ctx,
@@ -385,12 +416,16 @@ func (e *Executor) advanceDictationReadbackTx(ctx context.Context, tx *sql.Tx, i
 
 // replayAdvanceDictation serves a duplicate request_id from the FIRST
 // stored result (the claim INSERT conflicted and the transaction rolled
-// back). Identity first: a record claimed by ANOTHER lesson or another
-// tool is never replayed — the collision surfaces loudly instead of
-// handing this classroom a foreign result. An empty stored result is the
-// residue of a crashed first write (never success), and a stored version
-// GREATER than the current row version belongs to a dead generation of
-// the row (U-2) — refused, never replayed into a rebuilt classroom.
+// back). Identity first: a record claimed by ANOTHER lesson, or by a tool
+// outside the advance family, is never replayed — the collision surfaces
+// loudly instead of handing this classroom a foreign result. Same-lesson
+// records of the LEGACY advance_word tool replay explicitly AS legacy:
+// index and version only, never a guessed stage/outcome/last-word fact the
+// old format never had (旧数据不可猜测修复；显式区分新旧格式). An empty
+// stored result is the residue of a crashed first write (never success).
+// A stored version GREATER than the current row version belongs to a dead
+// generation of the row (U-2): *staleRecordError drives the caller's
+// purge-and-re-execute — the existing stale-record rule.
 func (e *Executor) replayAdvanceDictation(ctx context.Context, in AdvanceDictationInput) (AdvanceDictationResult, error) {
 	var (
 		resultJSON string
@@ -407,7 +442,7 @@ func (e *Executor) replayAdvanceDictation(ctx context.Context, in AdvanceDictati
 		}
 		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: read idempotent record")
 	}
-	if recLesson != in.LessonID || recTool != "advance_dictation" {
+	if recLesson != in.LessonID || (recTool != "advance_dictation" && recTool != "advance_word") {
 		e.logger.Error("advance dictation: dedupe record identity mismatch",
 			infra.F("component", "lesson/executor"),
 			infra.F("lesson_id", in.LessonID),
@@ -425,10 +460,21 @@ func (e *Executor) replayAdvanceDictation(ctx context.Context, in AdvanceDictati
 		)
 		return AdvanceDictationResult{}, errors.Wrap(ErrInvalidLesson, "advance dictation: first execution left no stored result")
 	}
+
 	var res AdvanceDictationResult
-	if err := json.Unmarshal([]byte(resultJSON), &res); err != nil {
-		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: unmarshal stored result")
+	if recTool == "advance_word" {
+		// Legacy format: the old result knew index and version only.
+		var legacy AdvanceResult
+		if uerr := json.Unmarshal([]byte(resultJSON), &legacy); uerr != nil {
+			return AdvanceDictationResult{}, errors.Wrap(uerr, "advance dictation: unmarshal legacy result")
+		}
+		res = AdvanceDictationResult{NewIndex: legacy.NewIndex, NewVersion: legacy.NewVersion}
+	} else {
+		if uerr := json.Unmarshal([]byte(resultJSON), &res); uerr != nil {
+			return AdvanceDictationResult{}, errors.Wrap(uerr, "advance dictation: unmarshal stored result")
+		}
 	}
+
 	var currentVersion int
 	if err := e.store.db.QueryRowContext(ctx,
 		"SELECT version FROM lessons WHERE lesson_id = ?",
@@ -446,14 +492,14 @@ func (e *Executor) replayAdvanceDictation(ctx context.Context, in AdvanceDictati
 		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: read current lesson version")
 	}
 	if res.NewVersion > currentVersion {
-		e.logger.Error("advance dictation: stale dedupe record (lesson reset/rolled back), refusing replay",
+		e.logger.Error("advance dictation: stale dedupe record (lesson reset/rolled back), purging and re-executing",
 			infra.F("component", "lesson/executor"),
 			infra.F("lesson_id", in.LessonID),
 			infra.F("request_id", in.RequestID),
 			infra.F("stored_new_version", res.NewVersion),
 			infra.F("current_lesson_version", currentVersion),
 		)
-		return AdvanceDictationResult{}, errors.Wrap(ErrVersionConflict, "advance dictation: stale dedupe record")
+		return AdvanceDictationResult{}, &staleRecordError{StoredNewVersion: res.NewVersion, CurrentVersion: currentVersion}
 	}
 	res.Idempotent = true
 	e.logger.Info("advance dictation idempotent hit",
@@ -461,6 +507,7 @@ func (e *Executor) replayAdvanceDictation(ctx context.Context, in AdvanceDictati
 		infra.F("lesson_id", in.LessonID),
 		infra.F("request_id", in.RequestID),
 		infra.F("stored_new_version", res.NewVersion),
+		infra.F("legacy", recTool == "advance_word"),
 	)
 	return res, nil
 }

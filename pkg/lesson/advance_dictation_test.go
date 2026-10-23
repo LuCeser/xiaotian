@@ -416,7 +416,7 @@ func TestAdvanceDictationConflict(t *testing.T) {
 
 	for _, tc := range []struct{ name, recLesson, recTool string }{
 		{name: "wrong lesson", recLesson: "other-lesson", recTool: "advance_dictation"},
-		{name: "wrong tool", recLesson: "mine-lesson", recTool: "advance_word"},
+		{name: "wrong tool", recLesson: "mine-lesson", recTool: "complete_check"},
 	} {
 		t.Run(tc.name+" dedupe record is refused", func(t *testing.T) {
 			ex, store := newExecutorForTest(t)
@@ -446,4 +446,117 @@ func TestAdvanceDictationConflict(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAdvanceDictationLegacy pins the legacy-compatibility rules: an old
+// advance_word record under the SAME request-id family replays explicitly
+// as legacy (index/version only, never a re-advance and never guessed
+// stage/outcome facts); a stale record after a lesson rebuild follows the
+// existing U-2 rule (purge + re-execute once); a corrupted stored result
+// fails loudly instead of replaying zero values.
+func TestAdvanceDictationLegacy(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("legacy record replays without re-advancing", func(t *testing.T) {
+		ex, store := newExecutorForTest(t)
+		// The row looks like an old-flow classroom mid-dictation: word 0
+		// advanced (index 1, version 2), no outcomes, no stage.
+		if _, err := store.EnsureLessonCards(ctx, "leg-lesson", []Word{{Word: "苹果"}, {Word: "香蕉"}}, ""); err != nil {
+			t.Fatalf("EnsureLessonCards: %v", err)
+		}
+		if _, err := ex.AdvanceWord(ctx, "leg-lesson", 1, "leg-lesson-advance-0"); err != nil {
+			t.Fatalf("AdvanceWord setup: %v", err)
+		}
+
+		res, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+			LessonID: "leg-lesson", RequestID: "leg-lesson-advance-0",
+			TargetIndex: 0, ExpectedVersion: 2,
+			Outcome: WordOutcome{Outcome: OutcomeConfirmed},
+		})
+		if err != nil {
+			t.Fatalf("AdvanceDictation over the legacy record: %v", err)
+		}
+		if !res.Idempotent || res.NewIndex != 1 || res.NewVersion != 2 {
+			t.Fatalf("replay = %+v, want the legacy first result 1/2 idempotent", res)
+		}
+		if res.Stage != "" || res.LastWord || res.Outcomes != nil {
+			t.Fatalf("legacy replay = %+v — the old format never knew stage/outcomes/last-word", res)
+		}
+		row, gerr := store.GetLesson(ctx, "leg-lesson")
+		if gerr != nil || row.CurrentIndex != 1 || row.Version != 2 || row.Stage != "" {
+			t.Fatalf("row = %+v err=%v — a legacy replay must not re-advance", row, gerr)
+		}
+		// The legacy record itself is untouched (still advance_word).
+		var tool string
+		if qerr := store.db.QueryRowContext(ctx,
+			"SELECT tool FROM tool_requests WHERE request_id = ?", "leg-lesson-advance-0",
+		).Scan(&tool); qerr != nil || tool != "advance_word" {
+			t.Fatalf("record tool = %q err=%v — the legacy record must stay as-is", tool, qerr)
+		}
+	})
+
+	t.Run("stale record after a rebuild is purged and re-executed", func(t *testing.T) {
+		ex, store := newExecutorForTest(t)
+		advanceWord0(t, ex, store, "rebuild-lesson", "rebuild-lesson-advance-0", OutcomeConfirmed, 0)
+		// The row is deleted and recreated: version restarts at 1, the old
+		// record (new_version 2) is now stale.
+		if _, err := store.db.ExecContext(ctx, "DELETE FROM lessons WHERE lesson_id = ?", "rebuild-lesson"); err != nil {
+			t.Fatalf("delete row: %v", err)
+		}
+		if _, err := store.EnsureLessonCards(ctx, "rebuild-lesson", []Word{{Word: "苹果"}, {Word: "香蕉"}}, ""); err != nil {
+			t.Fatalf("recreate row: %v", err)
+		}
+
+		res, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+			LessonID: "rebuild-lesson", RequestID: "rebuild-lesson-advance-0",
+			TargetIndex: 0, ExpectedVersion: 1,
+			Outcome: WordOutcome{Outcome: OutcomeConfirmed, Hints: 1},
+		})
+		if err != nil {
+			t.Fatalf("AdvanceDictation after rebuild: %v", err)
+		}
+		if res.Idempotent || res.NewIndex != 1 || res.NewVersion != 2 {
+			t.Fatalf("result = %+v, want a fresh re-executed advance 1/2", res)
+		}
+		var tool string
+		if qerr := store.db.QueryRowContext(ctx,
+			"SELECT tool FROM tool_requests WHERE request_id = ?", "rebuild-lesson-advance-0",
+		).Scan(&tool); qerr != nil || tool != "advance_dictation" {
+			t.Fatalf("record tool = %q err=%v — the purge retry must store the new-format result", tool, qerr)
+		}
+		row, gerr := store.GetLesson(ctx, "rebuild-lesson")
+		if gerr != nil || row.CurrentIndex != 1 || row.Version != 2 {
+			t.Fatalf("row = %+v err=%v — the rebuilt classroom advanced exactly once", row, gerr)
+		}
+	})
+
+	t.Run("corrupted stored results fail loudly", func(t *testing.T) {
+		for _, tc := range []struct{ name, recTool, result string }{
+			{name: "new format", recTool: "advance_dictation", result: `{"new_index":`},
+			{name: "legacy format", recTool: "advance_word", result: `not json at all`},
+		} {
+			ex, store := newExecutorForTest(t)
+			if _, err := store.EnsureLessonCards(ctx, "corrupt-lesson", []Word{{Word: "苹果"}, {Word: "香蕉"}}, ""); err != nil {
+				t.Fatalf("EnsureLessonCards: %v", err)
+			}
+			if _, err := store.db.ExecContext(ctx,
+				"INSERT INTO tool_requests (request_id, lesson_id, tool, result) VALUES (?, ?, ?, ?)",
+				"corrupt-lesson-advance-0", "corrupt-lesson", tc.recTool, tc.result,
+			); err != nil {
+				t.Fatalf("seed corrupted record: %v", err)
+			}
+			res, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+				LessonID: "corrupt-lesson", RequestID: "corrupt-lesson-advance-0",
+				TargetIndex: 0, ExpectedVersion: 1,
+				Outcome: WordOutcome{Outcome: OutcomeConfirmed},
+			})
+			if err == nil {
+				t.Fatalf("%s: res = %+v — a corrupted result must fail, never replay zero values", tc.name, res)
+			}
+			row, gerr := store.GetLesson(ctx, "corrupt-lesson")
+			if gerr != nil || row.CurrentIndex != 0 || row.Version != 1 {
+				t.Fatalf("%s: row = %+v err=%v — a corrupted replay must not advance", tc.name, row, gerr)
+			}
+		}
+	})
 }
