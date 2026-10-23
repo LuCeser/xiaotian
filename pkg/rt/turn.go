@@ -1259,11 +1259,12 @@ func (tm *TurnManager) handleSentenceAck(m SentenceAckMsg) {
 // session_ended is never answered past its terminal message — a ping that
 // races the goodbye loses, and session_ended stays the wire's last word.
 func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
-	_ = s.SendControl(PongMsg{
+	pong := PongMsg{
 		Type:          TypePong,
 		TClientMs:     m.TClientMs,
 		TServerMonoNs: tm.recorder.MonoNs(),
-	})
+	}
+	tm.applySessionEffect(func() error { return s.SendControl(pong) })
 }
 
 // tryTerminalClose claims the session's ONE terminal close and ships the
