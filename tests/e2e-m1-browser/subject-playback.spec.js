@@ -16,7 +16,7 @@
 
 const { test, expect } = require('@playwright/test');
 const {
-  installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, listeningAfterPlayback,
 } = require('./helpers/rt-observe');
 const { installAudioObserver, audioSources, liveAt } = require('./helpers/audio-observe');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
@@ -90,19 +90,44 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
   const before = await controls(page);
   const askEpoch = before.find((e) => e.dir === 'in' && e.type === 'audio_start').msg.epoch;
   const nextEpoch = askEpoch + 1;
+  const epochKey = (epoch) => String(epoch) + ':';
   const at = (dir, type, epoch) => (e) => e.dir === dir && e.type === type
     && (!epoch || (e.msg && e.msg.epoch === epoch));
 
   // J05: 未选择前不创建课堂 — still zero rows while parked on the ask.
   expect(await lessonsNow(), 'no classroom row while the ask is parked').toHaveLength(0);
 
+  // Prove the REAL player has live sources from the ask epoch. Receiving
+  // audio_start/binary alone would not prove that the browser accepted and
+  // started them; a player that discarded every ask chunk must fail here.
+  await waitWs(page, async () => {
+    const state = await playbackState(page);
+    return state.playing && state.activeSourceKeys.some((key) => key.startsWith(epochKey(askEpoch)));
+  }, { label: 'old ask epoch has an active production audio source' });
+  const askPlayback = await playbackState(page);
+  const askSourceKeys = askPlayback.activeSourceKeys
+    .filter((key) => key.startsWith(epochKey(askEpoch)));
+  expect(askPlayback.playing, 'production player is playing before subject pick').toBe(true);
+  expect(askSourceKeys.length, 'old ask epoch has live production audio sources').toBeGreaterThan(0);
+
   // The pick, MID-PLAYBACK of the ask (J05's 询问中点击).
   await page.locator('#rt-subject-zh').click();
 
-  // Real epoch switch: interrupt_ack old→old+1 with old === the ask epoch.
-  await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'interrupt_ack'
-    && e.msg.old_epoch === askEpoch && e.msg.new_epoch === nextEpoch),
-  { label: 'interrupt_ack epoch switch' });
+  // Real epoch switch: interrupt_ack old→old+1 with old === the ask epoch,
+  // and its stopNow has removed every source and ledger entry from E0.
+  await waitWs(page, async (log) => {
+    const bumped = log.some((e) => e.dir === 'in' && e.type === 'interrupt_ack'
+      && e.msg.old_epoch === askEpoch && e.msg.new_epoch === nextEpoch);
+    if (!bumped) return false;
+    const state = await playbackState(page);
+    return !state.activeSourceKeys.some((key) => key.startsWith(epochKey(askEpoch)))
+      && !state.ledgerKeys.some((key) => key.startsWith(epochKey(askEpoch)));
+  }, { label: 'interrupt_ack clears every old-epoch production audio source' });
+  const afterBump = await playbackState(page);
+  expect(afterBump.activeSourceKeys.filter((key) => key.startsWith(epochKey(askEpoch))),
+    'old ask sources were removed by the epoch bump').toEqual([]);
+  expect(afterBump.ledgerKeys.filter((key) => key.startsWith(epochKey(askEpoch))),
+    'old ask playback ledger was removed by the epoch bump').toEqual([]);
 
   // New classroom under the PICKED subject only; student mode keeps words
   // masked (the server is the masking authority — never mode=test crutches).
@@ -143,11 +168,10 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
 
   // The server ACCEPTED those acks: it settles listening only after the
   // opening's real playback completion (audio_end ≠ completion).
-  await waitWs(page, (log) => {
-    const ends = log.filter(at('in', 'audio_end', nextEpoch));
-    const lastEnd = ends.length ? ends[ends.length - 1].i : -1;
-    return log.some((e) => e.i > lastEnd && e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening');
-  }, { label: 'server settled listening after the acks' });
+  const newOpeningIds = (await controls(page)).filter(at('in', 'audio_start', nextEpoch))
+    .map((e) => e.msg.sentence_id);
+  await waitWs(page, (log) => listeningAfterPlayback(log, nextEpoch, newOpeningIds),
+    { label: 'server settled listening only after every matching ack' });
 
   // Wire-level invariants (the whole flow legitimately carries zero
   // turn_start: announcements never open a turn — 无补发 turn_start).

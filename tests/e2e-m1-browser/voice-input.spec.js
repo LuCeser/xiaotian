@@ -20,7 +20,8 @@
 
 const { test, expect } = require('@playwright/test');
 const {
-  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, wsStats, wsView,
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, listeningAfterPlayback,
+  wsStats, wsView,
 } = require('./helpers/rt-observe');
 const { installFakeMic, micInfo, playPcm16 } = require('./helpers/fake-mic');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
@@ -98,19 +99,17 @@ test('synthetic mic rides the production capture path: format, silence, isolatio
       return end && ack && ack.i > end.i;
     });
   }, { timeoutMs: 30000, label: 'greeting fully acked by the production player' });
-  await waitWs(page, (log) => {
-    const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
-    const lastEnd = ends.length ? ends[ends.length - 1].i : -1;
-    return log.some((e) => e.i > lastEnd && e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening');
-  }, { label: 'listening settled after the greeting acks' });
+  const opening = await controls(page);
+  const openingEpoch = opening.find((e) => e.dir === 'in' && e.type === 'audio_start').msg.epoch;
+  const openingSids = opening.filter((e) => e.dir === 'in' && e.type === 'audio_start')
+    .map((e) => e.msg.sentence_id);
+  await waitWs(page, (log) => listeningAfterPlayback(log, openingEpoch, openingSids),
+    { label: 'listening settled only after every greeting ack' });
 
   // Isolation, playback→input half: while the teacher spoke, the page's own
   // RMS detector (fed by PRODUCTION capture frames) must never have fired.
   await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening'));
   const controlsNow = await controls(page);
-  const openingEpoch = controlsNow.find((e) => e.dir === 'in' && e.type === 'audio_start').msg.epoch;
-  const openingSids = controlsNow.filter((e) => e.dir === 'in' && e.type === 'audio_start')
-    .map((e) => e.msg.sentence_id);
   expect(openingSids).toHaveLength(3);
   const playback = await playbackState(page);
   for (const sid of openingSids) {
