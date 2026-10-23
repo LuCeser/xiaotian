@@ -79,7 +79,7 @@ func TestCheckPresentation(t *testing.T) {
 		tm.presentCheckedStage(s, ctx, cancel, checkStageInputs{
 			epoch: epoch, total: 2, words: []string{"苹果", "香蕉"},
 			reason: CheckStartedReasonResume, bridge: "我们来看看写得怎么样。",
-		})
+		}, func() {})
 		close(done)
 	}()
 	ttAwaitSpoken(t, s, sentBefore+1)

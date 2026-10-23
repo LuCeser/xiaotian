@@ -354,17 +354,20 @@ func (tm *TurnManager) prepareCheckStageInputs(epoch uint64) (checkStageInputs, 
 // presentCheckedStage only presents an already-persisted check stage. It
 // never calls EnterCheck or changes the authoritative verdict state.
 func (tm *TurnManager) presentCheckedStage(
-	s Sender, ctx context.Context, cancel context.CancelFunc, in checkStageInputs,
-) {
-	tm.mu.Lock()
-	if tm.epoch != in.epoch || tm.closed {
-		tm.mu.Unlock()
-		return
+	s Sender, ctx context.Context, cancel context.CancelFunc, in checkStageInputs, apply func(),
+) bool {
+	if !tm.applyTurnAt(in.epoch, func() error {
+		if err := s.SendControl(CheckStartedMsg{Type: TypeCheckStarted, Words: in.words, Reason: in.reason}); err != nil {
+			return err
+		}
+		apply()
+		return nil
+	}) {
+		return false
 	}
-	_ = s.SendControl(CheckStartedMsg{Type: TypeCheckStarted, Words: in.words, Reason: in.reason})
-	tm.mu.Unlock()
 	tm.recorder.Emit(EventCheckStarted, infra.F("total", in.total))
 	tm.runAnnouncementDisplayAt(s, in.epoch, ctx, cancel, in.bridge, in.bridge, purposeCheckBridge, nil)
+	return true
 }
 
 // enterCheck opens the check stage; reachable ONLY from advanceTarget's
@@ -387,15 +390,14 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	}
 	switch err {
 	case nil:
-		tm.mu.Lock()
-		if tm.epoch != epoch || tm.closed {
-			tm.mu.Unlock()
-			return
+		if tm.checkPresentationInterleave != nil {
+			tm.checkPresentationInterleave()
 		}
-		tm.tutor.version = res.NewVersion
-		tm.tutor.checking = true
-		tm.tutor.checkVerdicts = res.Verdicts
-		tm.mu.Unlock()
+		tm.presentCheckedStage(s, ctx, cancel, in, func() {
+			tm.tutor.version, tm.tutor.checking = res.NewVersion, true
+			tm.tutor.checkVerdicts = res.Verdicts
+		})
+		return
 	default:
 		var conflict *lesson.ConflictError
 		if !errors.As(err, &conflict) {
@@ -443,7 +445,7 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 			return
 		}
 	}
-	tm.presentCheckedStage(s, ctx, cancel, in)
+	tm.presentCheckedStage(s, ctx, cancel, in, func() {})
 }
 
 // handleCheckVerdict applies one screen verdict (the check_verdict control

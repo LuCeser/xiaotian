@@ -404,6 +404,9 @@ type TurnManager struct {
 	// settleInterleave is a narrow test probe between an announcement's
 	// valid final ack (await returned) and its protected settle.
 	settleInterleave func()
+	// checkPresentationInterleave is a narrow test probe after EnterCheck (or
+	// its conflict read-back) returns and before stored state is presented.
+	checkPresentationInterleave func()
 
 	// closeOwned marks the close path that won the ONE-TIME D-03 fallback
 	// ownership (uncheckedCloseFallback). Guarded by mu.
