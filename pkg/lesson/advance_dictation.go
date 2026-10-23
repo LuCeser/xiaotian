@@ -17,8 +17,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/pkg/errors"
+	sqlite "modernc.org/sqlite"
+	lib "modernc.org/sqlite/lib"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
 // The dictation-stage outcome vocabulary (U-9). These are the ROW's
@@ -159,4 +164,243 @@ func validateDictationRowTx(row dictationRowTx, targetIndex int) error {
 		return errors.Wrap(ErrInvalidLesson, fmt.Sprintf("advance dictation: target %d does not match the cursor %d", targetIndex, row.currentIndex))
 	}
 	return nil
+}
+
+// AdvanceDictation executes the dictation classroom's ONE atomic advance
+// (path B, issue #56): claim the request_id (a duplicate replays the FIRST
+// stored result, never a second advance), load the authoritative row and
+// validate it, merge the current word's outcome into the row's outcomes
+// JSON, and move the cursor + version in the SAME commit — so a cancel can
+// never separate "index moved" from "behavior saved". The last word's
+// checking transition joins this same transaction in the next commit; this
+// commit lands the middle-word shape (the caller is not wired up yet —
+// nothing in pkg/rt calls this). Same short-transaction discipline as
+// AdvanceWord (L-3: three statements plus the readback).
+func (e *Executor) AdvanceDictation(ctx context.Context, in AdvanceDictationInput) (AdvanceDictationResult, error) {
+	if err := in.validate(); err != nil {
+		e.logger.Warn("advance dictation rejected: invalid arguments",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+			infra.F("target_index", in.TargetIndex),
+			infra.F("expected_version", in.ExpectedVersion),
+		)
+		return AdvanceDictationResult{}, err
+	}
+	return e.advanceDictationTx(ctx, in)
+}
+
+// advanceDictationTx is the whole advance in one SQLite transaction:
+// (a) claim the request_id — a PRIMARY KEY violation rolls back and replays
+//     the FIRST stored result (typed constraint detection, review L-2);
+// (b) load + validate the authoritative row (stage/pacing/cursor checks);
+// (c) merge the current word's outcome, preserving every other word's
+//     stored behavior;
+// (d) the guarded write — optimistic version lock plus the cursor guard
+//     (defense in depth: within one generation the two move together);
+// (e) read back, persist the typed result, commit — all atomic.
+func (e *Executor) advanceDictationTx(ctx context.Context, in AdvanceDictationInput) (AdvanceDictationResult, error) {
+	tx, err := e.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		e.logger.Error("advance dictation: begin tx failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+			infra.ErrField(err),
+		)
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: begin tx")
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	// (a) Claim the request_id (typed constraint detection, review L-2).
+	if _, err = tx.ExecContext(ctx,
+		"INSERT INTO tool_requests (request_id, lesson_id, tool, result) VALUES (?, ?, 'advance_dictation', '')",
+		in.RequestID, in.LessonID,
+	); err != nil {
+		var serr *sqlite.Error
+		if errors.As(err, &serr) && (serr.Code() == lib.SQLITE_CONSTRAINT_PRIMARYKEY ||
+			serr.Code() == lib.SQLITE_CONSTRAINT_UNIQUE ||
+			serr.Code() == lib.SQLITE_CONSTRAINT) {
+			_ = tx.Rollback()
+			return e.replayAdvanceDictation(ctx, in)
+		}
+		e.logger.Error("advance dictation: insert tool_requests failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+			infra.ErrField(err),
+		)
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: insert tool_requests")
+	}
+
+	// (b) The authoritative row, read and validated inside this transaction.
+	row, err := e.loadDictationRowTx(ctx, tx, in.LessonID)
+	if err != nil {
+		return AdvanceDictationResult{}, err
+	}
+	if err := validateDictationRowTx(row, in.TargetIndex); err != nil {
+		e.logger.Warn("advance dictation rejected: row validation failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+			infra.F("target_index", in.TargetIndex),
+		)
+		return AdvanceDictationResult{}, err
+	}
+
+	// (c) Merge the current word's behavior; every other word's stored
+	// outcome is preserved untouched (同连接对齐不抹掉其他词的记录).
+	outcomes := row.outcomes
+	if outcomes == nil {
+		outcomes = map[string]WordOutcome{}
+	}
+	outcomes[strconv.Itoa(in.TargetIndex)] = in.Outcome
+	outJSON, err := json.Marshal(outcomes)
+	if err != nil {
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: marshal outcomes")
+	}
+
+	// (d) The guarded write: one version bump carries the cursor move and
+	// the behavior save together.
+	result, err := tx.ExecContext(ctx,
+		"UPDATE lessons SET current_index = current_index + 1, outcomes = ?, version = version + 1, updated_at = datetime('now') WHERE lesson_id = ? AND version = ? AND current_index = ?",
+		string(outJSON), in.LessonID, in.ExpectedVersion, in.TargetIndex,
+	)
+	if err != nil {
+		e.logger.Error("advance dictation: update lessons failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+			infra.ErrField(err),
+		)
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: update lessons")
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: rows affected")
+	}
+	if rows == 0 {
+		return AdvanceDictationResult{}, e.advanceDictationGuardFailedTx(ctx, tx, in)
+	}
+
+	// (e) Read back, persist the typed result, commit — atomically.
+	res, err := e.advanceDictationReadbackTx(ctx, tx, in, row, outcomes)
+	if err != nil {
+		return AdvanceDictationResult{}, err
+	}
+	resultJSON, err := json.Marshal(res)
+	if err != nil {
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: marshal result")
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE tool_requests SET result = ? WHERE request_id = ?",
+		string(resultJSON), in.RequestID,
+	); err != nil {
+		e.logger.Error("advance dictation: store result failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+			infra.ErrField(err),
+		)
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: store result")
+	}
+	if err := tx.Commit(); err != nil {
+		e.logger.Error("advance dictation: commit failed",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+			infra.ErrField(err),
+		)
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: commit")
+	}
+
+	e.logger.Info("advance dictation committed",
+		infra.F("component", "lesson/executor"),
+		infra.F("lesson_id", in.LessonID),
+		infra.F("request_id", in.RequestID),
+		infra.F("target_index", in.TargetIndex),
+		infra.F("new_version", res.NewVersion),
+	)
+	return res, nil
+}
+
+// advanceDictationGuardFailedTx classifies a 0-rows guarded UPDATE inside
+// the open transaction: the row moved under us (version conflict — the
+// normal optimistic-lock rejection) or the cursor no longer matches the
+// fixed target (a garbled command the load had already cleared; surfaced
+// loudly, never retried against another word).
+func (e *Executor) advanceDictationGuardFailedTx(ctx context.Context, tx *sql.Tx, in AdvanceDictationInput) error {
+	var (
+		curVersion int
+		curIndex   int
+	)
+	qerr := tx.QueryRowContext(ctx,
+		"SELECT version, current_index FROM lessons WHERE lesson_id = ?",
+		in.LessonID,
+	).Scan(&curVersion, &curIndex)
+	if qerr != nil {
+		if errors.Is(qerr, sql.ErrNoRows) {
+			return errors.Wrap(ErrLessonNotFound, fmt.Sprintf("advance dictation for lesson %q", in.LessonID))
+		}
+		return errors.Wrap(qerr, "advance dictation: read current row")
+	}
+	if curIndex != in.TargetIndex {
+		return errors.Wrap(ErrInvalidLesson, fmt.Sprintf("advance dictation: cursor moved to %d under target %d", curIndex, in.TargetIndex))
+	}
+	e.logger.Warn("advance dictation: version conflict",
+		infra.F("component", "lesson/executor"),
+		infra.F("lesson_id", in.LessonID),
+		infra.F("request_id", in.RequestID),
+		infra.F("expected_version", in.ExpectedVersion),
+		infra.F("current_version", curVersion),
+	)
+	return &ConflictError{CurrentVersion: curVersion}
+}
+
+// advanceDictationReadbackTx reads the row back inside the open
+// transaction and assembles the typed result. The stage stays the dictation
+// stage for a middle word; the last word's checking transition joins the
+// same transaction in the next commit (LastWord already reports it).
+func (e *Executor) advanceDictationReadbackTx(ctx context.Context, tx *sql.Tx, in AdvanceDictationInput, row dictationRowTx, outcomes map[string]WordOutcome) (AdvanceDictationResult, error) {
+	var (
+		newVersion int
+		stage      string
+	)
+	if err := tx.QueryRowContext(ctx,
+		"SELECT version, stage FROM lessons WHERE lesson_id = ?",
+		in.LessonID,
+	).Scan(&newVersion, &stage); err != nil {
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: read advanced lesson")
+	}
+	return AdvanceDictationResult{
+		NewIndex:   in.TargetIndex + 1,
+		NewVersion: newVersion,
+		Stage:      stage,
+		Outcomes:   outcomes,
+		LastWord:   in.TargetIndex+1 == row.wordCount,
+	}, nil
+}
+
+// replayAdvanceDictation serves a duplicate request_id from the FIRST
+// stored result (the claim INSERT conflicted and the transaction rolled
+// back). Shared with the check tools' replay reader (U-2 stale-record
+// guard included); lesson/tool identity hardening lands with the
+// idempotency commit.
+func (e *Executor) replayAdvanceDictation(ctx context.Context, in AdvanceDictationInput) (AdvanceDictationResult, error) {
+	stored, err := e.storedCheckResult(ctx, in.LessonID, in.RequestID, "advance_dictation")
+	if err != nil {
+		return AdvanceDictationResult{}, err
+	}
+	var res AdvanceDictationResult
+	if err := json.Unmarshal([]byte(stored), &res); err != nil {
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: unmarshal stored result")
+	}
+	res.Idempotent = true
+	e.logger.Info("advance dictation idempotent hit",
+		infra.F("component", "lesson/executor"),
+		infra.F("lesson_id", in.LessonID),
+		infra.F("request_id", in.RequestID),
+		infra.F("stored_new_version", res.NewVersion),
+	)
+	return res, nil
 }

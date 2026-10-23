@@ -131,3 +131,64 @@ func TestAdvanceDictationRowArguments(t *testing.T) {
 		}
 	}
 }
+
+// TestAdvanceDictationMiddle covers the middle-word advance through a real
+// migrated store: exactly ONE word's outcome changes (others preserved),
+// and the cursor + version move by exactly one in the same commit.
+func TestAdvanceDictationMiddle(t *testing.T) {
+	ex, store := newExecutorForTest(t)
+	ctx := context.Background()
+	cards := []Word{{Word: "苹果"}, {Word: "香蕉"}, {Word: "葡萄"}}
+	if _, err := store.EnsureLessonCards(ctx, "mid-lesson", cards, ""); err != nil {
+		t.Fatalf("EnsureLessonCards: %v", err)
+	}
+	// Word 0 advances first (timeout after one hint); its stored behavior
+	// must survive word 1's advance untouched.
+	if _, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+		LessonID: "mid-lesson", RequestID: "mid-lesson-advance-0",
+		TargetIndex: 0, ExpectedVersion: 1,
+		Outcome: WordOutcome{Outcome: OutcomeTimeout, Hints: 1},
+	}); err != nil {
+		t.Fatalf("AdvanceDictation (word 0): %v", err)
+	}
+
+	res, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+		LessonID: "mid-lesson", RequestID: "mid-lesson-advance-1",
+		TargetIndex: 1, ExpectedVersion: 2,
+		Outcome: WordOutcome{Outcome: OutcomeConfirmed, Hints: 2},
+	})
+	if err != nil {
+		t.Fatalf("AdvanceDictation: %v", err)
+	}
+	if res.Idempotent || res.NewIndex != 2 || res.NewVersion != 3 || res.Stage != "" || res.LastWord {
+		t.Fatalf("result = %+v, want index 2 / version 3 / stage '' / last=false / first execution", res)
+	}
+
+	row, err := store.GetLesson(ctx, "mid-lesson")
+	if err != nil {
+		t.Fatalf("GetLesson: %v", err)
+	}
+	if row.CurrentIndex != 2 || row.Version != 3 || row.Stage != "" {
+		t.Fatalf("row index/version/stage = %d/%d/%q, want 2/3/''", row.CurrentIndex, row.Version, row.Stage)
+	}
+	want := map[string]WordOutcome{
+		"0": {Outcome: "timeout", Hints: 1},
+		"1": {Outcome: "confirmed", Hints: 2},
+	}
+	if len(row.Outcomes) != len(want) {
+		t.Fatalf("outcomes = %+v, want exactly %d entries", row.Outcomes, len(want))
+	}
+	for k, v := range want {
+		if got, ok := row.Outcomes[k]; !ok || got != v {
+			t.Fatalf("outcomes[%s] = %+v, want %+v", k, got, v)
+		}
+	}
+
+	// The request claim left a replayable first result.
+	var stored string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT result FROM tool_requests WHERE request_id = ?", "mid-lesson-advance-1",
+	).Scan(&stored); err != nil || stored == "" {
+		t.Fatalf("stored result = %q err=%v — the first execution must persist its result", stored, err)
+	}
+}
