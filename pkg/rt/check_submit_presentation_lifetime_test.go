@@ -89,3 +89,56 @@ func TestCheckSubmitSummaryLifetime(t *testing.T) {
 	}
 	tm.handleEndSession(captured)
 }
+
+func TestCorrectionSubmitPresentationLifetime(t *testing.T) {
+	words := newFakeWords(ttCards("苹果"))
+	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
+	tm, s, _, exec := ttDriveToCheck(t, ttCards("苹果"), words)
+	tm.mu.Lock()
+	tm.tutor.checking = false
+	tm.tutor.correction = true
+	epoch := tm.epoch
+	tm.mu.Unlock()
+	exec.mu.Lock()
+	exec.lesson.Stage = "submitted"
+	exec.lesson.Unchecked = true
+	version := exec.lesson.Version
+	exec.mu.Unlock()
+	resultsBefore := s.countOf(TypeReviewResult)
+	sentBefore := s.countOf(TypeTeacherSentence)
+	hit := make(chan struct{})
+	tm.checkSubmitPresentationInterleave = func() {
+		tm.checkSubmitPresentationInterleave = nil
+		tm.handleEndSession(s)
+		close(hit)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		tm.finishCorrections(s, ctx, cancel, correctionInputs{
+			epoch: epoch, lessonID: ttLessonID, version: version,
+			requestID: "correction-race", changed: map[string]string{"苹果": "good"}, total: 1, correct: 1,
+		})
+		close(done)
+	}()
+	ttAwaitGate(t, hit, "correction presentation probe was not reached")
+	ttAwaitGate(t, done, "stale correction presentation did not finish")
+
+	row, err := exec.GetLessonState(context.Background(), ttLessonID)
+	if err != nil || row.Unchecked {
+		t.Fatalf("stored lesson = %+v, err=%v; want cleared correction marker", row, err)
+	}
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want the accepted correction save preserved", got)
+	}
+	if s.countOf(TypeReviewResult) != resultsBefore || s.countOf(TypeTeacherSentence) != sentBefore {
+		t.Fatalf("review results=%d sentences=%d, want %d/%d",
+			s.countOf(TypeReviewResult), s.countOf(TypeTeacherSentence), resultsBefore, sentBefore)
+	}
+	tm.mu.Lock()
+	reviewSeen, closed := tm.tutor.reviewSeen, tm.closed
+	tm.mu.Unlock()
+	if reviewSeen || !closed {
+		t.Fatalf("reviewSeen=%v closed=%v, want false/true", reviewSeen, closed)
+	}
+}

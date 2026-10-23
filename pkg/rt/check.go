@@ -877,6 +877,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	// derived hints, current version for ClearUnchecked).
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
 	l, err := tm.exec.GetLessonState(ctx, lessonID)
@@ -953,6 +954,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	}
 
 	go tm.finishCorrections(s, ctx, cancel, correctionInputs{
+		epoch:     epoch,
 		requestID: m.RequestID,
 		lessonID:  lessonID,
 		category:  lesson.NormalizeCategory(l.Category),
@@ -974,6 +976,7 @@ type correctionInputs struct {
 	version  int
 	total    int
 	correct  int
+	epoch    uint64
 }
 
 // finishCorrections runs on its own goroutine (runNaturalEnding blocks on
@@ -982,6 +985,7 @@ type correctionInputs struct {
 // review_result, then the wrap line and the acked ending.
 func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel context.CancelFunc, in correctionInputs) {
 	defer cancel()
+	persistCtx := context.WithoutCancel(ctx)
 
 	requested := len(in.changed)
 	updated := 0
@@ -993,7 +997,7 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 		receiptID := int64(0)
 		changedSet := sortedWordSet(in.changed)
 		if tm.cfg.Receipts != nil {
-			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+			rec, rerr := tm.cfg.Receipts.Begin(persistCtx, lesson.ReceiptInput{
 				LessonID:  in.lessonID,
 				RequestID: in.requestID,
 				Kind:      lesson.ReceiptKindCorrection,
@@ -1006,7 +1010,7 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 			}
 		}
 
-		wres, err := tm.cfg.Words.SubmitReview(ctx, in.changed, in.category)
+		wres, err := tm.cfg.Words.SubmitReview(persistCtx, in.changed, in.category)
 		switch {
 		case err != nil:
 			// Honest failure: the correction was NOT saved — never a
@@ -1031,9 +1035,9 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 		if tm.cfg.Receipts != nil && receiptID > 0 {
 			var cerr error
 			if err != nil {
-				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, nil, changedSet, false)
+				cerr = tm.cfg.Receipts.Complete(persistCtx, receiptID, nil, changedSet, false)
 			} else {
-				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
+				cerr = tm.cfg.Receipts.Complete(persistCtx, receiptID, wres.Updated, wres.Missing, true)
 			}
 			if cerr != nil {
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
@@ -1045,22 +1049,19 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 	// a failed/empty diff submit? NO — on a FAILED review write the row
 	// keeps its unchecked marker so the next session can retry the
 	// correction; only a clean run (or an empty diff) closes the loop.
+	newVersion := in.version
 	if !saveFailed {
-		if _, err := tm.exec.ClearUnchecked(ctx, in.lessonID, in.version, in.lessonID+"-clear-unchecked"); err != nil {
+		if cleared, err := tm.exec.ClearUnchecked(persistCtx, in.lessonID, in.version, in.lessonID+"-clear-unchecked"); err != nil {
 			// A failed marker reset leaves the row re-openable for
 			// correction — honest, recoverable, never retried blindly.
 			tm.recorder.Emit(EventError,
 				infra.F("code", ErrCodeProviderFailed),
 				infra.F("at", "clear_unchecked"),
 			)
+		} else {
+			newVersion = cleared.NewVersion
 		}
 	}
-
-	tm.mu.Lock()
-	tm.tutor.version = in.version
-	tm.tutor.checking = false
-	tm.tutor.reviewSeen = true
-	tm.mu.Unlock()
 
 	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
@@ -1073,10 +1074,26 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 		result.Updated = 0
 		result.Missing = requested
 	}
-	_ = s.SendControl(result)
-
 	summary := checkedSummaryText(in.total, in.correct, result.Updated, requested, saveFailed)
-	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
+	if tm.checkSubmitPresentationInterleave != nil {
+		tm.checkSubmitPresentationInterleave()
+	}
+	if !tm.applyTurnAt(in.epoch, func() error {
+		if err := s.SendControl(result); err != nil {
+			return err
+		}
+		tm.tutor.version = newVersion
+		tm.tutor.checking = false
+		tm.tutor.reviewSeen = true
+		tm.tutor.reviewResult = result
+		return nil
+	}) {
+		return
+	}
+	if tm.checkSubmitSummaryInterleave != nil {
+		tm.checkSubmitSummaryInterleave()
+	}
+	tm.runNaturalEndingAt(s, in.epoch, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
 }
 
 // ---------------------------------------------------------------------------
