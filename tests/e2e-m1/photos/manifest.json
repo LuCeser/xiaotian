@@ -25,7 +25,7 @@
         {"word": "hard", "kind": "word", "meaning": "困难的"},
         {"word": "easy", "kind": "word", "meaning": "容易的"},
         {"word": "be good at", "kind": "phrase", "meaning": "擅长..."},
-        {"word": "help … (do) …", "kind": "phrase", "meaning": "帮助...（做）...", "aliases": ["help…(do)…"]},
+        {"word": "help … (do) …", "kind": "phrase", "meaning": "帮助...（做）...", "aliases": ["help…(do)…", "help ... (do)..."]},
         {"word": "learn English", "kind": "phrase", "meaning": "学习英语"},
         {"word": "cheer for them", "kind": "phrase", "meaning": "为他们喝彩"},
         {"word": "want to be …", "kind": "phrase", "meaning": "想成为...", "aliases": ["want to be…"]},
@@ -34,7 +34,7 @@
         {"word": "paint pictures", "kind": "phrase", "meaning": "画图"},
         {"word": "play a guessing game", "kind": "phrase", "meaning": "玩猜谜游戏"},
         {"word": "clean the blackboard", "kind": "phrase", "meaning": "擦黑板"},
-        {"word": "share … with each other", "kind": "phrase", "meaning": "互相分享...", "aliases": ["share…with each other"]},
+        {"word": "share … with each other", "kind": "phrase", "meaning": "互相分享...", "aliases": ["share…with each other", "share ...with each other"]},
         {"word": "tell interesting stories", "kind": "phrase", "meaning": "讲有趣的故事"},
         {"word": "skip with a long rope", "kind": "phrase", "meaning": "跳长绳"}
       ],

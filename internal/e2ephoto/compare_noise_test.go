@@ -97,13 +97,26 @@ func TestCompareWrongMeaning(t *testing.T) {
 
 }
 
-// TestCompareEllipsisAliases: only the pre-declared compact alias (and
-// normalization of dot-runs) rescues the ellipsis template phrases; an
-// undeclared paraphrase is a miss plus an extra, never a fuzzy hit. One
-// missed phrase sits inside the tolerated 12/13 bar — two fail it, and
-// key phrases are covered by must-hit instead.
+// TestCompareEllipsisAliases: only the pre-declared surfaces (compact
+// alias and the photo's ACTUAL printed spacing) rescue the ellipsis
+// template phrases; an undeclared paraphrase is a miss plus an extra,
+// never a fuzzy hit. One missed phrase sits inside the tolerated 12/13
+// bar — two fail it, and key phrases are covered by must-hit instead.
 func TestCompareEllipsisAliases(t *testing.T) {
 	p := realPhoto(t)
+	for _, v := range []struct{ canonical, surface, why string }{
+		{"help … (do) …", "help…(do)…", "紧凑别名"},
+		{"help … (do) …", "help ... (do)...", "照片实际印刷形式"}, // …前有空格、后无空格
+		{"share … with each other", "share...with each other", "紧凑别名"},
+		{"share … with each other", "share ...with each other", "照片实际印刷形式"},
+	} {
+		rep := Compare(p, withSurface(baseline(p), v.canonical, v.surface))
+		// OK() 单独不够：漏一条词组仍在 12/13 容忍内。印刷形式必须真正
+		// 命中 —— 忠实识别不能消耗唯一允许漏掉的词组名额。
+		if len(rep.Missing) != 0 || len(rep.Extra) != 0 || rep.PhraseHits != 13 {
+			t.Errorf("%s %q must hit %q exactly once: %+v", v.why, v.surface, v.canonical, rep)
+		}
+	}
 	rows := withSurface(baseline(p), "help … (do) …", "help…(do)…") // declared alias
 	rows = withSurface(rows, "share … with each other", "share...with each other")
 	rep := Compare(p, rows)

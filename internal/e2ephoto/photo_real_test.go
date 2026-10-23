@@ -51,8 +51,8 @@ func TestLoadRealManifest(t *testing.T) {
 	for _, e := range p.Entries {
 		aliases += len(e.Aliases)
 	}
-	if aliases != 3 {
-		t.Errorf("%d alias surfaces declared, want 3 (the ellipsis template phrases)", aliases)
+	if aliases != 5 {
+		t.Errorf("%d alias surfaces declared, want 5 (紧凑形式 + 照片实际印刷的省略号空格)", aliases)
 	}
 	if p.Rules != (Rules{MinWordHits: 16, MinPhraseHits: 12, MinPrecision: 0.95}) {
 		t.Errorf("rules = %+v, want the pinned 16/17, 12/13, 0.95", p.Rules)
