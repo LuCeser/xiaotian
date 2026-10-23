@@ -70,7 +70,7 @@ module.exports = defineConfig({
   // service below serves the single read-only smoke test. Every stateful
   // classroom test starts its own service, temp DB and data root through
   // helpers/spec-service.js; no assertion depends on file execution order.
-  testMatch: /(smoke|subject-playback|voice-input)\.spec\.js$/,
+  testMatch: /(smoke|subject-playback|voice-input|finish)\.spec\.js$/,
   timeout: 60_000,
   retries: 0,
   // The strict vendor stub is shared, so its independently reset scripts
