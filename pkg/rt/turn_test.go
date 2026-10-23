@@ -135,12 +135,14 @@ type fakeExecutor struct {
 	verdictRelease   chan struct{}
 	verdictEntered   chan struct{}
 	requestResults   map[string]lesson.AdvanceResult
+	dictationResults map[string]lesson.AdvanceDictationResult
 	advanceRelease   chan struct{}
 	stateRelease     chan struct{}
 	stateEntered     chan struct{}
 	checkCalls       []fakeCheckCall
 	ensureIDs        []string
 	advanceCalls     []fakeAdvanceCall
+	dictationCalls   []lesson.AdvanceDictationInput
 	stateIDs         []string
 	lesson           lesson.Lesson
 	ensureCalls      int
@@ -176,10 +178,11 @@ func cardWords(cards []lesson.Word) []string {
 // cards (empty cards = the legacy-row case).
 func newFakeExecutor(lessonID string, cards []lesson.Word) *fakeExecutor {
 	return &fakeExecutor{
-		lesson:         lesson.Lesson{LessonID: lessonID, Words: cardWords(cards), Cards: cards, CurrentIndex: 0, Version: 1},
-		exists:         true,
-		requestResults: map[string]lesson.AdvanceResult{},
-		checkResults:   map[string]any{},
+		lesson:           lesson.Lesson{LessonID: lessonID, Words: cardWords(cards), Cards: cards, CurrentIndex: 0, Version: 1},
+		exists:           true,
+		requestResults:   map[string]lesson.AdvanceResult{},
+		dictationResults: map[string]lesson.AdvanceDictationResult{},
+		checkResults:     map[string]any{},
 	}
 }
 
@@ -367,6 +370,44 @@ func (f *fakeExecutor) AdvanceWord(_ context.Context, lessonID string, expectedV
 		close(entered)
 		<-release
 	}
+	return res, nil
+}
+
+func (f *fakeExecutor) AdvanceDictation(_ context.Context, in lesson.AdvanceDictationInput) (lesson.AdvanceDictationResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dictationCalls = append(f.dictationCalls, in)
+	if stored, ok := f.dictationResults[in.RequestID]; ok {
+		stored.Idempotent = true
+		return stored, nil
+	}
+	if f.conflictVersion > 0 {
+		return lesson.AdvanceDictationResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
+	}
+	if !f.exists {
+		return lesson.AdvanceDictationResult{}, lesson.ErrLessonNotFound
+	}
+	if in.LessonID != f.lesson.LessonID || in.TargetIndex != f.lesson.CurrentIndex {
+		return lesson.AdvanceDictationResult{}, lesson.ErrInvalidLesson
+	}
+	if in.ExpectedVersion != f.lesson.Version {
+		return lesson.AdvanceDictationResult{}, &lesson.ConflictError{CurrentVersion: f.lesson.Version}
+	}
+	if f.lesson.Outcomes == nil {
+		f.lesson.Outcomes = map[string]lesson.WordOutcome{}
+	}
+	f.lesson.Outcomes[strconv.Itoa(in.TargetIndex)] = in.Outcome
+	f.lesson.CurrentIndex++
+	f.lesson.Version++
+	lastWord := f.lesson.CurrentIndex == len(f.lesson.Words)
+	if lastWord {
+		f.lesson.Stage = lesson.StageChecking
+	}
+	res := lesson.AdvanceDictationResult{
+		NewIndex: f.lesson.CurrentIndex, NewVersion: f.lesson.Version,
+		Stage: f.lesson.Stage, Outcomes: f.lesson.Outcomes, LastWord: lastWord,
+	}
+	f.dictationResults[in.RequestID] = res
 	return res, nil
 }
 

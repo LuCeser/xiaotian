@@ -75,6 +75,9 @@ type LessonExecutor interface {
 	// AdvanceWord moves the cursor forward one word, idempotently by
 	// requestID, guarded by expectedVersion.
 	AdvanceWord(ctx context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error)
+	// AdvanceDictation atomically persists the current word's behavior,
+	// advances the fixed target, and opens checking on the last word.
+	AdvanceDictation(ctx context.Context, in lesson.AdvanceDictationInput) (lesson.AdvanceDictationResult, error)
 	// EnterCheck opens the check stage (13.1-01): persists stage='checking'
 	// plus the behavior snapshot, idempotently by requestID.
 	EnterCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, outcomes map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error)

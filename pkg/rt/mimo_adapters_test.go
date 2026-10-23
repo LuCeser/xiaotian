@@ -13,13 +13,56 @@ package rt
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 )
+
+// TestLessonToolsAdvanceDictation exercises the production adapter against
+// a real SQLite executor, including the behavior write and cursor/version
+// update that must remain in one lesson transaction.
+func TestLessonToolsAdvanceDictation(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "lesson-tools.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if err = lesson.Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	store, err := lesson.NewStore(db, nil)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	exec, err := lesson.NewExecutor(store, nil)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	tools, err := NewLessonTools(store, exec)
+	if err != nil {
+		t.Fatalf("new lesson tools: %v", err)
+	}
+	if _, err = tools.EnsureLessonCards(ctx, "adapter-lesson", []lesson.Word{{Word: "苹果"}, {Word: "香蕉"}}, ""); err != nil {
+		t.Fatalf("ensure lesson: %v", err)
+	}
+	res, err := tools.AdvanceDictation(ctx, lesson.AdvanceDictationInput{
+		LessonID: "adapter-lesson", RequestID: "adapter-lesson-advance-0",
+		TargetIndex: 0, ExpectedVersion: 1,
+		Outcome: lesson.WordOutcome{Outcome: lesson.OutcomeConfirmed, Hints: 1},
+	})
+	if err != nil {
+		t.Fatalf("advance dictation: %v", err)
+	}
+	if res.NewIndex != 1 || res.NewVersion != 2 || res.LastWord || res.Outcomes["0"].Hints != 1 {
+		t.Fatalf("result = %+v, want index/version 1/2 and persisted hint", res)
+	}
+}
 
 // fakePyBridge is a scripted pybridge.Executor: RunDue pops the next
 // scripted result (or error) and records the opts it was called with;
