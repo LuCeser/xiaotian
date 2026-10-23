@@ -18,9 +18,11 @@ func TestCompareNoiseHardFails(t *testing.T) {
 		{"class name row", "Class 3  Name Li Ming  No. 12", "表头"},
 		{"tips box", "小贴士：遇到不会的单词可以先跳过", "小贴士"},
 		{"sheet title", "4A Unit 2 Reading Sheet", "unit"},
-		// 照片上真实存在的中文标题／分区标题（英语朗读纸、一、单词、
-		// 二、词组、三、句子）混入词条同样必须硬失败（PR #65 复审 P1：
-		// 单词／词组等两字标题既不命中噪声子串也不足例句阈值）。
+		// 照片上真实存在的中文标题／分区标题（2026 学年第一学期、英语朗
+		// 读纸、一、单词、二、词组、三、句子）混入词条同样必须硬失败
+		// （PR #65 复审 P1：单词／词组等两字标题既不命中噪声子串也不足
+		// 例句阈值；学年行四字片段不带 unit，PR #70 复审 P2 补上）。
+		{"semester title line", "2026 学年第一学期", "学年第一学期"},
 		{"chinese sheet title", "英语朗读纸", "朗读纸"},
 		{"chinese word-section header", "单词", "单词"},
 		{"chinese phrase-section header", "二、词组", "词组"},

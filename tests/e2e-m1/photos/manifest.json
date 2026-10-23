@@ -39,7 +39,7 @@
         {"word": "skip with a long rope", "kind": "phrase", "meaning": "跳长绳"}
       ],
       "mustHit": ["helpful","duck","clean the blackboard","skip with a long rope"],
-      "noiseSubstrings": ["class","name","no.","unit","小贴士","朗读纸","单词","词组","句子"],
+      "noiseSubstrings": ["class","name","no.","unit","小贴士","朗读纸","学年第一学期","单词","词组","句子"],
       "rules": {"minWordHits": 16,"minPhraseHits": 12,"minPrecision": 0.95}
     }
   ]
