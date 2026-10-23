@@ -10,6 +10,14 @@
 //   onended → sentence_ack — plan §2 rule 2; the test never sends, calls or
 //   fakes an ack, and never fabricates a server control).
 //
+//   J01-en (review #67 P2): every OTHER english classroom spec feeds words
+//   through REST seeding or photo import, so an english-specific
+//   due/eligibility defect in the MANUAL entry path would slip through.
+//   The second test enters ONE english word through the real form and
+//   proves it is due and classroom-eligible the honest way: the generic
+//   student entry opens english DIRECTLY (no ask — J04's rule) and the
+//   greeting really plays that exact word.
+//
 // Isolation: this spec launches its OWN service+temp SQLite (spec-service)
 // — the shared instance hands out one lesson row per subject per run, and
 // J01 must create its own. The strict stub is shared: reset in finally.
@@ -47,6 +55,22 @@ const ZH_WORDS = [
 ];
 const EN_WORDS = [{ word: 'luminous', meaning: '发光的，明亮的' }];
 
+/** One manual add through the REAL 添加单词 form. Completion signal = that
+ *  word's browse row appearing (real POST → Python → SQLite, then the
+ *  no-reload list refresh). The success TOAST is asserted only by callers
+ *  right after a single add: it is a 2.5 s transient, so on consecutive
+ *  adds a leftover toast can satisfy a matcher while the new POST is
+ *  still in flight. */
+async function addWordViaForm(page, radioName, { word, meaning }, unit) {
+  await page.getByRole('radio', { name: radioName }).check();
+  await page.getByRole('textbox', { name: '单词', exact: true }).fill(word);
+  await page.getByRole('textbox', { name: '意思', exact: true }).fill(meaning);
+  await page.getByRole('combobox', { name: '单元', exact: true }).fill(unit);
+  await page.getByRole('button', { name: '添加单词' }).click();
+  await expect(page.locator(`.word-row[data-word="${word}"]`), 'row for ' + word)
+    .toBeVisible({ timeout: 15_000 });
+}
+
 test('J01 manual entry: save→refresh→query correct, no lesson row pre-seeded, real classroom plays the entered words', async ({ page }) => {
   test.setTimeout(90_000);
   const svc = await startSpecService();
@@ -55,24 +79,10 @@ test('J01 manual entry: save→refresh→query correct, no lesson row pre-seeded
     // ---------------- 1. 家长分别手动录入语文、英语词条 ----------------
     await page.goto(svc.url + 'parent.html');
     await page.getByRole('tab', { name: '词库' }).click();
-    // Completion signal per add = that word's browse row appearing (real
-    // POST → Python → SQLite, then the no-reload list refresh — both
-    // directions proven). The success TOAST is asserted only on the first
-    // add: it is a 2.5 s transient, so on consecutive adds a leftover toast
-    // can satisfy a matcher while the new POST is still in flight.
-    const addOne = async (radioName, { word, meaning }, unit) => {
-      await page.getByRole('radio', { name: radioName }).check();
-      await page.getByRole('textbox', { name: '单词', exact: true }).fill(word);
-      await page.getByRole('textbox', { name: '意思', exact: true }).fill(meaning);
-      await page.getByRole('combobox', { name: '单元', exact: true }).fill(unit);
-      await page.getByRole('button', { name: '添加单词' }).click();
-      await expect(page.locator(`.word-row[data-word="${word}"]`), 'row for ' + word)
-        .toBeVisible({ timeout: 15_000 });
-    };
-    await addOne('中文', ZH_WORDS[0], ZH_UNIT);
+    await addWordViaForm(page, '中文', ZH_WORDS[0], ZH_UNIT);
     await expect(page.locator('.toast-success')).toContainText('已添加');
-    await addOne('中文', ZH_WORDS[1], ZH_UNIT);
-    await addOne('英语', EN_WORDS[0], EN_UNIT);
+    await addWordViaForm(page, '中文', ZH_WORDS[1], ZH_UNIT);
+    await addWordViaForm(page, '英语', EN_WORDS[0], EN_UNIT);
 
     // Every entered word renders with its 词面 intact (no reload happened).
     for (const w of [...ZH_WORDS, ...EN_WORDS]) {
@@ -196,6 +206,90 @@ test('J01 manual entry: save→refresh→query correct, no lesson row pre-seeded
 
     const final = await stub.state();
     expect(final.violations, 'the strict stub saw only scripted traffic').toEqual([]);
+  } finally {
+    await stub.reset();
+    await svc.stop();
+  }
+});
+
+// J01-en — the manual-entry ENGLISH half (review #67 P2): other english
+// classrooms ride REST seeding or photo imports, so only this journey can
+// catch a due-state or eligibility defect specific to manually entered
+// english words. One real form add → refresh → the generic student entry
+// must find the word due (english-only ⇒ direct open, no ask) and the
+// greeting must REALLY play it — natural ACKs, player-side evidence, and
+// the vendor saw the exact entered word spoken.
+test('J01-en manual english entry: the word is due, classroom-eligible and really plays', async ({ page }) => {
+  test.setTimeout(90_000);
+  const svc = await startSpecService();
+  await installRtObserver(page);
+  try {
+    await page.goto(svc.url + 'parent.html');
+    await page.getByRole('tab', { name: '词库' }).click();
+    await addWordViaForm(page, '英语', EN_WORDS[0], EN_UNIT);
+    await expect(page.locator('.toast-success')).toContainText('已添加');
+
+    // 保存后刷新可查 + 学科正确, straight from the real read path.
+    await page.reload();
+    await page.getByRole('tab', { name: '词库' }).click();
+    await expect(page.locator(`.word-row[data-word="${EN_WORDS[0].word}"]`)).toBeVisible();
+    const en = (await svc.listWords({ category: 'english' })).body.words;
+    expect(en.map((w) => [w.word, w.meaning, w.category]))
+      .toEqual(EN_WORDS.map((w) => [w.word, w.meaning, 'english']));
+    expect((await svc.listLessons()).body.lessons).toHaveLength(0);
+
+    // One word ⇒ the single-word greeting, still 3 match-pinned sentences
+    // (你好呀！/ 今天我们只有一个词要写。/ 听好哦：第 1 个词，luminous。).
+    const r = await stub.scripts({
+      asr: [], llm: [], image: [],
+      tts: [
+        { ms: 1200, match: '你好呀' },
+        { ms: 1200, match: '个词要写' },
+        { ms: 1200, match: '第 1 个词' },
+      ],
+    });
+    expect(r.ok, 'stub scripts install').toBe(true);
+
+    await page.goto(svc.url + 'tutor/');
+    await page.locator('#rt-start').click();
+    await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ready'
+      && e.msg.category === 'english'
+      && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 1
+      && e.msg.lesson.words.every((w) => w === '')),
+    { timeoutMs: 30000, label: 'session_ready for the manually entered english word' });
+    expect((await controls(page)).filter((e) => e.type === 'subject_ask'),
+      'english is the only due subject — direct open, no ask').toHaveLength(0);
+
+    await waitWs(page, (log) => {
+      const starts = log.filter((e) => e.dir === 'in' && e.type === 'audio_start');
+      const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
+      const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack');
+      if (starts.length !== 3 || ends.length !== 3 || acks.length !== 3) return false;
+      return starts.every((s) => {
+        const end = ends.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+        const ack = acks.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+        return !!end && !!ack && ack.i > end.i;
+      });
+    }, { timeoutMs: 30000, label: 'greeting fully acked by the production player' });
+    await expectReallyPlayed(page, 'greeting');
+
+    const ttsTexts = (await stub.state()).requests.filter((q) => q.category === 'tts').map((q) => q.text);
+    expect(ttsTexts.some((t) => /第 1 个词，luminous。/.test(t)),
+      'the dictated word is the manually entered english word').toBe(true);
+
+    await expect(page.locator('#rt-progress-text')).toHaveText(/第 1 \/ 1 个词/);
+    const rows = (await svc.listLessons()).body.lessons;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ category: 'english', word_count: 1 });
+
+    await page.locator('#rt-end').click();
+    await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ended'),
+      { label: 'session_ended after explicit end' });
+
+    const state = await stub.state();
+    expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
+    expect(state.requests.filter((q) => q.category === 'asr')).toHaveLength(0);
+    expect(state.requests.filter((q) => q.category === 'llm')).toHaveLength(0);
   } finally {
     await stub.reset();
     await svc.stop();
