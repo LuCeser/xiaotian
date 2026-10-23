@@ -463,20 +463,15 @@ func passageIndexesEqual(a, b []int) bool {
 // not the answer).
 func (tm *TurnManager) startPassageSession(s Sender, l lesson.Lesson, p passage.Passage, scope passage.ScopeRow) {
 	view := passageTaskView(p, scope)
-	tm.mu.Lock()
-	tm.tutor = newDictationTutor(l)
-	tm.tutor.passage = &passageRef{
+	tutor := newDictationTutor(l)
+	tutor.passage = &passageRef{
 		ID: l.PassageID, ScopeID: l.PassageScopeID,
 		Title: p.Title, Author: p.Author,
 		Whole: l.PassageWhole, Paragraphs: append([]int(nil), view.Paragraphs...),
 	}
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	total := len(tm.tutor.words)
-	category := tm.tutor.category
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SessionReadyMsg{
+	total, category := len(tutor.words), tutor.category
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := SessionReadyMsg{
 		Type:      TypeSessionReady,
 		SessionID: tm.session,
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
@@ -484,18 +479,28 @@ func (tm *TurnManager) startPassageSession(s Sender, l lesson.Lesson, p passage.
 		Lesson:    tm.lessonViewFor(l),
 		Category:  category,
 		Passage:   view,
-	})
+	}
+	var epoch uint64
+	if !tm.applySessionEffect(func() error {
+		if err := s.SendControl(ready); err != nil {
+			return err
+		}
+		tm.tutor = tutor
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		tm.turnCancel = cancel
+		epoch = tm.epoch
+		return nil
+	}) {
+		cancel()
+		return
+	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
 	text := passageGreetingText(p.Title, p.Author, view.Whole, view.Paragraphs, total)
 	// onAck is deliberately nil: the passage classroom arms NO per-word
 	// timer (背默推进不靠机械计时) — nothing counts down while the child
 	// writes.
-	go tm.runAnnouncementDisplay(s, ctx, cancel, text, text, purposePassageGreeting, nil)
+	go tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purposePassageGreeting, nil)
 }
 
 // buildPassageClassifyMessages assembles the passage writing-stage
