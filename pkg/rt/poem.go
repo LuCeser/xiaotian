@@ -489,6 +489,7 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 	lessonID := tm.tutor.lessonID
 	expected := tm.tutor.version
 	total := len(tm.tutor.words)
+	ref := *tm.tutor.poem
 	manual := make(map[int]bool, total)
 	for _, v := range tm.tutor.checkVerdicts {
 		if v.Manual {
@@ -503,6 +504,7 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
 
@@ -533,13 +535,13 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 		return
 	}
 
-	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checking = false
-	ref := *tm.tutor.poem
-	tm.mu.Unlock()
+	tm.applyTurnAt(epoch, func() error {
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checking = false
+		return nil
+	})
 
-	go tm.finishPoemSubmit(s, ctx, cancel, ref, lessonID, total, res, m.RequestID)
+	go tm.finishPoemSubmit(s, ctx, cancel, epoch, ref, lessonID, total, res, m.RequestID)
 }
 
 // finishPoemSubmit runs on its own goroutine (the ACK-gated ending blocks;
@@ -548,8 +550,9 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 // poem_practice_logs row bracketed by the two-phase kind=poem receipt, ship
 // the honest review_result, then speak the wrap line through the ACK gate
 // and end with session_ended(lesson_complete).
-func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, ref poemRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string) {
+func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref poemRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string) {
 	defer cancel()
+	persistCtx := context.WithoutCancel(ctx)
 
 	correct := 0
 	for _, v := range res.Verdicts {
@@ -577,7 +580,7 @@ func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel co
 		// Receipt phase one: pending BEFORE the write (已提交 ≠ 已保存).
 		receiptID := int64(0)
 		if tm.cfg.Receipts != nil {
-			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+			rec, rerr := tm.cfg.Receipts.Begin(persistCtx, lesson.ReceiptInput{
 				LessonID:  lessonID,
 				RequestID: requestID,
 				Kind:      lesson.ReceiptKindPoem,
@@ -599,13 +602,13 @@ func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel co
 			Mastered:     mastered,
 			ReviewedDay:  beijingDay(time.Now()),
 		}
-		if err := tm.cfg.PoemPractice.RecordPractice(ctx, rec); err != nil {
+		if err := tm.cfg.PoemPractice.RecordPractice(persistCtx, rec); err != nil {
 			// Honest failure: the record was NOT saved — never a narrated
 			// success (S-05). The judgment (verdicts, stage=submitted) is
 			// already persisted on the lesson row and stays visible.
 			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
 			if tm.cfg.Receipts != nil && receiptID > 0 {
-				if cerr := tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false); cerr != nil {
+				if cerr := tm.cfg.Receipts.Complete(persistCtx, receiptID, nil, requestedSet, false); cerr != nil {
 					tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 				}
 			}
@@ -618,7 +621,7 @@ func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel co
 				infra.F("mastered", mastered),
 			)
 			if tm.cfg.Receipts != nil && receiptID > 0 {
-				if cerr := tm.cfg.Receipts.Complete(ctx, receiptID, requestedSet, nil, true); cerr != nil {
+				if cerr := tm.cfg.Receipts.Complete(persistCtx, receiptID, requestedSet, nil, true); cerr != nil {
 					tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 				}
 			}
@@ -637,18 +640,30 @@ func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel co
 	if recorded {
 		updated, missing = 1, 0
 	}
-	tm.mu.Lock()
-	tm.tutor.reviewSeen = true
-	tm.mu.Unlock()
-
-	_ = s.SendControl(ReviewResultMsg{
+	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
 		Requested: 1,
 		Updated:   updated,
 		Missing:   missing,
 		Unchecked: false,
-	})
+	}
 
 	summary := poemSummaryText(title, total, correct, saveFailed)
-	tm.runNaturalEnding(s, ctx, cancel, summary, purposePoemSummary, ReasonLessonComplete)
+	if tm.checkSubmitPresentationInterleave != nil {
+		tm.checkSubmitPresentationInterleave()
+	}
+	if !tm.applyTurnAt(epoch, func() error {
+		if err := s.SendControl(result); err != nil {
+			return err
+		}
+		tm.tutor.reviewSeen = true
+		tm.tutor.reviewResult = result
+		return nil
+	}) {
+		return
+	}
+	if tm.checkSubmitSummaryInterleave != nil {
+		tm.checkSubmitSummaryInterleave()
+	}
+	tm.runNaturalEndingAt(s, epoch, ctx, cancel, summary, purposePoemSummary, ReasonLessonComplete)
 }
