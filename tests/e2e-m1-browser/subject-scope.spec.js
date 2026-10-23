@@ -252,8 +252,10 @@ test('J06 voice subject answer: ambiguous keeps asking (no LLM), 英语 binds en
   await installRtObserver(page);
   await installFakeMic(page);
   try {
-    expect((await svc.seedWords({ category: 'chinese', unit: 'e2e-m1-j06-zh', entries: [{ word: '晨光' }, { word: '暮色' }] })).ok).toBe(true);
-    expect((await svc.seedWords({ category: 'english', unit: 'e2e-m1-j06-en', entries: [{ word: 'e2e-m1-j06-a' }, { word: 'e2e-m1-j06-b' }] })).ok).toBe(true);
+    const chineseWords = ['晨光', '暮色'];
+    const englishWords = ['e2e-m1-j06-a', 'e2e-m1-j06-b'];
+    expect((await svc.seedWords({ category: 'chinese', unit: 'e2e-m1-j06-zh', entries: chineseWords.map((word) => ({ word })) })).ok).toBe(true);
+    expect((await svc.seedWords({ category: 'english', unit: 'e2e-m1-j06-en', entries: englishWords.map((word) => ({ word })) })).ok).toBe(true);
     // Ask (3) → retry after the ambiguous answer (2) → greeting (3), each
     // match-pinned; the ASR replies carry the child's two answers.
     expect((await stub.scripts({
@@ -337,6 +339,14 @@ test('J06 voice subject answer: ambiguous keeps asking (no LLM), 英语 binds en
     const rows = (await svc.listLessons()).body.lessons;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ category: 'english', word_count: 2 });
+    const cards = svc.readLessonCards(rows[0].lesson_id);
+    expect(cards.map((card) => card.word).sort(), 'persisted classroom contains exactly the English input')
+      .toEqual([...englishWords].sort());
+    const texts = state.requests.filter((q) => q.category === 'tts').map((q) => q.text);
+    const firstWords = texts.filter((text) => text.includes('第 1 个词'));
+    expect(firstWords, 'exactly one first-word TTS after voice selection').toHaveLength(1);
+    expect(englishWords.some((word) => firstWords[0].includes(word)), 'first TTS belongs to English input').toBe(true);
+    expect(texts.some((text) => chineseWords.some((word) => text.includes(word))), 'no Chinese input reaches TTS').toBe(false);
     expect(state.violations).toEqual([]);
   } finally {
     await stub.reset();

@@ -24,7 +24,8 @@
 'use strict';
 
 const path = require('node:path');
-const { launchService } = require('./service-launcher');
+const { execFileSync } = require('node:child_process');
+const { launchService, resolvePython } = require('./service-launcher');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const TEMPLATE = path.join(__dirname, '..', 'config.m1-e2e.yaml');
@@ -61,6 +62,21 @@ async function startSpecService() {
     },
     listLessons() {
       return json('/lessons');
+    },
+    // The in-progress REST projection intentionally hides answers. Read
+    // ONLY this launcher's isolated database, in SQLite read-only mode.
+    readLessonCards(lessonId) {
+      const script = [
+        'import json, pathlib, sqlite3, sys',
+        'uri = pathlib.Path(sys.argv[1]).resolve().as_uri() + "?mode=ro"',
+        'with sqlite3.connect(uri, uri=True) as db:',
+        ' row = db.execute("SELECT cards FROM lessons WHERE lesson_id = ?", (sys.argv[2],)).fetchone()',
+        ' if row is None: raise RuntimeError("lesson not persisted")',
+        ' print(row[0])',
+      ].join('\n');
+      return JSON.parse(execFileSync(resolvePython(REPO_ROOT),
+        ['-c', script, path.join(svc.root, 'vocab.db'), lessonId],
+        { encoding: 'utf8', timeout: 5000 }));
     },
   };
 }
