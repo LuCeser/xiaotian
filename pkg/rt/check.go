@@ -826,6 +826,9 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 	}) {
 		return
 	}
+	if tm.checkSubmitSummaryInterleave != nil {
+		tm.checkSubmitSummaryInterleave()
+	}
 	tm.runNaturalEndingAt(s, epoch, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
 }
 

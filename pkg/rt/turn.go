@@ -410,6 +410,9 @@ type TurnManager struct {
 	// checkSubmitPresentationInterleave is a narrow test probe after a review
 	// save completes and before its result is presented.
 	checkSubmitPresentationInterleave func()
+	// checkSubmitSummaryInterleave probes the gap after review_result is
+	// accepted and before the ending announcement starts.
+	checkSubmitSummaryInterleave func()
 
 	// closeOwned marks the close path that won the ONE-TIME D-03 fallback
 	// ownership (uncheckedCloseFallback). Guarded by mu.

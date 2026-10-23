@@ -46,3 +46,46 @@ func TestCheckSubmitPresentationLifetime(t *testing.T) {
 		t.Fatalf("reviewSeen=%v closed=%v, want false/true", reviewSeen, closed)
 	}
 }
+
+func TestCheckSubmitSummaryLifetime(t *testing.T) {
+	words := newFakeWords(ttCards("苹果"))
+	words.reviewResult = ReviewWriteResult{Requested: []string{"苹果"}, Updated: []string{"苹果"}}
+	tm, captured, _, _ := ttDriveToCheck(t, ttCards("苹果"), words)
+	tm.mu.Lock()
+	tm.tutor.checking = false
+	epoch := tm.epoch
+	tm.mu.Unlock()
+	resultsBefore := captured.countOf(TypeReviewResult)
+	sentBefore := captured.countOf(TypeTeacherSentence)
+	s := &closeAtControlSender{
+		captureSender: captured, tm: tm, target: TypeTeacherSentence, closeDone: make(chan struct{}),
+	}
+	hit := make(chan struct{})
+	tm.checkSubmitSummaryInterleave = func() {
+		tm.checkSubmitSummaryInterleave = nil
+		tm.HandleControl(captured, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
+		close(hit)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		tm.finishCheckSubmit(s, ctx, cancel, epoch, map[string]string{"苹果": "good"}, 1, 1, "summary-race")
+		close(done)
+	}()
+	ttAwaitGate(t, hit, "check submit summary probe was not reached")
+	ttAwaitGate(t, done, "stale check submit summary did not finish")
+
+	if got := captured.countOf(TypeReviewResult); got != resultsBefore+1 {
+		t.Fatalf("review_result count = %d, want %d", got, resultsBefore+1)
+	}
+	if got := captured.countOf(TypeTeacherSentence); got != sentBefore {
+		t.Fatalf("teacher sentences = %d, want %d", got, sentBefore)
+	}
+	tm.mu.Lock()
+	reviewSeen := tm.tutor.reviewSeen
+	tm.mu.Unlock()
+	if !reviewSeen {
+		t.Fatal("accepted review result was not retained")
+	}
+	tm.handleEndSession(captured)
+}
