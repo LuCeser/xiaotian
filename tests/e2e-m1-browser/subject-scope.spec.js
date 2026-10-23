@@ -25,7 +25,7 @@
 const { test, expect } = require('@playwright/test');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 const {
-  installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, listeningAfterPlayback,
 } = require('./helpers/rt-observe');
 const { installFakeMic, playPcm16, tonePcm16Base64 } = require('./helpers/fake-mic');
 
@@ -81,15 +81,16 @@ async function waitFullyAcked(page, label, opts = {}) {
 }
 
 /** After a fully-acked announcement the FSM settles listening (echo tail
- *  starts) — the settle must follow THIS round's last audio_end, never an
- *  earlier round's. */
+ *  starts) — require every matching ACK and reject any early resume. */
 async function waitSettledListening(page, label, opts = {}) {
   const { from = 0 } = opts;
   await waitWs(page, (log) => {
-    const ends = log.filter((e) => e.i >= from && e.dir === 'in' && e.type === 'audio_end');
-    if (!ends.length) return false;
-    const lastEnd = ends[ends.length - 1].i;
-    return log.some((e) => e.i > lastEnd && e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening');
+    const round = log.filter((e) => e.i >= from);
+    const starts = round.filter((e) => e.dir === 'in' && e.type === 'audio_start');
+    if (!starts.length) return false;
+    const epoch = starts[0].msg.epoch;
+    if (!starts.every((e) => e.msg.epoch === epoch)) return false;
+    return listeningAfterPlayback(round, epoch, starts.map((e) => e.msg.sentence_id));
   }, { label: label + ' (settled listening)' });
 }
 
