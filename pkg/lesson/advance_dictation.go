@@ -385,17 +385,75 @@ func (e *Executor) advanceDictationReadbackTx(ctx context.Context, tx *sql.Tx, i
 
 // replayAdvanceDictation serves a duplicate request_id from the FIRST
 // stored result (the claim INSERT conflicted and the transaction rolled
-// back). Shared with the check tools' replay reader (U-2 stale-record
-// guard included); lesson/tool identity hardening lands with the
-// idempotency commit.
+// back). Identity first: a record claimed by ANOTHER lesson or another
+// tool is never replayed — the collision surfaces loudly instead of
+// handing this classroom a foreign result. An empty stored result is the
+// residue of a crashed first write (never success), and a stored version
+// GREATER than the current row version belongs to a dead generation of
+// the row (U-2) — refused, never replayed into a rebuilt classroom.
 func (e *Executor) replayAdvanceDictation(ctx context.Context, in AdvanceDictationInput) (AdvanceDictationResult, error) {
-	stored, err := e.storedCheckResult(ctx, in.LessonID, in.RequestID, "advance_dictation")
+	var (
+		resultJSON string
+		recLesson  string
+		recTool    string
+	)
+	err := e.store.db.QueryRowContext(ctx,
+		"SELECT result, lesson_id, tool FROM tool_requests WHERE request_id = ?",
+		in.RequestID,
+	).Scan(&resultJSON, &recLesson, &recTool)
 	if err != nil {
-		return AdvanceDictationResult{}, err
+		if errors.Is(err, sql.ErrNoRows) {
+			return AdvanceDictationResult{}, errors.Wrap(ErrLessonNotFound, fmt.Sprintf("advance dictation for lesson %q", in.LessonID))
+		}
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: read idempotent record")
+	}
+	if recLesson != in.LessonID || recTool != "advance_dictation" {
+		e.logger.Error("advance dictation: dedupe record identity mismatch",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+			infra.F("record_lesson_id", recLesson),
+			infra.F("record_tool", recTool),
+		)
+		return AdvanceDictationResult{}, errors.Wrap(ErrInvalidLesson, "advance dictation: request_id already claimed by another lesson/tool")
+	}
+	if resultJSON == "" {
+		e.logger.Warn("advance dictation: idempotent hit with empty stored result",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+		)
+		return AdvanceDictationResult{}, errors.Wrap(ErrInvalidLesson, "advance dictation: first execution left no stored result")
 	}
 	var res AdvanceDictationResult
-	if err := json.Unmarshal([]byte(stored), &res); err != nil {
+	if err := json.Unmarshal([]byte(resultJSON), &res); err != nil {
 		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: unmarshal stored result")
+	}
+	var currentVersion int
+	if err := e.store.db.QueryRowContext(ctx,
+		"SELECT version FROM lessons WHERE lesson_id = ?",
+		in.LessonID,
+	).Scan(&currentVersion); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			e.logger.Error("advance dictation: idempotent hit with no lessons row",
+				infra.F("component", "lesson/executor"),
+				infra.F("lesson_id", in.LessonID),
+				infra.F("request_id", in.RequestID),
+				infra.F("stored_new_version", res.NewVersion),
+			)
+			return AdvanceDictationResult{}, errors.Wrap(ErrLessonNotFound, fmt.Sprintf("advance dictation for lesson %q", in.LessonID))
+		}
+		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: read current lesson version")
+	}
+	if res.NewVersion > currentVersion {
+		e.logger.Error("advance dictation: stale dedupe record (lesson reset/rolled back), refusing replay",
+			infra.F("component", "lesson/executor"),
+			infra.F("lesson_id", in.LessonID),
+			infra.F("request_id", in.RequestID),
+			infra.F("stored_new_version", res.NewVersion),
+			infra.F("current_lesson_version", currentVersion),
+		)
+		return AdvanceDictationResult{}, errors.Wrap(ErrVersionConflict, "advance dictation: stale dedupe record")
 	}
 	res.Idempotent = true
 	e.logger.Info("advance dictation idempotent hit",

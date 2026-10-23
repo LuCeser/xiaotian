@@ -304,3 +304,146 @@ func TestAdvanceDictationRollback(t *testing.T) {
 		t.Fatalf("retry result = %+v, want a clean last-word advance", res)
 	}
 }
+
+// advanceWord0 runs one first advance of word 0 on a fresh 2-word lesson.
+func advanceWord0(t *testing.T, ex *Executor, store *Store, lessonID, requestID, outcome string, hints int) AdvanceDictationResult {
+	t.Helper()
+	if _, err := store.EnsureLessonCards(context.Background(), lessonID, []Word{{Word: "苹果"}, {Word: "香蕉"}}, ""); err != nil {
+		t.Fatalf("EnsureLessonCards: %v", err)
+	}
+	res, err := ex.AdvanceDictation(context.Background(), AdvanceDictationInput{
+		LessonID: lessonID, RequestID: requestID,
+		TargetIndex: 0, ExpectedVersion: 1,
+		Outcome: WordOutcome{Outcome: outcome, Hints: hints},
+	})
+	if err != nil {
+		t.Fatalf("AdvanceDictation (word 0): %v", err)
+	}
+	return res
+}
+
+// TestAdvanceDictationIdempotent pins the duplicate-request semantics:
+// the FIRST outcome is final (a same-id retry carrying a different outcome
+// replays without overwriting), a DIFFERENT request on the same target is
+// rejected as a cursor mismatch, and both confirm/timeout orders keep
+// exactly one advance.
+func TestAdvanceDictationIdempotent(t *testing.T) {
+	firstWins := func(t *testing.T, first, second string) {
+		t.Helper()
+		ex, store := newExecutorForTest(t)
+		ctx := context.Background()
+		lesson := "idem-" + first
+		res := advanceWord0(t, ex, store, lesson, lesson+"-advance-0", first, 0)
+
+		replay, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+			LessonID: lesson, RequestID: lesson + "-advance-0",
+			TargetIndex: 0, ExpectedVersion: 1,
+			Outcome: WordOutcome{Outcome: second, Hints: 5},
+		})
+		if err != nil {
+			t.Fatalf("same-id retry: %v", err)
+		}
+		if !replay.Idempotent || replay.NewVersion != res.NewVersion || replay.NewIndex != res.NewIndex {
+			t.Fatalf("replay = %+v, want the first stored result (version %d)", replay, res.NewVersion)
+		}
+		row, err := store.GetLesson(ctx, lesson)
+		if err != nil {
+			t.Fatalf("GetLesson: %v", err)
+		}
+		if row.CurrentIndex != 1 || row.Version != res.NewVersion {
+			t.Fatalf("row index/version = %d/%d, want ONE advance at version %d", row.CurrentIndex, row.Version, res.NewVersion)
+		}
+		if got := row.Outcomes["0"]; got.Outcome != first || got.Hints != 0 {
+			t.Fatalf("outcomes[0] = %+v, want the FIRST outcome %s untouched", got, first)
+		}
+
+		// A DIFFERENT request on the same target must not advance or
+		// overwrite anything: the cursor moved, the target is stale.
+		if _, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+			LessonID: lesson, RequestID: lesson + "-advance-0-retry",
+			TargetIndex: 0, ExpectedVersion: res.NewVersion,
+			Outcome: WordOutcome{Outcome: second},
+		}); !errors.Is(err, ErrInvalidLesson) {
+			t.Fatalf("different-request same-target err = %v, want ErrInvalidLesson", err)
+		}
+		row, err = store.GetLesson(ctx, lesson)
+		if err != nil {
+			t.Fatalf("GetLesson (after stale target): %v", err)
+		}
+		if row.CurrentIndex != 1 || row.Outcomes["0"].Outcome != first {
+			t.Fatalf("row = %+v — a stale target must change nothing", row)
+		}
+	}
+	t.Run("confirm first, timeout retry loses", func(t *testing.T) {
+		firstWins(t, OutcomeConfirmed, OutcomeTimeout)
+	})
+	t.Run("timeout first, confirm retry loses", func(t *testing.T) {
+		firstWins(t, OutcomeTimeout, OutcomeConfirmed)
+	})
+}
+
+// TestAdvanceDictationConflict pins the conflict half: a stale
+// expectedVersion is a typed ConflictError whose failed attempt leaves NO
+// dedupe residue, and a request_id claimed by another lesson or another
+// tool is refused instead of replayed.
+func TestAdvanceDictationConflict(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("version conflict leaves no dedupe residue", func(t *testing.T) {
+		ex, store := newExecutorForTest(t)
+		advanceWord0(t, ex, store, "cf-lesson", "cf-lesson-advance-0", OutcomeConfirmed, 0)
+		// Word 1 with the STALE version 1 (the row already moved to 2).
+		_, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+			LessonID: "cf-lesson", RequestID: "cf-lesson-advance-1",
+			TargetIndex: 1, ExpectedVersion: 1,
+			Outcome: WordOutcome{Outcome: OutcomeConfirmed},
+		})
+		var conflict *ConflictError
+		if !errors.As(err, &conflict) || conflict.CurrentVersion != 2 {
+			t.Fatalf("err = %v, want ConflictError{2}", err)
+		}
+		var claimed int
+		if qerr := store.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM tool_requests WHERE request_id = ?", "cf-lesson-advance-1",
+		).Scan(&claimed); qerr != nil || claimed != 0 {
+			t.Fatalf("claim rows = %d err=%v — a refused conflict must leave no dedupe record", claimed, qerr)
+		}
+		row, gerr := store.GetLesson(ctx, "cf-lesson")
+		if gerr != nil || row.Version != 2 || row.CurrentIndex != 1 {
+			t.Fatalf("row = %+v err=%v — the refused conflict must write nothing", row, gerr)
+		}
+	})
+
+	for _, tc := range []struct{ name, recLesson, recTool string }{
+		{name: "wrong lesson", recLesson: "other-lesson", recTool: "advance_dictation"},
+		{name: "wrong tool", recLesson: "mine-lesson", recTool: "advance_word"},
+	} {
+		t.Run(tc.name+" dedupe record is refused", func(t *testing.T) {
+			ex, store := newExecutorForTest(t)
+			if _, err := store.EnsureLessonCards(ctx, "mine-lesson", []Word{{Word: "苹果"}, {Word: "香蕉"}}, ""); err != nil {
+				t.Fatalf("EnsureLessonCards: %v", err)
+			}
+			// Seed a foreign claim under the SAME request id. Its stored
+			// version is deliberately NOT stale (new_version 1 == current),
+			// so ONLY the identity check can refuse it.
+			if _, err := store.db.ExecContext(ctx,
+				"INSERT INTO tool_requests (request_id, lesson_id, tool, result) VALUES (?, ?, ?, ?)",
+				"stolen-id", tc.recLesson, tc.recTool,
+				`{"new_index":0,"new_version":1,"stage":"","last_word":false}`,
+			); err != nil {
+				t.Fatalf("seed foreign record: %v", err)
+			}
+			if _, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+				LessonID: "mine-lesson", RequestID: "stolen-id",
+				TargetIndex: 0, ExpectedVersion: 1,
+				Outcome: WordOutcome{Outcome: OutcomeConfirmed},
+			}); !errors.Is(err, ErrInvalidLesson) {
+				t.Fatalf("err = %v, want ErrInvalidLesson — a foreign record must never replay", err)
+			}
+			row, gerr := store.GetLesson(ctx, "mine-lesson")
+			if gerr != nil || row.CurrentIndex != 0 || row.Version != 1 {
+				t.Fatalf("row = %+v err=%v — the refused replay must not advance", row, gerr)
+			}
+		})
+	}
+}
