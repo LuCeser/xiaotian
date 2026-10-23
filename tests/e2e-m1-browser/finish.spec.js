@@ -125,6 +125,143 @@ async function childSaysDone(page) {
   await playPcm16(page, CONFIRM_CLIP, 16000);
 }
 
+// The server synthesizes a whole announcement AHEAD of playback (per-sentence
+// streaming, ack-gated only at the round's SETTLE), so an announcement that
+// was killed mid-playback still shows 1..N consumed TTS entries — N is racy.
+// The deterministic post-end invariant is STABILITY: nothing new is requested
+// once the session is gone (a phantom reopening WOULD request more and also
+// exhaust the script → a violation).
+async function ttsCountStable() {
+  const count = async () => (await stubState()).requests.filter((r) => r.category === 'tts').length;
+  const first = await count();
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const second = await count();
+  return { first, second, stable: first === second };
+}
+
+test('J15 active end stops the classroom: ask-park, mid-greeting, listening', async ({ page }) => {
+  await installRtObserver(page);
+  await installFakeMic(page);
+  // BOTH subjects hold due words → the generic entry parks on the subject ask.
+  for (const [category, unit, words] of [
+    ['chinese', 'e2e-m1-fin-zh', ['e2e-fin-zh-a', 'e2e-fin-zh-b']],
+    ['english', 'e2e-m1-fin-en', ['e2e-fin-en-a', 'e2e-fin-en-b']],
+  ]) {
+    const seed = await svc.seedWords({ category, unit, entries: words.map((word) => ({ word })) });
+    expect(seed.ok, 'seed ' + category).toBeTruthy();
+  }
+  const askStreaming = (log) => log.some((e) => e.dir === 'in' && e.type === 'subject_ask')
+    && log.some((e) => e.dir === 'in' && e.type === 'audio_start')
+    && log.some((e) => e.dir === 'in' && e.kind === 'binary' && e.bytes > 0);
+
+  // ---- 选科中: the page offers NO end affordance before session_ready — the
+  // 结束 button is still disabled while the ask parks. The child's only exit
+  // is leaving the page; that must stop the ask with no classroom created.
+  // The whole ask is scripted: an in-flight round may legitimately finish
+  // synthesizing, but NOTHING new may follow once the socket is gone.
+  await stubScripts({
+    asr: [], llm: [], image: [],
+    tts: [
+      { ms: 1200, match: '都有要默写的词语' },
+      { ms: 1200, match: '想先默写哪一科' },
+      { ms: 1200, match: '也可以点屏幕上的按钮' },
+    ],
+  });
+  await page.goto(svc.url + 'tutor/');
+  await page.locator('#rt-start').click();
+  await waitWs(page, askStreaming, { label: 'ask audio streaming' });
+  await expect(page.locator('#rt-subject-ask')).toBeVisible();
+  await expect(page.locator('#rt-end'), 'no end button pre-session_ready').toBeDisabled();
+  expect(await lessonsNow(), 'no classroom row while parked on the ask').toHaveLength(0);
+  await page.reload();
+  await page.waitForTimeout(1500); // let the server see the dead socket
+  expect(await lessonsNow(), 'leaving the ask creates no classroom').toHaveLength(0);
+  const afterAsk = await ttsCountStable();
+  expect(afterAsk.stable, 'no vendor traffic revives after the page left (' + afterAsk.first + '→' + afterAsk.second + ')').toBe(true);
+  expect(afterAsk.second, 'at most the one scripted ask round was served').toBeLessThanOrEqual(3);
+  expect((await stubState()).violations).toEqual([]);
+
+  // ---- 播报中: end MID-GREETING playback → the goodbye, the classroom row
+  // stands but never advances, live audio stops, nothing follows the goodbye.
+  await stubScripts({
+    asr: [], llm: [], image: [],
+    tts: [
+      { ms: 1200, match: '都有要默写的词语' },
+      { ms: 1200, match: '想先默写哪一科' },
+      { ms: 1200, match: '也可以点屏幕上的按钮' },
+      { ms: 1200, match: '你好呀' },
+      { ms: 1200, match: '个词要写' },
+      { ms: 1200, match: '第 1 个词' },
+    ],
+  });
+  await page.locator('#rt-start').click();
+  await waitWs(page, askStreaming, { label: 'ask audio streaming (2nd session)' });
+  await page.locator('#rt-subject-en').click();
+  const readyI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'english'
+    && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2,
+  'the picked english classroom opens');
+  await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.kind === 'binary' && e.bytes > 0
+    && e.i > readyI), { label: 'greeting audio streaming' });
+  await page.locator('#rt-end').click();
+  const ended2I = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'client_end', 'session_ended(client_end) mid-greeting');
+  expect(ended2I, 'the goodbye follows the classroom it closes').toBeGreaterThan(readyI);
+  await waitWs(page, async () => (await playbackState(page)).activeSourceKeys.length === 0,
+    { label: 'the explicit end cleared every live audio source' });
+  expect(await page.evaluate(() => window.__rtTutor.capture.isCapturing),
+    'capture stopped by the explicit end').toBe(false);
+  const rowsAfter = await lessonsNow();
+  expect(rowsAfter, 'the classroom row stands — no re-created classroom').toHaveLength(1);
+  expect(rowsAfter[0]).toMatchObject({ category: 'english', word_count: 2, lesson_id: 'e2e-m1-browser' });
+  await page.waitForTimeout(1200);
+  expect((await controls(page)).filter((e) => e.i > ended2I && e.dir === 'in' && e.type !== 'pong'),
+    'no control frame follows the goodbye — no new opening').toEqual([]);
+  const afterMid = await ttsCountStable();
+  expect(afterMid.stable, 'no vendor traffic revives after the end').toBe(true);
+  expect(afterMid.second, 'at most the ask + greeting rounds were served').toBeLessThanOrEqual(9);
+  expect((await stubState()).violations).toEqual([]);
+
+  // ---- 收听中: the full greeting acks, listening settles, THEN end — no
+  // advance ever happened, the mic is released, the uplink freezes. An
+  // IN-PAGE restart adopts the classroom's resolved subject (no re-ask), so
+  // this leg needs only the greeting.
+  await stubScripts({
+    asr: [], llm: [], image: [],
+    tts: [
+      { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
+    ],
+  });
+  await page.locator('#rt-start').click();
+  const ready3I = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'english' && e.i > ended2I, 'the english classroom resumes directly');
+  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'subject_ask' && e.i > ended2I),
+    'an in-page restart never re-asks the subject').toHaveLength(0);
+  const greeting = await awaitRound(page, ready3I, 3, 'greeting (resume)');
+  await awaitAcked(page, greeting, 'greeting (resume)');
+  await page.locator('#rt-end').click();
+  const ended3I = await waitIndex(page, (e) => e.i > ended2I && e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'client_end', 'session_ended(client_end) while listening');
+  await page.waitForTimeout(1200);
+  const log = await controls(page);
+  expect(log.filter((e) => e.dir === 'in' && e.type === 'lesson_update'),
+    'no confirm ever advanced a word in this spec').toHaveLength(0);
+  // ping/pong is the transport keepalive (the socket stays open after
+  // client_end); every OTHER downlink frame must stop at the goodbye.
+  expect(log.filter((e) => e.i > ended3I && e.dir === 'in' && e.type !== 'pong'),
+    'no server frame after the goodbye').toEqual([]);
+  for (const t of (await micInfo(page)).tracks) expect(t.state, 'mic released by the end').toBe('ended');
+  const frozen = await wsStats(page);
+  await page.waitForTimeout(1200);
+  expect((await wsStats(page)).outBinaryFrames, 'uplink frozen after the end')
+    .toBe(frozen.outBinaryFrames);
+  const afterListen = await ttsCountStable();
+  expect(afterListen.stable, 'no vendor traffic revives after the end').toBe(true);
+  expect(afterListen.second, 'at most the scripted rounds were served').toBeLessThanOrEqual(12);
+  expect((await stubState()).violations, 'the strict stub saw only scripted traffic').toEqual([]);
+  expect(await lessonsNow(), 'still exactly the one english row').toHaveLength(1);
+});
+
 test('J13+J14 last word → one check entry, masked answers, real check submit, natural end', async ({ page }) => {
   await installRtObserver(page);
   await installFakeMic(page);
