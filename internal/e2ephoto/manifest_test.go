@@ -45,6 +45,13 @@ func TestLoadValidation(t *testing.T) {
 		{"unknown kind", strings.Replace(validPhoto, `"kind":"word"`, `"kind":"line"`, 1), "unknown kind"},
 		{"empty word", strings.Replace(validPhoto, `"word":"duck"`, `"word":""`, 1), "empty word"},
 		{"entry without meaning", strings.Replace(validPhoto, `,"meaning":"躲避"`, ``, 1), "no picture-verified meaning"},
+		// meanings empty AFTER normalization compare equal to a recognized
+		// row with no meaning — Load must reject them like a missing one
+		// (PR #70 复审 P2).
+		{"whitespace-only meaning", strings.Replace(validPhoto, `"meaning":"躲避"`, `"meaning":" "`, 1), "no picture-verified meaning"},
+		{"punctuation-only meaning", strings.Replace(validPhoto, `"meaning":"躲避"`, `"meaning":"。"`, 1), "no picture-verified meaning"},
+		{"empty meaning alias", strings.Replace(validPhoto, `"meaning":"躲避"}]`, `"meaning":"躲避","meaningAliases":[""]}]`, 1), "empty meaning"},
+		{"whitespace-only meaning alias", strings.Replace(validPhoto, `"meaning":"躲避"}]`, `"meaning":"躲避","meaningAliases":["　"]}]`, 1), "empty meaning"},
 		// normalization collisions: Compare keys entries by NormalizeWord,
 		// so Load must reject surfaces that would overwrite each other.
 		{"case-fold duplicate word", strings.Replace(validPhoto,

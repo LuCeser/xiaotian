@@ -126,8 +126,18 @@ func (p Photo) validate() error {
 		if e.Word == "" {
 			return fmt.Errorf("photo %s: entry with empty word", p.ID)
 		}
-		if e.Meaning == "" {
+		// Reject meanings that are empty AFTER normalization, not just the
+		// literal "": “ ”或“。” folds to "", which would compare equal to a
+		// recognition row with no meaning at all (PR #70 复审 P2).
+		if NormalizeMeaning(e.Meaning) == "" {
 			return fmt.Errorf("photo %s: entry %q has no picture-verified meaning", p.ID, e.Word)
+		}
+		// Same for the declared equivalents: an alias folding to "" lets an
+		// empty recognized meaning pass as aliased.
+		for _, a := range e.MeaningAliases {
+			if NormalizeMeaning(a) == "" {
+				return fmt.Errorf("photo %s: entry %q: meaning alias %q normalizes to an empty meaning", p.ID, e.Word, a)
+			}
 		}
 		byWord[e.Word] = true
 		// bySurface mirrors Compare's hit surface: entries are keyed by
