@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
 )
 
@@ -202,6 +203,43 @@ func TestAsyncOutputAfterClose(t *testing.T) {
 		tm.mu.Unlock()
 		if version != versionBefore {
 			t.Fatalf("tutor version = %d, want %d — the closed tutor must not align", version, versionBefore)
+		}
+	})
+
+	t.Run("submit latch replay after end sends no second goodbye", func(t *testing.T) {
+		cards := ttCards("苹果")
+		words := newFakeWords(cards)
+		tm, s, _, exec := ttDriveToCheck(t, cards, words)
+		// The manual gate passes and the latch already fell elsewhere.
+		tm.mu.Lock()
+		tm.tutor.checkVerdicts = []lesson.CheckVerdict{{WordIndex: 0, Correct: true, Manual: true}}
+		tm.mu.Unlock()
+		exec.mu.Lock()
+		exec.lesson.Stage = lesson.StageSubmitted
+		exec.mu.Unlock()
+		entered, release := exec.gateCompleteCheck()
+		endsBefore := s.countOf(TypeSessionEnded)
+
+		done := make(chan struct{})
+		go func() {
+			tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{
+				Type: TypeCheckSubmit, RequestID: "req-dup-end",
+			}))
+			close(done)
+		}()
+		ttAwaitGate(t, entered, "the latch write was not entered")
+		tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+		close(release)
+		ttAwaitGate(t, done, "the submit turn did not finish")
+
+		if got := s.countOf(TypeSessionEnded); got != endsBefore+1 {
+			t.Fatalf("session_ended messages = %d, want %d — exactly one goodbye", got, endsBefore+1)
+		}
+		if got := s.countOf(TypeReviewResult); got != 0 {
+			t.Fatalf("review_result messages = %d, want 0", got)
+		}
+		if got := len(words.submissions()); got != 0 {
+			t.Fatalf("SubmitReview calls = %d, want 0", got)
 		}
 	})
 }

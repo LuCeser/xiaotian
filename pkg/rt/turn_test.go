@@ -130,6 +130,8 @@ type fakeExecutor struct {
 	checkResults     map[string]any
 	checkRelease     chan struct{}
 	checkEntered     chan struct{}
+	completeRelease  chan struct{}
+	completeEntered  chan struct{}
 	verdictRelease   chan struct{}
 	verdictEntered   chan struct{}
 	requestResults   map[string]lesson.AdvanceResult
@@ -491,32 +493,51 @@ func (f *fakeExecutor) gateApplyVerdict() (entered, release chan struct{}) {
 
 func (f *fakeExecutor) CompleteCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "complete_check", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
+	var (
+		res lesson.CompleteCheckResult
+		err error
+	)
 	if stored, ok := f.checkResults[requestID]; ok {
-		res := stored.(lesson.CompleteCheckResult)
+		res = stored.(lesson.CompleteCheckResult)
 		res.Idempotent = true
-		return res, nil
-	}
-	if !f.exists {
-		return lesson.CompleteCheckResult{}, lesson.ErrLessonNotFound
-	}
-	if f.lesson.Stage == lesson.StageSubmitted {
+	} else if !f.exists {
+		err = lesson.ErrLessonNotFound
+	} else if f.lesson.Stage == lesson.StageSubmitted {
 		// The latch already fell: idempotent no-op with the stored state.
-		return lesson.CompleteCheckResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: f.lesson.Unchecked, Idempotent: true}, nil
+		res = lesson.CompleteCheckResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: f.lesson.Unchecked, Idempotent: true}
+	} else if f.conflictVersion > 0 {
+		err = &lesson.ConflictError{CurrentVersion: f.conflictVersion}
+	} else {
+		f.lesson.Version++
+		f.lesson.Stage = lesson.StageSubmitted
+		f.lesson.Unchecked = unchecked
+		res = lesson.CompleteCheckResult{
+			Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: unchecked,
+			Verdicts: f.lesson.Verdicts, Outcomes: f.lesson.Outcomes,
+		}
+		f.checkResults[requestID] = res
 	}
-	if f.conflictVersion > 0 {
-		return lesson.CompleteCheckResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
+	entered, release := f.completeEntered, f.completeRelease
+	f.completeEntered, f.completeRelease = nil, nil
+	f.mu.Unlock()
+	if entered != nil {
+		// Same commit-vs-return window as gateApplyVerdict, on the latch.
+		close(entered)
+		<-release
 	}
-	f.lesson.Version++
-	f.lesson.Stage = lesson.StageSubmitted
-	f.lesson.Unchecked = unchecked
-	res := lesson.CompleteCheckResult{
-		Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: unchecked,
-		Verdicts: f.lesson.Verdicts, Outcomes: f.lesson.Outcomes,
-	}
-	f.checkResults[requestID] = res
-	return res, nil
+	return res, err
+}
+
+// gateCompleteCheck arms a one-shot hold on the next CompleteCheck: the
+// latch decision (and its row write) has happened, the method has not yet
+// returned — the real submit-vs-close window.
+func (f *fakeExecutor) gateCompleteCheck() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.completeEntered = make(chan struct{})
+	f.completeRelease = make(chan struct{})
+	return f.completeEntered, f.completeRelease
 }
 
 // ClearUnchecked mirrors the real executor's clear_unchecked semantics on

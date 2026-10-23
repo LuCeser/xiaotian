@@ -538,7 +538,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	reviewSeen := alive && !tm.tutor.checking && tm.tutor.reviewSeen
 	tm.mu.Unlock()
 	if !alive {
-		tm.sendError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
 		return
 	}
 	if !checking {
@@ -553,7 +553,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 			)
 			return
 		}
-		tm.sendError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
 		return
 	}
 
@@ -613,7 +613,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		return
 	}
 	if m.RequestID == "" {
-		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
 		return
 	}
 
@@ -631,7 +631,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	}
 	tm.mu.Unlock()
 	if len(manual) < total {
-		tm.sendError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
 		return
 	}
 
@@ -648,17 +648,20 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		if errors.As(err, &conflict) {
 			// Align from the stored truth: if the row is already submitted
 			// the write was a cross-connection race — treat it as the
-			// duplicate path (no second write either way).
-			tm.mu.Lock()
-			tm.tutor.checking = false
-			tm.mu.Unlock()
+			// duplicate path (no second write either way). The memory flip
+			// rides the session effect: a session that ended while the
+			// latch write ran keeps its dead tutor untouched.
+			tm.applySessionEffect(func() error {
+				tm.tutor.checking = false
+				return nil
+			})
 			tm.recorder.Emit(EventError,
 				infra.F("code", ErrCodeDuplicateSubmit),
 				infra.F("duplicate", "check_submit_conflict"),
 			)
 			return
 		}
-		tm.sendError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		tm.sendOpenError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
 		return
 	}
 	if res.Idempotent {
@@ -673,16 +676,20 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		// honest shape is the terminal signal (session_ended with the
 		// existing lesson_complete copy) plus one diagnostic event
 		// (13.1-08 review consensus). internalClose cancels the turnCancel
-		// stored above, so no separate cancel is needed.
-		tm.mu.Lock()
-		tm.tutor.version = res.NewVersion
-		tm.tutor.checking = false
-		tm.mu.Unlock()
+		// stored above, so no separate cancel is needed. The goodbye rides
+		// the session effect — a session that already ended never sees a
+		// SECOND session_ended.
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "check_submit_latch"),
 		)
-		_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
+		if !tm.applySessionEffect(func() error {
+			tm.tutor.version = res.NewVersion
+			tm.tutor.checking = false
+			return s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
+		}) {
+			return
+		}
 		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 		tm.internalClose()
 		return
@@ -690,9 +697,16 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 
 	// Assemble the rating inputs from the STORED verdicts + outcomes
 	// readback (never from the in-memory cache — the row is the authority).
+	// The latch write landed (the accepted save): the memory flip rides the
+	// session effect — an ended session keeps the dead tutor untouched —
+	// while finishCheckSubmit still runs, because its SubmitReview is part
+	// of the same accepted save and gates its own presentation.
+	tm.applySessionEffect(func() error {
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checking = false
+		return nil
+	})
 	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checking = false
 	wordsCopy := make([]lesson.Word, len(tm.tutor.words))
 	copy(wordsCopy, tm.tutor.words)
 	tm.mu.Unlock()
@@ -866,7 +880,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 // the fallback as it stands.
 func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	if m.RequestID == "" {
-		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
 		return
 	}
 
@@ -883,7 +897,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	}
 	tm.mu.Unlock()
 	if len(manual) < total {
-		tm.sendError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
 		return
 	}
 
@@ -896,7 +910,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	tm.mu.Unlock()
 	l, err := tm.exec.GetLessonState(ctx, lessonID)
 	if err != nil {
-		tm.sendError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		tm.sendOpenError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
 		return
 	}
 	if !l.Unchecked {
