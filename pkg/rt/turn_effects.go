@@ -27,6 +27,27 @@ func (tm *TurnManager) applyTurnLocked(epoch uint64, effect func() error) bool {
 	return true
 }
 
+// applyCheckStageEffect is the check-stage sibling of applyTurnAt for the
+// surfaces that run OUTSIDE any turn — the photo OCR pass carries no epoch
+// of its own. The closed check, the still-checking check, the memory update
+// and the control enqueue are ONE hold: a session that ended — or a check
+// stage that already submitted — never sees a late presentation, while the
+// accepted writes themselves complete outside the effect (the upload was
+// admitted when its final chunk landed in a live check stage).
+func (tm *TurnManager) applyCheckStageEffect(effect func() error) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.closed || tm.tutor == nil || !tm.tutor.checking {
+		return false
+	}
+	if err := effect(); err != nil {
+		tm.logger.Warn("check stage effect enqueue failed",
+			infra.ErrField(err))
+		return false
+	}
+	return true
+}
+
 // applySessionEffect is the session-scoped sibling of applyTurnAt for the
 // classroom starters (pre-turn: no epoch to match): the closed check, the
 // memory bind (state, tutor, sessionReadyAt) and the ready/error enqueue

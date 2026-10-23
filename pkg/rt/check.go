@@ -1331,12 +1331,19 @@ func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
 	}
 	if err != nil && !errors.Is(err, ocr.ErrLowConfidence) {
 		// OCR genuinely failed: visible honest notice; the manual check
-		// path continues untouched.
+		// path continues untouched. The notice rides the stage effect — a
+		// close (or a submit) that landed while the vision call ran leaves
+		// the dead session silent.
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeProviderFailed),
 			infra.F("photo", "ocr_failed"),
 		)
-		tm.sendError(s, ErrCodeProviderFailed, photoOcrFailedNotice, true)
+		tm.applyCheckStageEffect(func() error {
+			return s.SendControl(ErrorMsg{
+				Type: TypeError, Code: ErrCodeProviderFailed,
+				Message: photoOcrFailedNotice, Recoverable: true,
+			})
+		})
 		return
 	}
 	lowConf := errors.Is(err, ocr.ErrLowConfidence)
@@ -1356,8 +1363,11 @@ func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
 	if lowConf {
 		// The gate fired (the pipeline owns the floor): recognition is too
 		// shaky to prefill ANY verdict — the student confirms every word
-		// manually. The recognized text still displays next to each row.
-		tm.broadcastOcrEntries(s, entries)
+		// manually. The recognized text still displays next to each row —
+		// unless the session (or the check stage) ended mid-call.
+		tm.applyCheckStageEffect(func() error {
+			return s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: entries})
+		})
 		return
 	}
 	tm.applyOcrPrefills(s, entries)
@@ -1374,7 +1384,10 @@ func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
 //     confirms the rest manually.
 //
 // A non-conflict success can never clobber a manual verdict: the optimistic
-// lock guarantees no other writer moved the row since our snapshot.
+// lock guarantees no other writer moved the row since our snapshot. The
+// writes are the accepted save — they complete even when the session ends
+// mid-pass; every memory update and both broadcasts ride the check-stage
+// effect, so an ended session (or a submitted check) presents nothing.
 func (tm *TurnManager) applyOcrPrefills(s Sender, entries []OcrResultEntry) {
 	tm.mu.Lock()
 	tm.ocrRuns++
@@ -1407,10 +1420,11 @@ func (tm *TurnManager) applyOcrPrefills(s Sender, entries []OcrResultEntry) {
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
 				break
 			}
-			tm.mu.Lock()
-			tm.tutor.align(l.CurrentIndex, l.Version)
-			tm.tutor.resyncCheck(l)
-			tm.mu.Unlock()
+			tm.applyCheckStageEffect(func() error {
+				tm.tutor.align(l.CurrentIndex, l.Version)
+				tm.tutor.resyncCheck(l)
+				return nil
+			})
 			if manualVerdictFor(l.Verdicts, e.WordIndex) {
 				continue // the human verdict landed first — it stands
 			}
@@ -1421,23 +1435,25 @@ func (tm *TurnManager) applyOcrPrefills(s Sender, entries []OcrResultEntry) {
 			}
 		}
 		version = res.NewVersion
-		tm.mu.Lock()
-		tm.tutor.version = version
-		tm.tutor.checkVerdicts = res.Verdicts
-		tm.mu.Unlock()
+		prefillVersion, prefillVerdicts := version, res.Verdicts
+		tm.applyCheckStageEffect(func() error {
+			tm.tutor.version = prefillVersion
+			tm.tutor.checkVerdicts = prefillVerdicts
+			return nil
+		})
 	}
 
-	tm.mu.Lock()
-	verdicts := append([]lesson.CheckVerdict(nil), tm.tutor.checkVerdicts...)
-	tm.mu.Unlock()
-	tm.broadcastCheckVerdicts(s, verdicts)
-	tm.broadcastOcrEntries(s, entries)
-}
-
-// broadcastOcrEntries sends the per-word recognition entries (server →
-// client) so the UI can show what was recognized next to each row.
-func (tm *TurnManager) broadcastOcrEntries(s Sender, entries []OcrResultEntry) {
-	_ = s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: entries})
+	if !tm.applyCheckStageEffect(func() error {
+		if err := s.SendControl(CheckVerdictsMsg{
+			Type:     TypeCheckVerdicts,
+			Verdicts: wireVerdicts(tm.tutor.checkVerdicts),
+		}); err != nil {
+			return err
+		}
+		return s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: entries})
+	}) {
+		return
+	}
 }
 
 // ---------------------------------------------------------------------------
