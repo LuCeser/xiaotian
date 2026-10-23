@@ -32,7 +32,10 @@ func TestCheckPresentationPreparation(t *testing.T) {
 	tm.mu.Unlock()
 
 	enterCallsBefore := ttEnterCheckCalls(exec)
-	in := tm.prepareCheckStageInputs(epoch)
+	in, ok := tm.prepareCheckStageInputs(epoch)
+	if !ok {
+		t.Fatal("current check preparation was rejected")
+	}
 	if got := in.outcomes["1"]; got.Outcome != outcomeConfirmed || got.Hints != 2 {
 		t.Fatalf("prepared outcome = %+v, want confirmed with two hints", got)
 	}
@@ -41,6 +44,20 @@ func TestCheckPresentationPreparation(t *testing.T) {
 	}
 	if got := ttEnterCheckCalls(exec); got != enterCallsBefore {
 		t.Fatalf("enter_check calls = %d, want %d", got, enterCallsBefore)
+	}
+
+	tm.mu.Lock()
+	tm.tutor.completed = false
+	stale := tm.epoch + 1
+	tm.mu.Unlock()
+	if _, ok := tm.prepareCheckStageInputs(stale); ok {
+		t.Fatal("stale check preparation was accepted")
+	}
+	tm.mu.Lock()
+	completed := tm.tutor.completed
+	tm.mu.Unlock()
+	if completed {
+		t.Fatal("stale check preparation marked the current tutor completed")
 	}
 }
 

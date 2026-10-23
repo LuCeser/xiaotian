@@ -325,29 +325,30 @@ type checkStageInputs struct {
 	bridge   string
 }
 
-func (tm *TurnManager) prepareCheckStageInputs(epoch uint64) checkStageInputs {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	tm.tutor.markCompleted()
-	tm.stopWordTimerLocked()
-	in := checkStageInputs{
-		epoch: epoch, lessonID: tm.tutor.lessonID, expected: tm.tutor.version,
-		outcomes: tm.tutor.snapshotCheckOutcomes(), total: len(tm.tutor.words),
-		reason: CheckStartedReasonDictationDone,
-	}
-	in.words = make([]string, 0, in.total)
-	for _, card := range tm.tutor.words {
-		in.words = append(in.words, card.Word)
-	}
-	in.bridge = checkBridgeText(in.total)
-	if tm.tutor.poem != nil {
-		in.reason = CheckStartedReasonPoemDone
-		in.bridge = poemCheckBridgeText(in.total)
-	} else if tm.tutor.passage != nil {
-		in.reason = CheckStartedReasonPassageDone
-		in.bridge = passageCheckBridgeText(tm.tutor.passage.Whole, tm.tutor.passage.Paragraphs, in.total)
-	}
-	return in
+func (tm *TurnManager) prepareCheckStageInputs(epoch uint64) (checkStageInputs, bool) {
+	var in checkStageInputs
+	ok := tm.applyTurnAt(epoch, func() error {
+		tm.tutor.markCompleted()
+		tm.stopWordTimerLocked()
+		in = checkStageInputs{
+			epoch: epoch, lessonID: tm.tutor.lessonID, expected: tm.tutor.version,
+			outcomes: tm.tutor.snapshotCheckOutcomes(), total: len(tm.tutor.words),
+			reason: CheckStartedReasonDictationDone,
+		}
+		in.words = make([]string, 0, in.total)
+		for _, card := range tm.tutor.words {
+			in.words = append(in.words, card.Word)
+		}
+		in.bridge = checkBridgeText(in.total)
+		if tm.tutor.poem != nil {
+			in.reason, in.bridge = CheckStartedReasonPoemDone, poemCheckBridgeText(in.total)
+		} else if tm.tutor.passage != nil {
+			in.reason = CheckStartedReasonPassageDone
+			in.bridge = passageCheckBridgeText(tm.tutor.passage.Whole, tm.tutor.passage.Paragraphs, in.total)
+		}
+		return nil
+	})
+	return in, ok
 }
 
 // presentCheckedStage only presents an already-persisted check stage. It
@@ -373,10 +374,10 @@ func (tm *TurnManager) presentCheckedStage(
 // (full plaintext, D-10 unmask) → the ACK-gated bridge announcement (Pitfall
 // 9: the new stage does not bypass sentence_ack). Replaces enterCompletion.
 func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64) {
-	if !tm.epochCurrent(epoch) {
+	in, ok := tm.prepareCheckStageInputs(epoch)
+	if !ok {
 		return
 	}
-	in := tm.prepareCheckStageInputs(epoch)
 	res, err := tm.exec.EnterCheck(ctx, in.lessonID, in.expected, in.lessonID+"-enter-check", in.outcomes)
 	// PR #61 review: the stage write may commit UNDER a close or interrupt —
 	// the row stands (a reconnect resumes from it), but a dead classroom
