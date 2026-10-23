@@ -3,6 +3,8 @@ package rt
 import (
 	"context"
 	"testing"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 )
 
 func TestPassageTurnLifetime(t *testing.T) {
@@ -53,4 +55,46 @@ func TestPassageSessionReadyLifetime(t *testing.T) {
 	}
 	ttReadyBeforeEnd(t, captured, TypeSessionReady)
 	ttAssertNothingAfterEnd(t, captured)
+}
+
+func TestPassageSubmitPresentationLifetime(t *testing.T) {
+	tm, s, _, practice := newPassageTestManager(t, newFakeASR(), newFakeLLM(), nil)
+	ttPassageInit(t, tm, s, 77, 51, ModeStudent)
+	tm.mu.Lock()
+	tm.tutor.checking = false
+	epoch := tm.epoch
+	ref := *tm.tutor.passage
+	tm.mu.Unlock()
+	resultsBefore := s.countOf(TypeReviewResult)
+	sentBefore := s.countOf(TypeTeacherSentence)
+	hit := make(chan struct{})
+	tm.checkSubmitPresentationInterleave = func() {
+		tm.checkSubmitPresentationInterleave = nil
+		tm.handleEndSession(s)
+		close(hit)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		tm.finishPassageSubmit(s, ctx, cancel, epoch, ref, ttLessonID, 2, lesson.CompleteCheckResult{
+			Verdicts: []lesson.CheckVerdict{{WordIndex: 0, Correct: true, Manual: true}},
+		}, "passage-race")
+		close(done)
+	}()
+	ttAwaitGate(t, hit, "passage presentation probe was not reached")
+	ttAwaitGate(t, done, "stale passage presentation did not finish")
+
+	if got := len(practice.recorded()); got != 1 {
+		t.Fatalf("passage practice records = %d, want the accepted save preserved", got)
+	}
+	if s.countOf(TypeReviewResult) != resultsBefore || s.countOf(TypeTeacherSentence) != sentBefore {
+		t.Fatalf("review results=%d sentences=%d, want %d/%d",
+			s.countOf(TypeReviewResult), s.countOf(TypeTeacherSentence), resultsBefore, sentBefore)
+	}
+	tm.mu.Lock()
+	reviewSeen, closed := tm.tutor.reviewSeen, tm.closed
+	tm.mu.Unlock()
+	if reviewSeen || !closed {
+		t.Fatalf("reviewSeen=%v closed=%v, want false/true", reviewSeen, closed)
+	}
 }
