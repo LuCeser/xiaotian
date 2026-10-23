@@ -120,8 +120,8 @@ func (e *Executor) loadDictationRowTx(ctx context.Context, tx *sql.Tx, lessonID 
 		return dictationRowTx{}, errors.Wrap(err, "advance dictation: read lesson row")
 	}
 	var words []string
-	if err := json.Unmarshal([]byte(wordsJSON), &words); err != nil {
-		return dictationRowTx{}, errors.Wrap(err, "advance dictation: decode words")
+	if decodeErr := json.Unmarshal([]byte(wordsJSON), &words); decodeErr != nil {
+		return dictationRowTx{}, errors.Wrap(decodeErr, "advance dictation: decode words")
 	}
 	row.wordCount = len(words)
 	row.poem = poemID != 0
@@ -270,14 +270,14 @@ func (e *Executor) advanceDictationTx(ctx context.Context, in AdvanceDictationIn
 	if err != nil {
 		return AdvanceDictationResult{}, err
 	}
-	if err := validateDictationRowTx(row, in.TargetIndex); err != nil {
+	if validationErr := validateDictationRowTx(row, in.TargetIndex); validationErr != nil {
 		e.logger.Warn("advance dictation rejected: row validation failed",
 			infra.F("component", "lesson/executor"),
 			infra.F("lesson_id", in.LessonID),
 			infra.F("request_id", in.RequestID),
 			infra.F("target_index", in.TargetIndex),
 		)
-		return AdvanceDictationResult{}, err
+		return AdvanceDictationResult{}, validationErr
 	}
 
 	// (c) Merge the current word's behavior; every other word's stored

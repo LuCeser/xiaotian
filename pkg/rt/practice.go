@@ -299,8 +299,8 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 			Category:  category,
 		}
 		if !tm.applySessionEffect(func() error {
-			if err := s.SendControl(ready); err != nil {
-				return err
+			if sendErr := s.SendControl(ready); sendErr != nil {
+				return sendErr
 			}
 			tm.state = StateListening
 			tm.sessionReadyAt = time.Now()

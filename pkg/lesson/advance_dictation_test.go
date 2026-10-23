@@ -281,16 +281,16 @@ func TestAdvanceDictationRollback(t *testing.T) {
 		t.Fatalf("outcomes = %+v, want only word 0's stored behavior", row.Outcomes)
 	}
 	var claimed int
-	if err := store.db.QueryRowContext(ctx,
+	if queryErr := store.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM tool_requests WHERE request_id = ?", "rb-lesson-advance-1",
-	).Scan(&claimed); err != nil || claimed != 0 {
-		t.Fatalf("claim rows = %d err=%v — the request claim must roll back with the transaction", claimed, err)
+	).Scan(&claimed); queryErr != nil || claimed != 0 {
+		t.Fatalf("claim rows = %d err=%v — the request claim must roll back with the transaction", claimed, queryErr)
 	}
 
 	// Drop the trigger: the SAME command now succeeds on a clean retry —
 	// the rollback left no half-state behind (no claim, no bump).
-	if _, err := store.db.ExecContext(ctx, "DROP TRIGGER reject_rb_result"); err != nil {
-		t.Fatalf("drop trigger: %v", err)
+	if _, dropErr := store.db.ExecContext(ctx, "DROP TRIGGER reject_rb_result"); dropErr != nil {
+		t.Fatalf("drop trigger: %v", dropErr)
 	}
 	res, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
 		LessonID: "rb-lesson", RequestID: "rb-lesson-advance-1",
@@ -359,12 +359,12 @@ func TestAdvanceDictationIdempotent(t *testing.T) {
 
 		// A DIFFERENT request on the same target must not advance or
 		// overwrite anything: the cursor moved, the target is stale.
-		if _, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+		if _, advanceErr := ex.AdvanceDictation(ctx, AdvanceDictationInput{
 			LessonID: lesson, RequestID: lesson + "-advance-0-retry",
 			TargetIndex: 0, ExpectedVersion: res.NewVersion,
 			Outcome: WordOutcome{Outcome: second},
-		}); !errors.Is(err, ErrInvalidLesson) {
-			t.Fatalf("different-request same-target err = %v, want ErrInvalidLesson", err)
+		}); !errors.Is(advanceErr, ErrInvalidLesson) {
+			t.Fatalf("different-request same-target err = %v, want ErrInvalidLesson", advanceErr)
 		}
 		row, err = store.GetLesson(ctx, lesson)
 		if err != nil {
