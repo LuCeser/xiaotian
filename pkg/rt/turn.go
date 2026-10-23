@@ -833,8 +833,10 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
 		Category:  tm.sessionCategory(),
 	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
-	tm.internalClose()
+	// The completion goodbye rides the ONE-TIME terminal close: a goodbye
+	// that raced in after session_ready already closed the session, and no
+	// second session_ended may ship.
+	tm.tryTerminalClose(s, ReasonLessonComplete)
 }
 
 // startDictationSession binds the FSM to the lesson row and immediately
@@ -1097,17 +1099,21 @@ func (tm *TurnManager) runNaturalEnding(s Sender, ctx context.Context, cancel co
 	ref := tm.speakTurn(s, turnID, epoch, text, text, purpose, ctx, cancel)
 	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
 	if !completed && !timedOut {
-		// Interrupted or disconnected: cancel the wait, never message.
-		tm.internalClose()
+		// Interrupted or disconnected: cancel the wait, never message — and
+		// only if this ending's epoch still owns the FSM: a summary wait
+		// that outlived an interrupt must not close the classroom that
+		// replaced it (orderlyCloseAt's epoch gate).
+		tm.orderlyCloseAt(epoch)
 		return
 	}
 	if purpose == purposeSummary {
 		tm.recorder.Emit(EventLessonComplete, infra.F("reason", reason))
 	}
-	// PR #61 review: same ordering as handleEndSession — closed first, then
-	// the goodbye, so no lock-disciplined sender can follow session_ended.
-	tm.internalClose()
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
+	// The goodbye rides the ONE-TIME terminal close at this ending's own
+	// epoch: a racing client goodbye (or an interrupt that bumped the
+	// epoch) already closed the session, and exactly one session_ended can
+	// ever ship.
+	tm.tryTerminalCloseAt(s, epoch, reason)
 }
 
 // handleInterrupt is the epoch bump + provider cancellation + short-history
@@ -1217,6 +1223,42 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 	})
 }
 
+// tryTerminalClose claims the session's ONE terminal close and ships the
+// single session_ended: the winner marks the session closed under tm.mu
+// FIRST (the lesson_update pattern — every lock-disciplined effect that
+// lost the race dies on the closed flag, and none can queue behind the
+// goodbye), losers send nothing. Epoch-free: the client's goodbye closes
+// whatever turn is live. The D-03 fallback ownership is decided separately
+// (ownUncheckedFallback) — this claim only orders the terminal message.
+func (tm *TurnManager) tryTerminalClose(s Sender, reason string) bool {
+	tm.mu.Lock()
+	if tm.closed {
+		tm.mu.Unlock()
+		return false
+	}
+	tm.internalCloseLocked()
+	tm.mu.Unlock()
+	tm.vad.Reset()
+	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
+	return true
+}
+
+// tryTerminalCloseAt is tryTerminalClose gated on the ending's OWN epoch: a
+// stale ending — a summary whose wait outlived an interrupt that bumped the
+// epoch — must not close (or goodbye) the classroom that replaced it.
+func (tm *TurnManager) tryTerminalCloseAt(s Sender, epoch uint64, reason string) bool {
+	tm.mu.Lock()
+	if tm.closed || tm.epoch != epoch {
+		tm.mu.Unlock()
+		return false
+	}
+	tm.internalCloseLocked()
+	tm.mu.Unlock()
+	tm.vad.Reset()
+	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
+	return true
+}
+
 // handleEndSession is the explicit goodbye (RT-10/SC7 server half). The
 // close owns the D-03 fallback (13.1-04) ONCE: the immutable snapshot is
 // taken under tm.mu first, then the session is marked closed and the
@@ -1230,9 +1272,9 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 // entirely. session_ended stays the terminal control message.
 func (tm *TurnManager) handleEndSession(s Sender) {
 	snap, owned := tm.ownUncheckedFallback()
-	tm.internalClose()
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonClientEnd})
-	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+	if tm.tryTerminalClose(s, ReasonClientEnd) {
+		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+	}
 	if owned {
 		tm.persistUncheckedFallback(snap)
 	}
