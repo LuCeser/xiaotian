@@ -52,6 +52,19 @@ func dropRow(rows []Recognized, canonical string) []Recognized {
 	return append(rows[:i], rows[i+1:]...)
 }
 
+// insertRow places row right before (or after) the canonical row, so a
+// duplicate surface can be pinned in both orders.
+func insertRow(rows []Recognized, canonical string, row Recognized, before bool) []Recognized {
+	at := findRow(rows, canonical)
+	if !before {
+		at++
+	}
+	rows = append(rows, Recognized{})
+	copy(rows[at+1:], rows[at:])
+	rows[at] = row
+	return rows
+}
+
 func TestNormalizeWord(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"Ｈｅｌｐｆｕｌ", "helpful"},                            // 全角→半角＋大小写
@@ -215,4 +228,57 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// TestCompareDuplicateSurfaceConflictingMeaningFails: a repeated word face
+// with a CONFLICTING picture meaning must fail in either row order (PR #70
+// 复审 P2) — precision stays 30/31 ≈ 96.8% above the 0.95 bar, so only
+// checking every matching row's meaning can catch the wrong duplicate.
+func TestCompareDuplicateSurfaceConflictingMeaningFails(t *testing.T) {
+	p := realPhoto(t)
+	for _, tc := range []struct {
+		name   string
+		before bool
+	}{
+		{"conflicting row after the correct one", false},
+		{"conflicting row before the correct one", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := insertRow(baseline(p), "duck", Recognized{Word: "duck", Meaning: "鸭子"}, tc.before)
+			rep := Compare(p, rows)
+			if rep.Precision() < p.Rules.MinPrecision {
+				t.Fatalf("precision %v already below the bar; this case must fail via the meaning check, not precision", rep.Precision())
+			}
+			if rep.OK(p.Rules) {
+				t.Fatalf("duplicate duck=鸭子 must not pass just because a correct duck row exists: %+v", rep)
+			}
+			if len(rep.WrongMeanings) != 1 ||
+				rep.WrongMeanings[0] != (WrongMeaning{Word: "duck", Want: "躲避", Got: "鸭子"}) {
+				t.Errorf("wrong meanings = %+v, want exactly duck wanting 躲避 got 鸭子", rep.WrongMeanings)
+			}
+			if !reflect.DeepEqual(rep.Extra, []string{"duck"}) {
+				t.Errorf("extras = %v, want the duplicate row listed as [duck]", rep.Extra)
+			}
+			if rep.WordHits != 17 || rep.PhraseHits != 13 || rep.Recognized != 31 {
+				t.Errorf("hits = %d/%d, rows = %d; want 17/13, 31 — duck counts as one hit",
+					rep.WordHits, rep.PhraseHits, rep.Recognized)
+			}
+		})
+	}
+}
+
+// TestCompareDuplicateSurfaceSameMeaningStaysExtra: a repeated surface with
+// the SAME picture meaning is no meaning conflict — it stays a plain extra
+// entry judged by precision (30/31 ≥ 95% passes); only the conflicting
+// duplicate hard-fails.
+func TestCompareDuplicateSurfaceSameMeaningStaysExtra(t *testing.T) {
+	p := realPhoto(t)
+	rows := insertRow(baseline(p), "duck", Recognized{Word: "duck", Meaning: "躲避。"}, false)
+	rep := Compare(p, rows)
+	if !rep.OK(p.Rules) {
+		t.Fatalf("duplicate duck with the same meaning must stay tolerable: %+v", rep)
+	}
+	if !reflect.DeepEqual(rep.Extra, []string{"duck"}) || len(rep.WrongMeanings) != 0 {
+		t.Errorf("duplicate row must surface only as an extra: %+v", rep)
+	}
 }

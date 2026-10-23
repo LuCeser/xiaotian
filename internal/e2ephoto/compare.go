@@ -97,7 +97,9 @@ func (r Report) OK(rules Rules) bool {
 // row hits an entry only on an exact normalized-surface match — the
 // canonical word or a pre-declared alias. No edit distance, no in-word
 // deletion, no joining of fragments: 漏词、拆词、拼写损坏和噪声都成为
-// 可报告的失败而不是被宽容吞掉.
+// 可报告的失败而不是被宽容吞掉. EVERY row matching an entry surface has
+// its meaning checked — a repeated word face stays an extra entry but a
+// conflicting picture meaning on it fails the run in either row order.
 func Compare(p Photo, rows []Recognized) Report {
 	var r Report
 	r.Recognized = len(rows)
@@ -108,14 +110,20 @@ func Compare(p Photo, rows []Recognized) Report {
 			surface[NormalizeWord(a)] = i
 		}
 	}
-	hitRow := make([]int, len(p.Entries))
-	for i := range hitRow {
-		hitRow[i] = -1
-	}
+	// hitRows keeps every row index matching entry i, not just the first:
+	// 只核对首行会让后到的重复词面带着冲突释义混进 Extra 假绿（PR #70
+	// 复审 P2），duck=鸭子 无论排在正确行前后都必须判失败。
+	hitRows := make([][]int, len(p.Entries))
 	for gi, g := range rows {
 		i, ok := surface[NormalizeWord(g.Word)]
-		if ok && hitRow[i] == -1 {
-			hitRow[i] = gi
+		if ok {
+			hitRows[i] = append(hitRows[i], gi)
+			if len(hitRows[i]) > 1 {
+				// 重复词面仍按额外条目列出（精确率分母已含这一行），
+				// 释义在下方与首次命中一并核对。
+				r.Extra = append(r.Extra, g.Word)
+				continue
+			}
 			if p.Entries[i].Kind == KindWord {
 				r.WordHits++
 			} else {
@@ -130,7 +138,7 @@ func Compare(p Photo, rows []Recognized) Report {
 		}
 	}
 	for i, e := range p.Entries {
-		if hitRow[i] == -1 {
+		if len(hitRows[i]) == 0 {
 			r.Missing = append(r.Missing, e.Word)
 			continue
 		}
@@ -138,19 +146,21 @@ func Compare(p Photo, rows []Recognized) Report {
 			// 未标注释义不允许静默跳过（PR #65 复审 P1）：词面全对也
 			// 必须失败 —— Load 同样拒绝缺标注的 manifest。
 			r.WrongMeanings = append(r.WrongMeanings, WrongMeaning{
-				Word: e.Word, Want: "（图片释义未标注）", Got: rows[hitRow[i]].Meaning,
+				Word: e.Word, Want: "（图片释义未标注）", Got: rows[hitRows[i][0]].Meaning,
 			})
 			continue
 		}
-		have := NormalizeMeaning(rows[hitRow[i]].Meaning)
-		if have != NormalizeMeaning(e.Meaning) && !meaningAliased(e.MeaningAliases, have) {
-			r.WrongMeanings = append(r.WrongMeanings, WrongMeaning{
-				Word: e.Word, Want: e.Meaning, Got: rows[hitRow[i]].Meaning,
-			})
+		for _, gi := range hitRows[i] {
+			have := NormalizeMeaning(rows[gi].Meaning)
+			if have != NormalizeMeaning(e.Meaning) && !meaningAliased(e.MeaningAliases, have) {
+				r.WrongMeanings = append(r.WrongMeanings, WrongMeaning{
+					Word: e.Word, Want: e.Meaning, Got: rows[gi].Meaning,
+				})
+			}
 		}
 	}
 	for _, m := range p.MustHit {
-		if hitRow[surface[NormalizeWord(m)]] == -1 {
+		if len(hitRows[surface[NormalizeWord(m)]]) == 0 {
 			r.MustMiss = append(r.MustMiss, m)
 		}
 	}
