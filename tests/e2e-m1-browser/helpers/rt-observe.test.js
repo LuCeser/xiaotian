@@ -11,7 +11,7 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { test } = require('node:test');
-const { playedBeforeAck, RT_OBSERVE_INIT } = require('./rt-observe.js');
+const { playedBeforeAck, listeningAfterPlayback, RT_OBSERVE_INIT } = require('./rt-observe.js');
 
 // Boot the observer init script in a bare sandbox with a fake NATIVE
 // WebSocket: just enough surface for the wrapper to install (constructor,
@@ -74,4 +74,24 @@ test('WS counts alone accept missing playback, but natural-playback evidence rej
   assert.equal(playedBeforeAck(['ack:4:' + sid, 'onended:4:' + sid], 4, sid), false,
     'onended 晚于 ack 时新验收必须失败');
   assert.equal(playedBeforeAck(['onended:4:' + sid, 'ack:4:' + sid], 4, sid), true);
+});
+
+test('listening resumes only after every matching playback ACK', () => {
+  const event = (i, dir, type, msg) => ({ i, dir, type, msg });
+  const ids = ['opening-1', 'opening-2'];
+  const prefix = [
+    event(1, 'in', 'audio_end', { epoch: 4, sentence_id: ids[0] }),
+    event(2, 'out', 'sentence_ack', { epoch: 4, sentence_id: ids[0] }),
+    event(3, 'in', 'audio_end', { epoch: 4, sentence_id: ids[1] }),
+  ];
+  const listening = (i) => event(i, 'in', 'state', { value: 'listening' });
+  const lastAck = event(5, 'out', 'sentence_ack', { epoch: 4, sentence_id: ids[1] });
+
+  assert.equal(listeningAfterPlayback([...prefix, lastAck, listening(6)], 4, ids), true);
+  assert.equal(listeningAfterPlayback([...prefix, listening(4), lastAck, listening(6)], 4, ids), false,
+    'a later valid resume must not hide listening between audio_end and the final ACK');
+  assert.equal(listeningAfterPlayback([...prefix, listening(4), lastAck], 4, ids), false,
+    'audio_end is not playback completion');
+  assert.equal(listeningAfterPlayback([...prefix, lastAck, listening(6)], 3, ids), false,
+    'ACKs from another epoch never satisfy this playback round');
 });

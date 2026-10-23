@@ -167,6 +167,29 @@ function playedBeforeAck(trace, epoch, sentenceId) {
   return lastOnended >= 0 && ackAt > lastOnended;
 }
 
+/**
+ * True only when one playback round resumes listening after EVERY matching
+ * sentence ACK. In particular, a historical listening event between the
+ * round's final audio_end and final ACK permanently rejects the sequence:
+ * observing a later, valid listening event must not hide an early resume.
+ */
+function listeningAfterPlayback(log, epoch, sentenceIds) {
+  if (!sentenceIds.length || new Set(sentenceIds).size !== sentenceIds.length) return false;
+  const matches = (e, dir, type, sid) => e.dir === dir && e.type === type
+    && e.msg && e.msg.epoch === epoch && e.msg.sentence_id === sid;
+  const ends = sentenceIds.map((sid) => log.find((e) => matches(e, 'in', 'audio_end', sid)));
+  const acks = sentenceIds.map((sid) => log.find((e) => matches(e, 'out', 'sentence_ack', sid)));
+  if (ends.some((e) => !e) || acks.some((e) => !e)) return false;
+  if (acks.some((ack, i) => ack.i <= ends[i].i)) return false;
+
+  const lastEnd = Math.max(...ends.map((e) => e.i));
+  const lastAck = Math.max(...acks.map((e) => e.i));
+  const listening = log.filter((e) => e.dir === 'in' && e.type === 'state'
+    && e.msg && e.msg.value === 'listening');
+  if (listening.some((e) => e.i > lastEnd && e.i < lastAck)) return false;
+  return listening.some((e) => e.i > lastAck);
+}
+
 /** Aggregate binary-frame counters (uplink freeze/release evidence). */
 async function wsStats(page) {
   return page.evaluate(() => {
@@ -183,5 +206,5 @@ async function wsStats(page) {
 
 module.exports = {
   installRtObserver, wsView, waitWs, controls, playbackTrace, playbackState,
-  playedBeforeAck, wsStats, RT_OBSERVE_INIT,
+  playedBeforeAck, listeningAfterPlayback, wsStats, RT_OBSERVE_INIT,
 };

@@ -16,7 +16,7 @@
 
 const { test, expect } = require('@playwright/test');
 const {
-  installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, listeningAfterPlayback,
 } = require('./helpers/rt-observe');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 
@@ -141,11 +141,10 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
 
   // The server ACCEPTED those acks: it settles listening only after the
   // opening's real playback completion (audio_end ≠ completion).
-  await waitWs(page, (log) => {
-    const ends = log.filter(at('in', 'audio_end', nextEpoch));
-    const lastEnd = ends.length ? ends[ends.length - 1].i : -1;
-    return log.some((e) => e.i > lastEnd && e.dir === 'in' && e.type === 'state' && e.msg.value === 'listening');
-  }, { label: 'server settled listening after the acks' });
+  const newOpeningIds = (await controls(page)).filter(at('in', 'audio_start', nextEpoch))
+    .map((e) => e.msg.sentence_id);
+  await waitWs(page, (log) => listeningAfterPlayback(log, nextEpoch, newOpeningIds),
+    { label: 'server settled listening only after every matching ack' });
 
   // Wire-level invariants (the whole flow legitimately carries zero
   // turn_start: announcements never open a turn — 无补发 turn_start).
