@@ -414,19 +414,6 @@ type TurnManager struct {
 	// accepted and before the ending announcement starts.
 	checkSubmitSummaryInterleave func()
 
-	// closeOwned marks the close path that won the ONE-TIME D-03 fallback
-	// ownership (uncheckedCloseFallback). Guarded by mu.
-	closeOwned bool
-
-	// initWriteMu serializes the classroom-init ROW WRITES (EnsureLessonCards
-	// in continueSessionInit and handlePracticeInit) against every close
-	// path, which must take it BEFORE marking closed. Fixed order:
-	// initWriteMu → mu — the starters hold it around the short DB write only
-	// (never while taking mu), so a close that arrives mid-write blocks until
-	// the row materializes ahead of session_ended, and a close that arrives
-	// first lets the init's re-check refuse with no row at all (#68).
-	initWriteMu sync.Mutex
-
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
 	// consumes them; close/cancel/over-cap/new-upload all discard.
@@ -477,13 +464,24 @@ type TurnManager struct {
 	// replayed key would pin the FIRST reading and drop the retake's).
 	ocrRuns uint64
 
-	mu sync.Mutex
+	// initWriteMu serializes the classroom-init ROW WRITES (EnsureLessonCards
+	// in continueSessionInit and handlePracticeInit) against every close
+	// path, which must take it BEFORE marking closed. Fixed order:
+	// initWriteMu → mu — the starters hold it around the short DB write only
+	// (never while taking mu), so a close that arrives mid-write blocks until
+	// the row materializes ahead of session_ended, and a close that arrives
+	// first lets the init's re-check refuse with no row at all (#68).
+	initWriteMu sync.Mutex
+	mu          sync.Mutex
 	// playbackPending marks an announcement awaiting its final ack; uplink
 	// stays gated while it holds.
 	playbackPending bool
 	// closed suppresses duplicate session_end emissions when the transport
 	// calls Close after an end_session already closed the session.
 	closed bool
+	// closeOwned marks the close path that won the ONE-TIME D-03 fallback
+	// ownership (uncheckedCloseFallback). Guarded by mu.
+	closeOwned bool
 }
 
 // Compile-time check: TurnManager satisfies the transport's SessionManager

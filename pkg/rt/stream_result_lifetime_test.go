@@ -54,9 +54,9 @@ var _ TTSSynthesizer = (*gatedTTS)(nil)
 // effect that would ship the notice.
 type gatingLogger struct {
 	*captureLogger
-	event   string
 	entered chan struct{}
 	release chan struct{}
+	event   string
 	once    sync.Once
 }
 

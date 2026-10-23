@@ -106,10 +106,10 @@ func TestAdvanceDictationRowArguments(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
+		wantError error
 		name      string
 		lessonID  string
 		target    int
-		wantError error
 	}{
 		{name: "missing lesson row", lessonID: "no-such-lesson", target: 0, wantError: ErrLessonNotFound},
 		{name: "poem classroom", lessonID: "poem-lesson", target: 0, wantError: ErrInvalidLesson},

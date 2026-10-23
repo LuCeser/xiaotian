@@ -315,14 +315,14 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 // checkStageInputs separates the data persisted by EnterCheck from the data
 // presented after that write succeeds.
 type checkStageInputs struct {
-	epoch      uint64
-	lessonID   string
-	expected   int
 	outcomes   map[string]lesson.WordOutcome
-	total      int
-	words      []string
+	lessonID   string
 	reason     string
 	bridge     string
+	words      []string
+	epoch      uint64
+	expected   int
+	total      int
 	correction bool
 }
 
@@ -1136,10 +1136,10 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 // lock-free persistence never reads or mutates the closed session's tutor.
 type uncheckedCloseSnapshot struct {
 	lessonID string
-	version  int
 	category string
-	poem     bool
 	words    []lesson.Word
+	version  int
+	poem     bool
 }
 
 // ownUncheckedFallback grants the ONE-TIME close-path fallback ownership to

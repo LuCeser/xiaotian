@@ -45,9 +45,9 @@ const (
 type AdvanceDictationInput struct {
 	LessonID        string
 	RequestID       string
+	Outcome         WordOutcome
 	TargetIndex     int
 	ExpectedVersion int
-	Outcome         WordOutcome
 }
 
 // AdvanceDictationResult is one advance_dictation execution's outcome:
@@ -56,10 +56,10 @@ type AdvanceDictationInput struct {
 // stage), the merged behavior snapshot read back from the row, and the
 // idempotent flag for same-request replays.
 type AdvanceDictationResult struct {
+	Outcomes   map[string]WordOutcome `json:"outcomes,omitempty"`
+	Stage      string                 `json:"stage"`
 	NewIndex   int                    `json:"new_index"`
 	NewVersion int                    `json:"new_version"`
-	Stage      string                 `json:"stage"`
-	Outcomes   map[string]WordOutcome `json:"outcomes,omitempty"`
 	LastWord   bool                   `json:"last_word"`
 	Idempotent bool                   `json:"-"`
 }
@@ -90,13 +90,13 @@ func (in AdvanceDictationInput) validate() error {
 // the whole advance command trusts (RESEARCH Pattern 5: no read-then-write
 // outside the transaction).
 type dictationRowTx struct {
+	outcomes     map[string]WordOutcome
+	stage        string
 	currentIndex int
 	version      int
 	wordCount    int
-	stage        string
 	poem         bool
 	passage      bool
-	outcomes     map[string]WordOutcome
 }
 
 // loadDictationRowTx reads the row's dictation-relevant state inside the

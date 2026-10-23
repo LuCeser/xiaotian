@@ -92,8 +92,8 @@ func TestTurnFailureLifetime(t *testing.T) {
 // or starting an echo tail — silence never counts as played audio.
 func TestASREmptyDoesNotCompletePlayback(t *testing.T) {
 	for _, tc := range []struct {
-		name string
 		asr  *fakeASR
+		name string
 	}{
 		{name: "empty transcription", asr: newFakeASR(asrScript{err: mimo.ErrEmptyTranscription})},
 		{name: "unusable transcript", asr: newFakeASR(asrScript{text: ""})},

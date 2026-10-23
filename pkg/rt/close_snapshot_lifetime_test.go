@@ -17,10 +17,10 @@ import (
 // SECOND fallback must be observable, not deadlocked.
 type gatingCompleteCheckExec struct {
 	*fakeExecutor
-	mu      sync.Mutex
-	fired   bool
 	entered chan struct{}
 	release chan struct{}
+	mu      sync.Mutex
+	fired   bool
 }
 
 func (g *gatingCompleteCheckExec) CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
