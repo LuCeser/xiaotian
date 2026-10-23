@@ -1566,21 +1566,28 @@ func (tm *TurnManager) checkDispatch(s Sender, ctx context.Context, cancel conte
 // The teacher's spoken ack goes through runAnnouncement — the ACK gate the
 // check stage never bypasses (Pitfall 9).
 func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, p intentPayload) {
-	tm.mu.Lock()
-	alive := tm.tutor != nil && !tm.closed && tm.tutor.checking
-	lessonID := tm.tutor.lessonID
-	version := tm.tutor.version
-	total := len(tm.tutor.words)
-	tm.mu.Unlock()
-	if !alive {
-		// The session closed (or left the check stage) mid-turn: nothing to
-		// act on, nothing to announce.
-		return
-	}
-
 	spelling := p.Intent == intentCheckSpelling
 	text := truncateRunes(strings.TrimSpace(p.Text), maxReplyRunes)
-	if p.Index < 1 || p.Index > total || (spelling && text == "") {
+	var lessonID, word string
+	var version, idx int
+	admitted, invalid := false, false
+	if !tm.applyTurnAt(epoch, func() error {
+		if tm.tutor == nil || !tm.tutor.checking {
+			return nil
+		}
+		if p.Index < 1 || p.Index > len(tm.tutor.words) || (spelling && text == "") {
+			invalid = true
+			return nil
+		}
+		idx = p.Index - 1
+		lessonID, version = tm.tutor.lessonID, tm.tutor.version
+		word = tm.tutor.words[idx].Word
+		admitted = true
+		return nil
+	}) {
+		return
+	}
+	if invalid {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeInvalidMessage),
 			infra.F("at", "voice_verdict"),
@@ -1588,7 +1595,9 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 		tm.runAnnouncementAt(s, epoch, ctx, cancel, checkVoiceClarifyText, purposeChat, nil)
 		return
 	}
-	idx := p.Index - 1
+	if !admitted {
+		return
+	}
 
 	var (
 		correct bool
@@ -1596,7 +1605,6 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 		entry   *OcrResultEntry
 	)
 	if spelling {
-		word := tm.tutorWordAt(idx)
 		j := grading.GradeWord(word, text, wordLang(word))
 		correct = j.Correct
 		line = spellingFeedbackText(word, text, j)

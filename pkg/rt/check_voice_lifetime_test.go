@@ -39,6 +39,31 @@ func TestCheckVoiceLifetime(t *testing.T) {
 		}
 	})
 
+	t.Run("stale voice verdict is not admitted", func(t *testing.T) {
+		tm, s, _, exec := ttIntentFixture(t, ttCards("苹果"), newFakeASR(), newFakeLLM())
+		tm.mu.Lock()
+		tm.tutor.checking = true
+		stale := tm.epoch + 1
+		tm.mu.Unlock()
+		exec.mu.Lock()
+		exec.lesson.Stage = "checking"
+		callsBefore := len(exec.checkCalls)
+		exec.mu.Unlock()
+		echoesBefore := s.countOf(TypeCheckVerdicts)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		tm.applyVoiceVerdict(s, ctx, func() {}, stale, intentPayload{Intent: intentCheckRight, Index: 1})
+
+		exec.mu.Lock()
+		calls := len(exec.checkCalls)
+		exec.mu.Unlock()
+		if calls != callsBefore || s.countOf(TypeCheckVerdicts) != echoesBefore {
+			t.Fatalf("check calls=%d verdict echoes=%d, want %d/%d unchanged",
+				calls, s.countOf(TypeCheckVerdicts), callsBefore, echoesBefore)
+		}
+	})
+
 	t.Run("stale resume keeps the current check paused", func(t *testing.T) {
 		tm, s, _, _ := ttIntentFixture(t, ttCards("苹果"), newFakeASR(), newFakeLLM())
 		tm.mu.Lock()
