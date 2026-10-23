@@ -320,11 +320,17 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 		return
 	}
 
-	// PR #60 review: a closed session creates no practice row either.
+	// #68 / path B: same init-write serialization as continueSessionInit —
+	// the practice row either completes ahead of a racing close (the close
+	// blocks on initWriteMu) or is refused outright when the close arrived
+	// first. The write runs without tm.mu.
+	tm.initWriteMu.Lock()
 	if !tm.stillOpen() {
+		tm.initWriteMu.Unlock()
 		return
 	}
 	l, err := tm.exec.EnsureLessonCards(ctx, lessonID, picked, category)
+	tm.initWriteMu.Unlock()
 	if err != nil {
 		tm.failLessonInit(s)
 		return

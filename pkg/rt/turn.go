@@ -409,6 +409,15 @@ type TurnManager struct {
 	// ownership (uncheckedCloseFallback). Guarded by mu.
 	closeOwned bool
 
+	// initWriteMu serializes the classroom-init ROW WRITES (EnsureLessonCards
+	// in continueSessionInit and handlePracticeInit) against every close
+	// path, which must take it BEFORE marking closed. Fixed order:
+	// initWriteMu → mu — the starters hold it around the short DB write only
+	// (never while taking mu), so a close that arrives mid-write blocks until
+	// the row materializes ahead of session_ended, and a close that arrives
+	// first lets the init's re-check refuse with no row at all (#68).
+	initWriteMu sync.Mutex
+
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
 	// consumes them; close/cancel/over-cap/new-upload all discard.
@@ -701,14 +710,20 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 			tm.startNoDueSession(s, lessonID)
 			return
 		}
-		// PR #60 review: the picked classroom's init runs on the ANSWER
-		// turn's goroutine, so an end_session can close the session under
-		// this very IO — a closed session creates no row (the starters
-		// below re-check at their own send points for the same reason).
+		// #68 / path B: the row write is serialized against every close path
+		// by the dedicated init-write lock (order: initWriteMu → mu). A
+		// close that arrived first marks closed and this re-check refuses —
+		// no row for a dead session; a write that started first completes
+		// BEFORE the close can mark anything (the close blocks on
+		// initWriteMu), so the row never materializes behind session_ended's
+		// back. The write itself runs without tm.mu.
+		tm.initWriteMu.Lock()
 		if !tm.stillOpen() {
+			tm.initWriteMu.Unlock()
 			return
 		}
 		l, err = tm.exec.EnsureLessonCards(ctx, lessonID, cards, category)
+		tm.initWriteMu.Unlock()
 		if err != nil {
 			// RunDue succeeded but the lesson row did not materialize; the
 			// 13-10 fetch lock (1h) may linger — recorded honestly below.
@@ -1237,6 +1252,8 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 // whatever turn is live. The D-03 fallback ownership is decided separately
 // (ownUncheckedFallback) — this claim only orders the terminal message.
 func (tm *TurnManager) tryTerminalClose(s Sender, reason string) bool {
+	tm.initWriteMu.Lock()
+	defer tm.initWriteMu.Unlock()
 	tm.mu.Lock()
 	if tm.closed {
 		tm.mu.Unlock()
@@ -1253,6 +1270,8 @@ func (tm *TurnManager) tryTerminalClose(s Sender, reason string) bool {
 // stale ending — a summary whose wait outlived an interrupt that bumped the
 // epoch — must not close (or goodbye) the classroom that replaced it.
 func (tm *TurnManager) tryTerminalCloseAt(s Sender, epoch uint64, reason string) bool {
+	tm.initWriteMu.Lock()
+	defer tm.initWriteMu.Unlock()
 	tm.mu.Lock()
 	if tm.closed || tm.epoch != epoch {
 		tm.mu.Unlock()
@@ -1292,6 +1311,8 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 // 取消等待) and sweeps the photo assembler (13.1-03 privacy P2: the child's
 // photo never outlives its session).
 func (tm *TurnManager) internalClose() {
+	tm.initWriteMu.Lock()
+	defer tm.initWriteMu.Unlock()
 	tm.mu.Lock()
 	tm.internalCloseLocked()
 	tm.mu.Unlock()
@@ -1328,6 +1349,8 @@ func (tm *TurnManager) internalCloseLocked() {
 // pick bumps the epoch and opens the new classroom → the stale close
 // lands" cannot happen.
 func (tm *TurnManager) orderlyCloseAt(epoch uint64) {
+	tm.initWriteMu.Lock()
+	defer tm.initWriteMu.Unlock()
 	tm.mu.Lock()
 	if tm.epoch != epoch || tm.closed {
 		tm.mu.Unlock()
