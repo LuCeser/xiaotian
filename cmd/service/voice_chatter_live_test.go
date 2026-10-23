@@ -7,9 +7,10 @@ package main
 // around a recording client, feeding the real LLMClassifier — asserting (a) no
 // reasoning_content came back on any call, (b) intent classification stays
 // usable (the issue's acceptance item: thinking off must not regress quality),
-// and (c) measured latency per call. Gated on MIMO_API_KEY via the shared
-// liveAPIKey loader; without a key the test skips, so offline runs stay green.
-// Each run costs one flash-model chat call per case.
+// and (c) measured latency per call. Gated on the shared explicit live switch
+// via liveAPIKey (XIAOTIAN_LIVE_TESTS=1 + MIMO_API_KEY); otherwise the test
+// skips, so offline runs stay green. Each run costs one flash-model chat call
+// per case.
 
 import (
 	"context"
