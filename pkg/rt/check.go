@@ -1507,6 +1507,9 @@ func (tm *TurnManager) classifyCheckTurn(s Sender, ctx context.Context, cancel c
 		// correction retry, then the deterministic spoken fallback.
 		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("attempts", 2))
 	}
+	if !tm.epochCurrent(epoch) {
+		return
+	}
 	// Desensitization boundary (T-13-06b): the intent label only.
 	tm.recorder.Emit(EventIntentClassified, infra.F("intent", p.Intent))
 	tm.checkDispatch(s, ctx, cancel, turnID, epoch, p)
@@ -1528,12 +1531,13 @@ func (tm *TurnManager) checkDispatch(s Sender, ctx context.Context, cancel conte
 		// Resume in the check stage clears the pause bit; the dictation
 		// resume line re-announces the CURRENT word, which does not exist
 		// here — speak the stage-appropriate continuation instead.
-		tm.mu.Lock()
-		if tm.tutor != nil {
+		if !tm.applyTurnAt(epoch, func() error {
 			tm.tutor.paused = false
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
-		tm.runAnnouncement(s, ctx, cancel, checkResumeAckText(), purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, checkResumeAckText(), purposeChat, nil)
 	default:
 		reply := p.Reply
 		if reply == "" {
@@ -1581,7 +1585,7 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 			infra.F("code", ErrCodeInvalidMessage),
 			infra.F("at", "voice_verdict"),
 		)
-		tm.runAnnouncement(s, ctx, cancel, checkVoiceClarifyText, purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, checkVoiceClarifyText, purposeChat, nil)
 		return
 	}
 	idx := p.Index - 1
