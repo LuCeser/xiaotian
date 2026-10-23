@@ -6,10 +6,6 @@
 // the stage to checking in the SAME commit, so no cancel can ever strand a
 // lesson between "index exhausted" and "check open". No FSRS write, no
 // correctness judgement, no skipped human check (完成确认只表示写完).
-//
-// This file starts with the command's vocabulary, input and result shapes
-// plus the caller-supplied half of validation; the transaction itself lands
-// with the next commits and reuses these pieces unchanged.
 package lesson
 
 import (
@@ -170,12 +166,11 @@ func validateDictationRowTx(row dictationRowTx, targetIndex int) error {
 // (path B, issue #56): claim the request_id (a duplicate replays the FIRST
 // stored result, never a second advance), load the authoritative row and
 // validate it, merge the current word's outcome into the row's outcomes
-// JSON, and move the cursor + version in the SAME commit — so a cancel can
-// never separate "index moved" from "behavior saved". The last word's
-// checking transition joins this same transaction in the next commit; this
-// commit lands the middle-word shape (the caller is not wired up yet —
-// nothing in pkg/rt calls this). Same short-transaction discipline as
-// AdvanceWord (L-3: three statements plus the readback).
+// JSON, and move the cursor + version in the SAME commit — and on the last
+// word flip the stage to checking in that same commit, so a cancel can
+// never strand a lesson between "index moved" and "check open" nor
+// separate the behavior save from the cursor move. Same short-transaction
+// discipline as AdvanceWord (L-3: three statements plus the readback).
 func (e *Executor) AdvanceDictation(ctx context.Context, in AdvanceDictationInput) (AdvanceDictationResult, error) {
 	if err := in.validate(); err != nil {
 		e.logger.Warn("advance dictation rejected: invalid arguments",
@@ -260,11 +255,19 @@ func (e *Executor) advanceDictationTx(ctx context.Context, in AdvanceDictationIn
 		return AdvanceDictationResult{}, errors.Wrap(err, "advance dictation: marshal outcomes")
 	}
 
-	// (d) The guarded write: one version bump carries the cursor move and
-	// the behavior save together.
+	// (d) The guarded write: one version bump carries the cursor move, the
+	// behavior save AND — on the last word — the checking flip, so no cancel
+	// can ever strand a lesson between "index exhausted" and "check open".
+	// Middle words rewrite the (validated-empty) dictation stage as-is: the
+	// version still rises exactly once per word (最后一词版本只增加一次).
+	lastWord := in.TargetIndex+1 == row.wordCount
+	nextStage := row.stage
+	if lastWord {
+		nextStage = StageChecking
+	}
 	result, err := tx.ExecContext(ctx,
-		"UPDATE lessons SET current_index = current_index + 1, outcomes = ?, version = version + 1, updated_at = datetime('now') WHERE lesson_id = ? AND version = ? AND current_index = ?",
-		string(outJSON), in.LessonID, in.ExpectedVersion, in.TargetIndex,
+		"UPDATE lessons SET current_index = current_index + 1, outcomes = ?, stage = ?, version = version + 1, updated_at = datetime('now') WHERE lesson_id = ? AND version = ? AND current_index = ?",
+		string(outJSON), nextStage, in.LessonID, in.ExpectedVersion, in.TargetIndex,
 	)
 	if err != nil {
 		e.logger.Error("advance dictation: update lessons failed",
@@ -358,9 +361,8 @@ func (e *Executor) advanceDictationGuardFailedTx(ctx context.Context, tx *sql.Tx
 }
 
 // advanceDictationReadbackTx reads the row back inside the open
-// transaction and assembles the typed result. The stage stays the dictation
-// stage for a middle word; the last word's checking transition joins the
-// same transaction in the next commit (LastWord already reports it).
+// transaction and assembles the typed result. The last word's readback
+// carries the checking stage its own UPDATE just wrote.
 func (e *Executor) advanceDictationReadbackTx(ctx context.Context, tx *sql.Tx, in AdvanceDictationInput, row dictationRowTx, outcomes map[string]WordOutcome) (AdvanceDictationResult, error) {
 	var (
 		newVersion int

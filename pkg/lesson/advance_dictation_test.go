@@ -192,3 +192,115 @@ func TestAdvanceDictationMiddle(t *testing.T) {
 		t.Fatalf("stored result = %q err=%v — the first execution must persist its result", stored, err)
 	}
 }
+
+// TestAdvanceDictationLast covers the last word's advance: the checking
+// flip rides the SAME commit and the SAME single version bump — the row
+// lands on "index exhausted AND check open" atomically, never between.
+func TestAdvanceDictationLast(t *testing.T) {
+	ex, store := newExecutorForTest(t)
+	ctx := context.Background()
+	cards := []Word{{Word: "苹果"}, {Word: "香蕉"}}
+	if _, err := store.EnsureLessonCards(ctx, "last-lesson", cards, ""); err != nil {
+		t.Fatalf("EnsureLessonCards: %v", err)
+	}
+	if _, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+		LessonID: "last-lesson", RequestID: "last-lesson-advance-0",
+		TargetIndex: 0, ExpectedVersion: 1,
+		Outcome: WordOutcome{Outcome: OutcomeConfirmed},
+	}); err != nil {
+		t.Fatalf("AdvanceDictation (word 0): %v", err)
+	}
+
+	res, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+		LessonID: "last-lesson", RequestID: "last-lesson-advance-1",
+		TargetIndex: 1, ExpectedVersion: 2,
+		Outcome: WordOutcome{Outcome: OutcomeConfirmed, Hints: 1},
+	})
+	if err != nil {
+		t.Fatalf("AdvanceDictation (last word): %v", err)
+	}
+	if !res.LastWord || res.Stage != StageChecking || res.NewIndex != 2 || res.NewVersion != 3 || res.Idempotent {
+		t.Fatalf("result = %+v, want index 2 / version 3 / checking / last=true / first execution", res)
+	}
+
+	row, err := store.GetLesson(ctx, "last-lesson")
+	if err != nil {
+		t.Fatalf("GetLesson: %v", err)
+	}
+	// 最后一词版本只增加一次：2 words, 2 advances, version 1 → 3.
+	if row.CurrentIndex != 2 || row.Version != 3 || row.Stage != StageChecking {
+		t.Fatalf("row index/version/stage = %d/%d/%q, want 2/3/checking", row.CurrentIndex, row.Version, row.Stage)
+	}
+	if len(row.Outcomes) != 2 {
+		t.Fatalf("outcomes = %+v, want both words' behavior on the row", row.Outcomes)
+	}
+}
+
+// TestAdvanceDictationRollback drives the result write to FAIL inside the
+// open transaction (a SQLite trigger rejects the tool_requests update) and
+// verifies the WHOLE command unwound: index, stage, outcomes and the
+// request claim all rolled back together.
+func TestAdvanceDictationRollback(t *testing.T) {
+	ex, store := newExecutorForTest(t)
+	ctx := context.Background()
+	cards := []Word{{Word: "苹果"}, {Word: "香蕉"}}
+	if _, err := store.EnsureLessonCards(ctx, "rb-lesson", cards, ""); err != nil {
+		t.Fatalf("EnsureLessonCards: %v", err)
+	}
+	if _, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+		LessonID: "rb-lesson", RequestID: "rb-lesson-advance-0",
+		TargetIndex: 0, ExpectedVersion: 1,
+		Outcome: WordOutcome{Outcome: OutcomeConfirmed},
+	}); err != nil {
+		t.Fatalf("AdvanceDictation (word 0): %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`CREATE TRIGGER reject_rb_result BEFORE UPDATE ON tool_requests
+		 WHEN NEW.request_id = 'rb-lesson-advance-1'
+		 BEGIN SELECT RAISE(ABORT, 'result write rejected'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	_, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+		LessonID: "rb-lesson", RequestID: "rb-lesson-advance-1",
+		TargetIndex: 1, ExpectedVersion: 2,
+		Outcome: WordOutcome{Outcome: OutcomeConfirmed, Hints: 1},
+	})
+	if err == nil {
+		t.Fatal("the rejected result write must surface an error")
+	}
+
+	row, gerr := store.GetLesson(ctx, "rb-lesson")
+	if gerr != nil {
+		t.Fatalf("GetLesson: %v", gerr)
+	}
+	if row.CurrentIndex != 1 || row.Version != 2 || row.Stage != "" {
+		t.Fatalf("row index/version/stage = %d/%d/%q, want the pre-advance 1/2/''", row.CurrentIndex, row.Version, row.Stage)
+	}
+	if len(row.Outcomes) != 1 {
+		t.Fatalf("outcomes = %+v, want only word 0's stored behavior", row.Outcomes)
+	}
+	var claimed int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM tool_requests WHERE request_id = ?", "rb-lesson-advance-1",
+	).Scan(&claimed); err != nil || claimed != 0 {
+		t.Fatalf("claim rows = %d err=%v — the request claim must roll back with the transaction", claimed, err)
+	}
+
+	// Drop the trigger: the SAME command now succeeds on a clean retry —
+	// the rollback left no half-state behind (no claim, no bump).
+	if _, err := store.db.ExecContext(ctx, "DROP TRIGGER reject_rb_result"); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	res, err := ex.AdvanceDictation(ctx, AdvanceDictationInput{
+		LessonID: "rb-lesson", RequestID: "rb-lesson-advance-1",
+		TargetIndex: 1, ExpectedVersion: 2,
+		Outcome: WordOutcome{Outcome: OutcomeConfirmed, Hints: 1},
+	})
+	if err != nil {
+		t.Fatalf("AdvanceDictation retry: %v", err)
+	}
+	if !res.LastWord || res.Stage != StageChecking || res.NewVersion != 3 {
+		t.Fatalf("retry result = %+v, want a clean last-word advance", res)
+	}
+}
