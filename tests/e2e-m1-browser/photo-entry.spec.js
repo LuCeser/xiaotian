@@ -9,12 +9,15 @@
 //        parent's final edits are committed — then the library holds
 //        EXACTLY the checked rows with the edited meanings (conflict keeps
 //        the library's meaning, unchecked never lands), still queryable
-//        after a refresh;
+//        after a refresh — and that SAME commit then feeds a REAL
+//        classroom (review #67: the edited/cancelled state, not a fresh
+//        re-import, must survive into the dictated word list);
 //   J03  a failing recognition shows the honest error (no fake success,
 //        old entries unharmed), the SAME form retries successfully, and a
 //        retried commit writes each word exactly once;
-//   J02c (second commit) the imported words then feed a REAL classroom:
-//        the dictation greeting actually plays them (natural ACKs).
+//   J02c (second commit) the PLAIN import (no edits) also feeds a REAL
+//        classroom: the dictation greeting actually plays it (natural
+//        ACKs).
 //
 // Fixture reply order is pinned by tests/e2e/fixtures/photo-wordlist.png's
 // sibling reply: 0 apple(conflict) · 1 banana · 2 ice cream · 3 go for a
@@ -66,9 +69,10 @@ async function library(svc) {
   return new Map(words.map((w) => [w.word, w.meaning]));
 }
 
-test('J02 draft stays out of the library; edited+checked rows save exactly; refresh still queries', async ({ page }) => {
-  test.setTimeout(90_000);
+test('J02 draft stays out of the library; edited+checked rows save exactly; refresh still queries, then the SAME commit feeds the classroom', async ({ page }) => {
+  test.setTimeout(120_000);
   const svc = await startSpecService();
+  await installRtObserver(page);
   try {
     // Conflict fixtures: apple conflicts (different meaning), river exists.
     expect((await svc.seedWords({ category: 'english', unit: 'e2e-m1-photo-seed', entries: [
@@ -77,7 +81,14 @@ test('J02 draft stays out of the library; edited+checked rows save exactly; refr
     ] })).ok).toBe(true);
     const before = await library(svc);
 
-    expect((await stub.scripts({ asr: [], llm: [], tts: [], image: [{ content: fixtureReply('photo-wordlist.reply.json') }] })).ok).toBe(true);
+    // Greeting TTS rides along from the start: the import half consumes no
+    // TTS, so all three entries are still there when the classroom below
+    // opens on this same service.
+    expect((await stub.scripts({
+      asr: [], llm: [],
+      tts: [{ ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' }],
+      image: [{ content: fixtureReply('photo-wordlist.reply.json') }],
+    })).ok).toBe(true);
     await openPhotoTab(page, svc);
     await recognize(page, WORDLIST_PNG);
     await expect(page.locator('.photo-row')).toHaveCount(6);
@@ -123,6 +134,61 @@ test('J02 draft stays out of the library; edited+checked rows save exactly; refr
     await page.getByRole('tab', { name: '词库' }).click();
     await expect(page.locator('.word-row[data-word="banana"]')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.word-row[data-word="go for a walk"] .word-meaning')).toHaveText('去散步');
+
+    // ---------------- 随后进入课堂 (review #67 P2) ----------------
+    // The SAME edited commit must continue into a real classroom — not a
+    // re-import on a fresh service. The final confirmed library holds
+    // exactly {apple, river, banana, go for a walk} (2 seeds + 2 confirmed
+    // rows), all due, so the classroom's word list must be exactly those 4
+    // in due order: a classroom fed from the raw draft would carry the
+    // unchecked ice cream (and the duplicate banana) and miss the edit.
+    await page.goto(svc.url + 'tutor/');
+    await page.locator('#rt-start').click();
+    await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ready'
+      && e.msg.category === 'english'
+      && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 4
+      && e.msg.lesson.words.every((w) => w === '')),
+    { timeoutMs: 30000, label: 'session_ready with exactly the final confirmed library' });
+    expect((await controls(page)).filter((e) => e.type === 'subject_ask'),
+      'english is the only subject with due words — no ask').toHaveLength(0);
+
+    // 真正播放: the greeting acks through the production player only, the
+    // dictated first word is the library's first due word (apple — seeded
+    // earliest, all four are fresh Learning cards), and nothing that only
+    // ever existed in the cancelled draft is spoken.
+    await waitWs(page, (log) => {
+      const starts = log.filter((e) => e.dir === 'in' && e.type === 'audio_start');
+      const ends = log.filter((e) => e.dir === 'in' && e.type === 'audio_end');
+      const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack');
+      if (starts.length !== 3 || ends.length !== 3 || acks.length !== 3) return false;
+      return starts.every((s) => {
+        const end = ends.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+        const ack = acks.find((e) => e.msg.sentence_id === s.msg.sentence_id);
+        return !!end && !!ack && ack.i > end.i;
+      });
+    }, { timeoutMs: 30000, label: 'greeting fully acked by the production player' });
+    const playback = await playbackState(page);
+    for (const s of (await controls(page)).filter((e) => e.dir === 'in' && e.type === 'audio_start')) {
+      expect(playedBeforeAck(playback.trace, s.msg.epoch, s.msg.sentence_id),
+        'onended before ack for ' + s.msg.epoch + ':' + s.msg.sentence_id).toBe(true);
+    }
+    expect(playback.droppedChunks, 'no audio chunk was discarded by the production player').toBe(0);
+    const ttsTexts = (await stub.state()).requests.filter((q) => q.category === 'tts').map((q) => q.text);
+    expect(ttsTexts.some((t) => /第 1 个词，apple。/.test(t)),
+      'the classroom dictates the final confirmed library in due order').toBe(true);
+    expect(ttsTexts.some((t) => t.includes('ice cream')),
+      'nothing that only existed in the cancelled draft is ever spoken').toBe(false);
+
+    // Persistence agrees: exactly one english lesson row with the confirmed
+    // library's size — the unchecked/duplicate draft rows never inflated it.
+    await expect(page.locator('#rt-progress-text')).toHaveText(/第 1 \/ 4 个词/);
+    const rows = (await svc.listLessons()).body.lessons;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ category: 'english', word_count: 4 });
+
+    await page.locator('#rt-end').click();
+    await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ended'),
+      { label: 'session_ended after explicit end' });
 
     expect((await stub.state()).violations).toEqual([]);
   } finally {
