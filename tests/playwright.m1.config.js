@@ -20,11 +20,41 @@
  */
 // @ts-check
 const { defineConfig } = require('@playwright/test');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..');
 const SERVICE = 'http://127.0.0.1:18290';
 const STUB = 'http://127.0.0.1:18285';
+
+// SILENT mic source (plan §2 B-layer: the browser microphone source is one
+// of the two replaced pieces). Chromium's fake audio device plays a loud
+// repeating tone by default, which would drive the server VAD into
+// unscripted ASR calls and fail the strict stub — so the fake device is fed
+// a looping all-zero WAV instead. Written at config load (one small file in
+// the OS temp dir); the uplink then carries real production-captured
+// silence, never a stubbed stream.
+const SILENCE_WAV = path.join(os.tmpdir(), 'xiaotian-m1-silence-16k.wav');
+{
+  const rate = 16000;
+  const dataLen = rate * 2 * 2; // 2 s of mono s16le
+  const wav = Buffer.alloc(44 + dataLen);
+  wav.write('RIFF', 0, 'ascii');
+  wav.writeUInt32LE(36 + dataLen, 4);
+  wav.write('WAVE', 8, 'ascii');
+  wav.write('fmt ', 12, 'ascii');
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20); // PCM
+  wav.writeUInt16LE(1, 22); // mono
+  wav.writeUInt32LE(rate, 24);
+  wav.writeUInt32LE(rate * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36, 'ascii');
+  wav.writeUInt32LE(dataLen, 40);
+  fs.writeFileSync(SILENCE_WAV, wav);
+}
 
 // Loopback traffic must never ride the system proxy (same guard as the
 // parent config — see its comment for the Privoxy failure mode).
@@ -36,17 +66,27 @@ process.env.no_proxy = process.env.NO_PROXY;
 module.exports = defineConfig({
   testDir: './e2e-m1-browser',
   // Explicit per-spec match: each plan step appends its spec file here, so
-  // the m1 line never silently picks up another suite's specs.
-  testMatch: /smoke\.spec\.js$/,
+  // the m1 line never silently picks up another suite's specs. The run-level
+  // service below serves the single read-only smoke test. Every stateful
+  // classroom test starts its own service, temp DB and data root through
+  // helpers/spec-service.js; no assertion depends on file execution order.
+  testMatch: /(smoke|subject-playback|voice-input)\.spec\.js$/,
   timeout: 60_000,
   retries: 0,
-  // One isolated instance + one vocabulary DB: serialize (two actors
-  // mutating the same unit would interleave asserts).
+  // The strict vendor stub is shared, so its independently reset scripts
+  // remain serialized even though classroom databases are per test.
   workers: 1,
   maxFailures: process.env.CI ? undefined : 1,
   reporter: [['list']],
   use: {
     baseURL: SERVICE,
+    launchOptions: {
+      args: [
+        '--use-fake-ui-for-media-stream', // auto-grant mic permission headless
+        '--use-fake-device-for-media-stream', // a mic device must exist headless
+        '--use-file-for-fake-audio-capture=' + SILENCE_WAV, // …but a SILENT one
+      ],
+    },
   },
   webServer: [
     {

@@ -145,7 +145,15 @@ function createStrictMimoStub(options = {}) {
     }
     if (body.stream === true) {
       if (body.model !== TTS_MODEL) return { violation: 'wrong model for tts shape', detail: { model: body.model } };
-      const text = body.messages && typeof body.messages[0].content === 'string' ? body.messages[0].content : '';
+      // The synthesized sentence rides the LAST message: the production
+      // dictation-teacher preset PREPENDS a user style instruction
+      // (mimo.PresetDictationTeacher → WithStyleInstruction), so messages[0]
+      // is the style text, never the sentence.
+      let text = '';
+      for (let i = (body.messages || []).length - 1; i >= 0; i--) {
+        const m = body.messages[i];
+        if (m && typeof m.content === 'string' && m.content) { text = m.content; break; }
+      }
       if (!text) return { violation: 'tts request without sentence text' };
       if (!body.audio || body.audio.format !== 'pcm16') return { violation: 'tts request must ask pcm16' };
       return { category: 'tts', facts: { text } };
