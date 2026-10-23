@@ -37,3 +37,20 @@ func TestPoemTurnLifetime(t *testing.T) {
 			pausedBefore, hintsBefore, checkCallsBefore, sentBefore)
 	}
 }
+
+func TestPoemSessionReadyLifetime(t *testing.T) {
+	tm, captured, _, _ := newPoemTestManager(t, newFakeASR(), newFakeLLM(), nil)
+	wrapped := ttCloseAtInit(t, tm, captured, TypeSessionReady)
+
+	tm.HandleControl(wrapped, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Poem: 42,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	ttAwaitGate(t, wrapped.closeDone, "close at poem session_ready did not finish")
+
+	if got := captured.countOf(TypeSessionReady); got != 1 {
+		t.Fatalf("session_ready count = %d, want 1", got)
+	}
+	ttReadyBeforeEnd(t, captured, TypeSessionReady)
+	ttAssertNothingAfterEnd(t, captured)
+}

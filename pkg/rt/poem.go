@@ -293,16 +293,11 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
 // The greeting carries NO line text, arms no timer, and its display equals
 // its spoken text (title/author are public identity, not the answer).
 func (tm *TurnManager) startPoemSession(s Sender, l lesson.Lesson, p poem.Poem) {
-	tm.mu.Lock()
-	tm.tutor = newDictationTutor(l)
-	tm.tutor.poem = &poemRef{ID: l.PoemID, Title: p.Title, Author: p.Author}
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	total := len(tm.tutor.words)
-	category := tm.tutor.category
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SessionReadyMsg{
+	tutor := newDictationTutor(l)
+	tutor.poem = &poemRef{ID: l.PoemID, Title: p.Title, Author: p.Author}
+	total, category := len(tutor.words), tutor.category
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := SessionReadyMsg{
 		Type:      TypeSessionReady,
 		SessionID: tm.session,
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
@@ -310,18 +305,28 @@ func (tm *TurnManager) startPoemSession(s Sender, l lesson.Lesson, p poem.Poem) 
 		Lesson:    tm.lessonViewFor(l),
 		Category:  category,
 		Poem:      poemTaskView(p),
-	})
+	}
+	var epoch uint64
+	if !tm.applySessionEffect(func() error {
+		if err := s.SendControl(ready); err != nil {
+			return err
+		}
+		tm.tutor = tutor
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		tm.turnCancel = cancel
+		epoch = tm.epoch
+		return nil
+	}) {
+		cancel()
+		return
+	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
 	text := poemGreetingText(p.Title, p.Author, total)
 	// onAck is deliberately nil: the poem classroom arms NO per-word timer
 	// (不用单词短计时器把整首任务机械推进) — nothing counts down while the
 	// child writes.
-	go tm.runAnnouncementDisplay(s, ctx, cancel, text, text, purposePoemGreeting, nil)
+	go tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purposePoemGreeting, nil)
 }
 
 // buildPoemClassifyMessages assembles the poem writing-stage classification
