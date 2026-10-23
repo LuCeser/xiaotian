@@ -242,4 +242,20 @@ func TestAsyncOutputAfterClose(t *testing.T) {
 			t.Fatalf("SubmitReview calls = %d, want 0", got)
 		}
 	})
+
+	t.Run("ping after end is not answered", func(t *testing.T) {
+		cards := ttCards("苹果")
+		tm, s, _, _ := ttDriveToCheck(t, cards, newFakeWords(cards))
+		tm.HandleControl(s, mustJSON(t, PingMsg{Type: TypePing, TClientMs: 42}))
+		if got := s.countOf(TypePong); got != 1 {
+			t.Fatalf("pong before end = %d, want 1", got)
+		}
+
+		tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+		tm.HandleControl(s, mustJSON(t, PingMsg{Type: TypePing, TClientMs: 43}))
+
+		if got := s.countOf(TypePong); got != 1 {
+			t.Fatalf("pong messages = %d, want 1 — no reply past session_ended", got)
+		}
+	})
 }

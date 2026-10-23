@@ -1254,7 +1254,10 @@ func (tm *TurnManager) handleSentenceAck(m SentenceAckMsg) {
 }
 
 // handlePing answers the clock-offset probe. TServerMonoNs shares the
-// recorder's anchor with every rt_event t_mono_ns (13-03 protocol).
+// recorder's anchor with every rt_event t_mono_ns (13-03 protocol). The
+// reply rides the session effect: a session that already shipped
+// session_ended is never answered past its terminal message — a ping that
+// races the goodbye loses, and session_ended stays the wire's last word.
 func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 	_ = s.SendControl(PongMsg{
 		Type:          TypePong,
