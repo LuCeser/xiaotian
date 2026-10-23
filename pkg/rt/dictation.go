@@ -388,15 +388,43 @@ type passageRef struct {
 // newDictationTutor binds the FSM to a lesson row read back from the
 // executor (resumable mid-lesson: currentIndex/version come from the row).
 func newDictationTutor(l lesson.Lesson) *DictationTutor {
-	return &DictationTutor{
+	t := &DictationTutor{
 		lessonID:       l.LessonID,
 		category:       lesson.NormalizeCategory(l.Category),
 		words:          l.Cards,
-		version:        l.Version,
-		currentIndex:   l.CurrentIndex,
 		perWordOutcome: map[int]string{},
 		perWordHints:   map[int]int{},
 	}
+	t.applyLessonSnapshot(l)
+	return t
+}
+
+// applyLessonSnapshot restores the authoritative row state without letting
+// an older read move the in-memory classroom backwards. A same-target
+// refresh preserves hints that have been given in this connection but are
+// not durable until that word advances.
+func (t *DictationTutor) applyLessonSnapshot(l lesson.Lesson) bool {
+	if l.LessonID != t.lessonID || l.Version < t.version {
+		return false
+	}
+	oldIndex := t.currentIndex
+	pendingOutcome := t.perWordOutcome[oldIndex]
+	pendingHints := t.perWordHints[oldIndex]
+	sameTarget := oldIndex == l.CurrentIndex
+
+	t.currentIndex = l.CurrentIndex
+	t.version = l.Version
+	t.perWordOutcome = map[int]string{}
+	t.perWordHints = map[int]int{}
+	t.restoreOutcomes(l.Outcomes)
+	if sameTarget && l.Stage == "" && pendingHints > t.perWordHints[oldIndex] {
+		t.perWordHints[oldIndex] = pendingHints
+		t.perWordOutcome[oldIndex] = pendingOutcome
+	}
+
+	t.checking = l.Stage == lesson.StageChecking
+	t.completed = t.checking || l.Stage == lesson.StageSubmitted || l.CurrentIndex >= len(t.words)
+	return true
 }
 
 // turnTarget snapshots the immutable advance target for one classification.

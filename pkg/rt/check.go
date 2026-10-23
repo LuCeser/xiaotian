@@ -251,7 +251,6 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	tm.tutor.checking = true  // the check panel owns the input surface
 	tm.tutor.correction = correction
 	tm.tutor.checkVerdicts = panelVerdicts
-	tm.tutor.restoreOutcomes(l.Outcomes)
 	tm.state = StateListening
 	tm.sessionReadyAt = time.Now()
 	tm.mu.Unlock()
