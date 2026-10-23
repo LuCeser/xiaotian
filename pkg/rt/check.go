@@ -624,6 +624,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	// Latch: the stage transition. ONLY the first commit proceeds.
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
 
@@ -689,7 +690,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		}
 	}
 
-	go tm.finishCheckSubmit(s, ctx, cancel, ratings, total, correct, m.RequestID)
+	go tm.finishCheckSubmit(s, ctx, cancel, epoch, ratings, total, correct, m.RequestID)
 }
 
 // sortedWordSet extracts a rating map's keys sorted — the receipt word-set
@@ -711,8 +712,9 @@ func sortedWordSet(m map[string]string) []string {
 // SubmitReview call site the check stage owns. 13.3-01 brackets the write
 // with the two-phase save receipt (Begin pending before, Complete with the
 // real outcome after) — a pure bypass that never alters the flow below.
-func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, ratings map[string]string, total, correct int, requestID string) {
+func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ratings map[string]string, total, correct int, requestID string) {
 	defer cancel()
+	persistCtx := context.WithoutCancel(ctx)
 
 	// Dictation-stage behavior data stays honestly reported (the D-01
 	// rewrite keeps outcomeCounts/hintAccounting as event fields).
@@ -738,7 +740,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		receiptID := int64(0)
 		requestedSet := sortedWordSet(ratings)
 		if tm.cfg.Receipts != nil {
-			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+			rec, rerr := tm.cfg.Receipts.Begin(persistCtx, lesson.ReceiptInput{
 				LessonID:  lessonID,
 				RequestID: requestID,
 				Kind:      lesson.ReceiptKindCheck,
@@ -751,7 +753,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 			}
 		}
 
-		wres, err := tm.cfg.Words.SubmitReview(ctx, ratings, category)
+		wres, err := tm.cfg.Words.SubmitReview(persistCtx, ratings, category)
 		switch {
 		case err != nil:
 			// Honest failure: the record was NOT saved — never a narrated
@@ -788,9 +790,9 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		if tm.cfg.Receipts != nil && receiptID > 0 {
 			var cerr error
 			if err != nil {
-				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false)
+				cerr = tm.cfg.Receipts.Complete(persistCtx, receiptID, nil, requestedSet, false)
 			} else {
-				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
+				cerr = tm.cfg.Receipts.Complete(persistCtx, receiptID, wres.Updated, wres.Missing, true)
 			}
 			if cerr != nil {
 				// The row stays pending — the parent view's honest 「待核实」.
@@ -810,14 +812,21 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		result.Updated = 0
 		result.Missing = requested
 	}
-	tm.mu.Lock()
-	tm.tutor.reviewSeen = true
-	tm.tutor.reviewResult = result
-	tm.mu.Unlock()
-	_ = s.SendControl(result)
-
 	summary := checkedSummaryText(total, correct, result.Updated, requested, saveFailed)
-	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
+	if tm.checkSubmitPresentationInterleave != nil {
+		tm.checkSubmitPresentationInterleave()
+	}
+	if !tm.applyTurnAt(epoch, func() error {
+		if err := s.SendControl(result); err != nil {
+			return err
+		}
+		tm.tutor.reviewSeen = true
+		tm.tutor.reviewResult = result
+		return nil
+	}) {
+		return
+	}
+	tm.runNaturalEndingAt(s, epoch, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
 }
 
 // ---------------------------------------------------------------------------

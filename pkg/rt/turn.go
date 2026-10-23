@@ -407,6 +407,9 @@ type TurnManager struct {
 	// checkPresentationInterleave is a narrow test probe after EnterCheck (or
 	// its conflict read-back) returns and before stored state is presented.
 	checkPresentationInterleave func()
+	// checkSubmitPresentationInterleave is a narrow test probe after a review
+	// save completes and before its result is presented.
+	checkSubmitPresentationInterleave func()
 
 	// closeOwned marks the close path that won the ONE-TIME D-03 fallback
 	// ownership (uncheckedCloseFallback). Guarded by mu.
@@ -1109,16 +1112,26 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 // no-due/explanation goroutine scheduled only after the session closed dies
 // at entry — no sentences, no ack-timeout theater, no second session_ended.
 func (tm *TurnManager) runNaturalEnding(s Sender, ctx context.Context, cancel context.CancelFunc, text, purpose, reason string) {
-	defer cancel()
-
 	tm.mu.Lock()
 	if tm.closed {
 		tm.mu.Unlock()
+		cancel()
 		return
 	}
 	epoch := tm.epoch
-	turnID := tm.nextTurnIDLocked()
 	tm.mu.Unlock()
+	tm.runNaturalEndingAt(s, epoch, ctx, cancel, text, purpose, reason)
+}
+
+func (tm *TurnManager) runNaturalEndingAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, text, purpose, reason string) {
+	defer cancel()
+	var turnID uint64
+	if !tm.applyTurnAt(epoch, func() error {
+		turnID = tm.nextTurnIDLocked()
+		return nil
+	}) {
+		return
+	}
 
 	ref := tm.speakTurn(s, turnID, epoch, text, text, purpose, ctx, cancel)
 	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
