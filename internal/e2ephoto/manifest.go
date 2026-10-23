@@ -37,7 +37,7 @@ const (
 // a recognition pass on surface alone (PR #65 复审 P1), so Load rejects
 // it. Aliases are the pre-declared accepted surfaces (the ellipsis
 // template phrases); MeaningAliases are pre-declared equivalent
-// expressions (e.g. the photo's own bracketed senses 躲避（闪避）).
+// expressions and never replace the photo text stored in Meaning.
 type Entry struct {
 	Word           string   `json:"word"`
 	Kind           string   `json:"kind"`

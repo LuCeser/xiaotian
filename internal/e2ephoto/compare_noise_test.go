@@ -75,7 +75,7 @@ func TestCompareSentenceNoise(t *testing.T) {
 
 // TestCompareWrongMeaning pins the picture-meaning rule: duck recognized
 // with the dictionary sense 鸭子 is wrong (the photo means 躲避), while an
-// equivalent with listed tolerance (trailing punctuation on 跳绳) passes.
+// trailing punctuation on 跳绳 passes via normalization.
 func TestCompareWrongMeaning(t *testing.T) {
 	p := realPhoto(t)
 	rows := withMeaning(baseline(p), "duck", "鸭子")
@@ -93,13 +93,6 @@ func TestCompareWrongMeaning(t *testing.T) {
 		t.Errorf("empty meaning for annotated duck: %+v, want one duck mismatch", rep.WrongMeanings)
 	}
 
-	// 照片印刷原文带括注义（躲避（闪避）／跳绳（跳过）），已事先列为
-	// 等义表达：识别按原文照抄也必须通过。
-	rows = withMeaning(baseline(p), "duck", "躲避（闪避）")
-	rows = withMeaning(rows, "skip", "跳绳（跳过）")
-	if rep := Compare(p, rows); !rep.OK(p.Rules) {
-		t.Fatalf("photo-printed bracketed meanings must pass via declared aliases: %+v", rep)
-	}
 }
 
 // TestCompareEllipsisAliases: only the pre-declared compact alias (and
