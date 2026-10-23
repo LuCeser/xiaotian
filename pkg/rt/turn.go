@@ -747,11 +747,14 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 // review: a session that closed under the init IO gets no failure message
 // either — nothing follows its session_ended.
 func (tm *TurnManager) failLessonInit(s Sender) {
-	if !tm.stillOpen() {
+	if !tm.applySessionEffect(func() error {
+		return s.SendControl(ErrorMsg{
+			Type: TypeError, Code: ErrCodeLessonUnavailable, Message: lessonUnavailableNotice, Recoverable: false,
+		})
+	}) {
 		return
 	}
 	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable))
-	tm.sendError(s, ErrCodeLessonUnavailable, lessonUnavailableNotice, false)
 }
 
 // normalizeSessionMode normalizes the page-supplied UI mode (13.1 D-08):
@@ -775,37 +778,38 @@ func normalizeSessionMode(mode string) string {
 // vocabulary's due data names the next review), and ends the session only
 // after the explanation's actual playback ack (or its bounded timeout).
 func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
-	tm.mu.Lock()
-	if tm.closed {
+	// sessionCategory/lessonViewFor take tm.mu themselves: read them before
+	// the effect (both are session-constant after session_init).
+	category := tm.sessionCategory()
+	if !tm.applySessionEffect(func() error {
 		// PR #60 review: the session may have closed under the init IO that
 		// led here — a closed session gets no session_ready and no spoken
-		// explanation (nothing may follow its session_ended).
-		tm.mu.Unlock()
+		// explanation (nothing may follow its session_ended); the bind and
+		// the enqueue are one hold, so the close can no longer land between
+		// them either.
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		return s.SendControl(SessionReadyMsg{
+			Type:      TypeSessionReady,
+			SessionID: tm.session,
+			Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+			TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
+			Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
+			Category:  category,
+		})
+	}) {
 		return
 	}
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SessionReadyMsg{
-		Type:      TypeSessionReady,
-		SessionID: tm.session,
-		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
-		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
-		Category:  tm.sessionCategory(),
-	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	if tm.closed {
-		tm.mu.Unlock()
+	if !tm.applySessionEffect(func() error {
+		tm.turnCancel = cancel
+		return nil
+	}) {
 		cancel()
 		return
 	}
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
 	go tm.runNaturalEnding(s, ctx, cancel, tm.noDueWordsTextForNow(), purposeNoDue, ReasonNoDueWords)
 }
 
@@ -813,25 +817,25 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 // already-finished lesson: session_ready then session_ended(lesson_complete)
 // — no summary replay, no second SubmitReview.
 func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
-	tm.mu.Lock()
-	if tm.closed {
+	// Locked helpers read before the effect (session-constant values).
+	view, category := tm.lessonViewFor(l), tm.sessionCategory()
+	if !tm.applySessionEffect(func() error {
 		// PR #60 review: same gate as the other starters — a closed session
-		// replays neither session_ready nor the completion session_ended.
-		tm.mu.Unlock()
+		// replays neither session_ready nor the completion session_ended;
+		// the bind and the enqueue are one hold.
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		return s.SendControl(SessionReadyMsg{
+			Type:      TypeSessionReady,
+			SessionID: tm.session,
+			Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+			TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
+			Lesson:    view,
+			Category:  category,
+		})
+	}) {
 		return
 	}
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SessionReadyMsg{
-		Type:      TypeSessionReady,
-		SessionID: tm.session,
-		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
-		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    tm.lessonViewFor(l),
-		Category:  tm.sessionCategory(),
-	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 	// The completion goodbye rides the ONE-TIME terminal close: a goodbye
 	// that raced in after session_ready already closed the session, and no
@@ -845,47 +849,49 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
 // the TTS first packet, no LLM call. practice (13.1-05) flips only the
 // submit-path flag; pacing, the check stage and the D-05 gate are identical.
 func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice bool) {
-	tm.mu.Lock()
-	if tm.closed {
+	// Locked helpers read before the effect (session-constant values).
+	view, category := tm.lessonViewFor(l), tm.sessionCategory()
+	var first lesson.Word
+	var total int
+	var mode string
+	if !tm.applySessionEffect(func() error {
 		// PR #60 review: the subject-picked classroom's init runs on the
 		// answer turn's goroutine, so an end_session may have closed the
 		// session under the fetch/row IO — the closed check shares the hold
 		// that binds the tutor, so a closed session binds nothing, sends no
-		// session_ready and never greets.
-		tm.mu.Unlock()
+		// session_ready and never greets; the bind and the enqueue are one
+		// hold, so the close can no longer land between them either.
+		tm.tutor = newDictationTutor(l)
+		tm.tutor.practice = practice
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		first = tm.tutor.words[tm.tutor.currentIndex]
+		total = len(tm.tutor.words)
+		mode = tm.mode
+		return s.SendControl(SessionReadyMsg{
+			Type:      TypeSessionReady,
+			SessionID: tm.session,
+			Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+			TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
+			Lesson:    view,
+			Category:  category,
+		})
+	}) {
 		return
 	}
-	tm.tutor = newDictationTutor(l)
-	tm.tutor.practice = practice
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	first := tm.tutor.words[tm.tutor.currentIndex]
-	total := len(tm.tutor.words)
-	mode := tm.mode
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SessionReadyMsg{
-		Type:      TypeSessionReady,
-		SessionID: tm.session,
-		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
-		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    tm.lessonViewFor(l),
-		Category:  tm.sessionCategory(),
-	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	if tm.closed {
+	if !tm.applySessionEffect(func() error {
 		// A close that landed after the session_ready send still gets no
 		// greeting: the entry gates (runAnnouncementDisplayAt) kill the
 		// goroutine even if it launches, but refusing here is the fast path.
-		tm.mu.Unlock()
+		tm.turnCancel = cancel
+		return nil
+	}) {
 		cancel()
 		return
 	}
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
 	spoken := greetingText(total, first.Word)
 	display := spoken
 	if mode != ModeTest {

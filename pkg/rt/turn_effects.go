@@ -26,3 +26,23 @@ func (tm *TurnManager) applyTurnLocked(epoch uint64, effect func() error) bool {
 	}
 	return true
 }
+
+// applySessionEffect is the session-scoped sibling of applyTurnAt for the
+// classroom starters (pre-turn: no epoch to match): the closed check, the
+// memory bind (state, tutor, sessionReadyAt) and the ready/error enqueue
+// are ONE hold, so a close that races the init IO either refuses the whole
+// start or lands behind the accepted message — session_ready/error can
+// never trail session_ended on the wire. Locked helpers that take tm.mu
+// themselves (sessionCategory, lessonViewFor, …) must run BEFORE the call.
+func (tm *TurnManager) applySessionEffect(effect func() error) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.closed {
+		return false
+	}
+	if err := effect(); err != nil {
+		tm.logger.Warn("session effect enqueue failed", infra.ErrField(err))
+		return false
+	}
+	return true
+}
