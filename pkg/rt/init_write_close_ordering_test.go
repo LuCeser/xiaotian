@@ -21,7 +21,7 @@ type ensureGateExec struct {
 	closeStarted chan struct{} // the test launched the real close
 	attempt      chan struct{} // the write position was reached
 	written      chan struct{} // the real write returned
-	endedAtWrite func() int    // session_ended count at write completion
+	endedAtWrite func() bool   // whether session_ended existed at write completion
 	lockHeld     func() bool   // whether the init-write lock is held (probe)
 
 	mu    sync.Mutex
@@ -44,7 +44,7 @@ func (g *ensureGateExec) EnsureLessonCards(ctx context.Context, lessonID string,
 		atomic.StoreInt32(&g.held, btoi(g.lockHeld()))
 	}
 	l, err := g.LessonExecutor.EnsureLessonCards(ctx, lessonID, cards, category)
-	atomic.StoreInt32(&g.ended, int32(g.endedAtWrite()))
+	atomic.StoreInt32(&g.ended, btoi(g.endedAtWrite()))
 	close(g.written)
 	return l, err
 }
@@ -112,7 +112,7 @@ func TestInitWriteCloseOrdering(t *testing.T) {
 			attempt:        make(chan struct{}),
 			closeStarted:   make(chan struct{}),
 			written:        make(chan struct{}),
-			endedAtWrite:   func() int { return captured.countOf(TypeSessionEnded) },
+			endedAtWrite:   func() bool { return captured.countOf(TypeSessionEnded) > 0 },
 			lockHeld:       nil, // armed below, once tm exists
 		}
 		tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), g,
@@ -172,7 +172,7 @@ func TestInitWriteCloseOrdering(t *testing.T) {
 			attempt:        make(chan struct{}),
 			closeStarted:   make(chan struct{}),
 			written:        make(chan struct{}),
-			endedAtWrite:   func() int { return 0 },
+			endedAtWrite:   func() bool { return false },
 		}
 		tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), g,
 			ttConfig(newFakeWords(ttCards("苹果"))), NewEventRecorder(&captureLogger{}, "t"), nil)
