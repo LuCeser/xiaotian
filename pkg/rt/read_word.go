@@ -30,13 +30,22 @@ func (tm *TurnManager) handleReadWord(s Sender, m ReadWordMsg) {
 	if tm.mode != ModeTest && !t.checking {
 		display = repeatMaskedText(m.WordIndex + 1)
 	}
-	tm.stopWordTimerLocked()
 	epoch, turnID := tm.epoch, tm.nextTurnIDLocked()
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.turnCancel = cancel
-	tm.state = StateProcessing
+	if !tm.applyTurnLocked(epoch, func() error {
+		if err := s.SendControl(TurnStartMsg{Type: TypeTurnStart, TurnID: turnID, Epoch: epoch}); err != nil {
+			return err
+		}
+		tm.stopWordTimerLocked()
+		tm.turnCancel = cancel
+		tm.state = StateProcessing
+		return nil
+	}) {
+		tm.mu.Unlock()
+		cancel()
+		return
+	}
 	tm.mu.Unlock()
-	_ = s.SendControl(TurnStartMsg{Type: TypeTurnStart, TurnID: turnID, Epoch: epoch})
 	go func() {
 		defer cancel()
 		ref := tm.speakTurn(s, turnID, epoch, spoken, display, purposeChat, ctx, cancel)

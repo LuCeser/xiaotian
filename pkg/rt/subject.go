@@ -91,20 +91,23 @@ func (tm *TurnManager) subjectHasDue(category string) bool {
 // row exists yet — the row's subject is whatever the child picks, and the
 // answered round then runs under that subject only.
 func (tm *TurnManager) startSubjectAsk(s Sender, m SessionInitMsg) {
-	tm.mu.Lock()
-	tm.pendingAsk = &m
-	tm.state = StateListening
-	askEpoch := tm.epoch // fixed NOW: a pick processed before the goroutine
-	// first runs bumps the epoch, and the ask's entry check must refuse it.
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SubjectAskMsg{Type: TypeSubjectAsk, Question: subjectAskText})
-	tm.recorder.Emit(EventSubjectAsk)
-
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
+	var askEpoch uint64
+	if !tm.applySessionEffect(func() error {
+		if err := s.SendControl(SubjectAskMsg{Type: TypeSubjectAsk, Question: subjectAskText}); err != nil {
+			return err
+		}
+		tm.pendingAsk = &m
+		tm.state = StateListening
+		askEpoch = tm.epoch // fixed NOW: a pick processed before the goroutine
+		// first runs bumps the epoch, and the ask's entry check must refuse it.
+		tm.turnCancel = cancel
+		return nil
+	}) {
+		cancel()
+		return
+	}
+	tm.recorder.Emit(EventSubjectAsk)
 	go tm.runAnnouncementDisplayAt(s, askEpoch, ctx, cancel, subjectAskText, subjectAskText, purposeSubjectAsk, nil)
 }
 
