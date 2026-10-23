@@ -11,8 +11,9 @@ import (
 
 // Real-key smoke tests for the tool loop with thinking disabled (Phase 13
 // RT-03/RT-04, Assumption A4). Gating reuses integration_test.go's
-// getTestAPIKey: no MIMO_API_KEY in the environment or -short mode means
-// t.Skip — a skip is never a failure, so key-less environments stay green.
+// getTestAPIKey (internal/livetest): no XIAOTIAN_LIVE_TESTS=1 plus
+// MIMO_API_KEY in the environment, or -short mode, means t.Skip — a skip is
+// never a failure, so key-less environments stay green.
 
 // getLessonStateToolDef declares the read tool the realtime lesson loop
 // offers to the model (13-RESEARCH Pattern 4 vocabulary).

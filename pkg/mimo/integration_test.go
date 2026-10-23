@@ -1,7 +1,6 @@
 package mimo
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -10,67 +9,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaotian/home-tutor-agent/internal/livetest"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
-// skipIntegration is set to false to enable integration tests when MIMO_API_KEY is provided
-const skipIntegration = false
-
-// TestMain loads the repo-root .env into this test process's environment
-// before any test runs, so `go test` picks up MIMO_API_KEY the same way the
-// dev workflow expects. Precedence: real environment always wins — .env only
-// fills variables that are unset (D-05: secrets travel via live env; this
-// loader never overrides and never logs key material).
-func TestMain(m *testing.M) {
-	// Go tests run with cwd = package dir (pkg/mimo), so the repo root is ../..
-	loadDotEnv("../../.env")
-	os.Exit(m.Run())
-}
-
-// loadDotEnv reads a minimal KEY=VALUE .env file into os.Environment.
-// It tolerates comments (#), blank lines, and surrounding quotes, and skips
-// any key that is already set in the environment. Missing file is not an
-// error — getTestAPIKey's t.Skip handles the no-key case.
-func loadDotEnv(path string) {
-	f, err := os.Open(path)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		value = strings.Trim(value, `"'`)
-		if key == "" {
-			continue
-		}
-		if _, exists := os.LookupEnv(key); exists {
-			continue // live environment takes precedence over .env
-		}
-		os.Setenv(key, value)
-	}
-}
-
-// getTestAPIKey retrieves the API key from environment or skips the test
+// getTestAPIKey gates every live integration test on the shared explicit
+// switch (internal/livetest): without XIAOTIAN_LIVE_TESTS=1 they skip even
+// when a key is present, and .env is never read implicitly — credentials
+// come from the real environment only.
 func getTestAPIKey(t *testing.T) string {
-	if testing.Short() {
-		t.Skip("live test requires real services; skipped in -short mode")
-	}
-	apiKey := os.Getenv("MIMO_API_KEY")
-	if apiKey == "" {
-		t.Skip("Skipping integration test: MIMO_API_KEY not set. Set MIMO_API_KEY environment variable to enable integration tests.")
-	}
-	return apiKey
+	t.Helper()
+	return livetest.RequireKey(t, livetest.KeyEnv)
 }
 
 // getTestBaseURL returns the base URL for testing (default to production)
@@ -85,10 +34,6 @@ func getTestBaseURL() string {
 // TestIntegration_Chat_RealAPI tests LLM chat completion with the real API
 // (Ticket 03: intent-analysis path). Skipped without MIMO_API_KEY.
 func TestIntegration_Chat_RealAPI(t *testing.T) {
-	if skipIntegration {
-		t.Skip("Skipping integration tests (set MIMO_API_KEY to enable)")
-	}
-
 	apiKey := getTestAPIKey(t)
 	config := ClientConfig{
 		APIKey:     apiKey,
@@ -133,10 +78,6 @@ func TestIntegration_Chat_RealAPI(t *testing.T) {
 
 // TestIntegration_Synthesize_RealAPI tests TTS synthesis with real API
 func TestIntegration_Synthesize_RealAPI(t *testing.T) {
-	if skipIntegration {
-		t.Skip("Skipping integration tests (set MIMO_API_KEY to enable)")
-	}
-
 	apiKey := getTestAPIKey(t)
 	baseURL := getTestBaseURL()
 
@@ -265,10 +206,6 @@ func TestIntegration_Synthesize_RealAPI(t *testing.T) {
 
 // TestIntegration_SynthesizeStream_RealAPI tests streaming TTS with real API
 func TestIntegration_SynthesizeStream_RealAPI(t *testing.T) {
-	if skipIntegration {
-		t.Skip("Skipping integration tests (set MIMO_API_KEY to enable)")
-	}
-
 	apiKey := getTestAPIKey(t)
 	baseURL := getTestBaseURL()
 
@@ -361,10 +298,6 @@ func ttsRoundTripAudio(t *testing.T, client Client, text string) []byte {
 
 // TestIntegration_Transcribe_RealAPI tests ASR transcription with real API
 func TestIntegration_Transcribe_RealAPI(t *testing.T) {
-	if skipIntegration {
-		t.Skip("Skipping integration tests (set MIMO_API_KEY to enable)")
-	}
-
 	apiKey := getTestAPIKey(t)
 	baseURL := getTestBaseURL()
 
@@ -449,10 +382,6 @@ func TestIntegration_Transcribe_RealAPI(t *testing.T) {
 
 // TestIntegration_HealthCheck_RealAPI tests API health check with real API
 func TestIntegration_HealthCheck_RealAPI(t *testing.T) {
-	if skipIntegration {
-		t.Skip("Skipping integration tests (set MIMO_API_KEY to enable)")
-	}
-
 	apiKey := getTestAPIKey(t)
 	baseURL := getTestBaseURL()
 
@@ -485,10 +414,6 @@ func TestIntegration_HealthCheck_RealAPI(t *testing.T) {
 
 // TestIntegration_EndToEnd_RealAPI tests complete dictation workflow
 func TestIntegration_EndToEnd_RealAPI(t *testing.T) {
-	if skipIntegration {
-		t.Skip("Skipping integration tests (set MIMO_API_KEY to enable)")
-	}
-
 	apiKey := getTestAPIKey(t)
 	baseURL := getTestBaseURL()
 
@@ -564,10 +489,6 @@ func TestIntegration_EndToEnd_RealAPI(t *testing.T) {
 
 // TestIntegration_ConcurrentRequests_RealAPI tests concurrent request handling
 func TestIntegration_ConcurrentRequests_RealAPI(t *testing.T) {
-	if skipIntegration {
-		t.Skip("Skipping integration tests (set MIMO_API_KEY to enable)")
-	}
-
 	apiKey := getTestAPIKey(t)
 	baseURL := getTestBaseURL()
 
@@ -639,10 +560,6 @@ func TestIntegration_ConcurrentRequests_RealAPI(t *testing.T) {
 
 // TestIntegration_ErrorHandling_RealAPI tests error scenarios with real API
 func TestIntegration_ErrorHandling_RealAPI(t *testing.T) {
-	if skipIntegration {
-		t.Skip("Skipping integration tests (set MIMO_API_KEY to enable)")
-	}
-
 	baseURL := getTestBaseURL()
 
 	tests := []struct {
