@@ -9,6 +9,7 @@
 package e2ephoto
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -73,7 +74,10 @@ type Photo struct {
 
 // Load reads and validates a photo manifest ({"version":1,"photos":[...]}).
 // Validation fails the whole file on the first bad photo — a typo must
-// never silently drop a photo from the live suite.
+// never silently drop a photo from the live suite. Decoding is strict:
+// unknown fields are rejected (a "minWordHit" typo must fail loudly, not
+// silently lower the bar), and the threshold keys must be present even
+// when their value is 0 (PR #70 复审 P2).
 func Load(path string) ([]Photo, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -83,8 +87,13 @@ func Load(path string) ([]Photo, error) {
 		Photos  []Photo `json:"photos"`
 		Version int     `json:"version"`
 	}
-	if err := json.Unmarshal(raw, &m); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("e2ephoto: parse manifest %s: %w", path, err)
+	}
+	if err := requireRulesKeys(raw); err != nil {
+		return nil, fmt.Errorf("e2ephoto: manifest %s: %w", path, err)
 	}
 	if m.Version != 1 {
 		return nil, fmt.Errorf("e2ephoto: manifest %s version = %d, want 1", path, m.Version)
@@ -107,6 +116,30 @@ func Load(path string) ([]Photo, error) {
 		ids[p.ID], files[p.File] = true, true
 	}
 	return m.Photos, nil
+}
+
+// requireRulesKeys rejects a photo whose rules object is missing any of
+// the three threshold keys. A missing key would decode to the zero value
+// and silently lower that bar to 0 (a wholly omitted minWordHits keeps
+// loading today), while an explicit "minWordHits":0 stays legal — 0 is a
+// meaningful threshold when declared (PR #70 复审 P2).
+func requireRulesKeys(raw []byte) error {
+	var probe struct {
+		Photos []struct {
+			Rules map[string]json.RawMessage `json:"rules"`
+		} `json:"photos"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return err
+	}
+	for i, p := range probe.Photos {
+		for _, key := range []string{"minWordHits", "minPhraseHits", "minPrecision"} {
+			if _, ok := p.Rules[key]; !ok {
+				return fmt.Errorf("photos[%d]: rules is missing %q", i, key)
+			}
+		}
+	}
+	return nil
 }
 
 // validate checks one photo against the enums and its own rules.

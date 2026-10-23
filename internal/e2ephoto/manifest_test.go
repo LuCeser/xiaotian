@@ -79,6 +79,16 @@ func TestLoadValidation(t *testing.T) {
 		{"minPhraseHits above count", strings.Replace(validPhoto, `"minPhraseHits":0`, `"minPhraseHits":1`, 1), "minPhraseHits"},
 		{"zero precision", strings.Replace(validPhoto, `"minPrecision":0.95`, `"minPrecision":0`, 1), "minPrecision"},
 		{"precision above one", strings.Replace(validPhoto, `"minPrecision":0.95`, `"minPrecision":1.5`, 1), "minPrecision"},
+		// strict decoding: a typo'd key must fail loudly instead of decoding
+		// to 0 and silently lowering the bar (PR #70 复审 P2).
+		{"typo threshold key", strings.Replace(validPhoto, `"minWordHits":1`, `"minWordHit":1`, 1), "unknown field"},
+		{"unknown entry field", strings.Replace(validPhoto, `,"meaning":"躲避"}]`, `,"meaning":"躲避","extra":1}]`, 1), "unknown field"},
+		{"unknown top-level field", strings.Replace(validPhoto, `{"version":1`, `{"version":1,"note":"x"`, 1), "unknown field"},
+		// …and the threshold keys must be WRITTEN OUT: an omitted one would
+		// decode to 0 while an explicit 0 stays a meaningful declared bar.
+		{"omitted minWordHits key", strings.Replace(validPhoto, `"minWordHits":1,`, ``, 1), `rules is missing "minWordHits"`},
+		{"omitted minPrecision key", strings.Replace(validPhoto, `,"minPrecision":0.95}`, `}`, 1), `rules is missing "minPrecision"`},
+		{"omitted rules object", strings.Replace(validPhoto, `,"rules":{"minWordHits":1,"minPhraseHits":0,"minPrecision":0.95}`, ``, 1), `rules is missing "minWordHits"`},
 		// duplicate id / file need a second photo block in the same file
 		{"duplicate id", strings.Replace(
 			strings.Replace(validPhoto, `}]}`, `},`+secondPhoto+`]}`, 1),
