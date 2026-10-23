@@ -24,10 +24,10 @@ type ensureGateExec struct {
 	endedAtWrite func() int    // session_ended count at write completion
 	lockHeld     func() bool   // whether the init-write lock is held (probe)
 
-	mu      sync.Mutex
-	ended   int32 // session_ended count observed when the gated write returned
-	held    int32 // 1 when the init-write lock was held during the write
-	calls   int
+	mu    sync.Mutex
+	ended int32 // session_ended count observed when the gated write returned
+	held  int32 // 1 when the init-write lock was held during the write
+	calls int
 }
 
 func (g *ensureGateExec) EnsureLessonCards(ctx context.Context, lessonID string, cards []lesson.Word, category string) (lesson.Lesson, error) {

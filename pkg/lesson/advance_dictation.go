@@ -136,7 +136,7 @@ func (e *Executor) loadDictationRowTx(ctx context.Context, tx *sql.Tx, lessonID 
 
 // validateDictationRowTx checks the row-level half inside the transaction:
 // 诗文/课文课堂 keep their own pacing models and never advance through this
-// command; the stage must still be the dictation stage ('' — checking and
+// command; the stage must still be the dictation stage (” — checking and
 // submitted rows belong to the check-stage tools, so an exhausted classroom
 // cannot be re-advanced); the classroom must hold words; and the fixed
 // target must equal the row's CURRENT cursor (每次只推进一词： within one
@@ -197,12 +197,18 @@ func (e *Executor) AdvanceDictation(ctx context.Context, in AdvanceDictationInpu
 
 // advanceDictationTx is the whole advance in one SQLite transaction:
 // (a) claim the request_id — a PRIMARY KEY violation rolls back and replays
-//     the FIRST stored result (typed constraint detection, review L-2);
+//
+//	the FIRST stored result (typed constraint detection, review L-2);
+//
 // (b) load + validate the authoritative row (stage/pacing/cursor checks);
 // (c) merge the current word's outcome, preserving every other word's
-//     stored behavior;
+//
+//	stored behavior;
+//
 // (d) the guarded write — optimistic version lock plus the cursor guard
-//     (defense in depth: within one generation the two move together);
+//
+//	(defense in depth: within one generation the two move together);
+//
 // (e) read back, persist the typed result, commit — all atomic.
 // purgeStale is the U-2 retry switch: the stale record is DELETEd by
 // primary key BEFORE the INSERT re-claims the request_id, atomically with
