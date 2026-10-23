@@ -18,6 +18,7 @@ const { test, expect } = require('@playwright/test');
 const {
   installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
 } = require('./helpers/rt-observe');
+const { installAudioObserver, audioSources, liveAt } = require('./helpers/audio-observe');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 
 const stub = makeStubControl();
@@ -54,6 +55,7 @@ function toneEntries(count) {
 
 test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-opening ack', async ({ page }) => {
   await installRtObserver(page);
+  await installAudioObserver(page);
   const chineseWords = ['晨光', '暮色'];
   const englishWords = ['e2e-m1-english-a', 'e2e-m1-english-b'];
 
@@ -168,6 +170,34 @@ test('J05 mid-ask button pick: real epoch switch, no turn_start, natural new-ope
     expect(playedBeforeAck(trace, nextEpoch, sid), 'onended before ack for ' + sid).toBe(true);
   }
   expect(playback.droppedChunks, 'no audio chunk was discarded by the production player').toBe(0);
+
+  // READ-ONLY audio observation (review #67 P2): everything above (the
+  // stopNow trace entry, zero old-epoch acks, the new opening playing)
+  // stays green even if production stopNow() skipped sources[i].stop() —
+  // the generation bump and ledger clear still block every old ack while
+  // the cancelled ask keeps sounding over the new opening. The wrapped
+  // AudioBufferSourceNode calls (delegating, planted before any page
+  // script — playback itself untouched) prove the old audio really
+  // stopped: every source still sounding at the epoch switch was stopped
+  // by production, and every stop precedes the new opening's first sound,
+  // so nothing of the ask can overlap the greeting.
+  const audio = await audioSources(page);
+  const ackEntry = after.find((e) => e.dir === 'in' && e.type === 'interrupt_ack'
+    && e.msg.old_epoch === askEpoch);
+  expect(ackEntry, 'the epoch-switch interrupt_ack is in the log').toBeTruthy();
+  const oldLive = liveAt(audio, ackEntry.t);
+  expect(oldLive.length, 'the ask was still sounding at the switch').toBeGreaterThan(0);
+  for (const s of oldLive) {
+    expect(s.stopAt, 'ask source #' + s.id + ' still sounding at the switch was stopped')
+      .toBeTruthy();
+  }
+  const newSources = audio.filter((s) => s.startAt !== null && s.startAt > ackEntry.t);
+  expect(newSources.length, 'the new opening really sounded').toBeGreaterThan(0);
+  const firstNewAt = Math.min(...newSources.map((s) => s.startAt));
+  for (const s of oldLive) {
+    expect(s.stopAt, 'ask source #' + s.id + ' stopped before the new opening sounded')
+      .toBeLessThan(firstNewAt);
+  }
 
   // UI + persistence together (plan rule 7): the ask panel is gone, the
   // picked classroom renders its progress, and exactly ONE lesson row
