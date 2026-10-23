@@ -30,8 +30,9 @@ const path = require('node:path');
 const { test, expect } = require('@playwright/test');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
 const {
-  installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, listeningAfterPlayback,
 } = require('./helpers/rt-observe');
+const { installFakeMic, playPcm16, tonePcm16Base64 } = require('./helpers/fake-mic');
 
 const stub = makeStubControl();
 
@@ -73,6 +74,7 @@ test('J02 draft stays out of the library; edited+checked rows save exactly; refr
   test.setTimeout(120_000);
   const svc = await startSpecService();
   await installRtObserver(page);
+  await installFakeMic(page);
   try {
     // Conflict fixtures: apple conflicts (different meaning), river exists.
     expect((await svc.seedWords({ category: 'english', unit: 'e2e-m1-photo-seed', entries: [
@@ -85,8 +87,12 @@ test('J02 draft stays out of the library; edited+checked rows save exactly; refr
     // TTS, so all three entries are still there when the classroom below
     // opens on this same service.
     expect((await stub.scripts({
-      asr: [], llm: [],
-      tts: [{ ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' }],
+      asr: [{ content: '好了' }, { content: '好了' }],
+      llm: Array.from({ length: 2 }, () => ({ content: JSON.stringify({ intent: 'confirm', reply: '' }) })),
+      tts: [
+        { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
+        { ms: 1200, match: '第 2 个词，river。' }, { ms: 1200, match: '第 3 个词，banana。' },
+      ],
       image: [{ content: fixtureReply('photo-wordlist.reply.json') }],
     })).ok).toBe(true);
     await openPhotoTab(page, svc);
@@ -185,6 +191,48 @@ test('J02 draft stays out of the library; edited+checked rows save exactly; refr
     const rows = (await svc.listLessons()).body.lessons;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ category: 'english', word_count: 4 });
+    const expectedCards = [
+      { word: 'apple', meaning: '苹果（水果）' },
+      { word: 'river', meaning: '河流' },
+      { word: 'banana', meaning: '香蕉' },
+      { word: 'go for a walk', meaning: '去散步' },
+    ];
+    const persisted = svc.readLessonCards(rows[0].lesson_id);
+    expect(persisted.map(({ word, meaning }) => ({ word, meaning })),
+      'persisted classroom exactly matches the final confirmed library, including edited meaning')
+      .toEqual(expectedCards);
+
+    const openingStarts = (await controls(page)).filter((e) => e.dir === 'in' && e.type === 'audio_start');
+    await waitWs(page, (log) => listeningAfterPlayback(log, openingStarts[0].msg.epoch,
+      openingStarts.map((e) => e.msg.sentence_id)), { label: 'opening playback completed before listening' });
+
+    // Two real microphone utterances advance apple → river → imported
+    // banana. Each round must play, naturally ACK, and resume listening.
+    for (const index of [2, 3]) {
+      const beforeTurn = await controls(page);
+      const from = beforeTurn[beforeTurn.length - 1].i + 1;
+      await page.waitForTimeout(700); // production post-playback echo tail
+      await playPcm16(page, tonePcm16Base64(2000), 16000);
+      await waitWs(page, (log) => {
+        const round = log.filter((e) => e.i >= from);
+        const starts = round.filter((e) => e.dir === 'in' && e.type === 'audio_start');
+        return starts.length === 1 && listeningAfterPlayback(round, starts[0].msg.epoch,
+          [starts[0].msg.sentence_id]);
+      }, { label: 'confirmed next word ' + index + ' naturally played and acked' });
+      await expect(page.locator('#rt-progress-text')).toHaveText(new RegExp('第 ' + index + ' / 4 个词'));
+    }
+    const finalControls = await controls(page);
+    const finalPlayback = await playbackState(page);
+    for (const s of finalControls.filter((e) => e.dir === 'in' && e.type === 'audio_start')) {
+      expect(playedBeforeAck(finalPlayback.trace, s.msg.epoch, s.msg.sentence_id),
+        'every dictated word, including imported banana, has real onended before ACK').toBe(true);
+    }
+    expect(finalPlayback.droppedChunks).toBe(0);
+    const finalState = await stub.state();
+    expect(finalState.requests.filter((q) => q.category === 'asr')).toHaveLength(2);
+    expect(finalState.requests.filter((q) => q.category === 'tts').map((q) => q.text))
+      .toContain('第 3 个词，banana。');
+    expect(svc.readLessonCards(rows[0].lesson_id), 'advancing preserves the confirmed classroom cards').toEqual(persisted);
 
     await page.locator('#rt-end').click();
     await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'session_ended'),
