@@ -288,35 +288,31 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 	if len(picked) == 0 {
 		// Honest empty answer: ready + spoken notice + ack-gated ending.
 		// No new reason — the client_end-style explicit end (plan).
-		tm.mu.Lock()
-		if tm.closed {
-			// PR #60 review: same gate as every other starter.
-			tm.mu.Unlock()
-			return
-		}
-		tm.state = StateListening
-		tm.sessionReadyAt = time.Now()
-		tm.mu.Unlock()
-		_ = s.SendControl(SessionReadyMsg{
+		nctx, cancel := context.WithCancel(context.Background())
+		var epoch uint64
+		ready := SessionReadyMsg{
 			Type:      TypeSessionReady,
 			SessionID: tm.session,
 			Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
 			TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
 			Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
 			Category:  category,
-		})
-		tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-
-		nctx, cancel := context.WithCancel(context.Background())
-		tm.mu.Lock()
-		if tm.closed {
-			tm.mu.Unlock()
+		}
+		if !tm.applySessionEffect(func() error {
+			if err := s.SendControl(ready); err != nil {
+				return err
+			}
+			tm.state = StateListening
+			tm.sessionReadyAt = time.Now()
+			tm.turnCancel = cancel
+			epoch = tm.epoch
+			return nil
+		}) {
 			cancel()
 			return
 		}
-		tm.turnCancel = cancel
-		tm.mu.Unlock()
-		go tm.runNaturalEnding(s, nctx, cancel, practiceAllPracticedNotice, purposeNoDue, ReasonClientEnd)
+		tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
+		go tm.runNaturalEndingAt(s, epoch, nctx, cancel, practiceAllPracticedNotice, purposeNoDue, ReasonClientEnd)
 		return
 	}
 
