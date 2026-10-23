@@ -312,6 +312,44 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	go tm.runAnnouncement(s, ctx, cancel, bridge, purposeCheckBridge, nil)
 }
 
+// checkStageInputs separates the data persisted by EnterCheck from the data
+// presented after that write succeeds.
+type checkStageInputs struct {
+	epoch    uint64
+	lessonID string
+	expected int
+	outcomes map[string]lesson.WordOutcome
+	total    int
+	words    []string
+	reason   string
+	bridge   string
+}
+
+func (tm *TurnManager) prepareCheckStageInputs(epoch uint64) checkStageInputs {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.tutor.markCompleted()
+	tm.stopWordTimerLocked()
+	in := checkStageInputs{
+		epoch: epoch, lessonID: tm.tutor.lessonID, expected: tm.tutor.version,
+		outcomes: tm.tutor.snapshotCheckOutcomes(), total: len(tm.tutor.words),
+		reason: CheckStartedReasonDictationDone,
+	}
+	in.words = make([]string, 0, in.total)
+	for _, card := range tm.tutor.words {
+		in.words = append(in.words, card.Word)
+	}
+	in.bridge = checkBridgeText(in.total)
+	if tm.tutor.poem != nil {
+		in.reason = CheckStartedReasonPoemDone
+		in.bridge = poemCheckBridgeText(in.total)
+	} else if tm.tutor.passage != nil {
+		in.reason = CheckStartedReasonPassageDone
+		in.bridge = passageCheckBridgeText(tm.tutor.passage.Whole, tm.tutor.passage.Paragraphs, in.total)
+	}
+	return in
+}
+
 // enterCheck opens the check stage; reachable ONLY from advanceTarget's
 // first-commit finished branch (a duplicate confirm replays idempotently and
 // can never re-enter — the same single-entry property enterCompletion had).
@@ -322,22 +360,8 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	if !tm.epochCurrent(epoch) {
 		return
 	}
-	tm.mu.Lock()
-	tm.tutor.markCompleted() // word pacing is over; the countdown stays disarmed
-	tm.stopWordTimerLocked() // no per-word timer in the check stage
-	lessonID := tm.tutor.lessonID
-	expected := tm.tutor.version
-	outcomes := tm.tutor.snapshotCheckOutcomes()
-	total := len(tm.tutor.words)
-	isPoem := tm.tutor.poem != nil       // Issue #12: the poem's own bridge copy/reason
-	isPassage := tm.tutor.passage != nil // Issue #14: the passage range's own bridge
-	words := make([]string, 0, total)    // the FULL plaintext list (D-10 unmask)
-	for _, c := range tm.tutor.words {
-		words = append(words, c.Word)
-	}
-	tm.mu.Unlock()
-
-	res, err := tm.exec.EnterCheck(ctx, lessonID, expected, lessonID+"-enter-check", outcomes)
+	in := tm.prepareCheckStageInputs(epoch)
+	res, err := tm.exec.EnterCheck(ctx, in.lessonID, in.expected, in.lessonID+"-enter-check", in.outcomes)
 	// PR #61 review: the stage write may commit UNDER a close or interrupt —
 	// the row stands (a reconnect resumes from it), but a dead classroom
 	// opens no panel: no tutor mutation, no check_started, no bridge.
@@ -346,11 +370,6 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	}
 	switch err {
 	case nil:
-		// PR #61 review round 2: the liveness re-check above only covered the
-		// executor's return moment. A close/interrupt landing between that
-		// check and this mutation would flip a dead classroom into the check
-		// stage — so the check rides the SAME lock hold as the mutation (the
-		// advanceTarget first-commit pattern).
 		tm.mu.Lock()
 		if tm.epoch != epoch || tm.closed {
 			tm.mu.Unlock()
@@ -370,7 +389,7 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 		}
 		// Conflict: align from the stored truth (another writer moved the
 		// row) and continue into the check stage from THAT state.
-		l, gerr := tm.exec.GetLessonState(ctx, lessonID)
+		l, gerr := tm.exec.GetLessonState(ctx, in.lessonID)
 		if gerr != nil {
 			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
 			return
@@ -402,51 +421,20 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 			)
 			_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
 			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-			cancel() // the caller's ctx — beyond what internalClose cancels
+			cancel()
 			tm.internalClose()
 			return
 		}
 	}
-
-	reason := CheckStartedReasonDictationDone
-	bridge := checkBridgeText(total)
-	if isPoem {
-		reason = CheckStartedReasonPoemDone
-		bridge = poemCheckBridgeText(total)
-	} else if isPassage {
-		// Issue #14: the passage's own bridge copy/reason — the rows are
-		// this range's paragraphs, labeled by the range the task announced.
-		reason = CheckStartedReasonPassageDone
-		tm.mu.Lock()
-		if tm.tutor != nil && tm.tutor.passage != nil {
-			bridge = passageCheckBridgeText(tm.tutor.passage.Whole, tm.tutor.passage.Paragraphs, total)
-		}
-		tm.mu.Unlock()
-	}
-	// The panel open rides ONE lock hold with the liveness re-check and the
-	// enqueue (the speakTurn / lesson_update pattern): a close that races this
-	// window either sets closed first (the branch dies here) or blocks on
-	// tm.mu until check_started is queued — the close paths ship session_ended
-	// only AFTER closed is set, so check_started can never trail the goodbye
-	// on the wire (PR #61 review round 2).
 	tm.mu.Lock()
 	if tm.epoch != epoch || tm.closed {
 		tm.mu.Unlock()
 		return
 	}
-	_ = s.SendControl(CheckStartedMsg{
-		Type:   TypeCheckStarted,
-		Words:  words,
-		Reason: reason,
-	})
+	_ = s.SendControl(CheckStartedMsg{Type: TypeCheckStarted, Words: in.words, Reason: in.reason})
 	tm.mu.Unlock()
-	tm.recorder.Emit(EventCheckStarted, infra.F("total", total))
-
-	// The bridge speaks under the TURN'S OWN epoch (runAnnouncementDisplayAt,
-	// the subject-ask pattern): snapshotting the live epoch here would let an
-	// interrupt that already bumped it play the check bridge over whatever
-	// classroom comes next.
-	tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, bridge, bridge, purposeCheckBridge, nil)
+	tm.recorder.Emit(EventCheckStarted, infra.F("total", in.total))
+	tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, in.bridge, in.bridge, purposeCheckBridge, nil)
 }
 
 // handleCheckVerdict applies one screen verdict (the check_verdict control
