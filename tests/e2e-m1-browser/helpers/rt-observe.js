@@ -176,24 +176,27 @@ function playedBeforeAck(trace, epoch, sentenceId) {
 
 /**
  * True only when one playback round resumes listening after EVERY matching
- * sentence ACK. In particular, a historical listening event between the
- * round's final audio_end and final ACK permanently rejects the sequence:
- * observing a later, valid listening event must not hide an early resume.
+ * sentence ACK. Any listening event between the round's FIRST audio_start
+ * and the final ACK is an early resume and permanently rejects the sequence:
+ * observing a later, valid listening event must not hide it. (Review
+ * @1c0620c P2: checking only from the round's last audio_end missed resumes
+ * that happened while earlier sentences were still playing.)
  */
 function listeningAfterPlayback(log, epoch, sentenceIds) {
   if (!sentenceIds.length || new Set(sentenceIds).size !== sentenceIds.length) return false;
   const matches = (e, dir, type, sid) => e.dir === dir && e.type === type
     && e.msg && e.msg.epoch === epoch && e.msg.sentence_id === sid;
+  const starts = sentenceIds.map((sid) => log.find((e) => matches(e, 'in', 'audio_start', sid)));
   const ends = sentenceIds.map((sid) => log.find((e) => matches(e, 'in', 'audio_end', sid)));
   const acks = sentenceIds.map((sid) => log.find((e) => matches(e, 'out', 'sentence_ack', sid)));
-  if (ends.some((e) => !e) || acks.some((e) => !e)) return false;
+  if (starts.some((e) => !e) || ends.some((e) => !e) || acks.some((e) => !e)) return false;
   if (acks.some((ack, i) => ack.i <= ends[i].i)) return false;
 
-  const lastEnd = Math.max(...ends.map((e) => e.i));
+  const firstStart = Math.min(...starts.map((e) => e.i));
   const lastAck = Math.max(...acks.map((e) => e.i));
   const listening = log.filter((e) => e.dir === 'in' && e.type === 'state'
     && e.msg && e.msg.value === 'listening');
-  if (listening.some((e) => e.i > lastEnd && e.i < lastAck)) return false;
+  if (listening.some((e) => e.i > firstStart && e.i < lastAck)) return false;
   return listening.some((e) => e.i > lastAck);
 }
 
