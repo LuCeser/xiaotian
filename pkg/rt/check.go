@@ -350,6 +350,22 @@ func (tm *TurnManager) prepareCheckStageInputs(epoch uint64) checkStageInputs {
 	return in
 }
 
+// presentCheckedStage only presents an already-persisted check stage. It
+// never calls EnterCheck or changes the authoritative verdict state.
+func (tm *TurnManager) presentCheckedStage(
+	s Sender, ctx context.Context, cancel context.CancelFunc, in checkStageInputs,
+) {
+	tm.mu.Lock()
+	if tm.epoch != in.epoch || tm.closed {
+		tm.mu.Unlock()
+		return
+	}
+	_ = s.SendControl(CheckStartedMsg{Type: TypeCheckStarted, Words: in.words, Reason: in.reason})
+	tm.mu.Unlock()
+	tm.recorder.Emit(EventCheckStarted, infra.F("total", in.total))
+	tm.runAnnouncementDisplayAt(s, in.epoch, ctx, cancel, in.bridge, in.bridge, purposeCheckBridge, nil)
+}
+
 // enterCheck opens the check stage; reachable ONLY from advanceTarget's
 // first-commit finished branch (a duplicate confirm replays idempotently and
 // can never re-enter — the same single-entry property enterCompletion had).
@@ -426,15 +442,7 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 			return
 		}
 	}
-	tm.mu.Lock()
-	if tm.epoch != epoch || tm.closed {
-		tm.mu.Unlock()
-		return
-	}
-	_ = s.SendControl(CheckStartedMsg{Type: TypeCheckStarted, Words: in.words, Reason: in.reason})
-	tm.mu.Unlock()
-	tm.recorder.Emit(EventCheckStarted, infra.F("total", in.total))
-	tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, in.bridge, in.bridge, purposeCheckBridge, nil)
+	tm.presentCheckedStage(s, ctx, cancel, in)
 }
 
 // handleCheckVerdict applies one screen verdict (the check_verdict control
