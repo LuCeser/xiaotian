@@ -446,6 +446,9 @@ type TurnManager struct {
 	// binds category and resumes through continueSessionInit. Non-nil ONLY
 	// while the ask is live; the classroom has no lesson row yet.
 	pendingAsk *SessionInitMsg
+	// pendingAdvance is the one accepted dictation write that later turns
+	// and reconnect reconciliation must wait for before reading a target.
+	pendingAdvance *pendingDictationAdvance
 	// turnSentences are the sentences sent for the current announcement, in
 	// order (the interrupt-trim source).
 	turnSentences []sentenceInfo
