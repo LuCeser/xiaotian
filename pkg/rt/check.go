@@ -1639,10 +1639,6 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
 			return
 		}
-		tm.mu.Lock()
-		tm.tutor.align(l.CurrentIndex, l.Version)
-		tm.tutor.resyncCheck(l)
-		tm.mu.Unlock()
 		version = l.Version
 		requestID = fmt.Sprintf("%s-verdict-%d-v%d-voice", lessonID, idx, version)
 		res, err = tm.exec.ApplyVerdict(ctx, lessonID, version, requestID, verdict)
@@ -1652,14 +1648,20 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 		}
 	}
 
-	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checkVerdicts = res.Verdicts
-	verdicts := append([]lesson.CheckVerdict(nil), res.Verdicts...)
-	tm.mu.Unlock()
-	tm.broadcastCheckVerdicts(s, verdicts)
-	if entry != nil {
-		_ = s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: []OcrResultEntry{*entry}})
+	if !tm.applyTurnAt(epoch, func() error {
+		if err := s.SendControl(CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: wireVerdicts(res.Verdicts)}); err != nil {
+			return err
+		}
+		if entry != nil {
+			if err := s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: []OcrResultEntry{*entry}}); err != nil {
+				return err
+			}
+		}
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checkVerdicts = res.Verdicts
+		return nil
+	}) {
+		return
 	}
 	if !res.Idempotent {
 		tm.recorder.Emit(EventVerdictApplied,
@@ -1668,7 +1670,7 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 			infra.F("correct", correct),
 		)
 	}
-	tm.runAnnouncement(s, ctx, cancel, line, purposeChat, nil)
+	tm.runAnnouncementAt(s, epoch, ctx, cancel, line, purposeChat, nil)
 }
 
 // tutorWordAt snapshots one lesson word (empty when out of range). Caller

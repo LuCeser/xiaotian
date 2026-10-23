@@ -130,6 +130,8 @@ type fakeExecutor struct {
 	checkResults     map[string]any
 	checkRelease     chan struct{}
 	checkEntered     chan struct{}
+	verdictRelease   chan struct{}
+	verdictEntered   chan struct{}
 	requestResults   map[string]lesson.AdvanceResult
 	advanceRelease   chan struct{}
 	stateRelease     chan struct{}
@@ -440,17 +442,19 @@ func (f *fakeExecutor) gateEnterCheck() (entered, release chan struct{}) {
 
 func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "apply_verdict", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.ApplyVerdictResult)
 		res.Idempotent = true
+		f.mu.Unlock()
 		return res, nil
 	}
 	if f.conflictVersion > 0 {
+		f.mu.Unlock()
 		return lesson.ApplyVerdictResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
 	}
 	if !f.exists {
+		f.mu.Unlock()
 		return lesson.ApplyVerdictResult{}, lesson.ErrLessonNotFound
 	}
 	replaced := false
@@ -467,7 +471,22 @@ func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expected
 	f.lesson.Version++
 	res := lesson.ApplyVerdictResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Verdicts: f.lesson.Verdicts}
 	f.checkResults[requestID] = res
+	entered, release := f.verdictEntered, f.verdictRelease
+	f.verdictEntered, f.verdictRelease = nil, nil
+	f.mu.Unlock()
+	if entered != nil {
+		close(entered)
+		<-release
+	}
 	return res, nil
+}
+
+func (f *fakeExecutor) gateApplyVerdict() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verdictEntered = make(chan struct{})
+	f.verdictRelease = make(chan struct{})
+	return f.verdictEntered, f.verdictRelease
 }
 
 func (f *fakeExecutor) CompleteCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {

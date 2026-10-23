@@ -64,6 +64,45 @@ func TestCheckVoiceLifetime(t *testing.T) {
 		}
 	})
 
+	t.Run("committed verdict returned after interrupt is not presented", func(t *testing.T) {
+		tm, s, _, exec := ttIntentFixture(t, ttCards("苹果"), newFakeASR(), newFakeLLM())
+		tm.mu.Lock()
+		tm.tutor.checking = true
+		epoch, versionBefore := tm.epoch, tm.tutor.version
+		tm.mu.Unlock()
+		exec.mu.Lock()
+		exec.lesson.Stage = "checking"
+		exec.mu.Unlock()
+		entered, release := exec.gateApplyVerdict()
+		echoesBefore := s.countOf(TypeCheckVerdicts)
+		sentBefore := s.countOf(TypeTeacherSentence)
+
+		done := make(chan struct{})
+		go func() {
+			tm.applyVoiceVerdict(s, context.Background(), func() {}, epoch,
+				intentPayload{Intent: intentCheckRight, Index: 1})
+			close(done)
+		}()
+		ttAwaitGate(t, entered, "voice verdict did not commit")
+		tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
+		close(release)
+		ttAwaitGate(t, done, "stale voice verdict result did not finish")
+
+		row, err := exec.GetLessonState(context.Background(), ttLessonID)
+		if err != nil || len(row.Verdicts) != 1 || !row.Verdicts[0].Correct {
+			t.Fatalf("stored lesson = %+v, err=%v; want committed correct verdict", row, err)
+		}
+		tm.mu.Lock()
+		version, verdicts := tm.tutor.version, len(tm.tutor.checkVerdicts)
+		tm.mu.Unlock()
+		if version != versionBefore || verdicts != 0 || s.countOf(TypeCheckVerdicts) != echoesBefore ||
+			s.countOf(TypeTeacherSentence) != sentBefore {
+			t.Fatalf("version=%d verdicts=%d echoes=%d sentences=%d, want %d/0/%d/%d",
+				version, verdicts, s.countOf(TypeCheckVerdicts), s.countOf(TypeTeacherSentence),
+				versionBefore, echoesBefore, sentBefore)
+		}
+	})
+
 	t.Run("stale resume keeps the current check paused", func(t *testing.T) {
 		tm, s, _, _ := ttIntentFixture(t, ttCards("苹果"), newFakeASR(), newFakeLLM())
 		tm.mu.Lock()
