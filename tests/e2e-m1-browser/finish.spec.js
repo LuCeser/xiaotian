@@ -125,6 +125,53 @@ async function childSaysDone(page) {
   await playPcm16(page, CONFIRM_CLIP, 16000);
 }
 
+/**
+ * J14's shared tail (used by J13 and the J16 switch leg): the REAL 对/错
+ * buttons with each authoritative check_verdicts echo, ONE submit, the
+ * honest review_result (all-correct), the battle summary fully acked by the
+ * production player BEFORE session_ended(lesson_complete), and the ending
+ * banner's real save copy. Returns the goodbye's log index.
+ */
+async function checkSubmitNaturalEnd(page, words) {
+  const rows = page.locator('#rt-check .rt-check-row');
+  for (let i = 0; i < words.length; i++) {
+    await rows.nth(i).locator('.rt-check-btn', { hasText: /^对$/ }).click();
+    await waitWs(page, (log) => log.some((e) => e.dir === 'out' && e.type === 'check_verdict'
+      && e.msg.word_index === i)
+      && log.some((e) => e.dir === 'in' && e.type === 'check_verdicts'
+        && (e.msg.verdicts || []).some((v) => v.word_index === i && v.manual && v.correct)),
+    { label: 'verdict ' + (i + 1) + ' tapped and echoed' });
+  }
+  await expect(page.locator('#rt-check .rt-check-submit')).toBeEnabled();
+  await page.locator('#rt-check .rt-check-submit').click();
+
+  const submitI = await waitIndex(page, (e) => e.dir === 'out' && e.type === 'check_submit',
+    'check_submit sent');
+  const resI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'review_result'
+    && e.msg.requested === words.length && e.msg.updated === words.length
+    && e.msg.unchecked === false,
+  'honest review_result: ' + words.length + ' requested, all really saved');
+  expect(resI).toBeGreaterThan(submitI);
+
+  // The natural ending WAITS for the summary audio: both sentences ack
+  // naturally, and session_ended(lesson_complete) follows the LAST ack.
+  const summary = await awaitRound(page, resI, 2, 'battle summary');
+  await awaitAcked(page, summary, 'battle summary', { settle: false });
+  const lastAckI = Math.max(...(await controls(page))
+    .filter((e) => e.dir === 'out' && e.type === 'sentence_ack'
+      && summary.sids.includes(e.msg.sentence_id))
+    .map((e) => e.i));
+  const endedI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'lesson_complete', 'session_ended(lesson_complete)');
+  expect(endedI, 'the goodbye follows the summary\'s last real ack').toBeGreaterThan(lastAckI);
+
+  await expect(page.locator('#rt-banner')).toContainText('今天的 ' + words.length + ' 个词都默写完了');
+  await expect(page.locator('#rt-banner'))
+    .toContainText('学习记录保存好了，' + words.length + ' 个词都记上啦。');
+  await expect(page.locator('#rt-banner .rt-practice-btn')).toBeVisible();
+  return endedI;
+}
+
 // The server synthesizes a whole announcement AHEAD of playback (per-sentence
 // streaming, ack-gated only at the round's SETTLE), so an announcement that
 // was killed mid-playback still shows 1..N consumed TTS entries — N is racy.
@@ -343,43 +390,9 @@ test('J13+J14 last word → one check entry, masked answers, real check submit, 
   await expect(page.locator('#rt-banner')).toBeHidden();
   expect((await observe(page)).check.resultText, 'no save note before submit').toBe('');
 
-  // J14: the REAL 对/错 buttons, each verdict echoed by the authoritative
-  // check_verdicts (RT-07 — never local optimistic state).
-  for (let i = 0; i < words.length; i++) {
-    await rows.nth(i).locator('.rt-check-btn', { hasText: /^对$/ }).click();
-    await waitWs(page, (log) => log.some((e) => e.dir === 'out' && e.type === 'check_verdict'
-      && e.msg.word_index === i)
-      && log.some((e) => e.dir === 'in' && e.type === 'check_verdicts'
-        && (e.msg.verdicts || []).some((v) => v.word_index === i && v.manual && v.correct)),
-    { label: 'verdict ' + (i + 1) + ' tapped and echoed' });
-  }
-  await expect(page.locator('#rt-check .rt-check-submit')).toBeEnabled();
-  await page.locator('#rt-check .rt-check-submit').click();
-
-  const submitI = await waitIndex(page, (e) => e.dir === 'out' && e.type === 'check_submit',
-    'check_submit sent');
-  const resI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'review_result'
-    && e.msg.requested === 2 && e.msg.updated === 2 && e.msg.unchecked === false,
-  'honest review_result: 2 requested, 2 really saved');
-  expect(resI).toBeGreaterThan(submitI);
-
-  // The natural ending WAITS for the summary audio: both sentences ack
-  // naturally, and session_ended(lesson_complete) follows the LAST ack.
-  const summary = await awaitRound(page, resI, 2, 'battle summary');
-  await awaitAcked(page, summary, 'battle summary', { settle: false });
-  const lastAckI = Math.max(...(await controls(page))
-    .filter((e) => e.dir === 'out' && e.type === 'sentence_ack'
-      && summary.sids.includes(e.msg.sentence_id))
-    .map((e) => e.i));
-  const endedI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
-    && e.msg.reason === 'lesson_complete', 'session_ended(lesson_complete)');
-  expect(endedI).toBeGreaterThan(lastAckI);
-
-  // Honest saved copy + the ending's own entries (再练一组 now, 回首页 after
-  // the drain releases the audio).
-  await expect(page.locator('#rt-banner')).toContainText('今天的 2 个词都默写完了');
-  await expect(page.locator('#rt-banner')).toContainText('学习记录保存好了，2 个词都记上啦。');
-  await expect(page.locator('#rt-banner .rt-practice-btn')).toBeVisible();
+  // J14's tail: real verdict buttons, one submit, honest review_result, the
+  // summary acked before the goodbye, the banner's real save copy.
+  const endedI = await checkSubmitNaturalEnd(page, words);
   await waitWs(page, async () => (await observe(page)).playbackResourceReleased === true,
     { label: 'terminal drain released the playback resources' });
   await expect(page.locator('#rt-banner .rt-btn-home')).toBeVisible();
@@ -422,4 +435,167 @@ test('J13+J14 last word → one check entry, masked answers, real check submit, 
     category: 'english', word_count: 2, lesson_id: 'e2e-m1-browser',
     stage: 'submitted', correct: 2, wrong: 0,
   });
+});
+
+/** Answer the subject ask by button; returns the picked session_ready index. */
+async function openViaAsk(page, pickButton, expectLessonId, words) {
+  await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.type === 'subject_ask'),
+    { label: 'the subject ask arrives' });
+  await page.locator(pickButton).click();
+  return waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.lesson && e.msg.lesson.id === expectLessonId
+    && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === words.length
+    && e.msg.lesson.words.every((w) => w === ''),
+  'the picked classroom opens: ' + expectLessonId + ', answers masked');
+}
+
+/**
+ * One full lesson journey from an OPEN classroom (readyI) to the natural
+ * ending: greeting → confirm ×N (each advance really acked) → the check
+ * stage → submit → summary → session_ended(lesson_complete). onGreetingSettled
+ * fires after the greeting round acked and listening settled — the J16 leg-1
+ * seam swaps the TTS scripts there (the ask+greeting split is 0..3/3..6
+ * nondeterministic under a mid-ask pick, so only matched-free tones can
+ * cover it; everything after the greeting is deterministic).
+ */
+async function driveLessonToNaturalEnd(page, words, readyI, { onGreetingSettled } = {}) {
+  const greeting = await awaitRound(page, readyI, 3, 'greeting');
+  await awaitAcked(page, greeting, 'greeting');
+  for (const w of words) {
+    expect((await page.locator('body').innerText()).includes(w), 'masked pre-check: ' + w).toBe(false);
+  }
+  if (onGreetingSettled) await onGreetingSettled();
+  for (let i = 1; i <= words.length; i++) {
+    await childSaysDone(page);
+    const luI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'lesson_update'
+      && e.msg.current_index === i, 'confirm ' + i + ' advances to index ' + i);
+    if (i < words.length) {
+      const next = await awaitRound(page, luI, 1, 'word-' + (i + 1) + ' announcement');
+      await awaitAcked(page, next, 'word-' + (i + 1) + ' announcement');
+    } else {
+      // The LAST confirm: boundary lesson_update then check_started.
+      let csI = -1;
+      await waitWs(page, (log) => {
+        const cs = log.find((e) => e.dir === 'in' && e.type === 'check_started'
+          && e.msg.reason === 'dictation_done' && e.i > luI);
+        if (cs) { csI = cs.i; return true; }
+        return false;
+      }, { timeoutMs: 30000, label: 'the last confirm opens the check stage' });
+      const started = (await controls(page)).find((e) => e.type === 'check_started');
+      expect(started.msg.words).toEqual(words);
+      const bridge = await awaitRound(page, csI, 2, 'check bridge');
+      await awaitAcked(page, bridge, 'check bridge');
+    }
+  }
+  return checkSubmitNaturalEnd(page, words);
+}
+
+test('J16 finish chinese, reload → the english classroom opens on its own words, both submit independently', async ({ page }) => {
+  await installRtObserver(page);
+  await installFakeMic(page);
+  const zhWords = ['e2e-fin-zh-a', 'e2e-fin-zh-b'];
+  const enWords = ['e2e-fin-en-a', 'e2e-fin-en-b'];
+  for (const [category, unit, words] of [
+    ['chinese', 'e2e-m1-j16-zh', zhWords],
+    ['english', 'e2e-m1-j16-en', enWords],
+  ]) {
+    const seed = await svc.seedWords({ category, unit, entries: words.map((word) => ({ word })) });
+    expect(seed.ok, 'seed ' + category).toBeTruthy();
+  }
+  // Leg 1 opens through the ASK: a pick that races the ask's synthesis makes
+  // the ask/greeting TTS split 0..3/3..6, so that stretch rides matched-free
+  // tones; the deterministic matched tail is installed AFTER the greeting
+  // settles (stub.scripts replaces the FIFO wholesale).
+  const confirmJson = { content: '{"intent":"confirm","reply":"好"}' };
+  await stubScripts({
+    asr: [{ content: '好了' }, { content: '好了' }, { content: '好了' }, { content: '好了' }],
+    llm: [confirmJson, confirmJson, confirmJson, confirmJson],
+    image: [],
+    tts: [{ ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }],
+  });
+  const installMatchedTail = () => stubScripts({
+    tts: [
+      { ms: 1200, match: '第 2 个词' },
+      { ms: 1200, match: '全都写完啦' }, { ms: 1200, match: '我们一起检查' },
+      { ms: 1200, match: '都默写完了' }, { ms: 1200, match: '全部都写对了' },
+      { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
+      { ms: 1200, match: '第 2 个词' },
+      { ms: 1200, match: '全都写完啦' }, { ms: 1200, match: '我们一起检查' },
+      { ms: 1200, match: '都默写完了' }, { ms: 1200, match: '全部都写对了' },
+    ],
+  });
+
+  // Leg 1: pick chinese, finish the whole lesson naturally.
+  await page.goto(svc.url + 'tutor/');
+  await page.locator('#rt-start').click();
+  const zhReadyI = await openViaAsk(page, '#rt-subject-zh', 'e2e-m1-browser-chinese', zhWords);
+  await driveLessonToNaturalEnd(page, zhWords, zhReadyI, { onGreetingSettled: installMatchedTail });
+  await waitWs(page, async () => (await observe(page)).playbackResourceReleased === true,
+    { label: 'chinese lesson drained and released' });
+  const zhRows = await lessonsNow();
+  expect(zhRows).toHaveLength(1);
+  expect(zhRows[0]).toMatchObject({ category: 'chinese', word_count: 2, lesson_id: 'e2e-m1-browser-chinese', stage: 'submitted', correct: 2 });
+  const zhTtsCount = (await stubState()).requests.filter((r) => r.category === 'tts').length;
+
+  // Leg 2: a fresh page (auto entry) — chinese is no longer due, so the
+  // ENGLISH classroom must open DIRECTLY: no re-ask, its own row, its own
+  // words, index from 1 — nothing of the finished lesson carries over.
+  await page.reload();
+  await page.locator('#rt-start').click();
+  const enReadyI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'english' && e.msg.lesson.id === 'e2e-m1-browser',
+  'the english classroom opens directly after the reload');
+  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'subject_ask'),
+    'no subject ask on the restart').toHaveLength(0);
+  await expect(page.locator('#rt-progress-text')).toHaveText('第 1 / 2 个词');
+  await driveLessonToNaturalEnd(page, enWords, enReadyI);
+
+  // Subject isolation, vendor-side: nothing spoken after the reload names a
+  // chinese word; the english greeting names its own first word.
+  const state = await stubState();
+  const postReloadTts = state.requests.filter((r) => r.category === 'tts').slice(zhTtsCount).map((r) => r.text);
+  expect(postReloadTts.some((t) => zhWords.some((w) => t.includes(w))),
+    'no chinese word leaks into the english session').toBe(false);
+  expect(postReloadTts.some((t) => t.includes(enWords[0])),
+    'the english greeting speaks its own first word').toBe(true);
+  expect(state.remaining.tts).toBe(0);
+  expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
+
+  // Persistence: TWO submitted rows — each subject its own, both real.
+  const rows = await lessonsNow();
+  expect(rows).toHaveLength(2);
+  expect(rows.find((r) => r.lesson_id === 'e2e-m1-browser-chinese'))
+    .toMatchObject({ category: 'chinese', word_count: 2, stage: 'submitted', correct: 2 });
+  expect(rows.find((r) => r.lesson_id === 'e2e-m1-browser'))
+    .toMatchObject({ category: 'english', word_count: 2, stage: 'submitted', correct: 2 });
+});
+
+test('J16 empty vocabulary ends through the real no-due result', async ({ page }) => {
+  await installRtObserver(page);
+  // No seeds at all: the real RunDue decides, the teacher explains, the
+  // session ends — never a fabricated empty classroom.
+  await stubScripts({ asr: [], llm: [], image: [], tts: [{ ms: 1200, match: '没有要到期的单词' }] });
+  await page.goto(svc.url + 'tutor/');
+  await page.locator('#rt-start').click();
+
+  const readyI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'english'
+    && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 0,
+  'session_ready: the honest empty word table');
+  const explain = await awaitRound(page, readyI, 1, 'the no-due explanation');
+  await awaitAcked(page, explain, 'the no-due explanation', { settle: false });
+  const lastAckI = Math.max(...(await controls(page))
+    .filter((e) => e.dir === 'out' && e.type === 'sentence_ack'
+      && explain.sids.includes(e.msg.sentence_id))
+    .map((e) => e.i));
+  const endedI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'no_due_words', 'session_ended(no_due_words)');
+  expect(endedI).toBeGreaterThan(lastAckI);
+
+  await expect(page.locator('#rt-banner')).toContainText('词库暂无到期词');
+  await expect(page.locator('#rt-banner .rt-practice-btn'), 'the page can start again').toBeVisible();
+  expect(await lessonsNow(), 'no empty classroom row was created').toHaveLength(0);
+  const state = await stubState();
+  expect(state.remaining.tts).toBe(0);
+  expect(state.violations).toEqual([]);
 });
