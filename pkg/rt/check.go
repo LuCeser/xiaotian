@@ -315,14 +315,15 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 // checkStageInputs separates the data persisted by EnterCheck from the data
 // presented after that write succeeds.
 type checkStageInputs struct {
-	epoch    uint64
-	lessonID string
-	expected int
-	outcomes map[string]lesson.WordOutcome
-	total    int
-	words    []string
-	reason   string
-	bridge   string
+	epoch      uint64
+	lessonID   string
+	expected   int
+	outcomes   map[string]lesson.WordOutcome
+	total      int
+	words      []string
+	reason     string
+	bridge     string
+	correction bool
 }
 
 func (tm *TurnManager) prepareCheckStageInputs(epoch uint64) (checkStageInputs, bool) {
@@ -333,7 +334,7 @@ func (tm *TurnManager) prepareCheckStageInputs(epoch uint64) (checkStageInputs, 
 		in = checkStageInputs{
 			epoch: epoch, lessonID: tm.tutor.lessonID, expected: tm.tutor.version,
 			outcomes: tm.tutor.snapshotCheckOutcomes(), total: len(tm.tutor.words),
-			reason: CheckStartedReasonDictationDone,
+			reason: CheckStartedReasonDictationDone, correction: tm.tutor.correction,
 		}
 		in.words = make([]string, 0, in.total)
 		for _, card := range tm.tutor.words {
@@ -413,16 +414,7 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
 			return
 		}
-		tm.mu.Lock()
-		if tm.epoch != epoch || tm.closed {
-			tm.mu.Unlock()
-			return
-		}
-		tm.tutor.align(l.CurrentIndex, l.Version)
-		tm.tutor.resyncCheck(l)
-		alreadySubmitted := l.Stage == lesson.StageSubmitted && !tm.tutor.correction
-		tm.mu.Unlock()
-		if alreadySubmitted {
+		if l.Stage == lesson.StageSubmitted && !in.correction {
 			// The concurrent writer already submitted the row (WR-02,
 			// 13.1-08): broadcasting check_started here would hand this
 			// connection a panel that can never open. The honest completion
@@ -438,14 +430,20 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 				infra.F("code", ErrCodeDuplicateSubmit),
 				infra.F("duplicate", "enter_check_submitted"),
 			)
-			_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
-			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 			cancel()
-			tm.internalClose()
+			if tm.tryTerminalCloseAt(s, epoch, ReasonLessonComplete) {
+				tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+			}
 			return
 		}
+		if tm.checkPresentationInterleave != nil {
+			tm.checkPresentationInterleave()
+		}
+		tm.presentCheckedStage(s, ctx, cancel, in, func() {
+			tm.tutor.align(l.CurrentIndex, l.Version)
+			tm.tutor.resyncCheck(l)
+		})
 	}
-	tm.presentCheckedStage(s, ctx, cancel, in, func() {})
 }
 
 // handleCheckVerdict applies one screen verdict (the check_verdict control
