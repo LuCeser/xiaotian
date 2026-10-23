@@ -154,6 +154,11 @@ async function playbackState(page) {
       trace: playback && Array.isArray(playback.trace) ? playback.trace.slice() : [],
       droppedChunks: playback && Number.isFinite(playback.droppedChunks)
         ? playback.droppedChunks : -1,
+      playing: !!(playback && playback.playing),
+      activeSourceKeys: playback && Array.isArray(playback._sources)
+        ? playback._sources.map((source) => String(source.__rtKey || '')) : [],
+      ledgerKeys: playback && playback._ledger instanceof Map
+        ? Array.from(playback._ledger.keys(), String) : [],
     };
   });
 }
