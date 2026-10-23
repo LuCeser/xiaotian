@@ -647,14 +647,6 @@ func (tm *TurnManager) armWordTimerLocked() {
 	})
 }
 
-// stopWordTimer suspends the countdown (the pause command, session close).
-// The generation bump kills every callback queued under the old handle.
-func (tm *TurnManager) stopWordTimer() {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	tm.stopWordTimerLocked()
-}
-
 // stopWordTimerLocked is the locked stop body. Caller holds tm.mu.
 func (tm *TurnManager) stopWordTimerLocked() {
 	tm.timerGen++

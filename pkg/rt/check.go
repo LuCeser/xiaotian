@@ -1745,14 +1745,3 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 	}
 	tm.runAnnouncementAt(s, epoch, ctx, cancel, line, purposeChat, nil)
 }
-
-// tutorWordAt snapshots one lesson word (empty when out of range). Caller
-// does NOT hold tm.mu — the single-lock discipline applies to every field.
-func (tm *TurnManager) tutorWordAt(idx int) string {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.tutor == nil || idx < 0 || idx >= len(tm.tutor.words) {
-		return ""
-	}
-	return tm.tutor.words[idx].Word
-}
