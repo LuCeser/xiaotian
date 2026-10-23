@@ -2204,6 +2204,24 @@ func (tm *TurnManager) sendError(s Sender, code, message string, recoverable boo
 	tm.recorder.Emit(EventError, all...)
 }
 
+// sendOpenError is sendError's session-gated sibling for replies to inbound
+// frames whose admission is the frame itself: the coded answer rides
+// applySessionEffect, so a session that already shipped session_ended is
+// never answered past its terminal message — the reply races the goodbye
+// (or a timeout close) and loses. The event records only when the reply
+// actually shipped, failTurn's discipline.
+func (tm *TurnManager) sendOpenError(s Sender, code, message string, recoverable bool, fields ...infra.Field) {
+	if !tm.applySessionEffect(func() error {
+		return s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: recoverable})
+	}) {
+		return
+	}
+	all := make([]infra.Field, 0, 1+len(fields))
+	all = append(all, infra.F("code", code))
+	all = append(all, fields...)
+	tm.recorder.Emit(EventError, all...)
+}
+
 // ---------------------------------------------------------------------------
 // Small locked helpers
 // ---------------------------------------------------------------------------

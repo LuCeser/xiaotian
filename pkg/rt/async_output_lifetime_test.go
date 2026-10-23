@@ -108,4 +108,22 @@ func TestAsyncOutputAfterClose(t *testing.T) {
 			t.Fatalf("error frames = %d, want %d — no late failure notice past session_ended", got, errsBefore)
 		}
 	})
+
+	t.Run("photo frame after the goodbye is not answered", func(t *testing.T) {
+		cards := ttCards("苹果")
+		tm, s, _, _ := ttDriveToCheck(t, cards, newFakeWords(cards))
+		reader := &fakeOCRReader{}
+		ttBindPhoto(tm, reader, 0)
+		errsBefore := s.countOf(TypeError)
+
+		tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+		ttPhotoChunk(t, tm, s, 1, fakeJPEG(100), true)
+
+		if got := s.countOf(TypeError); got != errsBefore {
+			t.Fatalf("error frames = %d, want %d — no reply past the goodbye", got, errsBefore)
+		}
+		if got := reader.imageCount(); got != 0 {
+			t.Fatalf("OCR calls = %d, want 0", got)
+		}
+	})
 }

@@ -310,11 +310,12 @@ func TestPhotoAssembler(t *testing.T) {
 		ttBindPhoto(tm, reader, 0)
 
 		ttPhotoChunk(t, tm, s, 1, fakeJPEG(2000), false)
+		errsBefore := s.countOf(TypeError)
 		tm.Close(nil) // the transport read loop exited
 
 		ttPhotoChunk(t, tm, s, 2, fakeJPEG(1000), true)
-		if got := s.countOf(TypeError); got == 0 {
-			t.Fatal("no coded error answered the post-close photo frame")
+		if got := s.countOf(TypeError); got != errsBefore {
+			t.Fatal("the post-close photo frame was answered — session_ended is terminal")
 		}
 		time.Sleep(150 * time.Millisecond)
 		if got := reader.imageCount(); got != 0 {
