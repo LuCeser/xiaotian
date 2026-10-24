@@ -24,7 +24,7 @@ func TestCheckSubmitPresentationLifetime(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		tm.finishCheckSubmit(s, ctx, cancel, epoch, map[string]string{"苹果": "good"}, 1, 1, "submit-race")
+		tm.finishCheckSubmit(s, ctx, cancel, epoch, map[string]string{"苹果": "good"}, 1, 1, "submit-race", nil)
 		close(done)
 	}()
 	ttAwaitGate(t, hit, "check submit presentation probe was not reached")
@@ -69,7 +69,7 @@ func TestCheckSubmitSummaryLifetime(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		tm.finishCheckSubmit(s, ctx, cancel, epoch, map[string]string{"苹果": "good"}, 1, 1, "summary-race")
+		tm.finishCheckSubmit(s, ctx, cancel, epoch, map[string]string{"苹果": "good"}, 1, 1, "summary-race", nil)
 		close(done)
 	}()
 	ttAwaitGate(t, hit, "check submit summary probe was not reached")

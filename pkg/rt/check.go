@@ -611,15 +611,32 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		return
 	}
 
-	// Latch: the stage transition. ONLY the first commit proceeds.
+	// Latch: the stage transition. ONLY the first commit proceeds. The
+	// admission is taken in the SAME critical section that stores the turn
+	// cancel: a close can only land before the whole accepted save (this
+	// submit writes nothing) or after it registered (the latch write, the
+	// SubmitReview and its receipt then run to their real outcome on the
+	// persist context — the save responsibility outlives the turn's
+	// cancellation, 1.09).
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	write, writeAdmitted := tm.admitCheckWriteLocked()
 	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
+	if !writeAdmitted {
+		// The session closed between the manual gate and the latch: the
+		// registry is sealed, nothing was accepted, nothing is written.
+		cancel()
+		return
+	}
+	persistCtx := context.WithoutCancel(ctx)
 
-	res, err := tm.exec.CompleteCheck(ctx, lessonID, expected, m.RequestID, false)
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, m.RequestID, false)
 	if err != nil {
+		// No save happened on this path (or the row was already another
+		// writer's): the admission ends with the attempt.
+		tm.completeCheckWrite(write)
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
 			// Align from the stored truth: if the row is already submitted
@@ -669,6 +686,9 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 			tm.tutor.checking = false
 			return nil
 		})
+		// The absorbed duplicate saves nothing: the admission ends BEFORE
+		// the terminal close claims (and would capture) it.
+		tm.completeCheckWrite(write)
 		if tm.tryTerminalClose(s, ReasonLessonComplete) {
 			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 		}
@@ -698,7 +718,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		}
 	}
 
-	go tm.finishCheckSubmit(s, ctx, cancel, epoch, ratings, total, correct, m.RequestID)
+	go tm.finishCheckSubmit(s, ctx, cancel, epoch, ratings, total, correct, m.RequestID, write)
 }
 
 // sortedWordSet extracts a rating map's keys sorted — the receipt word-set
@@ -720,7 +740,7 @@ func sortedWordSet(m map[string]string) []string {
 // SubmitReview call site the check stage owns. 13.3-01 brackets the write
 // with the two-phase save receipt (Begin pending before, Complete with the
 // real outcome after) — a pure bypass that never alters the flow below.
-func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ratings map[string]string, total, correct int, requestID string) {
+func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ratings map[string]string, total, correct int, requestID string, write *checkWriteAdmission) {
 	defer cancel()
 	persistCtx := context.WithoutCancel(ctx)
 
@@ -808,6 +828,12 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 			}
 		}
 	}
+	// The accepted submit's save responsibility ends with its receipt: the
+	// admission is released BEFORE any presentation — a close that captured
+	// the registration waits for the SAVE, never for the summary playback
+	// the close itself would cancel (1.09; the 1.06 registration spans
+	// handleCheckSubmit's latch through here).
+	tm.completeCheckWrite(write)
 
 	result := ReviewResultMsg{
 		Type:      TypeReviewResult,

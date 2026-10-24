@@ -1018,6 +1018,83 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 	})
 }
 
+// TestAcceptedSubmitSurvivesClose 是 1.09 的验收：正式提交（真实 UI 提交按钮
+// → check_submit → CompleteCheck 锁存 → 保存与回执）与关闭的两种顺序——实际
+// 提交发生前关闭、提交已落库但尚未返回时关闭。已接纳的提交保存责任延续到
+// 实际保存及回执完成（持久化独立上下文，不随轮次取消），保存恰好一次，关
+// 闭后没有迟到的 review_result 或总结播报，登记在播报前收回。
+func TestAcceptedSubmitSurvivesClose(t *testing.T) {
+	assertOutcome := func(t *testing.T, f *speechBrowserFixture, m *speechManagerTracker, res speechDriverResult) {
+		t.Helper()
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
+		f.assertOriginalTasksExited()
+
+		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+		l, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		if l.Stage != lesson.StageSubmitted {
+			t.Fatalf("stored stage = %q, want submitted — the accepted submit's latch must complete", l.Stage)
+		}
+		if len(l.Verdicts) != 2 {
+			t.Fatalf("stored verdicts = %+v, want both manual verdicts kept", l.Verdicts)
+		}
+		if subs := len(f.words.submissions()); subs != 1 {
+			t.Fatalf("review saves = %d, want exactly one save for the accepted submit", subs)
+		}
+		m.mu.Lock()
+		pending := len(m.checkWrites)
+		m.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0 (released before the announcement)", pending)
+		}
+	}
+
+	t.Run("close before the actual commit", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedCheckingWithManualVerdicts()
+		before, _ := f.gateCheckSubmit(true, false)
+		t.Cleanup(before.openUp)
+
+		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
+		select {
+		case <-before.entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the formal submit never reached the real latch write")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
+			t.Fatal("test close did not obtain session ownership")
+		}
+		before.openUp()
+		assertOutcome(t, f, m, <-driver)
+	})
+
+	t.Run("close after commit before return", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedCheckingWithManualVerdicts()
+		_, committed := f.gateCheckSubmit(false, true)
+		t.Cleanup(committed.openUp)
+
+		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
+		select {
+		case <-committed.entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the formal submit never committed its latch write")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
+			t.Fatal("test close did not obtain session ownership")
+		}
+		committed.openUp()
+		assertOutcome(t, f, m, <-driver)
+	})
+}
+
 func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {
 	f.t.Helper()
 	done := make(chan speechDriverResult, 1)
