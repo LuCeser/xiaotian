@@ -784,6 +784,139 @@ async function practiceSubmitNaturalEnd(page, words, fromI, traceMark) {
   return endedI;
 }
 
+test('J16 finish → real 再练一组: in-page second round, fresh progress/audio/acks, released again', async ({ page }) => {
+  await installRtObserver(page);
+  await installFakeMic(page);
+  const zhWords = ['e2e-fin-rz-a', 'e2e-fin-rz-b'];
+  const zhWords2 = ['e2e-fin-rz-c', 'e2e-fin-rz-d'];
+  const seed = await svc.seedWords({
+    category: 'chinese', unit: 'e2e-m1-j16r', entries: zhWords.map((word) => ({ word })),
+  });
+  expect(seed.ok, 'chinese seed').toBeTruthy();
+
+  // One FIFO for BOTH rounds (only chinese is due → leg 1 opens DIRECTLY, no
+  // ask race — every sentence is deterministic, so matched entries pin the
+  // whole journey): leg 1 = greeting 3 + word-2 1 + bridge 2 + summary 2;
+  // practice = greeting 3 + word-2 1 + bridge 2 + wrap 1.
+  const confirmJson = { content: '{"intent":"confirm","reply":"好"}' };
+  await stubScripts({
+    asr: [{ content: '好了' }, { content: '好了' }, { content: '好了' }, { content: '好了' }],
+    llm: [confirmJson, confirmJson, confirmJson, confirmJson],
+    image: [],
+    tts: [
+      { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
+      { ms: 1200, match: '第 2 个词' },
+      { ms: 1200, match: '全都写完啦' }, { ms: 1200, match: '我们一起检查' },
+      { ms: 1200, match: '都默写完了' }, { ms: 1200, match: '全部都写对了' },
+      { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
+      { ms: 1200, match: '第 2 个词' },
+      { ms: 1200, match: '全都写完啦' }, { ms: 1200, match: '我们一起检查' },
+      { ms: 1200, match: '这组练习' },
+    ],
+  });
+
+  // Leg 1: finish the chinese daily lesson naturally.
+  await page.goto(svc.url + 'tutor/');
+  await page.locator('#rt-start').click();
+  const zhReadyI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'chinese' && e.msg.lesson.id === 'e2e-m1-browser-chinese'
+    && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2
+    && e.msg.lesson.words.every((w) => w === ''), 'chinese opens directly (one subject due)');
+  await driveLessonToNaturalEnd(page, zhWords, zhReadyI);
+  await waitWs(page, async () => (await observe(page)).playbackResourceReleased === true,
+    { label: 'chinese lesson drained and released' });
+  const zhRows = await lessonsNow();
+  expect(zhRows).toHaveLength(1);
+  expect(zhRows[0]).toMatchObject({ category: 'chinese', word_count: 2, stage: 'submitted', correct: 2 });
+
+  // The in-page reopen. A same-document marker proves no navigation sneaks in;
+  // the tap bounds (ws log + player trace) scope every leg-2 assertion.
+  await page.evaluate(() => { window.__j16SameDoc = true; });
+  const beforeTap = await controls(page);
+  const tapI = beforeTap.length ? beforeTap[beforeTap.length - 1].i : 0;
+  const traceMark = (await playbackState(page)).trace.length;
+  // The parent adds two fresh chinese words (real REST) — today's dictated
+  // words are excluded from a practice pick, so these are the practice set.
+  const seed2 = await svc.seedWords({
+    category: 'chinese', unit: 'e2e-m1-j16r-2', entries: zhWords2.map((word) => ({ word })),
+  });
+  expect(seed2.ok, 'practice-set seed').toBeTruthy();
+
+  await page.locator('#rt-banner .rt-practice-btn').click();
+  expect((await observe(page)).playbackResourceReleased, 'the restart re-armed the release latch').toBe(false);
+
+  // The practice classroom: chinese (the resolved subject rides the re-init),
+  // its OWN r0x- row, its own words, index back from 1 — nothing of the
+  // finished lesson carried over.
+  const pReadyI = await waitIndexSince(page, tapI, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'chinese' && /^r0x-/.test(e.msg.lesson.id || '')
+    && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2
+    && e.msg.lesson.words.every((w) => w === ''), 'the practice classroom opens in-page (r0x-, masked)');
+  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'subject_ask'),
+    'no subject ask anywhere in the journey').toHaveLength(0);
+  await expect(page.locator('#rt-progress-text')).toHaveText('第 1 / 2 个词');
+
+  const greeting = await awaitRound(page, pReadyI, 3, 'practice greeting');
+  await ackedSince(page, greeting, tapI, traceMark, 'practice greeting');
+
+  // Two confirms on the practice set; the pick order is random, so the check
+  // stage's own words list is the authority for the verdict taps.
+  let pWords = null;
+  for (let i = 1; i <= 2; i++) {
+    await childSaysDone(page);
+    const luI = await waitIndexSince(page, tapI, (e) => e.dir === 'in' && e.type === 'lesson_update'
+      && e.msg.current_index === i, 'practice confirm ' + i + ' advances to index ' + i);
+    if (i < 2) {
+      const next = await awaitRound(page, luI, 1, 'practice word-2 announcement');
+      await ackedSince(page, next, tapI, traceMark, 'practice word-2 announcement');
+    } else {
+      const csI = await waitIndexSince(page, tapI, (e) => e.dir === 'in' && e.type === 'check_started'
+        && e.msg.reason === 'dictation_done' && e.i > luI, 'the last practice confirm opens the check stage');
+      const started = (await controls(page)).find((e) => e.type === 'check_started' && e.i > tapI);
+      pWords = started.msg.words;
+      expect([...pWords].sort()).toEqual([...zhWords2].sort());
+      const bridge = await awaitRound(page, csI, 2, 'practice check bridge');
+      await ackedSince(page, bridge, tapI, traceMark, 'practice check bridge');
+    }
+  }
+  const endedI = await practiceSubmitNaturalEnd(page, pWords, tapI, traceMark);
+
+  // Released AGAIN on the same page, and still the same document.
+  await waitWs(page, async () => (await observe(page)).playbackResourceReleased === true,
+    { label: 'the practice round drained and released again' });
+  expect(await page.evaluate(() => window.__j16SameDoc === true), 'no reload — the same document').toBe(true);
+  expect((await observe(page)).terminalDraining).toBe(true);
+  expect((await playbackState(page)).activeSourceKeys).toEqual([]);
+  for (const t of (await micInfo(page)).tracks) expect(t.state, 'mic released again').toBe('ended');
+  const frozen = await wsStats(page);
+  await page.waitForTimeout(1200);
+  expect((await wsStats(page)).outBinaryFrames, 'uplink frozen after the practice ending')
+    .toBe(frozen.outBinaryFrames);
+  const final = await controls(page);
+  expect(final.filter((e) => e.dir === 'in' && e.type === 'error'),
+    'the in-page restart never tripped an error (fresh epoch adopted)').toEqual([]);
+  expect(final.filter((e) => e.i > endedI && e.dir === 'in'),
+    'no server frame after session_ended').toEqual([]);
+  // Old acks never reused: every post-tap ack belongs to the practice round
+  // (greeting 3 + word-2 1 + bridge 2 + wrap 1) — none rides leg 1's keys.
+  expect(final.filter((e) => e.i > tapI && e.dir === 'out' && e.type === 'sentence_ack'),
+    'every post-tap ack belongs to the practice round').toHaveLength(7);
+
+  // Independent progress: the daily row stands untouched, the practice row is
+  // its own r0x- row with its own words.
+  const rows = await lessonsNow();
+  expect(rows).toHaveLength(2);
+  expect(rows.find((r) => r.lesson_id === 'e2e-m1-browser-chinese'))
+    .toMatchObject({ category: 'chinese', word_count: 2, stage: 'submitted', correct: 2 });
+  const practiceRow = rows.find((r) => /^r0x-/.test(r.lesson_id));
+  expect(practiceRow, 'the practice round landed its own row').toBeTruthy();
+  expect(practiceRow).toMatchObject({ category: 'chinese', word_count: 2, stage: 'submitted', correct: 2 });
+
+  const state = await stubState();
+  expect(state.remaining.tts, 'every scripted sentence served, none extra').toBe(0);
+  expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
+});
+
 test('J16 empty vocabulary ends through the real no-due result', async ({ page }) => {
   await installRtObserver(page);
   // No seeds at all: the real RunDue decides, the teacher explains, the
