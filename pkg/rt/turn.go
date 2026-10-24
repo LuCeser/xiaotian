@@ -1169,8 +1169,19 @@ func (tm *TurnManager) runNaturalEndingAt(s Sender, epoch uint64, ctx context.Co
 
 // handleInterrupt is the epoch bump + provider cancellation + short-history
 // trim (Pitfall 9 on the FSM deque) + old-epoch playback-wait invalidation.
+// issue #69 备选一 步骤 10: a CLOSED session stays silent — no epoch bump, no
+// ack, no state message; nothing may follow session_ended. On a live
+// session the state change and the reply enqueues ride ONE lock hold: a
+// close racing the interrupt either wins tm.mu first (this handler then
+// finds closed set and refuses outright) or lands behind the enqueued
+// replies — interrupt_ack and the state message can never trail
+// session_ended on the wire.
 func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 	tm.mu.Lock()
+	if tm.closed {
+		tm.mu.Unlock()
+		return
+	}
 	oldEpoch := tm.epoch
 	tm.epoch++
 	newEpoch := tm.epoch
@@ -1208,10 +1219,18 @@ func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 	tm.pendingPlayback = map[string]*pendingPlayback{}
 	tm.playbackPending = false
 
-	if tm.state != "" && !tm.closed {
+	if tm.state != "" {
 		tm.state = StateListening
 	}
 	effective := tm.effectiveClientStateLocked()
+	_ = s.SendControl(InterruptAckMsg{
+		Type:           TypeInterruptAck,
+		OldEpoch:       oldEpoch,
+		NewEpoch:       newEpoch,
+		LastSentenceID: m.LastSentenceID,
+		PlayedUntilMs:  m.PlayedUntilMs,
+	})
+	_ = s.SendControl(StateMsg{Type: TypeState, Value: effective})
 	tm.mu.Unlock()
 
 	tm.vad.Reset()
@@ -1222,14 +1241,6 @@ func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 		infra.F("last_sentence_id", m.LastSentenceID),
 		infra.F("played_until_ms", m.PlayedUntilMs),
 	)
-	_ = s.SendControl(InterruptAckMsg{
-		Type:           TypeInterruptAck,
-		OldEpoch:       oldEpoch,
-		NewEpoch:       newEpoch,
-		LastSentenceID: m.LastSentenceID,
-		PlayedUntilMs:  m.PlayedUntilMs,
-	})
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: effective})
 }
 
 // handleSentenceAck records one sentence the client actually played — the
@@ -2241,11 +2252,20 @@ func (tm *TurnManager) failTurn(s Sender, epoch uint64, code, message string, fi
 	tm.recorder.Emit(EventError, all...)
 }
 
-// sendError is the single error egress: coded ErrorMsg + error event. The
-// optional fields are desensitized event annotations only (attempts, codes)
-// — never transcript text (T-13-06b).
+// sendError is the single error egress: coded ErrorMsg + error event.
+// issue #69 备选一 步骤 10: the enqueue rides the session effect — a
+// session that already shipped session_ended answers NOTHING past its
+// terminal message (a parse failure, a server-only frame, a read_word or a
+// poem/passage/practice degradation landing after the goodbye stays
+// silent). The optional fields are desensitized event annotations only
+// (attempts, codes) — never transcript text (T-13-06b); the event records
+// only when the reply actually shipped, sendOpenError's discipline.
 func (tm *TurnManager) sendError(s Sender, code, message string, recoverable bool, fields ...infra.Field) {
-	_ = s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: recoverable})
+	if !tm.applySessionEffect(func() error {
+		return s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: recoverable})
+	}) {
+		return
+	}
 	all := make([]infra.Field, 0, 1+len(fields))
 	all = append(all, infra.F("code", code))
 	all = append(all, fields...)
