@@ -161,10 +161,10 @@ func TestClient_ChatContentShapes(t *testing.T) {
 	}
 
 	callers := []struct {
+		call func(Client) (ChatResponse, error)
 		name string
 		op   string
 		wrap string
-		call func(Client) (ChatResponse, error)
 	}{
 		{
 			name: "chat",

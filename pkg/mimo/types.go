@@ -380,8 +380,8 @@ func assistantContentPartText(raw json.RawMessage) (string, error) {
 		return s, nil
 	case '{':
 		var part struct {
-			Type string  `json:"type"`
 			Text *string `json:"text"`
+			Type string  `json:"type"`
 		}
 		if err := json.Unmarshal(trimmed, &part); err != nil {
 			return "", err
