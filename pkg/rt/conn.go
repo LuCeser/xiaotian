@@ -300,10 +300,14 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// ctx binds the heartbeat goroutine to this handler's lifetime.
 	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+	var heartbeatDone chan struct{}
 
 	if h.cfg.HeartbeatInterval > 0 {
-		go h.heartbeat(ctx, conn, h.cfg.HeartbeatInterval)
+		heartbeatDone = make(chan struct{})
+		go func() {
+			defer close(heartbeatDone)
+			h.heartbeat(ctx, conn, h.cfg.HeartbeatInterval)
+		}()
 	}
 
 	manager := h.factory()
@@ -332,6 +336,10 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	manager.Close(writer)
 	writer.shutdown()
 	_ = conn.Close()
+	cancel()
+	if heartbeatDone != nil {
+		<-heartbeatDone
+	}
 }
 
 // heartbeat pings the client every interval until ctx is cancelled or a
@@ -440,6 +448,9 @@ func (w *connWriter) Terminate(reason error) {
 		w.terminationMu.Lock()
 		w.terminated, w.reason = true, reason
 		w.terminationMu.Unlock()
+		if reason != nil && w.conn != nil {
+			_ = w.conn.Close()
+		}
 		w.cancel()
 	})
 }
@@ -462,15 +473,20 @@ func (w *connWriter) run() {
 		select {
 		case c := <-w.control:
 			if err := w.write(websocket.TextMessage, c); err != nil {
+				w.Terminate(errors.Wrap(err, "rt: write control frame"))
 				w.logWriteFailure("control", err)
 				return
 			}
 		case a := <-w.audio:
 			if err := w.write(websocket.BinaryMessage, a); err != nil {
+				w.Terminate(errors.Wrap(err, "rt: write audio frame"))
 				w.logWriteFailure("audio", err)
 				return
 			}
 		case <-w.ctx.Done():
+			if w.TerminationReason() != nil {
+				return
+			}
 			w.drainAndClose()
 			return
 		}
@@ -490,10 +506,12 @@ func (w *connWriter) drainAndClose() {
 		select {
 		case c := <-w.control:
 			if err := w.write(websocket.TextMessage, c); err != nil {
+				w.publishDrainFailure(errors.Wrap(err, "rt: drain control frame"))
 				return
 			}
 		case a := <-w.audio:
 			if err := w.write(websocket.BinaryMessage, a); err != nil {
+				w.publishDrainFailure(errors.Wrap(err, "rt: drain audio frame"))
 				return
 			}
 		default:
@@ -508,6 +526,17 @@ func (w *connWriter) drainAndClose() {
 	_ = w.conn.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		time.Now().Add(time.Second))
+}
+
+func (w *connWriter) publishDrainFailure(err error) {
+	w.terminationMu.Lock()
+	if w.reason == nil {
+		w.reason = err
+	}
+	w.terminationMu.Unlock()
+	if w.conn != nil {
+		_ = w.conn.Close()
+	}
 }
 
 func (w *connWriter) logWriteFailure(kind string, err error) {

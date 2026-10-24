@@ -2,6 +2,7 @@ package rt
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -448,6 +449,92 @@ func TestWriterTermination(t *testing.T) {
 	default:
 		t.Fatal("Done reopened after repeated termination")
 	}
+}
+
+type terminatingManager struct {
+	reason error
+	sender chan Sender
+	closed chan struct{}
+}
+
+func (m *terminatingManager) HandleControl(s Sender, _ []byte) {
+	m.sender <- s
+	s.Terminate(m.reason)
+}
+func (*terminatingManager) IngestAudio(Sender, []byte) {}
+func (m *terminatingManager) Close(Sender)             { close(m.closed) }
+
+func TestWriterFailureLifecycle(t *testing.T) {
+	t.Run("real websocket write failure publishes the reason", func(t *testing.T) {
+		sc, client := newConnPair(t)
+		w := newConnWriter(sc, 2, nil)
+		w.start()
+		if tcp, ok := client.UnderlyingConn().(*net.TCPConn); ok {
+			_ = tcp.SetLinger(0)
+		}
+		_ = client.Close()
+		if err := w.SendControl(PongMsg{Type: TypePong}); err != nil {
+			t.Fatalf("enqueue before write failure: %v", err)
+		}
+		select {
+		case <-w.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("writer did not exit after the real WebSocket write failed")
+		}
+		if w.TerminationReason() == nil {
+			t.Fatal("write failure did not publish its reason")
+		}
+		if err := w.SendAudio([]byte{1}); !errors.Is(err, ErrWriterTerminated) {
+			t.Fatalf("send after write failure = %v, want ErrWriterTerminated", err)
+		}
+	})
+
+	t.Run("failed termination releases the whole connection", func(t *testing.T) {
+		want := errors.New("terminal delivery failed")
+		manager := &terminatingManager{reason: want, sender: make(chan Sender, 1), closed: make(chan struct{})}
+		h, err := NewHandler(ServerConfig{
+			AllowedOrigins: []string{"http://origin.test"}, HeartbeatInterval: 10 * time.Millisecond,
+		}, func() SessionManager { return manager }, nil)
+		if err != nil {
+			t.Fatalf("NewHandler: %v", err)
+		}
+		handlerDone := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h.HandleWebSocket(w, r)
+			close(handlerDone)
+		}))
+		defer srv.Close()
+		client, _, err := dialRT(t, srv.URL, "http://origin.test")
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer client.Close()
+		if err := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"ping"}`)); err != nil {
+			t.Fatalf("write trigger: %v", err)
+		}
+		sender := <-manager.sender
+		select {
+		case <-manager.closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("read loop did not reach manager.Close")
+		}
+		select {
+		case <-sender.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("send loop did not exit")
+		}
+		select {
+		case <-handlerDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("handler or heartbeat did not exit")
+		}
+		if !errors.Is(sender.TerminationReason(), want) {
+			t.Fatalf("termination reason = %v, want %v", sender.TerminationReason(), want)
+		}
+		if err := sender.SendControl(PongMsg{Type: TypePong}); !errors.Is(err, ErrWriterTerminated) {
+			t.Fatalf("late send = %v, want ErrWriterTerminated", err)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
