@@ -33,13 +33,13 @@ import (
 // captureSender records every control message (as marshaled JSON) and audio
 // chunk a Sender would deliver.
 type captureSender struct {
+	reason     error
+	done       chan struct{}
 	controls   [][]byte
 	audioN     int
 	audioBytes int
 	mu         sync.Mutex
-	done       chan struct{}
 	terminated bool
-	reason     error
 }
 
 func (c *captureSender) SendControl(v any) error {

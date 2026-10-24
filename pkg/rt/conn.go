@@ -388,21 +388,19 @@ func stripOriginPort(origin string) string {
 // WriteMessage call (the only gorilla-permitted writer), so the session
 // manager can call SendControl/SendAudio from any goroutine without locks.
 type connWriter struct {
-	conn    *websocket.Conn
-	control chan []byte
-	audio   chan []byte
-	logger  infra.Logger
-
-	cancel context.CancelFunc
-	done   chan struct{}
-	ctx    context.Context
-
+	ctx           context.Context
+	logger        infra.Logger
+	reason        error
+	control       chan []byte
+	audio         chan []byte
+	cancel        context.CancelFunc
+	done          chan struct{}
+	conn          *websocket.Conn
 	droppedAudio  atomic.Int64
 	startOnce     sync.Once
 	terminateOnce sync.Once
 	terminationMu sync.Mutex
 	terminated    bool
-	reason        error
 }
 
 // newConnWriter builds the writer. The pump is NOT started here — call

@@ -1020,7 +1020,11 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 
 // correctionInputs carries the diff result into the finishing goroutine.
 type correctionInputs struct {
-	changed   map[string]string
+	changed map[string]string
+	// write is the accepted save's registration (1.10a): taken where the
+	// correction was accepted, released after the diff write, its receipt
+	// and the marker reset — before any presentation.
+	write     *checkWriteAdmission
 	requestID string
 	lessonID  string
 	// category is the ROW's subject (Issue #10): the diff write lands on the
@@ -1030,10 +1034,6 @@ type correctionInputs struct {
 	total    int
 	correct  int
 	epoch    uint64
-	// write is the accepted save's registration (1.10a): taken where the
-	// correction was accepted, released after the diff write, its receipt
-	// and the marker reset — before any presentation.
-	write *checkWriteAdmission
 }
 
 // finishCorrections runs on its own goroutine (runNaturalEnding blocks on

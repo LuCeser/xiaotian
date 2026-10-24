@@ -277,8 +277,8 @@ func (g *speechVerdictGate) ApplyVerdict(ctx context.Context, lessonID string, e
 // first entry signals entered exactly once.
 type speechBatchGate struct {
 	LessonExecutor
-	entered  chan struct{}
-	release  chan struct{}
+	entered     chan struct{}
+	release     chan struct{}
 	enteredOnce sync.Once
 }
 

@@ -434,7 +434,19 @@ type TurnManager struct {
 	photo           *photoBuffer
 	acked           map[string]bool
 	pendingPlayback map[string]*pendingPlayback
-	session         string
+	// pendingAsk (Issue #55): the parked session_init of an auto word
+	// classroom whose TWO subjects both hold due words — the clarify is
+	// out, and the child's answer (subject_pick or spoken 语文/英语)
+	// binds category and resumes through continueSessionInit. Non-nil ONLY
+	// while the ask is live; the classroom has no lesson row yet.
+	pendingAsk *SessionInitMsg
+	// pendingAdvance is the one accepted dictation write that later turns
+	// and reconnect reconciliation must wait for before reading a target.
+	pendingAdvance *pendingDictationAdvance
+	// checkWrites is the set of persistence operations accepted before a
+	// close. Closing seals admission and snapshots this set atomically.
+	checkWrites map[*checkWriteAdmission]struct{}
+	session     string
 	// state is one of StateListening/StateProcessing/StateSpeaking, or ""
 	// before session_init / after close.
 	state string
@@ -451,15 +463,6 @@ type TurnManager struct {
 	// grounds on English cards and a 语文 word degrades honestly to the
 	// classification fallback, per AC2's 不强制英语式例句.)
 	category string
-	// pendingAsk (Issue #55): the parked session_init of an auto word
-	// classroom whose TWO subjects both hold due words — the clarify is
-	// out, and the child's answer (subject_pick or spoken 语文/英语)
-	// binds category and resumes through continueSessionInit. Non-nil ONLY
-	// while the ask is live; the classroom has no lesson row yet.
-	pendingAsk *SessionInitMsg
-	// pendingAdvance is the one accepted dictation write that later turns
-	// and reconnect reconciliation must wait for before reading a target.
-	pendingAdvance *pendingDictationAdvance
 	// turnSentences are the sentences sent for the current announcement, in
 	// order (the interrupt-trim source).
 	turnSentences []sentenceInfo
@@ -499,9 +502,8 @@ type TurnManager struct {
 	// closeOwned marks the close path that won the ONE-TIME D-03 fallback
 	// ownership (uncheckedCloseFallback). Guarded by mu.
 	closeOwned bool
-	// checkWrites is the set of persistence operations accepted before a
-	// close. Closing seals admission and snapshots this set atomically.
-	checkWrites       map[*checkWriteAdmission]struct{}
+	// checkWritesSealed flips in the close claim's critical section: once
+	// set, admitCheckWriteLocked refuses new admissions forever.
 	checkWritesSealed bool
 }
 
@@ -1305,8 +1307,8 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 // slip past the fallback decision. Every other path that raced the close
 // owns nothing — nothing to send, nothing to persist.
 type closeClaim struct {
-	fallback    uncheckedCloseSnapshot
 	checkWrites []*checkWriteAdmission
+	fallback    uncheckedCloseSnapshot
 	owned       bool
 	hasFallback bool
 }
