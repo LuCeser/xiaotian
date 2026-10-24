@@ -225,22 +225,10 @@ type fakeTTS struct {
 	// flowing until ctx is cancelled or the callback errors (interrupt
 	// semantics — isFinal never arrives on the cancelled path).
 	streamUntilCancel bool
-	// hold, when non-nil, makes every call wait for it to close (or ctx
-	// cancellation) before producing anything — the provider-return control
-	// point for the rtbrowser fault fixtures (issue #69 alt1 step 4).
-	hold     chan struct{}
-	holdHits int
 }
 
 func newFakeTTS(chunkCount, chunkSize int) *fakeTTS {
 	return &fakeTTS{chunkCount: chunkCount, chunkSize: chunkSize}
-}
-
-// holdHitsCount reports how many calls actually waited on the hold gate.
-func (f *fakeTTS) holdHitsCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.holdHits
 }
 
 // SynthesizeStream implements TTSSynthesizer.
@@ -248,20 +236,8 @@ func (f *fakeTTS) SynthesizeStream(ctx context.Context, text string, onAudio Aud
 	f.mu.Lock()
 	f.texts = append(f.texts, text)
 	failWith := f.failWith
-	hold := f.hold
 	chunkCount, chunkSize, delay, untilCancel := f.chunkCount, f.chunkSize, f.delay, f.streamUntilCancel
-	if hold != nil {
-		f.holdHits++
-	}
 	f.mu.Unlock()
-
-	if hold != nil {
-		select {
-		case <-hold:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
 
 	if failWith != nil {
 		return nil, failWith

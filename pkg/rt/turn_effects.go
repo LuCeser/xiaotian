@@ -25,10 +25,10 @@ const (
 
 // TurnEffectResult is the effect entry's discriminated return shape.
 type TurnEffectResult struct {
-	Outcome TurnEffectOutcome
 	// Err carries the concrete delivery error exactly when Outcome is
 	// TurnEffectDeliveryFailed; nil otherwise.
-	Err error
+	Err     error
+	Outcome TurnEffectOutcome
 }
 
 // Applied reports whether the effect fully landed (legacy-bool equivalent).

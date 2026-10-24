@@ -37,6 +37,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
+	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 )
 
 // speechPageAck is one sentence_ack the real page sent (observed read-only).
@@ -83,6 +84,42 @@ type speechDriverResult struct {
 	// hold window while a fault control was active.
 	HoldControlIn int `json:"holdControlIn"`
 	HoldBinaryIn  int `json:"holdBinaryIn"`
+}
+
+// speechHoldTTS wraps the fixture's fake TTS with a hold gate — the
+// provider-return control point of step 4, kept in the rtbrowser build only
+// (the production providers_fake_test.go stays untouched). While the gate is
+// open every SynthesizeStream call parks (ctx-interruptible) before the
+// inner synthesizer produces anything.
+type speechHoldTTS struct {
+	inner TTSSynthesizer
+
+	mu   sync.Mutex
+	hold chan struct{}
+	hits int
+}
+
+func (s *speechHoldTTS) SynthesizeStream(ctx context.Context, text string, onAudio AudioChunkFunc, opts ...mimo.TTSOption) (*mimo.StreamResult, error) {
+	s.mu.Lock()
+	hold := s.hold
+	if hold != nil {
+		s.hits++
+	}
+	s.mu.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return s.inner.SynthesizeStream(ctx, text, onAudio, opts...)
+}
+
+func (s *speechHoldTTS) holdHits() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hits
 }
 
 // speechManagerTracker wraps one connection's real TurnManager: it counts
@@ -141,7 +178,7 @@ type speechBrowserFixture struct {
 
 	asr   *fakeASR
 	llm   *fakeLLM
-	tts   *fakeTTS
+	tts   TTSSynthesizer
 	words *fakeWordSource
 	tools *LessonTools
 	db    *sql.DB
@@ -579,10 +616,11 @@ func TestSpeechBrowserFaultControls(t *testing.T) {
 		held := make(chan struct{})
 		var releaseOnce sync.Once
 		release := func() { releaseOnce.Do(func() { close(held) }) }
-		f.tts.hold = held
+		gated := &speechHoldTTS{inner: f.tts, hold: held}
+		f.tts = gated
 
 		res := f.runDriver("starve-probe", 30*time.Second, "--hold-ms", "3000")
-		if got := f.tts.holdHitsCount(); got == 0 {
+		if gated.holdHits() == 0 {
 			t.Fatal("provider-return control point never hit")
 		}
 		if res.HoldControlIn == 0 {
