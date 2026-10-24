@@ -333,10 +333,25 @@
    * Open the /rt connection. On open, records 'connected' and sends
    * session_init declaring the (post-downsample) uplink spec — the rate is
    * declared by the client and verified by the server, never assumed.
+   *
+   * J14 (PR #72 review P1): one client, one live socket. The server's read
+   * loop only exits when THIS side disconnects, so replacing a still-open
+   * ws here would orphan that connection — with its server-side session
+   * manager and heartbeat — until the page unloads. The superseded socket
+   * is closed with its handlers detached first: its close event must never
+   * fire the page-level teardown against the session that replaces it.
    * @param {string} [url] - explicit ws(s) URL; default deriveRtUrl(location)
    */
   RTCClient.prototype.connect = function (url) {
     var self = this;
+    if (this.ws) {
+      var stale = this.ws;
+      stale.onopen = null;
+      stale.onmessage = null;
+      stale.onclose = null;
+      stale.onerror = null;
+    }
+    this.close(); // idempotent; also ends the old ping cadence below
     var wsUrl = url || deriveRtUrl(global.location);
     var WS = this._wsFactory || (typeof WebSocket !== 'undefined' ? WebSocket : null);
     if (!WS || !wsUrl) return false;
@@ -422,6 +437,12 @@
 
   /** @private */
   RTCClient.prototype._stopPing = function () {
+    // J14 (PR #72 review P1): the latch resets WITH the timer — the cadence
+    // is per-connection. Sessions now really close between rounds, so a
+    // stale _pingStarted would keep every later connection from probing the
+    // clock offset again (the never-closed socket's still-running interval
+    // used to hide this by pinging whatever ws was current).
+    this._pingStarted = false;
     if (this._pingTimer !== null) {
       clearInterval(this._pingTimer);
       this._pingTimer = null;

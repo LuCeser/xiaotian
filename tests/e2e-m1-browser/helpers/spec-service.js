@@ -33,11 +33,15 @@ const STUB_BASE = 'http://127.0.0.1:18285';
 
 /**
  * Launch one isolated real service for a single test. Returns
- *   { url, stop, seedWords, listWords, listLessons }
+ *   { url, stop, seedWords, deleteWords, listWords, listLessons }
  *   url        — http://127.0.0.1:<port>/ (absolute: these pages do NOT use
  *                the config baseURL, whose 18290 instance is not this one)
  *   stop()     — idempotent teardown (kills the child, removes its temp root)
  *   seedWords({category, unit, entries}) — real REST → Python → SQLite write
+ *   deleteWords({category, words}) — the parent's real confirmed delete
+ *                (DELETE /words → python delete-words --confirm; the payload
+ *                carries {"deleted": N}) — the mid-session word removal the
+ *                J14 partial-save leg stages through the product surface
  *   listWords({category}) / listLessons() — real read path for assertions
  */
 async function startSpecService() {
@@ -56,6 +60,9 @@ async function startSpecService() {
     stop: () => svc.stop(),
     seedWords({ category, unit, entries }) {
       return json('/words', { method: 'POST', body: JSON.stringify({ category, unit, entries }) });
+    },
+    deleteWords({ category, words }) {
+      return json('/words', { method: 'DELETE', body: JSON.stringify({ category, words }) });
     },
     listWords({ category }) {
       return json('/words?category=' + encodeURIComponent(category));
