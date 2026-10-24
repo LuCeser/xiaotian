@@ -499,6 +499,10 @@ type TurnManager struct {
 	// closeOwned marks the close path that won the ONE-TIME D-03 fallback
 	// ownership (uncheckedCloseFallback). Guarded by mu.
 	closeOwned bool
+	// checkWrites is the set of persistence operations accepted before a
+	// close. Closing seals admission and snapshots this set atomically.
+	checkWrites       map[*checkWriteAdmission]struct{}
+	checkWritesSealed bool
 }
 
 // Compile-time check: TurnManager satisfies the transport's SessionManager
@@ -1302,6 +1306,7 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 // owns nothing — nothing to send, nothing to persist.
 type closeClaim struct {
 	fallback    uncheckedCloseSnapshot
+	checkWrites []*checkWriteAdmission
 	owned       bool
 	hasFallback bool
 }
@@ -1320,6 +1325,10 @@ func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch, takeFallback bo
 		return closeClaim{}
 	}
 	c := closeClaim{owned: true}
+	tm.checkWritesSealed = true
+	for w := range tm.checkWrites {
+		c.checkWrites = append(c.checkWrites, w)
+	}
 	if takeFallback && !tm.closeOwned && tm.tutor != nil && tm.tutor.checking {
 		tm.closeOwned = true
 		t := tm.tutor
