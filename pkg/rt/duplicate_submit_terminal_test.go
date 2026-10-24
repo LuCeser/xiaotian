@@ -2,7 +2,6 @@ package rt
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 )
@@ -82,7 +81,7 @@ func TestDuplicateSubmitTerminal(t *testing.T) {
 		ttCheckAll(t, tm, inner, 2)
 		ttPreFallSubmitLatch(t, tm, exec)
 
-		s := &failingControlSender{captureSender: inner, failType: TypeSessionEnded, failErr: errors.New("enqueue refused")}
+		s := &failingControlSender{captureSender: inner, failType: TypeSessionEnded}
 		tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-dup"}))
 
 		tm.mu.Lock()

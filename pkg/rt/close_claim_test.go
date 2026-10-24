@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// errTerminalRefused is failingControlSender's transport refusal sentinel.
+var errTerminalRefused = errors.New("enqueue refused")
+
 // failingControlSender rejects the enqueue of one wire type (issue #69
 // 备选一 步骤 6/7: the terminal message's transport refusal) while recording
 // the attempt, so a close can be observed completing PAST a failed
@@ -16,7 +19,6 @@ import (
 type failingControlSender struct {
 	*captureSender
 	failType string
-	failErr  error
 	attempts int32
 }
 
@@ -28,7 +30,7 @@ func (s *failingControlSender) SendControl(v any) error {
 	_ = json.Unmarshal(b, &probe)
 	if probe.Type == s.failType {
 		atomic.AddInt32(&s.attempts, 1)
-		return s.failErr
+		return errTerminalRefused
 	}
 	return s.captureSender.SendControl(v)
 }
@@ -137,7 +139,7 @@ func TestCloseClaim(t *testing.T) {
 	t.Run("a rejected session_ended still completes the close", func(t *testing.T) {
 		tm := NewTurnManager(nil, nil, nil, nil, TurnManagerConfig{}, NewEventRecorder(&captureLogger{}, "t"), nil)
 		inner := &captureSender{}
-		s := &failingControlSender{captureSender: inner, failType: TypeSessionEnded, failErr: errors.New("queue refused")}
+		s := &failingControlSender{captureSender: inner, failType: TypeSessionEnded}
 		cancelCount := ttArmCancelCounting(tm)
 
 		done := make(chan struct{})
