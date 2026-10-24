@@ -255,6 +255,14 @@ func TestTruncateResponseForLog(t *testing.T) {
 	}
 }
 
+func TestTruncateResponseForLogRedactsShortAPIKey(t *testing.T) {
+	const apiKey = "short"
+	got := truncateResponseForLog([]byte("response echoed "+apiKey), apiKey)
+	if strings.Contains(got, apiKey) {
+		t.Errorf("body prefix leaked the API key: %q", got)
+	}
+}
+
 func newContentShapeClient(t *testing.T, logger *testLogger, apiKey, body string) Client {
 	t.Helper()
 	server, cleanup := mockTTSServer(func(w http.ResponseWriter, r *http.Request) {

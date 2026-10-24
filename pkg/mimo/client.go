@@ -544,12 +544,12 @@ func truncateResponseForLog(body []byte, apiKey string) string {
 	return cutUTF8(s, maxLoggedResponseBytes)
 }
 
-// redactResponseSecrets strips an echoed bearer token and, when the
-// configured API key is long enough to be a real secret, that key. Short
-// keys are left alone so a tiny test value cannot punch holes in the prefix.
+// redactResponseSecrets strips an echoed bearer token and the configured
+// API key. Every non-empty key is sensitive because NewClient accepts keys
+// of any length.
 func redactResponseSecrets(s, apiKey string) string {
 	s = bearerTokenRE.ReplaceAllString(s, "Bearer [redacted]")
-	if len(apiKey) >= 8 {
+	if apiKey != "" {
 		s = strings.ReplaceAll(s, apiKey, "[redacted]")
 	}
 	return s
