@@ -86,6 +86,12 @@ type speechDriverResult struct {
 	HoldBinaryIn  int `json:"holdBinaryIn"`
 }
 
+var speechExpectedOpening = []string{
+	"你好呀！",
+	"今天我们有 2 个词要写。",
+	"听好哦：第 1 个词。",
+}
+
 // speechHoldTTS wraps the fixture's fake TTS with a hold gate — the
 // provider-return control point of step 4, kept in the rtbrowser build only
 // (the production providers_fake_test.go stays untouched). While the gate is
@@ -414,6 +420,13 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		"--scenario", scenario,
 		"--timeout-ms", fmt.Sprint(int64(timeout / time.Millisecond)),
 	}, extraArgs...)
+	if scenario == "fixture" {
+		expected, err := json.Marshal(speechExpectedOpening)
+		if err != nil {
+			f.t.Fatalf("encode expected opening: %v", err)
+		}
+		args = append(args, "--expected-sentences-json", string(expected))
+	}
 	cmd := exec.CommandContext(ctx, "node", args...)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
@@ -462,6 +475,11 @@ func (f *speechBrowserFixture) runDriverCheck() {
 		Check struct {
 			Scenarios  []string `json:"scenarios"`
 			Violations []string `json:"violations"`
+			Assertions struct {
+				Valid                  bool `json:"valid"`
+				MissingRejected        bool `json:"missingRejected"`
+				EarlyListeningRejected bool `json:"earlyListeningRejected"`
+			} `json:"observationAssertions"`
 		} `json:"selfCheck"`
 	}
 	if err := json.Unmarshal([]byte(line), &res); err != nil {
@@ -469,6 +487,9 @@ func (f *speechBrowserFixture) runDriverCheck() {
 	}
 	if !res.OK {
 		f.t.Fatalf("driver self-check violations: %v", res.Check.Violations)
+	}
+	if !res.Check.Assertions.Valid || !res.Check.Assertions.MissingRejected || !res.Check.Assertions.EarlyListeningRejected {
+		f.t.Fatalf("driver observation self-check incomplete: %+v", res.Check.Assertions)
 	}
 	found := false
 	for _, s := range res.Check.Scenarios {
