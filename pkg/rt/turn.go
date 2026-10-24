@@ -1611,6 +1611,9 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		// The ASR half of the invalid-response discipline (13-08 built the
 		// LLM half): same ctx, at most ONE retry; the failure count lands
 		// in the event fields when it still fails.
+		if ctx.Err() != nil || !tm.epochCurrent(epoch) {
+			return
+		}
 		attempts = 2
 		transcript, err = tm.asr.Transcribe(ctx, segment)
 	}

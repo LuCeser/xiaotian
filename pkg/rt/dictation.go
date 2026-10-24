@@ -1351,6 +1351,9 @@ func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, turn
 	msgs := tm.buildClassifyMessages(transcript, turnCtx.target)
 	intent, reply, ok := tm.classifyOnce(ctx, msgs)
 	if !ok {
+		if ctx.Err() != nil || !tm.epochCurrent(turnCtx.epoch) {
+			return "", ""
+		}
 		msgs = append(msgs, mimo.Message{
 			Role:    "user",
 			Content: "你刚才的输出不符合要求。请只输出一个 JSON 对象，键为 intent 与 reply，不要输出任何其它内容。",
