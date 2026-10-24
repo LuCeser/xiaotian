@@ -1638,6 +1638,7 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 	text := truncateRunes(strings.TrimSpace(p.Text), maxReplyRunes)
 	var lessonID, word string
 	var version, idx int
+	var write *checkWriteAdmission
 	admitted, invalid := false, false
 	if !tm.applyTurnAt(epoch, func() error {
 		if tm.tutor == nil || !tm.tutor.checking {
@@ -1650,7 +1651,7 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 		idx = p.Index - 1
 		lessonID, version = tm.tutor.lessonID, tm.tutor.version
 		word = tm.tutor.words[idx].Word
-		admitted = true
+		write, admitted = tm.admitCheckWriteLocked()
 		return nil
 	}) {
 		return
@@ -1666,6 +1667,13 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 	if !admitted {
 		return
 	}
+	// The admission covers the write AND its one legal conflict retry: the
+	// save responsibility starts here and survives the turn's cancellation —
+	// a close (or a replacement turn) cancels ctx, but the accepted save runs
+	// to its real outcome on the persist context; only the PRESENTATION stays
+	// bound to the original identity below (1.07b).
+	defer tm.completeCheckWrite(write)
+	persistCtx := context.WithoutCancel(ctx)
 
 	var (
 		correct bool
@@ -1693,7 +1701,7 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 	// word never replays the earlier write (a replayed key would silently
 	// pin the FIRST verdict, the OCR retake lesson).
 	requestID := fmt.Sprintf("%s-verdict-%d-v%d-voice", lessonID, idx, version)
-	res, err := tm.exec.ApplyVerdict(ctx, lessonID, version, requestID, verdict)
+	res, err := tm.exec.ApplyVerdict(persistCtx, lessonID, version, requestID, verdict)
 	if err != nil {
 		var conflict *lesson.ConflictError
 		if !errors.As(err, &conflict) {
@@ -1702,14 +1710,14 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 		}
 		// Conflict: align from the stored truth and retry once on the fresh
 		// version (same discipline as the OCR prefill path).
-		l, gerr := tm.exec.GetLessonState(ctx, lessonID)
+		l, gerr := tm.exec.GetLessonState(persistCtx, lessonID)
 		if gerr != nil {
 			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
 			return
 		}
 		version = l.Version
 		requestID = fmt.Sprintf("%s-verdict-%d-v%d-voice", lessonID, idx, version)
-		res, err = tm.exec.ApplyVerdict(ctx, lessonID, version, requestID, verdict)
+		res, err = tm.exec.ApplyVerdict(persistCtx, lessonID, version, requestID, verdict)
 		if err != nil {
 			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
 			return

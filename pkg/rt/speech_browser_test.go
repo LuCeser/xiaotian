@@ -86,6 +86,12 @@ type speechDriverResult struct {
 	HoldBinaryIn      int `json:"holdBinaryIn"`
 	WSCloseCount      int `json:"wsCloseCount"`
 	LateVerdictEchoes int `json:"lateVerdictEchoes"`
+
+	// voice-verdict-close scenario fields: the state-frame trace after the
+	// settled round (the natural voice turn's evidence) and whether any late
+	// teacher sentence followed the close.
+	VoiceStates          []string `json:"voiceStates"`
+	LateTeacherSentences int      `json:"lateTeacherSentences"`
 }
 
 var speechExpectedOpening = []string{
@@ -461,6 +467,25 @@ func (f *speechBrowserFixture) gateScreenVerdict() (entered, release chan struct
 	return g.entered, g.release
 }
 
+// scriptVoiceCheckVerdict arms the fake providers for ONE spoken verdict turn:
+// the synthetic-mic tone rides the production capture into the real VAD, the
+// fake ASR answers the transcript, and the fake LLM classifies it to
+// check_right on the given word — the natural voice entry (applyVoiceVerdict),
+// the screen taps' sibling. The scripted answers queue behind whatever the
+// connection already consumed.
+func (f *speechBrowserFixture) scriptVoiceCheckVerdict(transcript string, index int) {
+	f.t.Helper()
+	f.asr.mu.Lock()
+	f.asr.script = append(f.asr.script, asrScript{text: transcript})
+	f.asr.mu.Unlock()
+	inner := fmt.Sprintf(`{\"intent\":\"%s\",\"reply\":\"\",\"index\":%d}`, intentCheckRight, index)
+	f.llm.mu.Lock()
+	f.llm.script = append(f.llm.script, llmScript{
+		wire: fmt.Sprintf(`{"choices":[{"message":{"content":"%s"}}]}`, inner),
+	})
+	f.llm.mu.Unlock()
+}
+
 func (f *speechBrowserFixture) url() string { return "http://" + f.ln.Addr().String() + "/" }
 
 // close tears the fixture down: stop accepting, close every live connection,
@@ -538,7 +563,8 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		"--scenario", scenario,
 		"--timeout-ms", fmt.Sprint(int64(timeout / time.Millisecond)),
 	}, extraArgs...)
-	if scenario == "fixture" || scenario == "held-fixture" || scenario == "close-after-opening" || scenario == "screen-verdict-close" {
+	if scenario == "fixture" || scenario == "held-fixture" || scenario == "close-after-opening" ||
+		scenario == "screen-verdict-close" || scenario == "voice-verdict-close" {
 		f.mu.Lock()
 		sentences := append([]string(nil), f.expectedSentences...)
 		f.mu.Unlock()
@@ -643,6 +669,62 @@ func TestCloseDuringScreenVerdict(t *testing.T) {
 	}
 	if len(stored.Verdicts) != 1 || !stored.Verdicts[0].Manual || !stored.Verdicts[0].Correct {
 		t.Fatalf("stored verdicts = %+v, want the accepted manual screen verdict", stored.Verdicts)
+	}
+	m.mu.Lock()
+	pending := len(m.checkWrites)
+	m.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("completed check-write admissions = %d, want 0", pending)
+	}
+}
+
+// TestCloseDuringVoiceVerdict 是 1.07b 的验收：检查阶段的自然语音入口
+// （合成麦克风音调 → 生产采集 → 服务端 VAD → ASR → 检查分类 → 语音判定）
+// 在真实判定写入的持久化门上与关闭竞争——已接纳的判定保存仍然完成（保存
+// 责任不随轮次取消而取消），关闭后没有任何迟到的回显或播报，登记全部收回。
+func TestCloseDuringVoiceVerdict(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedChecking()
+	f.scriptVoiceCheckVerdict("第一个词对了", 1)
+	entered, release := f.gateScreenVerdict()
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseGate)
+
+	driver := f.runDriverAsync("voice-verdict-close", 45*time.Second)
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("spoken verdict did not reach the real persistence gate — the natural voice turn never landed")
+	}
+	m := f.waitFirstManager(5 * time.Second)
+	if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
+		t.Fatal("test close did not obtain session ownership")
+	}
+	releaseGate()
+	res := <-driver
+	if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 || res.LateTeacherSentences != 0 {
+		t.Fatalf("close=%d late echoes=%d late teacher sentences=%d, want 1/0/0",
+			res.WSCloseCount, res.LateVerdictEchoes, res.LateTeacherSentences)
+	}
+	voiceTurn := false
+	for _, v := range res.VoiceStates {
+		if v == StateProcessing {
+			voiceTurn = true
+		}
+	}
+	if !voiceTurn {
+		t.Fatalf("state trace after the settled round = %v, want a real processing turn from the spoken verdict", res.VoiceStates)
+	}
+	f.assertOriginalTasksExited()
+
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if len(stored.Verdicts) != 1 || !stored.Verdicts[0].Manual || !stored.Verdicts[0].Correct {
+		t.Fatalf("stored verdicts = %+v, want the accepted spoken manual verdict", stored.Verdicts)
 	}
 	m.mu.Lock()
 	pending := len(m.checkWrites)
