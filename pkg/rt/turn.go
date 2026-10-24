@@ -400,6 +400,8 @@ type TurnManager struct {
 	// turnAnnouncementInterleave is a narrow test probe immediately before
 	// an ordinary classroom announcement checks its original epoch.
 	turnAnnouncementInterleave func()
+	// starterInterleave gates a registered starter task before it runs.
+	starterInterleave func(func())
 	// speakTurnInterleave and speakRegistrationInterleave are narrow test
 	// probes around speakTurn's initial registration.
 	speakTurnInterleave         func()
@@ -838,14 +840,18 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
 	ctx, cancel := context.WithCancel(context.Background())
+	var epoch uint64
 	if !tm.applySessionEffect(func() error {
 		tm.turnCancel = cancel
+		epoch = tm.epoch
 		return nil
 	}) {
 		cancel()
 		return
 	}
-	go tm.runNaturalEnding(s, ctx, cancel, tm.noDueWordsTextForNow(), purposeNoDue, ReasonNoDueWords)
+	go tm.runStarterTask(func() {
+		tm.runNaturalEndingAt(s, epoch, ctx, cancel, tm.noDueWordsTextForNow(), purposeNoDue, ReasonNoDueWords)
+	})
 }
 
 // startCompletedSession restores the completion state for an
@@ -917,11 +923,13 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
 	ctx, cancel := context.WithCancel(context.Background())
+	var epoch uint64
 	if !tm.applySessionEffect(func() error {
 		// A close that landed after the session_ready send still gets no
 		// greeting: the entry gates (runAnnouncementDisplayAt) kill the
 		// goroutine even if it launches, but refusing here is the fast path.
 		tm.turnCancel = cancel
+		epoch = tm.epoch
 		return nil
 	}) {
 		cancel()
@@ -934,9 +942,19 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 		// first word's text; the TTS input stays the raw greeting.
 		display = greetingMaskedText(total)
 	}
-	go tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeGreeting, func() {
-		tm.announceAckedLocked()
+	go tm.runStarterTask(func() {
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeGreeting, func() {
+			tm.announceAckedLocked()
+		})
 	})
+}
+
+func (tm *TurnManager) runStarterTask(task func()) {
+	if tm.starterInterleave != nil {
+		tm.starterInterleave(task)
+		return
+	}
+	task()
 }
 
 // lessonViewOf projects a lesson row into the wire LessonView (test mode and
