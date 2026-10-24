@@ -14,7 +14,10 @@
 //   J14 check & end — the REAL 对/错 buttons, one submit, honest
 //                     review_result + saved copy, the summary fully acked
 //                     BEFORE session_ended(lesson_complete), mic + playback
-//                     resources released, uplink frozen;
+//                     resources released, uplink frozen; plus the same tail
+//                     under a REAL partial save (the parent deletes a word
+//                     mid-check) — the honest 1/2 copy everywhere, never a
+//                     dressed-up success;
 //   J15/J16 follow in later tests of this file (主动结束、完成后再开/换科).
 'use strict';
 
@@ -425,6 +428,142 @@ test('J13+J14 last word → one check entry, masked answers, real check submit, 
   expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
 
   // Persistence: one submitted english row with the real verdict counts.
+  const lessonRows = await lessonsNow();
+  expect(lessonRows).toHaveLength(1);
+  expect(lessonRows[0]).toMatchObject({
+    category: 'english', word_count: 2, lesson_id: 'e2e-m1-browser',
+    stage: 'submitted', correct: 2, wrong: 0,
+  });
+});
+
+// J14's save-failure leg (review PR #72 P2): the only product-real way a
+// BROWSER journey can stage a save failure — SubmitReview goes Python/SQLite
+// and the stub layer cannot inject one — is the parent surface itself: while
+// the check panel waits for the verdicts, DELETE /words really removes one
+// of the two cards, so the submit's `review` batch finds it gone and skips
+// it (updated 1 of 2 requested, missing 1). The page must then narrate the
+// PARTIAL save honestly in every channel — resultText, banner, and the
+// teacher's spoken summary — and the ending must still complete. (The hard
+// error path — the python subprocess itself failing — has no browser-layer
+// trigger; that boundary belongs to the Go tests.)
+test('J14 partial save: the parent deletes a word mid-check → the honest 1/2 copy, the ending still completes', async ({ page }) => {
+  await installRtObserver(page);
+  await installFakeMic(page);
+  const words = ['e2e-fin-ps-a', 'e2e-fin-ps-b'];
+  const seed = await svc.seedWords({
+    category: 'english', unit: 'e2e-m1-fin-ps', entries: words.map((word) => ({ word })),
+  });
+  expect(seed.ok, 'english seed').toBeTruthy();
+
+  // Same deterministic corpus as the J13+J14 journey, EXCEPT the battle
+  // summary gains a THIRD sentence: 「全部都写对了，你真棒！」 ends at ！, so
+  // the partial-save suffix 「本次保存 1/2 个。」 is its own speakable
+  // sentence (splitSentences) — the tts FIFO must script it too.
+  await stubScripts({
+    asr: [{ content: '好了' }, { content: '好了' }],
+    llm: [
+      { content: '{"intent":"confirm","reply":"好"}' },
+      { content: '{"intent":"confirm","reply":"好"}' },
+    ],
+    image: [],
+    tts: [
+      { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
+      { ms: 1200, match: '第 2 个词' },
+      { ms: 1200, match: '全都写完啦' }, { ms: 1200, match: '我们一起检查' },
+      { ms: 1200, match: '都默写完了' }, { ms: 1200, match: '全部都写对了' },
+      { ms: 1200, match: '本次保存 1/2' },
+    ],
+  });
+
+  // The lesson reaches its check stage through the REAL journey: greeting
+  // fully acked, two 好了 confirms, the check bridge acked and settled.
+  await page.goto(svc.url + 'tutor/');
+  await page.locator('#rt-start').click();
+  const readyI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'english'
+    && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2
+    && e.msg.lesson.words.every((w) => w === ''), 'session_ready: english, answers masked');
+  const greeting = await awaitRound(page, readyI, 3, 'greeting');
+  await awaitAcked(page, greeting, 'greeting');
+  await childSaysDone(page);
+  const lu1I = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'lesson_update'
+    && e.msg.current_index === 1, 'first 好了 advances to word 2');
+  const word2 = await awaitRound(page, lu1I, 1, 'word-2 announcement');
+  await awaitAcked(page, word2, 'word-2 announcement');
+  await childSaysDone(page);
+  let csI = -1;
+  await waitWs(page, (log) => {
+    const lu = log.find((e) => e.dir === 'in' && e.type === 'lesson_update' && e.msg.current_index === 2);
+    const cs = log.find((e) => e.dir === 'in' && e.type === 'check_started');
+    if (lu && cs && cs.i > lu.i) { csI = cs.i; return true; }
+    return false;
+  }, { timeoutMs: 30000, label: 'boundary lesson_update precedes check_started' });
+  const started = (await controls(page)).find((e) => e.type === 'check_started');
+  expect(started.msg.words).toEqual(words);
+  const bridge = await awaitRound(page, csI, 2, 'check bridge');
+  await awaitAcked(page, bridge, 'check bridge');
+
+  // THE REAL SAVE FAILURE: the parent deletes word 2 through the real parent
+  // REST surface. The classroom keeps its in-session snapshot and drives on;
+  // only the submit's FSRS write will find the card gone.
+  const del = await svc.deleteWords({ category: 'english', words: [words[1]] });
+  expect(del.ok, 'parent delete REST call').toBeTruthy();
+  expect(del.body && del.body.deleted, 'one card really deleted mid-check').toBe(1);
+
+  // J14's tail under the partial save: real verdicts, one submit, the
+  // HONEST review_result sets — 2 requested / 1 updated / 1 missing, never
+  // a fabricated full success (S-05, prohibition P3).
+  const rows = page.locator('#rt-check .rt-check-row');
+  for (let i = 0; i < words.length; i++) {
+    await rows.nth(i).locator('.rt-check-btn', { hasText: /^对$/ }).click();
+    await waitWs(page, (log) => log.some((e) => e.dir === 'out' && e.type === 'check_verdict'
+      && e.msg.word_index === i)
+      && log.some((e) => e.dir === 'in' && e.type === 'check_verdicts'
+        && (e.msg.verdicts || []).some((v) => v.word_index === i && v.manual && v.correct)),
+    { label: 'verdict ' + (i + 1) + ' tapped and echoed' });
+  }
+  await expect(page.locator('#rt-check .rt-check-submit')).toBeEnabled();
+  await page.locator('#rt-check .rt-check-submit').click();
+  const submitI = await waitIndex(page, (e) => e.dir === 'out' && e.type === 'check_submit',
+    'check_submit sent');
+  const resI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'review_result'
+    && e.msg.requested === 2 && e.msg.updated === 1 && e.msg.missing === 1
+    && e.msg.unchecked === false,
+  'honest review_result: 2 requested, only 1 really saved');
+  expect(resI).toBeGreaterThan(submitI);
+
+  // The ending still completes — the summary (now THREE sentences, the last
+  // one the partial-save note) fully acked by the production player before
+  // session_ended(lesson_complete).
+  const summary = await awaitRound(page, resI, 3, 'battle summary with the honest 1/2 sentence');
+  await awaitAcked(page, summary, 'battle summary', { settle: false });
+  const lastAckI = Math.max(...(await controls(page))
+    .filter((e) => e.dir === 'out' && e.type === 'sentence_ack'
+      && summary.sids.includes(e.msg.sentence_id))
+    .map((e) => e.i));
+  const endedI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'lesson_complete', 'session_ended(lesson_complete) despite the partial save');
+  expect(endedI, 'the goodbye still follows the summary\'s last real ack').toBeGreaterThan(lastAckI);
+
+  // Honest copy in EVERY channel: the panel's resultText, the banner, and
+  // the teacher really SPOKE the partial save (the third summary sentence
+  // reached the vendor — not just the screen).
+  expect((await observe(page)).check.resultText, 'the panel\'s honest partial-save copy')
+    .toBe('保存了 1 / 2 个，别担心，下次会补上。');
+  await expect(page.locator('#rt-banner')).toContainText('今天的 2 个词都默写完了');
+  await expect(page.locator('#rt-banner'))
+    .toContainText('保存了 1 / 2 个，别担心，下次会补上。');
+  await expect(page.locator('#rt-banner .rt-practice-btn'), 'the ending still offers 再练一组')
+    .toBeVisible();
+  const state = await stubState();
+  const spoken = state.requests.filter((r) => r.category === 'tts').map((r) => r.text);
+  expect(spoken.some((t) => t.includes('本次保存 1/2 个')),
+    'the teacher really SPOKE the partial save').toBe(true);
+  expect(state.remaining.tts, 'every scripted sentence served, none extra').toBe(0);
+  expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
+
+  // The classroom row still lands — the VERDICTS were real (2 对); only the
+  // FSRS refresh went 1/2, and that is review_result's story, not the row's.
   const lessonRows = await lessonsNow();
   expect(lessonRows).toHaveLength(1);
   expect(lessonRows[0]).toMatchObject({
