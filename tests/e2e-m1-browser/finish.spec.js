@@ -206,7 +206,7 @@ async function ttsCountStable() {
   return { first, second, stable: first === second };
 }
 
-test('J15 active end stops the classroom: ask-park, mid-greeting, listening', async ({ page }) => {
+test('J15 active end stops the classroom: ask-park, mid-answer, mid-greeting, listening', async ({ page }) => {
   await installRtObserver(page);
   await installFakeMic(page);
   // BOTH subjects hold due words → the generic entry parks on the subject ask.
@@ -217,15 +217,18 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
     const seed = await svc.seedWords({ category, unit, entries: words.map((word) => ({ word })) });
     expect(seed.ok, 'seed ' + category).toBeTruthy();
   }
-  const askStreaming = (log) => log.some((e) => e.dir === 'in' && e.type === 'subject_ask')
-    && log.some((e) => e.dir === 'in' && e.type === 'audio_start')
-    && log.some((e) => e.dir === 'in' && e.kind === 'binary' && e.bytes > 0);
+  const askStreamingFrom = (fromI) => (log) =>
+    log.some((e) => e.dir === 'in' && e.type === 'subject_ask' && e.i > fromI)
+    && log.some((e) => e.dir === 'in' && e.type === 'audio_start' && e.i > fromI)
+    && log.some((e) => e.dir === 'in' && e.kind === 'binary' && e.bytes > 0 && e.i > fromI);
+  // Log indices start at 0, so "from the very beginning" is -1.
 
-  // ---- 选科中: the page offers NO end affordance before session_ready — the
-  // 结束 button is still disabled while the ask parks. The child's only exit
-  // is leaving the page; that must stop the ask with no classroom created.
-  // The whole ask is scripted: an in-flight round may legitimately finish
-  // synthesizing, but NOTHING new may follow once the socket is gone.
+  // ---- 选科中 (PR #72 review P2): the clarify is a live session phase, so
+  // the 结束 button is offered the MOMENT the ask appears — the child's exit
+  // from the question is a real end_session, never "leave the page". The
+  // whole ask is scripted: an in-flight round may legitimately finish
+  // synthesizing, but NOTHING new may follow once the session is gone, and
+  // the ended ask must leave no classroom behind.
   await stubScripts({
     asr: [], llm: [], image: [],
     tts: [
@@ -236,16 +239,74 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
   });
   await page.goto(svc.url + 'tutor/');
   await page.locator('#rt-start').click();
-  await waitWs(page, askStreaming, { label: 'ask audio streaming' });
+  await waitWs(page, askStreamingFrom(-1), { label: 'ask audio streaming' });
   await expect(page.locator('#rt-subject-ask')).toBeVisible();
-  await expect(page.locator('#rt-end'), 'no end button pre-session_ready').toBeDisabled();
+  await expect(page.locator('#rt-end'), 'the ask phase offers the explicit end').toBeEnabled();
   expect(await lessonsNow(), 'no classroom row while parked on the ask').toHaveLength(0);
-  await page.reload();
-  await page.waitForTimeout(1500); // let the server see the dead socket
-  expect(await lessonsNow(), 'leaving the ask creates no classroom').toHaveLength(0);
+  await page.locator('#rt-end').click();
+  const end1I = await waitIndex(page, (e) => e.dir === 'out' && e.type === 'end_session',
+    'end_session sent from the ask park');
+  const ended1I = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'client_end', 'session_ended(client_end) from the ask park');
+  expect(ended1I, 'the goodbye follows the end_session that caused it').toBeGreaterThan(end1I);
+  await waitWs(page, async () => (await playbackState(page)).activeSourceKeys.length === 0,
+    { label: 'the ask-park end stopped the live ask audio' });
+  for (const t of (await micInfo(page)).tracks) expect(t.state, 'mic released by the ask-park end').toBe('ended');
+  await expect(page.locator('#rt-subject-ask'), 'a stopped session retires the clarify panel').toBeHidden();
+  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'session_ready'),
+    'no classroom ever opened from the ended ask').toHaveLength(0);
+  await awaitSocketClosed(page, ended1I, 'the ask-park end');
+  expect(await lessonsNow(), 'ending the ask creates no classroom').toHaveLength(0);
+  await page.waitForTimeout(1200);
+  expect((await controls(page)).filter((e) => e.i > ended1I && e.dir === 'in' && e.type !== 'pong'),
+    'no control frame follows the goodbye').toEqual([]);
   const afterAsk = await ttsCountStable();
-  expect(afterAsk.stable, 'no vendor traffic revives after the page left (' + afterAsk.first + '→' + afterAsk.second + ')').toBe(true);
+  expect(afterAsk.stable, 'no vendor traffic revives after the end (' + afterAsk.first + '→' + afterAsk.second + ')').toBe(true);
   expect(afterAsk.second, 'at most the one scripted ask round was served').toBeLessThanOrEqual(3);
+  expect((await stubState()).violations).toEqual([]);
+
+  // ---- 取词中 (PR #72 review P2): a BUTTON pick runs the whole classroom
+  // init on the transport's read loop, so an end_session behind it can only
+  // land AFTER session_ready — the one browser-reachable window where the
+  // subject binding and the due-word fetch (取词/建课) run OFF the read loop
+  // is the VOICE answer: the spoken 英语 rides a turn goroutine while the
+  // transport stays free. The end click lands just after the answer clip
+  // finishes sounding — inside the 700 ms VAD hangover, before the answer
+  // turn dispatches — and races the whole binding→fetch→建行 pipeline.
+  // Whichever side the scheduler lets win, the convergent invariant is the
+  // acceptance: no session_ready, no lesson row, no new announcement (the
+  // narrower in-fetch interleavings stay pinned by pkg/rt's own races).
+  // No reload between legs, so the restarted connection reuses the epoch 0 /
+  // t1-s* ledger keys of leg 1's ask — every round assertion rides the
+  // bounded *Since helpers (ws log index + player-trace slice), never the
+  // unbounded first-match forms (same discipline as the J16 practice leg).
+  await stubScripts({
+    asr: [{ content: '英语' }], llm: [], image: [],
+    tts: [
+      { ms: 1200, match: '都有要默写的词语' },
+      { ms: 1200, match: '想先默写哪一科' },
+      { ms: 1200, match: '也可以点屏幕上的按钮' },
+    ],
+  });
+  const mark2 = (await playbackState(page)).trace.length;
+  await page.locator('#rt-start').click();
+  await waitWs(page, askStreamingFrom(ended1I), { label: 'ask audio streaming (voice-answer leg)' });
+  const ask2 = await awaitRound(page, ended1I, 3, 'ask (voice-answer leg)');
+  await ackedSince(page, ask2, ended1I, mark2, 'ask (voice-answer leg)');
+  await expect(page.locator('#rt-end'), 'the re-asked clarify offers the end again').toBeEnabled();
+  await page.waitForTimeout(1000); // past the 500 ms echo tail + poll margin
+  await playPcm16(page, CONFIRM_CLIP, 16000); // the spoken 英语 answer (stub-scripted)
+  await page.locator('#rt-end').click(); // the answer is still inside its hangover
+  const ended2I = await waitIndexSince(page, ended1I, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'client_end', 'session_ended(client_end) with the answer in flight');
+  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'session_ready'),
+    'the racing answer never opened a classroom').toHaveLength(0);
+  expect(await lessonsNow(), 'the racing answer created no lesson row').toHaveLength(0);
+  await awaitSocketClosed(page, ended2I, 'the mid-answer end');
+  for (const t of (await micInfo(page)).tracks) expect(t.state, 'mic released by the mid-answer end').toBe('ended');
+  const afterAnswer = await ttsCountStable();
+  expect(afterAnswer.stable, 'no vendor traffic revives after the end').toBe(true);
+  expect(afterAnswer.second, 'at most the two scripted ask rounds were served').toBeLessThanOrEqual(6);
   expect((await stubState()).violations).toEqual([]);
 
   // ---- 播报中: end MID-GREETING playback → the goodbye, the classroom row
@@ -258,18 +319,18 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
     tts: [{ ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }],
   });
   await page.locator('#rt-start').click();
-  await waitWs(page, askStreaming, { label: 'ask audio streaming (2nd session)' });
+  await waitWs(page, askStreamingFrom(ended2I), { label: 'ask audio streaming (3rd session)' });
   await page.locator('#rt-subject-en').click();
-  const readyI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+  const ready3I = await waitIndexSince(page, ended2I, (e) => e.dir === 'in' && e.type === 'session_ready'
     && e.msg.category === 'english'
     && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2,
   'the picked english classroom opens');
   await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.kind === 'binary' && e.bytes > 0
-    && e.i > readyI), { label: 'greeting audio streaming' });
+    && e.i > ready3I), { label: 'greeting audio streaming' });
   await page.locator('#rt-end').click();
-  const ended2I = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
+  const ended3I = await waitIndexSince(page, ready3I, (e) => e.dir === 'in' && e.type === 'session_ended'
     && e.msg.reason === 'client_end', 'session_ended(client_end) mid-greeting');
-  expect(ended2I, 'the goodbye follows the classroom it closes').toBeGreaterThan(readyI);
+  expect(ended3I, 'the goodbye follows the classroom it closes').toBeGreaterThan(ready3I);
   await waitWs(page, async () => (await playbackState(page)).activeSourceKeys.length === 0,
     { label: 'the explicit end cleared every live audio source' });
   expect(await page.evaluate(() => window.__rtTutor.capture.isCapturing),
@@ -278,12 +339,12 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
   expect(rowsAfter, 'the classroom row stands — no re-created classroom').toHaveLength(1);
   expect(rowsAfter[0]).toMatchObject({ category: 'english', word_count: 2, lesson_id: 'e2e-m1-browser' });
   await page.waitForTimeout(1200);
-  expect((await controls(page)).filter((e) => e.i > ended2I && e.dir === 'in' && e.type !== 'pong'),
+  expect((await controls(page)).filter((e) => e.i > ended3I && e.dir === 'in' && e.type !== 'pong'),
     'no control frame follows the goodbye — no new opening').toEqual([]);
-  await awaitSocketClosed(page, ended2I, 'the explicit mid-greeting end');
+  await awaitSocketClosed(page, ended3I, 'the explicit mid-greeting end');
   const afterMid = await ttsCountStable();
   expect(afterMid.stable, 'no vendor traffic revives after the end').toBe(true);
-  expect(afterMid.second, 'at most the ask + greeting rounds were served').toBeLessThanOrEqual(9);
+  expect(afterMid.second, 'at most the ask + greeting rounds were served').toBeLessThanOrEqual(12);
   expect((await stubState()).violations).toEqual([]);
 
   // ---- 收听中: the full greeting acks, listening settles, THEN end — no
@@ -296,15 +357,18 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
       { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
     ],
   });
+  // Same key-collision discipline as leg 2: the resumed classroom's greeting
+  // reuses the epoch 0 / t1-s* keys of the earlier asks on this document.
+  const mark4 = (await playbackState(page)).trace.length;
   await page.locator('#rt-start').click();
-  const ready3I = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
-    && e.msg.category === 'english' && e.i > ended2I, 'the english classroom resumes directly');
-  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'subject_ask' && e.i > ended2I),
+  const ready4I = await waitIndexSince(page, ended3I, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'english', 'the english classroom resumes directly');
+  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'subject_ask' && e.i > ended3I),
     'an in-page restart never re-asks the subject').toHaveLength(0);
-  const greeting = await awaitRound(page, ready3I, 3, 'greeting (resume)');
-  await awaitAcked(page, greeting, 'greeting (resume)');
+  const greeting = await awaitRound(page, ready4I, 3, 'greeting (resume)');
+  await ackedSince(page, greeting, ended3I, mark4, 'greeting (resume)');
   await page.locator('#rt-end').click();
-  const ended3I = await waitIndex(page, (e) => e.i > ended2I && e.dir === 'in' && e.type === 'session_ended'
+  const ended4I = await waitIndexSince(page, ended3I, (e) => e.dir === 'in' && e.type === 'session_ended'
     && e.msg.reason === 'client_end', 'session_ended(client_end) while listening');
   await page.waitForTimeout(1200);
   const log = await controls(page);
@@ -313,9 +377,9 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
   // ping/pong is the transport keepalive and may race the goodbye; every
   // OTHER downlink frame must stop at it. The page then closes the socket
   // itself — J14's release contract reaches the explicit end too.
-  expect(log.filter((e) => e.i > ended3I && e.dir === 'in' && e.type !== 'pong'),
+  expect(log.filter((e) => e.i > ended4I && e.dir === 'in' && e.type !== 'pong'),
     'no server frame after the goodbye').toEqual([]);
-  await awaitSocketClosed(page, ended3I, 'the explicit listening end');
+  await awaitSocketClosed(page, ended4I, 'the explicit listening end');
   for (const t of (await micInfo(page)).tracks) expect(t.state, 'mic released by the end').toBe('ended');
   const frozen = await wsStats(page);
   await page.waitForTimeout(1200);
@@ -323,7 +387,7 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
     .toBe(frozen.outBinaryFrames);
   const afterListen = await ttsCountStable();
   expect(afterListen.stable, 'no vendor traffic revives after the end').toBe(true);
-  expect(afterListen.second, 'at most the scripted rounds were served').toBeLessThanOrEqual(12);
+  expect(afterListen.second, 'at most the scripted rounds were served').toBeLessThanOrEqual(15);
   expect((await stubState()).violations, 'the strict stub saw only scripted traffic').toEqual([]);
   expect(await lessonsNow(), 'still exactly the one english row').toHaveLength(1);
 });
