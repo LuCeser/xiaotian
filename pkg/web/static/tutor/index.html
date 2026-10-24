@@ -223,6 +223,11 @@
         subjectZhBtn.disabled = false;
         subjectEnBtn.disabled = false;
         subjectAskEl.hidden = false;
+        // J15 (PR #72 review P2): the clarify is a live session phase — the
+        // mic is open and the teacher is mid-question — so the explicit end
+        // is offered the moment the ask appears, not only after
+        // session_ready. Ending here stops the ask with no classroom built.
+        endBtn.disabled = false;
       });
       function pickSubject(category) {
         subjectZhBtn.disabled = true;
@@ -669,6 +674,11 @@
         // mic stream alive — MediaStreamTrack.stop happens inside.
         capture.stop();
         playback.stopNow();
+        // J15 (PR #72 review P2): a stopped session retires the clarify
+        // panel too — its pick buttons must not outlive the session (a
+        // post-end tap could only fire into the closed socket). The next
+        // subject_ask re-shows and re-enables it.
+        subjectAskEl.hidden = true;
         startBtn.disabled = false;
         started = false;
       }
