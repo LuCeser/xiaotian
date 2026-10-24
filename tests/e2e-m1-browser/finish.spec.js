@@ -705,6 +705,85 @@ test('J16 finish chinese, reload → the english classroom opens on its own word
     .toMatchObject({ category: 'english', word_count: 2, stage: 'submitted', correct: 2 });
 });
 
+// ---------------------------------------------------------------------------
+// J16's in-page reopen (review PR #72 P2): the reload leg above proves the
+// OTHER subject opens on a fresh page; the leg below proves the COMPLETED
+// page can re-initiate ITSELF — a real 「再练一组」 tap on the SAME document,
+// player and flags still warm from leg 1.
+//
+// The practice connection restarts the server's id namespace from scratch
+// (fresh session → epoch 0, turn 1 — the SAME t1-s* ledger keys as leg 1),
+// so every first-match helper would shadow leg-2 evidence with leg-1
+// entries. The *Since helpers below bound the ws log (index > fromI) and
+// the player trace (slice at the tap) instead — leg-2 evidence must live
+// entirely after the tap.
+async function waitIndexSince(page, fromI, pred, label) {
+  let at = -1;
+  await waitWs(page, (log) => {
+    const hit = log.find((e) => e.i > fromI && pred(e));
+    if (hit) at = hit.i;
+    return at >= 0;
+  }, { timeoutMs: 30000, label });
+  return at;
+}
+
+async function ackedSince(page, round, fromI, traceMark, label, { settle = true } = {}) {
+  await waitWs(page, (log) => {
+    const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack' && e.i > fromI
+      && e.msg.epoch === round.epoch && round.sids.includes(e.msg.sentence_id));
+    return acks.length === round.sids.length;
+  }, { timeoutMs: 30000, label: label + ' acked by the production player (this round)' });
+  const since = (await playbackState(page)).trace.slice(traceMark);
+  for (const sid of round.sids) {
+    expect(playedBeforeAck(since, round.epoch, sid), label + ': real onended before ack ' + sid).toBe(true);
+  }
+  if (settle) {
+    await waitWs(page, (log) => listeningAfterPlayback(log.filter((e) => e.i > fromI), round.epoch, round.sids),
+      { label: label + ': listening only after the last ack (this round)' });
+  }
+}
+
+// The practice tail: the same manual 对/错 gate, but the wrap line is ONE
+// sentence, review_result reports the practice-record counts, and the ending
+// is practice_complete with NO 再练一组 (one tap = one set, bounded loop).
+async function practiceSubmitNaturalEnd(page, words, fromI, traceMark) {
+  const rows = page.locator('#rt-check .rt-check-row');
+  for (let i = 0; i < words.length; i++) {
+    await rows.nth(i).locator('.rt-check-btn', { hasText: /^对$/ }).click();
+    await waitWs(page, (log) => log.some((e) => e.i > fromI && e.dir === 'out' && e.type === 'check_verdict'
+      && e.msg.word_index === i)
+      && log.some((e) => e.i > fromI && e.dir === 'in' && e.type === 'check_verdicts'
+        && (e.msg.verdicts || []).some((v) => v.word_index === i && v.manual && v.correct)),
+    { label: 'practice verdict ' + (i + 1) + ' tapped and echoed' });
+  }
+  await expect(page.locator('#rt-check .rt-check-submit')).toBeEnabled();
+  await page.locator('#rt-check .rt-check-submit').click();
+
+  const submitI = await waitIndexSince(page, fromI, (e) => e.dir === 'out' && e.type === 'check_submit',
+    'practice check_submit sent');
+  const resI = await waitIndexSince(page, fromI, (e) => e.dir === 'in' && e.type === 'review_result'
+    && e.msg.requested === words.length && e.msg.updated === words.length && e.msg.unchecked === false,
+  'honest practice review_result: ' + words.length + ' recorded');
+  expect(resI).toBeGreaterThan(submitI);
+
+  const summary = await awaitRound(page, resI, 1, 'practice wrap line');
+  await ackedSince(page, summary, fromI, traceMark, 'practice wrap line', { settle: false });
+  const lastAckI = Math.max(...(await controls(page))
+    .filter((e) => e.i > fromI && e.dir === 'out' && e.type === 'sentence_ack'
+      && summary.sids.includes(e.msg.sentence_id))
+    .map((e) => e.i));
+  const endedI = await waitIndexSince(page, fromI, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'practice_complete', 'session_ended(practice_complete)');
+  expect(endedI, 'the wrap ending follows the wrap line\'s last real ack').toBeGreaterThan(lastAckI);
+
+  await expect(page.locator('#rt-banner')).toContainText('这组练习完成啦');
+  expect((await observe(page)).check.resultText, 'the practice records saved — honest copy')
+    .toBe('学习记录保存好了，' + words.length + ' 个词都记上啦。');
+  await expect(page.locator('#rt-banner .rt-practice-btn'), 'no second practice button (bounded loop)')
+    .toHaveCount(0);
+  return endedI;
+}
+
 test('J16 empty vocabulary ends through the real no-due result', async ({ page }) => {
   await installRtObserver(page);
   // No seeds at all: the real RunDue decides, the teacher explains, the
