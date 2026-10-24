@@ -115,8 +115,11 @@ func TestCloseSnapshot(t *testing.T) {
 
 		close(g.release)
 		ttAwaitGate(t, closed, "close did not finish")
-		if got := ttEventCount(t, log, EventUncheckedFallback); got != 1 {
-			t.Fatalf("unchecked_fallback events = %d, want 1", got)
+		// The owned fallback runs on its own goroutine (1.11: it waits for
+		// captured saves before deciding), so its terminal event settles by
+		// polling — the close call itself has long returned by then.
+		if !waitFor(t, 5*time.Second, func() bool { return ttEventCount(t, log, EventUncheckedFallback) == 1 }) {
+			t.Fatalf("unchecked_fallback events = %d, want 1", ttEventCount(t, log, EventUncheckedFallback))
 		}
 		if got := ttCompleteCheckCalls(g.fakeExecutor); got != 1 {
 			t.Fatalf("complete_check calls = %d, want 1", got)
@@ -140,12 +143,13 @@ func TestCloseSnapshot(t *testing.T) {
 
 		close(g.release)
 		ttAwaitGate(t, closed, "first close did not finish")
-
+		// Same 1.11 shape: the first close returned, the owned fallback
+		// finishes on its own goroutine — poll for its terminal event.
+		if !waitFor(t, 5*time.Second, func() bool { return ttEventCount(t, log, EventUncheckedFallback) == 1 }) {
+			t.Fatalf("unchecked_fallback events = %d, want 1", ttEventCount(t, log, EventUncheckedFallback))
+		}
 		if got := ttCompleteCheckCalls(g.fakeExecutor); got != 1 {
 			t.Fatalf("complete_check calls = %d, want 1 (one-time ownership)", got)
-		}
-		if got := ttEventCount(t, log, EventUncheckedFallback); got != 1 {
-			t.Fatalf("unchecked_fallback events = %d, want 1", got)
 		}
 	})
 }

@@ -87,12 +87,14 @@ func TestCloseSnapshotAtomic(t *testing.T) {
 
 		// The claim decided on the POST-presentation state: the classroom
 		// was in checking when it closed, so the fallback is owned and
-		// attempted exactly once, and the goodbye stays the last word.
+		// attempted exactly once, and the goodbye stays the last word. The
+		// owned fallback runs on its own goroutine (1.11): poll for its
+		// terminal event, then judge the rest.
+		if !waitFor(t, 5*time.Second, func() bool { return ttEventCount(t, log, EventUncheckedFallback) == 1 }) {
+			t.Fatalf("unchecked_fallback events = %d, want 1", ttEventCount(t, log, EventUncheckedFallback))
+		}
 		if got := ttCompleteCheckCalls(exec); got != 1 {
 			t.Fatalf("complete_check calls = %d, want 1 (the owned fallback)", got)
-		}
-		if got := ttEventCount(t, log, EventUncheckedFallback); got != 1 {
-			t.Fatalf("unchecked_fallback events = %d, want 1", got)
 		}
 		stage, unchecked := ttRowStage(t, exec)
 		if stage != lesson.StageSubmitted || !unchecked {

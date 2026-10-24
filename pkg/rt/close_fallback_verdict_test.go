@@ -7,12 +7,13 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 )
 
-// TestCloseFallbackAfterVerdictCommit pins the close fallback's handling of
-// admitted writes that commit AFTER the close snapshot (issue #69 备选一
-// 步骤 9): a verdict write that raised the row version must not silently
-// kill the fallback — the authoritative row is read lock-free and the latch
-// retried once — and an already-admitted FORMAL submit owns the one FSRS
-// write: the fallback replays the latch idempotently and writes nothing.
+// TestCloseFallbackAfterVerdictCommit pins the close fallback's coordination
+// with admitted writes (issue #69 路径 A 1.11): the fallback AWAITS the
+// saves the close claim captured, then reads the AUTHORITATIVE row — never
+// the snapshot's pre-close version — and competes for the latch exactly
+// once on the fresh version. A verdict committed after the snapshot thus
+// still gets its fallback; an already-admitted FORMAL submit owns the one
+// FSRS write and the fallback saves nothing on top of the submitted row.
 func TestCloseFallbackAfterVerdictCommit(t *testing.T) {
 	t.Run("a verdict committed after the snapshot still gets its fallback", func(t *testing.T) {
 		words := newFakeWords(ttCards("苹果", "香蕉"))
@@ -28,17 +29,20 @@ func TestCloseFallbackAfterVerdictCommit(t *testing.T) {
 		ttAwaitGate(t, entered, "the verdict write was not entered")
 		verdictEchoes := s.countOf(TypeCheckVerdicts)
 
-		tm.Close(s) // transport death: claim owns the fallback at version v
+		// Transport death: the claim owns the fallback and the close
+		// returns at once; the owned persistence then WAITS for the parked
+		// verdict write instead of racing the snapshot's stale version.
+		tm.Close(s)
 		close(release)
 
-		// The fallback's first latch write conflicts on the verdict's
-		// version bump; the authoritative re-read retries once and the
-		// fallback lands: submitted+unchecked, one degraded batch.
-		if got := ttCompleteCheckCalls(exec); got != 2 {
-			t.Fatalf("complete_check calls = %d, want 2 (stale snapshot + authoritative retry)", got)
+		// The fallback's single complete_check runs on the AUTHORITATIVE
+		// version the waited verdict left behind: submitted+unchecked, one
+		// degraded batch — no stale first attempt, no retry ladder.
+		if !waitFor(t, 5*time.Second, func() bool { return ttEventCount(t, log, EventUncheckedFallback) == 1 }) {
+			t.Fatalf("unchecked_fallback events = %d, want 1", ttEventCount(t, log, EventUncheckedFallback))
 		}
-		if got := ttEventCount(t, log, EventUncheckedFallback); got != 1 {
-			t.Fatalf("unchecked_fallback events = %d, want 1", got)
+		if got := ttCompleteCheckCalls(exec); got != 1 {
+			t.Fatalf("complete_check calls = %d, want 1 (the authoritative latch only)", got)
 		}
 		batches := words.submissions()
 		if len(batches) != 1 || len(batches[0]) != 2 {
@@ -72,22 +76,27 @@ func TestCloseFallbackAfterVerdictCommit(t *testing.T) {
 		entered, release := exec.gateCompleteCheck()
 		go tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-formal"}))
 		ttAwaitGate(t, entered, "the formal submit latch was not entered")
+		stateReads := len(exec.stateIDCalls())
 
 		// The transport dies inside that window: the claim still sees
-		// checking=true and owns the fallback, whose latch write replays
-		// the submitted row IDEMPOTENTLY — the formal submit keeps the one
-		// FSRS write.
+		// checking=true and owns the fallback, which waits for the submit
+		// to finish and then reads the row AUTHORITATIVELY — submitted
+		// means the formal submit owns the save and the fallback neither
+		// replays the latch nor writes FSRS.
 		tm.Close(s)
 		close(release)
 
 		if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 1 }) {
 			t.Fatalf("review writes = %d, want exactly the formal submit's one", len(words.submissions()))
 		}
-		if got := ttCompleteCheckCalls(exec); got != 2 {
-			t.Fatalf("complete_check calls = %d, want 2 (formal latch + fallback replay)", got)
+		if !waitFor(t, 5*time.Second, func() bool { return len(exec.stateIDCalls()) > stateReads }) {
+			t.Fatal("the fallback never read the authoritative row after waiting")
+		}
+		if got := ttCompleteCheckCalls(exec); got != 1 {
+			t.Fatalf("complete_check calls = %d, want 1 (the formal submit's own latch)", got)
 		}
 		if got := ttEventCount(t, log, EventUncheckedFallback); got != 0 {
-			t.Fatalf("unchecked_fallback events = %d, want 0 (latch replay writes nothing)", got)
+			t.Fatalf("unchecked_fallback events = %d, want 0 (the fallback yields to the submitted row)", got)
 		}
 		stage, unchecked := ttRowStage(t, exec)
 		if stage != lesson.StageSubmitted || unchecked {

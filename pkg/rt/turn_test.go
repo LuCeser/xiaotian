@@ -1317,10 +1317,13 @@ func TestSaveReceiptUncheckedFallback(t *testing.T) {
 		Missing:   []string{"香蕉"},
 	}
 
-	tm.Close(s) // transport read loop exited mid-check → the fallback fires synchronously
+	// Transport read loop exited mid-check → the owned fallback runs on its
+	// own goroutine (1.11: it waits for captured saves before deciding), so
+	// the SubmitReview/receipt observations settle by polling.
+	tm.Close(s)
 
-	if got := len(words.submissions()); got != 1 {
-		t.Fatalf("SubmitReview calls after close = %d, want exactly 1", got)
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 1 }) {
+		t.Fatalf("SubmitReview calls after close = %d, want exactly 1", len(words.submissions()))
 	}
 	var got []lesson.Receipt
 	var err error
@@ -1378,11 +1381,11 @@ func TestSaveReceiptEmptyCloseNeverBegins(t *testing.T) {
 
 	tm.Close(s)
 
+	if !waitFor(t, 5*time.Second, func() bool { return ttEventCount(t, log, EventUncheckedFallback) == 1 }) {
+		t.Errorf("unchecked_fallback events = %d, want 1 (the path still ran, honestly empty)", ttEventCount(t, log, EventUncheckedFallback))
+	}
 	if got := len(words.submissions()); got != 0 {
 		t.Errorf("SubmitReview calls = %d, want 0 (empty batch never writes)", got)
-	}
-	if got := ttEventCount(t, log, EventUncheckedFallback); got != 1 {
-		t.Errorf("unchecked_fallback events = %d, want 1 (the path still ran, honestly empty)", got)
 	}
 	got, err := receipts.ListByLesson(ctx, ttLessonID)
 	if err != nil {
@@ -3127,12 +3130,14 @@ func TestUncheckedFallbackOnClose(t *testing.T) {
 		Missing:   []string{"香蕉"},
 	}
 
-	tm.Close(s) // transport read loop exited mid-check
+	// Transport read loop exited mid-check; the owned fallback runs on its
+	// own goroutine (1.11), so the write settles by polling.
+	tm.Close(s)
 
-	subs := words.submissions()
-	if len(subs) != 1 {
-		t.Fatalf("SubmitReview calls after close = %d, want exactly 1", len(subs))
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 1 }) {
+		t.Fatalf("SubmitReview calls after close = %d, want exactly 1", len(words.submissions()))
 	}
+	subs := words.submissions()
 	if subs[0]["苹果"] != ratingAgain {
 		t.Errorf("fallback rating 苹果 = %q, want again (confirmed+2 hints → hard → again)", subs[0]["苹果"])
 	}

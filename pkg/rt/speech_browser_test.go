@@ -1095,6 +1095,92 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 	})
 }
 
+// TestCloseFallbackAfterAcceptedWrites 是 1.11 的验收：检查阶段（无人工
+// 判定落库）关闭时，一笔已接纳的判定写入仍在途——兜底先在锁外等它完成，
+// 再读取真实 SQLite 的权威行，仅在仍 checking 时用权威版本竞争兜底提交。
+// 判定写入在关闭后落库推进了行版本：兜底结果不依赖关闭快照里的旧版本，
+// 行最终 submitted+unchecked，FSRS 只有一批降级评分，关闭后没有迟到回显。
+func TestCloseFallbackAfterAcceptedWrites(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	// seedChecking's shape, but the enter_check write carries REAL stored
+	// outcomes — the fallback's degraded batch derives from them, and an
+	// empty outcomes map would honestly rate nothing.
+	{
+		ctx := context.Background()
+		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+		cards := []lesson.Word{{Word: "听写浏览器"}, {Word: "第二词"}}
+		l, err := f.tools.EnsureLessonCards(ctx, lessonID, cards, lesson.CategoryChinese)
+		if err == nil {
+			var advance lesson.AdvanceResult
+			advance, err = f.tools.AdvanceWord(ctx, lessonID, l.Version, "fallback-seed-1")
+			if err == nil {
+				advance, err = f.tools.AdvanceWord(ctx, lessonID, advance.NewVersion, "fallback-seed-2")
+			}
+			if err == nil {
+				_, err = f.tools.EnterCheck(ctx, lessonID, advance.NewVersion, "fallback-seed-check", map[string]lesson.WordOutcome{
+					"0": {Outcome: outcomeConfirmed, Hints: 0}, // good → hard
+					"1": {Outcome: outcomeConfirmed, Hints: 2}, // hard → again
+				})
+			}
+		}
+		if err != nil {
+			t.Fatalf("seed checking lesson: %v", err)
+		}
+		f.mu.Lock()
+		f.expectedSentences = append([]string(nil), speechExpectedCheckResume...)
+		f.mu.Unlock()
+	}
+	entered, release := f.gateScreenVerdict()
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseGate)
+
+	driver := f.runDriverAsync("screen-verdict-close", 45*time.Second)
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the screen verdict did not reach the real persistence gate")
+	}
+	m := f.waitFirstManager(5 * time.Second)
+	// The goodbye close claims the fallback while the accepted verdict write
+	// is parked AHEAD of the real SQLite write.
+	m.handleEndSession(m.currentSender())
+	releaseGate()
+	res := <-driver
+	if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 {
+		t.Fatalf("close=%d late verdict echoes=%d, want 1/0", res.WSCloseCount, res.LateVerdictEchoes)
+	}
+	f.assertOriginalTasksExited()
+
+	// The fallback's one review batch is its terminal persistence step —
+	// once it lands, the authoritative row has long been decided.
+	if !waitFor(t, 10*time.Second, func() bool { return len(f.words.submissions()) == 1 }) {
+		t.Fatalf("fallback review batches = %d, want exactly one degraded batch", len(f.words.submissions()))
+	}
+	subs := f.words.submissions()
+	if subs[0]["听写浏览器"] != ratingHard || subs[0]["第二词"] != ratingAgain {
+		t.Fatalf("fallback degraded batch = %v, want hard/again from the stored outcomes", subs[0])
+	}
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if stored.Stage != lesson.StageSubmitted || !stored.Unchecked {
+		t.Fatalf("stored stage=%q unchecked=%v, want submitted+unchecked — the fallback must land on the authoritative version, not the snapshot's",
+			stored.Stage, stored.Unchecked)
+	}
+	if len(stored.Verdicts) != 1 || !stored.Verdicts[0].Manual || !stored.Verdicts[0].Correct {
+		t.Fatalf("stored verdicts = %+v, want the accepted manual screen verdict kept", stored.Verdicts)
+	}
+	m.mu.Lock()
+	pending := len(m.checkWrites)
+	m.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("completed check-write admissions = %d, want 0", pending)
+	}
+}
+
 func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {
 	f.t.Helper()
 	done := make(chan speechDriverResult, 1)

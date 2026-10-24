@@ -1176,7 +1176,6 @@ type uncheckedCloseSnapshot struct {
 	lessonID string
 	category string
 	words    []lesson.Word
-	version  int
 	poem     bool
 }
 
@@ -1184,15 +1183,17 @@ type uncheckedCloseSnapshot struct {
 // session is already marked closed (the server-side write completes after
 // the connection is gone); it sends NO client messages, and the dead tutor
 // is neither read nor written — the snapshot plus the STORED row are the
-// authority. Issue #69 备选一 步骤 9: a verdict (or submit) write admitted
-// before the close may COMMIT after the snapshot — its version bump must
-// not silently kill the fallback. On conflict the AUTHORITATIVE row is read
-// lock-free and the latch retried ONCE on its fresh version; a row the
-// racing submit already flipped to submitted answers idempotent — never a
-// second FSRS write (T-13.1-09). A write that still fails is logged as an
-// error event, never retried blindly (S-05): the row keeps stage='checking'
-// and the next session's resume path still finds it intact.
-func (tm *TurnManager) persistUncheckedFallback(snap uncheckedCloseSnapshot) {
+// authority. Issue #69 路径 A 1.11: the writes the close claim captured
+// (verdicts, prefills, formal submits admitted before the close) are AWAITED
+// first, lock-free, and only then is the AUTHORITATIVE row read — the
+// fallback never races the snapshot's stale version and never substitutes a
+// post-conflict retry for that wait. Still checking ⇒ compete for the
+// fallback latch exactly once on the fresh version; already submitted ⇒ the
+// racing submit owns the FSRS write — never a second one (T-13.1-09). A
+// write that still fails is logged as an error event, never retried blindly
+// (S-05): the row keeps stage='checking' and the next session's resume path
+// still finds it intact.
+func (tm *TurnManager) persistUncheckedFallback(snap uncheckedCloseSnapshot, writes []*checkWriteAdmission) {
 	if snap.poem {
 		// A poem has no behavior-derived fallback. Keep stage=checking so a
 		// refresh or disconnect reopens the same ordered lines and preserves
@@ -1201,40 +1202,48 @@ func (tm *TurnManager) persistUncheckedFallback(snap uncheckedCloseSnapshot) {
 		return
 	}
 
+	// 1.11: wait OUTSIDE every lock for the accepted saves the claim
+	// captured, then read the authoritative row — the outcome must not
+	// depend on the snapshot's pre-close version.
+	waitCheckWrites(writes)
+
 	ctx := context.Background()
-	res, err := tm.exec.CompleteCheck(ctx, snap.lessonID, snap.version, snap.lessonID+"-complete-check", true)
+	l, err := tm.exec.GetLessonState(ctx, snap.lessonID)
+	if err != nil {
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeProviderFailed),
+			infra.F("at", "unchecked_fallback"),
+		)
+		return
+	}
+	if l.Stage != lesson.StageChecking {
+		// A waited save (or another connection's write) already moved the
+		// row out of checking — typically the formal submit's latch. The
+		// fallback saves nothing on top of it.
+		return
+	}
+	res, err := tm.exec.CompleteCheck(ctx, snap.lessonID, l.Version, snap.lessonID+"-complete-check", true)
 	if err != nil {
 		var conflict *lesson.ConflictError
-		if !errors.As(err, &conflict) {
+		if errors.As(err, &conflict) {
+			// The latch lost to a write that landed after the authoritative
+			// read. Re-read once to NAME the outcome — flipped out of
+			// checking means the racing writer owns the save; still checking
+			// is a persistent external conflict (S-05): record it, keep the
+			// row recoverable, and do not retry the competition.
+			if l2, gerr := tm.exec.GetLessonState(ctx, snap.lessonID); gerr == nil && l2.Stage == lesson.StageChecking {
+				tm.recorder.Emit(EventError,
+					infra.F("code", ErrCodeProviderFailed),
+					infra.F("at", "unchecked_fallback"),
+				)
+			}
+		} else {
 			tm.recorder.Emit(EventError,
 				infra.F("code", ErrCodeProviderFailed),
 				infra.F("at", "unchecked_fallback"),
 			)
-			return
 		}
-		// The snapshot version went stale under an admitted write that
-		// committed after the close claim. The authoritative row decides:
-		// still checking ⇒ retry the latch once on its version; already
-		// submitted ⇒ the racing formal submit owns the FSRS write.
-		l, gerr := tm.exec.GetLessonState(ctx, snap.lessonID)
-		if gerr != nil {
-			tm.recorder.Emit(EventError,
-				infra.F("code", ErrCodeProviderFailed),
-				infra.F("at", "unchecked_fallback"),
-			)
-			return
-		}
-		if l.Stage != lesson.StageChecking {
-			return
-		}
-		res, err = tm.exec.CompleteCheck(ctx, snap.lessonID, l.Version, snap.lessonID+"-complete-check", true)
-		if err != nil {
-			tm.recorder.Emit(EventError,
-				infra.F("code", ErrCodeProviderFailed),
-				infra.F("at", "unchecked_fallback"),
-			)
-			return
-		}
+		return
 	}
 	if res.Idempotent {
 		// The latch already fell (a racing check_submit or a prior close

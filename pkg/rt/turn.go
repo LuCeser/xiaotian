@@ -1334,7 +1334,6 @@ func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch, takeFallback bo
 		t := tm.tutor
 		c.fallback = uncheckedCloseSnapshot{
 			lessonID: t.lessonID,
-			version:  t.version,
 			category: t.category,
 			poem:     t.poem != nil,
 			words:    append([]lesson.Word(nil), t.words...),
@@ -1417,7 +1416,11 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 	if c := tm.closeSessionAt(0, false, true, ReasonClientEnd, s); c.owned {
 		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 		if c.hasFallback {
-			tm.persistUncheckedFallback(c.fallback)
+			// The fallback AWAITS the captured saves before it can decide —
+			// that wait must not block the close's caller (the read loop):
+			// the transport closes now, the owned persistence finishes on
+			// its own (路径 A 1.11; the awaits run outside every lock).
+			go tm.persistUncheckedFallback(c.fallback, c.checkWrites)
 		}
 	}
 }
@@ -1475,7 +1478,11 @@ func (tm *TurnManager) Close(Sender) {
 	if c := tm.closeSessionAt(0, false, true, "", nil); c.owned {
 		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 		if c.hasFallback {
-			tm.persistUncheckedFallback(c.fallback)
+			// Same 1.11 rule as handleEndSession: the close returns as soon
+			// as the transport is finalized; the owned fallback (waits for
+			// captured saves, one authoritative read, one latch competition)
+			// runs on its own goroutine with a bounded result.
+			go tm.persistUncheckedFallback(c.fallback, c.checkWrites)
 		}
 	}
 }
