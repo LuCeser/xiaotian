@@ -49,12 +49,19 @@ func TestPracticeSubmitPresentationLifetime(t *testing.T) {
 		close(hit)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	write, admitted := tm.admitCheckWriteLocked()
+	tm.mu.Unlock()
+	if !admitted {
+		t.Fatal("practice save was not admitted")
+	}
+	cancel() // accepted persistence must outlive the turn context
 	done := make(chan struct{})
 	go func() {
 		tm.finishPracticeSubmit(s, ctx, cancel, epoch, ttLessonID, ttCards("苹果"), lesson.CompleteCheckResult{
 			Verdicts: []lesson.CheckVerdict{{WordIndex: 0, Correct: true, Manual: true}},
 			Outcomes: map[string]lesson.WordOutcome{"0": {Outcome: outcomeConfirmed}},
-		}, "practice-race")
+		}, "practice-race", write)
 		close(done)
 	}()
 	ttAwaitGate(t, hit, "practice presentation probe was not reached")
@@ -73,5 +80,8 @@ func TestPracticeSubmitPresentationLifetime(t *testing.T) {
 	tm.mu.Unlock()
 	if reviewSeen || !closed {
 		t.Fatalf("reviewSeen=%v closed=%v, want false/true", reviewSeen, closed)
+	}
+	if pending := len(tm.checkWrites); pending != 0 {
+		t.Fatalf("completed practice save admissions = %d, want 0 before presentation", pending)
 	}
 }

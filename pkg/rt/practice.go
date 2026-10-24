@@ -383,17 +383,25 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 		return
 	}
 
-	// Latch: the same stage transition — only its first commit proceeds
-	// (the replay/idempotency protection is the store's, not a session
-	// memory artifact).
+	// Latch: the same stage transition — only its first commit proceeds.
+	// One admission covers the latch, the practice records and their receipt;
+	// cancellation only stops presentation after that save was accepted.
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	write, writeAdmitted := tm.admitCheckWriteLocked()
 	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
+	if !writeAdmitted {
+		cancel()
+		return
+	}
+	persistCtx := context.WithoutCancel(ctx)
 
-	res, err := tm.exec.CompleteCheck(ctx, lessonID, expected, m.RequestID, false)
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, m.RequestID, false)
 	if err != nil {
+		tm.completeCheckWrite(write)
+		cancel()
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
 			tm.mu.Lock()
@@ -418,6 +426,8 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "practice_submit_latch"),
 		)
+		tm.completeCheckWrite(write)
+		cancel()
 		return
 	}
 
@@ -427,7 +437,7 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 		return nil
 	})
 
-	go tm.finishPracticeSubmit(s, ctx, cancel, epoch, lessonID, wordsList, res, m.RequestID)
+	go tm.finishPracticeSubmit(s, ctx, cancel, epoch, lessonID, wordsList, res, m.RequestID, write)
 }
 
 // finishPracticeSubmit runs on its own goroutine (the ACK-gated ending
@@ -438,7 +448,7 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 // two-phase save receipt — whose saved/failed expresses the PRACTICE
 // STORAGE result (practice_logs), NOT an FSRS write (practice never enters
 // the FSRS schedule, D-11).
-func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, lessonID string, wordsList []lesson.Word, res lesson.CompleteCheckResult, requestID string) {
+func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, lessonID string, wordsList []lesson.Word, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
 	persistCtx := context.WithoutCancel(ctx)
 
@@ -533,6 +543,9 @@ func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cance
 			}
 		}
 	}
+	// Persistence ownership ends with the practice receipt, before feedback
+	// or the ACK-gated summary can be cancelled by a concurrent close.
+	tm.completeCheckWrite(write)
 
 	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
