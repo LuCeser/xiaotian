@@ -54,4 +54,45 @@ func TestCheckResumeLifetime(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("bridge keeps registered epoch", func(t *testing.T) {
+		exec := newFakeExecutor(ttLessonID, ttCards("苹果"))
+		exec.mu.Lock()
+		exec.lesson.Stage = lesson.StageChecking
+		exec.lesson.CurrentIndex = 1
+		exec.mu.Unlock()
+		tts := newFakeTTS(1, 320)
+		tm := NewTurnManager(newFakeASR(), newFakeLLM(), tts, exec,
+			ttConfig(newFakeWords()), NewEventRecorder(&captureLogger{}, "t"), nil)
+		captured := &captureSender{}
+		s := &starterOutputSender{captureSender: captured, late: make(chan struct{})}
+		entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		tm.starterInterleave = func(task func()) {
+			close(entered)
+			<-release
+			task()
+			close(done)
+		}
+
+		ttInitWithSender(t, tm, s)
+		ttAwaitGate(t, entered, "check bridge task was not registered")
+		tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
+		close(release)
+		select {
+		case <-done:
+		case <-s.late:
+			tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
+			ttAwaitGate(t, done, "stale check bridge did not exit")
+		}
+
+		if got := captured.countOf(TypeTeacherSentence); got != 0 {
+			t.Errorf("teacher sentences = %d, want 0", got)
+		}
+		if got := captured.countOf(TypeAudioStart); got != 0 {
+			t.Errorf("audio starts = %d, want 0", got)
+		}
+		if got := len(tts.recordedTexts()); got != 0 {
+			t.Errorf("TTS calls = %d, want 0", got)
+		}
+	})
 }

@@ -290,7 +290,9 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	// the announcement blocks on its playback ack — the same shape
 	// startDictationSession uses for the greeting (the ack must stay
 	// servable).
-	go tm.runAnnouncement(s, ctx, cancel, bridge, purposeCheckBridge, nil)
+	go tm.runStarterTask(func() {
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, bridge, purposeCheckBridge, nil)
+	})
 }
 
 // checkStageInputs separates the data persisted by EnterCheck from the data
