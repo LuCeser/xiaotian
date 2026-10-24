@@ -80,18 +80,68 @@ test('listening resumes only after every matching playback ACK', () => {
   const event = (i, dir, type, msg) => ({ i, dir, type, msg });
   const ids = ['opening-1', 'opening-2'];
   const prefix = [
-    event(1, 'in', 'audio_end', { epoch: 4, sentence_id: ids[0] }),
-    event(2, 'out', 'sentence_ack', { epoch: 4, sentence_id: ids[0] }),
-    event(3, 'in', 'audio_end', { epoch: 4, sentence_id: ids[1] }),
+    event(1, 'in', 'audio_start', { epoch: 4, sentence_id: ids[0] }),
+    event(2, 'in', 'audio_end', { epoch: 4, sentence_id: ids[0] }),
+    event(3, 'out', 'sentence_ack', { epoch: 4, sentence_id: ids[0] }),
+    event(4, 'in', 'audio_start', { epoch: 4, sentence_id: ids[1] }),
+    event(5, 'in', 'audio_end', { epoch: 4, sentence_id: ids[1] }),
   ];
   const listening = (i) => event(i, 'in', 'state', { value: 'listening' });
-  const lastAck = event(5, 'out', 'sentence_ack', { epoch: 4, sentence_id: ids[1] });
+  const lastAck = event(7, 'out', 'sentence_ack', { epoch: 4, sentence_id: ids[1] });
 
-  assert.equal(listeningAfterPlayback([...prefix, lastAck, listening(6)], 4, ids), true);
-  assert.equal(listeningAfterPlayback([...prefix, listening(4), lastAck, listening(6)], 4, ids), false,
+  assert.equal(listeningAfterPlayback([...prefix, lastAck, listening(8)], 4, ids), true);
+  assert.equal(listeningAfterPlayback([...prefix, listening(6), lastAck, listening(8)], 4, ids), false,
     'a later valid resume must not hide listening between audio_end and the final ACK');
-  assert.equal(listeningAfterPlayback([...prefix, listening(4), lastAck], 4, ids), false,
+  assert.equal(listeningAfterPlayback([...prefix, listening(6), lastAck], 4, ids), false,
     'audio_end is not playback completion');
-  assert.equal(listeningAfterPlayback([...prefix, lastAck, listening(6)], 3, ids), false,
+  assert.equal(listeningAfterPlayback([...prefix, lastAck, listening(8)], 3, ids), false,
     'ACKs from another epoch never satisfy this playback round');
+});
+
+// Codex review @1c0620c P2: the old check only rejected listening between
+// the round's LAST audio_end and the last ACK, so a resume that happened
+// earlier — while the round was still playing — was invisible whenever the
+// log later showed one valid post-ACK resume. Both counter-examples below
+// returned true against the old implementation.
+test("early resume from the round's first audio_start is rejected even with a later valid resume", () => {
+  const event = (i, dir, type, msg) => ({ i, dir, type, msg });
+  const listening = (i) => event(i, 'in', 'state', { value: 'listening' });
+  const start = (i, sid) => event(i, 'in', 'audio_start', { epoch: 4, sentence_id: sid });
+  const end = (i, sid) => event(i, 'in', 'audio_end', { epoch: 4, sentence_id: sid });
+  const ack = (i, sid) => event(i, 'out', 'sentence_ack', { epoch: 4, sentence_id: sid });
+
+  // 评审反例 1：本轮开始后、唯一句子 audio_end 之前就恢复收听，
+  // 最后又出现一次“合法”恢复 —— 旧实现假绿。
+  const one = ['opening-1'];
+  const earlyMidPlayback = [
+    start(1, one[0]), listening(2), end(3, one[0]), ack(4, one[0]), listening(5),
+  ];
+  assert.equal(listeningAfterPlayback(earlyMidPlayback, 4, one), false,
+    'listening before the only audio_end must reject the round');
+
+  // 评审反例 2：多句播报中途（第一句 ack 后、第二句还在播）恢复收听，
+  // 最后一句话正常落定 —— 中途的提前收听在最后一个 audio_end 之前，旧实现假绿。
+  const ids = ['opening-1', 'opening-2'];
+  const midRoundResume = [
+    start(1, ids[0]), end(2, ids[0]), ack(3, ids[0]),
+    listening(4),
+    start(5, ids[1]), end(6, ids[1]), ack(7, ids[1]),
+    listening(8),
+  ];
+  assert.equal(listeningAfterPlayback(midRoundResume, 4, ids), false,
+    'a mid-round resume must not be hidden by the later valid one');
+
+  // 边界：本轮首个 audio_start 之前的 listening 属于上一轮的落定，不算提前。
+  const previousRoundSettle = [
+    listening(1),
+    start(2, ids[0]), end(3, ids[0]), ack(4, ids[0]),
+    start(5, ids[1]), end(6, ids[1]), ack(7, ids[1]),
+    listening(8),
+  ];
+  assert.equal(listeningAfterPlayback(previousRoundSettle, 4, ids), true,
+    "the previous round's settle does not reject this round");
+
+  // 本轮没有 audio_start 证据时起点不可知，不得放行。
+  assert.equal(listeningAfterPlayback([end(2, ids[0]), ack(3, ids[0]), listening(4)], 4, [ids[0]]), false,
+    'a round without its audio_start cannot be verified');
 });
