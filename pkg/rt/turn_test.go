@@ -549,6 +549,12 @@ func (f *fakeExecutor) CompleteCheck(_ context.Context, lessonID string, expecte
 		res = lesson.CompleteCheckResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: f.lesson.Unchecked, Idempotent: true}
 	} else if f.conflictVersion > 0 {
 		err = &lesson.ConflictError{CurrentVersion: f.conflictVersion}
+	} else if f.lesson.Version != expectedVersion {
+		// Optimistic lock (issue #69 备选一 步骤 9 fidelity): the real
+		// executor's guarded UPDATE refuses a stale version while the row
+		// still reads checking — an admitted verdict write that committed
+		// after the close snapshot must surface HERE, not commit anyway.
+		err = &lesson.ConflictError{CurrentVersion: f.lesson.Version}
 	} else {
 		f.lesson.Version++
 		f.lesson.Stage = lesson.StageSubmitted
