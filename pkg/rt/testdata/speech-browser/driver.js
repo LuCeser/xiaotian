@@ -294,6 +294,54 @@ async function scenarioVoiceVerdictClose(args) {
   };
 }
 
+// notebookJpegB64 — 一张极小的真实 JPEG（64×64 色块）。页面生产链路经
+// Image/canvas 解码并重编码后分块上传；服务端 fake OCR 只看脚本应答，不看
+// 像素。文件必须可解码：解码失败会走 encode-failed，不上传。
+const notebookJpegB64 = ''
+  + '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQY'
+  + 'GBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYa'
+  + 'KCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAAR'
+  + 'CABAAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAA'
+  + 'AgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkK'
+  + 'FhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWG'
+  + 'h4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl'
+  + '5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREA'
+  + 'AgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYk'
+  + 'NOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOE'
+  + 'hYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk'
+  + '5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD12iiiuQoKKKKACiiigAooooAKKKKACiii'
+  + 'gAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//9k=';
+
+// scenario "ocr-prefill-close"（1.08）：检查阶段的真实拍照入口。恢复播报自然
+// 完成后，点击「拍照检查」并经隐藏 file input 投入一张真实 JPEG——页面生产
+// 链路（canvas 降采样 → 分块 photo_chunk 控制 frame）真实上传，服务端 OCR →
+// 预填批次写入真实发生；Go 侧在选定的控制点（预填写入门／OCR 调用保持）上
+// 关闭会话。页面只观察：close 事件与关闭后迟到的 check_verdicts、ocr_result、
+// 教师播报必须为零。
+async function scenarioOcrPrefillClose(args) {
+  const opening = await scenarioFixture(args);
+  const before = await wsView(args.page);
+  const echoesBefore = before.filter((e) => e.dir === 'in' && e.type === 'check_verdicts').length;
+  const ocrBefore = before.filter((e) => e.dir === 'in' && e.type === 'ocr_result').length;
+  const teachersBefore = before.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length;
+  await args.page.locator('.rt-check-photo').click();
+  await args.page.locator('input[type=file]').setInputFiles({
+    name: 'notebook.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from(notebookJpegB64, 'base64'),
+  });
+  await waitWs(args.page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+    { timeoutMs: args.timeoutMs, label: 'close while the OCR prefill batch is saving' });
+  const view = await wsView(args.page);
+  return {
+    ...opening,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    lateVerdictEchoes: view.filter((e) => e.dir === 'in' && e.type === 'check_verdicts').length - echoesBefore,
+    lateOcrResults: view.filter((e) => e.dir === 'in' && e.type === 'ocr_result').length - ocrBefore,
+    lateTeacherSentences: view.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length - teachersBefore,
+  };
+}
+
 // scenario "starve-probe"：点击「开始上课」后只观察一个固定窗口
 // （--hold-ms，默认 3000），输出窗口内页面真实收到的下行控制/二进制帧数
 // 后退出，不等待播放完成。这是故障控制点「命中」的页面侧证据：被控制的
@@ -318,6 +366,7 @@ const SCENARIOS = {
   'close-after-opening': scenarioCloseAfterOpening,
   'screen-verdict-close': scenarioScreenVerdictClose,
   'voice-verdict-close': scenarioVoiceVerdictClose,
+  'ocr-prefill-close': scenarioOcrPrefillClose,
   'starve-probe': scenarioStarveProbe,
 };
 

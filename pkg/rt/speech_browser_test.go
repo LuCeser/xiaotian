@@ -38,6 +38,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
+	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
 )
 
 // speechPageAck is one sentence_ack the real page sent (observed read-only).
@@ -92,6 +93,9 @@ type speechDriverResult struct {
 	// teacher sentence followed the close.
 	VoiceStates          []string `json:"voiceStates"`
 	LateTeacherSentences int      `json:"lateTeacherSentences"`
+
+	// ocr-prefill-close scenario fields: late ocr_result frames after close.
+	LateOcrResults int `json:"lateOcrResults"`
 }
 
 var speechExpectedOpening = []string{
@@ -231,6 +235,11 @@ type speechBrowserFixture struct {
 	mu       sync.Mutex
 	managers []*speechManagerTracker
 
+	// ocrRead, when armed, is wired into every future manager's photo
+	// channel (cfg.OCR + the real pipeline around it) — the check stage's
+	// 拍照检查 button then runs the production photo→OCR→prefill path.
+	ocrRead func(ctx context.Context, systemPrompt, userPrompt string, imageJPEG []byte) (string, error)
+
 	// timerProbe, when set, is installed as every manager's timerFactory
 	// (the existing test seam): arms are counted while the REAL AfterFunc
 	// still runs — the timing control point of step 4.
@@ -257,6 +266,38 @@ func (g *speechVerdictGate) ApplyVerdict(ctx context.Context, lessonID string, e
 	close(g.entered)
 	<-g.release
 	return g.LessonExecutor.ApplyVerdict(ctx, lessonID, expectedVersion, requestID, verdict)
+}
+
+// speechBatchGate gates a MULTI-write batch (an OCR prefill pass writes per
+// word): every ApplyVerdict call parks on the one shared release, and the
+// first entry signals entered exactly once.
+type speechBatchGate struct {
+	LessonExecutor
+	entered  chan struct{}
+	release  chan struct{}
+	enteredOnce sync.Once
+}
+
+func (g *speechBatchGate) ApplyVerdict(ctx context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
+	g.enteredOnce.Do(func() { close(g.entered) })
+	<-g.release
+	return g.LessonExecutor.ApplyVerdict(ctx, lessonID, expectedVersion, requestID, verdict)
+}
+
+// speechHeldRead holds one OCR vision call: the reader parks before the
+// scripted reply, so the prefill batch's ADMISSION happens only after the
+// hold releases (the close-first ordering of TestCloseDuringOcrPrefills).
+type speechHeldRead struct {
+	inner   *fakeOCRReader
+	entered chan struct{}
+	hold    chan struct{}
+	once    sync.Once
+}
+
+func (h *speechHeldRead) read(ctx context.Context, systemPrompt, userPrompt string, imageJPEG []byte) (string, error) {
+	h.once.Do(func() { close(h.entered) })
+	<-h.hold
+	return h.inner.read(ctx, systemPrompt, userPrompt, imageJPEG)
 }
 
 func (s *speechObservedTTS) SynthesizeStream(ctx context.Context, text string, onAudio AudioChunkFunc, opts ...mimo.TTSOption) (*mimo.StreamResult, error) {
@@ -411,12 +452,19 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 // providers and the real temp-SQLite lesson tools, wrapped by the tracker.
 func (f *speechBrowserFixture) newManager() SessionManager {
 	f.mu.Lock()
-	tts, probe, executor := f.tts, f.timerProbe, f.exec
+	tts, probe, executor, ocrRead := f.tts, f.timerProbe, f.exec, f.ocrRead
 	f.mu.Unlock()
 	tm := NewTurnManager(f.asr, f.llm, &speechObservedTTS{inner: tts, fixture: f}, executor, TurnManagerConfig{
 		LessonID: "speech-browser-fixture",
 		Words:    f.words,
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
+	if ocrRead != nil {
+		// The production photo channel (ttBindPhoto's wiring, fixture-wide):
+		// the scripted reader under the REAL pipeline, so 拍照检查 rides the
+		// real assembler, JPEG validation and confidence gate.
+		tm.cfg.OCR = ocrRead
+		tm.ocrPipeline = ocr.NewPipeline(ocr.Reader(ocrRead), tm.cfg.PhotoConfidence)
+	}
 	if probe != nil {
 		tm.timerFactory = func(d time.Duration, fn func()) *time.Timer {
 			probe.arms.Add(1)
@@ -465,6 +513,36 @@ func (f *speechBrowserFixture) gateScreenVerdict() (entered, release chan struct
 	g := &speechVerdictGate{LessonExecutor: f.exec, entered: make(chan struct{}), release: make(chan struct{})}
 	f.exec = g
 	return g.entered, g.release
+}
+
+// gateOcrPrefillWrites gates a whole prefill BATCH: every ApplyVerdict parks
+// on the shared release, first entry signals once.
+func (f *speechBrowserFixture) gateOcrPrefillWrites() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g := &speechBatchGate{LessonExecutor: f.exec, entered: make(chan struct{}), release: make(chan struct{})}
+	f.exec = g
+	return g.entered, g.release
+}
+
+// armPhotoOCR wires the scripted fake OCR reader into every future manager's
+// photo channel. replies follow fakeOCRReader's per-call queue.
+func (f *speechBrowserFixture) armPhotoOCR(replies ...string) *fakeOCRReader {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	reader := &fakeOCRReader{replies: replies}
+	f.ocrRead = reader.read
+	return reader
+}
+
+// holdPhotoOCR arms the scripted reader behind a hold: the vision call parks
+// after entering, so the prefill batch only starts when the hold releases.
+func (f *speechBrowserFixture) holdPhotoOCR(replies ...string) (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	h := &speechHeldRead{inner: &fakeOCRReader{replies: replies}, entered: make(chan struct{}), hold: make(chan struct{})}
+	f.ocrRead = h.read
+	return h.entered, h.hold
 }
 
 // scriptVoiceCheckVerdict arms the fake providers for ONE spoken verdict turn:
@@ -564,7 +642,7 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		"--timeout-ms", fmt.Sprint(int64(timeout / time.Millisecond)),
 	}, extraArgs...)
 	if scenario == "fixture" || scenario == "held-fixture" || scenario == "close-after-opening" ||
-		scenario == "screen-verdict-close" || scenario == "voice-verdict-close" {
+		scenario == "screen-verdict-close" || scenario == "voice-verdict-close" || scenario == "ocr-prefill-close" {
 		f.mu.Lock()
 		sentences := append([]string(nil), f.expectedSentences...)
 		f.mu.Unlock()
