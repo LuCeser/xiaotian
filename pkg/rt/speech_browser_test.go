@@ -30,6 +30,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -147,6 +148,28 @@ type speechBrowserFixture struct {
 
 	mu       sync.Mutex
 	managers []*speechManagerTracker
+
+	// timerProbe, when set, is installed as every manager's timerFactory
+	// (the existing test seam): arms are counted while the REAL AfterFunc
+	// still runs — the timing control point of step 4.
+	timerProbe *speechTimerProbe
+}
+
+// speechTimerProbe counts word-timer arms seen through the timerFactory seam.
+type speechTimerProbe struct {
+	arms atomic.Int64
+}
+
+func (p *speechTimerProbe) count() int64 { return p.arms.Load() }
+
+// useTimerProbe installs the counting timer factory on every future manager.
+func (f *speechBrowserFixture) useTimerProbe() *speechTimerProbe {
+	f.t.Helper()
+	if f.timerProbe != nil {
+		f.t.Fatal("timer probe already installed")
+	}
+	f.timerProbe = &speechTimerProbe{}
+	return f.timerProbe
 }
 
 // speechRepoRoot locates the repository root from this test file's path.
@@ -264,6 +287,12 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 		LessonID: "speech-browser-fixture",
 		Words:    f.words,
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
+	if probe := f.timerProbe; probe != nil {
+		tm.timerFactory = func(d time.Duration, fn func()) *time.Timer {
+			probe.arms.Add(1)
+			return time.AfterFunc(d, fn)
+		}
+	}
 	m := &speechManagerTracker{TurnManager: tm, fixture: f}
 	f.mu.Lock()
 	f.managers = append(f.managers, m)
@@ -541,6 +570,41 @@ func TestSpeechBrowserFaultControls(t *testing.T) {
 		release()
 		restore()
 		f.assertNaturalCompletion()
+		f.assertAllManagersClosed()
+	})
+
+	t.Run("tts hold starves audio only", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+
+		held := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(held) }) }
+		f.tts.hold = held
+
+		res := f.runDriver("starve-probe", 30*time.Second, "--hold-ms", "3000")
+		if got := f.tts.holdHitsCount(); got == 0 {
+			t.Fatal("provider-return control point never hit")
+		}
+		if res.HoldControlIn == 0 {
+			t.Fatal("control frames must keep flowing while only the provider is held")
+		}
+		if res.HoldBinaryIn != 0 {
+			t.Fatalf("page received %d audio frames while the provider was held", res.HoldBinaryIn)
+		}
+
+		release()
+		f.assertNaturalCompletion()
+		f.assertAllManagersClosed()
+	})
+
+	t.Run("timer factory seam records arms", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		probe := f.useTimerProbe()
+
+		f.assertNaturalCompletion()
+		if probe.count() == 0 {
+			t.Fatal("timing control point never hit — the word timer never armed through the factory")
+		}
 		f.assertAllManagersClosed()
 	})
 }
