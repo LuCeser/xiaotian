@@ -102,8 +102,10 @@ jobs:
 
       # list reporter for the log, JSON for the mandatory-case check below.
       # Playwright's own exit code fails the job on any failed test; the
-      # check step catches the OTHER failure mode — a green run whose cases
-      # never executed (browser/Python/launcher missing → all skipped).
+      # check step catches the OTHER failure modes — a green run whose cases
+      # never executed (browser/Python/launcher missing → all skipped), a
+      # required case deleted/renamed while filler keeps counts up, or a
+      # test.fail() expected failure that stats.expected counts as fine.
       - run: npm run e2e:m1 -- --reporter=list,json
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: reports/m1-results.json
