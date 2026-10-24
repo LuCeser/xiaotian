@@ -8,8 +8,8 @@ import (
 
 func TestCheckResumeLifetime(t *testing.T) {
 	for _, tc := range []struct {
-		name string
 		stop func(*TurnManager, Sender)
+		name string
 	}{
 		{name: "close", stop: func(tm *TurnManager, s Sender) { tm.handleEndSession(s) }},
 		{name: "interrupt", stop: func(tm *TurnManager, s Sender) {

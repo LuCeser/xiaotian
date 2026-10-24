@@ -173,12 +173,6 @@ func wireVerdicts(verdicts []lesson.CheckVerdict) []WireVerdict {
 	return out
 }
 
-// broadcastCheckVerdicts sends the authoritative verdict echo (RT-07: the
-// client renders ONLY this server state, never local optimistic state).
-func (tm *TurnManager) broadcastCheckVerdicts(s Sender, verdicts []lesson.CheckVerdict) {
-	_ = s.SendControl(CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: wireVerdicts(verdicts)})
-}
-
 // derivedVerdicts projects the STORED behavior snapshot onto pending check
 // verdicts (13.1-04 correction mode): a word derives correct iff its
 // behavior rating was good (the D-03 fallback read 无提示说好 and stored it

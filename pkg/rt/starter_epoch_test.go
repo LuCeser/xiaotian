@@ -22,8 +22,8 @@ func (s *starterOutputSender) SendControl(v any) error {
 
 func TestStarterKeepsEpoch(t *testing.T) {
 	tests := []struct {
-		name  string
 		start func(*TurnManager, Sender)
+		name  string
 	}{
 		{
 			name: "dictation greeting",

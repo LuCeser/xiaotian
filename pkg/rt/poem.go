@@ -190,18 +190,6 @@ func (tm *TurnManager) poemViewForRow(l lesson.Lesson) *PoemTaskView {
 	return &PoemTaskView{ID: l.PoemID, LineCount: lines, Method: "背默"}
 }
 
-// bindPoemRef attaches the poem identity to the live tutor (caller has
-// already constructed it from the row). Caller holds NO lock — this runs
-// between construction and message traffic.
-func (tm *TurnManager) bindPoemRef(l lesson.Lesson, view *PoemTaskView) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.tutor == nil {
-		return
-	}
-	tm.tutor.poem = &poemRef{ID: l.PoemID, Title: view.Title, Author: view.Author}
-}
-
 // handlePoemInit is the session_init{poem} branch (Issue #12): resolve the
 // work, enforce the scope gate, then EITHER resume this poem's in-flight
 // attempt under its own id (a mid-writing reconnect or an unfinished check)

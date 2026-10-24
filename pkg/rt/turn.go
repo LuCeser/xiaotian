@@ -1057,26 +1057,8 @@ func (tm *TurnManager) announceAckedLocked() {
 // lives in dictation.go next to the rest of the 13-09 timer logic.
 // stopWordTimer suspends it (the pause command).
 
-// runAnnouncement speaks one FSM announcement whose display text equals its
-// spoken text (non-word-bearing announcements) and settles the FSM only
-// after its valid final playback ack — TTS send completion and audio_end
-// NEVER restore listening (uplink stays gated through the ack; 13-09 adds
-// the 500ms echo tail afterwards). Timeout degrades per purpose: ordinary
-// announcements orderly-close; natural endings still ship their original
-// reason first.
-func (tm *TurnManager) runAnnouncement(s Sender, ctx context.Context, cancel context.CancelFunc, text, purpose string, onAck func()) {
-	tm.runAnnouncementDisplay(s, ctx, cancel, text, text, purpose, onAck)
-}
-
 func (tm *TurnManager) runAnnouncementAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, text, purpose string, onAck func()) {
 	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purpose, onAck)
-}
-
-// runAnnouncementDisplay is runAnnouncement with SEPARATE spoken and display
-// texts (13.1-02 student masking): spoken feeds TTS, the LLM history, and the
-// interrupt trim; display rides the teacher_sentence subtitle only.
-func (tm *TurnManager) runAnnouncementDisplay(s Sender, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
-	tm.runAnnouncementDisplayAt(s, tm.currentEpoch(), ctx, cancel, spoken, display, purpose, onAck)
 }
 
 func (tm *TurnManager) runTurnAnnouncementDisplayAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {

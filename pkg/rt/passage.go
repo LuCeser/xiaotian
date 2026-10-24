@@ -264,22 +264,6 @@ func (tm *TurnManager) passageViewForRow(l lesson.Lesson) *PassageTaskView {
 	return view
 }
 
-// bindPassageRef attaches the passage identity to the live tutor (caller has
-// already constructed it from the row or the init request). Caller holds NO
-// lock — this runs between construction and message traffic.
-func (tm *TurnManager) bindPassageRef(view *PassageTaskView) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.tutor == nil || view == nil {
-		return
-	}
-	tm.tutor.passage = &passageRef{
-		ID: view.ID, ScopeID: view.ScopeID,
-		Title: view.Title, Author: view.Author,
-		Whole: view.Whole, Paragraphs: append([]int(nil), view.Paragraphs...),
-	}
-}
-
 // scopeParagraphs resolves the range's own paragraph TEXTS in original
 // order: whole → every stored paragraph; a set → the named paragraphs at
 // their original indexes. The scope row's indexes are already canonical
