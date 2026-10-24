@@ -1413,6 +1413,22 @@ func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
 // effect, so an ended session (or a submitted check) presents nothing.
 func (tm *TurnManager) applyOcrPrefills(s Sender, entries []OcrResultEntry) {
 	tm.mu.Lock()
+	if tm.tutor == nil || tm.closed || !tm.tutor.checking {
+		// 关闭后（或检查阶段已不在）不接纳新批次：一个在视觉调用期间结束
+		// 的会话不再产生保存责任——批次的接纳与关闭查封在同一次临界区里
+		// 判定（1.08），已接纳的批次不受影响，其写入照常完成。
+		tm.mu.Unlock()
+		return
+	}
+	// ONE admission covers the whole finite batch: every per-word write and
+	// its legal conflict retry ride the same registration, so a close that
+	// lands mid-batch waits for the accepted save (1.06 discipline).
+	write, admitted := tm.admitCheckWriteLocked()
+	if !admitted {
+		tm.mu.Unlock()
+		return
+	}
+	defer tm.completeCheckWrite(write)
 	tm.ocrRuns++
 	lessonID := tm.tutor.lessonID
 	version := tm.tutor.version

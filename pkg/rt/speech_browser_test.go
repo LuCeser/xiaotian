@@ -812,6 +812,124 @@ func TestCloseDuringVoiceVerdict(t *testing.T) {
 	}
 }
 
+// TestCloseDuringOcrPrefills 是 1.08 的验收：真实拍照入口（页面 file input →
+// canvas 降采样 → 分块 photo_chunk → 生产组装器 → OCR → 预填批次）与关闭的
+// 两种顺序——批次已接纳、写入在途时关闭：保存完成，人工判定优先规则保留；
+// 批次尚未接纳（OCR 在途）时关闭：不接纳新批次，零写入。两种顺序都无迟到
+// 回显／ocr_result／播报，登记全部收回。
+func TestCloseDuringOcrPrefills(t *testing.T) {
+	// Both words recognized positionally → two prefill writes per batch.
+	prefillReplies := []string{`[{"text":"听写浏览器","confidence":0.95},{"text":"第二词","confidence":0.95}]`}
+	storedVerdicts := func(f *speechBrowserFixture) []lesson.CheckVerdict {
+		t.Helper()
+		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+		l, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		return l.Verdicts
+	}
+
+	t.Run("in-flight batch at close keeps manual priority", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedChecking()
+		f.armPhotoOCR(prefillReplies...)
+		entered, release := f.gateOcrPrefillWrites()
+		var releaseOnce sync.Once
+		releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(releaseGate)
+
+		driver := f.runDriverAsync("ocr-prefill-close", 45*time.Second)
+		select {
+		case <-entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("OCR prefill batch did not reach the first real persistence gate")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+
+		// A cross-connection manual verdict lands while the batch's first
+		// write parks (another tab's tap — §七 multi-connection rule): the
+		// stored truth must keep it and drop the word's prefill.
+		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+		l, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read lesson state: %v", err)
+		}
+		if _, err := f.tools.ApplyVerdict(context.Background(), lessonID, l.Version, "cross-tab-manual-1",
+			lesson.CheckVerdict{WordIndex: 0, Correct: true, Manual: true}); err != nil {
+			t.Fatalf("cross-connection manual verdict: %v", err)
+		}
+		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
+			t.Fatal("test close did not obtain session ownership")
+		}
+		releaseGate()
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 || res.LateOcrResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late echoes=%d ocr=%d sentences=%d, want 1/0/0/0",
+				res.WSCloseCount, res.LateVerdictEchoes, res.LateOcrResults, res.LateTeacherSentences)
+		}
+		f.assertOriginalTasksExited()
+
+		verdicts := storedVerdicts(f)
+		if len(verdicts) != 2 {
+			t.Fatalf("stored verdicts = %+v, want the manual tap plus the surviving prefill", verdicts)
+		}
+		byIndex := map[int]lesson.CheckVerdict{}
+		for _, v := range verdicts {
+			byIndex[v.WordIndex] = v
+		}
+		if v := byIndex[0]; !v.Manual || !v.Correct {
+			t.Fatalf("word 0 verdict = %+v, want the cross-connection manual verdict to stand", v)
+		}
+		if v := byIndex[1]; v.Manual || !v.Correct {
+			t.Fatalf("word 1 verdict = %+v, want the accepted OCR prefill (manual=false)", v)
+		}
+		m.mu.Lock()
+		pending := len(m.checkWrites)
+		m.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
+
+	t.Run("batch arriving after close writes nothing", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedChecking()
+		entered, release := f.holdPhotoOCR(prefillReplies...)
+		var releaseOnce sync.Once
+		releaseHold := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(releaseHold)
+
+		driver := f.runDriverAsync("ocr-prefill-close", 45*time.Second)
+		select {
+		case <-entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the real OCR vision call never started")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
+			t.Fatal("test close did not obtain session ownership")
+		}
+		releaseHold()
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 || res.LateOcrResults != 0 {
+			t.Fatalf("close=%d late echoes=%d ocr=%d, want 1/0/0",
+				res.WSCloseCount, res.LateVerdictEchoes, res.LateOcrResults)
+		}
+		f.assertOriginalTasksExited()
+
+		if verdicts := storedVerdicts(f); len(verdicts) != 0 {
+			t.Fatalf("stored verdicts = %+v, want zero writes — a batch arriving after close is not admitted", verdicts)
+		}
+		m.mu.Lock()
+		pending := len(m.checkWrites)
+		m.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("registered check-write admissions = %d, want 0", pending)
+		}
+	})
+}
+
 func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {
 	f.t.Helper()
 	done := make(chan speechDriverResult, 1)
