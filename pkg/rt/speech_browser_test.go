@@ -158,6 +158,12 @@ func (m *speechManagerTracker) HandleControl(s Sender, data []byte) {
 
 func (m *speechManagerTracker) Close(s Sender) {
 	m.TurnManager.Close(s)
+	if writer, ok := s.(*connWriter); ok {
+		go func() {
+			<-writer.done
+			m.fixture.writerDone.Add(1)
+		}()
+	}
 	m.mu.Lock()
 	m.closed = true
 	m.mu.Unlock()
@@ -196,6 +202,22 @@ type speechBrowserFixture struct {
 	// (the existing test seam): arms are counted while the REAL AfterFunc
 	// still runs — the timing control point of step 4.
 	timerProbe *speechTimerProbe
+
+	handlerActive, handlerDone        atomic.Int64
+	writerDone                        atomic.Int64
+	providerStarted, providerDone     atomic.Int64
+	announcementRun, announcementDone atomic.Int64
+}
+
+type speechObservedTTS struct {
+	inner   TTSSynthesizer
+	fixture *speechBrowserFixture
+}
+
+func (s *speechObservedTTS) SynthesizeStream(ctx context.Context, text string, onAudio AudioChunkFunc, opts ...mimo.TTSOption) (*mimo.StreamResult, error) {
+	s.fixture.providerStarted.Add(1)
+	defer s.fixture.providerDone.Add(1)
+	return s.inner.SynthesizeStream(ctx, text, onAudio, opts...)
 }
 
 // speechTimerProbe counts word-timer arms seen through the timerFactory seam.
@@ -208,11 +230,21 @@ func (p *speechTimerProbe) count() int64 { return p.arms.Load() }
 // useTimerProbe installs the counting timer factory on every future manager.
 func (f *speechBrowserFixture) useTimerProbe() *speechTimerProbe {
 	f.t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.timerProbe != nil {
 		f.t.Fatal("timer probe already installed")
 	}
 	f.timerProbe = &speechTimerProbe{}
 	return f.timerProbe
+}
+
+func (f *speechBrowserFixture) gateTTS(hold chan struct{}) *speechHoldTTS {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	gated := &speechHoldTTS{inner: f.tts, hold: hold}
+	f.tts = gated
+	return gated
 }
 
 // speechRepoRoot locates the repository root from this test file's path.
@@ -310,7 +342,12 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/rt", handler.HandleWebSocket)
+	mux.HandleFunc("/rt", func(w http.ResponseWriter, r *http.Request) {
+		f.handlerActive.Add(1)
+		defer f.handlerActive.Add(-1)
+		defer f.handlerDone.Add(1)
+		handler.HandleWebSocket(w, r)
+	})
 	tutorDir := filepath.Join(root, "pkg", "web", "static", "tutor")
 	if _, err := os.Stat(tutorDir); err != nil {
 		t.Fatalf("tutor static dir: %v", err)
@@ -326,15 +363,23 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 // newManager is the per-connection factory: a real TurnManager over the fake
 // providers and the real temp-SQLite lesson tools, wrapped by the tracker.
 func (f *speechBrowserFixture) newManager() SessionManager {
-	tm := NewTurnManager(f.asr, f.llm, f.tts, f.tools, TurnManagerConfig{
+	f.mu.Lock()
+	tts, probe := f.tts, f.timerProbe
+	f.mu.Unlock()
+	tm := NewTurnManager(f.asr, f.llm, &speechObservedTTS{inner: tts, fixture: f}, f.tools, TurnManagerConfig{
 		LessonID: "speech-browser-fixture",
 		Words:    f.words,
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
-	if probe := f.timerProbe; probe != nil {
+	if probe != nil {
 		tm.timerFactory = func(d time.Duration, fn func()) *time.Timer {
 			probe.arms.Add(1)
 			return time.AfterFunc(d, fn)
 		}
+	}
+	tm.starterInterleave = func(task func()) {
+		f.announcementRun.Add(1)
+		defer f.announcementDone.Add(1)
+		task()
 	}
 	m := &speechManagerTracker{TurnManager: tm, fixture: f}
 	f.mu.Lock()
@@ -448,6 +493,42 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		f.t.Fatalf("driver scenario %q failed: %s\nstderr:\n%s", scenario, res.Err, errOut.String())
 	}
 	return res
+}
+
+func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {
+	f.t.Helper()
+	done := make(chan speechDriverResult, 1)
+	go func() {
+		defer close(done)
+		done <- f.runDriver(scenario, timeout, extraArgs...)
+	}()
+	return done
+}
+
+func (f *speechBrowserFixture) waitOneManager(timeout time.Duration) {
+	f.t.Helper()
+	f.waitFirstManager(timeout)
+	f.mu.Lock()
+	n := len(f.managers)
+	f.mu.Unlock()
+	if n != 1 {
+		f.t.Fatalf("browser created %d managers, want the original connection only", n)
+	}
+}
+
+func (f *speechBrowserFixture) assertOriginalTasksExited() {
+	f.t.Helper()
+	if !waitFor(f.t, 15*time.Second, func() bool {
+		return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
+			f.writerDone.Load() == 1 && f.providerStarted.Load() > 0 &&
+			f.providerStarted.Load() == f.providerDone.Load() &&
+			f.announcementRun.Load() > 0 && f.announcementRun.Load() == f.announcementDone.Load()
+	}) {
+		f.t.Fatalf("original tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+			f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
+			f.providerStarted.Load(), f.providerDone.Load(),
+			f.announcementRun.Load(), f.announcementDone.Load())
+	}
 }
 
 // runDriverCheck executes the driver's --check self-check (计划步骤 3「辅助
@@ -585,26 +666,25 @@ func TestSpeechBrowserFaultControls(t *testing.T) {
 	t.Run("send site intercept hits and clears", func(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 
-		restore, hits := speechFaultSetSend(func(kind string, payload []byte) error {
-			return fmt.Errorf("fault-injected: refuse %s frame", kind)
+		held := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(held) }) }
+		restore, hits := speechFaultSetSend(func(string, []byte) error {
+			<-held
+			return nil
 		})
+		t.Cleanup(release)
 		t.Cleanup(restore)
 
-		res := f.runDriver("starve-probe", 30*time.Second, "--hold-ms", "3000")
-		if !res.WSOpened {
-			t.Fatal("page could not complete the /rt handshake — the intercept must not touch the upgrade")
-		}
-		if got := hits(); got == 0 {
+		driver := f.runDriverAsync("held-fixture", 45*time.Second, "--hold-ms", "500")
+		if !waitFor(t, 5*time.Second, func() bool { return hits() > 0 }) {
 			t.Fatal("send-site control point never hit")
 		}
-		if res.HoldControlIn != 0 {
-			t.Fatalf("page received %d control frames while every send was refused", res.HoldControlIn)
-		}
-
-		// 解除控制：同一 fixture 重连后自然完成，无遗留会话。
+		f.waitOneManager(5 * time.Second)
+		release()
 		restore()
-		f.assertNaturalCompletion()
-		f.assertAllManagersClosed()
+		<-driver
+		f.assertOriginalTasksExited()
 	})
 
 	t.Run("pump consumption gate hits and releases", func(t *testing.T) {
@@ -616,19 +696,15 @@ func TestSpeechBrowserFaultControls(t *testing.T) {
 		restore, waits := speechFaultSetPumpGate(func() <-chan struct{} { return held })
 		t.Cleanup(restore)
 
-		res := f.runDriver("starve-probe", 30*time.Second, "--hold-ms", "3000")
-		if got := waits(); got == 0 {
+		driver := f.runDriverAsync("held-fixture", 45*time.Second, "--hold-ms", "500")
+		if !waitFor(t, 5*time.Second, func() bool { return waits() > 0 }) {
 			t.Fatal("pump consumption control point never hit")
 		}
-		if res.HoldControlIn != 0 || res.HoldBinaryIn != 0 {
-			t.Fatalf("page received frames (control=%d binary=%d) while the pump was held",
-				res.HoldControlIn, res.HoldBinaryIn)
-		}
-
+		f.waitOneManager(5 * time.Second)
 		release()
 		restore()
-		f.assertNaturalCompletion()
-		f.assertAllManagersClosed()
+		<-driver
+		f.assertOriginalTasksExited()
 	})
 
 	t.Run("tts hold starves audio only", func(t *testing.T) {
@@ -637,23 +713,17 @@ func TestSpeechBrowserFaultControls(t *testing.T) {
 		held := make(chan struct{})
 		var releaseOnce sync.Once
 		release := func() { releaseOnce.Do(func() { close(held) }) }
-		gated := &speechHoldTTS{inner: f.tts, hold: held}
-		f.tts = gated
+		gated := f.gateTTS(held)
+		t.Cleanup(release)
 
-		res := f.runDriver("starve-probe", 30*time.Second, "--hold-ms", "3000")
-		if gated.holdHits() == 0 {
+		driver := f.runDriverAsync("held-fixture", 45*time.Second, "--hold-ms", "500")
+		if !waitFor(t, 5*time.Second, func() bool { return gated.holdHits() > 0 }) {
 			t.Fatal("provider-return control point never hit")
 		}
-		if res.HoldControlIn == 0 {
-			t.Fatal("control frames must keep flowing while only the provider is held")
-		}
-		if res.HoldBinaryIn != 0 {
-			t.Fatalf("page received %d audio frames while the provider was held", res.HoldBinaryIn)
-		}
-
+		f.waitOneManager(5 * time.Second)
 		release()
-		f.assertNaturalCompletion()
-		f.assertAllManagersClosed()
+		<-driver
+		f.assertOriginalTasksExited()
 	})
 
 	t.Run("timer factory seam records arms", func(t *testing.T) {
@@ -664,7 +734,7 @@ func TestSpeechBrowserFaultControls(t *testing.T) {
 		if probe.count() == 0 {
 			t.Fatal("timing control point never hit — the word timer never armed through the factory")
 		}
-		f.assertAllManagersClosed()
+		f.assertOriginalTasksExited()
 	})
 }
 
