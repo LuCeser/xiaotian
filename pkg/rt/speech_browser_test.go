@@ -96,6 +96,10 @@ type speechDriverResult struct {
 
 	// ocr-prefill-close scenario fields: late ocr_result frames after close.
 	LateOcrResults int `json:"lateOcrResults"`
+
+	// check-submit-close scenario fields: late review_result frames and late
+	// summary sentences after the close.
+	LateReviewResults int `json:"lateReviewResults"`
 }
 
 var speechExpectedOpening = []string{
@@ -507,6 +511,29 @@ func (f *speechBrowserFixture) seedChecking() {
 	f.mu.Unlock()
 }
 
+// seedCheckingWithManualVerdicts extends seedChecking with two real manual
+// verdict writes: the panel then re-renders from the authoritative echo with
+// every word confirmed, and the 提交 button enables (the client gate mirrors
+// the server's manual gate).
+func (f *speechBrowserFixture) seedCheckingWithManualVerdicts() {
+	f.t.Helper()
+	f.seedChecking()
+	ctx := context.Background()
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	l, err := f.tools.GetLessonState(ctx, lessonID)
+	if err != nil {
+		f.t.Fatalf("read seeded lesson: %v", err)
+	}
+	for idx := range l.Words {
+		res, err := f.tools.ApplyVerdict(ctx, lessonID, l.Version, fmt.Sprintf("browser-seed-manual-%d", idx),
+			lesson.CheckVerdict{WordIndex: idx, Correct: true, Manual: true})
+		if err != nil {
+			f.t.Fatalf("seed manual verdict %d: %v", idx, err)
+		}
+		l.Version = res.NewVersion
+	}
+}
+
 func (f *speechBrowserFixture) gateScreenVerdict() (entered, release chan struct{}) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -523,6 +550,66 @@ func (f *speechBrowserFixture) gateOcrPrefillWrites() (entered, release chan str
 	g := &speechBatchGate{LessonExecutor: f.exec, entered: make(chan struct{}), release: make(chan struct{})}
 	f.exec = g
 	return g.entered, g.release
+}
+
+// speechOneGate is one reusable entered/release pair (first hit signals);
+// openUp is idempotent so a t.Cleanup can pair with an explicit release.
+type speechOneGate struct {
+	entered  chan struct{}
+	release  chan struct{}
+	armOnce  sync.Once
+	openOnce sync.Once
+}
+
+func newSpeechOneGate() *speechOneGate {
+	return &speechOneGate{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *speechOneGate) arm()  { g.armOnce.Do(func() { close(g.entered) }) }
+func (g *speechOneGate) wait() { <-g.release }
+func (g *speechOneGate) openUp() {
+	g.arm()
+	g.openOnce.Do(func() { close(g.release) })
+}
+
+// speechSubmitGate wraps the executor's CompleteCheck at the two formal-
+// submit control points (1.12a's window set, installed for 1.09's orderings):
+// before parks AHEAD of the real latch write; committed parks AFTER the real
+// write succeeded but BEFORE its result returns to the manager.
+type speechSubmitGate struct {
+	LessonExecutor
+	before    *speechOneGate
+	committed *speechOneGate
+}
+
+func (g *speechSubmitGate) CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
+	if g.before != nil {
+		g.before.arm()
+		g.before.wait()
+	}
+	res, err := g.LessonExecutor.CompleteCheck(ctx, lessonID, expectedVersion, requestID, unchecked)
+	if err == nil && g.committed != nil {
+		g.committed.arm()
+		g.committed.wait()
+	}
+	return res, err
+}
+
+// gateCheckSubmit arms the chosen CompleteCheck control points.
+func (f *speechBrowserFixture) gateCheckSubmit(before, committed bool) (beforeGate, committedGate *speechOneGate) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g := &speechSubmitGate{LessonExecutor: f.exec}
+	if before {
+		g.before = newSpeechOneGate()
+		beforeGate = g.before
+	}
+	if committed {
+		g.committed = newSpeechOneGate()
+		committedGate = g.committed
+	}
+	f.exec = g
+	return beforeGate, committedGate
 }
 
 // armPhotoOCR wires the scripted fake OCR reader into every future manager's
@@ -642,7 +729,8 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		"--timeout-ms", fmt.Sprint(int64(timeout / time.Millisecond)),
 	}, extraArgs...)
 	if scenario == "fixture" || scenario == "held-fixture" || scenario == "close-after-opening" ||
-		scenario == "screen-verdict-close" || scenario == "voice-verdict-close" || scenario == "ocr-prefill-close" {
+		scenario == "screen-verdict-close" || scenario == "voice-verdict-close" ||
+		scenario == "ocr-prefill-close" || scenario == "check-submit-close" {
 		f.mu.Lock()
 		sentences := append([]string(nil), f.expectedSentences...)
 		f.mu.Unlock()

@@ -342,6 +342,28 @@ async function scenarioOcrPrefillClose(args) {
   };
 }
 
+// scenario "check-submit-close"（1.09）：真实正式提交入口。恢复播报自然完成、
+// 全部词都带人工判定（服务端 echo 驱动）后，点击「检查完了，提交」——生产
+// check_submit → CompleteCheck 锁存 → 保存与回执真实发生；Go 侧在提交的控
+// 制点（实际提交前／提交已落库未返回）上关闭会话。页面只观察：close 事件、
+// 迟到的 review_result 与总结播报必须为零。
+async function scenarioCheckSubmitClose(args) {
+  const opening = await scenarioFixture(args);
+  const before = await wsView(args.page);
+  const teachersBefore = before.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length;
+  const reviewBefore = before.filter((e) => e.dir === 'in' && e.type === 'review_result').length;
+  await args.page.locator('.rt-check-submit').click();
+  await waitWs(args.page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+    { timeoutMs: args.timeoutMs, label: 'close racing the formal check submit' });
+  const view = await wsView(args.page);
+  return {
+    ...opening,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    lateTeacherSentences: view.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length - teachersBefore,
+    lateReviewResults: view.filter((e) => e.dir === 'in' && e.type === 'review_result').length - reviewBefore,
+  };
+}
+
 // scenario "starve-probe"：点击「开始上课」后只观察一个固定窗口
 // （--hold-ms，默认 3000），输出窗口内页面真实收到的下行控制/二进制帧数
 // 后退出，不等待播放完成。这是故障控制点「命中」的页面侧证据：被控制的
@@ -367,6 +389,7 @@ const SCENARIOS = {
   'screen-verdict-close': scenarioScreenVerdictClose,
   'voice-verdict-close': scenarioVoiceVerdictClose,
   'ocr-prefill-close': scenarioOcrPrefillClose,
+  'check-submit-close': scenarioCheckSubmitClose,
   'starve-probe': scenarioStarveProbe,
 };
 
