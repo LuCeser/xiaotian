@@ -226,6 +226,19 @@ async function scenarioHeldFixture(args) {
   return scenarioFixture({ ...args, preWaitMs: args.holdMs });
 }
 
+async function scenarioCloseAfterOpening(args) {
+  const opening = await scenarioFixture(args);
+  if (args.holdMs > 0) await args.page.waitForTimeout(args.holdMs);
+  await args.page.locator('#rt-end').click();
+  await waitWs(args.page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+    { timeoutMs: args.timeoutMs, label: 'original WebSocket close after end_session failure' });
+  const view = await wsView(args.page);
+  return {
+    ...opening,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+  };
+}
+
 // scenario "starve-probe"：点击「开始上课」后只观察一个固定窗口
 // （--hold-ms，默认 3000），输出窗口内页面真实收到的下行控制/二进制帧数
 // 后退出，不等待播放完成。这是故障控制点「命中」的页面侧证据：被控制的
@@ -247,6 +260,7 @@ async function scenarioStarveProbe({ page, url, holdMs }) {
 const SCENARIOS = {
   fixture: scenarioFixture,
   'held-fixture': scenarioHeldFixture,
+  'close-after-opening': scenarioCloseAfterOpening,
   'starve-probe': scenarioStarveProbe,
 };
 

@@ -84,6 +84,7 @@ type speechDriverResult struct {
 	// hold window while a fault control was active.
 	HoldControlIn int `json:"holdControlIn"`
 	HoldBinaryIn  int `json:"holdBinaryIn"`
+	WSCloseCount  int `json:"wsCloseCount"`
 }
 
 var speechExpectedOpening = []string{
@@ -139,6 +140,7 @@ type speechManagerTracker struct {
 	mu     sync.Mutex
 	acks   []SentenceAckMsg
 	closed bool
+	closes int
 }
 
 func (m *speechManagerTracker) HandleControl(s Sender, data []byte) {
@@ -166,6 +168,7 @@ func (m *speechManagerTracker) Close(s Sender) {
 	}
 	m.mu.Lock()
 	m.closed = true
+	m.closes++
 	m.mu.Unlock()
 }
 
@@ -179,6 +182,12 @@ func (m *speechManagerTracker) wasClosed() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.closed
+}
+
+func (m *speechManagerTracker) closeCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closes
 }
 
 // speechBrowserFixture is one test's isolated production-shaped server.
@@ -465,7 +474,7 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		"--scenario", scenario,
 		"--timeout-ms", fmt.Sprint(int64(timeout / time.Millisecond)),
 	}, extraArgs...)
-	if scenario == "fixture" || scenario == "held-fixture" {
+	if scenario == "fixture" || scenario == "held-fixture" || scenario == "close-after-opening" {
 		expected, err := json.Marshal(speechExpectedOpening)
 		if err != nil {
 			f.t.Fatalf("encode expected opening: %v", err)
@@ -493,6 +502,46 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		f.t.Fatalf("driver scenario %q failed: %s\nstderr:\n%s", scenario, res.Err, errOut.String())
 	}
 	return res
+}
+
+func TestCloseTransportFailure(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	var attempts atomic.Int64
+	restore, _ := speechFaultSetSend(func(kind string, payload []byte) error {
+		if kind != "control" {
+			return nil
+		}
+		var message struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(payload, &message) == nil && message.Type == TypeSessionEnded {
+			attempts.Add(1)
+			return errTerminalRefused
+		}
+		return nil
+	})
+	t.Cleanup(restore)
+
+	settled := f.watchAnnouncementSettled(60 * time.Second)
+	driver := f.runDriverAsync("close-after-opening", 45*time.Second, "--hold-ms", "1000")
+	select {
+	case <-settled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("opening did not settle before the close test")
+	}
+	m := f.waitFirstManager(5 * time.Second)
+	cancelCount := ttArmCancelCounting(m.TurnManager)
+	res := <-driver
+	if res.WSCloseCount != 1 {
+		t.Fatalf("original WebSocket close events = %d, want 1", res.WSCloseCount)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("session_ended attempts = %d, want 1", attempts.Load())
+	}
+	f.assertOriginalTasksExited()
+	if m.closeCount() != 1 || atomic.LoadInt32(cancelCount) != 1 {
+		t.Fatalf("manager closes=%d cleanup cancels=%d, want 1/1", m.closeCount(), atomic.LoadInt32(cancelCount))
+	}
 }
 
 func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {

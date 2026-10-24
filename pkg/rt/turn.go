@@ -1361,7 +1361,10 @@ func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch, takeFallback bool
 	tm.vad.Reset()
 	if s != nil {
 		if err := s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason}); err != nil {
+			s.Terminate(err)
 			tm.logger.Warn("session_ended enqueue failed", infra.ErrField(err))
+		} else {
+			s.Terminate(nil)
 		}
 	}
 	return c
