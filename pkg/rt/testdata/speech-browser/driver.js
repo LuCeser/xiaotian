@@ -76,9 +76,19 @@ function checkSelf() {
 async function scenarioFixture({ page, url, timeoutMs }) {
   await page.goto(url);
   await page.locator('#rt-start').click();
-  await waitWs(page, (view) => view.some((e) => e.dir === 'out' && e.type === 'sentence_ack')
-    && view.some((e) => e.dir === 'in' && e.type === 'state' && e.msg && e.msg.value === 'listening'),
-  { timeoutMs, label: 'natural opening playback: sentence_acks then listening restored' });
+  try {
+    await waitWs(page, (view) => view.some((e) => e.dir === 'out' && e.type === 'sentence_ack')
+      && view.some((e) => e.dir === 'in' && e.type === 'state' && e.msg && e.msg.value === 'listening'),
+    { timeoutMs, label: 'natural opening playback: sentence_acks then listening restored' });
+  } catch (err) {
+    // 诊断增补：超时原语只带 trace 尾部，这里补齐 droppedChunks/麦克风状态，
+    // 让「帧已到、播放停滞」类失败可分辨。
+    let diag = '';
+    try {
+      diag = JSON.stringify({ playback: await playbackState(page), mic: await micInfo(page) });
+    } catch (_) { /* page may be gone */ }
+    throw new Error(String(err && err.message) + '\ndiag: ' + diag);
+  }
 
   const view = await wsView(page);
   const playback = await playbackState(page);
@@ -104,7 +114,25 @@ async function scenarioFixture({ page, url, timeoutMs }) {
   };
 }
 
-const SCENARIOS = { fixture: scenarioFixture };
+// scenario "starve-probe"：点击「开始上课」后只观察一个固定窗口
+// （--hold-ms，默认 3000），输出窗口内页面真实收到的下行控制/二进制帧数
+// 后退出，不等待播放完成。这是故障控制点「命中」的页面侧证据：被控制的
+// 方向（控制帧／音频帧／全部）在窗口内必须为零；解除控制后的自然完成由
+// 其它 scenario 验证。
+async function scenarioStarveProbe({ page, url, holdMs }) {
+  await page.goto(url);
+  await page.locator('#rt-start').click();
+  await page.waitForTimeout(holdMs);
+  const view = await wsView(page);
+  return {
+    ok: true,
+    wsOpened: view.some((e) => e.dir === 'evt' && e.kind === 'open'),
+    holdControlIn: view.filter((e) => e.dir === 'in' && e.kind === 'text').length,
+    holdBinaryIn: view.filter((e) => e.dir === 'in' && e.kind === 'binary').length,
+  };
+}
+
+const SCENARIOS = { fixture: scenarioFixture, 'starve-probe': scenarioStarveProbe };
 
 async function main() {
   const args = process.argv.slice(2);
@@ -121,6 +149,7 @@ async function main() {
   const scenarioName = opt('--scenario') || 'fixture';
   const url = opt('--url');
   const timeoutMs = Number(opt('--timeout-ms') || 45000);
+  const holdMs = Number(opt('--hold-ms') || 3000);
   const run = SCENARIOS[scenarioName];
   if (!url || !run) {
     emit({ ok: false, error: 'usage: driver.js --url URL [--scenario NAME] [--timeout-ms N] | --check' });
@@ -134,7 +163,7 @@ async function main() {
     const page = await context.newPage();
     await installRtObserver(page);
     await installFakeMic(page);
-    result = await run({ page, url, timeoutMs });
+    result = await run({ page, url, timeoutMs, holdMs });
     await context.close();
   } catch (err) {
     result = { ok: false, error: String((err && err.message) || err) };

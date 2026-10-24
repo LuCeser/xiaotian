@@ -77,6 +77,11 @@ type speechDriverResult struct {
 	PageAcks         []speechPageAck           `json:"pageAcks"`
 	Playback         speechPlaybackObservation `json:"playback"`
 	Mic              speechMicObservation      `json:"mic"`
+
+	// starve-probe scenario fields: what the page REALLY received inside the
+	// hold window while a fault control was active.
+	HoldControlIn int `json:"holdControlIn"`
+	HoldBinaryIn  int `json:"holdBinaryIn"`
 }
 
 // speechManagerTracker wraps one connection's real TurnManager: it counts
@@ -327,21 +332,23 @@ func (f *speechBrowserFixture) waitManagersClosed(timeout time.Duration) bool {
 }
 
 // runDriver spawns the Node browser driver and returns its parsed result.
-// The returned error is non-nil only for process-level failures; a failed
-// scenario comes back as speechDriverResult{OK:false, Err:...} with the
-// driver's combined output attached for diagnosis.
-func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration) speechDriverResult {
+// extraArgs append verbatim (e.g. "--hold-ms", "3000" for starve-probe).
+// A failed scenario comes back as speechDriverResult{OK:false, Err:...}
+// with the driver's combined output attached for diagnosis.
+func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration, extraArgs ...string) speechDriverResult {
 	f.t.Helper()
 	root := speechRepoRoot(f.t)
 	driver := filepath.Join(root, "pkg", "rt", "testdata", "speech-browser", "driver.js")
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout+15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "node", driver,
-		"--url", f.url()+"tutor/",
+	args := append([]string{
+		driver,
+		"--url", f.url() + "tutor/",
 		"--scenario", scenario,
-		"--timeout-ms", fmt.Sprint(int64(timeout/time.Millisecond)),
-	)
+		"--timeout-ms", fmt.Sprint(int64(timeout / time.Millisecond)),
+	}, extraArgs...)
+	cmd := exec.CommandContext(ctx, "node", args...)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	runErr := cmd.Run()
@@ -448,6 +455,96 @@ func (f *speechBrowserFixture) watchAnnouncementSettled(timeout time.Duration) <
 	return ch
 }
 
+// assertNaturalCompletion runs one fixture round and asserts the natural
+// completion evidence: every sentence_ack followed its own native onended,
+// zero dropped chunks, the synthetic mic adopted — together proving the
+// read-only observer does not alter native playback.
+func (f *speechBrowserFixture) assertNaturalCompletion() {
+	f.t.Helper()
+	res := f.runDriver("fixture", 45*time.Second)
+	if !res.WSOpened {
+		f.t.Fatal("the real page never opened its /rt WebSocket")
+	}
+	if len(res.PageAcks) == 0 {
+		f.t.Fatal("the real page sent no sentence_ack (natural playback did not complete)")
+	}
+	for _, ack := range res.PageAcks {
+		if !ack.PlayedBeforeAck {
+			f.t.Fatalf("sentence_ack for %q (epoch %d) did not follow its native onended — trace %v",
+				ack.SentenceID, ack.Epoch, res.Playback.Trace)
+		}
+	}
+	if res.Playback.DroppedChunks != 0 {
+		f.t.Fatalf("playback dropped %d chunks — the fixture PCM must play whole", res.Playback.DroppedChunks)
+	}
+}
+
+// assertAllManagersClosed waits for every session to be released.
+func (f *speechBrowserFixture) assertAllManagersClosed() {
+	f.t.Helper()
+	if !f.waitManagersClosed(15 * time.Second) {
+		f.mu.Lock()
+		n := len(f.managers)
+		f.mu.Unlock()
+		f.t.Fatalf("%d /rt session(s) still alive after the browser left", n)
+	}
+}
+
+// TestSpeechBrowserFaultControls is 步骤 4 的验收（发送位置与队列消费两类
+// 控制点）：控制点在真实执行位置命中（页面侧帧停滞 + Go 侧命中计数），
+// 解除控制后任务正常退出（完成轮 + 无遗留会话），只读观察器不改变原生
+// 播放（完成轮 playedBeforeAck 全真）。
+func TestSpeechBrowserFaultControls(t *testing.T) {
+	t.Run("send site intercept hits and clears", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+
+		restore, hits := speechFaultSetSend(func(kind string, payload []byte) error {
+			return fmt.Errorf("fault-injected: refuse %s frame", kind)
+		})
+		t.Cleanup(restore)
+
+		res := f.runDriver("starve-probe", 30*time.Second, "--hold-ms", "3000")
+		if !res.WSOpened {
+			t.Fatal("page could not complete the /rt handshake — the intercept must not touch the upgrade")
+		}
+		if got := hits(); got == 0 {
+			t.Fatal("send-site control point never hit")
+		}
+		if res.HoldControlIn != 0 {
+			t.Fatalf("page received %d control frames while every send was refused", res.HoldControlIn)
+		}
+
+		// 解除控制：同一 fixture 重连后自然完成，无遗留会话。
+		restore()
+		f.assertNaturalCompletion()
+		f.assertAllManagersClosed()
+	})
+
+	t.Run("pump consumption gate hits and releases", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+
+		held := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(held) }) }
+		restore, waits := speechFaultSetPumpGate(func() <-chan struct{} { return held })
+		t.Cleanup(restore)
+
+		res := f.runDriver("starve-probe", 30*time.Second, "--hold-ms", "3000")
+		if got := waits(); got == 0 {
+			t.Fatal("pump consumption control point never hit")
+		}
+		if res.HoldControlIn != 0 || res.HoldBinaryIn != 0 {
+			t.Fatalf("page received frames (control=%d binary=%d) while the pump was held",
+				res.HoldControlIn, res.HoldBinaryIn)
+		}
+
+		release()
+		restore()
+		f.assertNaturalCompletion()
+		f.assertAllManagersClosed()
+	})
+}
+
 // TestSpeechBrowserFixture is 步骤 2 的验收：真实生产页面能连上进程内真实
 // /rt 服务端，自然完成一段非零 PCM 的教师播报（原生 onended → 真实
 // sentence_ack，服务器侧门控解除、计时启动），销毁后无遗留连接与进程。
@@ -484,9 +581,6 @@ func TestSpeechBrowserFixture(t *testing.T) {
 	// 复用的合成麦克风被页面生产 capture 真实采用（fake-mic.js 工具的验收）。
 	if len(res.Mic.Tracks) == 0 || res.Mic.Tracks[0].State != "live" {
 		t.Fatalf("synthetic mic not adopted by the production capture: %+v", res.Mic)
-	}
-	if res.Playback.DroppedChunks != 0 {
-		t.Fatalf("playback dropped %d chunks — the fixture PCM must play whole", res.Playback.DroppedChunks)
 	}
 
 	// Server side: the browser's real acks reached the production handler

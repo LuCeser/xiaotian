@@ -418,9 +418,11 @@ func (w *connWriter) shutdown() {
 
 // run is the pump body: serialize every outbound message through one
 // WriteMessage caller, exit on the first write error or on cancellation
-// (after draining).
+// (after draining). The pre-frame hook is a no-op outside the rtbrowser
+// test build (speech_fault_default.go).
 func (w *connWriter) run() {
 	for {
+		speechFaultPumpGateWait(w.ctx)
 		select {
 		case c := <-w.control:
 			if err := w.write(websocket.TextMessage, c); err != nil {
@@ -489,6 +491,10 @@ func (w *connWriter) SendControl(v any) error {
 	if err != nil {
 		return errors.Wrap(err, "rt: marshal control message")
 	}
+	// Test-build fault point at the real enqueue site (no-op in production).
+	if ferr := speechFaultInterceptSend("control", data); ferr != nil {
+		return ferr
+	}
 	select {
 	case w.control <- data:
 		return nil
@@ -503,6 +509,10 @@ func (w *connWriter) SendControl(v any) error {
 // stall, and the 150MB budget prefers a bounded queue to an unbounded one
 // (T-13-02).
 func (w *connWriter) SendAudio(b []byte) error {
+	// Test-build fault point at the real enqueue site (no-op in production).
+	if ferr := speechFaultInterceptSend("audio", b); ferr != nil {
+		return ferr
+	}
 	cp := make([]byte, len(b))
 	copy(cp, b)
 	select {
