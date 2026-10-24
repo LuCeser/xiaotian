@@ -1140,36 +1140,18 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 // ---------------------------------------------------------------------------
 
 // uncheckedCloseSnapshot is the immutable input of the D-03 close-path
-// fallback: copied under tm.mu while the classroom is still open, so the
-// lock-free persistence never reads or mutates the closed session's tutor.
+// fallback: captured by claimCloseLocked in the SAME tm.mu hold that marks
+// the session closed (issue #69 备选一 步骤 8 — the old ownUncheckedFallback
+// snapshotted in its own earlier hold, leaving a window where the state the
+// fallback decision saw and the state the close finalized could diverge),
+// so the lock-free persistence never reads or mutates the closed session's
+// tutor while always seeing the state the close actually observed.
 type uncheckedCloseSnapshot struct {
 	lessonID string
 	category string
 	words    []lesson.Word
 	version  int
 	poem     bool
-}
-
-// ownUncheckedFallback grants the ONE-TIME close-path fallback ownership to
-// this caller (the first closer wins) and snapshots its immutable input in
-// the same lock hold. false means another close already owns the fallback,
-// the session is already closed, or the classroom was never eligible (no
-// tutor, or not in checking).
-func (tm *TurnManager) ownUncheckedFallback() (uncheckedCloseSnapshot, bool) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.closeOwned || tm.closed || tm.tutor == nil || !tm.tutor.checking {
-		return uncheckedCloseSnapshot{}, false
-	}
-	tm.closeOwned = true
-	t := tm.tutor
-	return uncheckedCloseSnapshot{
-		lessonID: t.lessonID,
-		version:  t.version,
-		category: t.category,
-		poem:     t.poem != nil,
-		words:    append([]lesson.Word(nil), t.words...),
-	}, true
 }
 
 // persistUncheckedFallback runs the OWNED fallback OUTSIDE tm.mu once the

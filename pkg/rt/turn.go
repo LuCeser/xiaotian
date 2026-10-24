@@ -416,6 +416,13 @@ type TurnManager struct {
 	// checkSubmitSummaryInterleave probes the gap after review_result is
 	// accepted and before the ending announcement starts.
 	checkSubmitSummaryInterleave func()
+	// closeEntryInterleave (test seam, issue #69 备选一 步骤 8; nil in
+	// production) fires inside the unified close entry after the init-write
+	// lock is taken and BEFORE tm.mu — the last window in which a racing
+	// check-stage presentation can still land ahead of the claim's
+	// eligibility/snapshot decision. The deterministic race tests probe the
+	// claim's one-critical-section contract from here.
+	closeEntryInterleave func()
 
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
@@ -1271,28 +1278,49 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 	tm.applySessionEffect(func() error { return s.SendControl(pong) })
 }
 
-// closeClaim reports one unified-close attempt (issue #69 备选一 步骤 6):
+// closeClaim reports one unified-close attempt (issue #69 备选一 步骤 6/8):
 // Owned is true only for the single caller whose critical section flipped
-// the session closed. Every other path that raced the same close owns
-// nothing — nothing to send, nothing to persist.
+// the session closed. When the closing path carries the D-03 fallback
+// (takeFallback — the goodbye and the transport close), the SAME critical
+// section captured the unchecked-fallback snapshot: whatever state the
+// claim observed is the state the closed marking finalized, so a check
+// stage presented inside the close's old two-lock window can no longer
+// slip past the fallback decision. Every other path that raced the close
+// owns nothing — nothing to send, nothing to persist.
 type closeClaim struct {
-	owned bool
+	fallback    uncheckedCloseSnapshot
+	owned       bool
+	hasFallback bool
 }
 
 // claimCloseLocked is the single ownership point of the session's close:
 // eligibility (already closed, and for the epoch-gated flavors a stale
-// epoch) and the closed marking complete in ONE critical section, so the
-// check and the marking can never split. Caller holds initWriteMu AND
-// tm.mu (fixed order initWriteMu → tm.mu). Everything that can block —
-// persistence, logs, the goodbye enqueue, the VAD reset — runs outside,
-// after the claim: a failed notification must never reopen, delay or skip
-// the close.
-func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch bool) bool {
+// epoch), the D-03 fallback snapshot (takeFallback: the classroom still
+// holds an unsubmitted check stage) and the closed marking complete in ONE
+// critical section, so the decision and the marking can never split.
+// Caller holds initWriteMu AND tm.mu (fixed order initWriteMu → tm.mu).
+// Everything that can block — persistence, logs, the goodbye enqueue, the
+// VAD reset — runs outside, after the claim: a failed notification must
+// never reopen, delay or skip the close.
+func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch, takeFallback bool) closeClaim {
 	if tm.closed || (gateEpoch && tm.epoch != epoch) {
-		return false
+		return closeClaim{}
+	}
+	c := closeClaim{owned: true}
+	if takeFallback && !tm.closeOwned && tm.tutor != nil && tm.tutor.checking {
+		tm.closeOwned = true
+		t := tm.tutor
+		c.fallback = uncheckedCloseSnapshot{
+			lessonID: t.lessonID,
+			version:  t.version,
+			category: t.category,
+			poem:     t.poem != nil,
+			words:    append([]lesson.Word(nil), t.words...),
+		}
+		c.hasFallback = true
 	}
 	tm.internalCloseLocked()
-	return true
+	return c
 }
 
 // closeSessionAt is the unified close entry every close path funnels
@@ -1301,14 +1329,21 @@ func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch bool) bool {
 // for) runs lock-free. A failed session_ended enqueue is logged and
 // swallowed — the session is already closed at that point, the close is
 // not undoable, and the caller still learns it owns the close.
-func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch bool, reason string, s Sender) bool {
+func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch, takeFallback bool, reason string, s Sender) closeClaim {
 	tm.initWriteMu.Lock()
+	if tm.closeEntryInterleave != nil {
+		// Narrow test probe (issue #69 备选一 步骤 8): fires with the
+		// init-write lock held and tm.mu NOT yet taken — the exact window
+		// where a check-stage presentation can still slip in ahead of the
+		// claim's decision.
+		tm.closeEntryInterleave()
+	}
 	tm.mu.Lock()
-	owned := tm.claimCloseLocked(epoch, gateEpoch)
+	c := tm.claimCloseLocked(epoch, gateEpoch, takeFallback)
 	tm.mu.Unlock()
 	tm.initWriteMu.Unlock()
-	if !owned {
-		return false
+	if !c.owned {
+		return c
 	}
 	tm.vad.Reset()
 	if s != nil {
@@ -1316,7 +1351,7 @@ func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch bool, reason strin
 			tm.logger.Warn("session_ended enqueue failed", infra.ErrField(err))
 		}
 	}
-	return true
+	return c
 }
 
 // tryTerminalClose claims the session's ONE terminal close and ships the
@@ -1325,37 +1360,40 @@ func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch bool, reason strin
 // lock-disciplined effect that lost the race dies on the closed flag, and
 // none can queue behind the goodbye), losers send nothing. Epoch-free: the
 // client's goodbye closes whatever turn is live. The D-03 fallback
-// ownership is decided separately (ownUncheckedFallback) — this claim only
-// orders the terminal message.
+// ownership is NOT decided here — only the goodbye (handleEndSession) and
+// the transport close (Close) carry it; these callers have either already
+// left the check stage or never showed it.
 func (tm *TurnManager) tryTerminalClose(s Sender, reason string) bool {
-	return tm.closeSessionAt(0, false, reason, s)
+	return tm.closeSessionAt(0, false, false, reason, s).owned
 }
 
 // tryTerminalCloseAt is tryTerminalClose gated on the ending's OWN epoch: a
 // stale ending — a summary whose wait outlived an interrupt that bumped the
 // epoch — must not close (or goodbye) the classroom that replaced it.
 func (tm *TurnManager) tryTerminalCloseAt(s Sender, epoch uint64, reason string) bool {
-	return tm.closeSessionAt(epoch, true, reason, s)
+	return tm.closeSessionAt(epoch, true, false, reason, s).owned
 }
 
 // handleEndSession is the explicit goodbye (RT-10/SC7 server half). The
-// close owns the D-03 fallback (13.1-04) ONCE: the immutable snapshot is
-// taken under tm.mu first, then the session is marked closed and the
-// goodbye ships, and only afterwards does the lock-free persistence run —
-// every in-flight callback that returns during that write finds closed set
-// and stays silent, and the dead tutor is never touched again. PR #61
-// review: closed is set BEFORE session_ended ships — the flag (under tm.mu)
-// is what every advance-side gate checks, and the lesson_update enqueue in
-// advanceTarget shares that lock, so a racing advance's wire output lands
-// strictly before the goodbye, or (when it lost the race) is suppressed
-// entirely. session_ended stays the terminal control message.
+// close owns the D-03 fallback (13.1-04) ONCE, decided in the claim's ONE
+// critical section together with the closed marking (issue #69 备选一
+// 步骤 8: the old shape snapshotted in its own earlier lock hold, so a
+// check stage presented in between closed the session with the fallback
+// silently missed). The goodbye ships after the marking, and only then
+// does the lock-free persistence run — every in-flight callback that
+// returns during that write finds closed set and stays silent, and the
+// dead tutor is never touched again. PR #61 review: closed is set BEFORE
+// session_ended ships — the flag (under tm.mu) is what every advance-side
+// gate checks, and the lesson_update enqueue in advanceTarget shares that
+// lock, so a racing advance's wire output lands strictly before the
+// goodbye, or (when it lost the race) is suppressed entirely.
+// session_ended stays the terminal control message.
 func (tm *TurnManager) handleEndSession(s Sender) {
-	snap, owned := tm.ownUncheckedFallback()
-	if tm.tryTerminalClose(s, ReasonClientEnd) {
+	if c := tm.closeSessionAt(0, false, true, ReasonClientEnd, s); c.owned {
 		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-	}
-	if owned {
-		tm.persistUncheckedFallback(snap)
+		if c.hasFallback {
+			tm.persistUncheckedFallback(c.fallback)
+		}
 	}
 }
 
@@ -1365,7 +1403,7 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 // 取消等待) and sweeps the photo assembler (13.1-03 privacy P2: the child's
 // photo never outlives its session).
 func (tm *TurnManager) internalClose() {
-	tm.closeSessionAt(0, false, "", nil)
+	tm.closeSessionAt(0, false, false, "", nil)
 }
 
 // internalCloseLocked is internalClose's locked half (caller holds tm.mu),
@@ -1398,33 +1436,22 @@ func (tm *TurnManager) internalCloseLocked() {
 // pick bumps the epoch and opens the new classroom → the stale close
 // lands" cannot happen.
 func (tm *TurnManager) orderlyCloseAt(epoch uint64) {
-	tm.closeSessionAt(epoch, true, "", nil)
+	tm.closeSessionAt(epoch, true, false, "", nil)
 }
 
 // Close implements SessionManager: the transport read loop exited for any
 // reason (disconnect, deadline, read error). Idempotent — an end_session
 // path already closed the session. The D-03 fallback (13.1-04) rides the
-// same ONE-TIME close ownership as handleEndSession: this closer snapshots
-// before marking closed, and persists afterwards even when a concurrent
-// goodbye won the race to set the flag — ownership, not the flag, decides
-// who persists.
+// same ONE-TIME close ownership as handleEndSession, decided in the claim's
+// ONE critical section (issue #69 备选一 步骤 8): whoever's claim flipped
+// the closed flag also decided — and owns — the fallback; the loser does
+// nothing. No session_ended ships here (the transport is gone).
 func (tm *TurnManager) Close(Sender) {
-	snap, owned := tm.ownUncheckedFallback()
-	tm.mu.Lock()
-	already := tm.closed
-	tm.mu.Unlock()
-	if already {
-		if owned {
-			// A concurrent goodbye closed first but did not own the
-			// fallback: the snapshot is still this closer's to persist.
-			tm.persistUncheckedFallback(snap)
+	if c := tm.closeSessionAt(0, false, true, "", nil); c.owned {
+		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+		if c.hasFallback {
+			tm.persistUncheckedFallback(c.fallback)
 		}
-		return
-	}
-	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-	tm.internalClose()
-	if owned {
-		tm.persistUncheckedFallback(snap)
 	}
 }
 
