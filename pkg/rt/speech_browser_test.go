@@ -611,6 +611,47 @@ func TestCloseTransportFailure(t *testing.T) {
 	}
 }
 
+func TestCloseDuringScreenVerdict(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedChecking()
+	entered, release := f.gateScreenVerdict()
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseGate)
+
+	driver := f.runDriverAsync("screen-verdict-close", 45*time.Second)
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("screen verdict did not reach the real persistence gate")
+	}
+	m := f.waitFirstManager(5 * time.Second)
+	if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
+		t.Fatal("test close did not obtain session ownership")
+	}
+	releaseGate()
+	res := <-driver
+	if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 {
+		t.Fatalf("close events=%d late verdict echoes=%d, want 1/0", res.WSCloseCount, res.LateVerdictEchoes)
+	}
+	f.assertOriginalTasksExited()
+
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if len(stored.Verdicts) != 1 || !stored.Verdicts[0].Manual || !stored.Verdicts[0].Correct {
+		t.Fatalf("stored verdicts = %+v, want the accepted manual screen verdict", stored.Verdicts)
+	}
+	m.mu.Lock()
+	pending := len(m.checkWrites)
+	m.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("completed check-write admissions = %d, want 0", pending)
+	}
+}
+
 func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {
 	f.t.Helper()
 	done := make(chan speechDriverResult, 1)

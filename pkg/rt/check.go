@@ -431,25 +431,24 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 // loop; the DB write is the same short-transaction class as session_init's.
 func (tm *TurnManager) handleCheckVerdict(s Sender, m CheckVerdictMsg) {
 	tm.mu.Lock()
-	alive := tm.tutor != nil && !tm.closed && tm.tutor.checking
-	total := 0
-	if tm.tutor != nil {
-		total = len(tm.tutor.words)
-	}
-	tm.mu.Unlock()
-	if !alive {
+	if tm.tutor == nil || tm.closed || !tm.tutor.checking {
+		tm.mu.Unlock()
 		tm.sendOpenError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
 		return
 	}
-	if m.RequestID == "" || m.WordIndex < 0 || m.WordIndex >= total {
+	if m.RequestID == "" || m.WordIndex < 0 || m.WordIndex >= len(tm.tutor.words) {
+		tm.mu.Unlock()
 		tm.sendOpenError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
 		return
 	}
-
-	tm.mu.Lock()
 	lessonID := tm.tutor.lessonID
 	expected := tm.tutor.version
+	write, admitted := tm.admitCheckWriteLocked()
 	tm.mu.Unlock()
+	if !admitted {
+		return
+	}
+	defer tm.completeCheckWrite(write)
 
 	// Screen verdicts are the only verdict kind this plan creates: manual
 	// always true (OCR prefills arrive in 13.1-03 with Manual=false and do
