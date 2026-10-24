@@ -447,10 +447,17 @@ func (c *mimoClient) buildChatVisionRequest(systemPrompt, userPrompt string, ima
 // executeChatVisionRequest posts the vision request to /chat/completions and
 // decodes the (shared) ChatResponse shape.
 func (c *mimoClient) executeChatVisionRequest(ctx context.Context, req ChatVisionRequest) (ChatResponse, error) {
+	start := time.Now()
 	body, err := json.Marshal(req)
 	if err != nil {
 		return ChatResponse{}, errors.Wrap(ErrEncodingFailed, "failed to marshal vision chat request")
 	}
+
+	c.logger.Debug("vision chat request started",
+		infra.F("component", "mimo.client"),
+		infra.F("model", req.Model),
+		infra.F("request_bytes", len(body)),
+	)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
@@ -474,11 +481,34 @@ func (c *mimoClient) executeChatVisionRequest(ctx context.Context, req ChatVisio
 	}
 
 	var chatResp ChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	rawBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		c.logger.Warn("vision chat response body read failed",
+			infra.F("component", "mimo.client"),
+			infra.F("model", req.Model),
+			infra.F("request_bytes", len(body)),
+			infra.F("elapsed_ms", time.Since(start).Milliseconds()),
+			infra.F("partial_body", string(rawBody)),
+			infra.ErrField(readErr),
+		)
+		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "failed to read vision chat response body")
+	}
+	if err := json.Unmarshal(rawBody, &chatResp); err != nil {
+		c.logger.Warn("vision chat response decode failed",
+			infra.F("component", "mimo.client"),
+			infra.F("model", req.Model),
+			infra.F("body", string(rawBody)),
+			infra.ErrField(err),
+		)
 		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "failed to decode vision chat response")
 	}
 
 	if len(chatResp.Choices) == 0 {
+		c.logger.Warn("vision chat response had no choices",
+			infra.F("component", "mimo.client"),
+			infra.F("model", req.Model),
+			infra.F("body", string(rawBody)),
+		)
 		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "no choices in vision chat response")
 	}
 
