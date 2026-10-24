@@ -364,9 +364,8 @@ func decodeAssistantContentArray(raw []byte) (string, error) {
 }
 
 // assistantContentPartText extracts the text of one multimodal part.
-// Image and audio parts are skipped. Any other object contributes its
-// "text" field (empty when the field is absent), so an unfamiliar text
-// type is not dropped.
+// Known image and audio parts are skipped. Every other object must provide
+// a string text field, including objects with an unfamiliar type.
 func assistantContentPartText(raw json.RawMessage) (string, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -381,8 +380,8 @@ func assistantContentPartText(raw json.RawMessage) (string, error) {
 		return s, nil
 	case '{':
 		var part struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type string  `json:"type"`
+			Text *string `json:"text"`
 		}
 		if err := json.Unmarshal(trimmed, &part); err != nil {
 			return "", err
@@ -391,7 +390,10 @@ func assistantContentPartText(raw json.RawMessage) (string, error) {
 		case "image_url", "image", "input_audio", "audio":
 			return "", nil
 		default:
-			return part.Text, nil
+			if part.Text == nil {
+				return "", fmt.Errorf("assistant message content part: object type %q has no string text", part.Type)
+			}
+			return *part.Text, nil
 		}
 	default:
 		return "", fmt.Errorf("assistant message content part: unsupported JSON value")

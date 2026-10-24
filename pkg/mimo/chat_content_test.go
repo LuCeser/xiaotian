@@ -62,6 +62,12 @@ func TestChatMessageContentUnmarshal(t *testing.T) {
 			wantRole: "assistant",
 		},
 		{
+			name:     "unknown object with text",
+			raw:      `{"role":"assistant","content":[{"type":"future_text","text":"apple"}]}`,
+			want:     "apple",
+			wantRole: "assistant",
+		},
+		{
 			name:      "null content keeps tool calls",
 			raw:       `{"role":"assistant","content":null,"tool_calls":` + toolCalls + `}`,
 			want:      "",
@@ -81,6 +87,11 @@ func TestChatMessageContentUnmarshal(t *testing.T) {
 		{
 			name:    "number inside the array is rejected",
 			raw:     `{"role":"assistant","content":[{"type":"text","text":"apple"}, 1]}`,
+			wantErr: true,
+		},
+		{
+			name:    "unknown object without text is rejected",
+			raw:     `{"role":"assistant","content":[{"type":"video_url","video_url":{"url":"https://example.invalid/video"}}]}`,
 			wantErr: true,
 		},
 	}
@@ -289,6 +300,17 @@ func TestReadAndDecodeChatResponseLimitsBody(t *testing.T) {
 func TestClientChatRejectsOversizedResponse(t *testing.T) {
 	body := `{"choices":[{"message":{"content":"` +
 		strings.Repeat("Z", maxChatResponseBytes) + `"}}]}`
+	client := newContentShapeClient(t, newTestLogger(), "short", body)
+	defer client.Close()
+
+	_, err := client.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("Chat() error = %v, want errors.Is ErrInvalidResponse", err)
+	}
+}
+
+func TestClientChatRejectsUnknownContentObject(t *testing.T) {
+	body := `{"choices":[{"message":{"role":"assistant","content":[{"type":"unknown"}]}}]}`
 	client := newContentShapeClient(t, newTestLogger(), "short", body)
 	defer client.Close()
 
