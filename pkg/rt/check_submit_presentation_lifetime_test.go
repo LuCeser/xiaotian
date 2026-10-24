@@ -113,11 +113,19 @@ func TestCorrectionSubmitPresentationLifetime(t *testing.T) {
 		close(hit)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	write, admitted := tm.admitCheckWriteLocked()
+	tm.mu.Unlock()
+	if !admitted {
+		t.Fatal("correction save was not admitted")
+	}
+	cancel() // accepted persistence must outlive the turn context
 	done := make(chan struct{})
 	go func() {
 		tm.finishCorrections(s, ctx, cancel, correctionInputs{
 			epoch: epoch, lessonID: ttLessonID, version: version,
 			requestID: "correction-race", changed: map[string]string{"苹果": "good"}, total: 1, correct: 1,
+			write: write,
 		})
 		close(done)
 	}()
@@ -140,5 +148,8 @@ func TestCorrectionSubmitPresentationLifetime(t *testing.T) {
 	tm.mu.Unlock()
 	if reviewSeen || !closed {
 		t.Fatalf("reviewSeen=%v closed=%v, want false/true", reviewSeen, closed)
+	}
+	if pending := len(tm.checkWrites); pending != 0 {
+		t.Fatalf("completed correction save admissions = %d, want 0 before presentation", pending)
 	}
 }

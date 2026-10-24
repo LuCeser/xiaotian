@@ -992,6 +992,19 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 		}
 	}
 
+	// The correction's save responsibility starts here (1.10a): one
+	// admission covers the diff write, its receipt and the marker reset. A
+	// close that sealed the registry first admits nothing — no write, no
+	// presentation; an admitted registration survives the turn's
+	// cancellation and ends in finishCorrections BEFORE the wrap line.
+	tm.mu.Lock()
+	write, writeAdmitted := tm.admitCheckWriteLocked()
+	tm.mu.Unlock()
+	if !writeAdmitted {
+		cancel()
+		return
+	}
+
 	go tm.finishCorrections(s, ctx, cancel, correctionInputs{
 		epoch:     epoch,
 		requestID: m.RequestID,
@@ -1001,6 +1014,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 		changed:   changed,
 		total:     total,
 		correct:   correct,
+		write:     write,
 	})
 }
 
@@ -1016,6 +1030,10 @@ type correctionInputs struct {
 	total    int
 	correct  int
 	epoch    uint64
+	// write is the accepted save's registration (1.10a): taken where the
+	// correction was accepted, released after the diff write, its receipt
+	// and the marker reset — before any presentation.
+	write *checkWriteAdmission
 }
 
 // finishCorrections runs on its own goroutine (runNaturalEnding blocks on
@@ -1101,6 +1119,11 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 			newVersion = cleared.NewVersion
 		}
 	}
+	// The accepted correction's save responsibility ends after both the
+	// diff receipt and the unchecked-marker reset. Release it before any
+	// client presentation, which can wait for playback and may be cancelled
+	// by the close that captured this admission.
+	tm.completeCheckWrite(in.write)
 
 	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
