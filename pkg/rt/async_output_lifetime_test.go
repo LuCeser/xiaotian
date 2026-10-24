@@ -42,7 +42,7 @@ func ttBindGatedOCR(tm *TurnManager, reader *gatedOCRReader) {
 // terminal session_ended, while every write that was already admitted
 // still completes (the accepted-save semantics).
 func TestAsyncOutputAfterClose(t *testing.T) {
-	t.Run("ocr prefill returned after end is saved but not presented", func(t *testing.T) {
+	t.Run("ocr prefill returned after end is neither admitted nor presented", func(t *testing.T) {
 		cards := ttCards("苹果", "香蕉")
 		tm, s, _, exec := ttDriveToCheck(t, cards, newFakeWords(cards))
 		gated := &gatedOCRReader{
@@ -64,12 +64,15 @@ func TestAsyncOutputAfterClose(t *testing.T) {
 		close(gated.release)
 		ttAwaitGate(t, done, "the OCR pass did not finish")
 
-		// The accepted save survived the end: both prefills are on the row.
+		// 1.08 semantics: the batch's admission happens at applyOcrPrefills'
+		// entry — a session that ended DURING the vision call admits no new
+		// batch and writes nothing (RB TestCloseDuringOcrPrefills, second
+		// ordering). Only a batch admitted before the close keeps its saves.
 		exec.mu.Lock()
 		stored := len(exec.lesson.Verdicts)
 		exec.mu.Unlock()
-		if stored != 2 {
-			t.Fatalf("stored verdicts = %d, want 2 — the admitted upload's writes must complete", stored)
+		if stored != 0 {
+			t.Fatalf("stored verdicts = %d, want 0 — a batch arriving past the end is not admitted", stored)
 		}
 		// Nothing was presented past the terminal message, and the dead
 		// tutor was not mutated.
