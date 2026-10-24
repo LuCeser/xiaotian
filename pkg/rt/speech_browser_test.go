@@ -420,7 +420,7 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		"--scenario", scenario,
 		"--timeout-ms", fmt.Sprint(int64(timeout / time.Millisecond)),
 	}, extraArgs...)
-	if scenario == "fixture" {
+	if scenario == "fixture" || scenario == "held-fixture" {
 		expected, err := json.Marshal(speechExpectedOpening)
 		if err != nil {
 			f.t.Fatalf("encode expected opening: %v", err)

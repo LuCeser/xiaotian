@@ -177,9 +177,10 @@ function checkSelf() {
 // 是真实的自然完成，不是发送完成或超时捷径。结果里逐句报告
 // playedBeforeAck（该句原生 onended 是否先于其 ACK——空播 ACK/丢块 ACK 在
 // 此必为 false）与合成麦克风被页面采用的情况。
-async function scenarioFixture({ page, url, timeoutMs, expectedSentences }) {
+async function scenarioFixture({ page, url, timeoutMs, expectedSentences, preWaitMs = 0 }) {
   await page.goto(url);
   await page.locator('#rt-start').click();
+  if (preWaitMs > 0) await page.waitForTimeout(preWaitMs);
   try {
     await waitWs(page, async (view) => inspectExpectedRound(
       view, await playbackState(page), expectedSentences).ok,
@@ -221,6 +222,10 @@ async function scenarioFixture({ page, url, timeoutMs, expectedSentences }) {
   };
 }
 
+async function scenarioHeldFixture(args) {
+  return scenarioFixture({ ...args, preWaitMs: args.holdMs });
+}
+
 // scenario "starve-probe"：点击「开始上课」后只观察一个固定窗口
 // （--hold-ms，默认 3000），输出窗口内页面真实收到的下行控制/二进制帧数
 // 后退出，不等待播放完成。这是故障控制点「命中」的页面侧证据：被控制的
@@ -239,7 +244,11 @@ async function scenarioStarveProbe({ page, url, holdMs }) {
   };
 }
 
-const SCENARIOS = { fixture: scenarioFixture, 'starve-probe': scenarioStarveProbe };
+const SCENARIOS = {
+  fixture: scenarioFixture,
+  'held-fixture': scenarioHeldFixture,
+  'starve-probe': scenarioStarveProbe,
+};
 
 async function main() {
   const args = process.argv.slice(2);
