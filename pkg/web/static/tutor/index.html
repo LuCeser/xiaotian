@@ -696,6 +696,13 @@
         playbackResourceReleased = true;
         playback.releaseSharedResources();
         playback.note('release');
+        // J14 (PR #72 review P1): the drain's completion also releases the
+        // transport. The playback_ack_timeout path can end WITHOUT any
+        // session_ended (the server's orderlyCloseAt is silent for an
+        // ordinary announcement), so this is the one release point that
+        // covers it; after a real goodbye the session_ended handler's
+        // client.close() already ran and this is an idempotent no-op.
+        client.close();
         startBtn.disabled = false; // restart re-authorizes via the same button
         started = false;
         // 13.3-04: the drain is COMPLETE — scheduled audio released. Only
@@ -932,6 +939,15 @@
         setStatus('ended');
         setConn('closed', '课程已结束');
         endBtn.disabled = true;
+        // J14 (PR #72 review P1): the goodbye is the terminal wire message —
+        // nothing may follow it, and the server's read loop only exits when
+        // THIS side disconnects. The page owns releasing the transport right
+        // here: a socket left open keeps the connection, its server-side
+        // session manager and heartbeat alive until the page unloads, and an
+        // in-page restart (再练一组 / retry) would orphan it outright. The
+        // drain below only shepherds already-scheduled LOCAL audio — closing
+        // now cannot truncate it, and onClose defers to terminalDraining.
+        client.close();
         // 13.1-08 (loser-UI unlock, cross-AI review consensus): EVERY
         // session_ended clears a stuck 「正在提交…」 — the loser of a
         // cross-connection race receives the terminal signal INSTEAD of a

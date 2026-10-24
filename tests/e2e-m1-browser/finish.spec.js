@@ -86,6 +86,23 @@ async function waitIndex(page, pred, label) {
 }
 
 /**
+ * J14's WS-release wait (review PR #72 P1): after the session's terminal
+ * message the page itself must close the WebSocket. The server's read loop
+ * only exits on OUR disconnect, so a socket left open keeps the connection,
+ * its server-side session manager and heartbeat alive until the page
+ * unloads — and an in-page restart orphans it outright (connect replaces
+ * client.ws). Waits for the socket's real close EVENT after fromI, then
+ * proves the production client's socket object reached CLOSED: silence on
+ * the wire proves nothing (the server simply keeps waiting).
+ */
+async function awaitSocketClosed(page, fromI, label) {
+  await waitWs(page, (log) => log.some((e) => e.i > fromI && e.kind === 'close'),
+    { timeoutMs: 30000, label: label + ': the page closed the WebSocket' });
+  expect(await page.evaluate(() => window.__rtTutor.client.ws.readyState),
+    label + ': the production socket object is CLOSED (3)').toBe(3);
+}
+
+/**
  * Await one announcement round: the first `count` audio_start frames after
  * log index `fromI`. Returns {epoch, sids} for the ack/listening assertions.
  */
@@ -263,6 +280,7 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
   await page.waitForTimeout(1200);
   expect((await controls(page)).filter((e) => e.i > ended2I && e.dir === 'in' && e.type !== 'pong'),
     'no control frame follows the goodbye — no new opening').toEqual([]);
+  await awaitSocketClosed(page, ended2I, 'the explicit mid-greeting end');
   const afterMid = await ttsCountStable();
   expect(afterMid.stable, 'no vendor traffic revives after the end').toBe(true);
   expect(afterMid.second, 'at most the ask + greeting rounds were served').toBeLessThanOrEqual(9);
@@ -292,10 +310,12 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
   const log = await controls(page);
   expect(log.filter((e) => e.dir === 'in' && e.type === 'lesson_update'),
     'no confirm ever advanced a word in this spec').toHaveLength(0);
-  // ping/pong is the transport keepalive (the socket stays open after
-  // client_end); every OTHER downlink frame must stop at the goodbye.
+  // ping/pong is the transport keepalive and may race the goodbye; every
+  // OTHER downlink frame must stop at it. The page then closes the socket
+  // itself — J14's release contract reaches the explicit end too.
   expect(log.filter((e) => e.i > ended3I && e.dir === 'in' && e.type !== 'pong'),
     'no server frame after the goodbye').toEqual([]);
+  await awaitSocketClosed(page, ended3I, 'the explicit listening end');
   for (const t of (await micInfo(page)).tracks) expect(t.state, 'mic released by the end').toBe('ended');
   const frozen = await wsStats(page);
   await page.waitForTimeout(1200);
@@ -413,6 +433,10 @@ test('J13+J14 last word → one check entry, masked answers, real check submit, 
     .toBe(frozen.outBinaryFrames);
   expect((await controls(page)).filter((e) => e.i > endedI && e.dir === 'in'),
     'no server frame after session_ended').toEqual([]);
+  // J14 (review P1): silence after the goodbye is NOT release evidence —
+  // the server read loop simply keeps waiting. The transport itself must
+  // close: the real close event, then the production socket at CLOSED.
+  await awaitSocketClosed(page, endedI, 'the natural ending');
 
   // J13 closing invariants: ONE check entry, no advance past the boundary, no
   // word 3 anywhere, exact vendor traffic consumed.
@@ -544,6 +568,7 @@ test('J14 partial save: the parent deletes a word mid-check → the honest 1/2 c
   const endedI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
     && e.msg.reason === 'lesson_complete', 'session_ended(lesson_complete) despite the partial save');
   expect(endedI, 'the goodbye still follows the summary\'s last real ack').toBeGreaterThan(lastAckI);
+  await awaitSocketClosed(page, endedI, 'the partial-save ending');
 
   // Honest copy in EVERY channel: the panel's resultText, the banner, and
   // the teacher really SPOKE the partial save (the third summary sentence
@@ -664,9 +689,10 @@ test('J16 finish chinese, reload → the english classroom opens on its own word
   await page.goto(svc.url + 'tutor/');
   await page.locator('#rt-start').click();
   const zhReadyI = await openViaAsk(page, '#rt-subject-zh', 'e2e-m1-browser-chinese', zhWords);
-  await driveLessonToNaturalEnd(page, zhWords, zhReadyI, { onGreetingSettled: installMatchedTail });
+  const zhEndedI = await driveLessonToNaturalEnd(page, zhWords, zhReadyI, { onGreetingSettled: installMatchedTail });
   await waitWs(page, async () => (await observe(page)).playbackResourceReleased === true,
     { label: 'chinese lesson drained and released' });
+  await awaitSocketClosed(page, zhEndedI, 'the chinese lesson');
   const zhRows = await lessonsNow();
   expect(zhRows).toHaveLength(1);
   expect(zhRows[0]).toMatchObject({ category: 'chinese', word_count: 2, lesson_id: 'e2e-m1-browser-chinese', stage: 'submitted', correct: 2 });
@@ -683,7 +709,8 @@ test('J16 finish chinese, reload → the english classroom opens on its own word
   expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'subject_ask'),
     'no subject ask on the restart').toHaveLength(0);
   await expect(page.locator('#rt-progress-text')).toHaveText('第 1 / 2 个词');
-  await driveLessonToNaturalEnd(page, enWords, enReadyI);
+  const enEndedI = await driveLessonToNaturalEnd(page, enWords, enReadyI);
+  await awaitSocketClosed(page, enEndedI, 'the english lesson (fresh page)');
 
   // Subject isolation, vendor-side: nothing spoken after the reload names a
   // chinese word; the english greeting names its own first word.
@@ -822,9 +849,10 @@ test('J16 finish → real 再练一组: in-page second round, fresh progress/aud
     && e.msg.category === 'chinese' && e.msg.lesson.id === 'e2e-m1-browser-chinese'
     && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2
     && e.msg.lesson.words.every((w) => w === ''), 'chinese opens directly (one subject due)');
-  await driveLessonToNaturalEnd(page, zhWords, zhReadyI);
+  const zhEndedI = await driveLessonToNaturalEnd(page, zhWords, zhReadyI);
   await waitWs(page, async () => (await observe(page)).playbackResourceReleased === true,
     { label: 'chinese lesson drained and released' });
+  await awaitSocketClosed(page, zhEndedI, 'the daily lesson (leg 1)');
   const zhRows = await lessonsNow();
   expect(zhRows).toHaveLength(1);
   expect(zhRows[0]).toMatchObject({ category: 'chinese', word_count: 2, stage: 'submitted', correct: 2 });
@@ -844,6 +872,14 @@ test('J16 finish → real 再练一组: in-page second round, fresh progress/aud
 
   await page.locator('#rt-banner .rt-practice-btn').click();
   expect((await observe(page)).playbackResourceReleased, 'the restart re-armed the release latch').toBe(false);
+  // Review P1, the leak's sharpest shape: the in-page reopen must not
+  // orphan leg 1's connection. The finished lesson's socket closed BEFORE
+  // the practice session_init went out — the page never leaves a live ws
+  // behind for connect() to overwrite.
+  const initI = await waitIndexSince(page, tapI, (e) => e.dir === 'out' && e.type === 'session_init',
+    'the practice connection sent its own session_init');
+  expect((await controls(page)).find((e) => e.kind === 'close' && e.i > zhEndedI && e.i < initI),
+    'the finished lesson\'s socket closed before the practice connection opened').toBeTruthy();
 
   // The practice classroom: chinese (the resolved subject rides the re-init),
   // its OWN r0x- row, its own words, index back from 1 — nothing of the
@@ -897,6 +933,16 @@ test('J16 finish → real 再练一组: in-page second round, fresh progress/aud
     'the in-page restart never tripped an error (fresh epoch adopted)').toEqual([]);
   expect(final.filter((e) => e.i > endedI && e.dir === 'in'),
     'no server frame after session_ended').toEqual([]);
+  // J14 release, whole-document shape: the practice round's socket closed
+  // too, and open/close parity holds on the SAME document — every
+  // connection this page opened was closed by the page itself, none left
+  // for unload to reap (review P1: 每轮遗留真实连接).
+  await awaitSocketClosed(page, endedI, 'the practice round');
+  const evts = await controls(page);
+  const opens = evts.filter((e) => e.kind === 'open').length;
+  const closes = evts.filter((e) => e.kind === 'close').length;
+  expect(opens, 'this document opened exactly two connections').toBe(2);
+  expect(closes, 'every connection the page opened was closed by the page').toBe(opens);
   // Old acks never reused: every post-tap ack belongs to the practice round
   // (greeting 3 + word-2 1 + bridge 2 + wrap 1) — none rides leg 1's keys.
   expect(final.filter((e) => e.i > tapI && e.dir === 'out' && e.type === 'sentence_ack'),
@@ -941,6 +987,7 @@ test('J16 empty vocabulary ends through the real no-due result', async ({ page }
 
   await expect(page.locator('#rt-banner')).toContainText('词库暂无到期词');
   await expect(page.locator('#rt-banner .rt-practice-btn'), 'the page can start again').toBeVisible();
+  await awaitSocketClosed(page, endedI, 'the no-due ending');
   expect(await lessonsNow(), 'no empty classroom row was created').toHaveLength(0);
   const state = await stubState();
   expect(state.remaining.tts).toBe(0);
