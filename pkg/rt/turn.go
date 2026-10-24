@@ -412,6 +412,8 @@ type TurnManager struct {
 	// checkPresentationInterleave is a narrow test probe after EnterCheck (or
 	// its conflict read-back) returns and before stored state is presented.
 	checkPresentationInterleave func()
+	// checkResumeInterleave fires after resume IO and before panel binding.
+	checkResumeInterleave func()
 	// checkSubmitPresentationInterleave is a narrow test probe after a review
 	// save completes and before its result is presented.
 	checkSubmitPresentationInterleave func()

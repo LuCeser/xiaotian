@@ -227,6 +227,10 @@ func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson) {
 // ACK gate. No due-fetch, no word timers, no rating write — those belong to
 // the paths that FINISH the check (handleCheckVerdict / handleCheckSubmit).
 func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason string, correction bool) {
+	epoch := tm.currentEpoch()
+	if tm.checkResumeInterleave != nil {
+		tm.checkResumeInterleave()
+	}
 	words := make([]string, 0, len(l.Cards))
 	for _, c := range l.Cards {
 		words = append(words, c.Word)
@@ -238,68 +242,46 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 		panelVerdicts = derivedVerdicts(l.Cards, l.Outcomes)
 	}
 
-	tm.mu.Lock()
-	if tm.closed {
-		// PR #60 review: the subject-picked classroom reaches this resume
-		// branch on the answer turn's goroutine — an end_session that closed
-		// the session under the row IO gets no panel replay at all.
-		tm.mu.Unlock()
+	poemView := tm.poemViewForRow(l)
+	passageView := tm.passageViewForRow(l)
+	view, category := tm.lessonViewFor(l), tm.sessionCategory()
+	if !tm.applyTurnAt(epoch, func() error {
+		tm.tutor = newDictationTutor(l)
+		tm.tutor.completed, tm.tutor.checking = true, true
+		tm.tutor.correction, tm.tutor.checkVerdicts = correction, panelVerdicts
+		if poemView != nil {
+			tm.tutor.poem = &poemRef{ID: l.PoemID, Title: poemView.Title, Author: poemView.Author}
+		}
+		if passageView != nil {
+			tm.tutor.passage = &passageRef{ID: passageView.ID, ScopeID: passageView.ScopeID,
+				Title: passageView.Title, Author: passageView.Author, Whole: passageView.Whole,
+				Paragraphs: append([]int(nil), passageView.Paragraphs...)}
+		}
+		tm.state, tm.sessionReadyAt = StateListening, time.Now()
+		if err := s.SendControl(SessionReadyMsg{Type: TypeSessionReady, SessionID: tm.session,
+			Audio: AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+			TTS:   TTSSpec{SampleRate: TTSOutputSampleRate}, Lesson: view, Category: category,
+			Poem: poemView, Passage: passageView}); err != nil {
+			return err
+		}
+		if err := s.SendControl(CheckStartedMsg{Type: TypeCheckStarted, Words: words, Reason: reason}); err != nil {
+			return err
+		}
+		return s.SendControl(CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: wireVerdicts(panelVerdicts)})
+	}) {
 		return
 	}
-	tm.tutor = newDictationTutor(l)
-	tm.tutor.completed = true // word pacing is over; the countdown stays disarmed
-	tm.tutor.checking = true  // the check panel owns the input surface
-	tm.tutor.correction = correction
-	tm.tutor.checkVerdicts = panelVerdicts
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	tm.mu.Unlock()
-	// Issue #12: a POEM row reopened into its check panel keeps its poem
-	// identity (the task view on session_ready + the submit's whole-poem
-	// save need it).
-	poemView := tm.poemViewForRow(l)
-	if poemView != nil {
-		tm.bindPoemRef(l, poemView)
-	}
-	// Issue #14: a PASSAGE row reopened into its check panel keeps its
-	// work + range identity the same way (the range always re-reads from
-	// the ROW — what the child actually practiced).
-	passageView := tm.passageViewForRow(l)
-	if passageView != nil {
-		tm.bindPassageRef(passageView)
-	}
-
-	_ = s.SendControl(SessionReadyMsg{
-		Type:      TypeSessionReady,
-		SessionID: tm.session,
-		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
-		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    tm.lessonViewFor(l),
-		Category:  tm.sessionCategory(),
-		Poem:      poemView,
-		Passage:   passageView,
-	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-
 	tm.recorder.Emit(EventCheckStarted, infra.F("total", len(words)))
-	_ = s.SendControl(CheckStartedMsg{
-		Type:   TypeCheckStarted,
-		Words:  words,
-		Reason: reason,
-	})
-	tm.broadcastCheckVerdicts(s, panelVerdicts)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	if tm.closed {
-		// A close that landed after the panel replay still gets no spoken
-		// bridge (runAnnouncementDisplayAt's entry gate is the backstop).
-		tm.mu.Unlock()
+	if !tm.applyTurnAt(epoch, func() error {
+		tm.turnCancel = cancel
+		return nil
+	}) {
 		cancel()
 		return
 	}
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
 	bridge := checkResumeBridgeText(len(words))
 	if correction {
 		bridge = checkCorrectionBridgeText(len(words))
