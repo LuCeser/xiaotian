@@ -1271,44 +1271,71 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 	tm.applySessionEffect(func() error { return s.SendControl(pong) })
 }
 
-// tryTerminalClose claims the session's ONE terminal close and ships the
-// single session_ended: the winner marks the session closed under tm.mu
-// FIRST (the lesson_update pattern — every lock-disciplined effect that
-// lost the race dies on the closed flag, and none can queue behind the
-// goodbye), losers send nothing. Epoch-free: the client's goodbye closes
-// whatever turn is live. The D-03 fallback ownership is decided separately
-// (ownUncheckedFallback) — this claim only orders the terminal message.
-func (tm *TurnManager) tryTerminalClose(s Sender, reason string) bool {
-	tm.initWriteMu.Lock()
-	defer tm.initWriteMu.Unlock()
-	tm.mu.Lock()
-	if tm.closed {
-		tm.mu.Unlock()
+// closeClaim reports one unified-close attempt (issue #69 备选一 步骤 6):
+// Owned is true only for the single caller whose critical section flipped
+// the session closed. Every other path that raced the same close owns
+// nothing — nothing to send, nothing to persist.
+type closeClaim struct {
+	owned bool
+}
+
+// claimCloseLocked is the single ownership point of the session's close:
+// eligibility (already closed, and for the epoch-gated flavors a stale
+// epoch) and the closed marking complete in ONE critical section, so the
+// check and the marking can never split. Caller holds initWriteMu AND
+// tm.mu (fixed order initWriteMu → tm.mu). Everything that can block —
+// persistence, logs, the goodbye enqueue, the VAD reset — runs outside,
+// after the claim: a failed notification must never reopen, delay or skip
+// the close.
+func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch bool) bool {
+	if tm.closed || (gateEpoch && tm.epoch != epoch) {
 		return false
 	}
 	tm.internalCloseLocked()
-	tm.mu.Unlock()
-	tm.vad.Reset()
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
 	return true
+}
+
+// closeSessionAt is the unified close entry every close path funnels
+// through: initWriteMu → tm.mu → claimCloseLocked, then the transport
+// finalization (VAD reset; the ONE session_ended when a reason is asked
+// for) runs lock-free. A failed session_ended enqueue is logged and
+// swallowed — the session is already closed at that point, the close is
+// not undoable, and the caller still learns it owns the close.
+func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch bool, reason string, s Sender) bool {
+	tm.initWriteMu.Lock()
+	tm.mu.Lock()
+	owned := tm.claimCloseLocked(epoch, gateEpoch)
+	tm.mu.Unlock()
+	tm.initWriteMu.Unlock()
+	if !owned {
+		return false
+	}
+	tm.vad.Reset()
+	if s != nil {
+		if err := s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason}); err != nil {
+			tm.logger.Warn("session_ended enqueue failed", infra.ErrField(err))
+		}
+	}
+	return true
+}
+
+// tryTerminalClose claims the session's ONE terminal close and ships the
+// single session_ended: the winner's claim (closeSessionAt) marks the
+// session closed under tm.mu FIRST (the lesson_update pattern — every
+// lock-disciplined effect that lost the race dies on the closed flag, and
+// none can queue behind the goodbye), losers send nothing. Epoch-free: the
+// client's goodbye closes whatever turn is live. The D-03 fallback
+// ownership is decided separately (ownUncheckedFallback) — this claim only
+// orders the terminal message.
+func (tm *TurnManager) tryTerminalClose(s Sender, reason string) bool {
+	return tm.closeSessionAt(0, false, reason, s)
 }
 
 // tryTerminalCloseAt is tryTerminalClose gated on the ending's OWN epoch: a
 // stale ending — a summary whose wait outlived an interrupt that bumped the
 // epoch — must not close (or goodbye) the classroom that replaced it.
 func (tm *TurnManager) tryTerminalCloseAt(s Sender, epoch uint64, reason string) bool {
-	tm.initWriteMu.Lock()
-	defer tm.initWriteMu.Unlock()
-	tm.mu.Lock()
-	if tm.closed || tm.epoch != epoch {
-		tm.mu.Unlock()
-		return false
-	}
-	tm.internalCloseLocked()
-	tm.mu.Unlock()
-	tm.vad.Reset()
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
-	return true
+	return tm.closeSessionAt(epoch, true, reason, s)
 }
 
 // handleEndSession is the explicit goodbye (RT-10/SC7 server half). The
@@ -1338,12 +1365,7 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 // 取消等待) and sweeps the photo assembler (13.1-03 privacy P2: the child's
 // photo never outlives its session).
 func (tm *TurnManager) internalClose() {
-	tm.initWriteMu.Lock()
-	defer tm.initWriteMu.Unlock()
-	tm.mu.Lock()
-	tm.internalCloseLocked()
-	tm.mu.Unlock()
-	tm.vad.Reset()
+	tm.closeSessionAt(0, false, "", nil)
 }
 
 // internalCloseLocked is internalClose's locked half (caller holds tm.mu),
@@ -1376,16 +1398,7 @@ func (tm *TurnManager) internalCloseLocked() {
 // pick bumps the epoch and opens the new classroom → the stale close
 // lands" cannot happen.
 func (tm *TurnManager) orderlyCloseAt(epoch uint64) {
-	tm.initWriteMu.Lock()
-	defer tm.initWriteMu.Unlock()
-	tm.mu.Lock()
-	if tm.epoch != epoch || tm.closed {
-		tm.mu.Unlock()
-		return
-	}
-	tm.internalCloseLocked()
-	tm.mu.Unlock()
-	tm.vad.Reset()
+	tm.closeSessionAt(epoch, true, "", nil)
 }
 
 // Close implements SessionManager: the transport read loop exited for any
