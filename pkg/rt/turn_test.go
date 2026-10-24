@@ -37,6 +37,9 @@ type captureSender struct {
 	audioN     int
 	audioBytes int
 	mu         sync.Mutex
+	done       chan struct{}
+	terminated bool
+	reason     error
 }
 
 func (c *captureSender) SendControl(v any) error {
@@ -45,6 +48,10 @@ func (c *captureSender) SendControl(v any) error {
 		return err
 	}
 	c.mu.Lock()
+	if c.terminated {
+		c.mu.Unlock()
+		return ErrWriterTerminated
+	}
 	c.controls = append(c.controls, b)
 	c.mu.Unlock()
 	return nil
@@ -52,10 +59,42 @@ func (c *captureSender) SendControl(v any) error {
 
 func (c *captureSender) SendAudio(b []byte) error {
 	c.mu.Lock()
+	if c.terminated {
+		c.mu.Unlock()
+		return ErrWriterTerminated
+	}
 	c.audioN++
 	c.audioBytes += len(b)
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *captureSender) Terminate(reason error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.terminated {
+		return
+	}
+	c.terminated, c.reason = true, reason
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
+	close(c.done)
+}
+
+func (c *captureSender) Done() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
+	return c.done
+}
+
+func (c *captureSender) TerminationReason() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reason
 }
 
 func (c *captureSender) audioCount() int {

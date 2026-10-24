@@ -418,6 +418,38 @@ func TestWriterBackpressure(t *testing.T) {
 	w.shutdown()
 }
 
+func TestWriterTermination(t *testing.T) {
+	sc, _ := newConnPair(t)
+	w := newConnWriter(sc, 2, nil)
+	w.start()
+	w.start() // idempotent: only one loop may own and close Done.
+
+	want := errors.New("write path failed")
+	w.Terminate(want)
+	w.Terminate(errors.New("later reason must not replace the first"))
+	select {
+	case <-w.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("writer Done was not closed after termination")
+	}
+	if !errors.Is(w.TerminationReason(), want) {
+		t.Fatalf("termination reason = %v, want first reason %v", w.TerminationReason(), want)
+	}
+	if err := w.SendControl(PongMsg{Type: TypePong}); !errors.Is(err, ErrWriterTerminated) {
+		t.Fatalf("SendControl after termination = %v, want ErrWriterTerminated", err)
+	}
+	if err := w.SendAudio([]byte{1, 2}); !errors.Is(err, ErrWriterTerminated) {
+		t.Fatalf("SendAudio after termination = %v, want ErrWriterTerminated", err)
+	}
+	// Repeated termination leaves the same already-closed completion signal.
+	w.Terminate(nil)
+	select {
+	case <-w.Done():
+	default:
+		t.Fatal("Done reopened after repeated termination")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Heartbeat rolls the read deadline (T-13-02)
 // ---------------------------------------------------------------------------

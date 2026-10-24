@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -65,6 +66,9 @@ var (
 	// connection's control queue is saturated (the caller decides how to
 	// surface the failure — control messages are never dropped silently).
 	ErrControlQueueFull = errors.New("rt: control send queue full")
+
+	// ErrWriterTerminated rejects every enqueue after transport termination.
+	ErrWriterTerminated = errors.New("rt: writer terminated")
 )
 
 // ServerConfig configures the /rt WebSocket endpoint. Zero values mean "use
@@ -132,6 +136,14 @@ type Sender interface {
 	// loss; blocking or buffering unboundedly does not) and nil is
 	// returned. The buffer is copied; callers may reuse their slice.
 	SendAudio(b []byte) error
+	// Terminate stops accepting frames and asks the send loop to exit. The
+	// first call owns the reason; later calls are no-ops.
+	Terminate(reason error)
+	// Done closes once after the send loop has exited.
+	Done() <-chan struct{}
+	// TerminationReason reports the first termination reason. Nil means the
+	// transport was ended normally.
+	TerminationReason() error
 }
 
 // SessionManager owns one connection's session state (implemented by the
@@ -377,7 +389,12 @@ type connWriter struct {
 	done   chan struct{}
 	ctx    context.Context
 
-	droppedAudio atomic.Int64
+	droppedAudio  atomic.Int64
+	startOnce     sync.Once
+	terminateOnce sync.Once
+	terminationMu sync.Mutex
+	terminated    bool
+	reason        error
 }
 
 // newConnWriter builds the writer. The pump is NOT started here — call
@@ -404,16 +421,35 @@ func newConnWriter(conn *websocket.Conn, queueSize int, logger infra.Logger) *co
 
 // start launches the pump goroutine. Call exactly once.
 func (w *connWriter) start() {
-	go func() {
-		defer close(w.done)
-		w.run()
-	}()
+	w.startOnce.Do(func() {
+		go func() {
+			defer close(w.done)
+			w.run()
+		}()
+	})
 }
 
 // shutdown stops the pump after a bounded drain and waits for it to exit.
 func (w *connWriter) shutdown() {
-	w.cancel()
+	w.Terminate(nil)
 	<-w.done
+}
+
+func (w *connWriter) Terminate(reason error) {
+	w.terminateOnce.Do(func() {
+		w.terminationMu.Lock()
+		w.terminated, w.reason = true, reason
+		w.terminationMu.Unlock()
+		w.cancel()
+	})
+}
+
+func (w *connWriter) Done() <-chan struct{} { return w.done }
+
+func (w *connWriter) TerminationReason() error {
+	w.terminationMu.Lock()
+	defer w.terminationMu.Unlock()
+	return w.reason
 }
 
 // run is the pump body: serialize every outbound message through one
@@ -495,6 +531,11 @@ func (w *connWriter) SendControl(v any) error {
 	if ferr := speechFaultInterceptSend("control", data); ferr != nil {
 		return ferr
 	}
+	w.terminationMu.Lock()
+	defer w.terminationMu.Unlock()
+	if w.terminated {
+		return ErrWriterTerminated
+	}
 	select {
 	case w.control <- data:
 		return nil
@@ -515,6 +556,11 @@ func (w *connWriter) SendAudio(b []byte) error {
 	}
 	cp := make([]byte, len(b))
 	copy(cp, b)
+	w.terminationMu.Lock()
+	defer w.terminationMu.Unlock()
+	if w.terminated {
+		return ErrWriterTerminated
+	}
 	select {
 	case w.audio <- cp:
 		return nil
