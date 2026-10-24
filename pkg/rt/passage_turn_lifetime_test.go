@@ -74,11 +74,18 @@ func TestPassageSubmitPresentationLifetime(t *testing.T) {
 		close(hit)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	write, admitted := tm.admitCheckWriteLocked()
+	tm.mu.Unlock()
+	if !admitted {
+		t.Fatal("passage save was not admitted")
+	}
+	cancel() // accepted persistence must outlive the turn context
 	done := make(chan struct{})
 	go func() {
 		tm.finishPassageSubmit(s, ctx, cancel, epoch, ref, ttLessonID, 2, lesson.CompleteCheckResult{
 			Verdicts: []lesson.CheckVerdict{{WordIndex: 0, Correct: true, Manual: true}},
-		}, "passage-race")
+		}, "passage-race", write)
 		close(done)
 	}()
 	ttAwaitGate(t, hit, "passage presentation probe was not reached")
@@ -96,5 +103,8 @@ func TestPassageSubmitPresentationLifetime(t *testing.T) {
 	tm.mu.Unlock()
 	if reviewSeen || !closed {
 		t.Fatalf("reviewSeen=%v closed=%v, want false/true", reviewSeen, closed)
+	}
+	if pending := len(tm.checkWrites); pending != 0 {
+		t.Fatalf("completed passage save admissions = %d, want 0 before presentation", pending)
 	}
 }

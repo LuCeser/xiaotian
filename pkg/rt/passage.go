@@ -671,12 +671,20 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	write, writeAdmitted := tm.admitCheckWriteLocked()
 	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
+	if !writeAdmitted {
+		cancel()
+		return
+	}
+	persistCtx := context.WithoutCancel(ctx)
 
-	res, err := tm.exec.CompleteCheck(ctx, lessonID, expected, m.RequestID, false)
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, m.RequestID, false)
 	if err != nil {
+		tm.completeCheckWrite(write)
+		cancel()
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
 			tm.mu.Lock()
@@ -699,6 +707,8 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "passage_submit_latch"),
 		)
+		tm.completeCheckWrite(write)
+		cancel()
 		return
 	}
 
@@ -708,7 +718,7 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 		return nil
 	})
 
-	go tm.finishPassageSubmit(s, ctx, cancel, epoch, ref, lessonID, total, res, m.RequestID)
+	go tm.finishPassageSubmit(s, ctx, cancel, epoch, ref, lessonID, total, res, m.RequestID, write)
 }
 
 // finishPassageSubmit runs on its own goroutine (the ACK-gated ending
@@ -718,7 +728,7 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 // two-phase kind=passage receipt, ship the honest review_result, then speak
 // the wrap line through the ACK gate and end with session_ended
 // (lesson_complete).
-func (tm *TurnManager) finishPassageSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref passageRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string) {
+func (tm *TurnManager) finishPassageSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref passageRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
 	persistCtx := context.WithoutCancel(ctx)
 
@@ -808,6 +818,9 @@ func (tm *TurnManager) finishPassageSubmit(s Sender, ctx context.Context, cancel
 			infra.F("at", "passage_practice"),
 		)
 	}
+	// The accepted passage save ends with its practice record and receipt.
+	// Feedback and summary playback remain cancellable presentation work.
+	tm.completeCheckWrite(write)
 
 	updated := 0
 	missing := 1
