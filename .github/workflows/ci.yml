@@ -52,3 +52,60 @@ jobs:
           name: service-binary
           path: bin/service
           if-no-files-found: error
+
+  # Milestone-1 B-layer browser e2e (issue #58, e2e-test-plan §6 / §7 step
+  # 16): real page + real Go service + real Python + real SQLite — ONLY the
+  # external vendor HTTP boundary is replaced (strict stub). No key anywhere:
+  # the launcher pins MIMO_API_KEY to a local dummy and points voice.baseUrl
+  # at the stub, so this job must never read or need a real secret. It runs
+  # the exact local command (`npm run e2e:m1`) through the cross-platform
+  # launcher, which compiles cmd/service from THIS checkout (never a stale
+  # bin/service) — hence the Go toolchain here too.
+  m1-browser-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOFLAGS: -trimpath
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Real Python is mandatory for the B layer: every word seed goes
+      # REST → vocab_manager.py → SQLite, and vocab_manager imports fsrs at
+      # module level. The venv lives at the `make py-bootstrap` location
+      # (gitignored; service-launcher.js resolvePython auto-detects it). The
+      # runner's bare python3 has no deps ON PURPOSE: if this step is ever
+      # dropped the classroom specs must fail at seeding, not silently pass.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m venv third_party/python/.venv
+      - run: third_party/python/.venv/bin/pip install -r third_party/python/requirements.txt
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      - run: npm test
+
+      # list reporter for the log, JSON for the mandatory-case check below.
+      # Playwright's own exit code fails the job on any failed test; the
+      # check step catches the OTHER failure mode — a green run whose cases
+      # never executed (browser/Python/launcher missing → all skipped).
+      - run: npm run e2e:m1 -- --reporter=list,json
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: reports/m1-results.json
+      - name: Verify the B-layer core set actually ran (no silent pass)
+        run: node scripts/check-m1-report.mjs reports/m1-results.json
