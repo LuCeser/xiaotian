@@ -42,6 +42,9 @@ node_modules/
 
 # Playwright browser-E2E artifacts (tests/e2e)
 test-results/
+# Machine-readable m1 run report (PLAYWRIGHT_JSON_OUTPUT_NAME, ci.yml job
+# m1-browser-e2e / scripts/check-m1-report.mjs)
+/reports/
 playwright-report/
 blob-report/
 third_party/data/
