@@ -487,6 +487,10 @@ func (c *mimoClient) executeChatVisionRequest(ctx context.Context, req ChatVisio
 	return chatResp, nil
 }
 
+// maxChatResponseBytes caps a chat-completion body before JSON decoding so
+// an upstream service cannot exhaust the process's memory with an HTTP 200.
+const maxChatResponseBytes = 1 << 20
+
 // maxLoggedResponseBytes is how much of an undecodable chat-completion body
 // is written to the log (issue #76). The rest is dropped so a huge payload
 // cannot flood the log. Only the failure path logs a body; successful
@@ -498,14 +502,19 @@ const maxLoggedResponseBytes = 2048
 // API key is stripped separately, by literal match, in truncateResponseForLog.
 var bearerTokenRE = regexp.MustCompile(`(?i)bearer\s+\S+`)
 
-// readAndDecodeChatResponse reads an HTTP 200 chat-completion body into
-// ChatResponse. A read or JSON failure is logged with a truncated,
-// secret-redacted prefix and returned unwrapped; callers keep their existing
-// ErrInvalidResponse wrap text.
+// readAndDecodeChatResponse reads a bounded HTTP 200 chat-completion body
+// into ChatResponse. A read, size, or JSON failure is logged with a
+// truncated, secret-redacted prefix and returned unwrapped; callers keep
+// their existing ErrInvalidResponse wrap text.
 func (c *mimoClient) readAndDecodeChatResponse(resp *http.Response, operation string) (ChatResponse, error) {
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxChatResponseBytes+1))
 	if err != nil {
 		c.logUndecodableChatBody(operation, raw, err)
+		return ChatResponse{}, err
+	}
+	if len(raw) > maxChatResponseBytes {
+		err := fmt.Errorf("chat completion response exceeds %d bytes", maxChatResponseBytes)
+		c.logUndecodableChatBody(operation, raw[:maxChatResponseBytes], err)
 		return ChatResponse{}, err
 	}
 	var chatResp ChatResponse

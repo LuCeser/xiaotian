@@ -3,6 +3,7 @@ package mimo
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -261,6 +262,51 @@ func TestTruncateResponseForLogRedactsShortAPIKey(t *testing.T) {
 	if strings.Contains(got, apiKey) {
 		t.Errorf("body prefix leaked the API key: %q", got)
 	}
+}
+
+func TestReadAndDecodeChatResponseLimitsBody(t *testing.T) {
+	body := `{"choices":[{"message":{"content":"` +
+		strings.Repeat("Z", maxChatResponseBytes) + `"}}]}`
+	reader := &countingReader{Reader: strings.NewReader(body)}
+	logger := newTestLogger()
+	client := &mimoClient{logger: logger, config: ClientConfig{APIKey: "short"}}
+
+	_, err := client.readAndDecodeChatResponse(
+		&http.Response{Body: io.NopCloser(reader)}, "chat",
+	)
+	if err == nil {
+		t.Fatal("readAndDecodeChatResponse() expected oversized response error")
+	}
+	if reader.bytesRead != maxChatResponseBytes+1 {
+		t.Errorf("body bytes read = %d, want %d", reader.bytesRead, maxChatResponseBytes+1)
+	}
+	prefix := loggedStringField(t, logger, "failed to decode chat completion response", "body_prefix")
+	if !strings.HasPrefix(prefix, `{"choices"`) {
+		t.Errorf("body_prefix = %q, want response prefix", prefix)
+	}
+}
+
+func TestClientChatRejectsOversizedResponse(t *testing.T) {
+	body := `{"choices":[{"message":{"content":"` +
+		strings.Repeat("Z", maxChatResponseBytes) + `"}}]}`
+	client := newContentShapeClient(t, newTestLogger(), "short", body)
+	defer client.Close()
+
+	_, err := client.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("Chat() error = %v, want errors.Is ErrInvalidResponse", err)
+	}
+}
+
+type countingReader struct {
+	io.Reader
+	bytesRead int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.bytesRead += n
+	return n, err
 }
 
 func newContentShapeClient(t *testing.T, logger *testLogger, apiKey, body string) Client {
