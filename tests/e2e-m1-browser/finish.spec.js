@@ -230,16 +230,12 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
 
   // ---- 播报中: end MID-GREETING playback → the goodbye, the classroom row
   // stands but never advances, live audio stops, nothing follows the goodbye.
+  // The mid-ask pick interrupts the ask after 1..3 synthesized sentences, so
+  // the ask/greeting FIFO split is racy — matched-free tones cover both
+  // rounds; any speech BEYOND them exhausts the script → a violation.
   await stubScripts({
     asr: [], llm: [], image: [],
-    tts: [
-      { ms: 1200, match: '都有要默写的词语' },
-      { ms: 1200, match: '想先默写哪一科' },
-      { ms: 1200, match: '也可以点屏幕上的按钮' },
-      { ms: 1200, match: '你好呀' },
-      { ms: 1200, match: '个词要写' },
-      { ms: 1200, match: '第 1 个词' },
-    ],
+    tts: [{ ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }],
   });
   await page.locator('#rt-start').click();
   await waitWs(page, askStreaming, { label: 'ask audio streaming (2nd session)' });
