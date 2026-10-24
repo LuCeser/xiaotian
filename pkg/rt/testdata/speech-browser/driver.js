@@ -239,6 +239,20 @@ async function scenarioCloseAfterOpening(args) {
   };
 }
 
+async function scenarioScreenVerdictClose(args) {
+  const opening = await scenarioFixture(args);
+  const before = (await wsView(args.page)).filter((e) => e.dir === 'in' && e.type === 'check_verdicts').length;
+  await args.page.locator('.rt-check-row .rt-check-btn').first().click();
+  await waitWs(args.page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+    { timeoutMs: args.timeoutMs, label: 'close while screen verdict is saving' });
+  const view = await wsView(args.page);
+  return {
+    ...opening,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    lateVerdictEchoes: view.filter((e) => e.dir === 'in' && e.type === 'check_verdicts').length - before,
+  };
+}
+
 // scenario "starve-probe"：点击「开始上课」后只观察一个固定窗口
 // （--hold-ms，默认 3000），输出窗口内页面真实收到的下行控制/二进制帧数
 // 后退出，不等待播放完成。这是故障控制点「命中」的页面侧证据：被控制的
@@ -261,6 +275,7 @@ const SCENARIOS = {
   fixture: scenarioFixture,
   'held-fixture': scenarioHeldFixture,
   'close-after-opening': scenarioCloseAfterOpening,
+  'screen-verdict-close': scenarioScreenVerdictClose,
   'starve-probe': scenarioStarveProbe,
 };
 

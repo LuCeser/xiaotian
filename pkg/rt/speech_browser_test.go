@@ -82,15 +82,21 @@ type speechDriverResult struct {
 
 	// starve-probe scenario fields: what the page REALLY received inside the
 	// hold window while a fault control was active.
-	HoldControlIn int `json:"holdControlIn"`
-	HoldBinaryIn  int `json:"holdBinaryIn"`
-	WSCloseCount  int `json:"wsCloseCount"`
+	HoldControlIn     int `json:"holdControlIn"`
+	HoldBinaryIn      int `json:"holdBinaryIn"`
+	WSCloseCount      int `json:"wsCloseCount"`
+	LateVerdictEchoes int `json:"lateVerdictEchoes"`
 }
 
 var speechExpectedOpening = []string{
 	"你好呀！",
 	"今天我们有 2 个词要写。",
 	"听好哦：第 1 个词。",
+}
+
+var speechExpectedCheckResume = []string{
+	"欢迎回来！",
+	"我们继续检查刚才那 2 个词，接着点「对」或「错」告诉我吧。",
 }
 
 // speechHoldTTS wraps the fixture's fake TTS with a hold gate — the
@@ -139,11 +145,15 @@ type speechManagerTracker struct {
 
 	mu     sync.Mutex
 	acks   []SentenceAckMsg
+	sender Sender
 	closed bool
 	closes int
 }
 
 func (m *speechManagerTracker) HandleControl(s Sender, data []byte) {
+	m.mu.Lock()
+	m.sender = s
+	m.mu.Unlock()
 	var probe struct {
 		Type string `json:"type"`
 	}
@@ -156,6 +166,12 @@ func (m *speechManagerTracker) HandleControl(s Sender, data []byte) {
 		}
 	}
 	m.TurnManager.HandleControl(s, data)
+}
+
+func (m *speechManagerTracker) currentSender() Sender {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sender
 }
 
 func (m *speechManagerTracker) Close(s Sender) {
@@ -197,12 +213,14 @@ type speechBrowserFixture struct {
 	ln  net.Listener
 	srv *http.Server
 
-	asr   *fakeASR
-	llm   *fakeLLM
-	tts   TTSSynthesizer
-	words *fakeWordSource
-	tools *LessonTools
-	db    *sql.DB
+	asr               *fakeASR
+	llm               *fakeLLM
+	tts               TTSSynthesizer
+	words             *fakeWordSource
+	tools             *LessonTools
+	exec              LessonExecutor
+	db                *sql.DB
+	expectedSentences []string
 
 	mu       sync.Mutex
 	managers []*speechManagerTracker
@@ -221,6 +239,18 @@ type speechBrowserFixture struct {
 type speechObservedTTS struct {
 	inner   TTSSynthesizer
 	fixture *speechBrowserFixture
+}
+
+type speechVerdictGate struct {
+	LessonExecutor
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *speechVerdictGate) ApplyVerdict(ctx context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
+	close(g.entered)
+	<-g.release
+	return g.LessonExecutor.ApplyVerdict(ctx, lessonID, expectedVersion, requestID, verdict)
 }
 
 func (s *speechObservedTTS) SynthesizeStream(ctx context.Context, text string, onAudio AudioChunkFunc, opts ...mimo.TTSOption) (*mimo.StreamResult, error) {
@@ -310,11 +340,13 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 		{Word: "第二词", Meaning: "fixture 第二词"},
 	}
 	f := &speechBrowserFixture{
-		t:     t,
-		db:    db,
-		tools: tools,
-		asr:   newFakeASR(),
-		llm:   newFakeLLM(),
+		t:                 t,
+		db:                db,
+		tools:             tools,
+		exec:              tools,
+		expectedSentences: append([]string(nil), speechExpectedOpening...),
+		asr:               newFakeASR(),
+		llm:               newFakeLLM(),
 		// Two non-zero sawtooth chunks per sentence (~250ms each at 24kHz
 		// s16le): audible-length PCM so real playback and onended are stable.
 		// The inter-chunk delay mirrors the real TTS first-packet latency
@@ -373,9 +405,9 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 // providers and the real temp-SQLite lesson tools, wrapped by the tracker.
 func (f *speechBrowserFixture) newManager() SessionManager {
 	f.mu.Lock()
-	tts, probe := f.tts, f.timerProbe
+	tts, probe, executor := f.tts, f.timerProbe, f.exec
 	f.mu.Unlock()
-	tm := NewTurnManager(f.asr, f.llm, &speechObservedTTS{inner: tts, fixture: f}, f.tools, TurnManagerConfig{
+	tm := NewTurnManager(f.asr, f.llm, &speechObservedTTS{inner: tts, fixture: f}, executor, TurnManagerConfig{
 		LessonID: "speech-browser-fixture",
 		Words:    f.words,
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
@@ -395,6 +427,38 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 	f.managers = append(f.managers, m)
 	f.mu.Unlock()
 	return m
+}
+
+func (f *speechBrowserFixture) seedChecking() {
+	f.t.Helper()
+	ctx := context.Background()
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	cards := []lesson.Word{{Word: "听写浏览器"}, {Word: "第二词"}}
+	l, err := f.tools.EnsureLessonCards(ctx, lessonID, cards, lesson.CategoryChinese)
+	if err == nil {
+		var advance lesson.AdvanceResult
+		advance, err = f.tools.AdvanceWord(ctx, lessonID, l.Version, "browser-seed-1")
+		if err == nil {
+			advance, err = f.tools.AdvanceWord(ctx, lessonID, advance.NewVersion, "browser-seed-2")
+		}
+		if err == nil {
+			_, err = f.tools.EnterCheck(ctx, lessonID, advance.NewVersion, "browser-seed-check", nil)
+		}
+	}
+	if err != nil {
+		f.t.Fatalf("seed checking lesson: %v", err)
+	}
+	f.mu.Lock()
+	f.expectedSentences = append([]string(nil), speechExpectedCheckResume...)
+	f.mu.Unlock()
+}
+
+func (f *speechBrowserFixture) gateScreenVerdict() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g := &speechVerdictGate{LessonExecutor: f.exec, entered: make(chan struct{}), release: make(chan struct{})}
+	f.exec = g
+	return g.entered, g.release
 }
 
 func (f *speechBrowserFixture) url() string { return "http://" + f.ln.Addr().String() + "/" }
@@ -474,8 +538,11 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		"--scenario", scenario,
 		"--timeout-ms", fmt.Sprint(int64(timeout / time.Millisecond)),
 	}, extraArgs...)
-	if scenario == "fixture" || scenario == "held-fixture" || scenario == "close-after-opening" {
-		expected, err := json.Marshal(speechExpectedOpening)
+	if scenario == "fixture" || scenario == "held-fixture" || scenario == "close-after-opening" || scenario == "screen-verdict-close" {
+		f.mu.Lock()
+		sentences := append([]string(nil), f.expectedSentences...)
+		f.mu.Unlock()
+		expected, err := json.Marshal(sentences)
 		if err != nil {
 			f.t.Fatalf("encode expected opening: %v", err)
 		}
