@@ -492,12 +492,20 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	write, writeAdmitted := tm.admitCheckWriteLocked()
 	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
+	if !writeAdmitted {
+		cancel()
+		return
+	}
+	persistCtx := context.WithoutCancel(ctx)
 
-	res, err := tm.exec.CompleteCheck(ctx, lessonID, expected, m.RequestID, false)
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, m.RequestID, false)
 	if err != nil {
+		tm.completeCheckWrite(write)
+		cancel()
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
 			tm.mu.Lock()
@@ -520,6 +528,8 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "poem_submit_latch"),
 		)
+		tm.completeCheckWrite(write)
+		cancel()
 		return
 	}
 
@@ -529,7 +539,7 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 		return nil
 	})
 
-	go tm.finishPoemSubmit(s, ctx, cancel, epoch, ref, lessonID, total, res, m.RequestID)
+	go tm.finishPoemSubmit(s, ctx, cancel, epoch, ref, lessonID, total, res, m.RequestID, write)
 }
 
 // finishPoemSubmit runs on its own goroutine (the ACK-gated ending blocks;
@@ -538,7 +548,7 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 // poem_practice_logs row bracketed by the two-phase kind=poem receipt, ship
 // the honest review_result, then speak the wrap line through the ACK gate
 // and end with session_ended(lesson_complete).
-func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref poemRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string) {
+func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref poemRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
 	persistCtx := context.WithoutCancel(ctx)
 
@@ -622,6 +632,10 @@ func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel co
 			infra.F("at", "poem_practice"),
 		)
 	}
+	// The accepted poem save ends with its practice record and receipt. The
+	// review result and summary remain presentation work and are not part of
+	// close-time persistence coordination.
+	tm.completeCheckWrite(write)
 
 	updated := 0
 	missing := 1
