@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pkg/errors"
 
@@ -337,8 +339,8 @@ func (c *mimoClient) executeChatRequest(ctx context.Context, req ChatRequest) (C
 		return ChatResponse{}, c.handleAPIError(resp)
 	}
 
-	var chatResp ChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	chatResp, err := c.readAndDecodeChatResponse(resp, "chat")
+	if err != nil {
 		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "failed to decode chat response")
 	}
 
@@ -473,8 +475,8 @@ func (c *mimoClient) executeChatVisionRequest(ctx context.Context, req ChatVisio
 		return ChatResponse{}, c.handleAPIError(resp)
 	}
 
-	var chatResp ChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	chatResp, err := c.readAndDecodeChatResponse(resp, "vision chat")
+	if err != nil {
 		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "failed to decode vision chat response")
 	}
 
@@ -483,6 +485,90 @@ func (c *mimoClient) executeChatVisionRequest(ctx context.Context, req ChatVisio
 	}
 
 	return chatResp, nil
+}
+
+// maxLoggedResponseBytes is how much of an undecodable chat-completion body
+// is written to the log (issue #76). The rest is dropped so a huge payload
+// cannot flood the log. Only the failure path logs a body; successful
+// responses stay out of the log.
+const maxLoggedResponseBytes = 2048
+
+// bearerTokenRE matches an Authorization-style bearer token so a response
+// that echoes the request header cannot land in the log. The client's own
+// API key is stripped separately, by literal match, in truncateResponseForLog.
+var bearerTokenRE = regexp.MustCompile(`(?i)bearer\s+\S+`)
+
+// readAndDecodeChatResponse reads an HTTP 200 chat-completion body into
+// ChatResponse. A read or JSON failure is logged with a truncated,
+// secret-redacted prefix and returned unwrapped; callers keep their existing
+// ErrInvalidResponse wrap text.
+func (c *mimoClient) readAndDecodeChatResponse(resp *http.Response, operation string) (ChatResponse, error) {
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.logUndecodableChatBody(operation, raw, err)
+		return ChatResponse{}, err
+	}
+	var chatResp ChatResponse
+	if err := json.Unmarshal(raw, &chatResp); err != nil {
+		c.logUndecodableChatBody(operation, raw, err)
+		return ChatResponse{}, err
+	}
+	return chatResp, nil
+}
+
+// logUndecodableChatBody records the decode failure without the API key or
+// an echoed bearer token. The returned error is unchanged.
+func (c *mimoClient) logUndecodableChatBody(operation string, raw []byte, err error) {
+	c.logger.Warn("failed to decode chat completion response",
+		infra.F("component", "mimo.client"),
+		infra.F("operation", operation),
+		infra.F("body_prefix", truncateResponseForLog(raw, c.config.APIKey)),
+		infra.ErrField(err),
+	)
+}
+
+// truncateResponseForLog returns at most maxLoggedResponseBytes of body with
+// secrets removed. The window extends past the cut by the key length so a
+// key that straddles the boundary is still redacted in full, then the
+// redacted text is cut back to the limit.
+func truncateResponseForLog(body []byte, apiKey string) string {
+	overlap := len(apiKey)
+	if overlap < 256 {
+		overlap = 256
+	}
+	window := len(body)
+	if window > maxLoggedResponseBytes+overlap {
+		window = maxLoggedResponseBytes + overlap
+	}
+	s := redactResponseSecrets(string(body[:window]), apiKey)
+	return cutUTF8(s, maxLoggedResponseBytes)
+}
+
+// redactResponseSecrets strips an echoed bearer token and, when the
+// configured API key is long enough to be a real secret, that key. Short
+// keys are left alone so a tiny test value cannot punch holes in the prefix.
+func redactResponseSecrets(s, apiKey string) string {
+	s = bearerTokenRE.ReplaceAllString(s, "Bearer [redacted]")
+	if len(apiKey) >= 8 {
+		s = strings.ReplaceAll(s, apiKey, "[redacted]")
+	}
+	return s
+}
+
+// cutUTF8 returns s limited to at most limit bytes, backing up so the result
+// does not end on a partial rune.
+func cutUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	if utf8.RuneStart(s[limit]) {
+		return s[:limit]
+	}
+	n := limit
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // HealthCheck verifies API connectivity

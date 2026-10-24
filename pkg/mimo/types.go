@@ -7,8 +7,11 @@
 package mimo
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -279,11 +282,120 @@ type ChatRequest struct {
 // response. Thinking models may populate ReasoningContent with the chain of
 // thought while the final answer lands in Content; tool-calling turns carry
 // the requested calls in ToolCalls with an empty Content.
+//
+// On the wire, message.content is polymorphic (issue #76): a JSON string,
+// null, or a multimodal array. Content stays a plain string for callers;
+// UnmarshalJSON folds those shapes into it. Marshaling still emits a JSON
+// string — this client does not re-encode responses.
 type ChatMessageContent struct {
 	Role             string     `json:"role"`
 	Content          string     `json:"content"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+}
+
+// UnmarshalJSON accepts the assistant message shapes MiMo returns for
+// message.content: a JSON string, null (or an absent field), or a multimodal
+// array. Text parts are concatenated in order with no added separator, so a
+// JSON answer split across parts stays intact; non-text parts (image_url and
+// the like) contribute nothing. Any other JSON type is an error, so a
+// corrupted payload still fails the decode and the client can log the body.
+func (m *ChatMessageContent) UnmarshalJSON(data []byte) error {
+	// A local wire type avoids recursing into UnmarshalJSON. Same approach
+	// as StreamChunk.
+	var wire struct {
+		Role             string          `json:"role"`
+		Content          json.RawMessage `json:"content"`
+		ReasoningContent string          `json:"reasoning_content"`
+		ToolCalls        []ToolCall      `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	content, err := decodeAssistantContent(wire.Content)
+	if err != nil {
+		return err
+	}
+	*m = ChatMessageContent{
+		Role:             wire.Role,
+		Content:          content,
+		ReasoningContent: wire.ReasoningContent,
+		ToolCalls:        wire.ToolCalls,
+	}
+	return nil
+}
+
+// decodeAssistantContent folds one message.content value into a string.
+func decodeAssistantContent(raw json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", nil
+	}
+	switch trimmed[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return "", err
+		}
+		return s, nil
+	case '[':
+		return decodeAssistantContentArray(trimmed)
+	default:
+		return "", fmt.Errorf("assistant message content: unsupported JSON value")
+	}
+}
+
+// decodeAssistantContentArray concatenates text from a multimodal content
+// array. A bare JSON string element is itself a text part.
+func decodeAssistantContentArray(raw []byte) (string, error) {
+	var parts []json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, part := range parts {
+		text, err := assistantContentPartText(part)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(text)
+	}
+	return b.String(), nil
+}
+
+// assistantContentPartText extracts the text of one multimodal part.
+// Image and audio parts are skipped. Any other object contributes its
+// "text" field (empty when the field is absent), so an unfamiliar text
+// type is not dropped.
+func assistantContentPartText(raw json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", nil
+	}
+	switch trimmed[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return "", err
+		}
+		return s, nil
+	case '{':
+		var part struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(trimmed, &part); err != nil {
+			return "", err
+		}
+		switch part.Type {
+		case "image_url", "image", "input_audio", "audio":
+			return "", nil
+		default:
+			return part.Text, nil
+		}
+	default:
+		return "", fmt.Errorf("assistant message content part: unsupported JSON value")
+	}
 }
 
 // ChatResponse represents the response from an LLM chat completion request.
