@@ -674,23 +674,27 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		// transparency prohibition (S-05) across connections. The loser's
 		// honest shape is the terminal signal (session_ended with the
 		// existing lesson_complete copy) plus one diagnostic event
-		// (13.1-08 review consensus). internalClose cancels the turnCancel
-		// stored above, so no separate cancel is needed. The goodbye rides
-		// the session effect — a session that already ended never sees a
-		// SECOND session_ended.
+		// (13.1-08 review consensus). The memory flip is the accepted save's
+		// own bookkeeping (guarded by the session effect — a session that
+		// already closed keeps its dead tutor untouched); the terminal close
+		// then rides the unified entry: closed FIRST, the ONE session_ended
+		// second, and a refused enqueue is swallowed inside the entry — the
+		// cancel of the turnCancel stored above, the cleanup and the
+		// transport termination still complete (issue #69 备选一 步骤 7: the
+		// old send-first-then-close shape skipped the close entirely when
+		// the goodbye was refused).
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "check_submit_latch"),
 		)
-		if !tm.applySessionEffect(func() error {
+		tm.applySessionEffect(func() error {
 			tm.tutor.version = res.NewVersion
 			tm.tutor.checking = false
-			return s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
-		}) {
-			return
+			return nil
+		})
+		if tm.tryTerminalClose(s, ReasonLessonComplete) {
+			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 		}
-		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-		tm.internalClose()
 		return
 	}
 
@@ -923,18 +927,23 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 		// millisecond both pass this read-side gate — closing it fully
 		// needs a preemptive ClearUnchecked latch, which would break the
 		// S-05 retry semantics below (a failed review write must keep the
-		// marker for the next session).
-		tm.mu.Lock()
-		tm.tutor.align(l.CurrentIndex, l.Version)
-		tm.tutor.checking = false
-		tm.mu.Unlock()
+		// marker for the next session). The memory align rides the session
+		// effect (a session that already closed keeps its dead tutor
+		// untouched) and the terminal close rides the unified entry: closed
+		// FIRST, the ONE session_ended second, a refused enqueue swallowed
+		// (issue #69 备选一 步骤 7).
+		tm.applySessionEffect(func() error {
+			tm.tutor.align(l.CurrentIndex, l.Version)
+			tm.tutor.checking = false
+			return nil
+		})
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "correction_submit_latch"),
 		)
-		_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
-		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-		tm.internalClose()
+		if tm.tryTerminalClose(s, ReasonLessonComplete) {
+			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+		}
 		return
 	}
 
