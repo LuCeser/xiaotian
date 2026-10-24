@@ -21,7 +21,7 @@ const { chromium } = require('@playwright/test');
 const {
   installRtObserver, waitWs, wsView, playbackState, playedBeforeAck,
 } = require('../../../../tests/e2e-m1-browser/helpers/rt-observe');
-const { installFakeMic, micInfo } = require('../../../../tests/e2e-m1-browser/helpers/fake-mic');
+const { installFakeMic, micInfo, playPcm16 } = require('../../../../tests/e2e-m1-browser/helpers/fake-mic');
 
 // 与 tests/playwright.m1.config.js 相同的 headless 麦克风授旗：真实页面在生产
 // capture 流程里调用 getUserMedia，flags 保证 headless 下权限不弹窗；音频来源
@@ -253,6 +253,47 @@ async function scenarioScreenVerdictClose(args) {
   };
 }
 
+// tonePcm16Base64 — 生成一段确定性音频剪辑（voice-input.spec.js 的同款生成
+// 器）：2 秒 440 Hz s16le @16 kHz，能量足够触发服务端 VAD、长度覆盖一个分段
+// （+ 拖尾）。播放走 fake-mic.js 的合成麦克风（playPcm16）——这是「提供麦克
+// 风来源」的法定能力：只向合成流注入音频，页面生产采集链路无感知，驱动器
+// 仍不接触 WS 或页面内部。
+function tonePcm16Base64(ms = 2000, freq = 440, rate = 16000, amp = 0.6) {
+  const n = Math.round((ms * rate) / 1000);
+  const buf = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) {
+    buf.writeInt16LE(Math.round(Math.sin((2 * Math.PI * freq * i) / rate) * amp * 32767), i * 2);
+  }
+  return buf.toString('base64');
+}
+
+// scenario "voice-verdict-close"（1.07b）：检查阶段的自然语音入口。恢复播报
+// 自然完成并回到 listening 后，向合成麦克风播放一段真实音调——生产采集→
+// 上行→服务端 VAD→ASR→检查分类→语音判定全部真实发生；Go 侧在真实判定写入
+// 的持久化门上关闭会话。页面只观察：close 事件、关闭后迟到的 check_verdicts
+// 回显与教师播报必须为零，语音轮的 state 轨迹里必须出现 processing（证明这
+// 是真的语音轮，不是测试代劳）。
+async function scenarioVoiceVerdictClose(args) {
+  const opening = await scenarioFixture(args);
+  const before = await wsView(args.page);
+  const echoesBefore = before.filter((e) => e.dir === 'in' && e.type === 'check_verdicts').length;
+  const teachersBefore = before.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length;
+  await playPcm16(args.page, tonePcm16Base64(), 16000, 0.6);
+  await waitWs(args.page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+    { timeoutMs: args.timeoutMs, label: 'close while the spoken verdict is saving' });
+  const view = await wsView(args.page);
+  const voiceStates = view
+    .filter((e) => e.dir === 'in' && e.type === 'state' && e.msg && e.i > opening.round.lastAckIndex)
+    .map((e) => e.msg.value);
+  return {
+    ...opening,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    lateVerdictEchoes: view.filter((e) => e.dir === 'in' && e.type === 'check_verdicts').length - echoesBefore,
+    lateTeacherSentences: view.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length - teachersBefore,
+    voiceStates,
+  };
+}
+
 // scenario "starve-probe"：点击「开始上课」后只观察一个固定窗口
 // （--hold-ms，默认 3000），输出窗口内页面真实收到的下行控制/二进制帧数
 // 后退出，不等待播放完成。这是故障控制点「命中」的页面侧证据：被控制的
@@ -276,6 +317,7 @@ const SCENARIOS = {
   'held-fixture': scenarioHeldFixture,
   'close-after-opening': scenarioCloseAfterOpening,
   'screen-verdict-close': scenarioScreenVerdictClose,
+  'voice-verdict-close': scenarioVoiceVerdictClose,
   'starve-probe': scenarioStarveProbe,
 };
 
