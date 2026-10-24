@@ -173,12 +173,6 @@ func wireVerdicts(verdicts []lesson.CheckVerdict) []WireVerdict {
 	return out
 }
 
-// broadcastCheckVerdicts sends the authoritative verdict echo (RT-07: the
-// client renders ONLY this server state, never local optimistic state).
-func (tm *TurnManager) broadcastCheckVerdicts(s Sender, verdicts []lesson.CheckVerdict) {
-	_ = s.SendControl(CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: wireVerdicts(verdicts)})
-}
-
 // derivedVerdicts projects the STORED behavior snapshot onto pending check
 // verdicts (13.1-04 correction mode): a word derives correct iff its
 // behavior rating was good (the D-03 fallback read 无提示说好 and stored it
@@ -227,6 +221,10 @@ func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson) {
 // ACK gate. No due-fetch, no word timers, no rating write — those belong to
 // the paths that FINISH the check (handleCheckVerdict / handleCheckSubmit).
 func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason string, correction bool) {
+	epoch := tm.currentEpoch()
+	if tm.checkResumeInterleave != nil {
+		tm.checkResumeInterleave()
+	}
 	words := make([]string, 0, len(l.Cards))
 	for _, c := range l.Cards {
 		words = append(words, c.Word)
@@ -238,69 +236,46 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 		panelVerdicts = derivedVerdicts(l.Cards, l.Outcomes)
 	}
 
-	tm.mu.Lock()
-	if tm.closed {
-		// PR #60 review: the subject-picked classroom reaches this resume
-		// branch on the answer turn's goroutine — an end_session that closed
-		// the session under the row IO gets no panel replay at all.
-		tm.mu.Unlock()
+	poemView := tm.poemViewForRow(l)
+	passageView := tm.passageViewForRow(l)
+	view, category := tm.lessonViewFor(l), tm.sessionCategory()
+	if !tm.applyTurnAt(epoch, func() error {
+		tm.tutor = newDictationTutor(l)
+		tm.tutor.completed, tm.tutor.checking = true, true
+		tm.tutor.correction, tm.tutor.checkVerdicts = correction, panelVerdicts
+		if poemView != nil {
+			tm.tutor.poem = &poemRef{ID: l.PoemID, Title: poemView.Title, Author: poemView.Author}
+		}
+		if passageView != nil {
+			tm.tutor.passage = &passageRef{ID: passageView.ID, ScopeID: passageView.ScopeID,
+				Title: passageView.Title, Author: passageView.Author, Whole: passageView.Whole,
+				Paragraphs: append([]int(nil), passageView.Paragraphs...)}
+		}
+		tm.state, tm.sessionReadyAt = StateListening, time.Now()
+		if err := s.SendControl(SessionReadyMsg{Type: TypeSessionReady, SessionID: tm.session,
+			Audio: AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+			TTS:   TTSSpec{SampleRate: TTSOutputSampleRate}, Lesson: view, Category: category,
+			Poem: poemView, Passage: passageView}); err != nil {
+			return err
+		}
+		if err := s.SendControl(CheckStartedMsg{Type: TypeCheckStarted, Words: words, Reason: reason}); err != nil {
+			return err
+		}
+		return s.SendControl(CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: wireVerdicts(panelVerdicts)})
+	}) {
 		return
 	}
-	tm.tutor = newDictationTutor(l)
-	tm.tutor.completed = true // word pacing is over; the countdown stays disarmed
-	tm.tutor.checking = true  // the check panel owns the input surface
-	tm.tutor.correction = correction
-	tm.tutor.checkVerdicts = panelVerdicts
-	tm.tutor.restoreOutcomes(l.Outcomes)
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	tm.mu.Unlock()
-	// Issue #12: a POEM row reopened into its check panel keeps its poem
-	// identity (the task view on session_ready + the submit's whole-poem
-	// save need it).
-	poemView := tm.poemViewForRow(l)
-	if poemView != nil {
-		tm.bindPoemRef(l, poemView)
-	}
-	// Issue #14: a PASSAGE row reopened into its check panel keeps its
-	// work + range identity the same way (the range always re-reads from
-	// the ROW — what the child actually practiced).
-	passageView := tm.passageViewForRow(l)
-	if passageView != nil {
-		tm.bindPassageRef(passageView)
-	}
-
-	_ = s.SendControl(SessionReadyMsg{
-		Type:      TypeSessionReady,
-		SessionID: tm.session,
-		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
-		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    tm.lessonViewFor(l),
-		Category:  tm.sessionCategory(),
-		Poem:      poemView,
-		Passage:   passageView,
-	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-
 	tm.recorder.Emit(EventCheckStarted, infra.F("total", len(words)))
-	_ = s.SendControl(CheckStartedMsg{
-		Type:   TypeCheckStarted,
-		Words:  words,
-		Reason: reason,
-	})
-	tm.broadcastCheckVerdicts(s, panelVerdicts)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	if tm.closed {
-		// A close that landed after the panel replay still gets no spoken
-		// bridge (runAnnouncementDisplayAt's entry gate is the backstop).
-		tm.mu.Unlock()
+	if !tm.applyTurnAt(epoch, func() error {
+		tm.turnCancel = cancel
+		return nil
+	}) {
 		cancel()
 		return
 	}
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
 	bridge := checkResumeBridgeText(len(words))
 	if correction {
 		bridge = checkCorrectionBridgeText(len(words))
@@ -309,7 +284,68 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	// the announcement blocks on its playback ack — the same shape
 	// startDictationSession uses for the greeting (the ack must stay
 	// servable).
-	go tm.runAnnouncement(s, ctx, cancel, bridge, purposeCheckBridge, nil)
+	go tm.runStarterTask(func() {
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, bridge, purposeCheckBridge, nil)
+	})
+}
+
+// checkStageInputs separates the data persisted by EnterCheck from the data
+// presented after that write succeeds.
+type checkStageInputs struct {
+	outcomes   map[string]lesson.WordOutcome
+	lessonID   string
+	reason     string
+	bridge     string
+	words      []string
+	epoch      uint64
+	expected   int
+	total      int
+	correction bool
+}
+
+func (tm *TurnManager) prepareCheckStageInputs(epoch uint64) (checkStageInputs, bool) {
+	var in checkStageInputs
+	ok := tm.applyTurnAt(epoch, func() error {
+		tm.tutor.markCompleted()
+		tm.stopWordTimerLocked()
+		in = checkStageInputs{
+			epoch: epoch, lessonID: tm.tutor.lessonID, expected: tm.tutor.version,
+			outcomes: tm.tutor.snapshotCheckOutcomes(), total: len(tm.tutor.words),
+			reason: CheckStartedReasonDictationDone, correction: tm.tutor.correction,
+		}
+		in.words = make([]string, 0, in.total)
+		for _, card := range tm.tutor.words {
+			in.words = append(in.words, card.Word)
+		}
+		in.bridge = checkBridgeText(in.total)
+		if tm.tutor.poem != nil {
+			in.reason, in.bridge = CheckStartedReasonPoemDone, poemCheckBridgeText(in.total)
+		} else if tm.tutor.passage != nil {
+			in.reason = CheckStartedReasonPassageDone
+			in.bridge = passageCheckBridgeText(tm.tutor.passage.Whole, tm.tutor.passage.Paragraphs, in.total)
+		}
+		return nil
+	})
+	return in, ok
+}
+
+// presentCheckedStage only presents an already-persisted check stage. It
+// never calls EnterCheck or changes the authoritative verdict state.
+func (tm *TurnManager) presentCheckedStage(
+	s Sender, ctx context.Context, cancel context.CancelFunc, in checkStageInputs, apply func(),
+) bool {
+	if !tm.applyTurnAt(in.epoch, func() error {
+		if err := s.SendControl(CheckStartedMsg{Type: TypeCheckStarted, Words: in.words, Reason: in.reason}); err != nil {
+			return err
+		}
+		apply()
+		return nil
+	}) {
+		return false
+	}
+	tm.recorder.Emit(EventCheckStarted, infra.F("total", in.total))
+	tm.runAnnouncementDisplayAt(s, in.epoch, ctx, cancel, in.bridge, in.bridge, purposeCheckBridge, nil)
+	return true
 }
 
 // enterCheck opens the check stage; reachable ONLY from advanceTarget's
@@ -319,25 +355,11 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 // (full plaintext, D-10 unmask) → the ACK-gated bridge announcement (Pitfall
 // 9: the new stage does not bypass sentence_ack). Replaces enterCompletion.
 func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64) {
-	if !tm.epochCurrent(epoch) {
+	in, ok := tm.prepareCheckStageInputs(epoch)
+	if !ok {
 		return
 	}
-	tm.mu.Lock()
-	tm.tutor.markCompleted() // word pacing is over; the countdown stays disarmed
-	tm.stopWordTimerLocked() // no per-word timer in the check stage
-	lessonID := tm.tutor.lessonID
-	expected := tm.tutor.version
-	outcomes := tm.tutor.snapshotCheckOutcomes()
-	total := len(tm.tutor.words)
-	isPoem := tm.tutor.poem != nil       // Issue #12: the poem's own bridge copy/reason
-	isPassage := tm.tutor.passage != nil // Issue #14: the passage range's own bridge
-	words := make([]string, 0, total)    // the FULL plaintext list (D-10 unmask)
-	for _, c := range tm.tutor.words {
-		words = append(words, c.Word)
-	}
-	tm.mu.Unlock()
-
-	res, err := tm.exec.EnterCheck(ctx, lessonID, expected, lessonID+"-enter-check", outcomes)
+	res, err := tm.exec.EnterCheck(ctx, in.lessonID, in.expected, in.lessonID+"-enter-check", in.outcomes)
 	// PR #61 review: the stage write may commit UNDER a close or interrupt —
 	// the row stands (a reconnect resumes from it), but a dead classroom
 	// opens no panel: no tutor mutation, no check_started, no bridge.
@@ -346,20 +368,14 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	}
 	switch err {
 	case nil:
-		// PR #61 review round 2: the liveness re-check above only covered the
-		// executor's return moment. A close/interrupt landing between that
-		// check and this mutation would flip a dead classroom into the check
-		// stage — so the check rides the SAME lock hold as the mutation (the
-		// advanceTarget first-commit pattern).
-		tm.mu.Lock()
-		if tm.epoch != epoch || tm.closed {
-			tm.mu.Unlock()
-			return
+		if tm.checkPresentationInterleave != nil {
+			tm.checkPresentationInterleave()
 		}
-		tm.tutor.version = res.NewVersion
-		tm.tutor.checking = true
-		tm.tutor.checkVerdicts = res.Verdicts
-		tm.mu.Unlock()
+		tm.presentCheckedStage(s, ctx, cancel, in, func() {
+			tm.tutor.version, tm.tutor.checking = res.NewVersion, true
+			tm.tutor.checkVerdicts = res.Verdicts
+		})
+		return
 	default:
 		var conflict *lesson.ConflictError
 		if !errors.As(err, &conflict) {
@@ -370,21 +386,12 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 		}
 		// Conflict: align from the stored truth (another writer moved the
 		// row) and continue into the check stage from THAT state.
-		l, gerr := tm.exec.GetLessonState(ctx, lessonID)
+		l, gerr := tm.exec.GetLessonState(ctx, in.lessonID)
 		if gerr != nil {
 			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
 			return
 		}
-		tm.mu.Lock()
-		if tm.epoch != epoch || tm.closed {
-			tm.mu.Unlock()
-			return
-		}
-		tm.tutor.align(l.CurrentIndex, l.Version)
-		tm.tutor.resyncCheck(l)
-		alreadySubmitted := l.Stage == lesson.StageSubmitted && !tm.tutor.correction
-		tm.mu.Unlock()
-		if alreadySubmitted {
+		if l.Stage == lesson.StageSubmitted && !in.correction {
 			// The concurrent writer already submitted the row (WR-02,
 			// 13.1-08): broadcasting check_started here would hand this
 			// connection a panel that can never open. The honest completion
@@ -400,53 +407,20 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 				infra.F("code", ErrCodeDuplicateSubmit),
 				infra.F("duplicate", "enter_check_submitted"),
 			)
-			_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
-			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-			cancel() // the caller's ctx — beyond what internalClose cancels
-			tm.internalClose()
+			cancel()
+			if tm.tryTerminalCloseAt(s, epoch, ReasonLessonComplete) {
+				tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+			}
 			return
 		}
-	}
-
-	reason := CheckStartedReasonDictationDone
-	bridge := checkBridgeText(total)
-	if isPoem {
-		reason = CheckStartedReasonPoemDone
-		bridge = poemCheckBridgeText(total)
-	} else if isPassage {
-		// Issue #14: the passage's own bridge copy/reason — the rows are
-		// this range's paragraphs, labeled by the range the task announced.
-		reason = CheckStartedReasonPassageDone
-		tm.mu.Lock()
-		if tm.tutor != nil && tm.tutor.passage != nil {
-			bridge = passageCheckBridgeText(tm.tutor.passage.Whole, tm.tutor.passage.Paragraphs, total)
+		if tm.checkPresentationInterleave != nil {
+			tm.checkPresentationInterleave()
 		}
-		tm.mu.Unlock()
+		tm.presentCheckedStage(s, ctx, cancel, in, func() {
+			tm.tutor.align(l.CurrentIndex, l.Version)
+			tm.tutor.resyncCheck(l)
+		})
 	}
-	// The panel open rides ONE lock hold with the liveness re-check and the
-	// enqueue (the speakTurn / lesson_update pattern): a close that races this
-	// window either sets closed first (the branch dies here) or blocks on
-	// tm.mu until check_started is queued — the close paths ship session_ended
-	// only AFTER closed is set, so check_started can never trail the goodbye
-	// on the wire (PR #61 review round 2).
-	tm.mu.Lock()
-	if tm.epoch != epoch || tm.closed {
-		tm.mu.Unlock()
-		return
-	}
-	_ = s.SendControl(CheckStartedMsg{
-		Type:   TypeCheckStarted,
-		Words:  words,
-		Reason: reason,
-	})
-	tm.mu.Unlock()
-	tm.recorder.Emit(EventCheckStarted, infra.F("total", total))
-
-	// The bridge speaks under the TURN'S OWN epoch (runAnnouncementDisplayAt,
-	// the subject-ask pattern): snapshotting the live epoch here would let an
-	// interrupt that already bumped it play the check bridge over whatever
-	// classroom comes next.
-	tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, bridge, bridge, purposeCheckBridge, nil)
 }
 
 // handleCheckVerdict applies one screen verdict (the check_verdict control
@@ -457,25 +431,24 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 // loop; the DB write is the same short-transaction class as session_init's.
 func (tm *TurnManager) handleCheckVerdict(s Sender, m CheckVerdictMsg) {
 	tm.mu.Lock()
-	alive := tm.tutor != nil && !tm.closed && tm.tutor.checking
-	total := 0
-	if tm.tutor != nil {
-		total = len(tm.tutor.words)
-	}
-	tm.mu.Unlock()
-	if !alive {
-		tm.sendError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
+	if tm.tutor == nil || tm.closed || !tm.tutor.checking {
+		tm.mu.Unlock()
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
 		return
 	}
-	if m.RequestID == "" || m.WordIndex < 0 || m.WordIndex >= total {
-		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
+	if m.RequestID == "" || m.WordIndex < 0 || m.WordIndex >= len(tm.tutor.words) {
+		tm.mu.Unlock()
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
 		return
 	}
-
-	tm.mu.Lock()
 	lessonID := tm.tutor.lessonID
 	expected := tm.tutor.version
+	write, admitted := tm.admitCheckWriteLocked()
 	tm.mu.Unlock()
+	if !admitted {
+		return
+	}
+	defer tm.completeCheckWrite(write)
 
 	// Screen verdicts are the only verdict kind this plan creates: manual
 	// always true (OCR prefills arrive in 13.1-03 with Manual=false and do
@@ -486,25 +459,39 @@ func (tm *TurnManager) handleCheckVerdict(s Sender, m CheckVerdictMsg) {
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
 			// Align from the stored truth and re-echo: the button state
-			// re-renders from the server's authoritative list.
+			// re-renders from the server's authoritative list. Nothing was
+			// written — the whole presentation rides the stage effect, so
+			// an ended session re-echoes nothing.
 			if l, gerr := tm.exec.GetLessonState(context.Background(), lessonID); gerr == nil {
-				tm.mu.Lock()
-				tm.tutor.align(l.CurrentIndex, l.Version)
-				tm.tutor.resyncCheck(l)
-				tm.mu.Unlock()
-				tm.broadcastCheckVerdicts(s, l.Verdicts)
+				tm.applyCheckStageEffect(func() error {
+					tm.tutor.align(l.CurrentIndex, l.Version)
+					tm.tutor.resyncCheck(l)
+					return s.SendControl(CheckVerdictsMsg{
+						Type:     TypeCheckVerdicts,
+						Verdicts: wireVerdicts(l.Verdicts),
+					})
+				})
 			}
 			return
 		}
-		tm.sendError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		tm.sendOpenError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
 		return
 	}
 
-	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checkVerdicts = res.Verdicts
-	tm.mu.Unlock()
-	tm.broadcastCheckVerdicts(s, res.Verdicts)
+	// The write landed (the accepted save). Present it only while the stage
+	// — and the session — is still the one that admitted the frame: the
+	// memory update and the authoritative echo are ONE hold, and the event
+	// records only when the echo shipped (applyVoiceVerdict's discipline).
+	if !tm.applyCheckStageEffect(func() error {
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checkVerdicts = res.Verdicts
+		return s.SendControl(CheckVerdictsMsg{
+			Type:     TypeCheckVerdicts,
+			Verdicts: wireVerdicts(res.Verdicts),
+		})
+	}) {
+		return
+	}
 	if !res.Idempotent {
 		tm.recorder.Emit(EventVerdictApplied,
 			infra.F("word_index", m.WordIndex),
@@ -527,7 +514,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	reviewSeen := alive && !tm.tutor.checking && tm.tutor.reviewSeen
 	tm.mu.Unlock()
 	if !alive {
-		tm.sendError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
 		return
 	}
 	if !checking {
@@ -542,7 +529,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 			)
 			return
 		}
-		tm.sendError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
 		return
 	}
 
@@ -602,7 +589,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		return
 	}
 	if m.RequestID == "" {
-		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
 		return
 	}
 
@@ -620,33 +607,54 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	}
 	tm.mu.Unlock()
 	if len(manual) < total {
-		tm.sendError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
 		return
 	}
 
-	// Latch: the stage transition. ONLY the first commit proceeds.
+	// Latch: the stage transition. ONLY the first commit proceeds. The
+	// admission is taken in the SAME critical section that stores the turn
+	// cancel: a close can only land before the whole accepted save (this
+	// submit writes nothing) or after it registered (the latch write, the
+	// SubmitReview and its receipt then run to their real outcome on the
+	// persist context — the save responsibility outlives the turn's
+	// cancellation, 1.09).
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	write, writeAdmitted := tm.admitCheckWriteLocked()
+	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
+	if !writeAdmitted {
+		// The session closed between the manual gate and the latch: the
+		// registry is sealed, nothing was accepted, nothing is written.
+		cancel()
+		return
+	}
+	persistCtx := context.WithoutCancel(ctx)
 
-	res, err := tm.exec.CompleteCheck(ctx, lessonID, expected, m.RequestID, false)
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, m.RequestID, false)
 	if err != nil {
+		// No save happened on this path (or the row was already another
+		// writer's): the admission ends with the attempt.
+		tm.completeCheckWrite(write)
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
 			// Align from the stored truth: if the row is already submitted
 			// the write was a cross-connection race — treat it as the
-			// duplicate path (no second write either way).
-			tm.mu.Lock()
-			tm.tutor.checking = false
-			tm.mu.Unlock()
+			// duplicate path (no second write either way). The memory flip
+			// rides the session effect: a session that ended while the
+			// latch write ran keeps its dead tutor untouched.
+			tm.applySessionEffect(func() error {
+				tm.tutor.checking = false
+				return nil
+			})
 			tm.recorder.Emit(EventError,
 				infra.F("code", ErrCodeDuplicateSubmit),
 				infra.F("duplicate", "check_submit_conflict"),
 			)
 			return
 		}
-		tm.sendError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		tm.sendOpenError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
 		return
 	}
 	if res.Idempotent {
@@ -660,27 +668,45 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		// transparency prohibition (S-05) across connections. The loser's
 		// honest shape is the terminal signal (session_ended with the
 		// existing lesson_complete copy) plus one diagnostic event
-		// (13.1-08 review consensus). internalClose cancels the turnCancel
-		// stored above, so no separate cancel is needed.
-		tm.mu.Lock()
-		tm.tutor.version = res.NewVersion
-		tm.tutor.checking = false
-		tm.mu.Unlock()
+		// (13.1-08 review consensus). The memory flip is the accepted save's
+		// own bookkeeping (guarded by the session effect — a session that
+		// already closed keeps its dead tutor untouched); the terminal close
+		// then rides the unified entry: closed FIRST, the ONE session_ended
+		// second, and a refused enqueue is swallowed inside the entry — the
+		// cancel of the turnCancel stored above, the cleanup and the
+		// transport termination still complete (issue #69 备选一 步骤 7: the
+		// old send-first-then-close shape skipped the close entirely when
+		// the goodbye was refused).
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "check_submit_latch"),
 		)
-		_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
-		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-		tm.internalClose()
+		tm.applySessionEffect(func() error {
+			tm.tutor.version = res.NewVersion
+			tm.tutor.checking = false
+			return nil
+		})
+		// The absorbed duplicate saves nothing: the admission ends BEFORE
+		// the terminal close claims (and would capture) it.
+		tm.completeCheckWrite(write)
+		if tm.tryTerminalClose(s, ReasonLessonComplete) {
+			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+		}
 		return
 	}
 
 	// Assemble the rating inputs from the STORED verdicts + outcomes
 	// readback (never from the in-memory cache — the row is the authority).
+	// The latch write landed (the accepted save): the memory flip rides the
+	// session effect — an ended session keeps the dead tutor untouched —
+	// while finishCheckSubmit still runs, because its SubmitReview is part
+	// of the same accepted save and gates its own presentation.
+	tm.applySessionEffect(func() error {
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checking = false
+		return nil
+	})
 	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checking = false
 	wordsCopy := make([]lesson.Word, len(tm.tutor.words))
 	copy(wordsCopy, tm.tutor.words)
 	tm.mu.Unlock()
@@ -692,7 +718,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		}
 	}
 
-	go tm.finishCheckSubmit(s, ctx, cancel, ratings, total, correct, m.RequestID)
+	go tm.finishCheckSubmit(s, ctx, cancel, epoch, ratings, total, correct, m.RequestID, write)
 }
 
 // sortedWordSet extracts a rating map's keys sorted — the receipt word-set
@@ -714,8 +740,9 @@ func sortedWordSet(m map[string]string) []string {
 // SubmitReview call site the check stage owns. 13.3-01 brackets the write
 // with the two-phase save receipt (Begin pending before, Complete with the
 // real outcome after) — a pure bypass that never alters the flow below.
-func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, ratings map[string]string, total, correct int, requestID string) {
+func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ratings map[string]string, total, correct int, requestID string, write *checkWriteAdmission) {
 	defer cancel()
+	persistCtx := context.WithoutCancel(ctx)
 
 	// Dictation-stage behavior data stays honestly reported (the D-01
 	// rewrite keeps outcomeCounts/hintAccounting as event fields).
@@ -741,7 +768,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		receiptID := int64(0)
 		requestedSet := sortedWordSet(ratings)
 		if tm.cfg.Receipts != nil {
-			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+			rec, rerr := tm.cfg.Receipts.Begin(persistCtx, lesson.ReceiptInput{
 				LessonID:  lessonID,
 				RequestID: requestID,
 				Kind:      lesson.ReceiptKindCheck,
@@ -754,7 +781,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 			}
 		}
 
-		wres, err := tm.cfg.Words.SubmitReview(ctx, ratings, category)
+		wres, err := tm.cfg.Words.SubmitReview(persistCtx, ratings, category)
 		switch {
 		case err != nil:
 			// Honest failure: the record was NOT saved — never a narrated
@@ -791,9 +818,9 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		if tm.cfg.Receipts != nil && receiptID > 0 {
 			var cerr error
 			if err != nil {
-				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false)
+				cerr = tm.cfg.Receipts.Complete(persistCtx, receiptID, nil, requestedSet, false)
 			} else {
-				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
+				cerr = tm.cfg.Receipts.Complete(persistCtx, receiptID, wres.Updated, wres.Missing, true)
 			}
 			if cerr != nil {
 				// The row stays pending — the parent view's honest 「待核实」.
@@ -801,6 +828,12 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 			}
 		}
 	}
+	// The accepted submit's save responsibility ends with its receipt: the
+	// admission is released BEFORE any presentation — a close that captured
+	// the registration waits for the SAVE, never for the summary playback
+	// the close itself would cancel (1.09; the 1.06 registration spans
+	// handleCheckSubmit's latch through here).
+	tm.completeCheckWrite(write)
 
 	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
@@ -813,14 +846,24 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		result.Updated = 0
 		result.Missing = requested
 	}
-	tm.mu.Lock()
-	tm.tutor.reviewSeen = true
-	tm.tutor.reviewResult = result
-	tm.mu.Unlock()
-	_ = s.SendControl(result)
-
 	summary := checkedSummaryText(total, correct, result.Updated, requested, saveFailed)
-	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
+	if tm.checkSubmitPresentationInterleave != nil {
+		tm.checkSubmitPresentationInterleave()
+	}
+	if !tm.applyTurnAt(epoch, func() error {
+		if err := s.SendControl(result); err != nil {
+			return err
+		}
+		tm.tutor.reviewSeen = true
+		tm.tutor.reviewResult = result
+		return nil
+	}) {
+		return
+	}
+	if tm.checkSubmitSummaryInterleave != nil {
+		tm.checkSubmitSummaryInterleave()
+	}
+	tm.runNaturalEndingAt(s, epoch, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
 }
 
 // ---------------------------------------------------------------------------
@@ -843,7 +886,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 // the fallback as it stands.
 func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	if m.RequestID == "" {
-		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
 		return
 	}
 
@@ -860,7 +903,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	}
 	tm.mu.Unlock()
 	if len(manual) < total {
-		tm.sendError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
 		return
 	}
 
@@ -868,11 +911,12 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	// derived hints, current version for ClearUnchecked).
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
 	l, err := tm.exec.GetLessonState(ctx, lessonID)
 	if err != nil {
-		tm.sendError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		tm.sendOpenError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
 		return
 	}
 	if !l.Unchecked {
@@ -886,18 +930,23 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 		// millisecond both pass this read-side gate — closing it fully
 		// needs a preemptive ClearUnchecked latch, which would break the
 		// S-05 retry semantics below (a failed review write must keep the
-		// marker for the next session).
-		tm.mu.Lock()
-		tm.tutor.align(l.CurrentIndex, l.Version)
-		tm.tutor.checking = false
-		tm.mu.Unlock()
+		// marker for the next session). The memory align rides the session
+		// effect (a session that already closed keeps its dead tutor
+		// untouched) and the terminal close rides the unified entry: closed
+		// FIRST, the ONE session_ended second, a refused enqueue swallowed
+		// (issue #69 备选一 步骤 7).
+		tm.applySessionEffect(func() error {
+			tm.tutor.align(l.CurrentIndex, l.Version)
+			tm.tutor.checking = false
+			return nil
+		})
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "correction_submit_latch"),
 		)
-		_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
-		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-		tm.internalClose()
+		if tm.tryTerminalClose(s, ReasonLessonComplete) {
+			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+		}
 		return
 	}
 
@@ -943,7 +992,21 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 		}
 	}
 
+	// The correction's save responsibility starts here (1.10a): one
+	// admission covers the diff write, its receipt and the marker reset. A
+	// close that sealed the registry first admits nothing — no write, no
+	// presentation; an admitted registration survives the turn's
+	// cancellation and ends in finishCorrections BEFORE the wrap line.
+	tm.mu.Lock()
+	write, writeAdmitted := tm.admitCheckWriteLocked()
+	tm.mu.Unlock()
+	if !writeAdmitted {
+		cancel()
+		return
+	}
+
 	go tm.finishCorrections(s, ctx, cancel, correctionInputs{
+		epoch:     epoch,
 		requestID: m.RequestID,
 		lessonID:  lessonID,
 		category:  lesson.NormalizeCategory(l.Category),
@@ -951,6 +1014,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 		changed:   changed,
 		total:     total,
 		correct:   correct,
+		write:     write,
 	})
 }
 
@@ -965,6 +1029,11 @@ type correctionInputs struct {
 	version  int
 	total    int
 	correct  int
+	epoch    uint64
+	// write is the accepted save's registration (1.10a): taken where the
+	// correction was accepted, released after the diff write, its receipt
+	// and the marker reset — before any presentation.
+	write *checkWriteAdmission
 }
 
 // finishCorrections runs on its own goroutine (runNaturalEnding blocks on
@@ -973,6 +1042,7 @@ type correctionInputs struct {
 // review_result, then the wrap line and the acked ending.
 func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel context.CancelFunc, in correctionInputs) {
 	defer cancel()
+	persistCtx := context.WithoutCancel(ctx)
 
 	requested := len(in.changed)
 	updated := 0
@@ -984,7 +1054,7 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 		receiptID := int64(0)
 		changedSet := sortedWordSet(in.changed)
 		if tm.cfg.Receipts != nil {
-			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+			rec, rerr := tm.cfg.Receipts.Begin(persistCtx, lesson.ReceiptInput{
 				LessonID:  in.lessonID,
 				RequestID: in.requestID,
 				Kind:      lesson.ReceiptKindCorrection,
@@ -997,7 +1067,7 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 			}
 		}
 
-		wres, err := tm.cfg.Words.SubmitReview(ctx, in.changed, in.category)
+		wres, err := tm.cfg.Words.SubmitReview(persistCtx, in.changed, in.category)
 		switch {
 		case err != nil:
 			// Honest failure: the correction was NOT saved — never a
@@ -1022,9 +1092,9 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 		if tm.cfg.Receipts != nil && receiptID > 0 {
 			var cerr error
 			if err != nil {
-				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, nil, changedSet, false)
+				cerr = tm.cfg.Receipts.Complete(persistCtx, receiptID, nil, changedSet, false)
 			} else {
-				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
+				cerr = tm.cfg.Receipts.Complete(persistCtx, receiptID, wres.Updated, wres.Missing, true)
 			}
 			if cerr != nil {
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
@@ -1036,22 +1106,24 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 	// a failed/empty diff submit? NO — on a FAILED review write the row
 	// keeps its unchecked marker so the next session can retry the
 	// correction; only a clean run (or an empty diff) closes the loop.
+	newVersion := in.version
 	if !saveFailed {
-		if _, err := tm.exec.ClearUnchecked(ctx, in.lessonID, in.version, in.lessonID+"-clear-unchecked"); err != nil {
+		if cleared, err := tm.exec.ClearUnchecked(persistCtx, in.lessonID, in.version, in.lessonID+"-clear-unchecked"); err != nil {
 			// A failed marker reset leaves the row re-openable for
 			// correction — honest, recoverable, never retried blindly.
 			tm.recorder.Emit(EventError,
 				infra.F("code", ErrCodeProviderFailed),
 				infra.F("at", "clear_unchecked"),
 			)
+		} else {
+			newVersion = cleared.NewVersion
 		}
 	}
-
-	tm.mu.Lock()
-	tm.tutor.version = in.version
-	tm.tutor.checking = false
-	tm.tutor.reviewSeen = true
-	tm.mu.Unlock()
+	// The accepted correction's save responsibility ends after both the
+	// diff receipt and the unchecked-marker reset. Release it before any
+	// client presentation, which can wait for playback and may be cancelled
+	// by the close that captured this admission.
+	tm.completeCheckWrite(in.write)
 
 	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
@@ -1064,10 +1136,26 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 		result.Updated = 0
 		result.Missing = requested
 	}
-	_ = s.SendControl(result)
-
 	summary := checkedSummaryText(in.total, in.correct, result.Updated, requested, saveFailed)
-	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
+	if tm.checkSubmitPresentationInterleave != nil {
+		tm.checkSubmitPresentationInterleave()
+	}
+	if !tm.applyTurnAt(in.epoch, func() error {
+		if err := s.SendControl(result); err != nil {
+			return err
+		}
+		tm.tutor.version = newVersion
+		tm.tutor.checking = false
+		tm.tutor.reviewSeen = true
+		tm.tutor.reviewResult = result
+		return nil
+	}) {
+		return
+	}
+	if tm.checkSubmitSummaryInterleave != nil {
+		tm.checkSubmitSummaryInterleave()
+	}
+	tm.runNaturalEndingAt(s, in.epoch, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,31 +1165,36 @@ func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel c
 // "never checked" and a later session can reopen the correction path.
 // ---------------------------------------------------------------------------
 
-// uncheckedCloseFallback runs synchronously in the CLOSE path's goroutine
-// (the server-side write completes after the connection is gone); it sends
-// NO client messages — the connection is going away. Idempotency (T-13.1-09):
-// CompleteCheck's first-commit branch is the ONLY write point — the DB latch
-// refuses any second submission, and replay/conflict branches do nothing, so
-// repeated closes never double-write the review. A failed write is logged as
-// an error event, never retried blindly (S-05): the row keeps
-// stage='checking' and the next session's resume path still finds it intact.
-func (tm *TurnManager) uncheckedCloseFallback() {
-	tm.mu.Lock()
-	eligible := tm.tutor != nil && !tm.closed && tm.tutor.checking
-	isPoem := eligible && tm.tutor.poem != nil
-	var lessonID string
-	var version int
-	var category string
-	if eligible {
-		lessonID = tm.tutor.lessonID
-		version = tm.tutor.version
-		category = tm.tutor.category
-	}
-	tm.mu.Unlock()
-	if !eligible {
-		return
-	}
-	if isPoem {
+// uncheckedCloseSnapshot is the immutable input of the D-03 close-path
+// fallback: captured by claimCloseLocked in the SAME tm.mu hold that marks
+// the session closed (issue #69 备选一 步骤 8 — the old ownUncheckedFallback
+// snapshotted in its own earlier hold, leaving a window where the state the
+// fallback decision saw and the state the close finalized could diverge),
+// so the lock-free persistence never reads or mutates the closed session's
+// tutor while always seeing the state the close actually observed.
+type uncheckedCloseSnapshot struct {
+	lessonID string
+	category string
+	words    []lesson.Word
+	poem     bool
+}
+
+// persistUncheckedFallback runs the OWNED fallback OUTSIDE tm.mu once the
+// session is already marked closed (the server-side write completes after
+// the connection is gone); it sends NO client messages, and the dead tutor
+// is neither read nor written — the snapshot plus the STORED row are the
+// authority. Issue #69 路径 A 1.11: the writes the close claim captured
+// (verdicts, prefills, formal submits admitted before the close) are AWAITED
+// first, lock-free, and only then is the AUTHORITATIVE row read — the
+// fallback never races the snapshot's stale version and never substitutes a
+// post-conflict retry for that wait. Still checking ⇒ compete for the
+// fallback latch exactly once on the fresh version; already submitted ⇒ the
+// racing submit owns the FSRS write — never a second one (T-13.1-09). A
+// write that still fails is logged as an error event, never retried blindly
+// (S-05): the row keeps stage='checking' and the next session's resume path
+// still finds it intact.
+func (tm *TurnManager) persistUncheckedFallback(snap uncheckedCloseSnapshot, writes []*checkWriteAdmission) {
+	if snap.poem {
 		// A poem has no behavior-derived fallback. Keep stage=checking so a
 		// refresh or disconnect reopens the same ordered lines and preserves
 		// the human confirmation work already stored on the lesson row.
@@ -1109,8 +1202,13 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 		return
 	}
 
+	// 1.11: wait OUTSIDE every lock for the accepted saves the claim
+	// captured, then read the authoritative row — the outcome must not
+	// depend on the snapshot's pre-close version.
+	waitCheckWrites(writes)
+
 	ctx := context.Background()
-	res, err := tm.exec.CompleteCheck(ctx, lessonID, version, lessonID+"-complete-check", true)
+	l, err := tm.exec.GetLessonState(ctx, snap.lessonID)
 	if err != nil {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeProviderFailed),
@@ -1118,12 +1216,35 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 		)
 		return
 	}
-	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checking = false
-	tm.tutor.completed = true
-	words := append([]lesson.Word(nil), tm.tutor.words...)
-	tm.mu.Unlock()
+	if l.Stage != lesson.StageChecking {
+		// A waited save (or another connection's write) already moved the
+		// row out of checking — typically the formal submit's latch. The
+		// fallback saves nothing on top of it.
+		return
+	}
+	res, err := tm.exec.CompleteCheck(ctx, snap.lessonID, l.Version, snap.lessonID+"-complete-check", true)
+	if err != nil {
+		var conflict *lesson.ConflictError
+		if errors.As(err, &conflict) {
+			// The latch lost to a write that landed after the authoritative
+			// read. Re-read once to NAME the outcome — flipped out of
+			// checking means the racing writer owns the save; still checking
+			// is a persistent external conflict (S-05): record it, keep the
+			// row recoverable, and do not retry the competition.
+			if l2, gerr := tm.exec.GetLessonState(ctx, snap.lessonID); gerr == nil && l2.Stage == lesson.StageChecking {
+				tm.recorder.Emit(EventError,
+					infra.F("code", ErrCodeProviderFailed),
+					infra.F("at", "unchecked_fallback"),
+				)
+			}
+		} else {
+			tm.recorder.Emit(EventError,
+				infra.F("code", ErrCodeProviderFailed),
+				infra.F("at", "unchecked_fallback"),
+			)
+		}
+		return
+	}
 	if res.Idempotent {
 		// The latch already fell (a racing check_submit or a prior close
 		// wrote first): never a second SubmitReview (T-13.1-09).
@@ -1132,7 +1253,7 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 
 	// First commit: the fallback batch derives from the STORED outcomes
 	// readback — never from session memory (the row is the authority).
-	ratings := uncheckedRatings(words, res.Outcomes)
+	ratings := uncheckedRatings(snap.words, res.Outcomes)
 	requested, updated := len(ratings), 0
 	if len(ratings) > 0 {
 		// 13.3-01 receipt: the fallback's own kind, keyed by the CompleteCheck
@@ -1143,8 +1264,8 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 		requestedSet := sortedWordSet(ratings)
 		if tm.cfg.Receipts != nil {
 			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
-				LessonID:  lessonID,
-				RequestID: lessonID + "-complete-check",
+				LessonID:  snap.lessonID,
+				RequestID: snap.lessonID + "-complete-check",
 				Kind:      lesson.ReceiptKindUncheckedFallback,
 				Requested: requestedSet,
 			})
@@ -1155,7 +1276,7 @@ func (tm *TurnManager) uncheckedCloseFallback() {
 			}
 		}
 
-		wres, werr := tm.cfg.Words.SubmitReview(ctx, ratings, category)
+		wres, werr := tm.cfg.Words.SubmitReview(ctx, ratings, snap.category)
 		switch {
 		case werr != nil:
 			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
@@ -1291,12 +1412,19 @@ func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
 	}
 	if err != nil && !errors.Is(err, ocr.ErrLowConfidence) {
 		// OCR genuinely failed: visible honest notice; the manual check
-		// path continues untouched.
+		// path continues untouched. The notice rides the stage effect — a
+		// close (or a submit) that landed while the vision call ran leaves
+		// the dead session silent.
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeProviderFailed),
 			infra.F("photo", "ocr_failed"),
 		)
-		tm.sendError(s, ErrCodeProviderFailed, photoOcrFailedNotice, true)
+		tm.applyCheckStageEffect(func() error {
+			return s.SendControl(ErrorMsg{
+				Type: TypeError, Code: ErrCodeProviderFailed,
+				Message: photoOcrFailedNotice, Recoverable: true,
+			})
+		})
 		return
 	}
 	lowConf := errors.Is(err, ocr.ErrLowConfidence)
@@ -1316,8 +1444,11 @@ func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
 	if lowConf {
 		// The gate fired (the pipeline owns the floor): recognition is too
 		// shaky to prefill ANY verdict — the student confirms every word
-		// manually. The recognized text still displays next to each row.
-		tm.broadcastOcrEntries(s, entries)
+		// manually. The recognized text still displays next to each row —
+		// unless the session (or the check stage) ended mid-call.
+		tm.applyCheckStageEffect(func() error {
+			return s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: entries})
+		})
 		return
 	}
 	tm.applyOcrPrefills(s, entries)
@@ -1334,9 +1465,28 @@ func (tm *TurnManager) runCheckPhoto(s Sender, jpeg []byte) {
 //     confirms the rest manually.
 //
 // A non-conflict success can never clobber a manual verdict: the optimistic
-// lock guarantees no other writer moved the row since our snapshot.
+// lock guarantees no other writer moved the row since our snapshot. The
+// writes are the accepted save — they complete even when the session ends
+// mid-pass; every memory update and both broadcasts ride the check-stage
+// effect, so an ended session (or a submitted check) presents nothing.
 func (tm *TurnManager) applyOcrPrefills(s Sender, entries []OcrResultEntry) {
 	tm.mu.Lock()
+	if tm.tutor == nil || tm.closed || !tm.tutor.checking {
+		// 关闭后（或检查阶段已不在）不接纳新批次：一个在视觉调用期间结束
+		// 的会话不再产生保存责任——批次的接纳与关闭查封在同一次临界区里
+		// 判定（1.08），已接纳的批次不受影响，其写入照常完成。
+		tm.mu.Unlock()
+		return
+	}
+	// ONE admission covers the whole finite batch: every per-word write and
+	// its legal conflict retry ride the same registration, so a close that
+	// lands mid-batch waits for the accepted save (1.06 discipline).
+	write, admitted := tm.admitCheckWriteLocked()
+	if !admitted {
+		tm.mu.Unlock()
+		return
+	}
+	defer tm.completeCheckWrite(write)
 	tm.ocrRuns++
 	lessonID := tm.tutor.lessonID
 	version := tm.tutor.version
@@ -1367,10 +1517,11 @@ func (tm *TurnManager) applyOcrPrefills(s Sender, entries []OcrResultEntry) {
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
 				break
 			}
-			tm.mu.Lock()
-			tm.tutor.align(l.CurrentIndex, l.Version)
-			tm.tutor.resyncCheck(l)
-			tm.mu.Unlock()
+			tm.applyCheckStageEffect(func() error {
+				tm.tutor.align(l.CurrentIndex, l.Version)
+				tm.tutor.resyncCheck(l)
+				return nil
+			})
 			if manualVerdictFor(l.Verdicts, e.WordIndex) {
 				continue // the human verdict landed first — it stands
 			}
@@ -1381,23 +1532,25 @@ func (tm *TurnManager) applyOcrPrefills(s Sender, entries []OcrResultEntry) {
 			}
 		}
 		version = res.NewVersion
-		tm.mu.Lock()
-		tm.tutor.version = version
-		tm.tutor.checkVerdicts = res.Verdicts
-		tm.mu.Unlock()
+		prefillVersion, prefillVerdicts := version, res.Verdicts
+		tm.applyCheckStageEffect(func() error {
+			tm.tutor.version = prefillVersion
+			tm.tutor.checkVerdicts = prefillVerdicts
+			return nil
+		})
 	}
 
-	tm.mu.Lock()
-	verdicts := append([]lesson.CheckVerdict(nil), tm.tutor.checkVerdicts...)
-	tm.mu.Unlock()
-	tm.broadcastCheckVerdicts(s, verdicts)
-	tm.broadcastOcrEntries(s, entries)
-}
-
-// broadcastOcrEntries sends the per-word recognition entries (server →
-// client) so the UI can show what was recognized next to each row.
-func (tm *TurnManager) broadcastOcrEntries(s Sender, entries []OcrResultEntry) {
-	_ = s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: entries})
+	if !tm.applyCheckStageEffect(func() error {
+		if err := s.SendControl(CheckVerdictsMsg{
+			Type:     TypeCheckVerdicts,
+			Verdicts: wireVerdicts(tm.tutor.checkVerdicts),
+		}); err != nil {
+			return err
+		}
+		return s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: entries})
+	}) {
+		return
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1496,6 +1649,9 @@ func (tm *TurnManager) classifyCheckTurn(s Sender, ctx context.Context, cancel c
 		// correction retry, then the deterministic spoken fallback.
 		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("attempts", 2))
 	}
+	if !tm.epochCurrent(epoch) {
+		return
+	}
 	// Desensitization boundary (T-13-06b): the intent label only.
 	tm.recorder.Emit(EventIntentClassified, infra.F("intent", p.Intent))
 	tm.checkDispatch(s, ctx, cancel, turnID, epoch, p)
@@ -1517,12 +1673,13 @@ func (tm *TurnManager) checkDispatch(s Sender, ctx context.Context, cancel conte
 		// Resume in the check stage clears the pause bit; the dictation
 		// resume line re-announces the CURRENT word, which does not exist
 		// here — speak the stage-appropriate continuation instead.
-		tm.mu.Lock()
-		if tm.tutor != nil {
+		if !tm.applyTurnAt(epoch, func() error {
 			tm.tutor.paused = false
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
-		tm.runAnnouncement(s, ctx, cancel, checkResumeAckText(), purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, checkResumeAckText(), purposeChat, nil)
 	default:
 		reply := p.Reply
 		if reply == "" {
@@ -1551,29 +1708,46 @@ func (tm *TurnManager) checkDispatch(s Sender, ctx context.Context, cancel conte
 // The teacher's spoken ack goes through runAnnouncement — the ACK gate the
 // check stage never bypasses (Pitfall 9).
 func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, p intentPayload) {
-	tm.mu.Lock()
-	alive := tm.tutor != nil && !tm.closed && tm.tutor.checking
-	lessonID := tm.tutor.lessonID
-	version := tm.tutor.version
-	total := len(tm.tutor.words)
-	tm.mu.Unlock()
-	if !alive {
-		// The session closed (or left the check stage) mid-turn: nothing to
-		// act on, nothing to announce.
-		return
-	}
-
 	spelling := p.Intent == intentCheckSpelling
 	text := truncateRunes(strings.TrimSpace(p.Text), maxReplyRunes)
-	if p.Index < 1 || p.Index > total || (spelling && text == "") {
+	var lessonID, word string
+	var version, idx int
+	var write *checkWriteAdmission
+	admitted, invalid := false, false
+	if !tm.applyTurnAt(epoch, func() error {
+		if tm.tutor == nil || !tm.tutor.checking {
+			return nil
+		}
+		if p.Index < 1 || p.Index > len(tm.tutor.words) || (spelling && text == "") {
+			invalid = true
+			return nil
+		}
+		idx = p.Index - 1
+		lessonID, version = tm.tutor.lessonID, tm.tutor.version
+		word = tm.tutor.words[idx].Word
+		write, admitted = tm.admitCheckWriteLocked()
+		return nil
+	}) {
+		return
+	}
+	if invalid {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeInvalidMessage),
 			infra.F("at", "voice_verdict"),
 		)
-		tm.runAnnouncement(s, ctx, cancel, checkVoiceClarifyText, purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, checkVoiceClarifyText, purposeChat, nil)
 		return
 	}
-	idx := p.Index - 1
+	if !admitted {
+		return
+	}
+	// The admission covers the write AND its one legal conflict retry: the
+	// save responsibility starts here and survives the turn's cancellation —
+	// a close (or a replacement turn) cancels ctx, but the accepted save runs
+	// to its real outcome on the persist context; only the PRESENTATION stays
+	// bound to the original identity below (1.07b).
+	defer tm.completeCheckWrite(write)
+	persistCtx := context.WithoutCancel(ctx)
 
 	var (
 		correct bool
@@ -1581,7 +1755,6 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 		entry   *OcrResultEntry
 	)
 	if spelling {
-		word := tm.tutorWordAt(idx)
 		j := grading.GradeWord(word, text, wordLang(word))
 		correct = j.Correct
 		line = spellingFeedbackText(word, text, j)
@@ -1602,7 +1775,7 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 	// word never replays the earlier write (a replayed key would silently
 	// pin the FIRST verdict, the OCR retake lesson).
 	requestID := fmt.Sprintf("%s-verdict-%d-v%d-voice", lessonID, idx, version)
-	res, err := tm.exec.ApplyVerdict(ctx, lessonID, version, requestID, verdict)
+	res, err := tm.exec.ApplyVerdict(persistCtx, lessonID, version, requestID, verdict)
 	if err != nil {
 		var conflict *lesson.ConflictError
 		if !errors.As(err, &conflict) {
@@ -1611,32 +1784,34 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 		}
 		// Conflict: align from the stored truth and retry once on the fresh
 		// version (same discipline as the OCR prefill path).
-		l, gerr := tm.exec.GetLessonState(ctx, lessonID)
+		l, gerr := tm.exec.GetLessonState(persistCtx, lessonID)
 		if gerr != nil {
 			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
 			return
 		}
-		tm.mu.Lock()
-		tm.tutor.align(l.CurrentIndex, l.Version)
-		tm.tutor.resyncCheck(l)
-		tm.mu.Unlock()
 		version = l.Version
 		requestID = fmt.Sprintf("%s-verdict-%d-v%d-voice", lessonID, idx, version)
-		res, err = tm.exec.ApplyVerdict(ctx, lessonID, version, requestID, verdict)
+		res, err = tm.exec.ApplyVerdict(persistCtx, lessonID, version, requestID, verdict)
 		if err != nil {
 			tm.failTurn(s, epoch, ErrCodeProviderFailed, checkStoreFailedNotice)
 			return
 		}
 	}
 
-	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checkVerdicts = res.Verdicts
-	verdicts := append([]lesson.CheckVerdict(nil), res.Verdicts...)
-	tm.mu.Unlock()
-	tm.broadcastCheckVerdicts(s, verdicts)
-	if entry != nil {
-		_ = s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: []OcrResultEntry{*entry}})
+	if !tm.applyTurnAt(epoch, func() error {
+		if err := s.SendControl(CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: wireVerdicts(res.Verdicts)}); err != nil {
+			return err
+		}
+		if entry != nil {
+			if err := s.SendControl(OcrResultMsg{Type: TypeOcrResult, Entries: []OcrResultEntry{*entry}}); err != nil {
+				return err
+			}
+		}
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checkVerdicts = res.Verdicts
+		return nil
+	}) {
+		return
 	}
 	if !res.Idempotent {
 		tm.recorder.Emit(EventVerdictApplied,
@@ -1645,16 +1820,5 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 			infra.F("correct", correct),
 		)
 	}
-	tm.runAnnouncement(s, ctx, cancel, line, purposeChat, nil)
-}
-
-// tutorWordAt snapshots one lesson word (empty when out of range). Caller
-// does NOT hold tm.mu — the single-lock discipline applies to every field.
-func (tm *TurnManager) tutorWordAt(idx int) string {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.tutor == nil || idx < 0 || idx >= len(tm.tutor.words) {
-		return ""
-	}
-	return tm.tutor.words[idx].Word
+	tm.runAnnouncementAt(s, epoch, ctx, cancel, line, purposeChat, nil)
 }

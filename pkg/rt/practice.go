@@ -288,43 +288,45 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 	if len(picked) == 0 {
 		// Honest empty answer: ready + spoken notice + ack-gated ending.
 		// No new reason — the client_end-style explicit end (plan).
-		tm.mu.Lock()
-		if tm.closed {
-			// PR #60 review: same gate as every other starter.
-			tm.mu.Unlock()
-			return
-		}
-		tm.state = StateListening
-		tm.sessionReadyAt = time.Now()
-		tm.mu.Unlock()
-		_ = s.SendControl(SessionReadyMsg{
+		nctx, cancel := context.WithCancel(context.Background())
+		var epoch uint64
+		ready := SessionReadyMsg{
 			Type:      TypeSessionReady,
 			SessionID: tm.session,
 			Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
 			TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
 			Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
 			Category:  category,
-		})
-		tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-
-		nctx, cancel := context.WithCancel(context.Background())
-		tm.mu.Lock()
-		if tm.closed {
-			tm.mu.Unlock()
+		}
+		if !tm.applySessionEffect(func() error {
+			if sendErr := s.SendControl(ready); sendErr != nil {
+				return sendErr
+			}
+			tm.state = StateListening
+			tm.sessionReadyAt = time.Now()
+			tm.turnCancel = cancel
+			epoch = tm.epoch
+			return nil
+		}) {
 			cancel()
 			return
 		}
-		tm.turnCancel = cancel
-		tm.mu.Unlock()
-		go tm.runNaturalEnding(s, nctx, cancel, practiceAllPracticedNotice, purposeNoDue, ReasonClientEnd)
+		tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
+		go tm.runNaturalEndingAt(s, epoch, nctx, cancel, practiceAllPracticedNotice, purposeNoDue, ReasonClientEnd)
 		return
 	}
 
-	// PR #60 review: a closed session creates no practice row either.
+	// #68 / path B: same init-write serialization as continueSessionInit —
+	// the practice row either completes ahead of a racing close (the close
+	// blocks on initWriteMu) or is refused outright when the close arrived
+	// first. The write runs without tm.mu.
+	tm.initWriteMu.Lock()
 	if !tm.stillOpen() {
+		tm.initWriteMu.Unlock()
 		return
 	}
 	l, err := tm.exec.EnsureLessonCards(ctx, lessonID, picked, category)
+	tm.initWriteMu.Unlock()
 	if err != nil {
 		tm.failLessonInit(s)
 		return
@@ -381,16 +383,25 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 		return
 	}
 
-	// Latch: the same stage transition — only its first commit proceeds
-	// (the replay/idempotency protection is the store's, not a session
-	// memory artifact).
+	// Latch: the same stage transition — only its first commit proceeds.
+	// One admission covers the latch, the practice records and their receipt;
+	// cancellation only stops presentation after that save was accepted.
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	write, writeAdmitted := tm.admitCheckWriteLocked()
+	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
+	if !writeAdmitted {
+		cancel()
+		return
+	}
+	persistCtx := context.WithoutCancel(ctx)
 
-	res, err := tm.exec.CompleteCheck(ctx, lessonID, expected, m.RequestID, false)
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, m.RequestID, false)
 	if err != nil {
+		tm.completeCheckWrite(write)
+		cancel()
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
 			tm.mu.Lock()
@@ -415,15 +426,18 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "practice_submit_latch"),
 		)
+		tm.completeCheckWrite(write)
+		cancel()
 		return
 	}
 
-	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checking = false
-	tm.mu.Unlock()
+	tm.applyTurnAt(epoch, func() error {
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checking = false
+		return nil
+	})
 
-	go tm.finishPracticeSubmit(s, ctx, cancel, lessonID, wordsList, res, m.RequestID)
+	go tm.finishPracticeSubmit(s, ctx, cancel, epoch, lessonID, wordsList, res, m.RequestID, write)
 }
 
 // finishPracticeSubmit runs on its own goroutine (the ACK-gated ending
@@ -434,8 +448,9 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 // two-phase save receipt — whose saved/failed expresses the PRACTICE
 // STORAGE result (practice_logs), NOT an FSRS write (practice never enters
 // the FSRS schedule, D-11).
-func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, lessonID string, wordsList []lesson.Word, res lesson.CompleteCheckResult, requestID string) {
+func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, lessonID string, wordsList []lesson.Word, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
+	persistCtx := context.WithoutCancel(ctx)
 
 	// The D-02 matrix over the STORED readback — the same single rating
 	// discipline as the main submit (never a second table, Pitfall 1).
@@ -485,7 +500,7 @@ func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cance
 		receiptID := int64(0)
 		requestedSet := sortedWordSet(ratings)
 		if tm.cfg.Receipts != nil {
-			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+			rec, rerr := tm.cfg.Receipts.Begin(persistCtx, lesson.ReceiptInput{
 				LessonID:  lessonID,
 				RequestID: requestID,
 				Kind:      lesson.ReceiptKindPractice,
@@ -498,7 +513,7 @@ func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cance
 			}
 		}
 
-		if err := tm.cfg.PracticeStore.RecordPractice(ctx, records); err != nil {
+		if err := tm.cfg.PracticeStore.RecordPractice(persistCtx, records); err != nil {
 			// Honest failure: the practice records were NOT saved — never a
 			// narrated success (transparency prohibition, S-05).
 			saveFailed = true
@@ -508,7 +523,7 @@ func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cance
 			// on this path by construction, T-13.1-11). missing = the full
 			// attempted set, updated empty.
 			if tm.cfg.Receipts != nil && receiptID > 0 {
-				if cerr := tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false); cerr != nil {
+				if cerr := tm.cfg.Receipts.Complete(persistCtx, receiptID, nil, requestedSet, false); cerr != nil {
 					tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 				}
 			}
@@ -522,25 +537,40 @@ func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cance
 			// updated = the requested set, missing empty. The receipt's saved
 			// means practice_logs storage succeeded, NOT an FSRS write (D-11).
 			if tm.cfg.Receipts != nil && receiptID > 0 {
-				if cerr := tm.cfg.Receipts.Complete(ctx, receiptID, requestedSet, nil, true); cerr != nil {
+				if cerr := tm.cfg.Receipts.Complete(persistCtx, receiptID, requestedSet, nil, true); cerr != nil {
 					tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 				}
 			}
 		}
 	}
+	// Persistence ownership ends with the practice receipt, before feedback
+	// or the ACK-gated summary can be cancelled by a concurrent close.
+	tm.completeCheckWrite(write)
 
-	tm.mu.Lock()
-	tm.tutor.reviewSeen = true
-	tm.mu.Unlock()
-
-	_ = s.SendControl(ReviewResultMsg{
+	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
 		Requested: requested,
 		Updated:   recorded,
 		Missing:   0,
 		Unchecked: false,
-	})
+	}
 
 	summary := practiceSummaryText(total, correct, saveFailed)
-	tm.runNaturalEnding(s, ctx, cancel, summary, purposePracticeSummary, ReasonPracticeComplete)
+	if tm.checkSubmitPresentationInterleave != nil {
+		tm.checkSubmitPresentationInterleave()
+	}
+	if !tm.applyTurnAt(epoch, func() error {
+		if err := s.SendControl(result); err != nil {
+			return err
+		}
+		tm.tutor.reviewSeen = true
+		tm.tutor.reviewResult = result
+		return nil
+	}) {
+		return
+	}
+	if tm.checkSubmitSummaryInterleave != nil {
+		tm.checkSubmitSummaryInterleave()
+	}
+	tm.runNaturalEndingAt(s, epoch, ctx, cancel, summary, purposePracticeSummary, ReasonPracticeComplete)
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -65,6 +66,9 @@ var (
 	// connection's control queue is saturated (the caller decides how to
 	// surface the failure — control messages are never dropped silently).
 	ErrControlQueueFull = errors.New("rt: control send queue full")
+
+	// ErrWriterTerminated rejects every enqueue after transport termination.
+	ErrWriterTerminated = errors.New("rt: writer terminated")
 )
 
 // ServerConfig configures the /rt WebSocket endpoint. Zero values mean "use
@@ -132,6 +136,14 @@ type Sender interface {
 	// loss; blocking or buffering unboundedly does not) and nil is
 	// returned. The buffer is copied; callers may reuse their slice.
 	SendAudio(b []byte) error
+	// Terminate stops accepting frames and asks the send loop to exit. The
+	// first call owns the reason; later calls are no-ops.
+	Terminate(reason error)
+	// Done closes once after the send loop has exited.
+	Done() <-chan struct{}
+	// TerminationReason reports the first termination reason. Nil means the
+	// transport was ended normally.
+	TerminationReason() error
 }
 
 // SessionManager owns one connection's session state (implemented by the
@@ -288,10 +300,14 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// ctx binds the heartbeat goroutine to this handler's lifetime.
 	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+	var heartbeatDone chan struct{}
 
 	if h.cfg.HeartbeatInterval > 0 {
-		go h.heartbeat(ctx, conn, h.cfg.HeartbeatInterval)
+		heartbeatDone = make(chan struct{})
+		go func() {
+			defer close(heartbeatDone)
+			h.heartbeat(ctx, conn, h.cfg.HeartbeatInterval)
+		}()
 	}
 
 	manager := h.factory()
@@ -320,6 +336,10 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	manager.Close(writer)
 	writer.shutdown()
 	_ = conn.Close()
+	cancel()
+	if heartbeatDone != nil {
+		<-heartbeatDone
+	}
 }
 
 // heartbeat pings the client every interval until ctx is cancelled or a
@@ -377,7 +397,12 @@ type connWriter struct {
 	done   chan struct{}
 	ctx    context.Context
 
-	droppedAudio atomic.Int64
+	droppedAudio  atomic.Int64
+	startOnce     sync.Once
+	terminateOnce sync.Once
+	terminationMu sync.Mutex
+	terminated    bool
+	reason        error
 }
 
 // newConnWriter builds the writer. The pump is NOT started here — call
@@ -404,35 +429,64 @@ func newConnWriter(conn *websocket.Conn, queueSize int, logger infra.Logger) *co
 
 // start launches the pump goroutine. Call exactly once.
 func (w *connWriter) start() {
-	go func() {
-		defer close(w.done)
-		w.run()
-	}()
+	w.startOnce.Do(func() {
+		go func() {
+			defer close(w.done)
+			w.run()
+		}()
+	})
 }
 
 // shutdown stops the pump after a bounded drain and waits for it to exit.
 func (w *connWriter) shutdown() {
-	w.cancel()
+	w.Terminate(nil)
 	<-w.done
+}
+
+func (w *connWriter) Terminate(reason error) {
+	w.terminateOnce.Do(func() {
+		w.terminationMu.Lock()
+		w.terminated, w.reason = true, reason
+		w.terminationMu.Unlock()
+		if reason != nil && w.conn != nil {
+			_ = w.conn.Close()
+		}
+		w.cancel()
+	})
+}
+
+func (w *connWriter) Done() <-chan struct{} { return w.done }
+
+func (w *connWriter) TerminationReason() error {
+	w.terminationMu.Lock()
+	defer w.terminationMu.Unlock()
+	return w.reason
 }
 
 // run is the pump body: serialize every outbound message through one
 // WriteMessage caller, exit on the first write error or on cancellation
-// (after draining).
+// (after draining). The pre-frame hook is a no-op outside the rtbrowser
+// test build (speech_fault_default.go).
 func (w *connWriter) run() {
 	for {
+		speechFaultPumpGateWait(w.ctx)
 		select {
 		case c := <-w.control:
 			if err := w.write(websocket.TextMessage, c); err != nil {
+				w.Terminate(errors.Wrap(err, "rt: write control frame"))
 				w.logWriteFailure("control", err)
 				return
 			}
 		case a := <-w.audio:
 			if err := w.write(websocket.BinaryMessage, a); err != nil {
+				w.Terminate(errors.Wrap(err, "rt: write audio frame"))
 				w.logWriteFailure("audio", err)
 				return
 			}
 		case <-w.ctx.Done():
+			if w.TerminationReason() != nil {
+				return
+			}
 			w.drainAndClose()
 			return
 		}
@@ -452,10 +506,12 @@ func (w *connWriter) drainAndClose() {
 		select {
 		case c := <-w.control:
 			if err := w.write(websocket.TextMessage, c); err != nil {
+				w.publishDrainFailure(errors.Wrap(err, "rt: drain control frame"))
 				return
 			}
 		case a := <-w.audio:
 			if err := w.write(websocket.BinaryMessage, a); err != nil {
+				w.publishDrainFailure(errors.Wrap(err, "rt: drain audio frame"))
 				return
 			}
 		default:
@@ -470,6 +526,17 @@ func (w *connWriter) drainAndClose() {
 	_ = w.conn.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		time.Now().Add(time.Second))
+}
+
+func (w *connWriter) publishDrainFailure(err error) {
+	w.terminationMu.Lock()
+	if w.reason == nil {
+		w.reason = err
+	}
+	w.terminationMu.Unlock()
+	if w.conn != nil {
+		_ = w.conn.Close()
+	}
 }
 
 func (w *connWriter) logWriteFailure(kind string, err error) {
@@ -489,6 +556,15 @@ func (w *connWriter) SendControl(v any) error {
 	if err != nil {
 		return errors.Wrap(err, "rt: marshal control message")
 	}
+	// Test-build fault point at the real enqueue site (no-op in production).
+	if ferr := speechFaultInterceptSend("control", data); ferr != nil {
+		return ferr
+	}
+	w.terminationMu.Lock()
+	defer w.terminationMu.Unlock()
+	if w.terminated {
+		return ErrWriterTerminated
+	}
 	select {
 	case w.control <- data:
 		return nil
@@ -503,8 +579,17 @@ func (w *connWriter) SendControl(v any) error {
 // stall, and the 150MB budget prefers a bounded queue to an unbounded one
 // (T-13-02).
 func (w *connWriter) SendAudio(b []byte) error {
+	// Test-build fault point at the real enqueue site (no-op in production).
+	if ferr := speechFaultInterceptSend("audio", b); ferr != nil {
+		return ferr
+	}
 	cp := make([]byte, len(b))
 	copy(cp, b)
+	w.terminationMu.Lock()
+	defer w.terminationMu.Unlock()
+	if w.terminated {
+		return ErrWriterTerminated
+	}
 	select {
 	case w.audio <- cp:
 		return nil

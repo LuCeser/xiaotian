@@ -37,6 +37,9 @@ type captureSender struct {
 	audioN     int
 	audioBytes int
 	mu         sync.Mutex
+	done       chan struct{}
+	terminated bool
+	reason     error
 }
 
 func (c *captureSender) SendControl(v any) error {
@@ -45,6 +48,10 @@ func (c *captureSender) SendControl(v any) error {
 		return err
 	}
 	c.mu.Lock()
+	if c.terminated {
+		c.mu.Unlock()
+		return ErrWriterTerminated
+	}
 	c.controls = append(c.controls, b)
 	c.mu.Unlock()
 	return nil
@@ -52,10 +59,42 @@ func (c *captureSender) SendControl(v any) error {
 
 func (c *captureSender) SendAudio(b []byte) error {
 	c.mu.Lock()
+	if c.terminated {
+		c.mu.Unlock()
+		return ErrWriterTerminated
+	}
 	c.audioN++
 	c.audioBytes += len(b)
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *captureSender) Terminate(reason error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.terminated {
+		return
+	}
+	c.terminated, c.reason = true, reason
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
+	close(c.done)
+}
+
+func (c *captureSender) Done() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
+	return c.done
+}
+
+func (c *captureSender) TerminationReason() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reason
 }
 
 func (c *captureSender) audioCount() int {
@@ -130,13 +169,19 @@ type fakeExecutor struct {
 	checkResults     map[string]any
 	checkRelease     chan struct{}
 	checkEntered     chan struct{}
+	completeRelease  chan struct{}
+	completeEntered  chan struct{}
+	verdictRelease   chan struct{}
+	verdictEntered   chan struct{}
 	requestResults   map[string]lesson.AdvanceResult
+	dictationResults map[string]lesson.AdvanceDictationResult
 	advanceRelease   chan struct{}
 	stateRelease     chan struct{}
 	stateEntered     chan struct{}
 	checkCalls       []fakeCheckCall
 	ensureIDs        []string
 	advanceCalls     []fakeAdvanceCall
+	dictationCalls   []lesson.AdvanceDictationInput
 	stateIDs         []string
 	lesson           lesson.Lesson
 	ensureCalls      int
@@ -172,10 +217,11 @@ func cardWords(cards []lesson.Word) []string {
 // cards (empty cards = the legacy-row case).
 func newFakeExecutor(lessonID string, cards []lesson.Word) *fakeExecutor {
 	return &fakeExecutor{
-		lesson:         lesson.Lesson{LessonID: lessonID, Words: cardWords(cards), Cards: cards, CurrentIndex: 0, Version: 1},
-		exists:         true,
-		requestResults: map[string]lesson.AdvanceResult{},
-		checkResults:   map[string]any{},
+		lesson:           lesson.Lesson{LessonID: lessonID, Words: cardWords(cards), Cards: cards, CurrentIndex: 0, Version: 1},
+		exists:           true,
+		requestResults:   map[string]lesson.AdvanceResult{},
+		dictationResults: map[string]lesson.AdvanceDictationResult{},
+		checkResults:     map[string]any{},
 	}
 }
 
@@ -366,6 +412,44 @@ func (f *fakeExecutor) AdvanceWord(_ context.Context, lessonID string, expectedV
 	return res, nil
 }
 
+func (f *fakeExecutor) AdvanceDictation(_ context.Context, in lesson.AdvanceDictationInput) (lesson.AdvanceDictationResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dictationCalls = append(f.dictationCalls, in)
+	if stored, ok := f.dictationResults[in.RequestID]; ok {
+		stored.Idempotent = true
+		return stored, nil
+	}
+	if f.conflictVersion > 0 {
+		return lesson.AdvanceDictationResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
+	}
+	if !f.exists {
+		return lesson.AdvanceDictationResult{}, lesson.ErrLessonNotFound
+	}
+	if in.LessonID != f.lesson.LessonID || in.TargetIndex != f.lesson.CurrentIndex {
+		return lesson.AdvanceDictationResult{}, lesson.ErrInvalidLesson
+	}
+	if in.ExpectedVersion != f.lesson.Version {
+		return lesson.AdvanceDictationResult{}, &lesson.ConflictError{CurrentVersion: f.lesson.Version}
+	}
+	if f.lesson.Outcomes == nil {
+		f.lesson.Outcomes = map[string]lesson.WordOutcome{}
+	}
+	f.lesson.Outcomes[strconv.Itoa(in.TargetIndex)] = in.Outcome
+	f.lesson.CurrentIndex++
+	f.lesson.Version++
+	lastWord := f.lesson.CurrentIndex == len(f.lesson.Words)
+	if lastWord {
+		f.lesson.Stage = lesson.StageChecking
+	}
+	res := lesson.AdvanceDictationResult{
+		NewIndex: f.lesson.CurrentIndex, NewVersion: f.lesson.Version,
+		Stage: f.lesson.Stage, Outcomes: f.lesson.Outcomes, LastWord: lastWord,
+	}
+	f.dictationResults[in.RequestID] = res
+	return res, nil
+}
+
 // gateAdvance arms a one-shot hold on the next first-commit AdvanceWord: the
 // call fires entered after the row mutation is stored and then waits for
 // release before returning — the DB write stands while the session can move
@@ -440,17 +524,19 @@ func (f *fakeExecutor) gateEnterCheck() (entered, release chan struct{}) {
 
 func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "apply_verdict", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
 	if stored, ok := f.checkResults[requestID]; ok {
 		res := stored.(lesson.ApplyVerdictResult)
 		res.Idempotent = true
+		f.mu.Unlock()
 		return res, nil
 	}
 	if f.conflictVersion > 0 {
+		f.mu.Unlock()
 		return lesson.ApplyVerdictResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
 	}
 	if !f.exists {
+		f.mu.Unlock()
 		return lesson.ApplyVerdictResult{}, lesson.ErrLessonNotFound
 	}
 	replaced := false
@@ -467,37 +553,77 @@ func (f *fakeExecutor) ApplyVerdict(_ context.Context, lessonID string, expected
 	f.lesson.Version++
 	res := lesson.ApplyVerdictResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Verdicts: f.lesson.Verdicts}
 	f.checkResults[requestID] = res
+	entered, release := f.verdictEntered, f.verdictRelease
+	f.verdictEntered, f.verdictRelease = nil, nil
+	f.mu.Unlock()
+	if entered != nil {
+		close(entered)
+		<-release
+	}
 	return res, nil
+}
+
+func (f *fakeExecutor) gateApplyVerdict() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verdictEntered = make(chan struct{})
+	f.verdictRelease = make(chan struct{})
+	return f.verdictEntered, f.verdictRelease
 }
 
 func (f *fakeExecutor) CompleteCheck(_ context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.checkCalls = append(f.checkCalls, fakeCheckCall{tool: "complete_check", lessonID: lessonID, requestID: requestID, expectedVersion: expectedVersion})
+	var (
+		res lesson.CompleteCheckResult
+		err error
+	)
 	if stored, ok := f.checkResults[requestID]; ok {
-		res := stored.(lesson.CompleteCheckResult)
+		res = stored.(lesson.CompleteCheckResult)
 		res.Idempotent = true
-		return res, nil
-	}
-	if !f.exists {
-		return lesson.CompleteCheckResult{}, lesson.ErrLessonNotFound
-	}
-	if f.lesson.Stage == lesson.StageSubmitted {
+	} else if !f.exists {
+		err = lesson.ErrLessonNotFound
+	} else if f.lesson.Stage == lesson.StageSubmitted {
 		// The latch already fell: idempotent no-op with the stored state.
-		return lesson.CompleteCheckResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: f.lesson.Unchecked, Idempotent: true}, nil
+		res = lesson.CompleteCheckResult{Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: f.lesson.Unchecked, Idempotent: true}
+	} else if f.conflictVersion > 0 {
+		err = &lesson.ConflictError{CurrentVersion: f.conflictVersion}
+	} else if f.lesson.Version != expectedVersion {
+		// Optimistic lock (issue #69 备选一 步骤 9 fidelity): the real
+		// executor's guarded UPDATE refuses a stale version while the row
+		// still reads checking — an admitted verdict write that committed
+		// after the close snapshot must surface HERE, not commit anyway.
+		err = &lesson.ConflictError{CurrentVersion: f.lesson.Version}
+	} else {
+		f.lesson.Version++
+		f.lesson.Stage = lesson.StageSubmitted
+		f.lesson.Unchecked = unchecked
+		res = lesson.CompleteCheckResult{
+			Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: unchecked,
+			Verdicts: f.lesson.Verdicts, Outcomes: f.lesson.Outcomes,
+		}
+		f.checkResults[requestID] = res
 	}
-	if f.conflictVersion > 0 {
-		return lesson.CompleteCheckResult{}, &lesson.ConflictError{CurrentVersion: f.conflictVersion}
+	entered, release := f.completeEntered, f.completeRelease
+	f.completeEntered, f.completeRelease = nil, nil
+	f.mu.Unlock()
+	if entered != nil {
+		// Same commit-vs-return window as gateApplyVerdict, on the latch.
+		close(entered)
+		<-release
 	}
-	f.lesson.Version++
-	f.lesson.Stage = lesson.StageSubmitted
-	f.lesson.Unchecked = unchecked
-	res := lesson.CompleteCheckResult{
-		Stage: f.lesson.Stage, NewVersion: f.lesson.Version, Unchecked: unchecked,
-		Verdicts: f.lesson.Verdicts, Outcomes: f.lesson.Outcomes,
-	}
-	f.checkResults[requestID] = res
-	return res, nil
+	return res, err
+}
+
+// gateCompleteCheck arms a one-shot hold on the next CompleteCheck: the
+// latch decision (and its row write) has happened, the method has not yet
+// returned — the real submit-vs-close window.
+func (f *fakeExecutor) gateCompleteCheck() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.completeEntered = make(chan struct{})
+	f.completeRelease = make(chan struct{})
+	return f.completeEntered, f.completeRelease
 }
 
 // ClearUnchecked mirrors the real executor's clear_unchecked semantics on
@@ -1191,10 +1317,13 @@ func TestSaveReceiptUncheckedFallback(t *testing.T) {
 		Missing:   []string{"香蕉"},
 	}
 
-	tm.Close(s) // transport read loop exited mid-check → the fallback fires synchronously
+	// Transport read loop exited mid-check → the owned fallback runs on its
+	// own goroutine (1.11: it waits for captured saves before deciding), so
+	// the SubmitReview/receipt observations settle by polling.
+	tm.Close(s)
 
-	if got := len(words.submissions()); got != 1 {
-		t.Fatalf("SubmitReview calls after close = %d, want exactly 1", got)
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 1 }) {
+		t.Fatalf("SubmitReview calls after close = %d, want exactly 1", len(words.submissions()))
 	}
 	var got []lesson.Receipt
 	var err error
@@ -1252,11 +1381,11 @@ func TestSaveReceiptEmptyCloseNeverBegins(t *testing.T) {
 
 	tm.Close(s)
 
+	if !waitFor(t, 5*time.Second, func() bool { return ttEventCount(t, log, EventUncheckedFallback) == 1 }) {
+		t.Errorf("unchecked_fallback events = %d, want 1 (the path still ran, honestly empty)", ttEventCount(t, log, EventUncheckedFallback))
+	}
 	if got := len(words.submissions()); got != 0 {
 		t.Errorf("SubmitReview calls = %d, want 0 (empty batch never writes)", got)
-	}
-	if got := ttEventCount(t, log, EventUncheckedFallback); got != 1 {
-		t.Errorf("unchecked_fallback events = %d, want 1 (the path still ran, honestly empty)", got)
 	}
 	got, err := receipts.ListByLesson(ctx, ttLessonID)
 	if err != nil {
@@ -3001,12 +3130,14 @@ func TestUncheckedFallbackOnClose(t *testing.T) {
 		Missing:   []string{"香蕉"},
 	}
 
-	tm.Close(s) // transport read loop exited mid-check
+	// Transport read loop exited mid-check; the owned fallback runs on its
+	// own goroutine (1.11), so the write settles by polling.
+	tm.Close(s)
 
-	subs := words.submissions()
-	if len(subs) != 1 {
-		t.Fatalf("SubmitReview calls after close = %d, want exactly 1", len(subs))
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 1 }) {
+		t.Fatalf("SubmitReview calls after close = %d, want exactly 1", len(words.submissions()))
 	}
+	subs := words.submissions()
 	if subs[0]["苹果"] != ratingAgain {
 		t.Errorf("fallback rating 苹果 = %q, want again (confirmed+2 hints → hard → again)", subs[0]["苹果"])
 	}

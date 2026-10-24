@@ -75,6 +75,9 @@ type LessonExecutor interface {
 	// AdvanceWord moves the cursor forward one word, idempotently by
 	// requestID, guarded by expectedVersion.
 	AdvanceWord(ctx context.Context, lessonID string, expectedVersion int, requestID string) (lesson.AdvanceResult, error)
+	// AdvanceDictation atomically persists the current word's behavior,
+	// advances the fixed target, and opens checking on the last word.
+	AdvanceDictation(ctx context.Context, in lesson.AdvanceDictationInput) (lesson.AdvanceDictationResult, error)
 	// EnterCheck opens the check stage (13.1-01): persists stage='checking'
 	// plus the behavior snapshot, idempotently by requestID.
 	EnterCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, outcomes map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error)
@@ -397,6 +400,33 @@ type TurnManager struct {
 	// turnAnnouncementInterleave is a narrow test probe immediately before
 	// an ordinary classroom announcement checks its original epoch.
 	turnAnnouncementInterleave func()
+	// starterInterleave gates a registered starter task before it runs.
+	starterInterleave func(func())
+	// speakTurnInterleave and speakRegistrationInterleave are narrow test
+	// probes around speakTurn's initial registration.
+	speakTurnInterleave         func()
+	speakRegistrationInterleave func()
+	// settleInterleave is a narrow test probe between an announcement's
+	// valid final ack (await returned) and its protected settle.
+	settleInterleave func()
+	// checkPresentationInterleave is a narrow test probe after EnterCheck (or
+	// its conflict read-back) returns and before stored state is presented.
+	checkPresentationInterleave func()
+	// checkResumeInterleave fires after resume IO and before panel binding.
+	checkResumeInterleave func()
+	// checkSubmitPresentationInterleave is a narrow test probe after a review
+	// save completes and before its result is presented.
+	checkSubmitPresentationInterleave func()
+	// checkSubmitSummaryInterleave probes the gap after review_result is
+	// accepted and before the ending announcement starts.
+	checkSubmitSummaryInterleave func()
+	// closeEntryInterleave (test seam, issue #69 备选一 步骤 8; nil in
+	// production) fires inside the unified close entry after the init-write
+	// lock is taken and BEFORE tm.mu — the last window in which a racing
+	// check-stage presentation can still land ahead of the claim's
+	// eligibility/snapshot decision. The deterministic race tests probe the
+	// claim's one-critical-section contract from here.
+	closeEntryInterleave func()
 
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
@@ -427,6 +457,9 @@ type TurnManager struct {
 	// binds category and resumes through continueSessionInit. Non-nil ONLY
 	// while the ask is live; the classroom has no lesson row yet.
 	pendingAsk *SessionInitMsg
+	// pendingAdvance is the one accepted dictation write that later turns
+	// and reconnect reconciliation must wait for before reading a target.
+	pendingAdvance *pendingDictationAdvance
 	// turnSentences are the sentences sent for the current announcement, in
 	// order (the interrupt-trim source).
 	turnSentences []sentenceInfo
@@ -448,13 +481,28 @@ type TurnManager struct {
 	// replayed key would pin the FIRST reading and drop the retake's).
 	ocrRuns uint64
 
-	mu sync.Mutex
+	// initWriteMu serializes the classroom-init ROW WRITES (EnsureLessonCards
+	// in continueSessionInit and handlePracticeInit) against every close
+	// path, which must take it BEFORE marking closed. Fixed order:
+	// initWriteMu → mu — the starters hold it around the short DB write only
+	// (never while taking mu), so a close that arrives mid-write blocks until
+	// the row materializes ahead of session_ended, and a close that arrives
+	// first lets the init's re-check refuse with no row at all (#68).
+	initWriteMu sync.Mutex
+	mu          sync.Mutex
 	// playbackPending marks an announcement awaiting its final ack; uplink
 	// stays gated while it holds.
 	playbackPending bool
 	// closed suppresses duplicate session_end emissions when the transport
 	// calls Close after an end_session already closed the session.
 	closed bool
+	// closeOwned marks the close path that won the ONE-TIME D-03 fallback
+	// ownership (uncheckedCloseFallback). Guarded by mu.
+	closeOwned bool
+	// checkWrites is the set of persistence operations accepted before a
+	// close. Closing seals admission and snapshots this set atomically.
+	checkWrites       map[*checkWriteAdmission]struct{}
+	checkWritesSealed bool
 }
 
 // Compile-time check: TurnManager satisfies the transport's SessionManager
@@ -690,14 +738,20 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 			tm.startNoDueSession(s, lessonID)
 			return
 		}
-		// PR #60 review: the picked classroom's init runs on the ANSWER
-		// turn's goroutine, so an end_session can close the session under
-		// this very IO — a closed session creates no row (the starters
-		// below re-check at their own send points for the same reason).
+		// #68 / path B: the row write is serialized against every close path
+		// by the dedicated init-write lock (order: initWriteMu → mu). A
+		// close that arrived first marks closed and this re-check refuses —
+		// no row for a dead session; a write that started first completes
+		// BEFORE the close can mark anything (the close blocks on
+		// initWriteMu), so the row never materializes behind session_ended's
+		// back. The write itself runs without tm.mu.
+		tm.initWriteMu.Lock()
 		if !tm.stillOpen() {
+			tm.initWriteMu.Unlock()
 			return
 		}
 		l, err = tm.exec.EnsureLessonCards(ctx, lessonID, cards, category)
+		tm.initWriteMu.Unlock()
 		if err != nil {
 			// RunDue succeeded but the lesson row did not materialize; the
 			// 13-10 fetch lock (1h) may linger — recorded honestly below.
@@ -736,11 +790,14 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 // review: a session that closed under the init IO gets no failure message
 // either — nothing follows its session_ended.
 func (tm *TurnManager) failLessonInit(s Sender) {
-	if !tm.stillOpen() {
+	if !tm.applySessionEffect(func() error {
+		return s.SendControl(ErrorMsg{
+			Type: TypeError, Code: ErrCodeLessonUnavailable, Message: lessonUnavailableNotice, Recoverable: false,
+		})
+	}) {
 		return
 	}
 	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable))
-	tm.sendError(s, ErrCodeLessonUnavailable, lessonUnavailableNotice, false)
 }
 
 // normalizeSessionMode normalizes the page-supplied UI mode (13.1 D-08):
@@ -764,66 +821,73 @@ func normalizeSessionMode(mode string) string {
 // vocabulary's due data names the next review), and ends the session only
 // after the explanation's actual playback ack (or its bounded timeout).
 func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
-	tm.mu.Lock()
-	if tm.closed {
+	// sessionCategory/lessonViewFor take tm.mu themselves: read them before
+	// the effect (both are session-constant after session_init).
+	category := tm.sessionCategory()
+	if !tm.applySessionEffect(func() error {
 		// PR #60 review: the session may have closed under the init IO that
 		// led here — a closed session gets no session_ready and no spoken
-		// explanation (nothing may follow its session_ended).
-		tm.mu.Unlock()
+		// explanation (nothing may follow its session_ended); the bind and
+		// the enqueue are one hold, so the close can no longer land between
+		// them either.
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		return s.SendControl(SessionReadyMsg{
+			Type:      TypeSessionReady,
+			SessionID: tm.session,
+			Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+			TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
+			Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
+			Category:  category,
+		})
+	}) {
 		return
 	}
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SessionReadyMsg{
-		Type:      TypeSessionReady,
-		SessionID: tm.session,
-		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
-		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
-		Category:  tm.sessionCategory(),
-	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	if tm.closed {
-		tm.mu.Unlock()
+	var epoch uint64
+	if !tm.applySessionEffect(func() error {
+		tm.turnCancel = cancel
+		epoch = tm.epoch
+		return nil
+	}) {
 		cancel()
 		return
 	}
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
-	go tm.runNaturalEnding(s, ctx, cancel, tm.noDueWordsTextForNow(), purposeNoDue, ReasonNoDueWords)
+	go tm.runStarterTask(func() {
+		tm.runNaturalEndingAt(s, epoch, ctx, cancel, tm.noDueWordsTextForNow(), purposeNoDue, ReasonNoDueWords)
+	})
 }
 
 // startCompletedSession restores the completion state for an
 // already-finished lesson: session_ready then session_ended(lesson_complete)
 // — no summary replay, no second SubmitReview.
 func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
-	tm.mu.Lock()
-	if tm.closed {
+	// Locked helpers read before the effect (session-constant values).
+	view, category := tm.lessonViewFor(l), tm.sessionCategory()
+	if !tm.applySessionEffect(func() error {
 		// PR #60 review: same gate as the other starters — a closed session
-		// replays neither session_ready nor the completion session_ended.
-		tm.mu.Unlock()
+		// replays neither session_ready nor the completion session_ended;
+		// the bind and the enqueue are one hold.
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		return s.SendControl(SessionReadyMsg{
+			Type:      TypeSessionReady,
+			SessionID: tm.session,
+			Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+			TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
+			Lesson:    view,
+			Category:  category,
+		})
+	}) {
 		return
 	}
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SessionReadyMsg{
-		Type:      TypeSessionReady,
-		SessionID: tm.session,
-		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
-		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    tm.lessonViewFor(l),
-		Category:  tm.sessionCategory(),
-	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonLessonComplete})
-	tm.internalClose()
+	// The completion goodbye rides the ONE-TIME terminal close: a goodbye
+	// that raced in after session_ready already closed the session, and no
+	// second session_ended may ship.
+	tm.tryTerminalClose(s, ReasonLessonComplete)
 }
 
 // startDictationSession binds the FSM to the lesson row and immediately
@@ -832,47 +896,51 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
 // the TTS first packet, no LLM call. practice (13.1-05) flips only the
 // submit-path flag; pacing, the check stage and the D-05 gate are identical.
 func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice bool) {
-	tm.mu.Lock()
-	if tm.closed {
+	// Locked helpers read before the effect (session-constant values).
+	view, category := tm.lessonViewFor(l), tm.sessionCategory()
+	var first lesson.Word
+	var total int
+	var mode string
+	if !tm.applySessionEffect(func() error {
 		// PR #60 review: the subject-picked classroom's init runs on the
 		// answer turn's goroutine, so an end_session may have closed the
 		// session under the fetch/row IO — the closed check shares the hold
 		// that binds the tutor, so a closed session binds nothing, sends no
-		// session_ready and never greets.
-		tm.mu.Unlock()
+		// session_ready and never greets; the bind and the enqueue are one
+		// hold, so the close can no longer land between them either.
+		tm.tutor = newDictationTutor(l)
+		tm.tutor.practice = practice
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		first = tm.tutor.words[tm.tutor.currentIndex]
+		total = len(tm.tutor.words)
+		mode = tm.mode
+		return s.SendControl(SessionReadyMsg{
+			Type:      TypeSessionReady,
+			SessionID: tm.session,
+			Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
+			TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
+			Lesson:    view,
+			Category:  category,
+		})
+	}) {
 		return
 	}
-	tm.tutor = newDictationTutor(l)
-	tm.tutor.practice = practice
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	first := tm.tutor.words[tm.tutor.currentIndex]
-	total := len(tm.tutor.words)
-	mode := tm.mode
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SessionReadyMsg{
-		Type:      TypeSessionReady,
-		SessionID: tm.session,
-		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
-		TTS:       TTSSpec{SampleRate: TTSOutputSampleRate},
-		Lesson:    tm.lessonViewFor(l),
-		Category:  tm.sessionCategory(),
-	})
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	if tm.closed {
+	var epoch uint64
+	if !tm.applySessionEffect(func() error {
 		// A close that landed after the session_ready send still gets no
 		// greeting: the entry gates (runAnnouncementDisplayAt) kill the
 		// goroutine even if it launches, but refusing here is the fast path.
-		tm.mu.Unlock()
+		tm.turnCancel = cancel
+		epoch = tm.epoch
+		return nil
+	}) {
 		cancel()
 		return
 	}
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
 	spoken := greetingText(total, first.Word)
 	display := spoken
 	if mode != ModeTest {
@@ -880,9 +948,19 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 		// first word's text; the TTS input stays the raw greeting.
 		display = greetingMaskedText(total)
 	}
-	go tm.runAnnouncementDisplay(s, ctx, cancel, spoken, display, purposeGreeting, func() {
-		tm.announceAcked(s)
+	go tm.runStarterTask(func() {
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeGreeting, func() {
+			tm.announceAckedLocked()
+		})
 	})
+}
+
+func (tm *TurnManager) runStarterTask(task func()) {
+	if tm.starterInterleave != nil {
+		tm.starterInterleave(task)
+		return
+	}
+	task()
 }
 
 // lessonViewOf projects a lesson row into the wire LessonView (test mode and
@@ -967,19 +1045,15 @@ func (tm *TurnManager) replyDisplay(reply string) string {
 	return maskTranscript(reply, tm.tutor.maskedWords())
 }
 
-// announceAcked is the ack-armed callback of word announcements: mark the
-// announced word event and arm the (13-09) per-word timer slot.
-func (tm *TurnManager) announceAcked(s Sender) {
-	tm.mu.Lock()
-	idx := -1
+// announceAckedLocked is the word announcement's ack post-processing: the
+// announced-word event and the (13-09) per-word timer arm. Caller holds
+// tm.mu — it runs INSIDE the settle effect, so the arm reads the epoch the
+// ack belonged to instead of re-reading whatever the FSM moved on to.
+func (tm *TurnManager) announceAckedLocked() {
 	if tm.tutor != nil && tm.tutor.currentIndex < len(tm.tutor.words) {
-		idx = tm.tutor.currentIndex
+		tm.recorder.Emit(EventWordAnnounced, infra.F("word_index", tm.tutor.currentIndex))
 	}
-	tm.mu.Unlock()
-	if idx >= 0 {
-		tm.recorder.Emit(EventWordAnnounced, infra.F("word_index", idx))
-	}
-	tm.armWordTimer()
+	tm.armWordTimerLocked()
 }
 
 // armWordTimer arms the per-word confirm countdown; the implementation
@@ -987,26 +1061,8 @@ func (tm *TurnManager) announceAcked(s Sender) {
 // lives in dictation.go next to the rest of the 13-09 timer logic.
 // stopWordTimer suspends it (the pause command).
 
-// runAnnouncement speaks one FSM announcement whose display text equals its
-// spoken text (non-word-bearing announcements) and settles the FSM only
-// after its valid final playback ack — TTS send completion and audio_end
-// NEVER restore listening (uplink stays gated through the ack; 13-09 adds
-// the 500ms echo tail afterwards). Timeout degrades per purpose: ordinary
-// announcements orderly-close; natural endings still ship their original
-// reason first.
-func (tm *TurnManager) runAnnouncement(s Sender, ctx context.Context, cancel context.CancelFunc, text, purpose string, onAck func()) {
-	tm.runAnnouncementDisplay(s, ctx, cancel, text, text, purpose, onAck)
-}
-
 func (tm *TurnManager) runAnnouncementAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, text, purpose string, onAck func()) {
 	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purpose, onAck)
-}
-
-// runAnnouncementDisplay is runAnnouncement with SEPARATE spoken and display
-// texts (13.1-02 student masking): spoken feeds TTS, the LLM history, and the
-// interrupt trim; display rides the teacher_sentence subtitle only.
-func (tm *TurnManager) runAnnouncementDisplay(s Sender, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
-	tm.runAnnouncementDisplayAt(s, tm.currentEpoch(), ctx, cancel, spoken, display, purpose, onAck)
 }
 
 func (tm *TurnManager) runTurnAnnouncementDisplayAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, spoken, display, purpose string, onAck func()) {
@@ -1046,6 +1102,9 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 	}
 	turnID := tm.nextTurnIDLocked()
 	tm.mu.Unlock()
+	if tm.speakTurnInterleave != nil {
+		tm.speakTurnInterleave()
+	}
 
 	ref := tm.speakTurn(s, turnID, epoch, spoken, display, purpose, ctx, cancel)
 	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
@@ -1055,12 +1114,14 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 		}
 		return
 	}
-	// The settle, and the onAck work it licenses (timer arms, word events),
-	// ride the SAME epoch gate: a stale announcer must not lift the new
-	// classroom's gate or arm timers over it.
-	if tm.settleListeningAt(s, epoch) && onAck != nil {
-		onAck()
+	if tm.settleInterleave != nil {
+		tm.settleInterleave()
 	}
+	// The settle, and the onAck work it licenses (timer arms, word events),
+	// ride the SAME epoch gate as ONE effect: a close or interrupt landing
+	// between the final ack and this processing suppresses the lot — no
+	// listening revival, no timer armed at a re-read epoch.
+	tm.settleAnnouncementAt(s, epoch, onAck)
 }
 
 // runNaturalEnding speaks a natural-ending announcement (no-due words, or
@@ -1071,37 +1132,62 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 // no-due/explanation goroutine scheduled only after the session closed dies
 // at entry — no sentences, no ack-timeout theater, no second session_ended.
 func (tm *TurnManager) runNaturalEnding(s Sender, ctx context.Context, cancel context.CancelFunc, text, purpose, reason string) {
-	defer cancel()
-
 	tm.mu.Lock()
 	if tm.closed {
 		tm.mu.Unlock()
+		cancel()
 		return
 	}
 	epoch := tm.epoch
-	turnID := tm.nextTurnIDLocked()
 	tm.mu.Unlock()
+	tm.runNaturalEndingAt(s, epoch, ctx, cancel, text, purpose, reason)
+}
+
+func (tm *TurnManager) runNaturalEndingAt(s Sender, epoch uint64, ctx context.Context, cancel context.CancelFunc, text, purpose, reason string) {
+	defer cancel()
+	var turnID uint64
+	if !tm.applyTurnAt(epoch, func() error {
+		turnID = tm.nextTurnIDLocked()
+		return nil
+	}) {
+		return
+	}
 
 	ref := tm.speakTurn(s, turnID, epoch, text, text, purpose, ctx, cancel)
 	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
 	if !completed && !timedOut {
-		// Interrupted or disconnected: cancel the wait, never message.
-		tm.internalClose()
+		// Interrupted or disconnected: cancel the wait, never message — and
+		// only if this ending's epoch still owns the FSM: a summary wait
+		// that outlived an interrupt must not close the classroom that
+		// replaced it (orderlyCloseAt's epoch gate).
+		tm.orderlyCloseAt(epoch)
 		return
 	}
 	if purpose == purposeSummary {
 		tm.recorder.Emit(EventLessonComplete, infra.F("reason", reason))
 	}
-	// PR #61 review: same ordering as handleEndSession — closed first, then
-	// the goodbye, so no lock-disciplined sender can follow session_ended.
-	tm.internalClose()
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason})
+	// The goodbye rides the ONE-TIME terminal close at this ending's own
+	// epoch: a racing client goodbye (or an interrupt that bumped the
+	// epoch) already closed the session, and exactly one session_ended can
+	// ever ship.
+	tm.tryTerminalCloseAt(s, epoch, reason)
 }
 
 // handleInterrupt is the epoch bump + provider cancellation + short-history
 // trim (Pitfall 9 on the FSM deque) + old-epoch playback-wait invalidation.
+// issue #69 备选一 步骤 10: a CLOSED session stays silent — no epoch bump, no
+// ack, no state message; nothing may follow session_ended. On a live
+// session the state change and the reply enqueues ride ONE lock hold: a
+// close racing the interrupt either wins tm.mu first (this handler then
+// finds closed set and refuses outright) or lands behind the enqueued
+// replies — interrupt_ack and the state message can never trail
+// session_ended on the wire.
 func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 	tm.mu.Lock()
+	if tm.closed {
+		tm.mu.Unlock()
+		return
+	}
 	oldEpoch := tm.epoch
 	tm.epoch++
 	newEpoch := tm.epoch
@@ -1139,10 +1225,18 @@ func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 	tm.pendingPlayback = map[string]*pendingPlayback{}
 	tm.playbackPending = false
 
-	if tm.state != "" && !tm.closed {
+	if tm.state != "" {
 		tm.state = StateListening
 	}
 	effective := tm.effectiveClientStateLocked()
+	_ = s.SendControl(InterruptAckMsg{
+		Type:           TypeInterruptAck,
+		OldEpoch:       oldEpoch,
+		NewEpoch:       newEpoch,
+		LastSentenceID: m.LastSentenceID,
+		PlayedUntilMs:  m.PlayedUntilMs,
+	})
+	_ = s.SendControl(StateMsg{Type: TypeState, Value: effective})
 	tm.mu.Unlock()
 
 	tm.vad.Reset()
@@ -1153,14 +1247,6 @@ func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 		infra.F("last_sentence_id", m.LastSentenceID),
 		infra.F("played_until_ms", m.PlayedUntilMs),
 	)
-	_ = s.SendControl(InterruptAckMsg{
-		Type:           TypeInterruptAck,
-		OldEpoch:       oldEpoch,
-		NewEpoch:       newEpoch,
-		LastSentenceID: m.LastSentenceID,
-		PlayedUntilMs:  m.PlayedUntilMs,
-	})
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: effective})
 }
 
 // handleSentenceAck records one sentence the client actually played — the
@@ -1196,28 +1282,147 @@ func (tm *TurnManager) handleSentenceAck(m SentenceAckMsg) {
 }
 
 // handlePing answers the clock-offset probe. TServerMonoNs shares the
-// recorder's anchor with every rt_event t_mono_ns (13-03 protocol).
+// recorder's anchor with every rt_event t_mono_ns (13-03 protocol). The
+// reply rides the session effect: a session that already shipped
+// session_ended is never answered past its terminal message — a ping that
+// races the goodbye loses, and session_ended stays the wire's last word.
 func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
-	_ = s.SendControl(PongMsg{
+	pong := PongMsg{
 		Type:          TypePong,
 		TClientMs:     m.TClientMs,
 		TServerMonoNs: tm.recorder.MonoNs(),
-	})
+	}
+	tm.applySessionEffect(func() error { return s.SendControl(pong) })
 }
 
-// handleEndSession is the explicit goodbye (RT-10/SC7 server half). The D-03
-// fallback (13.1-04) runs BEFORE the state reset: a session ended mid-check
-// persists its downgraded ratings once (the write needs the live tutor). PR
-// #61 review: closed is set BEFORE session_ended ships — the flag (under
-// tm.mu) is what every advance-side gate checks, and the lesson_update
-// enqueue in advanceTarget shares that lock, so a racing advance's wire
-// output lands strictly before the goodbye, or (when it lost the race) is
-// suppressed entirely. session_ended stays the terminal control message.
+// closeClaim reports one unified-close attempt (issue #69 备选一 步骤 6/8):
+// Owned is true only for the single caller whose critical section flipped
+// the session closed. When the closing path carries the D-03 fallback
+// (takeFallback — the goodbye and the transport close), the SAME critical
+// section captured the unchecked-fallback snapshot: whatever state the
+// claim observed is the state the closed marking finalized, so a check
+// stage presented inside the close's old two-lock window can no longer
+// slip past the fallback decision. Every other path that raced the close
+// owns nothing — nothing to send, nothing to persist.
+type closeClaim struct {
+	fallback    uncheckedCloseSnapshot
+	checkWrites []*checkWriteAdmission
+	owned       bool
+	hasFallback bool
+}
+
+// claimCloseLocked is the single ownership point of the session's close:
+// eligibility (already closed, and for the epoch-gated flavors a stale
+// epoch), the D-03 fallback snapshot (takeFallback: the classroom still
+// holds an unsubmitted check stage) and the closed marking complete in ONE
+// critical section, so the decision and the marking can never split.
+// Caller holds initWriteMu AND tm.mu (fixed order initWriteMu → tm.mu).
+// Everything that can block — persistence, logs, the goodbye enqueue, the
+// VAD reset — runs outside, after the claim: a failed notification must
+// never reopen, delay or skip the close.
+func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch, takeFallback bool) closeClaim {
+	if tm.closed || (gateEpoch && tm.epoch != epoch) {
+		return closeClaim{}
+	}
+	c := closeClaim{owned: true}
+	tm.checkWritesSealed = true
+	for w := range tm.checkWrites {
+		c.checkWrites = append(c.checkWrites, w)
+	}
+	if takeFallback && !tm.closeOwned && tm.tutor != nil && tm.tutor.checking {
+		tm.closeOwned = true
+		t := tm.tutor
+		c.fallback = uncheckedCloseSnapshot{
+			lessonID: t.lessonID,
+			category: t.category,
+			poem:     t.poem != nil,
+			words:    append([]lesson.Word(nil), t.words...),
+		}
+		c.hasFallback = true
+	}
+	tm.internalCloseLocked()
+	return c
+}
+
+// closeSessionAt is the unified close entry every close path funnels
+// through: initWriteMu → tm.mu → claimCloseLocked, then the transport
+// finalization (VAD reset; the ONE session_ended when a reason is asked
+// for) runs lock-free. A failed session_ended enqueue is logged and
+// swallowed — the session is already closed at that point, the close is
+// not undoable, and the caller still learns it owns the close.
+func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch, takeFallback bool, reason string, s Sender) closeClaim {
+	tm.initWriteMu.Lock()
+	if tm.closeEntryInterleave != nil {
+		// Narrow test probe (issue #69 备选一 步骤 8): fires with the
+		// init-write lock held and tm.mu NOT yet taken — the exact window
+		// where a check-stage presentation can still slip in ahead of the
+		// claim's decision.
+		tm.closeEntryInterleave()
+	}
+	tm.mu.Lock()
+	c := tm.claimCloseLocked(epoch, gateEpoch, takeFallback)
+	tm.mu.Unlock()
+	tm.initWriteMu.Unlock()
+	if !c.owned {
+		return c
+	}
+	tm.vad.Reset()
+	if s != nil {
+		if err := s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: reason}); err != nil {
+			s.Terminate(err)
+			tm.logger.Warn("session_ended enqueue failed", infra.ErrField(err))
+		} else {
+			s.Terminate(nil)
+		}
+	}
+	return c
+}
+
+// tryTerminalClose claims the session's ONE terminal close and ships the
+// single session_ended: the winner's claim (closeSessionAt) marks the
+// session closed under tm.mu FIRST (the lesson_update pattern — every
+// lock-disciplined effect that lost the race dies on the closed flag, and
+// none can queue behind the goodbye), losers send nothing. Epoch-free: the
+// client's goodbye closes whatever turn is live. The D-03 fallback
+// ownership is NOT decided here — only the goodbye (handleEndSession) and
+// the transport close (Close) carry it; these callers have either already
+// left the check stage or never showed it.
+func (tm *TurnManager) tryTerminalClose(s Sender, reason string) bool {
+	return tm.closeSessionAt(0, false, false, reason, s).owned
+}
+
+// tryTerminalCloseAt is tryTerminalClose gated on the ending's OWN epoch: a
+// stale ending — a summary whose wait outlived an interrupt that bumped the
+// epoch — must not close (or goodbye) the classroom that replaced it.
+func (tm *TurnManager) tryTerminalCloseAt(s Sender, epoch uint64, reason string) bool {
+	return tm.closeSessionAt(epoch, true, false, reason, s).owned
+}
+
+// handleEndSession is the explicit goodbye (RT-10/SC7 server half). The
+// close owns the D-03 fallback (13.1-04) ONCE, decided in the claim's ONE
+// critical section together with the closed marking (issue #69 备选一
+// 步骤 8: the old shape snapshotted in its own earlier lock hold, so a
+// check stage presented in between closed the session with the fallback
+// silently missed). The goodbye ships after the marking, and only then
+// does the lock-free persistence run — every in-flight callback that
+// returns during that write finds closed set and stays silent, and the
+// dead tutor is never touched again. PR #61 review: closed is set BEFORE
+// session_ended ships — the flag (under tm.mu) is what every advance-side
+// gate checks, and the lesson_update enqueue in advanceTarget shares that
+// lock, so a racing advance's wire output lands strictly before the
+// goodbye, or (when it lost the race) is suppressed entirely.
+// session_ended stays the terminal control message.
 func (tm *TurnManager) handleEndSession(s Sender) {
-	tm.uncheckedCloseFallback()
-	tm.internalClose()
-	_ = s.SendControl(SessionEndedMsg{Type: TypeSessionEnded, Reason: ReasonClientEnd})
-	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+	if c := tm.closeSessionAt(0, false, true, ReasonClientEnd, s); c.owned {
+		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+		if c.hasFallback {
+			// The fallback AWAITS the captured saves before it can decide —
+			// that wait must not block the close's caller (the read loop):
+			// the transport closes now, the owned persistence finishes on
+			// its own (路径 A 1.11; the awaits run outside every lock).
+			go tm.persistUncheckedFallback(c.fallback, c.checkWrites)
+		}
+	}
 }
 
 // internalClose cancels in-flight work, invalidates playback waits,
@@ -1226,10 +1431,7 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 // 取消等待) and sweeps the photo assembler (13.1-03 privacy P2: the child's
 // photo never outlives its session).
 func (tm *TurnManager) internalClose() {
-	tm.mu.Lock()
-	tm.internalCloseLocked()
-	tm.mu.Unlock()
-	tm.vad.Reset()
+	tm.closeSessionAt(0, false, false, "", nil)
 }
 
 // internalCloseLocked is internalClose's locked half (caller holds tm.mu),
@@ -1262,31 +1464,27 @@ func (tm *TurnManager) internalCloseLocked() {
 // pick bumps the epoch and opens the new classroom → the stale close
 // lands" cannot happen.
 func (tm *TurnManager) orderlyCloseAt(epoch uint64) {
-	tm.mu.Lock()
-	if tm.epoch != epoch || tm.closed {
-		tm.mu.Unlock()
-		return
-	}
-	tm.internalCloseLocked()
-	tm.mu.Unlock()
-	tm.vad.Reset()
+	tm.closeSessionAt(epoch, true, false, "", nil)
 }
 
 // Close implements SessionManager: the transport read loop exited for any
 // reason (disconnect, deadline, read error). Idempotent — an end_session
-// path already closed the session. The D-03 fallback (13.1-04) runs BEFORE
-// the state reset: a disconnect mid-check persists its downgraded ratings
-// once (the write needs the live tutor).
+// path already closed the session. The D-03 fallback (13.1-04) rides the
+// same ONE-TIME close ownership as handleEndSession, decided in the claim's
+// ONE critical section (issue #69 备选一 步骤 8): whoever's claim flipped
+// the closed flag also decided — and owns — the fallback; the loser does
+// nothing. No session_ended ships here (the transport is gone).
 func (tm *TurnManager) Close(Sender) {
-	tm.mu.Lock()
-	already := tm.closed
-	tm.mu.Unlock()
-	if already {
-		return
+	if c := tm.closeSessionAt(0, false, true, "", nil); c.owned {
+		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
+		if c.hasFallback {
+			// Same 1.11 rule as handleEndSession: the close returns as soon
+			// as the transport is finalized; the owned fallback (waits for
+			// captured saves, one authoritative read, one latch competition)
+			// runs on its own goroutine with a bounded result.
+			go tm.persistUncheckedFallback(c.fallback, c.checkWrites)
+		}
 	}
-	tm.uncheckedCloseFallback()
-	tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
-	tm.internalClose()
 }
 
 // ---------------------------------------------------------------------------
@@ -1405,13 +1603,18 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		// and the per-word countdown is NOT reset (hearing nothing is not an
 		// interaction). A server-side marker event only.
 		tm.recorder.Emit(EventSpeechEnded, infra.F("turn_id", turnID), infra.F("empty", true))
-		tm.settleListeningAt(s, epoch)
+		// Silence is not playback: the recovery lifts no playback-completion
+		// time and starts no echo tail (resumeListeningAt).
+		tm.resumeListeningAt(s, epoch)
 		return
 	}
 	if err != nil && errors.Is(err, mimo.ErrInvalidResponse) {
 		// The ASR half of the invalid-response discipline (13-08 built the
 		// LLM half): same ctx, at most ONE retry; the failure count lands
 		// in the event fields when it still fails.
+		if ctx.Err() != nil || !tm.epochCurrent(epoch) {
+			return
+		}
 		attempts = 2
 		transcript, err = tm.asr.Transcribe(ctx, segment)
 	}
@@ -1420,9 +1623,10 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		return
 	}
 	if transcript == "" {
-		// Nothing usable recognized: back to listening. (13-09 refines the
-		// silent tolerance of legal-empty ASR results.)
-		tm.settleListeningAt(s, epoch)
+		// Nothing usable recognized: back to listening — without inventing a
+		// playback-completion time. (13-09 refines the silent tolerance of
+		// legal-empty ASR results.)
+		tm.resumeListeningAt(s, epoch)
 		return
 	}
 	if asking {
@@ -1562,7 +1766,7 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		}
 		// LLM replies mask on screen in student mode (a leaking hint is still
 		// masked); TTS speaks the reply as generated (D-10).
-		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimerLocked)
 	case intentMeaning, intentExample:
 		// Issue #9 (ADR-0006): in the DICTATION stage these two intents
 		// may augment the classification reply with one on-demand example
@@ -1576,7 +1780,7 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 			}
 			reply = augmented
 		}
-		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimerLocked)
 	case intentPause:
 		if !tm.applyTurnAt(epoch, func() error {
 			if tm.tutor != nil {
@@ -1606,9 +1810,9 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		if mode != ModeTest {
 			display = resumeMaskedText(idx)
 		}
-		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimerLocked)
 	case intentChat:
-		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
+		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimerLocked)
 	}
 }
 
@@ -1634,7 +1838,7 @@ func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, ca
 	if mode != ModeTest {
 		display = masked(idx)
 	}
-	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimer)
+	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeChat, tm.armWordTimerLocked)
 }
 
 // confirmTarget advances the classroom through the target captured at
@@ -1781,7 +1985,7 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 		display = announceMaskedText(res.NewIndex+1, total)
 	}
 	tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeAnnounce, func() {
-		tm.announceAcked(s)
+		tm.announceAckedLocked()
 	})
 }
 
@@ -1813,30 +2017,22 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		displaySents = spokenSents
 	}
 
-	tm.mu.Lock()
-	if tm.epoch != epoch || tm.closed {
-		// Stale before the first sound: nothing registered, nothing spoken.
-		// The closed flag rides the entry check (PR #61 review round 2): a
-		// close does not bump the epoch, so the comparison alone let a dead
-		// session's announcement record history, drive the FSM to speaking
-		// and ship state=speaking past session_ended.
-		tm.mu.Unlock()
+	if !tm.applyTurnAt(epoch, func() error {
+		if tm.tutor != nil {
+			// RAW: the LLM context never sees the masked copies (Pitfall 4).
+			tm.tutor.recordTeacherReply(spoken)
+		}
+		tm.turnSentences = nil
+		tm.acked = map[string]bool{}
+		tm.state = StateSpeaking
+		tm.playbackPending = true
+		return s.SendControl(StateMsg{Type: TypeState, Value: StateSpeaking})
+	}) {
 		return PlaybackRef{}
 	}
-	if tm.tutor != nil {
-		// RAW: the LLM context never sees the masked copies (Pitfall 4).
-		tm.tutor.recordTeacherReply(spoken)
+	if tm.speakRegistrationInterleave != nil {
+		tm.speakRegistrationInterleave()
 	}
-	tm.turnSentences = nil
-	tm.acked = map[string]bool{}
-	tm.state = StateSpeaking
-	tm.playbackPending = true
-	// state=speaking rides the SAME lock hold (the lesson_update pattern):
-	// the close paths set closed under this lock and ship session_ended only
-	// after — a send after the unlock could land between the two and put a
-	// state change behind the goodbye on the wire.
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateSpeaking})
-	tm.mu.Unlock()
 
 	var ref PlaybackRef
 	ref.Epoch = epoch
@@ -1850,33 +2046,34 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		// same check (epochCurrent's predicate): a close does not bump the
 		// epoch, so the comparison alone would let a sentence of a dead
 		// session register and ship (PR #61 review).
-		tm.mu.Lock()
-		if tm.epoch != epoch || tm.closed {
-			tm.mu.Unlock()
+		if !tm.applyTurnAt(epoch, func() error {
+			tm.pendingPlayback[pendingKey(epoch, sentID)] = &pendingPlayback{purpose: purpose, done: make(chan struct{})}
+			tm.turnSentences = append(tm.turnSentences, sentenceInfo{id: sentID, text: sentence})
+			if err := s.SendControl(TeacherSentenceMsg{
+				Type: TypeTeacherSentence, TurnID: turnID, Epoch: epoch, SentenceID: sentID, Text: displaySents[i],
+			}); err != nil {
+				return err
+			}
+			return s.SendControl(AudioStartMsg{Type: TypeAudioStart, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
+		}) {
 			return ref
 		}
-		tm.pendingPlayback[pendingKey(epoch, sentID)] = &pendingPlayback{purpose: purpose, done: make(chan struct{})}
-		tm.turnSentences = append(tm.turnSentences, sentenceInfo{id: sentID, text: sentence})
-		_ = s.SendControl(TeacherSentenceMsg{
-			Type: TypeTeacherSentence, TurnID: turnID, Epoch: epoch, SentenceID: sentID, Text: displaySents[i],
-		})
-		_ = s.SendControl(AudioStartMsg{Type: TypeAudioStart, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
-		tm.mu.Unlock()
 
 		// pcm arrives as bare s16le bytes (AudioChunkFunc); the wire
 		// encoding is digested by the 13-06 adapter, never here (M-1).
 		var sentSamples int
 		_, err := tm.tts.SynthesizeStream(ctx, sentence, func(pcm []byte, isFinal bool) error {
-			tm.mu.Lock()
-			if tm.epoch != epoch || tm.closed {
-				tm.mu.Unlock()
-				cancel() // late chunk: abort the provider stream too
+			if !tm.applyTurnAt(epoch, func() error {
+				sentSamples += len(pcm) / 2 // s16le mono: 2 bytes per sample
+				return s.SendAudio(pcm)
+			}) {
+				// Late chunk (the turn lost its epoch or the session closed)
+				// or a dead audio queue: abort the provider stream too — no
+				// partial sentence keeps flowing at a dead identity.
+				cancel()
 				return ErrStaleEpoch
 			}
-			sentSamples += len(pcm) / 2 // s16le mono: 2 bytes per sample
-			err := s.SendAudio(pcm)
-			tm.mu.Unlock()
-			return err
+			return nil
 		})
 		if err != nil && !errors.Is(err, ErrStaleEpoch) && tm.epochCurrent(epoch) {
 			// A genuine provider failure on a still-live announcement.
@@ -1884,16 +2081,15 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 			return ref
 		}
 
-		tm.mu.Lock()
-		if p, ok := tm.pendingPlayback[pendingKey(epoch, sentID)]; ok {
-			p.pcmSamples = sentSamples
-		}
-		stale := tm.epoch != epoch || tm.closed
-		if !stale {
-			_ = s.SendControl(AudioEndMsg{Type: TypeAudioEnd, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
-		}
-		tm.mu.Unlock()
-		if stale {
+		// The sample count and audio_end ride ONE turn effect: a late
+		// audio_end is refused whole, so a dead turn's pending entry never
+		// carries a phantom sample count either.
+		if !tm.applyTurnAt(epoch, func() error {
+			if p, ok := tm.pendingPlayback[pendingKey(epoch, sentID)]; ok {
+				p.pcmSamples = sentSamples
+			}
+			return s.SendControl(AudioEndMsg{Type: TypeAudioEnd, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
+		}) {
 			return ref // interrupted mid-announcement: the interrupt branch trims
 		}
 		ref.SentenceIDs = append(ref.SentenceIDs, sentID)
@@ -1908,7 +2104,10 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 // from the last short sentence alone. On timeout ONLY the timeout is
 // reported (ErrorMsg code=playback_ack_timeout, recoverable) plus the
 // desensitized event: no fabricated ack, no lastPlaybackCompletedAt, no
-// timer arm, no word advance.
+// timer arm, no word advance. The timeout RESULT rides the announcement's
+// own epoch through the unified turn entry: a close or interrupt that
+// cancels the wait first wins outright, and one racing the timer branch
+// suppresses the notice instead of shipping it past session_ended.
 func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpose string) (completed, timedOut bool) {
 	if ref.FinalSentenceID == "" {
 		return false, false // nothing scheduled (stale before the first sound)
@@ -1936,16 +2135,26 @@ func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpos
 		tm.mu.Unlock()
 		return done, false
 	case <-timer.C:
+		// The timeout observation is logged regardless (desensitized
+		// evidence); the RESULT — the degraded-playback notice and the
+		// timed-out report — applies only while the announcement's own
+		// epoch still owns the FSM: a close or interrupt that won the race
+		// to this branch must not ship a playback complaint for a session
+		// that already ended or moved on.
 		tm.recorder.Emit(EventPlaybackAckTimeout,
 			infra.F("purpose", purpose),
 			infra.F("wait_ms", wait.Milliseconds()),
 		)
-		_ = s.SendControl(ErrorMsg{
-			Type:        TypeError,
-			Code:        ErrCodePlaybackAckTimeout,
-			Message:     playbackAckTimeoutNotice,
-			Recoverable: true,
-		})
+		if !tm.applyTurnAt(ref.Epoch, func() error {
+			return s.SendControl(ErrorMsg{
+				Type:        TypeError,
+				Code:        ErrCodePlaybackAckTimeout,
+				Message:     playbackAckTimeoutNotice,
+				Recoverable: true,
+			})
+		}) {
+			return false, false
+		}
 		return false, true
 	}
 }
@@ -1961,52 +2170,144 @@ func (tm *TurnManager) awaitPlaybackCompletion(s Sender, ref PlaybackRef, purpos
 // state update (PR #59 review): a stale announcer — the ask whose final ack
 // landed just before a pick bumped the epoch and opened the new classroom —
 // must not lift the fresh greeting's playbackPending gate or start an echo
-// tail over it. Returns whether the settle actually took effect (callers
-// gate their onAck work on it).
+// tail over it. The state change and the state message ride ONE turn effect
+// (the lesson_update pattern): a close that races the settle either wins
+// the lock and refuses it outright or blocks until the state message is
+// queued — the message can never trail session_ended on the wire. Returns
+// whether the settle actually took effect (callers gate their onAck work on
+// it).
 func (tm *TurnManager) settleListeningAt(s Sender, epoch uint64) bool {
+	var value string
 	tm.mu.Lock()
-	if tm.state == "" || tm.closed || tm.epoch != epoch {
-		tm.mu.Unlock()
+	defer tm.mu.Unlock()
+	if tm.state == "" {
 		return false
 	}
-	tm.state = StateListening
-	tm.playbackPending = false
-	now := time.Now()
-	tm.lastPlaybackCompletedAt = now
-	tm.echoTailUntil = now.Add(time.Duration(tm.cfg.VADEchoTailMs) * time.Millisecond)
-	value := tm.effectiveClientStateLocked()
-	tm.mu.Unlock()
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
-	return true
+	return tm.applyTurnLocked(epoch, func() error {
+		tm.state = StateListening
+		tm.playbackPending = false
+		now := time.Now()
+		tm.lastPlaybackCompletedAt = now
+		tm.echoTailUntil = now.Add(time.Duration(tm.cfg.VADEchoTailMs) * time.Millisecond)
+		value = tm.effectiveClientStateLocked()
+		return s.SendControl(StateMsg{Type: TypeState, Value: value})
+	})
+}
+
+// resumeListeningAt returns the FSM to listening after a turn that produced
+// nothing to play back (an ASR empty transcription, an unusable transcript):
+// the same protected shape as settleListeningAt, but NO playback-completion
+// stamp and no echo tail — silence must never masquerade as played audio,
+// because the 13-09 playback-relative gates key on the real thing.
+func (tm *TurnManager) resumeListeningAt(s Sender, epoch uint64) bool {
+	var value string
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.state == "" {
+		return false
+	}
+	return tm.applyTurnLocked(epoch, func() error {
+		tm.state = StateListening
+		tm.playbackPending = false
+		value = tm.effectiveClientStateLocked()
+		return s.SendControl(StateMsg{Type: TypeState, Value: value})
+	})
+}
+
+// settleAnnouncementAt is the announcement's protected ACK post-processing:
+// the settle and the onAck work it licenses (word events, timer arms) run
+// as ONE turn effect on the announcement's own epoch. onAck executes INSIDE
+// the effect — it must not take tm.mu (the locked timer/arm helpers), which
+// is what keeps the arm from re-reading an epoch the FSM has moved on to.
+func (tm *TurnManager) settleAnnouncementAt(s Sender, epoch uint64, onAck func()) bool {
+	var value string
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.state == "" {
+		return false
+	}
+	return tm.applyTurnLocked(epoch, func() error {
+		tm.state = StateListening
+		tm.playbackPending = false
+		now := time.Now()
+		tm.lastPlaybackCompletedAt = now
+		tm.echoTailUntil = now.Add(time.Duration(tm.cfg.VADEchoTailMs) * time.Millisecond)
+		value = tm.effectiveClientStateLocked()
+		if err := s.SendControl(StateMsg{Type: TypeState, Value: value}); err != nil {
+			return err
+		}
+		if onAck != nil {
+			onAck()
+		}
+		return nil
+	})
 }
 
 // failTurn reports a turn-level failure and returns the FSM to listening —
 // but only if the turn is still current: an interrupted turn must not emit a
-// spurious error on top of the interrupt ack. Any playback waits the failed
-// announcement left behind are invalidated. Optional fields ride the error
-// event (e.g. the retry-attempts count of the invalid-response discipline).
+// spurious error on top of the interrupt ack. The error message, the
+// playback-wait invalidation, the listening recovery and the state message
+// ride ONE turn effect on the failing turn's own epoch: a close that races
+// the report either refuses it outright or lands behind the accepted pair —
+// the failure notice and the listening state can never trail session_ended.
+// Optional fields ride the error event (e.g. the retry-attempts count of
+// the invalid-response discipline), which is recorded only when the report
+// was actually accepted.
 func (tm *TurnManager) failTurn(s Sender, epoch uint64, code, message string, fields ...infra.Field) {
-	if !tm.epochCurrent(epoch) {
+	var value string
+	if !tm.applyTurnAt(epoch, func() error {
+		for _, p := range tm.pendingPlayback {
+			p.cancelWait()
+		}
+		tm.pendingPlayback = map[string]*pendingPlayback{}
+		tm.playbackPending = false
+		tm.state = StateListening
+		value = tm.effectiveClientStateLocked()
+		if err := s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: true}); err != nil {
+			return err
+		}
+		return s.SendControl(StateMsg{Type: TypeState, Value: value})
+	}) {
 		return
 	}
-	tm.sendError(s, code, message, true, fields...)
-	tm.mu.Lock()
-	for _, p := range tm.pendingPlayback {
-		p.cancelWait()
-	}
-	tm.pendingPlayback = map[string]*pendingPlayback{}
-	tm.playbackPending = false
-	tm.state = StateListening
-	value := tm.effectiveClientStateLocked()
-	tm.mu.Unlock()
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
+	all := make([]infra.Field, 0, 1+len(fields))
+	all = append(all, infra.F("code", code))
+	all = append(all, fields...)
+	tm.recorder.Emit(EventError, all...)
 }
 
-// sendError is the single error egress: coded ErrorMsg + error event. The
-// optional fields are desensitized event annotations only (attempts, codes)
-// — never transcript text (T-13-06b).
+// sendError is the single error egress: coded ErrorMsg + error event.
+// issue #69 备选一 步骤 10: the enqueue rides the session effect — a
+// session that already shipped session_ended answers NOTHING past its
+// terminal message (a parse failure, a server-only frame, a read_word or a
+// poem/passage/practice degradation landing after the goodbye stays
+// silent). The optional fields are desensitized event annotations only
+// (attempts, codes) — never transcript text (T-13-06b); the event records
+// only when the reply actually shipped, sendOpenError's discipline.
 func (tm *TurnManager) sendError(s Sender, code, message string, recoverable bool, fields ...infra.Field) {
-	_ = s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: recoverable})
+	if !tm.applySessionEffect(func() error {
+		return s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: recoverable})
+	}) {
+		return
+	}
+	all := make([]infra.Field, 0, 1+len(fields))
+	all = append(all, infra.F("code", code))
+	all = append(all, fields...)
+	tm.recorder.Emit(EventError, all...)
+}
+
+// sendOpenError is sendError's session-gated sibling for replies to inbound
+// frames whose admission is the frame itself: the coded answer rides
+// applySessionEffect, so a session that already shipped session_ended is
+// never answered past its terminal message — the reply races the goodbye
+// (or a timeout close) and loses. The event records only when the reply
+// actually shipped, failTurn's discipline.
+func (tm *TurnManager) sendOpenError(s Sender, code, message string, recoverable bool, fields ...infra.Field) {
+	if !tm.applySessionEffect(func() error {
+		return s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: recoverable})
+	}) {
+		return
+	}
 	all := make([]infra.Field, 0, 1+len(fields))
 	all = append(all, infra.F("code", code))
 	all = append(all, fields...)
