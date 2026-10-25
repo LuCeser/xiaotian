@@ -839,7 +839,7 @@ func TestSettledStaleAnnouncerCannotLiftNewClassroomGate(t *testing.T) {
 	}
 
 	// The timeout twin: a stale orderlyClose must not close it either.
-	tm.orderlyCloseAt(askEpoch)
+	tm.orderlyCloseAt(s, askEpoch, ReasonPlaybackTimeout)
 	tm.mu.Lock()
 	closed = tm.closed
 	tm.mu.Unlock()
@@ -900,7 +900,7 @@ func TestMidBindingAskTimeoutCannotClosePickedClassroom(t *testing.T) {
 	tm.subjectTakeInterleave = func() {
 		if tm.mu.TryLock() {
 			tm.mu.Unlock()
-			tm.orderlyCloseAt(askEpoch)
+			tm.orderlyCloseAt(s, askEpoch, ReasonPlaybackTimeout)
 		}
 	}
 	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, askEpoch, true)
@@ -911,7 +911,7 @@ func TestMidBindingAskTimeoutCannotClosePickedClassroom(t *testing.T) {
 
 	// And even a timeout landing only AFTER the take must find the old epoch
 	// stale — the bump belongs to the take's own lock hold.
-	tm.orderlyCloseAt(oldEpoch)
+	tm.orderlyCloseAt(s, oldEpoch, ReasonPlaybackTimeout)
 	tm.mu.Lock()
 	closed := tm.closed
 	epoch := tm.epoch

@@ -53,7 +53,7 @@ func (tm *TurnManager) handleReadWord(s Sender, m ReadWordMsg) {
 		if timedOut {
 			// The epoch gate keeps a stale re-read's timeout from closing a
 			// classroom the FSM has since moved on to.
-			tm.orderlyCloseAt(epoch)
+			tm.orderlyCloseAt(s, epoch, ReasonPlaybackTimeout)
 		} else if completed {
 			// The settle and the timer re-arm are ONE protected ack
 			// post-processing on the re-read's own epoch — a stale re-read

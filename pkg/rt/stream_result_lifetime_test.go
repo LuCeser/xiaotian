@@ -191,8 +191,19 @@ func TestPlaybackTimeoutLifetime(t *testing.T) {
 		if len(errs) != 1 || errs[0]["code"] != ErrCodePlaybackAckTimeout {
 			t.Fatalf("error messages = %v, want exactly one playback_ack_timeout", errs)
 		}
-		if got := captured.countOf(TypeSessionEnded); got != 0 {
-			t.Fatalf("session_ended count = %d, want none from the orderly close", got)
+		// 单元 1 review P1: the orderly degraded close is a FULL close — the
+		// terminal session_ended carries playback_timeout and the transport
+		// terminates with it; the original connection must not outlive the
+		// close just because the browser keeps answering heartbeats.
+		ended := captured.controlsOf(t, TypeSessionEnded)
+		if len(ended) != 1 || ended[0]["reason"] != ReasonPlaybackTimeout {
+			t.Fatalf("session_ended = %v, want exactly one carrying playback_timeout", ended)
+		}
+		captured.mu.Lock()
+		terminated, termReason := captured.terminated, captured.reason
+		captured.mu.Unlock()
+		if !terminated || termReason != nil {
+			t.Fatalf("terminated=%v reason=%v, want the transport terminated normally", terminated, termReason)
 		}
 		tm.mu.Lock()
 		closed, state := tm.closed, tm.state

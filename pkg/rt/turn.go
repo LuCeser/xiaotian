@@ -1112,7 +1112,7 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 	completed, timedOut := tm.awaitPlaybackCompletion(s, ref, purpose)
 	if !completed {
 		if timedOut {
-			tm.orderlyCloseAt(epoch)
+			tm.orderlyCloseAt(s, epoch, ReasonPlaybackTimeout)
 		}
 		return
 	}
@@ -1161,8 +1161,10 @@ func (tm *TurnManager) runNaturalEndingAt(s Sender, epoch uint64, ctx context.Co
 		// Interrupted or disconnected: cancel the wait, never message — and
 		// only if this ending's epoch still owns the FSM: a summary wait
 		// that outlived an interrupt must not close the classroom that
-		// replaced it (orderlyCloseAt's epoch gate).
-		tm.orderlyCloseAt(epoch)
+		// replaced it (orderlyCloseAt's epoch gate). The degraded close
+		// still carries the ending's own reason and terminates the
+		// transport (单元 1 review P1).
+		tm.orderlyCloseAt(s, epoch, reason)
 		return
 	}
 	if purpose == purposeSummary {
@@ -1465,8 +1467,14 @@ func (tm *TurnManager) internalCloseLocked() {
 // and the close are one lock hold, so the interleaving "timeout fires →
 // pick bumps the epoch and opens the new classroom → the stale close
 // lands" cannot happen.
-func (tm *TurnManager) orderlyCloseAt(epoch uint64) {
-	tm.closeSessionAt(epoch, true, false, "", nil)
+//
+// 单元 1 (review P1): the degraded close is a FULL close — the terminal
+// session_ended carries reason (the natural ending's own reason, or
+// playback_timeout for an ordinary announcement) and the transport
+// terminates with it; a heartbeat-answering browser must not keep the
+// original connection alive past this point.
+func (tm *TurnManager) orderlyCloseAt(s Sender, epoch uint64, reason string) {
+	tm.closeSessionAt(epoch, true, false, reason, s)
 }
 
 // Close implements SessionManager: the transport read loop exited for any

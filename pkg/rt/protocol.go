@@ -513,6 +513,14 @@ const (
 	// FSRS schedule (D-12). The practice ending is the ONLY ending that
 	// carries this reason.
 	ReasonPracticeComplete = "practice_complete"
+	// ReasonPlaybackTimeout: the orderly degraded close after an
+	// announcement's bounded playback-ack wait timed out (the
+	// ErrorMsg(playback_ack_timeout) already shipped). It means ONLY "the
+	// server stopped waiting and is closing in order" — never that the
+	// announcement was actually played (issue #69 路径 A 单元 1: this close
+	// terminates the transport too; the heartbeat and the original
+	// connection must not outlive it).
+	ReasonPlaybackTimeout = "playback_timeout"
 )
 
 // SessionEndedMsg is the server's final message before closing the

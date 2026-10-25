@@ -68,7 +68,7 @@ func TestCloseClaim(t *testing.T) {
 		closers := []func(){
 			func() { tm.handleEndSession(s) },
 			func() { tm.Close(s) },
-			func() { tm.orderlyCloseAt(epoch) },
+			func() { tm.orderlyCloseAt(s, epoch, ReasonPlaybackTimeout) },
 			func() { tm.tryTerminalClose(s, ReasonLessonComplete) },
 			func() { tm.tryTerminalCloseAt(s, epoch, ReasonLessonComplete) },
 			func() { tm.internalClose() },
