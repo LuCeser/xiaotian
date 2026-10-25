@@ -140,7 +140,8 @@ function rtSessionInit(category) {
       if (category) init.category = category;
       ws.send(JSON.stringify(init));
     });
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) return; // teacher audio rides binary frames; only control JSON here
       const msg = JSON.parse(String(data));
       if (msg.type === 'session_ready') {
         clearTimeout(fail);
