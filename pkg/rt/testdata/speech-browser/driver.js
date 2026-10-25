@@ -382,11 +382,36 @@ async function scenarioStarveProbe({ page, url, holdMs }) {
   };
 }
 
+// scenario "resume-close-window"（1.13a）：连接并开始课堂后不等播报，只等
+// 服务端关闭（关闭由 Go 侧在 resume 呈现窗口的两侧触发），报告 close 计
+// 数与关闭前到达的 check_started / teacher_sentence 帧数——「呈现胜出窗
+// 口仍获兜底」由这些计数证明呈现确实发生，「关闭赢窗口拒绝呈现」由它们
+// 归零证明，close 之后再无任何下行帧。
+async function scenarioResumeCloseWindow(args) {
+  const { page, url, timeoutMs } = args;
+  await page.goto(url);
+  await page.locator('#rt-start').click();
+  await waitWs(page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+    { timeoutMs, label: 'server close from the resume presentation window' });
+  const view = await wsView(page);
+  const closeAt = view.findIndex((e) => e.dir === 'evt' && e.kind === 'close');
+  const before = closeAt >= 0 ? view.slice(0, closeAt) : [];
+  const after = closeAt >= 0 ? view.slice(closeAt + 1) : [];
+  return {
+    ok: true,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    checkStarted: before.filter((e) => e.dir === 'in' && e.type === 'check_started').length,
+    teacherSentences: before.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length,
+    lateFrames: after.filter((e) => e.dir === 'in').length,
+  };
+}
+
 const SCENARIOS = {
   fixture: scenarioFixture,
   'held-fixture': scenarioHeldFixture,
   'close-after-opening': scenarioCloseAfterOpening,
   'screen-verdict-close': scenarioScreenVerdictClose,
+  'resume-close-window': scenarioResumeCloseWindow,
   'voice-verdict-close': scenarioVoiceVerdictClose,
   'ocr-prefill-close': scenarioOcrPrefillClose,
   'check-submit-close': scenarioCheckSubmitClose,

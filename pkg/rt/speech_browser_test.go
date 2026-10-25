@@ -100,6 +100,12 @@ type speechDriverResult struct {
 	// check-submit-close scenario fields: late review_result frames and late
 	// summary sentences after the close.
 	LateReviewResults int `json:"lateReviewResults"`
+
+	// resume-close-window scenario fields (1.13a): the presentation frames
+	// that landed BEFORE the close, and any downlink after it.
+	CheckStartedBeforeClose     int `json:"checkStarted"`
+	TeacherSentencesBeforeClose int `json:"teacherSentences"`
+	LateFramesAfterClose        int `json:"lateFrames"`
 }
 
 var speechExpectedOpening = []string{
@@ -251,6 +257,13 @@ type speechBrowserFixture struct {
 	// (the existing test seam): arms are counted while the REAL AfterFunc
 	// still runs — the timing control point of step 4.
 	timerProbe *speechTimerProbe
+
+	// resumeHold, when set, is installed as every manager's
+	// checkResumeInterleave — the window between the resume's IO and its
+	// panel presentation (1.13a's browser claim-order probe). closeEntryHold
+	// likewise rides closeSessionAt's init-write-lock window.
+	resumeHold     func()
+	closeEntryHold func()
 
 	handlerActive, handlerDone        atomic.Int64
 	writerDone                        atomic.Int64
@@ -462,6 +475,7 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 	f.mu.Lock()
 	tts, probe, executor, ocrRead := f.tts, f.timerProbe, f.exec, f.ocrRead
 	words, receipts := f.wordsOverride, f.receipts
+	resumeHold, closeEntryHold := f.resumeHold, f.closeEntryHold
 	f.mu.Unlock()
 	if words == nil {
 		words = f.words
@@ -471,6 +485,8 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 		Words:    words,
 		Receipts: receipts,
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
+	tm.checkResumeInterleave = resumeHold
+	tm.closeEntryInterleave = closeEntryHold
 	if ocrRead != nil {
 		// The production photo channel (ttBindPhoto's wiring, fixture-wide):
 		// the scripted reader under the REAL pipeline, so 拍照检查 rides the
@@ -1505,6 +1521,159 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		m.mu.Unlock()
 		if pending != 0 {
 			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
+}
+
+// TestCloseSnapshotBrowser 是 1.13a 的验收：用自然播放夹具替换
+// close_snapshot_atomic 的代 ACK 初始化，核对统一关闭声明的单临界区契
+// 约在两种真实顺序下成立。
+//   - 呈现胜出窗口：resume 的面板呈现（checking 置位、check_started 发
+//     出）落在关闭的入口窗口里——声明的决定看到呈现后的状态，兜底仍被
+//     拥有并恰好落一次，行 submitted+unchecked；
+//   - 关闭胜出窗口：resume 呈现驻留在 IO 之后、绑定之前时关闭直接跑
+//     完——声明看到 checking=false，无兜底、无呈现（check_started 与教
+//     师句均为零），行保持 checking 供恢复，close 后无任何下行帧。
+func TestCloseSnapshotBrowser(t *testing.T) {
+	t.Run("presentation landing inside the close window still gets its fallback", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedCheckingWithOutcomes()
+		atResume, resumeProceed := make(chan struct{}), make(chan struct{})
+		atCloseEntry, closeProceed := make(chan struct{}), make(chan struct{})
+		var resumeOnce, closeOnce sync.Once
+		f.mu.Lock()
+		f.resumeHold = func() { resumeOnce.Do(func() { close(atResume) }); <-resumeProceed }
+		f.closeEntryHold = func() { closeOnce.Do(func() { close(atCloseEntry) }); <-closeProceed }
+		f.mu.Unlock()
+
+		driver := f.runDriverAsync("resume-close-window", 45*time.Second)
+		select {
+		case <-atResume:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the resume never reached its pre-presentation window")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		// The goodbye parks inside the close entry (init-write lock held,
+		// tm.mu not yet) while the presentation is still parked behind its
+		// own window — the old two-lock snapshot window, driven through the
+		// REAL resume path.
+		closeDone := make(chan struct{})
+		go func() {
+			m.handleEndSession(m.currentSender())
+			close(closeDone)
+		}()
+		select {
+		case <-atCloseEntry:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the close never entered its claim window")
+		}
+		// Release the presentation INTO the window: the tutor flips to
+		// checking and check_started ships before the claim decides.
+		close(resumeProceed)
+		if !waitFor(t, 10*time.Second, func() bool {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return m.tutor != nil && m.tutor.checking
+		}) {
+			t.Fatal("the resume presentation never landed inside the close window")
+		}
+		close(closeProceed)
+		select {
+		case <-closeDone:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the close never finished after the presentation")
+		}
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateFramesAfterClose != 0 {
+			t.Fatalf("close=%d late frames=%d, want 1/0", res.WSCloseCount, res.LateFramesAfterClose)
+		}
+		if res.CheckStartedBeforeClose != 1 || res.TeacherSentencesBeforeClose < 1 {
+			t.Fatalf("check_started=%d teacher sentences=%d, want the presentation to have landed",
+				res.CheckStartedBeforeClose, res.TeacherSentencesBeforeClose)
+		}
+		f.assertOriginalTasksExited()
+
+		if !waitFor(t, 10*time.Second, func() bool { return len(f.words.submissions()) == 1 }) {
+			t.Fatalf("fallback review batches = %d, want exactly one degraded batch", len(f.words.submissions()))
+		}
+		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		if stored.Stage != lesson.StageSubmitted || !stored.Unchecked {
+			t.Fatalf("stored stage=%q unchecked=%v, want the post-presentation fallback's submitted+unchecked",
+				stored.Stage, stored.Unchecked)
+		}
+		m.mu.Lock()
+		pending := len(m.checkWrites)
+		m.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
+
+	t.Run("a close winning the window refuses the presentation and keeps checking", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedChecking()
+		atResume, resumeProceed := make(chan struct{}), make(chan struct{})
+		var resumeOnce sync.Once
+		f.mu.Lock()
+		f.resumeHold = func() { resumeOnce.Do(func() { close(atResume) }); <-resumeProceed }
+		f.mu.Unlock()
+
+		driver := f.runDriverAsync("resume-close-window", 45*time.Second)
+		select {
+		case <-atResume:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the resume never reached its pre-presentation window")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		// The goodbye runs to completion while the presentation is still
+		// parked: the claim saw no checking classroom, so no fallback exists
+		// and the late presentation is refused outright.
+		m.handleEndSession(m.currentSender())
+		close(resumeProceed)
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateFramesAfterClose != 0 {
+			t.Fatalf("close=%d late frames=%d, want 1/0", res.WSCloseCount, res.LateFramesAfterClose)
+		}
+		if res.CheckStartedBeforeClose != 0 || res.TeacherSentencesBeforeClose != 0 {
+			t.Fatalf("check_started=%d teacher sentences=%d, want the refused presentation to ship nothing",
+				res.CheckStartedBeforeClose, res.TeacherSentencesBeforeClose)
+		}
+		// The refused presentation never starts an announcement — that zero
+		// IS the refusal's evidence, so only the connection tasks are
+		// asserted here (assertOriginalTasksExited demands a settled
+		// opening announcement this ordering never has).
+		if !waitFor(t, 15*time.Second, func() bool {
+			return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
+				f.writerDone.Load() == 1 &&
+				f.providerStarted.Load() == f.providerDone.Load() &&
+				f.announcementRun.Load() == 0
+		}) {
+			t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+				f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
+				f.providerStarted.Load(), f.providerDone.Load(),
+				f.announcementRun.Load(), f.announcementDone.Load())
+		}
+
+		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		if stored.Stage != lesson.StageChecking || stored.Unchecked {
+			t.Fatalf("stored stage=%q unchecked=%v, want checking for recovery", stored.Stage, stored.Unchecked)
+		}
+		if got := len(f.words.submissions()); got != 0 {
+			t.Fatalf("review batches = %d, want 0 (no fallback without the check stage)", got)
+		}
+		m.mu.Lock()
+		closedFlag, pending := m.closed, len(m.checkWrites)
+		m.mu.Unlock()
+		if !closedFlag || pending != 0 {
+			t.Fatalf("closed=%v admissions=%d, want true/0", closedFlag, pending)
 		}
 	})
 }
