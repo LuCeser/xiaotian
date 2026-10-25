@@ -406,6 +406,31 @@ async function scenarioResumeCloseWindow(args) {
   };
 }
 
+// scenario "correction-submit-close"（1.10a 复验）：重连补检课堂——恢复播
+// 报自然完成后，先点第一行的「错」与第二行的「对」（人工改判，凑出最小
+// diff），再点「检查完了，提交」；关闭由 Go 侧在提交闩驻留时触发，页面只
+// 观察 close 与迟到的 review_result/教师句。
+async function scenarioCorrectionSubmitClose(args) {
+  const opening = await scenarioFixture(args);
+  const before = await wsView(args.page);
+  const teachersBefore = before.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length;
+  const reviewBefore = before.filter((e) => e.dir === 'in' && e.type === 'review_result').length;
+  const buttons = args.page.locator('.rt-check-row .rt-check-btn');
+  await buttons.nth(1).click(); // 第一行的「错」—— the one-word diff this submit carries
+  await buttons.nth(3).click(); // 第二行的「错」—— agrees with the derived hint: no diff
+  await args.page.locator('.rt-check-submit').click();
+  await waitWs(args.page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+    { timeoutMs: args.timeoutMs, label: 'close racing the correction submit' });
+  const view = await wsView(args.page);
+  return {
+    ...opening,
+    verdictTaps: view.filter((e) => e.dir === 'out' && e.type === 'check_verdict').length,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    lateTeacherSentences: view.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length - teachersBefore,
+    lateReviewResults: view.filter((e) => e.dir === 'in' && e.type === 'review_result').length - reviewBefore,
+  };
+}
+
 const SCENARIOS = {
   fixture: scenarioFixture,
   'held-fixture': scenarioHeldFixture,
@@ -415,6 +440,7 @@ const SCENARIOS = {
   'voice-verdict-close': scenarioVoiceVerdictClose,
   'ocr-prefill-close': scenarioOcrPrefillClose,
   'check-submit-close': scenarioCheckSubmitClose,
+  'correction-submit-close': scenarioCorrectionSubmitClose,
   'starve-probe': scenarioStarveProbe,
 };
 

@@ -106,6 +106,10 @@ type speechDriverResult struct {
 	CheckStartedBeforeClose     int `json:"checkStarted"`
 	TeacherSentencesBeforeClose int `json:"teacherSentences"`
 	LateFramesAfterClose        int `json:"lateFrames"`
+
+	// correction-submit-close scenario field (1.10a re-proof): the verdict
+	// taps the page actually sent.
+	VerdictTaps int `json:"verdictTaps"`
 }
 
 var speechExpectedOpening = []string{
@@ -568,6 +572,32 @@ func (f *speechBrowserFixture) seedCheckingWithOutcomes() {
 	f.mu.Unlock()
 }
 
+// seedCorrection closes a checking lesson through the REAL fallback shape
+// (CompleteCheck with unchecked=true): the next reconnect reopens it as the
+// post-hoc correction panel with derived (manual=false) verdicts — the
+// classroom 1.10a's correction submit rides on a real browser connection.
+func (f *speechBrowserFixture) seedCorrection() {
+	f.t.Helper()
+	f.seedCheckingWithOutcomes()
+	ctx := context.Background()
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	l, err := f.tools.GetLessonState(ctx, lessonID)
+	if err != nil {
+		f.t.Fatalf("read seeded lesson: %v", err)
+	}
+	if _, err := f.tools.CompleteCheck(ctx, lessonID, l.Version, "browser-seed-fallback", true); err != nil {
+		f.t.Fatalf("seed correction row: %v", err)
+	}
+	f.mu.Lock()
+	// speakTurn splits on the exclamation mark — the expected list mirrors
+	// the two server-side sentences (speechExpectedCheckResume's shape).
+	f.expectedSentences = []string{
+		"欢迎回来！",
+		"上次没来得及检查，我们现在补上：屏幕上有 2 个词，老师先猜了一个，你来点「对」或「错」告诉老师真正的答案吧。",
+	}
+	f.mu.Unlock()
+}
+
 // seedCheckingWithManualVerdicts extends seedChecking with two real manual
 // verdict writes: the panel then re-renders from the authoritative echo with
 // every word confirmed, and the 提交 button enables (the client gate mirrors
@@ -589,6 +619,37 @@ func (f *speechBrowserFixture) seedCheckingWithManualVerdicts() {
 		}
 		l.Version = res.NewVersion
 	}
+}
+
+// speechReviewGate parks the FIRST SubmitReview after mounting — the
+// corrections path's diff write (1.10a) rides cfg.Words, not the lesson
+// executor, so its close-race control point sits here.
+type speechReviewGate struct {
+	WordSource
+	gate *speechOneGate
+	once sync.Once
+}
+
+func (g *speechReviewGate) SubmitReview(ctx context.Context, results map[string]string, category string) (ReviewWriteResult, error) {
+	g.once.Do(func() {
+		g.gate.arm()
+		g.gate.wait()
+	})
+	return g.WordSource.SubmitReview(ctx, results, category)
+}
+
+// gateReviewWrite mounts the one-shot SubmitReview hold on every future
+// manager's word source (the current override chain, fake or real).
+func (f *speechBrowserFixture) gateReviewWrite() *speechOneGate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	inner := WordSource(f.words)
+	if f.wordsOverride != nil {
+		inner = f.wordsOverride
+	}
+	g := &speechReviewGate{WordSource: inner, gate: newSpeechOneGate()}
+	f.wordsOverride = g
+	return g.gate
 }
 
 func (f *speechBrowserFixture) gateScreenVerdict() (entered, release chan struct{}) {
@@ -787,7 +848,8 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 	}, extraArgs...)
 	if scenario == "fixture" || scenario == "held-fixture" || scenario == "close-after-opening" ||
 		scenario == "screen-verdict-close" || scenario == "voice-verdict-close" ||
-		scenario == "ocr-prefill-close" || scenario == "check-submit-close" {
+		scenario == "ocr-prefill-close" || scenario == "check-submit-close" ||
+		scenario == "correction-submit-close" {
 		f.mu.Lock()
 		sentences := append([]string(nil), f.expectedSentences...)
 		f.mu.Unlock()
@@ -1817,6 +1879,64 @@ func TestClosedControlBrowser(t *testing.T) {
 			t.Fatal("the raced close never landed")
 		}
 	})
+}
+
+// TestCorrectionSubmitBrowser 是 1.10a 的复验（review P1）：更正提交的接
+// 纳与保存责任经真实浏览器旅程——重连补检课堂（自然 ACK 恢复播报）、人工
+// 改判、真实 UI 提交按钮——在提交闩驻留时关闭，已接纳的 diff 保存与回执
+// 仍然完成，关闭后没有迟到的 review_result 或总结播报。撤销验证：撤掉
+// submitCorrections 的生产接纳后本测试红（提交被拒、行不落 diff）。
+func TestCorrectionSubmitBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedCorrection()
+	reviewGate := f.gateReviewWrite()
+
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	seeded, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read seeded lesson: %v", err)
+	}
+
+	driver := f.runDriverAsync("correction-submit-close", 45*time.Second)
+	select {
+	case <-reviewGate.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the correction diff write never reached its review gate")
+	}
+	m := f.waitFirstManager(5 * time.Second)
+	// The goodbye close claims the accepted correction (its admission covers
+	// the diff write, the receipt and the marker reset) while the diff write
+	// is parked AHEAD of the real save.
+	m.handleEndSession(m.currentSender())
+	reviewGate.openUp()
+	res := <-driver
+	if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+		t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+	}
+	f.assertOriginalTasksExited()
+
+	if got := len(f.words.submissions()); got != 1 || len(f.words.submissions()[0]) != 1 {
+		t.Fatalf("correction diff batches = %v, want exactly the one-word diff", f.words.submissions())
+	}
+	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
+		t.Fatalf("stored stage=%q unchecked=%v, want the marker cleared by the accepted correction", stored.Stage, stored.Unchecked)
+	}
+	// Two manual verdicts (v+2) then the marker reset (+1): the diff's own
+	// review write lands in the vocabulary store, not the lesson row.
+	if stored.Version != seeded.Version+3 {
+		t.Fatalf("stored version = %d, want seeded %d + 2 verdicts + 1 marker reset", stored.Version, seeded.Version)
+	}
+	m.TurnManager.mu.Lock()
+	pending := len(m.checkWrites)
+	m.TurnManager.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("completed check-write admissions = %d, want 0", pending)
+	}
 }
 
 func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {
