@@ -626,12 +626,15 @@ body {
 /* above; only the photo-specific surfaces live here.                  */
 /* ------------------------------------------------------------------ */
 
-/* The form is a transparent container (single/batch-add-form family
-   pattern — children own the spacing) with one exception: the 开始识别
-   button is a direct child followed straight by the bordered preview
-   table, so the table carries the 16px rhythm gap. */
-.photo-add-form > .preview-scroll {
+/* Issue #81: the review table lives inside the workspace's 词条核对
+   column (no longer a direct form child); the column head owns the
+   rhythm, so the old `form > .preview-scroll` margin rule is gone. */
+.photo-workspace {
   margin-top: 16px;
+}
+
+.photo-workspace[hidden] {
+  display: none;
 }
 
 .photo-pick-row {
@@ -1770,16 +1773,14 @@ body {
     grid-row: 1;
   }
 
-  /* Issue #42: the photo review table is the one wide workflow in the
-     词库 panel — five editable columns never fit a 1fr rail (and its
-     min-content was prying the fr tracks open to ~528px each, the 527px
-     constraint the acceptance run measured). While the 照片导入 tab is
-     showing (#add-panel-photo unhidden via its hidden attribute), the
-     grid collapses to a single full-width column in the DOM order the
-     <1024px layout already uses: 添加 on top, 浏览 below. The other two
-     add tabs keep the 2fr/1fr rail untouched; browsers without :has()
-     degrade to the rail + the sideways-scroll floor above, never the
-     34px collapse. */
+  /* Issue #42 + #81: the photo review is the one wide workflow in the
+     词库 panel — since #81 it carries its OWN two-column workspace
+     inside the tab (材料 | 词条核对), so at the page level the photo tab
+     keeps the full width and the grid collapses to a single column
+     (DOM order: 添加 on top, 浏览 below) while #add-panel-photo is
+     showing. The other two add tabs keep the 2fr/1fr rail untouched;
+     browsers without :has() degrade to the rail + the sideways-scroll
+     floor, never the 34px collapse. */
   .parent-panel-vocab:has(#add-panel-photo:not([hidden])) {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2658,5 +2659,359 @@ body {
   background: var(--surface);
   color: var(--muted);
   cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------------ */
+/* Issue #81 — A 并排核对：照片导入的两列工作区                          */
+/* 宽屏（≥1024px）：左侧「材料与学习安排」（原图大图 + 页状态 + 教材归属  */
+/* + 释义补充），右侧「词条核对」（表格 + 卡片 + 底部操作）。窄屏保持同一  */
+/* 任务顺序单列堆叠：材料 → 学习安排 → 词条 → 操作。工作区上方一行紧凑   */
+/* 状态条陈述 教材·进度·本批·课次 与诚实的默写安排说明——只陈述，不提问。 */
+/* ------------------------------------------------------------------ */
+
+/* The picker's small thumbnail yields to the large 本次材料 view as soon
+   as the workspace opens (both read the same object URL). */
+.photo-add-form.photo-workspace-open .photo-thumb {
+  display: none;
+}
+
+/* ---- 状态条（教材 · 进度 · 本批 · 课次 + honest hint） ---- */
+
+.photo-state-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 20px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.photo-state-line[hidden] {
+  display: none;
+}
+
+.photo-state-fact {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.photo-state-fact strong {
+  color: var(--ink);
+  font-weight: 600;
+  margin-left: 4px;
+  overflow-wrap: anywhere;
+}
+
+/* One statement per row: good = 课次已学（保存后即可安排默写）,
+   warn = 尚未学到/无进度（暂不自动安排）, neutral = 事实补充。
+   信息性说明，永不做成提问或选择控件（进度已知即静默沿用）。 */
+.photo-state-hint {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  background: var(--background);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.photo-state-hint-good {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success-strong); /* 5.2:1 on the tint */
+}
+
+.photo-state-hint-warn {
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+  color: var(--warning-strong); /* 4.8:1 on the tint */
+}
+
+/* ---- 两列工作区 ---- */
+
+.photo-workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.photo-col-source {
+  min-width: 0;
+}
+
+.photo-col-source-inner {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+
+/* The inner grid owns the rhythm — the panels' own form-flow margins
+   (built for the old single-column stack) would double it. */
+.photo-col-source-inner .pdf-status-bar,
+.photo-col-source-inner .photo-textbook-panel,
+.photo-col-source-inner .photo-meaning-bar {
+  margin: 0;
+}
+
+.photo-col-review {
+  min-width: 0;
+}
+
+/* 本次材料 card */
+.photo-source-card {
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.photo-source-label {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.photo-source-view {
+  padding: 8px;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.photo-source-view[hidden] {
+  display: none;
+}
+
+.photo-source-img {
+  display: block;
+  width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: zoom-in;
+}
+
+/* 放大查看：去掉高度上限，密集词表在旁边也能读清（CSS 缩放，无需新库）。 */
+.photo-source-view.photo-source-zoomed .photo-source-img {
+  max-height: none;
+  object-fit: initial;
+  cursor: zoom-out;
+}
+
+.photo-source-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.photo-source-caption {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* 44px nested-control floor — the zoom toggle is a real tap target, not a
+   hover trick. */
+.photo-source-zoom-btn {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 4px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.photo-source-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.photo-source-note[hidden] {
+  display: none;
+}
+
+/* 词条核对 column head */
+.photo-review-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.photo-review-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.photo-review-note {
+  margin: 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+/* ---- 行内视觉层级：词面与释义突出，课次与状态另列轻权 ---- */
+
+.photo-preview-table th.photo-th-primary {
+  color: var(--ink);
+}
+
+.photo-preview-table th.photo-th-secondary {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.photo-word-input {
+  font-weight: 600;
+}
+
+/* 课次 reads secondary: lighter field chrome, still 16px text (iOS
+   zoom-on-focus rule) and 44px tall via .photo-cell-input. */
+.photo-lesson-cell .photo-lesson-input {
+  background: var(--background);
+  color: var(--muted);
+}
+
+.photo-row-conflict .photo-lesson-cell .photo-lesson-input,
+.photo-row-exists .photo-lesson-cell .photo-lesson-input,
+.photo-row-invalid .photo-lesson-cell .photo-lesson-input {
+  background: var(--surface);
+}
+
+/* ---- 底部操作 + 保存说明 ---- */
+
+.photo-commit-hint {
+  flex-basis: 100%;
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.photo-commit-hint[hidden] {
+  display: none;
+}
+
+/* Narrow-first: the primary pair grows to the row so 确认添加/放弃识别结果
+   are reachable without horizontal hunting; wide, they sit content-width. */
+.photo-actions .btn {
+  flex: 1 1 160px;
+}
+
+/* ---- 回执：保存结果 与 默写安排 分开表达 ---- */
+
+.result-scope {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.result-scope-title {
+  font-weight: 600;
+}
+
+.result-scope-line {
+  font-size: 14px;
+  font-weight: 400;
+  margin-top: 4px !important;
+  overflow-wrap: anywhere;
+}
+
+/* Tones work on BOTH banner tints (success/warning backgrounds): the
+   strong partners measure >=4.5:1 on their own tint and on the other
+   (--warning-strong on --success-bg is 4.7:1, --success-strong on
+   --warning-bg 4.6:1). */
+.result-scope-good {
+  color: var(--success-strong);
+}
+
+.result-scope-wait {
+  color: var(--warning-strong);
+}
+
+.result-scope-next {
+  color: var(--ink);
+}
+
+/* ---- ≥1024px：并排两列 ---- */
+
+@media (min-width: 1024px) {
+  .photo-workspace-grid {
+    grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+    gap: 20px;
+    /* stretch gives the sticky left column its travel room */
+    align-items: stretch;
+  }
+
+  /* The whole 材料与学习安排 column pins beside the review while the
+     (internally scrolling) entry list and the long poem/passage cards
+     run past it; it scrolls itself when taller than the viewport. */
+  .photo-col-source-inner {
+    position: sticky;
+    top: 12px;
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 4px;
+  }
+
+  /* The review column is the wide one: 单词/释义 take the visible weight,
+     课次/状态 keep their separate, lighter tracks. */
+  .photo-preview-table th:nth-child(2) {
+    width: 28%;
+  }
+
+  .photo-preview-table th:nth-child(4) {
+    width: 104px;
+  }
+
+  .photo-preview-table th:nth-child(5) {
+    width: 148px;
+  }
+
+  /* Inside the ~360px-rail-plus-gap viewport the old 640px floor would
+     force sideways scroll at exactly 1024px; 560px keeps every column's
+     acceptance floor and still fits the right column. */
+  .photo-workspace .photo-preview-table {
+    min-width: 560px;
+  }
+
+  /* Side-by-side reading wants more than the batch table's 320px window;
+     the list scrolls internally so the footer actions stay in view. */
+  .photo-workspace .preview-scroll {
+    max-height: min(68vh, 640px);
+  }
+
+  .photo-actions .btn {
+    flex: 0 0 auto;
+  }
+}
+
+/* ---- ≥1400px（iPad Pro 横屏一类的大屏）：材料列稍宽，图更好读 ---- */
+
+@media (min-width: 1400px) {
+  .photo-workspace-grid {
+    grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
+  }
+
+  .photo-source-img {
+    max-height: 480px;
+  }
 }
 

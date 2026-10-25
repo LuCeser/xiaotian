@@ -110,9 +110,10 @@ if ($listeners.Count -gt 0) {
 }
 
 # 3. Build, then start the service DETACHED (background, hidden window).
-# Logs go via redirect: stderr -> the mode's log (the service logs JSON to
-# stderr per config log.output=stderr), stdout -> companion .out log.
-# Truncated at each start so logs reflect only the current instance.
+# The Node launcher creates a new process group and gives the service explicit
+# file handles. This matters under OpenCode on Windows: Start-Process alone can
+# leave the shell tool waiting forever for inherited stdout/stderr pipe EOF.
+# Logs go to files and are truncated at each start.
 $logDir = Join-Path $root 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $logErr = Join-Path $logDir $logName
@@ -122,26 +123,50 @@ $logOut = if ($Https) { Join-Path $logDir 'server-8443.out.log' } else { Join-Pa
 Write-Host "[run.ps1] building service (incremental)..." -ForegroundColor Cyan
 go build -o .\bin\service.exe .\cmd\service
 if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: build failed" -ForegroundColor Red; exit 1 }
-$p = Start-Process -FilePath (Join-Path $root 'bin\service.exe') `
-    -ArgumentList '-config', $configFile `
-    -WorkingDirectory $root -WindowStyle Hidden `
-    -RedirectStandardError $logErr -RedirectStandardOutput $logOut -PassThru
-Write-Host "[run.ps1] service started in background, PID $($p.Id)  (logs: logs\$logName / $(Split-Path -Leaf $logOut))" -ForegroundColor Green
+$launcher = Join-Path $root 'scripts\start-detached.mjs'
+if (-not (Test-Path $launcher)) {
+    Write-Host "ERROR: detached launcher not found: $launcher" -ForegroundColor Red
+    exit 1
+}
+$launchOutput = @(& node $launcher $root $logOut $logErr -- (Join-Path $root 'bin\service.exe') '-config' $configFile)
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: detached service launch failed" -ForegroundColor Red
+    $launchOutput | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+    exit 1
+}
+try {
+    $launchResult = ($launchOutput | Select-Object -Last 1) | ConvertFrom-Json
+    $servicePid = [int]$launchResult.pid
+    $p = Get-Process -Id $servicePid -ErrorAction Stop
+} catch {
+    Write-Host "ERROR: detached launcher returned an invalid PID: $($launchOutput -join ' ')" -ForegroundColor Red
+    exit 1
+}
+Write-Host "[run.ps1] service started in background, PID $servicePid  (logs: logs\$logName / $(Split-Path -Leaf $logOut))" -ForegroundColor Green
 Write-Host "[run.ps1] entry URL: $entryUrl" -ForegroundColor Cyan
 if ($Https) { Write-Host "[run.ps1] mic-ready secure context; health: http://127.0.0.1:8081/health" -ForegroundColor Cyan }
 
-# Bounded readiness wait: port listening within ~10s (early exit -> log tail hint).
+# Bounded readiness wait: THIS process must own the public listener within
+# ~10s. Checking only "some listener exists" can report a stale/racing
+# instance as ready while the process we just launched failed to bind.
 $ready = $false
 foreach ($i in 1..20) {
+    $p.Refresh()
     if ($p.HasExited) { break }
-    if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { $ready = $true; break }
+    $ownedListener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -eq $servicePid }
+    if ($ownedListener) { $ready = $true; break }
     Start-Sleep -Milliseconds 500
 }
 if ($ready) {
-    Write-Host "[run.ps1] :$port is listening — ready" -ForegroundColor Green
+    Write-Host "[run.ps1] :$port is listening on PID $servicePid — ready" -ForegroundColor Green
 } else {
-    Write-Host "[run.ps1] WARNING: :$port not listening within 10s (exit=$($p.HasExited))" -ForegroundColor Yellow
-    Write-Host "[run.ps1] last log lines (logs\$logName):" -ForegroundColor Yellow
+    Write-Host "ERROR: PID $servicePid did not own :$port within 10s (exit=$($p.HasExited))" -ForegroundColor Red
+    Write-Host "[run.ps1] last log lines (logs\$logName):" -ForegroundColor Red
     Get-Content $logErr -Tail 5 -ErrorAction SilentlyContinue
+    if (-not $p.HasExited) {
+        Stop-Process -Id $servicePid -Force -ErrorAction SilentlyContinue
+    }
+    exit 1
 }
 Write-Host "[run.ps1] stop with: .\stop.ps1" -ForegroundColor Cyan

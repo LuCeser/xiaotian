@@ -80,7 +80,7 @@ module.exports = defineConfig({
   testDir: './e2e',
   // Only the parent suites ride this config; the student specs stay on the
   // legacy config (they need the .env-loaded dev service).
-  testMatch: /(?:parent-(management|photo-chinese|photo-import|poem-import|poem-recitation|passage-recitation|zh-passage-import|pdf-import|photo-reimport|photo-textbook|textbook-scope|meaning-supplement|uat-gaps)|family-journey)\.spec\.js|pdf-capture\.spec\.js/,
+  testMatch: /(?:parent-(management|photo-alayout|photo-chinese|photo-import|poem-import|poem-recitation|passage-recitation|zh-passage-import|pdf-import|photo-reimport|photo-textbook|textbook-scope|meaning-supplement|uat-gaps)|family-journey)\.spec\.js|pdf-capture\.spec\.js/,
   timeout: 120_000,
   retries: 0,
   // One isolated instance, one vocabulary DB: serialize like the legacy

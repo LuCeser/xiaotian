@@ -101,6 +101,22 @@ async function installFakeMic(page) {
   await page.addInitScript(FAKE_MIC_INIT);
 }
 
+/**
+ * Deterministic s16le mono tone clip as base64 — the standard spoken-input
+ * corpus stand-in for specs that only need the VAD to segment something
+ * (the strict stub's ASR reply carries the actual "transcript"): loud
+ * enough for the server VAD, ≥2 s so one segment closes after the ~700 ms
+ * hangover. Node-side: this SYNTHESIZES a clip; playPcm16 renders it.
+ */
+function tonePcm16Base64(ms = 2000, freq = 440, rate = 16000, amp = 0.6) {
+  const n = Math.round((ms * rate) / 1000);
+  const buf = Buffer.alloc(n * 2);
+  for (let i = 0; i < n; i++) {
+    buf.writeInt16LE(Math.round(Math.sin((2 * Math.PI * freq * i) / rate) * amp * 32767), i * 2);
+  }
+  return buf.toString('base64');
+}
+
 /** Read the control surface (tracks/context/clip counters). */
 async function micInfo(page) {
   return page.evaluate(() => window.__rtFakeMic.info());
@@ -112,4 +128,4 @@ async function playPcm16(page, b64, rate, amplitude) {
     { c: b64, r: rate, a: amplitude });
 }
 
-module.exports = { installFakeMic, micInfo, playPcm16 };
+module.exports = { installFakeMic, micInfo, playPcm16, tonePcm16Base64 };

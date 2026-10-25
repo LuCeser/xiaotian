@@ -112,10 +112,10 @@ python:
   # third_party/python/ in this repo — see `make py-sync` for upstream sync.
   scriptsDir: third_party/python
 
-  # Filename of the FSRS vocab_manager script inside scriptsDir (D-03).
-  vocabScript: vocab_manager.py
-  # Filename of the pregenerate_dictation script inside scriptsDir (D-03).
-  pregenScript: pregenerate_dictation.py
+  # Script path the bridge launches VERBATIM (no scriptsDir join) — the
+  # directory prefix is included. Relative to the process CWD (repo root).
+  vocabScript: third_party/python/vocab_manager.py
+  pregenScript: third_party/python/pregenerate_dictation.py
 
   # Runtime SQLite DB path (env DICTATION_DB_PATH) for FSRS state (D-09/D-10).
   vocabDBPath: /opt/hta/data/vocab.db
