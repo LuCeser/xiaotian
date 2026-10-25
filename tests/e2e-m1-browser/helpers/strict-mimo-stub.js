@@ -148,7 +148,8 @@ function createStrictMimoStub(options = {}) {
       // The synthesized sentence rides the LAST message: the production
       // dictation-teacher preset PREPENDS a user style instruction
       // (mimo.PresetDictationTeacher → WithStyleInstruction), so messages[0]
-      // is the style text, never the sentence.
+      // is the style text, never the sentence (surfaced by step 11's
+      // match-pinned TTS scripts — earlier specs never matched on text).
       let text = '';
       for (let i = (body.messages || []).length - 1; i >= 0; i--) {
         const m = body.messages[i];
