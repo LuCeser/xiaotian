@@ -1678,6 +1678,147 @@ func TestCloseSnapshotBrowser(t *testing.T) {
 	})
 }
 
+// TestDuplicateSubmitBrowser 是 1.13b 的验收：用自然播放夹具替换
+// duplicate_submit_terminal 的代 ACK 初始化。另一连接先把检查闩落库，本
+// 会话的真实 UI 提交（面板按钮 → check_submit → 生产 CompleteCheck）以
+// Idempotent 回放撞上已 submitted 的行——重复提交终端分支经统一关闭入口：
+// 终态 session_ended 恰一次、没有第二笔保存、没有 review_result 或迟到
+// 播报越过终止消息，连接与任务全部退出。
+func TestDuplicateSubmitBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedCheckingWithManualVerdicts()
+	before, _ := f.gateCheckSubmit(true, false)
+	t.Cleanup(before.openUp)
+
+	driver := f.runDriverAsync("check-submit-close", 45*time.Second)
+	select {
+	case <-before.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the formal submit never reached its pre-latch window")
+	}
+	m := f.waitFirstManager(5 * time.Second)
+	// While THIS session's submit is parked ahead of its latch write, another
+	// connection flips the checking→submitted latch first (the multi-
+	// connection rule rides the database, §七).
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	l, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read lesson before the foreign latch: %v", err)
+	}
+	if _, err := f.tools.CompleteCheck(context.Background(), lessonID, l.Version, "other-tab-submit", false); err != nil {
+		t.Fatalf("foreign submit latch: %v", err)
+	}
+	before.openUp()
+	res := <-driver
+	if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+		t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+	}
+	f.assertOriginalTasksExited()
+
+	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
+		t.Fatalf("stored stage=%q unchecked=%v, want the foreign submit's submitted+checked", stored.Stage, stored.Unchecked)
+	}
+	if got := len(f.words.submissions()); got != 0 {
+		t.Fatalf("review batches = %d, want 0 — the duplicate submit never saves", got)
+	}
+	m.TurnManager.mu.Lock()
+	closedFlag, pending := m.closed, len(m.checkWrites)
+	m.TurnManager.mu.Unlock()
+	if !closedFlag || pending != 0 {
+		t.Fatalf("closed=%v admissions=%d, want true/0", closedFlag, pending)
+	}
+}
+
+// TestClosedControlBrowser 是 1.13c 的验收：用自然播放夹具替换
+// closed_control_silence 的代 ACK 初始化。真实连接经 resume 播报自然 ACK
+// 完成初始化后：终态关闭之后到达的控制面（不可解析帧、服务器专用类型、
+// 打断、重读、ping）经生产入口零应答、epoch 不动；打断与 goodbye 的竞争
+// 无论谁赢，close 之后再无任何下行帧尾随终止消息。
+func TestClosedControlBrowser(t *testing.T) {
+	settled := func(f *speechBrowserFixture) {
+		t.Helper()
+		if !waitFor(t, 20*time.Second, func() bool { return f.announcementDone.Load() >= 1 }) {
+			t.Fatal("the resume announcement never settled — no natural playback initialization")
+		}
+	}
+
+	t.Run("frames after the terminal close answer nothing", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedChecking()
+		driver := f.runDriverAsync("resume-close-window", 45*time.Second)
+		m := f.waitFirstManager(5 * time.Second)
+		settled(f)
+		m.handleEndSession(m.currentSender())
+		res := <-driver
+		if res.WSCloseCount != 1 {
+			t.Fatalf("close events = %d, want 1", res.WSCloseCount)
+		}
+
+		// The post-terminal barrage rides a capture sender through the
+		// production entry: the closed session must answer none of it.
+		capture := &captureSender{}
+		before := ttTotalControls(capture)
+		m.HandleControl(capture, []byte("not json"))
+		m.HandleControl(capture, mustJSON(t, TeacherSentenceMsg{Type: TypeTeacherSentence}))
+		m.HandleControl(capture, mustJSON(t, InterruptMsg{Type: TypeInterrupt, LastSentenceID: "t1-s0"}))
+		m.HandleControl(capture, mustJSON(t, ReadWordMsg{Type: TypeReadWord, WordIndex: 0, CurrentIndex: 0}))
+		m.HandleControl(capture, mustJSON(t, PingMsg{Type: TypePing, TClientMs: 9}))
+		if got := ttTotalControls(capture); got != before {
+			t.Fatalf("controls after the close = %d, want unchanged %d", got, before)
+		}
+		m.TurnManager.mu.Lock()
+		closedFlag, epoch := m.closed, m.epoch
+		m.TurnManager.mu.Unlock()
+		if !closedFlag {
+			t.Fatal("the close did not stand")
+		}
+		if got := m.currentEpoch(); got != epoch {
+			t.Fatalf("epoch after the closed interrupt = %d, want unchanged %d", got, epoch)
+		}
+	})
+
+	t.Run("an interrupt racing the goodbye never trails the terminal message", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedChecking()
+		driver := f.runDriverAsync("resume-close-window", 45*time.Second)
+		m := f.waitFirstManager(5 * time.Second)
+		settled(f)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for _, c := range []func(){
+			func() { m.handleInterrupt(m.currentSender(), InterruptMsg{Type: TypeInterrupt}) },
+			func() { m.handleEndSession(m.currentSender()) },
+		} {
+			c := c
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				c()
+			}()
+		}
+		close(start)
+		wg.Wait()
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateFramesAfterClose != 0 {
+			t.Fatalf("close=%d late frames=%d, want 1/0 — nothing may trail the terminal message",
+				res.WSCloseCount, res.LateFramesAfterClose)
+		}
+		m.TurnManager.mu.Lock()
+		closedFlag := m.closed
+		m.TurnManager.mu.Unlock()
+		if !closedFlag {
+			t.Fatal("the raced close never landed")
+		}
+	})
+}
+
 func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {
 	f.t.Helper()
 	done := make(chan speechDriverResult, 1)
