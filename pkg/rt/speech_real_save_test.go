@@ -108,32 +108,41 @@ func speechUVBootstrap() (interp, venvDir, reason string, err error) {
 // Authoritative read-back control point.
 // ---------------------------------------------------------------------------
 
-// speechReadGate parks the FIRST GetLessonState after mounting — the
-// authoritative read the 1.11 fallback performs once its waits settle. Later
-// calls pass straight through: production reads the state all over the place
-// and only the armed window is under test control.
+// speechReadGate parks the FIRST GetLessonState after the test HOLDS it —
+// the authoritative read the 1.11 fallback performs once its waits settle.
+// Until hold() the gate is transparent (the fixture's own resume reads go
+// through); after it, exactly one read parks and every later one passes.
+// Production reads the state all over the place, so the parked window must
+// be a test-chosen instant.
 type speechReadGate struct {
 	LessonExecutor
-	gate *speechOneGate
-	once sync.Once
+	gate  *speechOneGate
+	armed atomic.Bool
+	once  sync.Once
 }
 
 func (g *speechReadGate) GetLessonState(ctx context.Context, lessonID string) (lesson.Lesson, error) {
-	g.once.Do(func() {
-		g.gate.arm()
-		g.gate.wait()
-	})
+	if g.armed.Load() {
+		g.once.Do(func() {
+			g.gate.arm()
+			g.gate.wait()
+		})
+	}
 	return g.LessonExecutor.GetLessonState(ctx, lessonID)
 }
 
+// hold arms the one-shot park; openUp (idempotent) releases the parked read.
+func (g *speechReadGate) hold()   { g.armed.Store(true) }
+func (g *speechReadGate) openUp() { g.gate.openUp() }
+
 // gateStateRead mounts the one-shot authoritative-read hold on every future
-// manager's executor chain (1.12a).
-func (f *speechBrowserFixture) gateStateRead() *speechOneGate {
+// manager's executor chain (1.12a). The gate is passive until hold().
+func (f *speechBrowserFixture) gateStateRead() *speechReadGate {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	g := &speechReadGate{LessonExecutor: f.exec, gate: newSpeechOneGate()}
 	f.exec = g
-	return g.gate
+	return g
 }
 
 // ---------------------------------------------------------------------------
@@ -251,10 +260,27 @@ func (f *speechBrowserFixture) useRealFSRS(t *testing.T) *speechFSRSSource {
 // before 与 committed 位置都能命中。全部控制点经 openUp 释放后没有滞留
 // 的等待方。
 func TestSpeechFixtureControlPoints(t *testing.T) {
-	t.Run("state read gate parks the first read only", func(t *testing.T) {
+	t.Run("state read gate parks the first held read only", func(t *testing.T) {
 		exec := newFakeExecutor(ttLessonID, ttCards("苹果"))
 		g := &speechReadGate{LessonExecutor: exec, gate: newSpeechOneGate()}
 
+		// Before hold() the gate is transparent — the fixture/resume reads
+		// pass straight through.
+		early := make(chan lesson.Lesson, 1)
+		go func() {
+			l, err := g.GetLessonState(context.Background(), ttLessonID)
+			if err != nil {
+				t.Errorf("early read: %v", err)
+			}
+			early <- l
+		}()
+		select {
+		case <-early:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a passive read parked on an unheld gate")
+		}
+
+		g.hold()
 		first := make(chan lesson.Lesson, 1)
 		go func() {
 			l, err := g.GetLessonState(context.Background(), ttLessonID)
@@ -266,20 +292,20 @@ func TestSpeechFixtureControlPoints(t *testing.T) {
 		select {
 		case <-g.gate.entered:
 		case <-time.After(5 * time.Second):
-			t.Fatal("the first authoritative read never hit the gate")
+			t.Fatal("the first held read never hit the gate")
 		}
 		select {
 		case l := <-first:
-			t.Fatalf("first read returned while parked: %+v", l)
+			t.Fatalf("held read returned while parked: %+v", l)
 		case <-time.After(100 * time.Millisecond):
 		}
-		g.gate.openUp()
+		g.openUp()
 		select {
 		case <-first:
 		case <-time.After(5 * time.Second):
 			t.Fatal("the parked read never resumed after openUp")
 		}
-		// The second read passes straight through — the gate is one-shot.
+		// The second read passes straight through — the hold is one-shot.
 		done := make(chan lesson.Lesson, 1)
 		go func() {
 			l, err := g.GetLessonState(context.Background(), ttLessonID)

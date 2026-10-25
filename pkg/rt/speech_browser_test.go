@@ -520,6 +520,38 @@ func (f *speechBrowserFixture) seedChecking() {
 	f.mu.Unlock()
 }
 
+// seedCheckingWithOutcomes extends seedChecking with REAL stored outcomes on
+// the enter_check write (word 0 confirmed clean → good → hard; word 1
+// confirmed after two hints → hard → again): the D-03 fallback's degraded
+// batch derives from the STORED outcomes, and an empty outcomes map would
+// honestly rate nothing (1.11's shape, shared with 1.12b's multi-write case).
+func (f *speechBrowserFixture) seedCheckingWithOutcomes() {
+	f.t.Helper()
+	ctx := context.Background()
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	cards := []lesson.Word{{Word: "听写浏览器"}, {Word: "第二词"}}
+	l, err := f.tools.EnsureLessonCards(ctx, lessonID, cards, lesson.CategoryChinese)
+	if err == nil {
+		var advance lesson.AdvanceResult
+		advance, err = f.tools.AdvanceWord(ctx, lessonID, l.Version, "fallback-seed-1")
+		if err == nil {
+			advance, err = f.tools.AdvanceWord(ctx, lessonID, advance.NewVersion, "fallback-seed-2")
+		}
+		if err == nil {
+			_, err = f.tools.EnterCheck(ctx, lessonID, advance.NewVersion, "fallback-seed-check", map[string]lesson.WordOutcome{
+				"0": {Outcome: outcomeConfirmed, Hints: 0}, // good → hard
+				"1": {Outcome: outcomeConfirmed, Hints: 2}, // hard → again
+			})
+		}
+	}
+	if err != nil {
+		f.t.Fatalf("seed checking lesson with outcomes: %v", err)
+	}
+	f.mu.Lock()
+	f.expectedSentences = append([]string(nil), speechExpectedCheckResume...)
+	f.mu.Unlock()
+}
+
 // seedCheckingWithManualVerdicts extends seedChecking with two real manual
 // verdict writes: the panel then re-renders from the authoritative echo with
 // every word confirmed, and the 提交 button enables (the client gate mirrors
@@ -1181,6 +1213,109 @@ func TestCloseFallbackAfterAcceptedWrites(t *testing.T) {
 	}
 	if len(stored.Verdicts) != 1 || !stored.Verdicts[0].Manual || !stored.Verdicts[0].Correct {
 		t.Fatalf("stored verdicts = %+v, want the accepted manual screen verdict kept", stored.Verdicts)
+	}
+	m.mu.Lock()
+	pending := len(m.checkWrites)
+	m.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("completed check-write admissions = %d, want 0", pending)
+	}
+}
+
+// TestCloseFallbackMultipleWrites 是 1.12b 的验收：两笔已接纳但尚未提交的
+// 判定（一个 OCR 预填批次内的两笔逐词写入，1.06 纪律下由一次登记覆盖）与
+// 关闭竞争——兜底先在锁外等批次完成，再读权威行：两笔写入已把版本连续推
+// 进两次，兜底用权威版本竞争一次成功，行 submitted+unchecked、两笔预填保
+// 留、FSRS 只有一批降级评分、关闭后没有迟到回显。读回门（1.12a）把「读
+// 权威」的时机握在测试手里：读门在批次仍驻留时打开——跳过等待的实现会在
+// 门放行处读到写入落库前的旧版本并闩住它，随后两笔写入全部冲突丢失（撤
+// 销验证的红证据即此断言）。
+func TestCloseFallbackMultipleWrites(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedCheckingWithOutcomes()
+	f.armPhotoOCR(`[{"text":"听写浏览器","confidence":0.95},{"text":"第二词","confidence":0.95}]`)
+	verdictEntered, verdictRelease := f.gateOcrPrefillWrites() // the batch's per-word ApplyVerdict hold
+	readGate := f.gateStateRead()
+	var releaseOnce sync.Once
+	releaseWrites := func() { releaseOnce.Do(func() { close(verdictRelease) }) }
+	t.Cleanup(releaseWrites)
+
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	seeded, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read seeded lesson: %v", err)
+	}
+
+	driver := f.runDriverAsync("ocr-prefill-close", 45*time.Second)
+	m := f.waitFirstManager(5 * time.Second)
+	select {
+	case <-verdictEntered:
+	case res := <-driver:
+		t.Fatalf("driver finished before the batch: ok=%v err=%s", res.OK, res.Err)
+	case <-time.After(30 * time.Second):
+		m.mu.Lock()
+		pending := len(m.checkWrites)
+		m.mu.Unlock()
+		t.Fatalf("the prefill batch never hit the gate: admissions=%d", pending)
+	}
+	// The batch's ONE admission is registered before its first write parks.
+	if !waitFor(t, 10*time.Second, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return len(m.checkWrites) == 1
+	}) {
+		t.Fatal("the prefill batch was never admitted")
+	}
+	// Hold the read gate NOW: the fixture/resume reads are long past, the
+	// parked batch issues no reads, so the fallback's read is the first one
+	// of the held window — holding before the close removes any start-up
+	// race a fast (wait-skipping) fallback could win.
+	readGate.hold()
+	// The goodbye close claims the fallback while the batch's writes are
+	// parked AHEAD of their real SQLite commits.
+	m.handleEndSession(m.currentSender())
+	// Open the held read gate while the writes are STILL parked: the
+	// waiting fallback has not reached the gate yet; an implementation that
+	// skips the wait reads the PRE-write version here.
+	readGate.openUp()
+	// Release the batch: both prefill writes commit as v+1 and v+2; the
+	// waiting fallback then reads v+2 and wins the latch on the fresh
+	// version.
+	releaseWrites()
+	res := <-driver
+	if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 || res.LateOcrResults != 0 {
+		t.Fatalf("close=%d late echoes=%d late ocr=%d, want 1/0/0",
+			res.WSCloseCount, res.LateVerdictEchoes, res.LateOcrResults)
+	}
+	f.assertOriginalTasksExited()
+
+	if !waitFor(t, 10*time.Second, func() bool { return len(f.words.submissions()) == 1 }) {
+		t.Fatalf("fallback review batches = %d, want exactly one degraded batch", len(f.words.submissions()))
+	}
+	subs := f.words.submissions()
+	if subs[0]["听写浏览器"] != ratingHard || subs[0]["第二词"] != ratingAgain {
+		t.Fatalf("fallback degraded batch = %v, want hard/again from the stored outcomes", subs[0])
+	}
+	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if stored.Stage != lesson.StageSubmitted || !stored.Unchecked {
+		t.Fatalf("stored stage=%q unchecked=%v, want submitted+unchecked on the post-wait authoritative version",
+			stored.Stage, stored.Unchecked)
+	}
+	// The consecutive-version evidence: both prefill writes landed (v+1,
+	// v+2) and the fallback's latch added exactly one more.
+	if stored.Version != seeded.Version+3 {
+		t.Fatalf("stored version = %d, want seeded %d + 2 prefills + 1 latch", stored.Version, seeded.Version)
+	}
+	if len(stored.Verdicts) != 2 {
+		t.Fatalf("stored verdicts = %+v, want BOTH accepted prefill writes kept after the close", stored.Verdicts)
+	}
+	for _, v := range stored.Verdicts {
+		if v.Manual || !v.Correct {
+			t.Fatalf("stored verdicts = %+v, want both OCR prefills (manual=false, correct)", stored.Verdicts)
+		}
 	}
 	m.mu.Lock()
 	pending := len(m.checkWrites)
