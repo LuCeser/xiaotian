@@ -255,61 +255,50 @@ function Invoke-HtaStart {
     "" | Set-Content $logOut -ErrorAction SilentlyContinue
     "" | Set-Content $logErr -ErrorAction SilentlyContinue
 
-    # Detached launch. PS 5.1's Start-Process redirection leaks the caller's
-    # inherited stdio PIPE handles into the launched tree (run.ps1's
-    # scripts\start-detached.mjs exists for exactly this reason) - any caller
-    # that captures this script's output then waits on pipe EOF forever.
-    # Win32_Process.Create instead spawns through the WMI/CIM provider
-    # (WmiPrvSE.exe), so NOTHING from this process's handle chain reaches the
-    # service. Use Invoke-CimMethod, NOT the deprecated Invoke-WmiMethod: the
-    # latter throws InvalidOperationException ("无效操作") under PowerShell 7
-    # (pwsh), which is the default interactive shell on modern Windows - it
-    # returns $null, so $launch.ProcessId collapses to 0 and the launch never
-    # happens (issue #78 follow-up). A cmd /c wrapper performs the dual file
-    # redirection; its paths are relative to CurrentDirectory (= install dir),
-    # so no quoting is needed and the log contract is unchanged:
-    # logs\server.out.log + logs\server.err.log, cleared above and re-created
-    # by the redirect. (No Win32_ProcessStartup/SW_HIDE: CIM cannot carry it,
-    # and the WMI-spawned cmd/service.exe run detached without a visible
-    # console, so there is nothing to hide.)
-    $cmdLine = "`"$env:ComSpec`" /d /c bin\service.exe -config config\config.yaml 1>logs\server.out.log 2>logs\server.err.log"
-    $launch = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-        CommandLine = $cmdLine
-        CurrentDirectory = $root
-    }
-    if ([int]$launch.ReturnValue -ne 0) {
-        Write-Host "[hta.ps1] ERROR: detached launch failed (Win32_Process.Create returned $($launch.ReturnValue))" -ForegroundColor Red
+    # Detached launch that PRESERVES the loaded secrets. Win32_Process.Create
+    # (via Invoke-CimMethod) spawns service.exe under the WMI/CIM provider host
+    # (WmiPrvSE.exe), so the child inherits the PROVIDER's environment, NOT this
+    # process's - Import-HtaEnv's MIMO_API_KEY / VOLCENGINE_TTS_* set above never
+    # reached the service, which then booted "MIMO_API_KEY not set" and answered
+    # photo/voice with 503 recognition_unavailable. Start-Process instead spawns
+    # service.exe as a direct child of THIS process (so it inherits the
+    # Process-scope env vars), and -RedirectStandardOutput/-RedirectStandardError
+    # give it explicit FILE handles, so it does not retain the caller's
+    # stdout/stderr pipes (the PS 5.1 pipe-EOF hang run.ps1's
+    # scripts\start-detached.mjs exists for). Same shape as run-uat.ps1.
+    try {
+        $service = Start-Process -FilePath (Join-Path $root 'bin\service.exe') `
+            -ArgumentList @('-config', 'config\config.yaml') `
+            -WorkingDirectory $root `
+            -RedirectStandardOutput $logOut `
+            -RedirectStandardError $logErr `
+            -WindowStyle Hidden `
+            -PassThru `
+            -ErrorAction Stop
+    } catch {
+        Write-Host "[hta.ps1] ERROR: detached launch failed: $_" -ForegroundColor Red
         exit 1
     }
-    $wrapperPid = [int]$launch.ProcessId
-    Write-Host "[hta.ps1] service launching in background (wrapper PID $wrapperPid; logs: logs\server.out.log / logs\server.err.log)" -ForegroundColor Cyan
+    $servicePid = [int]$service.Id
+    Write-Host "[hta.ps1] service launching in background (PID $servicePid; logs: logs\server.out.log / logs\server.err.log)" -ForegroundColor Cyan
 
-    # Bounded readiness wait: a listener on the health port whose owner passes
-    # the G1 identity check (our bin\service.exe) must appear within ~10s.
-    # Both service ports were cleared above, so the first guard-passing owner
-    # IS this launch. The cmd wrapper exits only after service.exe exits, so
-    # a dead wrapper with no listener means the launch already failed.
-    $servicePid = $null
+    # Bounded readiness wait: THIS launch's service.exe must own a listener on
+    # the health port within ~10s. Both service ports were cleared above, so a
+    # guard-passing owner with our PID is unambiguously this launch.
     $ready = $false
     foreach ($i in 1..20) {
+        $service.Refresh()
+        if ($service.HasExited) { break }
         $ownerPid = Get-HtaGuardedPortOwner -Port $cfg.HealthPort
-        if ($ownerPid) { $servicePid = $ownerPid; $ready = $true; break }
-        if (-not (Get-Process -Id $wrapperPid -ErrorAction SilentlyContinue)) { break }
+        if ($ownerPid -eq $servicePid) { $ready = $true; break }
         Start-Sleep -Milliseconds 500
     }
     if (-not $ready) {
-        $wrapperAlive = [bool](Get-Process -Id $wrapperPid -ErrorAction SilentlyContinue)
-        Write-Host "[hta.ps1] ERROR: no bin\service.exe owned health port $($cfg.HealthPort) within 10s (wrapper alive=$wrapperAlive)" -ForegroundColor Red
+        Write-Host "[hta.ps1] ERROR: PID $servicePid did not own health port $($cfg.HealthPort) within 10s (exited=$($service.HasExited))" -ForegroundColor Red
         Write-Host "[hta.ps1] last log lines (logs\server.err.log):" -ForegroundColor Red
         Get-Content $logErr -Tail 5 -ErrorAction SilentlyContinue
-        # Kill the failed launch: stray service.exe under this install's bin\
-        # plus the cmd wrapper if it is still lingering.
-        $binPrefix = Join-Path $root 'bin'
-        Get-CimInstance Win32_Process -Filter "Name='service.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($binPrefix, [StringComparison]::OrdinalIgnoreCase) } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-        if ($wrapperAlive) {
-            Stop-Process -Id $wrapperPid -Force -ErrorAction SilentlyContinue
+        if (-not $service.HasExited) {
+            Stop-Process -Id $servicePid -Force -ErrorAction SilentlyContinue
         }
         exit 1
     }
