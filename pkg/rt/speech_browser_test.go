@@ -269,9 +269,12 @@ type speechBrowserFixture struct {
 	// resumeHold, when set, is installed as every manager's
 	// checkResumeInterleave — the window between the resume's IO and its
 	// panel presentation (1.13a's browser claim-order probe). closeEntryHold
-	// likewise rides closeSessionAt's init-write-lock window.
+	// likewise rides closeSessionAt's init-write-lock window. settleHold
+	// parks an announcement between its valid final ack and the protected
+	// settle (1.14a's probe).
 	resumeHold     func()
 	closeEntryHold func()
+	settleHold     func()
 
 	handlerActive, handlerDone        atomic.Int64
 	writerDone                        atomic.Int64
@@ -483,7 +486,7 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 	f.mu.Lock()
 	tts, probe, executor, ocrRead := f.tts, f.timerProbe, f.exec, f.ocrRead
 	words, receipts, passages, poems := f.wordsOverride, f.receipts, f.passages, f.poems
-	resumeHold, closeEntryHold := f.resumeHold, f.closeEntryHold
+	resumeHold, closeEntryHold, settleHold := f.resumeHold, f.closeEntryHold, f.settleHold
 	f.mu.Unlock()
 	if words == nil {
 		words = f.words
@@ -497,6 +500,7 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
 	tm.checkResumeInterleave = resumeHold
 	tm.closeEntryInterleave = closeEntryHold
+	tm.settleInterleave = settleHold
 	if ocrRead != nil {
 		// The production photo channel (ttBindPhoto's wiring, fixture-wide):
 		// the scripted reader under the REAL pipeline, so 拍照检查 rides the
@@ -2154,6 +2158,50 @@ func TestPoemSubmitBrowser(t *testing.T) {
 	}
 	if pending != 0 {
 		t.Fatalf("completed check-write admissions = %d, want 0", pending)
+	}
+}
+
+// TestPlaybackSettleBrowser 是 1.14a 的验收：用自然播放夹具为
+// playback_settle 建立对应证明。真实连接经 resume 播报逐句自然 ACK 后，
+// 播报的结算（listening 复兴、state 帧、回声尾及其许可的计时器）park 在
+// 生产 settle 探针上——goodbye 关闭在该窗口落地并 release 后，整组结算
+// 全部被抑制：无 listening 复兴、零计时器、close 之后无任何下行帧。
+func TestPlaybackSettleBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedChecking()
+	probe := f.useTimerProbe()
+	settleHit := make(chan struct{})
+	settleRelease := make(chan struct{})
+	var settleOnce sync.Once
+	f.mu.Lock()
+	f.settleHold = func() {
+		settleOnce.Do(func() { close(settleHit) })
+		<-settleRelease
+	}
+	f.mu.Unlock()
+
+	driver := f.runDriverAsync("resume-close-window", 45*time.Second)
+	m := f.waitFirstManager(5 * time.Second)
+	select {
+	case <-settleHit:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the naturally-acked announcement never reached its settle window")
+	}
+	m.handleEndSession(m.currentSender())
+	close(settleRelease)
+	res := <-driver
+	if res.WSCloseCount != 1 || res.LateFramesAfterClose != 0 {
+		t.Fatalf("close=%d late frames=%d, want 1/0", res.WSCloseCount, res.LateFramesAfterClose)
+	}
+	m.TurnManager.mu.Lock()
+	state := m.state
+	m.TurnManager.mu.Unlock()
+	closed := m.wasClosed()
+	if !closed || state == StateListening {
+		t.Fatalf("state=%q closed=%v, want the closed session never revived to listening", state, closed)
+	}
+	if arms := probe.count(); arms != 0 {
+		t.Fatalf("word-timer arms after the closed settle = %d, want 0", arms)
 	}
 }
 
