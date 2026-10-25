@@ -190,10 +190,22 @@ function Get-HtaGuardedPortOwner {
 }
 
 function Get-HtaLanIPv4 {
-    $addrs = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
-        ForEach-Object { $_.IPAddress })
-    if ($addrs.Count -gt 0) { return $addrs[0] }
+    # Prefer a PHYSICAL network adapter: virtual NICs (WSL / Hyper-V / Tailscale /
+    # OpenVPN / Bluetooth) report Virtual=$true and their addresses are
+    # unreachable from iPads on the LAN. Pick physical adapters that are Up,
+    # lowest InterfaceMetric first (the default-route interface), then fall back
+    # to any Up adapter, and return the first non-loopback / non-APIPA IPv4.
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
+    $ordered = @($adapters | Where-Object { -not $_.Virtual -and $_.Status -eq 'Up' } | Sort-Object InterfaceMetric)
+    if ($ordered.Count -eq 0) {
+        $ordered = @($adapters | Where-Object { $_.Status -eq 'Up' } | Sort-Object InterfaceMetric)
+    }
+    foreach ($a in $ordered) {
+        $ip = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $a.InterfaceIndex -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+            Select-Object -First 1
+        if ($ip) { return $ip.IPAddress }
+    }
     return $null
 }
 
@@ -247,16 +259,24 @@ function Invoke-HtaStart {
     # inherited stdio PIPE handles into the launched tree (run.ps1's
     # scripts\start-detached.mjs exists for exactly this reason) - any caller
     # that captures this script's output then waits on pipe EOF forever.
-    # Win32_Process.Create instead spawns through the WMI provider
+    # Win32_Process.Create instead spawns through the WMI/CIM provider
     # (WmiPrvSE.exe), so NOTHING from this process's handle chain reaches the
-    # service. A cmd /c wrapper performs the dual file redirection; its paths
-    # are relative to CurrentDirectory (= install dir), so no quoting is
-    # needed and the log contract is unchanged: logs\server.out.log +
-    # logs\server.err.log, cleared above and re-created by the redirect.
+    # service. Use Invoke-CimMethod, NOT the deprecated Invoke-WmiMethod: the
+    # latter throws InvalidOperationException ("无效操作") under PowerShell 7
+    # (pwsh), which is the default interactive shell on modern Windows - it
+    # returns $null, so $launch.ProcessId collapses to 0 and the launch never
+    # happens (issue #78 follow-up). A cmd /c wrapper performs the dual file
+    # redirection; its paths are relative to CurrentDirectory (= install dir),
+    # so no quoting is needed and the log contract is unchanged:
+    # logs\server.out.log + logs\server.err.log, cleared above and re-created
+    # by the redirect. (No Win32_ProcessStartup/SW_HIDE: CIM cannot carry it,
+    # and the WMI-spawned cmd/service.exe run detached without a visible
+    # console, so there is nothing to hide.)
     $cmdLine = "`"$env:ComSpec`" /d /c bin\service.exe -config config\config.yaml 1>logs\server.out.log 2>logs\server.err.log"
-    $startup = ([wmiclass]'Win32_ProcessStartup').CreateInstance()
-    $startup.ShowWindow = 0   # SW_HIDE - no console window flash on launch
-    $launch = Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $cmdLine, $root, $startup
+    $launch = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = $cmdLine
+        CurrentDirectory = $root
+    }
     if ([int]$launch.ReturnValue -ne 0) {
         Write-Host "[hta.ps1] ERROR: detached launch failed (Win32_Process.Create returned $($launch.ReturnValue))" -ForegroundColor Red
         exit 1
@@ -394,7 +414,14 @@ function Invoke-HtaStatus {
     $healthy = $false
     $healthUrl = "http://$($cfg.HealthHost):$($cfg.HealthPort)/health"
     try {
-        $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 3
+        # Bypass any system proxy: the health endpoint is 127.0.0.1 and must
+        # never be routed through a proxy (pwsh/.NET Core routes localhost via
+        # the configured proxy and gets a bogus 500, e.g. Privoxy). -NoProxy
+        # only exists in PowerShell 6.1+; 5.1's WebRequest already bypasses
+        # localhost by default, so omit it there.
+        $probeParams = @{ Uri = $healthUrl; UseBasicParsing = $true; TimeoutSec = 3 }
+        if ($PSVersionTable.PSVersion.Major -ge 6) { $probeParams.NoProxy = $true }
+        $resp = Invoke-WebRequest @probeParams
         if ($resp.StatusCode -eq 200) {
             $healthy = $true
             Write-Host "[hta.ps1] health probe $healthUrl -> 200 OK" -ForegroundColor Green

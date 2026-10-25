@@ -74,11 +74,23 @@ function Test-ValidLanIp([string]$Value) {
 }
 
 function Get-AutoLanIp {
-    $candidates = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and -not $_.SkipAsUnreachable } |
-        Sort-Object InterfaceMetric -ErrorAction SilentlyContinue)
-    if ($candidates.Count -eq 0) { return '' }
-    return $candidates[0].IPAddress
+    # Prefer a PHYSICAL network adapter: virtual NICs (WSL / Hyper-V / Tailscale /
+    # OpenVPN / Bluetooth) report Virtual=$true and their addresses are
+    # unreachable from iPads on the LAN. Pick physical adapters that are Up,
+    # lowest InterfaceMetric first (the default-route interface), then fall back
+    # to any Up adapter, and return the first non-loopback / non-APIPA IPv4.
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
+    $ordered = @($adapters | Where-Object { -not $_.Virtual -and $_.Status -eq 'Up' } | Sort-Object InterfaceMetric)
+    if ($ordered.Count -eq 0) {
+        $ordered = @($adapters | Where-Object { $_.Status -eq 'Up' } | Sort-Object InterfaceMetric)
+    }
+    foreach ($a in $ordered) {
+        $ip = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $a.InterfaceIndex -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+            Select-Object -First 1
+        if ($ip) { return $ip.IPAddress }
+    }
+    return ''
 }
 
 function Test-IsAdmin {
@@ -399,6 +411,31 @@ try {
             Fail "venv step finished but $venvPython is missing"
         }
         $created += 'venv'
+    }
+
+    # ---------------------------------------------------------------------------
+    # 6b. Vocab schema bootstrap (issue #78) - best effort, NEVER an install
+    # failure (matches the firewall/cert-expiry degrade pattern).
+    #
+    # The Python side owns cards/textbooks/review_logs/card_assignments; Go's
+    # Migrate deliberately does not create them. On a fresh install the service
+    # reads SQLite directly (GET /api/v1/units -> CountByUnit) without ever
+    # having spawned a Python process, so those tables do not exist yet and the
+    # endpoint 500s with "no such table: cards". Run vocab_manager.py's explicit
+    # `init` subcommand once here (idempotent CREATE TABLE IF NOT EXISTS) to
+    # guarantee the schema exists before first start. A broken venv python
+    # degrades to a printed manual command, never an install failure.
+    # ---------------------------------------------------------------------------
+    $vocabDB = Join-Path $DataDir 'vocab.db'
+    $vocabScript = Join-Path $InstallDir 'python\vocab_manager.py'
+    Write-Host "==> Initializing vocab schema at $vocabDB" -ForegroundColor Cyan
+    try {
+        & $venvPython $vocabScript --db $vocabDB init
+        if ($LASTEXITCODE -ne 0) { throw "vocab_manager init exited $LASTEXITCODE" }
+        Write-Host "[install] vocab schema ready (cards/textbooks/etc.)" -ForegroundColor Green
+    } catch {
+        Write-Host "WARNING: could not initialize the vocab schema ($($_.Exception.Message)) - run once manually:" -ForegroundColor Yellow
+        Write-Host "  & `"$venvPython`" `"$vocabScript`" --db `"$vocabDB`" init" -ForegroundColor Yellow
     }
 
     # ---------------------------------------------------------------------------

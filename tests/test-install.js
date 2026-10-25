@@ -185,6 +185,10 @@ try {
       path.join(instDir, 'INSTALL-NOTES.md'),
     ];
     for (const p of layout) mustExist(p);
+    assert.ok(
+      r.stdout.includes('Initializing vocab schema'),
+      'installer must run the vocab schema init step (issue #78)',
+    );
     console.log('PASS section 1: positive run exit 0, full install layout present');
   }
 
