@@ -431,6 +431,35 @@ async function scenarioCorrectionSubmitClose(args) {
   };
 }
 
+// scenario "passage-submit-close"（1.10d 复验）：课文背默课堂（?passage=
+// &scope= 打开本范围的行）。任务播报自然 ACK 后，向合成麦克风播放一段真
+// 实音调——生产采集→VAD→ASR→confirm 全真实——背默任务一次确认即进检查；
+// 桥接播报落后面板点「对」，再点提交；关闭由 Go 侧在提交闩驻留时触发。
+async function scenarioPassageSubmitClose(args) {
+  const { page, url, timeoutMs } = args;
+  await page.goto(url + '?passage=77&scope=51');
+  await page.locator('#rt-start').click();
+  await waitWs(page, async (view) => inspectExpectedRound(view, await playbackState(page), args.expectedSentences).ok,
+    { timeoutMs, label: 'passage greeting played naturally' });
+  await playPcm16(page, tonePcm16Base64());
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'check_started'),
+    { timeoutMs, label: 'spoken confirm opened the passage check' });
+  const before = await wsView(page);
+  const teachersBefore = before.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length;
+  const reviewBefore = before.filter((e) => e.dir === 'in' && e.type === 'review_result').length;
+  await page.locator('.rt-check-row .rt-check-btn').first().click();
+  await page.locator('.rt-check-submit').click();
+  await waitWs(page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+    { timeoutMs, label: 'close racing the passage submit' });
+  const view = await wsView(page);
+  return {
+    ok: true,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    lateTeacherSentences: view.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length - teachersBefore,
+    lateReviewResults: view.filter((e) => e.dir === 'in' && e.type === 'review_result').length - reviewBefore,
+  };
+}
+
 const SCENARIOS = {
   fixture: scenarioFixture,
   'held-fixture': scenarioHeldFixture,
@@ -441,6 +470,7 @@ const SCENARIOS = {
   'ocr-prefill-close': scenarioOcrPrefillClose,
   'check-submit-close': scenarioCheckSubmitClose,
   'correction-submit-close': scenarioCorrectionSubmitClose,
+  'passage-submit-close': scenarioPassageSubmitClose,
   'starve-probe': scenarioStarveProbe,
 };
 

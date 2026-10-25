@@ -39,6 +39,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
+	"github.com/xiaotian/home-tutor-agent/pkg/passage"
 )
 
 // speechPageAck is one sentence_ack the real page sent (observed read-only).
@@ -247,6 +248,7 @@ type speechBrowserFixture struct {
 	dbPath            string
 	receipts          *lesson.ReceiptStore
 	wordsOverride     WordSource
+	passages          PassageSource
 	expectedSentences []string
 
 	mu       sync.Mutex
@@ -478,7 +480,7 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 func (f *speechBrowserFixture) newManager() SessionManager {
 	f.mu.Lock()
 	tts, probe, executor, ocrRead := f.tts, f.timerProbe, f.exec, f.ocrRead
-	words, receipts := f.wordsOverride, f.receipts
+	words, receipts, passages := f.wordsOverride, f.receipts, f.passages
 	resumeHold, closeEntryHold := f.resumeHold, f.closeEntryHold
 	f.mu.Unlock()
 	if words == nil {
@@ -488,6 +490,7 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 		LessonID: "speech-browser-fixture",
 		Words:    words,
 		Receipts: receipts,
+		Passages: passages,
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
 	tm.checkResumeInterleave = resumeHold
 	tm.closeEntryInterleave = closeEntryHold
@@ -650,6 +653,63 @@ func (f *speechBrowserFixture) gateReviewWrite() *speechOneGate {
 	g := &speechReviewGate{WordSource: inner, gate: newSpeechOneGate()}
 	f.wordsOverride = g
 	return g.gate
+}
+
+// speechPassageSource is the fixture's passage content seam: one stored
+// work with one range scope, answering everything else as not-found.
+type speechPassageSource struct {
+	content passage.Passage
+}
+
+func (s speechPassageSource) FetchPassage(ctx context.Context, passageID int64) (passage.Passage, error) {
+	if passageID != s.content.ID {
+		return passage.Passage{}, passage.ErrPassageNotFound
+	}
+	return s.content, nil
+}
+
+// seedPassage opens the passage classroom's inputs: the content source (the
+// 测试课文 work, one range scope = paragraph 2) and the range's initial
+// lesson row (mid-writing, nothing dictated yet) — a fresh page connect
+// (?passage=77&scope=51) then re-announces the task. expectedSentences
+// mirror speakTurn's sentence split of the greeting.
+func (f *speechBrowserFixture) seedPassage() {
+	f.t.Helper()
+	f.mu.Lock()
+	f.passages = speechPassageSource{content: passage.Passage{
+		ID: 77, Title: "测试课文", Category: "chinese", InScope: true,
+		Paragraphs: []string{"床前明月光。", "疑是地上霜。"},
+		Scopes:     []passage.ScopeRow{{ID: 51, Paragraphs: []int{2}, Whole: false}},
+	}}
+	f.mu.Unlock()
+	lessonID := resolvePassageLessonID(time.Now(), 77, 51)
+	if _, err := f.tools.EnsurePassageLesson(context.Background(), lessonID, 77, 51, false,
+		[]int{2}, []string{"疑是地上霜。"}, lesson.CategoryChinese); err != nil {
+		f.t.Fatalf("seed passage lesson: %v", err)
+	}
+	f.mu.Lock()
+	f.expectedSentences = []string{
+		"今天的任务是把《测试课文》第 2 段默写下来。",
+		"这次要写 1 个自然段，请凭记忆按顺序写在纸上，一段写一行。",
+		"想不起来可以喊我提醒，写完了告诉我，我们对答案。",
+	}
+	f.mu.Unlock()
+}
+
+// scriptSpokenConfirm arms ONE spoken 写完了 turn: the synthetic tone rides
+// the production capture into the real VAD, the fake ASR answers 好了, and
+// the fake LLM classifies it to confirm.
+func (f *speechBrowserFixture) scriptSpokenConfirm() {
+	f.t.Helper()
+	f.asr.mu.Lock()
+	f.asr.script = append(f.asr.script, asrScript{text: "好了"})
+	f.asr.mu.Unlock()
+	inner := fmt.Sprintf(`{\"intent\":\"%s\",\"reply\":\"\",\"index\":0}`, intentConfirm)
+	f.llm.mu.Lock()
+	f.llm.script = append(f.llm.script, llmScript{
+		wire: fmt.Sprintf(`{"choices":[{"message":{"content":"%s"}}]}`, inner),
+	})
+	f.llm.mu.Unlock()
 }
 
 func (f *speechBrowserFixture) gateScreenVerdict() (entered, release chan struct{}) {
@@ -849,7 +909,7 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 	if scenario == "fixture" || scenario == "held-fixture" || scenario == "close-after-opening" ||
 		scenario == "screen-verdict-close" || scenario == "voice-verdict-close" ||
 		scenario == "ocr-prefill-close" || scenario == "check-submit-close" ||
-		scenario == "correction-submit-close" {
+		scenario == "correction-submit-close" || scenario == "passage-submit-close" {
 		f.mu.Lock()
 		sentences := append([]string(nil), f.expectedSentences...)
 		f.mu.Unlock()
@@ -1934,6 +1994,66 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 	m.TurnManager.mu.Lock()
 	pending := len(m.checkWrites)
 	m.TurnManager.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("completed check-write admissions = %d, want 0", pending)
+	}
+}
+
+// TestPassageSubmitBrowser 是 1.10d 的复验（review P1）：短文提交的接纳与
+// 保存责任经真实浏览器旅程——?passage 打开本范围课堂、任务播报自然 ACK、
+// 一次语音「写完了」（合成音调→生产采集→VAD→ASR→confirm）进检查、人工判
+// 定、真实 UI 提交——在提交闩驻留时关闭，已接纳的保存（行翻转与练习记
+// 录）仍然完成，关闭后没有迟到的 review_result 或总结播报。撤销验证：撤
+// 掉 submitPassage 的生产接纳后本测试红（提交被拒、行不落库）。
+func TestPassageSubmitBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedPassage()
+	f.scriptSpokenConfirm()
+	before, _ := f.gateCheckSubmit(true, false)
+	t.Cleanup(before.openUp)
+
+	driver := f.runDriverAsync("passage-submit-close", 45*time.Second)
+	select {
+	case <-before.entered:
+	case <-time.After(30 * time.Second):
+		f.runDriver("passage-submit-close", 20*time.Second) // surface the scenario's stderr trace
+		t.Fatal("the passage submit never reached its pre-latch window")
+	}
+	m := f.waitFirstManager(5 * time.Second)
+	m.handleEndSession(m.currentSender())
+	before.openUp()
+	res := <-driver
+	if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+		t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+	}
+	// The passage greeting runs on its own goroutine (not the starter
+	// wrapper), so announcementRun stays 0 by construction — assert the
+	// connection tasks directly, as the no-announcement orderings do.
+	if !waitFor(t, 15*time.Second, func() bool {
+		return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
+			f.writerDone.Load() == 1 &&
+			f.providerStarted.Load() == f.providerDone.Load() &&
+			f.announcementRun.Load() == f.announcementDone.Load()
+	}) {
+		t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+			f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
+			f.providerStarted.Load(), f.providerDone.Load(),
+			f.announcementRun.Load(), f.announcementDone.Load())
+	}
+
+	m.TurnManager.mu.Lock()
+	lessonID := m.tutor.lessonID
+	pending := len(m.checkWrites)
+	m.TurnManager.mu.Unlock()
+	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
+		t.Fatalf("stored stage=%q unchecked=%v, want the accepted passage submit's submitted+checked",
+			stored.Stage, stored.Unchecked)
+	}
 	if pending != 0 {
 		t.Fatalf("completed check-write admissions = %d, want 0", pending)
 	}
