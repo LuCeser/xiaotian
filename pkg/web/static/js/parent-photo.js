@@ -4251,7 +4251,7 @@
               // from the POST-SAVE truth — the assigns just rewrote the
               // entries, and the books' progress may have moved since the
               // client cached it. Re-read both (null on failure ⇒ the
-              // receipt degrades to the assign payloads, never a guess).
+              // receipt marks the words 资格待核实, never a guess).
               var postWords = self.fetchWords(self.draftCategory)
                 .catch(function () { return null; });
               var postBooks = self.fetchTextbooks
@@ -4753,24 +4753,27 @@
    * summarizeAssignScope (Issue #81) — the 默写安排 half of the textbook
    * receipt, derived from the ACTUAL assign results (ok groups only: a
    * failed group's words are already 失败 under 保存结果 and are never
-   * counted as scheduled here). With a post-save snapshot the verdict is
-   * computed PER WORD from the saved entries and EVERY source, mirroring
-   * the server's scope rule (card_repo's ScopeEligibleOnly twin):
-   * participates × (includeInScope on ANY textbook ∨ a lesson inside ANY
-   * textbook's learned prefix ∨ no attribution at all). Without one
-   * (snapshot fetch failed) it degrades to the assign payloads — still
-   * honoring an explicit includeInScope for ANY lesson shape. Pure.
+   * counted as scheduled here). The verdict is computed PER WORD from the
+   * post-save word entries and EVERY source, mirroring the server's scope
+   * rule (card_repo's ScopeEligibleOnly twin): participates ×
+   * (includeInScope on ANY textbook ∨ a lesson inside ANY textbook's
+   * learned prefix ∨ no attribution at all). A fact the post-save reads
+   * could not deliver is NEVER guessed from the assign payloads or the
+   * client's cached books (PR #87 复审 P2): the payload knows neither
+   * participates nor the word's other sources, and a stale cached prefix
+   * can neither admit nor hold a word — such words count 资格待核实
+   * (unverified) instead. Pure.
    */
   function summarizeAssignScope(book, groupResults, postSave, books) {
-    var lessons = (book && book.lessons) || [];
-    var learned = (book && book.learnedLessons) || 0;
     var out = {
       schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 0,
+      pausedReady: 0, unverified: 0,
       unlearnedNames: [],
     };
-    // The learned prefixes as the SERVER has them now (post-save), keyed
-    // by textbook id — the receipt must not judge eligibility by the
-    // client's possibly stale pre-save copy of the target book.
+    // The learned prefixes as the SERVER has them now (the post-save
+    // textbook read), keyed by textbook id. A textbook this read does not
+    // cover is UNKNOWN — its prefix can neither admit a word nor honestly
+    // hold it, so the client's cached copy must not stand in for it.
     var learnedByBook = {};
     (books || []).forEach(function (b) {
       if (!b || !b.id) {
@@ -4781,13 +4784,6 @@
         .forEach(function (name) { set[name] = true; });
       learnedByBook[b.id] = set;
     });
-    if (book && book.id && !learnedByBook[book.id]) {
-      var target = {};
-      lessons.slice(0, Math.max(0, learned)).forEach(function (name) {
-        target[name] = true;
-      });
-      learnedByBook[book.id] = target;
-    }
     var byWord = {};
     (postSave || []).forEach(function (w) {
       if (w && w.word) {
@@ -4795,52 +4791,30 @@
       }
     });
 
-    var verdictFromPayload = function (group, lesson) {
-      // Degraded truth: an explicit include joins the scope regardless of
-      // the lesson's shape or progress (the pre-fix code ignored it for
-      // non-empty lessons).
-      if (group.includeInScope) {
-        out.joined += 1;
-        return;
-      }
-      if (!lesson) {
-        out.heldPending += 1;
-        return;
-      }
-      var idx = lessons.indexOf(lesson);
-      if (idx >= 0 && idx + 1 <= learned) {
-        out.schedulable += 1;
-      } else {
-        out.heldUnlearned += 1;
-        if (out.unlearnedNames.indexOf(lesson) < 0) {
-          out.unlearnedNames.push(lesson);
-        }
-      }
-    };
-
     (groupResults || []).forEach(function (r) {
       if (!r || !r.ok || !r.group) {
         return;
       }
       var group = r.group;
-      var groupLesson = metaField(group.lesson);
       (group.words || []).forEach(function (word) {
         var saved = postSave ? byWord[String(word).trim()] : null;
+        // No saved entry (the post-save word read failed, or a good read
+        // lacks the word) → participates and the word's other sources are
+        // unknown; the old fallback to the assign payload asserted
+        // 可安排默写 for moved-out words and missed other textbooks'
+        // eligibility (P2-1). 资格待核实, never a guess.
         if (!saved) {
-          verdictFromPayload(group, groupLesson);
+          out.unverified += 1;
           return;
         }
         // Post-save truth: participates composes with scope (AND), and
         // ANY textbook source can admit the word (US-33: one learned
         // assignment among several suffices; a sticky or foreign include
         // joins the range just the same).
-        if (saved.participates === false) {
-          out.paused += 1;
-          return;
-        }
         var includeHit = false;
         var learnedHit = false;
-        var targetLesson = groupLesson;
+        var allCovered = true;
+        var targetLesson = '';
         var entries = saved.textbooks || [];
         entries.forEach(function (a) {
           if (!a) {
@@ -4850,19 +4824,42 @@
             includeHit = true;
           }
           var set = a.id != null ? learnedByBook[a.id] : null;
-          if (set && a.lesson && set[a.lesson]) {
-            learnedHit = true;
+          if (set) {
+            if (a.lesson && set[a.lesson]) {
+              learnedHit = true;
+            }
+          } else {
+            allCovered = false;
           }
           if (book && a.id === book.id) {
             targetLesson = metaField(a.lesson);
+          } else if (!targetLesson && a.lesson) {
+            targetLesson = metaField(a.lesson);
           }
         });
+        if (saved.participates === false) {
+          out.paused += 1;
+          // P2-2: 「恢复参与后即可安排」 holds only when some source
+          // ALREADY qualifies the word — an explicit include, a learned
+          // entry on a covered book, or no attribution at all. A paused
+          // word whose only source is unlearned (or unverifiable) still
+          // needs progress or an include after restoration.
+          if (includeHit || !entries.length || learnedHit) {
+            out.pausedReady += 1;
+          }
+          return;
+        }
         if (includeHit) {
           out.joined += 1;
         } else if (learnedHit) {
           out.schedulable += 1;
         } else if (!entries.length) {
           out.joined += 1; // nothing attributed → supplementary default
+        } else if (!allCovered) {
+          // An attribution sits on a textbook the post-save read did not
+          // cover: that source may already admit the word (P2-1's
+          // missed-other-textbook case), so neither schedule nor hold it.
+          out.unverified += 1;
         } else if (targetLesson) {
           out.heldUnlearned += 1;
           if (out.unlearnedNames.indexOf(targetLesson) < 0) {
@@ -4880,11 +4877,14 @@
    * renderScopeReceipt (Issue #81) — the visually separate 默写安排 block
    * inside a result banner: real counts + reasons, beside (never merged
    * into) the 保存结果 buckets. A sensible next step closes the block —
-   * what the parent can do NOW versus what unlocks later.
+   * what the parent can do NOW versus what unlocks later. Each present
+   * bucket contributes its own clause, and the paused clause only
+   * promises 「恢复参与后即可安排」 when the word's other conditions
+   * already qualify it (PR #87 复审 P2-2); 待核实 words defer to 词库.
    */
   function renderScopeReceipt(box, scope) {
     var total = scope.schedulable + scope.joined + scope.heldUnlearned +
-      scope.heldPending + (scope.paused || 0);
+      scope.heldPending + (scope.paused || 0) + (scope.unverified || 0);
     if (!total) {
       return;
     }
@@ -4917,17 +4917,35 @@
     if (scope.paused) {
       addLine('暂不自动安排 ' + scope.paused + ' 词（已移出课堂参与，可在词库中恢复）', 'wait');
     }
+    if (scope.unverified) {
+      addLine('资格待核实 ' + scope.unverified + ' 词（保存后词库或教材数据读取失败，请刷新词库核对）', 'wait');
+    }
     var next = document.createElement('p');
     next.className = 'result-scope-line result-scope-next';
+    var steps = [];
     if (scope.schedulable || scope.joined) {
-      next.textContent = '下一步：这些词现在就能安排默写；其余词按进度或加入范围自动跟进。';
-    } else if (scope.heldUnlearned) {
-      next.textContent = '下一步：在「教材管理」中更新已学进度，这些词会自动进入默写安排。';
-    } else if (scope.paused) {
-      next.textContent = '下一步：这些词已移出课堂参与，在「词库」中恢复参与后即可安排默写。';
-    } else {
-      next.textContent = '下一步：在词库中为这些词指定课次，或加入默写范围。';
+      steps.push('可安排默写的词现在就能安排。');
     }
+    if (scope.heldUnlearned) {
+      steps.push('课次尚未学到的词，在「教材管理」中更新已学进度后会自动进入默写安排。');
+    }
+    if (scope.paused) {
+      if (scope.pausedReady === scope.paused) {
+        steps.push('已移出课堂参与的词，在「词库」中恢复参与后即可安排默写。');
+      } else if (!scope.pausedReady) {
+        steps.push('已移出课堂参与的词，恢复参与后还需课次已学或加入默写范围，才会进入默写安排。');
+      } else {
+        steps.push('已移出课堂参与的词中 ' + scope.pausedReady +
+          ' 词恢复参与后即可安排默写；其余还需课次已学或加入默写范围。');
+      }
+    }
+    if (scope.heldPending) {
+      steps.push('课次待确认的词，请在词库中指定课次或加入默写范围。');
+    }
+    if (scope.unverified) {
+      steps.push('资格待核实的词，请刷新词库核对这些词的安排情况。');
+    }
+    next.textContent = '下一步：' + steps.join('');
     scopeBox.appendChild(next);
     box.appendChild(scopeBox);
   }
@@ -5202,9 +5220,9 @@
 
     // Issue #81: the 默写安排 verdict comes from the ACTUAL post-save
     // state (summarizeAssignScope over the post-assign word entries, all
-    // eligibility sources and the fresh progress; assign payloads only
-    // when that re-read failed) — rendered as its own block below, never
-    // merged into the 保存结果 buckets.
+    // eligibility sources and the fresh progress; a word whose post-save
+    // reads are missing counts 资格待核实) — rendered as its own block
+    // below, never merged into the 保存结果 buckets.
     var scope = summarizeAssignScope(book, receipt.groupResults, receipt.postSave, receipt.booksAfter);
     scope.mode = 'textbook';
 

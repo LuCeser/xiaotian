@@ -25,6 +25,15 @@
  *     (participates, include_in_scope on any textbook, learned prefixes
  *     from the fresh book read); scheduleHint never answers a direct
  *     join with the 全部未勾选 contradiction.
+ *   - PR #87 复审 P2-1: a word whose post-save word read or textbook
+ *     read is missing counts 资格待核实 — never a payload/cached-copy
+ *     verdict (the payload knows neither participates nor the word's
+ *     other sources).
+ *   - PR #87 复审 P2-2: 「恢复参与后即可安排」 is promised (pausedReady)
+ *     only for paused words some source ALREADY qualifies.
+ *   - The renderTextbookCommitResult wiring: the banner's 默写安排 lines
+ *     must come from receipt.postSave/receipt.booksAfter (dropping those
+ *     args at the call site turns the assertions red).
  */
 'use strict';
 
@@ -45,6 +54,7 @@ const {
   buildTextbookReceipt,
   summarizeAssignScope,
   scheduleHint,
+  PhotoAddForm,
 } = global.window;
 
 let failures = 0;
@@ -425,7 +435,10 @@ function catOf(receipt, word) {
 // entries and every eligibility source (Issue #81 P2: the old count rode
 // this import's group payloads alone, so a participates=0 word could show
 // 可安排默写 and an explicitly included but unlearned word could show
-// 暂不自动安排).
+// 暂不自动安排). PR #87 复审 P2-1/P2-2: a fact the post-save reads cannot
+// deliver is never guessed from the payloads or the cached books — the
+// word counts 资格待核实 — and 恢复参与后即可安排 is promised only when a
+// source already qualifies the paused word (pausedReady).
 // ----------------------------------------------------------------------
 
 // The receipt's book view: lessons [第1课,第5课,第7课], learned 2 (第1课
@@ -440,6 +453,14 @@ const SCOPE_BOOKS_AFTER = [
 const scopeGroupResults = function (lesson, includeInScope, words) {
   return [{ group: { lesson: lesson, includeInScope: includeInScope, words: words }, ok: true }];
 };
+// Expected summarizeAssignScope shape with zeroed buckets — keys in the
+// function's own return order so eq's JSON comparison stays exact.
+const scopeExpect = function (overrides) {
+  return Object.assign({
+    schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 0,
+    pausedReady: 0, unverified: 0, unlearnedNames: [],
+  }, overrides || {});
+};
 
 (function () {
   // Post-save baseline: a word whose saved entry sits in the target
@@ -447,7 +468,7 @@ const scopeGroupResults = function (lesson, includeInScope, words) {
   eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第5课', false, ['apple']), [
     { word: 'apple', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] },
   ], SCOPE_BOOKS_AFTER),
-    { schedulable: 1, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 0, unlearnedNames: [] },
+    scopeExpect({ schedulable: 1 }),
     'a saved entry inside the learned prefix counts 可安排默写');
 
   // P2 headline: an explicit includeInScope on an UNLEARNED lesson joins
@@ -455,7 +476,7 @@ const scopeGroupResults = function (lesson, includeInScope, words) {
   eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', true, ['lake']), [
     { word: 'lake', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: true }] },
   ], SCOPE_BOOKS_AFTER),
-    { schedulable: 0, joined: 1, heldUnlearned: 0, heldPending: 0, paused: 0, unlearnedNames: [] },
+    scopeExpect({ joined: 1 }),
     'an explicit include on an unlearned lesson counts 已加入范围');
 
   // All sources: the target book's lesson is unlearned, but the word's
@@ -469,7 +490,7 @@ const scopeGroupResults = function (lesson, includeInScope, words) {
       ],
     },
   ], SCOPE_BOOKS_AFTER),
-    { schedulable: 1, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 0, unlearnedNames: [] },
+    scopeExpect({ schedulable: 1 }),
     'a learned entry on ANOTHER textbook admits the word');
 
   // participates composes with scope (AND): a moved-out word is paused,
@@ -477,7 +498,7 @@ const scopeGroupResults = function (lesson, includeInScope, words) {
   eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第5课', false, ['sun']), [
     { word: 'sun', participates: false, textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] },
   ], SCOPE_BOOKS_AFTER),
-    { schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 1, unlearnedNames: [] },
+    scopeExpect({ paused: 1, pausedReady: 1 }),
     'a participates=0 word counts 已移出课堂参与, not 可安排默写');
 
   // Fresh progress beats the client's stale book copy: the book object
@@ -489,28 +510,107 @@ const scopeGroupResults = function (lesson, includeInScope, words) {
   ], [
     { id: 9, name: '书A', lessons: ['第1课', '第5课', '第7课'], learnedLessons: 1 },
   ]),
-    { schedulable: 0, joined: 0, heldUnlearned: 1, heldPending: 0, paused: 0, unlearnedNames: ['第5课'] },
+    scopeExpect({ heldUnlearned: 1, unlearnedNames: ['第5课'] }),
     'the fresh learned prefix decides, not the stale client book');
 
   // A saved empty lesson without an include stays 待确认.
   eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('', false, ['star']), [
     { word: 'star', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '', includeInScope: false }] },
   ], SCOPE_BOOKS_AFTER),
-    { schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 1, paused: 0, unlearnedNames: [] },
+    scopeExpect({ heldPending: 1 }),
     'an empty saved lesson without an include stays 课次待确认');
 
-  // Degraded (the post-save fetch failed): the assign payloads decide,
-  // but an explicit include joins for ANY lesson shape — the non-empty-
-  // lesson ignore was the P2 defect.
+  // PR #87 复审 P2-1 — the word-read degraded path: the assign payload
+  // CANNOT decide (it knows neither participates nor the word's other
+  // sources). The review's repro: a moved-out LEARNED word must not show
+  // 可安排默写 after a failed readback; an include payload must not claim
+  // 已加入范围 (assign never restores participation); a payload hold can
+  // miss another textbook's eligibility. Everything counts 待核实.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第5课', false, ['apple']), null, null),
+    scopeExpect({ unverified: 1 }),
+    'P2-1 word read failed: a learned-lesson payload never asserts 可安排默写');
   eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', true, ['lake']), null, null),
-    { schedulable: 0, joined: 1, heldUnlearned: 0, heldPending: 0, paused: 0, unlearnedNames: [] },
-    'degraded: an include payload joins even with a non-empty lesson');
-  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['lake']), null, null),
-    { schedulable: 0, joined: 0, heldUnlearned: 1, heldPending: 0, paused: 0, unlearnedNames: ['第7课'] },
-    'degraded: an unlearned lesson without an include is held');
+    scopeExpect({ unverified: 1 }),
+    'P2-1 word read failed: an include payload never asserts 已加入范围');
   eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('', false, ['star']), null, null),
-    { schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 1, paused: 0, unlearnedNames: [] },
-    'degraded: an empty lesson without an include stays 待确认');
+    scopeExpect({ unverified: 1 }),
+    'P2-1 word read failed: an empty-lesson payload never asserts 待确认');
+
+  // The word IS in the post-save read, but the read lacks it (a good
+  // fetch that somehow does not carry the word) — same unknown, same
+  // 待核实, never a payload verdict.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第5课', false, ['apple']), [
+    { word: 'other', participates: true, textbooks: [] },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ unverified: 1 }),
+    'P2-1 a word missing from a good read is 待核实, not judged by payload');
+
+  // PR #87 复审 P2-1 — the textbook-read degraded path: words are saved
+  // but no fresh book prefix is known, so eligibility is 待核实 — the
+  // client's cached 书A copy (learned 2) must not stand in for the read
+  // and hand out 可安排默写.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第5课', false, ['apple']), [
+    { word: 'apple', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] },
+  ], null),
+    scopeExpect({ unverified: 1 }),
+    'P2-1 textbook read failed: 待核实, never the cached prefix\'s 可安排默写');
+
+  // One source covered and unlearned, another on a textbook the read
+  // missed: that missing source may admit the word (missed-other-
+  // textbook eligibility), so it cannot be held either → 待核实.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['river']), [
+    {
+      word: 'river', participates: true,
+      textbooks: [
+        { id: 9, name: '书A', lesson: '第7课', includeInScope: false },
+        { id: 3, name: '书C', lesson: 'C课', includeInScope: false },
+      ],
+    },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ unverified: 1 }),
+    'P2-1 an attribution on an unread textbook is 待核实, never 暂不自动安排');
+
+  // PR #87 复审 P2-2 — paused words: pausedReady separates 「恢复参与后
+  // 即可安排」 (a source already qualifies) from the honest 「还需课次已学
+  // 或加入默写范围」.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', true, ['lake']), [
+    { word: 'lake', participates: false, textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: true }] },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ paused: 1, pausedReady: 1 }),
+    'P2-2 a paused word with an include is pausedReady (restore suffices)');
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('', false, ['star']), [
+    { word: 'star', participates: false, textbooks: [] },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ paused: 1, pausedReady: 1 }),
+    'P2-2 an unattributed paused word is pausedReady (supplementary default)');
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['river']), [
+    {
+      word: 'river', participates: false,
+      textbooks: [
+        { id: 9, name: '书A', lesson: '第7课', includeInScope: false },
+        { id: 2, name: '书B', lesson: 'B课', includeInScope: false },
+      ],
+    },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ paused: 1, pausedReady: 1 }),
+    'P2-2 a paused word with a learned entry on 书B is pausedReady');
+  // The review's repro: moved out AND the only source lesson unlearned —
+  // restoring participation alone still does not schedule the word.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['lake']), [
+    { word: 'lake', participates: false, textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: false }] },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ paused: 1, pausedReady: 0 }),
+    'P2-2 a paused word whose only lesson is unlearned is NOT pausedReady');
+  // A paused word with a source on an UNREAD textbook: that source may or
+  // may not qualify it — the promise cannot be made.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['river']), [
+    {
+      word: 'river', participates: false,
+      textbooks: [{ id: 3, name: '书C', lesson: 'C课', includeInScope: false }],
+    },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ paused: 1, pausedReady: 0 }),
+    'P2-2 a paused word qualified only by an unread textbook is NOT pausedReady');
 
   // Failed groups are never counted (they are 失败 under 保存结果).
   eq(summarizeAssignScope(SCOPE_BOOK, [
@@ -518,7 +618,7 @@ const scopeGroupResults = function (lesson, includeInScope, words) {
   ], [
     { word: 'apple', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] },
   ], SCOPE_BOOKS_AFTER),
-    { schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 0, unlearnedNames: [] },
+    scopeExpect(),
     'a failed assign group is never counted as scheduled');
 })();
 
