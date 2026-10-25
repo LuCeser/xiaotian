@@ -2205,6 +2205,37 @@ func TestPlaybackSettleBrowser(t *testing.T) {
 	}
 }
 
+// TestStreamResultBrowser 是 1.14b 的验收：用自然播放夹具为 stream_result
+// 建立对应证明。真实连接的 resume 播报在供应商块间驻留（首块已入真实传
+// 输）时 goodbye 关闭——release 后旧任务不得再向已关闭的连接送出任何后
+// 续块或句子，close 之后无任何下行帧。
+func TestStreamResultBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedChecking()
+	// The FIRST provider call parks BETWEEN its two chunks: the first chunk
+	// already rode the real transport, the second waits for the test.
+	g := newGatedTTS(1)
+	f.mu.Lock()
+	f.tts = g
+	f.mu.Unlock()
+
+	driver := f.runDriverAsync("resume-close-window", 45*time.Second)
+	m := f.waitFirstManager(5 * time.Second)
+	select {
+	case <-g.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the resume stream never parked between its chunks")
+	}
+	m.handleEndSession(m.currentSender())
+	close(g.release)
+	res := <-driver
+	if res.WSCloseCount != 1 || res.LateFramesAfterClose != 0 {
+		t.Fatalf("close=%d late frames=%d, want 1/0 — the stale stream must ship nothing past the close",
+			res.WSCloseCount, res.LateFramesAfterClose)
+	}
+	f.assertOriginalTasksExited()
+}
+
 func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {
 	f.t.Helper()
 	done := make(chan speechDriverResult, 1)
