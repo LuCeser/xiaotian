@@ -234,6 +234,9 @@ type speechBrowserFixture struct {
 	tools             *LessonTools
 	exec              LessonExecutor
 	db                *sql.DB
+	dbPath            string
+	receipts          *lesson.ReceiptStore
+	wordsOverride     WordSource
 	expectedSentences []string
 
 	mu       sync.Mutex
@@ -393,6 +396,7 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 	f := &speechBrowserFixture{
 		t:                 t,
 		db:                db,
+		dbPath:            dbPath,
 		tools:             tools,
 		exec:              tools,
 		expectedSentences: append([]string(nil), speechExpectedOpening...),
@@ -457,10 +461,15 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 func (f *speechBrowserFixture) newManager() SessionManager {
 	f.mu.Lock()
 	tts, probe, executor, ocrRead := f.tts, f.timerProbe, f.exec, f.ocrRead
+	words, receipts := f.wordsOverride, f.receipts
 	f.mu.Unlock()
+	if words == nil {
+		words = f.words
+	}
 	tm := NewTurnManager(f.asr, f.llm, &speechObservedTTS{inner: tts, fixture: f}, executor, TurnManagerConfig{
 		LessonID: "speech-browser-fixture",
-		Words:    f.words,
+		Words:    words,
+		Receipts: receipts,
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
 	if ocrRead != nil {
 		// The production photo channel (ttBindPhoto's wiring, fixture-wide):
