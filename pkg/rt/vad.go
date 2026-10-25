@@ -64,7 +64,6 @@ func DefaultVADConfig() VADConfig {
 // goroutines, so the segmenter serializes itself with its own leaf mutex
 // (held only across pure in-memory state work — no calls out, no deadlock).
 type VAD struct {
-	observation vadObservation
 	// pending holds bytes not yet consumed to whole frames: a partial tail
 	// of a Feed call, plus whole frames that arrived after a segment closed
 	// mid-call (the single-segment return contract — see Feed).
@@ -73,8 +72,9 @@ type VAD struct {
 	// ring holds the most recent preRollFrames frames of audio as copies.
 	ring [][]byte
 	// segment accumulates the open segment's bytes; segmentMs its length.
-	segment []byte
-	cfg     VADConfig
+	segment     []byte
+	observation vadObservation
+	cfg         VADConfig
 
 	// frameBytes is one analysis frame in bytes; frameMs the cfg value
 	// normalized to >= 1.

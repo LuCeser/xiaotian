@@ -35,12 +35,12 @@ func TestAudioObservationDistinguishesDoubledStream(t *testing.T) {
 func TestVADObservationDistinguishesSilenceFromHardCut(t *testing.T) {
 	cases := []struct {
 		name   string
-		pcm    []byte
 		reason string
+		pcm    []byte
 		quiet  int
 	}{
-		{"normal", append(vadSine(5000, 300), vadSilence(720)...), "silence", 720},
-		{"continuous_noise", vadSine(5000, 30000), "max_duration", 0},
+		{"normal", "silence", append(vadSine(5000, 300), vadSilence(720)...), 720},
+		{"continuous_noise", "max_duration", vadSine(5000, 30000), 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

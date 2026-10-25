@@ -430,7 +430,9 @@ type TurnManager struct {
 	// turnSentences are the sentences sent for the current announcement, in
 	// order (the interrupt-trim source).
 	turnSentences []sentenceInfo
-	cfg           TurnManagerConfig
+	// Temporary aggregate diagnostics; protected by mu, no PCM retained.
+	audioObservation audioObservation
+	cfg              TurnManagerConfig
 
 	// timerGen is the monotonic per-word timer generation. EVERY
 	// arm/reset/stop increments it, so a callback already queued before the
@@ -439,8 +441,6 @@ type TurnManager struct {
 	timerGen uint64
 	// droppedUplink counts audio chunks dropped by half-duplex gating.
 	droppedUplink int
-	// Temporary aggregate diagnostics; protected by mu, no PCM retained.
-	audioObservation audioObservation
 	// turnID counts turns and announcements (sentence-id namespace).
 	turnID uint64
 	// epoch is the monotonic cancellation token. In-flight provider work
