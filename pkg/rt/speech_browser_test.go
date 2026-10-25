@@ -1325,6 +1325,190 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 	}
 }
 
+// TestCloseFallbackVersusSubmit 是 1.12c 的验收：正式提交与关闭的三种顺
+// 序，全部经真实保存链路（useRealFSRS：SubmitReview 走真实 pybridge 落进
+// 本夹具的临时 SQLite，回执进同一库）核对持久结果——不只数 fake 调用。
+//   - 提交先接纳（latch 写前关闭）：关闭等已接纳的提交落库，读权威行
+//     submitted 后让位——只有提交自己的 kind=check 回执与 FSRS 批；
+//   - 提交已落库、尚未返回（committed 窗口关闭）：同一让位语义，提交保
+//     存与回执完整；
+//   - 关闭先接纳：迟到的提交经生产入口被拒（零写入），兜底独占保存——
+//     kind=unchecked_fallback 回执与降级 FSRS 批恰好各一。
+func TestCloseFallbackVersusSubmit(t *testing.T) {
+	receiptsOf := func(f *speechBrowserFixture) []lesson.Receipt {
+		t.Helper()
+		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+		got, err := f.receipts.ListByLesson(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("list receipts: %v", err)
+		}
+		return got
+	}
+	reviewLogs := func(f *speechBrowserFixture) int {
+		t.Helper()
+		var n int
+		if err := f.db.QueryRow(`SELECT COUNT(*) FROM review_logs`).Scan(&n); err != nil {
+			t.Fatalf("count review_logs: %v", err)
+		}
+		return n
+	}
+	storedLesson := func(f *speechBrowserFixture) lesson.Lesson {
+		t.Helper()
+		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+		l, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		return l
+	}
+
+	t.Run("submit admitted before the close", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		probe := f.useRealFSRS(t)
+		f.seedCheckingWithManualVerdicts()
+		before, _ := f.gateCheckSubmit(true, false)
+		t.Cleanup(before.openUp)
+
+		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
+		select {
+		case <-before.entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the formal submit never reached its pre-latch window")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		// The goodbye close claims the fallback while the ACCEPTED submit is
+		// parked ahead of its latch write; the fallback must wait for it,
+		// then yield to the submitted row it reads back.
+		m.handleEndSession(m.currentSender())
+		before.openUp()
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
+		f.assertOriginalTasksExited()
+
+		l := storedLesson(f)
+		if l.Stage != lesson.StageSubmitted || l.Unchecked {
+			t.Fatalf("stored stage=%q unchecked=%v, want the submit's submitted+checked", l.Stage, l.Unchecked)
+		}
+		if got := reviewLogs(f); got != 2 {
+			t.Fatalf("review_logs rows = %d, want exactly the submit's 2-word batch", got)
+		}
+		if calls := probe.submitCalls(); calls != 1 {
+			t.Fatalf("real review writes = %d, want exactly 1 (the submit's; the fallback yields)", calls)
+		}
+		recs := receiptsOf(f)
+		if len(recs) != 1 || recs[0].Kind != lesson.ReceiptKindCheck {
+			t.Fatalf("receipts = %+v, want exactly one kind=check (the submit's own)", recs)
+		}
+		m.mu.Lock()
+		pending := len(m.checkWrites)
+		m.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
+
+	t.Run("submit committed, close before return", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		probe := f.useRealFSRS(t)
+		f.seedCheckingWithManualVerdicts()
+		_, committed := f.gateCheckSubmit(false, true)
+		t.Cleanup(committed.openUp)
+
+		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
+		select {
+		case <-committed.entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the formal submit never committed its latch write")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		m.handleEndSession(m.currentSender())
+		committed.openUp()
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
+		f.assertOriginalTasksExited()
+
+		l := storedLesson(f)
+		if l.Stage != lesson.StageSubmitted || l.Unchecked {
+			t.Fatalf("stored stage=%q unchecked=%v, want the submit's submitted+checked", l.Stage, l.Unchecked)
+		}
+		if got := reviewLogs(f); got != 2 {
+			t.Fatalf("review_logs rows = %d, want exactly the submit's 2-word batch", got)
+		}
+		if calls := probe.submitCalls(); calls != 1 {
+			t.Fatalf("real review writes = %d, want exactly 1", calls)
+		}
+		recs := receiptsOf(f)
+		if len(recs) != 1 || recs[0].Kind != lesson.ReceiptKindCheck {
+			t.Fatalf("receipts = %+v, want exactly one kind=check", recs)
+		}
+		m.mu.Lock()
+		pending := len(m.checkWrites)
+		m.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
+
+	t.Run("close first: the late submit is refused, the fallback owns the save", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		probe := f.useRealFSRS(t)
+		f.seedCheckingWithOutcomes()
+		entered, release := f.gateScreenVerdict()
+		var releaseOnce sync.Once
+		releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(releaseGate)
+
+		driver := f.runDriverAsync("screen-verdict-close", 45*time.Second)
+		select {
+		case <-entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the screen verdict did not reach the persistence gate")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		m.handleEndSession(m.currentSender())
+		releaseGate()
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 {
+			t.Fatalf("close=%d late verdict echoes=%d, want 1/0", res.WSCloseCount, res.LateVerdictEchoes)
+		}
+		f.assertOriginalTasksExited()
+
+		// A submit frame arriving past the sealed close rides the production
+		// entry (the read loop's last-message equivalent): it must be
+		// refused with zero persistence effects.
+		m.HandleControl(m.currentSender(), mustJSON(t, CheckSubmitMsg{
+			Type: TypeCheckSubmit, RequestID: "late-submit-after-close",
+		}))
+
+		l := storedLesson(f)
+		if l.Stage != lesson.StageSubmitted || !l.Unchecked {
+			t.Fatalf("stored stage=%q unchecked=%v, want the fallback's submitted+unchecked", l.Stage, l.Unchecked)
+		}
+		if got := reviewLogs(f); got != 2 {
+			t.Fatalf("review_logs rows = %d, want exactly the fallback's 2-word degraded batch", got)
+		}
+		if calls := probe.submitCalls(); calls != 1 {
+			t.Fatalf("real review writes = %d, want exactly 1 (the fallback's; the late submit writes nothing)", calls)
+		}
+		recs := receiptsOf(f)
+		if len(recs) != 1 || recs[0].Kind != lesson.ReceiptKindUncheckedFallback {
+			t.Fatalf("receipts = %+v, want exactly one kind=unchecked_fallback", recs)
+		}
+		m.mu.Lock()
+		pending := len(m.checkWrites)
+		m.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
+}
+
 func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {
 	f.t.Helper()
 	done := make(chan speechDriverResult, 1)
