@@ -71,7 +71,6 @@ type ProgressInterpretation struct {
 	Status         string
 	TextbookID     int64
 	TextbookName   string
-	Category       string
 	Lesson         string
 	LearnedLessons int
 	Reason         string
@@ -83,7 +82,7 @@ type ProgressInterpretation struct {
 // name the book only when the statement plus context identify exactly one.
 const progressSystemPrompt = `你是听写助手小天的家长端进度理解助手。家长会用一句话说明孩子的教学进度，例如「现在学到第五课了」「语文上到第二单元了」。
 给你已登记教材的真实信息：编号、名称、学科、教材信息、按教学顺序的课次名单、当前已学进度。你的任务：
-1. 判断这句话是否在说明教学进度。指定默写、加入词、开始课堂等不是进度说明，用 not_progress 并用一句中文说明原因。
+1. 判断这句话是否在说明教学进度。指定默写、加入范围、开始课堂等不是进度说明，用 not_progress 并用一句中文说明原因。
 2. 找到家长说的课次：课次名称必须从某本教材的课次名单里逐字选择。家长可能说「第三单元」「Unit 3」「第五课」，你要对应到名单里的实际名称；找不到对应课次（名单为空或没有匹配）就返回 unclear，reason 用一句中文向家长说明还缺什么，不要编造课次。
 3. 确定教材：这句话和教材信息能确定唯一一本时给出 textbook_id；两本以上教材都说得通（例如不同教材有同名课次，而话里没有说明是哪本）时 textbook_id 用 null，lesson 填你找到的课次名，reason 用一句中文问家长是哪一本。
 只输出一个 JSON 对象，不要输出 JSON 以外的内容。格式：
@@ -100,9 +99,15 @@ func BuildProgressUserPrompt(message string, books []ProgressTextbook) string {
 	b.WriteString("已登记教材：\n")
 	for _, book := range books {
 		fmt.Fprintf(&b, "编号 %d《%s》", book.ID, book.Name)
-		meta := progressMetaSummary(book)
-		if meta != "" {
-			b.WriteString("（" + meta + "）")
+		info := []string{}
+		if label := progressCategoryLabel(book.Category); label != "" {
+			info = append(info, "学科 "+label)
+		}
+		if meta := progressMetaSummary(book); meta != "" {
+			info = append(info, meta)
+		}
+		if len(info) > 0 {
+			b.WriteString("（" + strings.Join(info, "·") + "）")
 		}
 		b.WriteString("\n")
 		if len(book.Lessons) == 0 {
@@ -110,7 +115,11 @@ func BuildProgressUserPrompt(message string, books []ProgressTextbook) string {
 		} else {
 			b.WriteString("  课次名单（按教学顺序）：" + strings.Join(book.Lessons, "、") + "\n")
 		}
-		fmt.Fprintf(&b, "  当前已学完第 %d 课\n", book.LearnedLessons)
+		if book.LearnedLessons > 0 {
+			fmt.Fprintf(&b, "  当前已学完第 %d 课\n", book.LearnedLessons)
+		} else {
+			b.WriteString("  当前尚未开始\n")
+		}
 	}
 	b.WriteString("家长说：「")
 	b.WriteString(message)
@@ -128,6 +137,20 @@ func progressMetaSummary(book ProgressTextbook) string {
 		}
 	}
 	return strings.Join(parts, "·")
+}
+
+// progressCategoryLabel maps the wire category onto the display word the
+// prompt promises the model (学科). An empty/unknown category renders
+// nothing rather than a guess.
+func progressCategoryLabel(category string) string {
+	switch strings.TrimSpace(category) {
+	case "english":
+		return "英语"
+	case "chinese":
+		return "语文"
+	default:
+		return ""
+	}
 }
 
 // ProgressInterpreter turns one parent sentence into a verified progress
@@ -205,7 +228,10 @@ func parseProgressReply(reply string) (progressReplyJSON, bool) {
 // are checked: the textbook must exist and the lesson must be IN that
 // book's list verbatim; a failed check degrades through the candidate
 // resolution (the named lesson still picks out the books that really
-// contain it) instead of trusting the model.
+// contain it) instead of trusting the model. When the lesson sits in
+// several books but the model NAMES one, the named pick stands — the model
+// resolved the sentence's own identification, and the parent's confirm
+// card shows the book for the explicit correction (家长的明确纠正优先).
 func verifyProgress(reply progressReplyJSON, books []ProgressTextbook) ProgressInterpretation {
 	switch strings.TrimSpace(reply.Status) {
 	case ProgressNotStatement:
@@ -232,33 +258,19 @@ func verifyProgress(reply progressReplyJSON, books []ProgressTextbook) ProgressI
 		}
 	}
 
-	// A proposed pick survives only if BOTH checks pass.
+	// A proposed pick survives only when the named book is one of the
+	// real containers; otherwise the lesson's own containers decide.
 	if reply.Status == ProgressProposed && reply.TextbookID != nil {
 		for _, book := range matches {
 			if book.ID == *reply.TextbookID {
-				return ProgressInterpretation{
-					Status:         ProgressProposed,
-					TextbookID:     book.ID,
-					TextbookName:   book.Name,
-					Category:       book.Category,
-					Lesson:         lesson,
-					LearnedLessons: lessonPosition(book.Lessons, lesson),
-				}
+				return proposedResult(book, lesson)
 			}
 		}
 	}
 	if len(matches) == 1 {
 		// The model could not name the book (or named a wrong one) but the
 		// lesson itself identifies exactly one registered book.
-		book := matches[0]
-		return ProgressInterpretation{
-			Status:         ProgressProposed,
-			TextbookID:     book.ID,
-			TextbookName:   book.Name,
-			Category:       book.Category,
-			Lesson:         lesson,
-			LearnedLessons: lessonPosition(book.Lessons, lesson),
-		}
+		return proposedResult(matches[0], lesson)
 	}
 	if len(matches) > 1 {
 		out := ProgressInterpretation{Status: ProgressUnclear, Lesson: lesson,
@@ -276,6 +288,18 @@ func verifyProgress(reply progressReplyJSON, books []ProgressTextbook) ProgressI
 	// The named lesson is in NO registered list: ask, never invent.
 	return ProgressInterpretation{Status: ProgressUnclear, Lesson: lesson,
 		Reason: orDefaultReason(reply.Reason, "登记的教材里没有找到课次「"+lesson+"」，请核对课次名单或补充课次")}
+}
+
+// proposedResult builds the verified proposal for one book+lesson pair
+// (shared by the model-pick and unique-container branches).
+func proposedResult(book ProgressTextbook, lesson string) ProgressInterpretation {
+	return ProgressInterpretation{
+		Status:         ProgressProposed,
+		TextbookID:     book.ID,
+		TextbookName:   book.Name,
+		Lesson:         lesson,
+		LearnedLessons: lessonPosition(book.Lessons, lesson),
+	}
 }
 
 // lessonPosition returns the lesson's 1-based list position (已学完第 N

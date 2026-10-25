@@ -79,6 +79,11 @@ func TestProgressInterpreterProposed(t *testing.T) {
 			t.Errorf("user prompt missing %q:\n%s", want, user)
 		}
 	}
+	// The subject rides along (spec: 不同学科存在相同课次名称) — the model
+	// must be able to honor 「语文学到第1课了」 against an english twin.
+	if !strings.Contains(user, "学科 英语") || !strings.Contains(user, "学科 语文") {
+		t.Errorf("user prompt drops the subject labels:\n%s", user)
+	}
 	// The in-order list must appear in list order (not dictionary order).
 	if strings.Index(user, "第一单元") > strings.Index(user, "第四单元") {
 		t.Errorf("lesson list is not rendered in teaching order:\n%s", user)
@@ -173,8 +178,8 @@ func TestProgressInterpreterCrossCategoryExactMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Interpret: %v", err)
 	}
-	if res.Status != ProgressProposed || res.TextbookID != 11 || res.Category != "chinese" || res.LearnedLessons != 1 {
-		t.Fatalf("res = %+v, want proposed book 11 (chinese) learned 1", res)
+	if res.Status != ProgressProposed || res.TextbookID != 11 || res.LearnedLessons != 1 {
+		t.Fatalf("res = %+v, want proposed book 11 learned 1", res)
 	}
 }
 

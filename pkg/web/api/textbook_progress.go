@@ -24,6 +24,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
@@ -46,17 +47,10 @@ type ProgressInterpretRequest struct {
 	Message string `json:"message"`
 }
 
-// progressCandidateJSON is one element of the unclear response's minimal
-// confirmation choices.
-type progressCandidateJSON struct {
-	TextbookID     int64  `json:"textbookId"`
-	TextbookName   string `json:"textbookName"`
-	Lesson         string `json:"lesson"`
-	LearnedLessons int    `json:"learnedLessons"`
-}
-
 // progressInterpretResponse is the 200 payload for every status; absent
-// fields stay omitted (omitempty), never null.
+// fields stay omitted (omitempty), never null. Candidates reuses
+// ocr.ProgressCandidate verbatim — one definition across the seam (the
+// meaning_generate.go precedent; its json tags are the wire contract).
 type progressInterpretResponse struct {
 	Status         string                  `json:"status"`
 	TextbookID     int64                   `json:"textbookId,omitempty"`
@@ -64,7 +58,7 @@ type progressInterpretResponse struct {
 	Lesson         string                  `json:"lesson,omitempty"`
 	LearnedLessons int                     `json:"learnedLessons,omitempty"`
 	Reason         string                  `json:"reason,omitempty"`
-	Candidates     []progressCandidateJSON `json:"candidates,omitempty"`
+	Candidates     []ocr.ProgressCandidate `json:"candidates,omitempty"`
 }
 
 // interpretTextbookProgress serves POST /textbooks/progress/interpret.
@@ -84,7 +78,7 @@ func (h *handler) interpretTextbookProgress(w http.ResponseWriter, r *http.Reque
 	msg := []rune(req.Message)
 	if len(msg) < 1 || len(msg) > maxProgressMessageRunes {
 		writeError(w, http.StatusBadRequest, codeInvalidRequest,
-			"message must contain between 1 and 200 characters")
+			fmt.Sprintf("message must contain between 1 and %d characters", maxProgressMessageRunes))
 		return
 	}
 
@@ -143,12 +137,7 @@ func (h *handler) interpretTextbookProgress(w http.ResponseWriter, r *http.Reque
 	default:
 		out.Reason = res.Reason
 		out.Lesson = res.Lesson
-		for _, c := range res.Candidates {
-			out.Candidates = append(out.Candidates, progressCandidateJSON{
-				TextbookID: c.TextbookID, TextbookName: c.TextbookName,
-				Lesson: c.Lesson, LearnedLessons: c.LearnedLessons,
-			})
-		}
+		out.Candidates = res.Candidates
 	}
 	writeJSON(w, out)
 }

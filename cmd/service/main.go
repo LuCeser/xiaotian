@@ -677,12 +677,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// model — the mimoChatter adapter the voice intent classifier
 			// uses, type-converted onto the ocr.ChatReader seam (no image
 			// part is involved).
-			meaningGen = ocr.NewMeaningGenerator(
-				ocr.ChatReader(mimoChatter(mimoClient, cfg.Voice.ChatModel)))
-			// Issue #82: the progress interpreter rides the SAME text chat
-			// seam (one deployment shape with the supplement above).
-			progressGen = ocr.NewProgressInterpreter(
-				ocr.ChatReader(mimoChatter(mimoClient, cfg.Voice.ChatModel)))
+			// Issue #8 + Issue #82: the meaning supplement and the
+			// progress interpreter ride the SAME text chat seam — one
+			// adapter, two pipelines (no image part involved).
+			textChat := ocr.ChatReader(mimoChatter(mimoClient, cfg.Voice.ChatModel))
+			meaningGen = ocr.NewMeaningGenerator(textChat)
+			progressGen = ocr.NewProgressInterpreter(textChat)
 			logger.Info("voice command pipeline enabled",
 				infra.F("component", "infra.main"),
 				infra.F("chat_model", cfg.Voice.ChatModel),
