@@ -430,7 +430,9 @@ type TurnManager struct {
 	// turnSentences are the sentences sent for the current announcement, in
 	// order (the interrupt-trim source).
 	turnSentences []sentenceInfo
-	cfg           TurnManagerConfig
+	// Temporary aggregate diagnostics; protected by mu, no PCM retained.
+	audioObservation audioObservation
+	cfg              TurnManagerConfig
 
 	// timerGen is the monotonic per-word timer generation. EVERY
 	// arm/reset/stop increments it, so a callback already queued before the
@@ -1317,17 +1319,29 @@ func (tm *TurnManager) IngestAudio(s Sender, data []byte) {
 			now.Sub(tm.sessionReadyAt) < time.Duration(tm.cfg.VADStartGraceMs)*time.Millisecond)
 	state := tm.state
 	closed := tm.closed
+	observation := tm.audioObservation.add(now, len(data), ordinaryGated || state != StateListening || closed)
 	if ordinaryGated || state != StateListening || closed {
 		tm.droppedUplink++
 	}
 	tm.mu.Unlock()
+	if observation != nil {
+		tm.recorder.Emit("[DEBUG-asr-recurrence]uplink", observation...)
+	}
 	if ordinaryGated || state != StateListening || closed {
 		return
 	}
-	segment, segClosed := tm.vad.Feed(data)
+	segment, segClosed, report := tm.vad.feedObserved(data)
 	if !segClosed {
 		return
 	}
+	meanRMS := 0.0
+	if report.Frames > 0 {
+		meanRMS = report.RMSSum / float64(report.Frames)
+	}
+	tm.recorder.Emit("[DEBUG-asr-recurrence]vad_closed",
+		infra.F("reason", report.Reason), infra.F("duration_ms", report.DurationMs),
+		infra.F("max_quiet_ms", report.MaxQuietMs), infra.F("trailing_quiet_ms", report.QuietMs),
+		infra.F("mean_rms", meanRMS), infra.F("max_rms", report.RMSMax))
 	// Utterances shorter than two frames (60 ms) are nose breaths, not
 	// speech — do not spend an ASR call on them.
 	if len(segment) < 2*960 {
@@ -1398,7 +1412,7 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	tm.recorder.Emit(EventSpeechEnded, infra.F("turn_id", turnID))
 
 	attempts := 1
-	transcript, err := tm.asr.Transcribe(ctx, segment)
+	transcript, err := tm.transcribeObserved(ctx, segment, turnID, attempts)
 	if errors.Is(err, mimo.ErrEmptyTranscription) {
 		// The provider's legitimate "nothing spoken" answer (13-07 sentinel):
 		// silence is not a fault — no user-visible error, no classification,
@@ -1413,7 +1427,7 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		// LLM half): same ctx, at most ONE retry; the failure count lands
 		// in the event fields when it still fails.
 		attempts = 2
-		transcript, err = tm.asr.Transcribe(ctx, segment)
+		transcript, err = tm.transcribeObserved(ctx, segment, turnID, attempts)
 	}
 	if err != nil {
 		tm.failTurn(s, epoch, ErrCodeProviderFailed, "语音识别失败，请再对我说一遍", infra.F("attempts", attempts))
@@ -1492,7 +1506,9 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		return
 	}
 
+	classificationStarted := time.Now()
 	intent, reply := tm.classifyTurn(ctx, transcript, turnCtx)
+	tm.recorder.Emit("[DEBUG-asr-recurrence]classification", infra.F("turn_id", turnID), infra.F("duration_ms", time.Since(classificationStarted).Milliseconds()))
 	if !tm.epochCurrent(epoch) {
 		return // interrupted mid-classification: abort the whole turn silently
 	}

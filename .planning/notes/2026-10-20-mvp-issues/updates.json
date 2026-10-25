@@ -1,0 +1,139 @@
+[
+  {
+    "number": 57,
+    "title": "[延后] 默写推进延迟：预先确定词序，并核查逐词推进是否经过大模型",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\57.md",
+    "addLabels": [],
+    "removeLabels": []
+  },
+  {
+    "number": 56,
+    "title": "默写中“好了 / 下一个 / 好嘞”等确认语未推进到下一词",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\56.md",
+    "addLabels": [],
+    "removeLabels": []
+  },
+  {
+    "number": 55,
+    "title": "默写任务应按学科隔离，避免语文与英语混合出题",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\55.md",
+    "addLabels": [],
+    "removeLabels": []
+  },
+  {
+    "number": 46,
+    "title": "[延后] chore(mimo): Chat 路径 max_tokens 迁移到官方 max_completion_tokens",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\46.md",
+    "addLabels": [
+      "needs-triage"
+    ],
+    "removeLabels": [
+      "ready-for-agent"
+    ]
+  },
+  {
+    "number": 41,
+    "title": "bug(rt): 语音响应延迟复发，VAD 达到 30 秒上限才切段；需对比首轮与后续轮次",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\41.md",
+    "addLabels": [],
+    "removeLabels": []
+  },
+  {
+    "number": 29,
+    "title": "[按需] CI 时序敏感测试偶发清单（阻塞最小版本交付时处理）",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\29.md",
+    "addLabels": [],
+    "removeLabels": []
+  },
+  {
+    "number": 17,
+    "title": "[延后] 家长端跨模块 UI 工具函数去重",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\17.md",
+    "addLabels": [],
+    "removeLabels": []
+  },
+  {
+    "number": 16,
+    "title": "[延后] 统一 tutor.css 强调色与全家 --accent（消除双蓝）",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\16.md",
+    "addLabels": [
+      "needs-triage"
+    ],
+    "removeLabels": [
+      "ready-for-agent"
+    ]
+  },
+  {
+    "number": 15,
+    "title": "[延后] 诗文背诵与背默分开记录",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\15.md",
+    "addLabels": [
+      "needs-triage"
+    ],
+    "removeLabels": [
+      "ready-for-agent"
+    ]
+  },
+  {
+    "number": 14,
+    "title": "[延后] 课文指定段落背默与独立掌握记录",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\14.md",
+    "addLabels": [
+      "needs-triage"
+    ],
+    "removeLabels": [
+      "ready-for-agent"
+    ]
+  },
+  {
+    "number": 12,
+    "title": "[延后] 整首古诗背默、检查与学习记录",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\12.md",
+    "addLabels": [
+      "needs-triage"
+    ],
+    "removeLabels": [
+      "ready-for-human"
+    ]
+  },
+  {
+    "number": 9,
+    "title": "[延后] 课堂按当前学习进度生成简单例句",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\9.md",
+    "addLabels": [
+      "needs-triage"
+    ],
+    "removeLabels": [
+      "ready-for-human"
+    ]
+  },
+  {
+    "number": 8,
+    "title": "[延后] 缺失英语释义按教材语境补充并标明来源",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\8.md",
+    "addLabels": [
+      "needs-triage"
+    ],
+    "removeLabels": [
+      "ready-for-human"
+    ]
+  },
+  {
+    "number": 7,
+    "title": "[延后] 多页扫描 PDF 导入与逐页结果确认",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\7.md",
+    "addLabels": [
+      "needs-triage"
+    ],
+    "removeLabels": [
+      "ready-for-human"
+    ]
+  },
+  {
+    "number": 1,
+    "title": "当前目标：词语录入与正常默写（最小版本）",
+    "bodyFile": "D:\\workspace\\ai\\xiaotian\\.planning\\notes\\2026-10-20-mvp-issues\\.\\1.md",
+    "addLabels": [],
+    "removeLabels": []
+  }
+]

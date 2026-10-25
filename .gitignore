@@ -75,3 +75,6 @@ nul
 /rt-timing-*.jsonl
 .scratch/debug/
 tests/e2e/.pdf-capture/
+
+# session scratch logs (asr captures, recurrence drafts) — never enter git
+logs/

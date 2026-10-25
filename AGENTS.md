@@ -44,6 +44,14 @@
 
 使用根目录 CONTEXT.md 和 docs/adr/ 的单领域布局。见 docs/agents/domain.md。
 
+## 本地长驻进程（OpenCode / Windows）
+
+- 服务、监听器和 watch 进程是后台依赖。启动动作必须在有限时间内完成就绪检查并返回；随后在同一轮继续执行测试和验证，不能停在 `running` 状态等待长驻进程退出。
+- 运行普通开发服务时，直接使用 `powershell -NoProfile -ExecutionPolicy Bypass -File .\run.ps1`，不要把它接到 `Select-Object` 等输出管道。该脚本会构建服务、以独立进程启动、重定向日志并等待端口就绪；启动后用有限时长的健康检查或日志末尾若干行诊断。
+- 运行端到端测试时，直接执行对应的 `npm run e2e`、`npm run e2e:parent`、`npm run e2e:rt`、`npm run e2e:family` 或 `npm run e2e:rt-real`。Playwright 或测试脚本负责启动与检查依赖，隔离测试还会自行清理；无需预先手工启动 `go run`、`service.exe` 或 mock server。
+- 只有用户明确要求交互式前台运行或持续查看实时日志时，才在主 Agent 的终端直接运行长驻命令。误启动到前台时应中止该次调用，改用仓库启动器或测试自带的进程管理，然后继续原任务。
+- 需要查看共享开发服务日志时，只读取 `logs/server*.log` 末尾若干行。`.\stop.ps1` 会同时停止本仓库的 HTTP、HTTPS 和健康检查监听器；只有确认整套本地服务都可以停止时才运行。
+
 ## Cursor Cloud specific instructions
 
 - 开机时 `start` 在仓库根执行 `./bin/service -config config.yaml`。页面在 `http://127.0.0.1:8080/`，家长页在 `/parent.html`，健康检查在 `http://127.0.0.1:8081/health`。改过 Go 代码后先 `make build`，开机跑的是已编译的 `bin/service`。

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "batch_id": "261024-njm",
+  "created_at": "2026-10-24T08:57:08.702Z",
+  "options": {},
+  "base_revision": "b77be738ba1921702626f7f8515f8f27185314b9",
+  "items": [
+    {
+      "quick_id": "261024-njn",
+      "client_id": null,
+      "description": "scripts/install.ps1（一次性安装器）：建安装目录（如 D:\\hta，参数化）；拷入 bin\\service.exe、pkg\\web\\static → web\\static、third_party\\python\\*.py → python\\；从 config.example.yaml 生成生产 config\\config.yaml（绝对路径、自定义数据目录、TLS 块指向拷入的 mkcert 证书、rt/ws allowedOrigins 含主机 LAN IP、端口避开开发占用的 8080/8443/8081，健康端口也错开）；拷 .local-certs 证书到 certs\\；用 uv + 清华源在安装目录建 venv（Windows 布局 Scripts\\python.exe，config interpreter 指它，参照 Makefile py-bootstrap）；netsh 防火墙放行部署端口（提示需管理员一次）；把 hta.ps1 装进安装目录；生成含 mkcert 证书到期日的说明文件。幂等：绝不覆盖已存在的 secrets\\.env、config、certs、数据目录。",
+      "status": "complete",
+      "depends_on": [],
+      "planned_files": [
+        "scripts/install.ps1",
+        "tests/test-install.js",
+        "package.json"
+      ],
+      "directory": null,
+      "worktree": null,
+      "dispatched_worktree": null,
+      "dispatched_branch": null,
+      "dispatched_base": null,
+      "wave": 0,
+      "commit": "8961739",
+      "failure_reason": null
+    },
+    {
+      "quick_id": "261024-njo",
+      "client_id": null,
+      "description": "hta.ps1（装进安装目录的日常启停脚本，由任务 1 落盘到安装目录）：start/stop/status 子命令。start = 加载安装目录 .env → 用 scripts/start-detached.mjs 同款模式后台拉起 bin\\service.exe -config config\\config.yaml → 有限等待健康端口就绪（照抄 run.ps1 的\"本进程必须拥有监听\"检查逻辑，不含 build 步骤）→ 打印 iPad 入口 URL；stop = 按部署端口杀进程（stop.ps1 模式）；status = 健康检查 + 进程查询。日志写安装目录 logs\\。",
+      "status": "complete",
+      "depends_on": [],
+      "planned_files": [
+        "scripts/hta.ps1"
+      ],
+      "directory": null,
+      "worktree": null,
+      "dispatched_worktree": null,
+      "dispatched_branch": null,
+      "dispatched_base": null,
+      "wave": 0,
+      "commit": "7d625a6",
+      "failure_reason": null
+    },
+    {
+      "quick_id": "261024-njp",
+      "client_id": null,
+      "description": "scripts/deploy.ps1（升级/回滚）：go build（本机 Windows 直编，CGO_ENABLED=0 -ldflags '-s -w'，参照 Makefile build 目标；SQLite 为纯 Go 驱动 modernc.org/sqlite 无 CGO）→ 停部署实例（若在跑）→ 当前 bin/web/python 备份到 versions\\prev → 拷新版 → 启动（复用安装目录 hta.ps1 的 start）→ 健康检查，失败提示回滚；rollback 子命令 = versions\\prev 换回 + 重启。绝不碰 config\\、secrets\\、certs\\、数据目录、venv。背景：数据路径全由 config.yaml 的 vocabDBPath/dataDir/cacheDir/manifestDir/envFile 键驱动，零 Go 代码改动；PowerShell 脚本配 node 冒烟测试（参照 tests/test-start-detached.js 对 start-detached.mjs 的测法），pwsh 套件在 Linux CI 跳过并说明。",
+      "status": "complete",
+      "depends_on": [
+        "261024-njn",
+        "261024-njo"
+      ],
+      "planned_files": [
+        "scripts/deploy.ps1",
+        "tests/test-deploy-ps1.js",
+        "package.json"
+      ],
+      "directory": null,
+      "worktree": null,
+      "dispatched_worktree": null,
+      "dispatched_branch": null,
+      "dispatched_base": null,
+      "wave": 1,
+      "commit": "32f4c74",
+      "failure_reason": null
+    }
+  ]
+}

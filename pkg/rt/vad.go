@@ -72,8 +72,9 @@ type VAD struct {
 	// ring holds the most recent preRollFrames frames of audio as copies.
 	ring [][]byte
 	// segment accumulates the open segment's bytes; segmentMs its length.
-	segment []byte
-	cfg     VADConfig
+	segment     []byte
+	observation vadObservation
+	cfg         VADConfig
 
 	// frameBytes is one analysis frame in bytes; frameMs the cfg value
 	// normalized to >= 1.
@@ -142,6 +143,25 @@ func NewVAD(cfg VADConfig) *VAD {
 //     by the next Feed — callers that keep streaming (the read loop does)
 //     see it then.
 func (v *VAD) Feed(pcm []byte) ([]byte, bool) {
+	segment, closed, _ := v.feedObserved(pcm)
+	return segment, closed
+}
+
+// vadObservation contains only aggregate levels and durations, never audio.
+// Temporary investigation of device-dependent utterance closure delays.
+type vadObservation struct {
+	Reason     string
+	DurationMs int
+	MaxQuietMs int
+	QuietMs    int
+	Frames     int
+	RMSSum     float64
+	RMSMax     float64
+}
+
+// feedObserved returns metrics with the corresponding segment under the same
+// lock; Reset cannot detach a report from the audio it describes.
+func (v *VAD) feedObserved(pcm []byte) ([]byte, bool, vadObservation) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.pending = append(v.pending, pcm...)
@@ -154,15 +174,17 @@ func (v *VAD) Feed(pcm []byte) ([]byte, bool) {
 			v.pending = rest
 
 			seg := v.segment
+			report := v.observation
+			report.DurationMs = v.segmentMs
 			v.closeSegmentState()
-			return seg, true
+			return seg, true, report
 		}
 		v.pending = v.pending[v.frameBytes:]
 	}
 	if len(v.pending) == 0 {
 		v.pending = nil
 	}
-	return nil, false
+	return nil, false, vadObservation{}
 }
 
 // Reset clears all state: partial frames, ring, open segment, counters.
@@ -180,12 +202,14 @@ func (v *VAD) Reset() {
 	v.ring = nil
 	v.segment = nil
 	v.segmentMs = 0
+	v.observation = vadObservation{}
 }
 
 // closeSegmentState resets the per-segment bookkeeping after a close. The
 // hunt state (consec) also restarts — post-close audio must re-trigger the
 // onset detector before a new segment opens.
 func (v *VAD) closeSegmentState() {
+	v.observation = vadObservation{}
 	v.inSegment = false
 	v.consec = 0
 	v.hangoverMs = v.cfg.HangoverMs
@@ -209,6 +233,7 @@ func (v *VAD) processFrame(frame []byte) bool {
 			v.consec = 0
 		}
 		if v.consec >= v.cfg.StartFrames {
+			v.observation = vadObservation{}
 			// Onset: the ring's contents (recent silence + the trigger
 			// frames) become the segment head — nothing before speech is
 			// clipped. The ring restarts for the next hunt.
@@ -228,17 +253,29 @@ func (v *VAD) processFrame(frame []byte) bool {
 	// (the ASR gets the pause that ended the utterance).
 	v.segment = append(v.segment, frame...)
 	v.segmentMs += v.frameMs
+	v.observation.Frames++
+	v.observation.RMSSum += rms
+	if rms > v.observation.RMSMax {
+		v.observation.RMSMax = rms
+	}
 
 	if rms < v.cfg.StopRMS {
+		v.observation.QuietMs += v.frameMs
+		if v.observation.QuietMs > v.observation.MaxQuietMs {
+			v.observation.MaxQuietMs = v.observation.QuietMs
+		}
 		v.hangoverMs -= v.frameMs
 		if v.hangoverMs <= 0 {
+			v.observation.Reason = "silence"
 			return true // hangover expired: utterance complete
 		}
 	} else {
+		v.observation.QuietMs = 0
 		v.hangoverMs = v.cfg.HangoverMs // speech continues the segment
 	}
 
 	if v.segmentMs >= v.cfg.MaxSegmentMs {
+		v.observation.Reason = "max_duration"
 		return true // hard cut (Pitfall 6)
 	}
 	return false
