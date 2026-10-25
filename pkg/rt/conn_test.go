@@ -449,6 +449,26 @@ func TestWriterTermination(t *testing.T) {
 	default:
 		t.Fatal("Done reopened after repeated termination")
 	}
+
+	t.Run("a write failure after the normal termination still propagates", func(t *testing.T) {
+		sc, client := newConnPair(t)
+		w := newConnWriter(sc, 2, nil)
+		// The pump stays unstarted: this pins failSend — the send loop's ONE
+		// write-failure egress — free of select-order flakiness; the loop's
+		// two failure branches call this same method (compile-checked).
+		w.Terminate(nil) // the normal termination consumes terminateOnce FIRST
+
+		want := errors.New("tcp: connection reset by peer")
+		w.failSend("control", want)
+
+		if got := w.TerminationReason(); !errors.Is(got, want) {
+			t.Fatalf("termination reason = %v, want the post-termination failure upgrading the nil", got)
+		}
+		_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := client.ReadMessage(); err == nil {
+			t.Fatal("underlying connection still readable after failure propagation — the read loop would never wake")
+		}
+	})
 }
 
 type terminatingManager struct {

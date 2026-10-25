@@ -471,14 +471,12 @@ func (w *connWriter) run() {
 		select {
 		case c := <-w.control:
 			if err := w.write(websocket.TextMessage, c); err != nil {
-				w.Terminate(errors.Wrap(err, "rt: write control frame"))
-				w.logWriteFailure("control", err)
+				w.failSend("control", err)
 				return
 			}
 		case a := <-w.audio:
 			if err := w.write(websocket.BinaryMessage, a); err != nil {
-				w.Terminate(errors.Wrap(err, "rt: write audio frame"))
-				w.logWriteFailure("audio", err)
+				w.failSend("audio", err)
 				return
 			}
 		case <-w.ctx.Done():
@@ -504,12 +502,12 @@ func (w *connWriter) drainAndClose() {
 		select {
 		case c := <-w.control:
 			if err := w.write(websocket.TextMessage, c); err != nil {
-				w.publishDrainFailure(errors.Wrap(err, "rt: drain control frame"))
+				w.publishWriteFailure(errors.Wrap(err, "rt: drain control frame"))
 				return
 			}
 		case a := <-w.audio:
 			if err := w.write(websocket.BinaryMessage, a); err != nil {
-				w.publishDrainFailure(errors.Wrap(err, "rt: drain audio frame"))
+				w.publishWriteFailure(errors.Wrap(err, "rt: drain audio frame"))
 				return
 			}
 		default:
@@ -526,7 +524,25 @@ func (w *connWriter) drainAndClose() {
 		time.Now().Add(time.Second))
 }
 
-func (w *connWriter) publishDrainFailure(err error) {
+// failSend is the send pump's ONE write-failure egress (both frame kinds,
+// pump loop and drain alike): first-wins termination, then the
+// UNCONDITIONAL propagation. 单元 1 review P1: Terminate alone is not
+// enough — when the writer was ALREADY terminated normally (Terminate(nil)
+// consumed terminateOnce), Terminate(err) is a no-op; the failure must still
+// upgrade the nil reason and close the underlying conn so the read loop
+// wakes. That is publishWriteFailure's job here.
+func (w *connWriter) failSend(kind string, err error) {
+	w.Terminate(errors.Wrap(err, "rt: write "+kind+" frame"))
+	w.publishWriteFailure(errors.Wrap(err, "rt: write "+kind+" frame"))
+	w.logWriteFailure(kind, err)
+}
+
+// publishWriteFailure propagates one send-side write failure unconditionally
+// — even when Terminate already ran (first-wins keeps terminateOnce, but a
+// normal Terminate(nil) must never swallow a subsequent write failure: the
+// nil reason upgrades to the error and the underlying connection closes so
+// the read loop wakes 单元 1 review P1).
+func (w *connWriter) publishWriteFailure(err error) {
 	w.terminationMu.Lock()
 	if w.reason == nil {
 		w.reason = err
