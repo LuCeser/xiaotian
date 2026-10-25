@@ -283,6 +283,47 @@ type historyRound struct {
 	teacherText string
 }
 
+// dictationTurnContext is the immutable snapshot of the classroom's task
+// state captured under tm.mu BEFORE a turn enters processing (Issue #56):
+// what the classifier — and the full-phrase confirmation correction — may
+// assume about the classroom as it stood when the child started speaking.
+// It is a local per-turn view, never a second copy of classroom state:
+// execution still re-checks the live epoch, close flag, and pause bit at
+// dispatch time.
+type dictationTurnContext struct {
+	target TurnTarget
+	turnID uint64
+	epoch  uint64
+	// awaitingWord: an ordinary WORD dictation in its writing stage — the
+	// teacher announced the current word and the classroom is waiting for
+	// the child to finish writing it. The ONLY state where #56's
+	// completion-phrase correction may override the model's intent.
+	awaitingWord bool
+	paused       bool
+	checking     bool
+}
+
+// captureDictationTurnContextLocked snapshots the turn's task context.
+// Caller holds tm.mu; checking and target are the caller's turn-entry
+// values (already computed under the same hold — the capture adds the
+// stage bits the classifier needs, judging the classroom at turn START).
+func (tm *TurnManager) captureDictationTurnContextLocked(turnID, epoch uint64, checking bool, target TurnTarget) dictationTurnContext {
+	snap := dictationTurnContext{
+		turnID:   turnID,
+		epoch:    epoch,
+		target:   target,
+		checking: checking,
+	}
+	if tm.tutor == nil {
+		return snap
+	}
+	snap.paused = tm.tutor.paused
+	snap.awaitingWord = !checking && !tm.tutor.recitation() && !tm.tutor.paused &&
+		!tm.tutor.completed &&
+		target.WordIndex >= 0 && target.WordIndex < len(tm.tutor.words)
+	return snap
+}
+
 // DictationTutor holds the classroom-side state of one dictation lesson.
 //
 // SINGLE-LOCK DISCIPLINE: every field here is guarded by the owning
@@ -631,13 +672,16 @@ func (tm *TurnManager) stopTimerHandleLocked() {
 
 // onWordTimeout is the countdown firing (its own goroutine). It re-acquires
 // the lock and validates in order: generation, session close, epoch, tutor
-// liveness, the pause bit, and the FULL TurnTarget (word/index/version — a
-// late confirm that already advanced bumps the version, so a stale target
-// mismatches). The processing branch is handled BEFORE the generic
-// state-rejection drop: a student reply being classified must not swallow
-// the timeout — that firing is discarded and a fresh countdown re-armed.
-// speaking is ack-driven and never advances early; anything else is
-// dropped.
+// liveness, the pause bit, and the captured target's index+version (a late
+// confirm that already advanced bumps the version, so a stale target
+// mismatches). The target is compared by index+version, NEVER through
+// turnTarget(): in the window between the last word's first-commit align and
+// enterCheck's markCompleted/stop the cursor already sits at len(words) —
+// turnTarget would index past the word list (the #56 最后一词越界 red line).
+// The processing branch is handled BEFORE the generic state-rejection drop:
+// a student reply being classified must not swallow the timeout — that
+// firing is discarded and a fresh countdown re-armed. speaking is
+// ack-driven and never advances early; anything else is dropped.
 func (tm *TurnManager) onWordTimeout(gen uint64, epoch uint64, target TurnTarget) {
 	tm.mu.Lock()
 	if gen != tm.timerGen || tm.closed || tm.epoch != epoch ||
@@ -645,7 +689,7 @@ func (tm *TurnManager) onWordTimeout(gen uint64, epoch uint64, target TurnTarget
 		tm.mu.Unlock()
 		return
 	}
-	if tm.tutor.turnTarget() != target {
+	if tm.tutor.currentIndex != target.WordIndex || tm.tutor.version != target.ExpectedVersion {
 		tm.mu.Unlock()
 		return
 	}
@@ -774,6 +818,92 @@ func resumeAckText(idx int, word string) string {
 // paused: pacing stays suspended — no advance, no lesson_update.
 func confirmPausedRejectText() string {
 	return "我们还在休息呢，想继续的时候说继续，老师再陪你写这个词。"
+}
+
+// ---------------------------------------------------------------------------
+// Issue #56: state-gated full-phrase confirmation correction. The model
+// occasionally misreads a plain 「好了」 as repeat or chat, and a completion
+// phrase must advance exactly once — so BEFORE dispatch, a small pure
+// function corrects a FINITE table of unambiguous whole phrases. The gate
+// (awaitingWord: ordinary word dictation, writing stage, unpaused,
+// unfinished, valid target) is enforced by the caller; every other
+// expression keeps the model's verdict — and a collapsed classification
+// keeps its fixed spoken fallback, the exact-phrase table excepted (the
+// transcript is the input, never the model output).
+// ---------------------------------------------------------------------------
+
+// isDictationPhraseEdge reports whether a rune may be stripped from the END
+// of an utterance during phrase normalization: surrounding whitespace plus
+// a finite set of STATEMENT terminators and soft pauses. Question marks are
+// deliberately absent — 「好了？」 is a question, not a completion — and
+// nothing inside the phrase is ever touched.
+func isDictationPhraseEdge(r rune) bool {
+	switch r {
+	case '。', '！', '，', '、', '；', ',', '.', '!', ';', ' ', '\t', '\n', '\r', '　':
+		return true
+	}
+	return unicode.IsSpace(r)
+}
+
+// normalizeDictationPhrase trims statement punctuation and whitespace from
+// both ends of an utterance, leaving question marks, negations, and all
+// interior structure intact.
+func normalizeDictationPhrase(s string) string {
+	return strings.TrimFunc(s, isDictationPhraseEdge)
+}
+
+// The finite whole-phrase tables (Issue #56). EXACT matches on the
+// normalized phrase — never a substring, never fuzzy, never a homophone
+// substitution. Compound utterances (「好了，再读一遍」「好了再叫你」) keep
+// their interior structure and therefore never hit.
+var (
+	dictationConfirmPhrases = map[string]bool{
+		"好了": true, "好嘞": true, "写好了": true, "写完了": true,
+		"可以了": true, "下一个": true, "下一个词": true,
+	}
+	dictationRepeatPhrases  = map[string]bool{"再读一遍": true}
+	dictationNotDonePhrases = map[string]bool{
+		"还没好": true, "还没写好": true, "没写完": true, "不要下一个": true,
+	}
+	dictationPausePhrases = map[string]bool{"等一下": true}
+)
+
+// notDoneAckText is the fixed gentle reply to an explicit not-yet-done
+// phrase: the classroom keeps waiting on the SAME word — no advance, no
+// re-read, just patience.
+func notDoneAckText() string {
+	return "不着急，慢慢写，写好了告诉老师就行。"
+}
+
+// resolveDictationIntent corrects the model's verdict for the finite
+// full-phrase table (Issue #56); everything else passes through untouched:
+//
+//   - completion phrases → confirm with the reply CLEARED — the state
+//     machine alone narrates the next word, so a stale model reply must
+//     never ride along (and a model misjudgement of repeat/chat cannot
+//     swallow the advance);
+//   - 再读一遍 → repeat (an explicit re-read outranks any affirmative
+//     reading — the current word is re-read, the cursor never moves);
+//   - explicit not-yet-done phrases → chat with the fixed gentle ack — a
+//     model confirm here must NOT advance;
+//   - 等一下 → pause, the existing pause handling (timer suspended, ack
+//     line spoken).
+//
+// The caller gates this on awaitingWord, so the correction can only ever
+// fire inside a live word-dictation writing stage.
+func resolveDictationIntent(transcript, modelIntent, modelReply string) (string, string) {
+	phrase := normalizeDictationPhrase(transcript)
+	switch {
+	case dictationConfirmPhrases[phrase]:
+		return intentConfirm, ""
+	case dictationRepeatPhrases[phrase]:
+		return intentRepeat, ""
+	case dictationNotDonePhrases[phrase]:
+		return intentChat, notDoneAckText()
+	case dictationPausePhrases[phrase]:
+		return intentPause, ""
+	}
+	return modelIntent, modelReply
 }
 
 // ---------------------------------------------------------------------------
@@ -942,6 +1072,10 @@ func lessonIDForCategory(configured string, now time.Time, category string) stri
 // buildClassifySystemPrompt assembles the classification system prompt:
 //   - the tutor persona with the child-safety wording prohibition carried
 //     over VERBATIM from the 13-04 teacherSystemPrompt;
+//   - the waiting context and the judgment rules (Issue #56): the teacher
+//     has announced the current word and is waiting for the child to finish
+//     writing it — natural completion phrases are confirm, while negation,
+//     waiting, and re-read requests are NEVER completion;
 //   - the nine-value intent vocabulary with one-line definitions;
 //   - the word ground truth (current word, meaning, example — either may be
 //     absent, and the prompt says so honestly);
@@ -952,6 +1086,14 @@ func buildClassifySystemPrompt(word lesson.Word, index, total int) string {
 	var b strings.Builder
 	b.WriteString(`你是一位亲切、耐心的小学听写家教老师，正在通过语音陪学生完成听写练习。回应要简短、自然、温暖，适合小学生：写对了就真诚表扬，写错了就耐心鼓励再试一次。严禁任何羞辱、恐吓、惩罚性或让孩子难过的表述。
 课堂节奏由服务端负责，你不能推进课程，只判断学生这句话的意图并给出回应。
+现在的情形是：老师已经报完当前这个词，正在等学生把它写完。
+判断规则（按此优先级）：
+- 学生说“好了”“好嘞”“写好了”“写完了”“可以了”“下一个”“下一个词”，都表示当前这个词写完了，intent 是 confirm。
+- 学生明确说还没写完，比如“还没好”“还没写好”“没写完”“不要下一个”，不是 confirm，按 chat 回应，鼓励学生慢慢写。
+- 学生要等待，比如“等一下”“等一等”，不是 confirm，按 pause 处理。
+- 学生要“再读一遍”“慢一点读”，是要老师重读当前词，不是写完了。
+- 疑问或不肯定的语气（比如“好了？”）不算明确的完成表达；复合的话（比如“好了，再读一遍”）按学生真正的意图判断。
+- 想休息才是 pause，想继续才是 resume；肯定词本身不代表休息或继续。
 `)
 	fmt.Fprintf(&b, "当前是第 %d 个词（共 %d 个）：“%s”。\n", index+1, total, word.Word)
 	if word.Meaning != "" {
@@ -1114,26 +1256,61 @@ func (t *DictationTutor) appendShortHistoryLocked(b *strings.Builder) {
 	}
 }
 
+// appendShortHistoryExceptLocked is the dictation-stage history render
+// (Issue #56): OLDER rounds only, written BEFORE the current utterance. The
+// trailing round carrying THIS turn's transcript (processTurn appends it
+// under the lock right before classification; it cannot have a teacher
+// reply yet) is the current utterance itself — the caller renders it
+// separately, so it must not be duplicated as history.
+// appendShortHistoryLocked stays byte-identical for the check-stage and 背默
+// classifiers, which this issue does not touch. Caller holds tm.mu.
+func (t *DictationTutor) appendShortHistoryExceptLocked(b *strings.Builder, current string) {
+	rounds := t.shortHistory
+	if n := len(rounds); n > 0 && current != "" &&
+		rounds[n-1].userText == current && rounds[n-1].teacherText == "" {
+		rounds = rounds[:n-1]
+	}
+	if len(rounds) == 0 {
+		return
+	}
+	b.WriteString("最近对话：")
+	for _, r := range rounds {
+		if r.userText != "" {
+			fmt.Fprintf(b, "\n学生：%s", r.userText)
+		}
+		if r.teacherText != "" {
+			fmt.Fprintf(b, "\n老师：%s", r.teacherText)
+		}
+	}
+	b.WriteString("\n")
+}
+
 // buildClassifyMessages assembles the classification request: the system
-// prompt (persona + intent vocabulary + word ground truth + output
-// contract) plus one user message carrying the transcript and the FSM
-// short-history deque (last 4 rounds), so chat/hint/meaning stay coherent.
+// prompt (persona + waiting context + intent vocabulary + word ground truth
+// + output contract) plus one user message structured HISTORY FIRST, then
+// the progress line, then the CURRENT utterance marked separately (Issue
+// #56) — the current input is never duplicated as history, and the
+// progress rides the CAPTURED target so the system prompt and the user
+// message can never point at two different words (a stale live cursor
+// mid-advance must not re-describe the classroom).
 func (tm *TurnManager) buildClassifyMessages(transcript string, target TurnTarget) []mimo.Message {
 	var user strings.Builder
-	user.WriteString("学生说：")
-	user.WriteString(transcript)
 	tm.mu.Lock()
 	total := 0
 	var card lesson.Word
 	if tm.tutor != nil {
 		total = len(tm.tutor.words)
-		fmt.Fprintf(&user, "\n（当前进度：第 %d 个词，共 %d 个）", tm.tutor.currentIndex+1, total)
 		if target.WordIndex >= 0 && target.WordIndex < total {
 			card = tm.tutor.words[target.WordIndex]
 		}
-		tm.tutor.appendShortHistoryLocked(&user)
+		tm.tutor.appendShortHistoryExceptLocked(&user, transcript)
 	}
 	tm.mu.Unlock()
+	if total > 0 && target.WordIndex >= 0 {
+		fmt.Fprintf(&user, "（当前进度：第 %d 个词，共 %d 个）\n", target.WordIndex+1, total)
+	}
+	user.WriteString("本轮学生说：")
+	user.WriteString(transcript)
 	system := buildClassifySystemPrompt(card, target.WordIndex, total)
 	return []mimo.Message{
 		{Role: "system", Content: system},
@@ -1147,8 +1324,11 @@ func (tm *TurnManager) buildClassifyMessages(transcript string, target TurnTarge
 // "JSON only" nudge. A second failure collapses deterministically to chat
 // with the fixed fallback wording: the teacher asks again out loud (no
 // user-visible ErrorMsg), while the server records the provider failure.
-func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, target TurnTarget) (string, string) {
-	msgs := tm.buildClassifyMessages(transcript, target)
+// turnCtx (Issue #56) carries the captured target plus the turn's task
+// context; the emitted event correlates this turn's identity and target
+// with the model's verdict.
+func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, turnCtx dictationTurnContext) (string, string) {
+	msgs := tm.buildClassifyMessages(transcript, turnCtx.target)
 	intent, reply, ok := tm.classifyOnce(ctx, msgs)
 	if !ok {
 		msgs = append(msgs, mimo.Message{
@@ -1157,6 +1337,7 @@ func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, targ
 		})
 		intent, reply, ok = tm.classifyOnce(ctx, msgs)
 	}
+	modelIntent := intent
 	if !ok {
 		intent, reply = intentChat, classifyFallbackReply
 		// The LLM half of the invalid-response discipline: exactly one
@@ -1164,9 +1345,35 @@ func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, targ
 		// failure count rides the event fields like the ASR half's does.
 		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("attempts", 2))
 	}
+	if turnCtx.awaitingWord {
+		// Issue #56: in a live word-dictation writing stage, correct the
+		// finite table of unambiguous whole phrases BEFORE dispatch — a
+		// completion phrase advances whatever the model made of it, and an
+		// explicit not-yet-done / waiting / re-read phrase never advances.
+		// The correction keys on the TRANSCRIPT alone, so it also runs on a
+		// collapsed classification (PR #61 review round 2): an exact 「好了」
+		// advances even when the model never produced legal JSON — the
+		// reliable transcript needs no model verdict to be recognized; every
+		// other utterance keeps the fixed spoken fallback.
+		intent, reply = resolveDictationIntent(transcript, intent, reply)
+	}
 	// Desensitization boundary (T-13-06b): the intent label only — never
-	// the transcript text — reaches the event stream.
-	tm.recorder.Emit(EventIntentClassified, infra.F("intent", intent))
+	// the transcript text — reaches the event stream. Issue #56: the event
+	// also carries the turn identity and the CAPTURED target (word index +
+	// version, count-class values) plus the MODEL's intent beside the final
+	// one, so a confirmation the classifier misjudged stays diagnosable
+	// from the evidence stream alone; a collapsed classification has no
+	// model verdict to report and omits model_intent.
+	fields := []infra.Field{
+		infra.F("intent", intent),
+		infra.F("turn_id", turnCtx.turnID),
+		infra.F("word_index", turnCtx.target.WordIndex),
+		infra.F("version", turnCtx.target.ExpectedVersion),
+	}
+	if ok {
+		fields = append(fields, infra.F("model_intent", modelIntent))
+	}
+	tm.recorder.Emit(EventIntentClassified, fields...)
 	return intent, reply
 }
 

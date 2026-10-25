@@ -1,0 +1,61 @@
+# config.m1-e2e.yaml — minimal isolated-instance template for the
+# milestone-1 browser line (tests/playwright.m1.config.js, issue #58 A-line;
+# plan §7 step 5). Same isolation primitives as tests/e2e/config.parent-e2e.yaml,
+# kept deliberately separate from every other suite's template:
+#
+#   1. Independent ports — 127.0.0.1:18290 (service) / 18291 (health);
+#      the strict mimo stub rides 18285. No contact with run.ps1's 8080,
+#      the parent pair 18080/18081+18180, the real-instance pair 8790/8791,
+#      or the family pair 18280/18281+18380.
+#   2. Independent state — the launcher (tests/e2e-m1-browser/helpers/
+#      service-launcher.js) overrides python.vocabDBPath and every
+#      python.*Dir via HTA_* env (viper env > file) into a per-run OS temp
+#      dir, removed on exit. The .scratch defaults below only make the
+#      template bootable standalone.
+#   3. No secrets — the launcher always injects the local dummy
+#      MIMO_API_KEY; voice.baseUrl targets the STRICT stub only.
+#
+# The interpreter is NOT listed as a real path: the launcher resolves env /
+# repo venvs / bare python3 and injects it via HTA_PYTHON_INTERPRETER.
+# Relative paths resolve against the repo root (the launcher pins CWD).
+
+server:
+  # Isolated public listener (REST /api/v1 + static pages + /ws + /rt).
+  addr: "127.0.0.1:18290"
+  readTimeout: 10s
+  writeTimeout: 10s
+  # Isolated health listener — must differ alongside addr.
+  healthAddr: "127.0.0.1:18291"
+  # Static student/parent pages, resolved from the repo root.
+  staticDir: ./pkg/web/static
+  staticRoute: /
+
+python:
+  # Placeholder only — overridden by HTA_PYTHON_INTERPRETER at boot.
+  interpreter: python3
+  scriptsDir: third_party/python
+  # Verbatim argv (no scriptsDir join), so the directory prefix is included.
+  vocabScript: third_party/python/vocab_manager.py
+  pregenScript: third_party/python/pregenerate_dictation.py
+  # Standalone defaults; the launcher's HTA_* env points these at a
+  # per-run temp dir instead.
+  vocabDBPath: ./.scratch/m1-e2e/vocab.db
+  dataDir: ./.scratch/m1-e2e
+  cacheDir: ./.scratch/m1-e2e/cache/audio
+  manifestDir: ./.scratch/m1-e2e/cache
+  envFile: ./.scratch/m1-e2e/dictation.env
+
+# The EXTERNAL vendor boundary for the whole m1 browser line: every ASR /
+# classification-LLM / TTS / vision call goes to the STRICT stub, which
+# fails anything not explicitly scripted (tests/e2e-m1-browser/helpers/
+# strict-mimo-stub.js). Unlike the parent line's loose stub there is NO
+# default success response here.
+voice:
+  baseUrl: http://127.0.0.1:18285/v1
+
+# Pinned e2e-* lesson key (never the daily r0-YYYYMMDD derivation, never a
+# production lesson row); port-qualified origins make the browser's exact
+# Origin match (pkg/rt conn.go CheckOrigin).
+rt:
+  lessonId: e2e-m1-browser
+  allowedOrigins: [localhost, "127.0.0.1", "localhost:18290", "127.0.0.1:18290"]

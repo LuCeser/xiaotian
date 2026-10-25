@@ -10,8 +10,9 @@ package main
 //	testdata/handwriting-apple.jpg     → real vision OCR → judged "apple"
 //	testdata/handwriting-piaoliang.jpg → real vision OCR → judged "漂亮"
 //
-// Gated on MIMO_API_KEY via the shared liveAPIKey loader (voice_live_test.go
-// twin); without a key the test skips, so offline runs stay green. The
+// Gated on the shared explicit live switch via liveAPIKey (voice_live_test.go
+// twin: XIAOTIAN_LIVE_TESTS=1 + MIMO_API_KEY); otherwise the test skips, so
+// offline runs stay green. The
 // judging seam stays faked — the session/FSRS layer is not what this test
 // verifies. Each run costs 1 vision call per case.
 //

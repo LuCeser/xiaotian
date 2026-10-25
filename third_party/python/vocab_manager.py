@@ -1256,10 +1256,33 @@ def cmd_merge_units(db, args):
     print(json.dumps({"moved": total_moved, "from": sources, "to": target, "category": args.category}))
 
 
+def cmd_init(db, args):
+    """Issue #78: guarantee the Python-owned schema exists (no data changes).
+
+    main() already runs init_db(db) unconditionally before dispatch, so the
+    schema is present by the time this runs. The command exists purely as an
+    explicit, side-effect-free entrypoint for installers / first-boot to invoke,
+    instead of leaning on a data command (e.g. `list`) whose output and side
+    effects they do not want.
+    """
+    # Schema already ensured by main(); nothing further to do.
+
+
 def main():
     parser = argparse.ArgumentParser(description="Vocabulary Manager with FSRS")
     parser.add_argument("--db", default=DB_PATH, help="Database path")
     subparsers = parser.add_subparsers(dest="command", help="Command")
+
+    # init (Issue #78): explicit, side-effect-free schema bootstrap. Fresh
+    # installs reach /api/v1/units (Go reads SQLite directly, no Python
+    # process) before any vocab command has ever run, so cards/textbooks/
+    # review_logs never get created -> "no such table: cards". Installers call
+    # this once (idempotent) to guarantee the Python-owned schema exists.
+    p_init = subparsers.add_parser(
+        "init",
+        help="Create the database schema if missing (idempotent, no data changes)",
+        description="Create the Python-owned schema (cards/textbooks/review_logs/card_assignments) if missing. Idempotent.",
+    )
 
     # add
     p_add = subparsers.add_parser("add", help="Add words")
@@ -1390,6 +1413,7 @@ def main():
     init_db(db)
 
     commands = {
+        "init": cmd_init,
         "add": cmd_add,
         "due": cmd_due,
         "new": cmd_new,

@@ -41,7 +41,12 @@ const (
 	EventTimeoutFired = "timeout_fired"
 	// EventIntentClassified: the classification Chat produced a whitelisted
 	// intent (13-08). Fields carry the intent label only — never the
-	// transcript text (T-13-06b boundary).
+	// transcript text (T-13-06b boundary). Issue #56: the dictation-stage
+	// emission also correlates the turn (turn_id) and the captured target
+	// (word_index, version) with the MODEL's intent (model_intent) beside
+	// the final one, so a confirmation phrase the classifier misjudged —
+	// and any later correction of it — stays diagnosable from the evidence
+	// stream alone; a collapsed classification omits model_intent.
 	EventIntentClassified = "intent_classified"
 	// EventLessonComplete: the lesson's natural completion sequence ran
 	// (summary played/acknowledged or degraded, session ended).

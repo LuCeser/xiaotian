@@ -346,8 +346,12 @@ test('review rows: the 单词 column stays visually readable (Issue #42 width re
     // fixed-layout contract that makes the split deterministic.
     expect(col('释义（原文）').w, '释义 stays the widest column').toBeGreaterThan(col('单词').w);
     expect(geo.meaningW).toBeGreaterThan(80);
-    // The table never shrinks below its scroll floor.
-    expect(geo.tableW, 'table keeps its 640px min-width floor').toBeGreaterThanOrEqual(640);
+    // Issue #81: inside the ≥1024px side-by-side workspace the table floor
+    // dropped from 640px to 560px to give the review column more room
+    // beside the material rail. The per-column acceptance floors above are
+    // unchanged (the table still overflows its own scroller sideways when
+    // the available width is tighter than the floor).
+    expect(geo.tableW, 'table keeps its 560px min-width floor').toBeGreaterThanOrEqual(560);
   } finally {
     await deleteUnit(request, UNIT_IMPORT);
   }

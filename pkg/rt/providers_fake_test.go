@@ -34,13 +34,26 @@ type asrScript struct {
 // fakeASR answers Transcribe calls from a FIFO script queue and records the
 // byte counts it was fed.
 type fakeASR struct {
-	script   []asrScript
-	fedBytes []int // len(pcm) per call, in call order
-	mu       sync.Mutex
+	holdEntered chan struct{}
+	holdRelease chan struct{}
+	script      []asrScript
+	fedBytes    []int // len(pcm) per call, in call order
+	mu          sync.Mutex
 }
 
 func newFakeASR(script ...asrScript) *fakeASR {
 	return &fakeASR{script: append([]asrScript(nil), script...)}
+}
+
+// gateNextTranscribe holds the next provider result after the request has
+// entered Transcribe. Tests release the actual ASR return after moving the
+// session, instead of approximating that ordering with a sleep.
+func (f *fakeASR) gateNextTranscribe() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holdEntered = make(chan struct{})
+	f.holdRelease = make(chan struct{})
+	return f.holdEntered, f.holdRelease
 }
 
 // Transcribe implements ASRProvider.
@@ -53,7 +66,13 @@ func (f *fakeASR) Transcribe(_ context.Context, pcm []byte) (string, error) {
 	}
 	head := f.script[0]
 	f.script = f.script[1:]
+	entered, release := f.holdEntered, f.holdRelease
+	f.holdEntered, f.holdRelease = nil, nil
 	f.mu.Unlock()
+	if entered != nil {
+		close(entered)
+		<-release
+	}
 	// The delay sleeps OUTSIDE the mutex (a second scripted call must not
 	// block on the sleeper) and ignores ctx on purpose: the point is a reply
 	// that arrives after cancellation.
@@ -106,13 +125,31 @@ type llmCall struct {
 // fakeLLM answers Chat calls from a FIFO script queue and records every
 // received messages slice (deep-copied) plus the option count.
 type fakeLLM struct {
-	script []llmScript
-	calls  []llmCall
-	mu     sync.Mutex
+	// holdEntered/holdRelease: the one-shot classification hold armed by
+	// gateNextChat (PR #61 review) — nil when disarmed.
+	holdEntered chan struct{}
+	holdRelease chan struct{}
+	script      []llmScript
+	calls       []llmCall
+	mu          sync.Mutex
 }
 
 func newFakeLLM(script ...llmScript) *fakeLLM {
 	return &fakeLLM{script: append([]llmScript(nil), script...)}
+}
+
+// gateNextChat arms a one-shot hold on the NEXT Chat call: the call is
+// recorded, entered closes, and the scripted reply waits until release
+// closes. This pins the classification request IN FLIGHT — sent, unanswered
+// — which is the race PR #61's review asked to cover: an ASR-side delay
+// proves nothing about the classification phase, and waiting for
+// StateProcessing only proves the turn started.
+func (f *fakeLLM) gateNextChat() (entered, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holdEntered = make(chan struct{})
+	f.holdRelease = make(chan struct{})
+	return f.holdEntered, f.holdRelease
 }
 
 // Chat implements LLMProvider.
@@ -127,7 +164,14 @@ func (f *fakeLLM) Chat(_ context.Context, messages []mimo.Message, opts ...mimo.
 	cp := make([]mimo.Message, len(messages))
 	copy(cp, messages)
 	f.calls = append(f.calls, llmCall{messages: cp, opts: len(opts)})
+	entered, release := f.holdEntered, f.holdRelease
+	f.holdEntered, f.holdRelease = nil, nil
 	f.mu.Unlock()
+
+	if entered != nil {
+		close(entered) // the request is out; the model stays silent for now
+		<-release      // the verdict arrives only after the test lets it
+	}
 
 	if head.err != nil {
 		return mimo.ChatResponse{}, head.err
