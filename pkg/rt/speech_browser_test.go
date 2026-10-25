@@ -893,9 +893,9 @@ func TestCloseDuringScreenVerdict(t *testing.T) {
 	if len(stored.Verdicts) != 1 || !stored.Verdicts[0].Manual || !stored.Verdicts[0].Correct {
 		t.Fatalf("stored verdicts = %+v, want the accepted manual screen verdict", stored.Verdicts)
 	}
-	m.mu.Lock()
+	m.TurnManager.mu.Lock()
 	pending := len(m.checkWrites)
-	m.mu.Unlock()
+	m.TurnManager.mu.Unlock()
 	if pending != 0 {
 		t.Fatalf("completed check-write admissions = %d, want 0", pending)
 	}
@@ -949,9 +949,9 @@ func TestCloseDuringVoiceVerdict(t *testing.T) {
 	if len(stored.Verdicts) != 1 || !stored.Verdicts[0].Manual || !stored.Verdicts[0].Correct {
 		t.Fatalf("stored verdicts = %+v, want the accepted spoken manual verdict", stored.Verdicts)
 	}
-	m.mu.Lock()
+	m.TurnManager.mu.Lock()
 	pending := len(m.checkWrites)
-	m.mu.Unlock()
+	m.TurnManager.mu.Unlock()
 	if pending != 0 {
 		t.Fatalf("completed check-write admissions = %d, want 0", pending)
 	}
@@ -1029,9 +1029,9 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 		if v := byIndex[1]; v.Manual || !v.Correct {
 			t.Fatalf("word 1 verdict = %+v, want the accepted OCR prefill (manual=false)", v)
 		}
-		m.mu.Lock()
+		m.TurnManager.mu.Lock()
 		pending := len(m.checkWrites)
-		m.mu.Unlock()
+		m.TurnManager.mu.Unlock()
 		if pending != 0 {
 			t.Fatalf("completed check-write admissions = %d, want 0", pending)
 		}
@@ -1066,9 +1066,9 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 		if verdicts := storedVerdicts(f); len(verdicts) != 0 {
 			t.Fatalf("stored verdicts = %+v, want zero writes — a batch arriving after close is not admitted", verdicts)
 		}
-		m.mu.Lock()
+		m.TurnManager.mu.Lock()
 		pending := len(m.checkWrites)
-		m.mu.Unlock()
+		m.TurnManager.mu.Unlock()
 		if pending != 0 {
 			t.Fatalf("registered check-write admissions = %d, want 0", pending)
 		}
@@ -1103,9 +1103,9 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		if subs := len(f.words.submissions()); subs != 1 {
 			t.Fatalf("review saves = %d, want exactly one save for the accepted submit", subs)
 		}
-		m.mu.Lock()
+		m.TurnManager.mu.Lock()
 		pending := len(m.checkWrites)
-		m.mu.Unlock()
+		m.TurnManager.mu.Unlock()
 		if pending != 0 {
 			t.Fatalf("completed check-write admissions = %d, want 0 (released before the announcement)", pending)
 		}
@@ -1230,9 +1230,9 @@ func TestCloseFallbackAfterAcceptedWrites(t *testing.T) {
 	if len(stored.Verdicts) != 1 || !stored.Verdicts[0].Manual || !stored.Verdicts[0].Correct {
 		t.Fatalf("stored verdicts = %+v, want the accepted manual screen verdict kept", stored.Verdicts)
 	}
-	m.mu.Lock()
+	m.TurnManager.mu.Lock()
 	pending := len(m.checkWrites)
-	m.mu.Unlock()
+	m.TurnManager.mu.Unlock()
 	if pending != 0 {
 		t.Fatalf("completed check-write admissions = %d, want 0", pending)
 	}
@@ -1269,15 +1269,15 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 	case res := <-driver:
 		t.Fatalf("driver finished before the batch: ok=%v err=%s", res.OK, res.Err)
 	case <-time.After(30 * time.Second):
-		m.mu.Lock()
+		m.TurnManager.mu.Lock()
 		pending := len(m.checkWrites)
-		m.mu.Unlock()
+		m.TurnManager.mu.Unlock()
 		t.Fatalf("the prefill batch never hit the gate: admissions=%d", pending)
 	}
 	// The batch's ONE admission is registered before its first write parks.
 	if !waitFor(t, 10*time.Second, func() bool {
-		m.mu.Lock()
-		defer m.mu.Unlock()
+		m.TurnManager.mu.Lock()
+		defer m.TurnManager.mu.Unlock()
 		return len(m.checkWrites) == 1
 	}) {
 		t.Fatal("the prefill batch was never admitted")
@@ -1333,9 +1333,9 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 			t.Fatalf("stored verdicts = %+v, want both OCR prefills (manual=false, correct)", stored.Verdicts)
 		}
 	}
-	m.mu.Lock()
+	m.TurnManager.mu.Lock()
 	pending := len(m.checkWrites)
-	m.mu.Unlock()
+	m.TurnManager.mu.Unlock()
 	if pending != 0 {
 		t.Fatalf("completed check-write admissions = %d, want 0", pending)
 	}
@@ -1418,9 +1418,9 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		if len(recs) != 1 || recs[0].Kind != lesson.ReceiptKindCheck {
 			t.Fatalf("receipts = %+v, want exactly one kind=check (the submit's own)", recs)
 		}
-		m.mu.Lock()
+		m.TurnManager.mu.Lock()
 		pending := len(m.checkWrites)
-		m.mu.Unlock()
+		m.TurnManager.mu.Unlock()
 		if pending != 0 {
 			t.Fatalf("completed check-write admissions = %d, want 0", pending)
 		}
@@ -1463,9 +1463,9 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		if len(recs) != 1 || recs[0].Kind != lesson.ReceiptKindCheck {
 			t.Fatalf("receipts = %+v, want exactly one kind=check", recs)
 		}
-		m.mu.Lock()
+		m.TurnManager.mu.Lock()
 		pending := len(m.checkWrites)
-		m.mu.Unlock()
+		m.TurnManager.mu.Unlock()
 		if pending != 0 {
 			t.Fatalf("completed check-write admissions = %d, want 0", pending)
 		}
@@ -1516,9 +1516,9 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		if len(recs) != 1 || recs[0].Kind != lesson.ReceiptKindUncheckedFallback {
 			t.Fatalf("receipts = %+v, want exactly one kind=unchecked_fallback", recs)
 		}
-		m.mu.Lock()
+		m.TurnManager.mu.Lock()
 		pending := len(m.checkWrites)
-		m.mu.Unlock()
+		m.TurnManager.mu.Unlock()
 		if pending != 0 {
 			t.Fatalf("completed check-write admissions = %d, want 0", pending)
 		}
@@ -1571,8 +1571,8 @@ func TestCloseSnapshotBrowser(t *testing.T) {
 		// checking and check_started ships before the claim decides.
 		close(resumeProceed)
 		if !waitFor(t, 10*time.Second, func() bool {
-			m.mu.Lock()
-			defer m.mu.Unlock()
+			m.TurnManager.mu.Lock()
+			defer m.TurnManager.mu.Unlock()
 			return m.tutor != nil && m.tutor.checking
 		}) {
 			t.Fatal("the resume presentation never landed inside the close window")
@@ -1605,9 +1605,9 @@ func TestCloseSnapshotBrowser(t *testing.T) {
 			t.Fatalf("stored stage=%q unchecked=%v, want the post-presentation fallback's submitted+unchecked",
 				stored.Stage, stored.Unchecked)
 		}
-		m.mu.Lock()
+		m.TurnManager.mu.Lock()
 		pending := len(m.checkWrites)
-		m.mu.Unlock()
+		m.TurnManager.mu.Unlock()
 		if pending != 0 {
 			t.Fatalf("completed check-write admissions = %d, want 0", pending)
 		}
@@ -1669,9 +1669,9 @@ func TestCloseSnapshotBrowser(t *testing.T) {
 		if got := len(f.words.submissions()); got != 0 {
 			t.Fatalf("review batches = %d, want 0 (no fallback without the check stage)", got)
 		}
-		m.mu.Lock()
+		m.TurnManager.mu.Lock()
 		closedFlag, pending := m.closed, len(m.checkWrites)
-		m.mu.Unlock()
+		m.TurnManager.mu.Unlock()
 		if !closedFlag || pending != 0 {
 			t.Fatalf("closed=%v admissions=%d, want true/0", closedFlag, pending)
 		}
