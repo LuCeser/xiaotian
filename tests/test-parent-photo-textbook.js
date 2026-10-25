@@ -674,6 +674,129 @@ const scopeExpect = function (overrides) {
 })();
 
 // ----------------------------------------------------------------------
+// renderTextbookCommitResult — the WIRING regression (PR #87 复审): the
+// banner's 默写安排 lines must come from receipt.postSave and
+// receipt.booksAfter (the post-save reads). The review found that deleting
+// those two args at the summarizeAssignScope call site kept every check
+// green — the assertions below turn that removal red, and pin the P2-1
+// degraded banner and the P2-2 paused next-step at the render level.
+// ----------------------------------------------------------------------
+
+// Minimal DOM shim (tests/test-parent-category-error.js precedent) —
+// the renderer only creates nodes, sets className/textContent and
+// appends. `document` is assigned late: parent-photo.js looks it up at
+// call time, and the pure sections above never touch it.
+function makeScopeNode(tag) {
+  return {
+    tagName: tag,
+    className: '',
+    textContent: '',
+    children: [],
+    attrs: {},
+    setAttribute: function (name, value) {
+      this.attrs[name] = value;
+    },
+    appendChild: function (child) {
+      this.children.push(child);
+      return child;
+    },
+  };
+}
+
+const scopeTextOf = function (node) {
+  const parts = [node.textContent || ''];
+  (node.children || []).forEach(function (child) {
+    parts.push(scopeTextOf(child));
+  });
+  return parts.join('\n');
+};
+
+const renderScopeBanner = function (overrides) {
+  global.document = { createElement: makeScopeNode };
+  const form = Object.create(PhotoAddForm.prototype);
+  form.rows = [{ index: 0, word: 'apple', meaning: '苹果', lesson: '第5课', status: 'exists', checked: true }];
+  form.banner = makeScopeNode('div');
+  const receipt = Object.assign({
+    book: SCOPE_BOOK,
+    submittedRows: [],
+    addOutcome: { added: 0, skipped: 0 },
+    fresh: [],
+    editResults: [],
+    groups: [],
+    groupResults: scopeGroupResults('第5课', false, ['apple']),
+    unassigned: [],
+    postSave: null,
+    booksAfter: null,
+  }, overrides);
+  form.renderTextbookCommitResult(receipt);
+  return scopeTextOf(form.banner);
+};
+
+(function () {
+  // The wiring: the verdict text must track receipt.postSave/booksAfter.
+  // Deleting those args at the summarizeAssignScope call site drops the
+  // word to 资格待核实 and every assertion in this first case fails.
+  const postSaveWords = [
+    { word: 'apple', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] },
+  ];
+  const good = renderScopeBanner({ postSave: postSaveWords, booksAfter: SCOPE_BOOKS_AFTER });
+  assert(good.indexOf('可安排默写 1 词（课次已学）') >= 0,
+    'the banner schedules from receipt.postSave/booksAfter (wiring guard)');
+  assert(good.indexOf('资格待核实') < 0,
+    'a fully read-back save never claims 资格待核实');
+  assert(good.indexOf('合并 1 个') >= 0,
+    'the real 保存结果 stays beside the 默写安排 block');
+
+  // P2-1 at the render level: the word read failed — the payload's
+  // learned lesson must not become 可安排默写; the honest banner says
+  // 资格待核实 and still reports the real save result above it.
+  const degradedWords = renderScopeBanner({ postSave: null, booksAfter: SCOPE_BOOKS_AFTER });
+  assert(degradedWords.indexOf('资格待核实 1 词') >= 0,
+    'a failed word read renders 资格待核实');
+  assert(degradedWords.indexOf('可安排默写') < 0,
+    'a failed word read never renders 可安排默写');
+  assert(degradedWords.indexOf('合并 1 个') >= 0,
+    'P2-1: 资格待核实 replaces only the 默写安排 verdict, not the save result');
+
+  // P2-1's other half at the render level: words read back, textbooks
+  // not — eligibility is 待核实, not the cached prefix's verdict.
+  const degradedBooks = renderScopeBanner({ postSave: postSaveWords, booksAfter: null });
+  assert(degradedBooks.indexOf('资格待核实 1 词') >= 0,
+    'a failed textbook read renders 资格待核实');
+  assert(degradedBooks.indexOf('可安排默写') < 0,
+    'a failed textbook read never renders 可安排默写');
+
+  // P2-2 at the render level: the next step matches the real eligibility
+  // condition of the paused words.
+  const pausedRows = [{ index: 0, word: 'lake', meaning: '湖', lesson: '第7课', status: 'exists', checked: true }];
+  const pausedSaved = [
+    { word: 'lake', participates: false, textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: false }] },
+  ];
+  const pausedNotReady = renderScopeBanner({
+    rows: pausedRows,
+    groupResults: scopeGroupResults('第7课', false, ['lake']),
+    postSave: pausedSaved,
+    booksAfter: SCOPE_BOOKS_AFTER,
+  });
+  assert(pausedNotReady.indexOf('恢复参与后还需课次已学或加入默写范围') >= 0,
+    'a paused+unlearned word states the full condition (not just 恢复参与)');
+  assert(pausedNotReady.indexOf('恢复参与后即可安排默写。') < 0,
+    'a paused+unlearned word never promises 恢复参与后即可安排默写');
+
+  const pausedReadySaved = [
+    { word: 'lake', participates: false, textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: true }] },
+  ];
+  const pausedReady = renderScopeBanner({
+    rows: pausedRows,
+    groupResults: scopeGroupResults('第7课', true, ['lake']),
+    postSave: pausedReadySaved,
+    booksAfter: SCOPE_BOOKS_AFTER,
+  });
+  assert(pausedReady.indexOf('恢复参与后即可安排默写') >= 0,
+    'a paused word an include already qualifies keeps the restore-and-schedule promise');
+})();
+
+// ----------------------------------------------------------------------
 
 if (failures) {
   console.error('parent-photo-textbook: ' + failures + ' of ' + checks + ' checks failed');
