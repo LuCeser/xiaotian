@@ -460,6 +460,37 @@ async function scenarioPassageSubmitClose(args) {
   };
 }
 
+// scenario "poem-submit-close"（1.10c 复验）：古诗背默课堂（?poem= 打开整
+// 首背默行）。任务播报自然 ACK 后播放一段真实音调——生产采集→VAD→ASR→
+// confirm——整首诗一次确认进检查；面板点两句「对」，再点提交；关闭由 Go
+// 侧在提交闩驻留时触发。
+async function scenarioPoemSubmitClose(args) {
+  const { page, url, timeoutMs } = args;
+  await page.goto(url + '?poem=77');
+  await page.locator('#rt-start').click();
+  await waitWs(page, async (view) => inspectExpectedRound(view, await playbackState(page), args.expectedSentences).ok,
+    { timeoutMs, label: 'poem greeting played naturally' });
+  await playPcm16(page, tonePcm16Base64());
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'check_started'),
+    { timeoutMs, label: 'spoken confirm opened the poem check' });
+  const before = await wsView(page);
+  const teachersBefore = before.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length;
+  const reviewBefore = before.filter((e) => e.dir === 'in' && e.type === 'review_result').length;
+  const buttons = args.page.locator('.rt-check-row .rt-check-btn');
+  await buttons.nth(0).click(); // 第一句「对」
+  await buttons.nth(2).click(); // 第二句「对」
+  await args.page.locator('.rt-check-submit').click();
+  await waitWs(page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+    { timeoutMs, label: 'close racing the poem submit' });
+  const view = await wsView(page);
+  return {
+    ok: true,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    lateTeacherSentences: view.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length - teachersBefore,
+    lateReviewResults: view.filter((e) => e.dir === 'in' && e.type === 'review_result').length - reviewBefore,
+  };
+}
+
 const SCENARIOS = {
   fixture: scenarioFixture,
   'held-fixture': scenarioHeldFixture,
@@ -471,6 +502,7 @@ const SCENARIOS = {
   'check-submit-close': scenarioCheckSubmitClose,
   'correction-submit-close': scenarioCorrectionSubmitClose,
   'passage-submit-close': scenarioPassageSubmitClose,
+  'poem-submit-close': scenarioPoemSubmitClose,
   'starve-probe': scenarioStarveProbe,
 };
 

@@ -40,6 +40,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 	"github.com/xiaotian/home-tutor-agent/pkg/ocr"
 	"github.com/xiaotian/home-tutor-agent/pkg/passage"
+	"github.com/xiaotian/home-tutor-agent/pkg/poem"
 )
 
 // speechPageAck is one sentence_ack the real page sent (observed read-only).
@@ -249,6 +250,7 @@ type speechBrowserFixture struct {
 	receipts          *lesson.ReceiptStore
 	wordsOverride     WordSource
 	passages          PassageSource
+	poems             PoemSource
 	expectedSentences []string
 
 	mu       sync.Mutex
@@ -480,7 +482,7 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 func (f *speechBrowserFixture) newManager() SessionManager {
 	f.mu.Lock()
 	tts, probe, executor, ocrRead := f.tts, f.timerProbe, f.exec, f.ocrRead
-	words, receipts, passages := f.wordsOverride, f.receipts, f.passages
+	words, receipts, passages, poems := f.wordsOverride, f.receipts, f.passages, f.poems
 	resumeHold, closeEntryHold := f.resumeHold, f.closeEntryHold
 	f.mu.Unlock()
 	if words == nil {
@@ -491,6 +493,7 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 		Words:    words,
 		Receipts: receipts,
 		Passages: passages,
+		Poems:    poems,
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
 	tm.checkResumeInterleave = resumeHold
 	tm.closeEntryInterleave = closeEntryHold
@@ -691,6 +694,44 @@ func (f *speechBrowserFixture) seedPassage() {
 	f.expectedSentences = []string{
 		"今天的任务是把《测试课文》第 2 段默写下来。",
 		"这次要写 1 个自然段，请凭记忆按顺序写在纸上，一段写一行。",
+		"想不起来可以喊我提醒，写完了告诉我，我们对答案。",
+	}
+	f.mu.Unlock()
+}
+
+// speechPoemSource is the fixture's poem content seam (the passage twin).
+type speechPoemSource struct {
+	content poem.Poem
+}
+
+func (s speechPoemSource) FetchPoem(ctx context.Context, poemID int64) (poem.Poem, error) {
+	if poemID != s.content.ID {
+		return poem.Poem{}, poem.ErrPoemNotFound
+	}
+	return s.content, nil
+}
+
+// seedPoem opens the poem classroom's inputs: the content source (静夜思,
+// two lines, in scope) and the attempt's initial lesson row. expected
+// sentences mirror speakTurn's split of the greeting (poemGreetingText with
+// total=2).
+func (f *speechBrowserFixture) seedPoem() {
+	f.t.Helper()
+	f.mu.Lock()
+	f.poems = speechPoemSource{content: poem.Poem{
+		ID: 77, Title: "静夜思", Author: "李白", Category: "chinese", InScope: true,
+		Lines: []string{"床前明月光，疑是地上霜。", "举头望明月，低头思故乡。"},
+	}}
+	f.mu.Unlock()
+	lessonID := resolvePoemLessonID(time.Now(), 77)
+	if _, err := f.tools.EnsurePoemLesson(context.Background(), lessonID, 77,
+		[]string{"床前明月光，疑是地上霜。", "举头望明月，低头思故乡。"}); err != nil {
+		f.t.Fatalf("seed poem lesson: %v", err)
+	}
+	f.mu.Lock()
+	f.expectedSentences = []string{
+		"今天的任务是把《静夜思》默写下来，是李白写的。",
+		"这首诗一共有 2 句，请凭记忆把整首诗写在纸上，一句写一行。",
 		"想不起来可以喊我提醒，写完了告诉我，我们对答案。",
 	}
 	f.mu.Unlock()
@@ -909,7 +950,8 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 	if scenario == "fixture" || scenario == "held-fixture" || scenario == "close-after-opening" ||
 		scenario == "screen-verdict-close" || scenario == "voice-verdict-close" ||
 		scenario == "ocr-prefill-close" || scenario == "check-submit-close" ||
-		scenario == "correction-submit-close" || scenario == "passage-submit-close" {
+		scenario == "correction-submit-close" || scenario == "passage-submit-close" ||
+		scenario == "poem-submit-close" {
 		f.mu.Lock()
 		sentences := append([]string(nil), f.expectedSentences...)
 		f.mu.Unlock()
@@ -2052,6 +2094,62 @@ func TestPassageSubmitBrowser(t *testing.T) {
 	}
 	if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
 		t.Fatalf("stored stage=%q unchecked=%v, want the accepted passage submit's submitted+checked",
+			stored.Stage, stored.Unchecked)
+	}
+	if pending != 0 {
+		t.Fatalf("completed check-write admissions = %d, want 0", pending)
+	}
+}
+
+// TestPoemSubmitBrowser 是 1.10c 的复验（review P1）：古诗提交的接纳与保
+// 存责任经真实浏览器旅程——?poem=77 打开整首背默课堂、任务播报自然 ACK、
+// 一次语音「写完了」进检查、两句人工判定、真实 UI 提交——提交闩驻留时
+// goodbye 关闭，已接纳的保存（行翻转与古诗练习记录）完成，关闭后无迟到
+// review_result 或总结。撤销验证：撤掉 submitPoem 的生产接纳后本测试红。
+func TestPoemSubmitBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedPoem()
+	f.scriptSpokenConfirm()
+	before, _ := f.gateCheckSubmit(true, false)
+	t.Cleanup(before.openUp)
+
+	driver := f.runDriverAsync("poem-submit-close", 45*time.Second)
+	select {
+	case <-before.entered:
+	case <-time.After(30 * time.Second):
+		f.runDriver("poem-submit-close", 20*time.Second) // surface the scenario's stderr trace
+		t.Fatal("the poem submit never reached its pre-latch window")
+	}
+	m := f.waitFirstManager(5 * time.Second)
+	m.handleEndSession(m.currentSender())
+	before.openUp()
+	res := <-driver
+	if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+		t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+	}
+	if !waitFor(t, 15*time.Second, func() bool {
+		return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
+			f.writerDone.Load() == 1 &&
+			f.providerStarted.Load() == f.providerDone.Load() &&
+			f.announcementRun.Load() == f.announcementDone.Load()
+	}) {
+		t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+			f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
+			f.providerStarted.Load(), f.providerDone.Load(),
+			f.announcementRun.Load(), f.announcementDone.Load())
+	}
+
+	m.TurnManager.mu.Lock()
+	lessonID := m.tutor.lessonID
+	pending := len(m.checkWrites)
+	m.TurnManager.mu.Unlock()
+	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
+		t.Fatalf("stored stage=%q unchecked=%v, want the accepted poem submit's submitted+checked",
 			stored.Stage, stored.Unchecked)
 	}
 	if pending != 0 {
