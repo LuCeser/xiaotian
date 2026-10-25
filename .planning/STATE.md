@@ -190,6 +190,9 @@ None yet.
 | 261012-aes | 完成 Issue #3 英语词表照片识别收尾：半成品盘点采纳、回归验证、原子提交、issue 勾选（含吸收并行会话审查修复 eb5251b） | 2026-10-12 | 0ab9ef6,0141274,7302f8f,f045edf,eb5251b | complete | [261012-aes-issue-3-issue](./quick/261012-aes-issue-3-issue/) |
 | 261012-auz | 完成 Issue #4 教材归属与已学进度控制练习范围：前端半成品盘点落库、三套 e2e（pybridge/rt/浏览器）、修复创建按钮 form 关联 bug、issue 勾选关闭 | 2026-10-12 | ba13300,3d2e52d,a3bbe22,5505fef,8656539,cb20f97,47f1e97,68ca62a,ae51201,8ff8390 | complete | [261012-auz-issue-4-2-e2e](./quick/261012-auz-issue-4-2-e2e/) |
 | 261016-0c5 | AGENTS.md:54 删除过时提醒——TestE2E_Story_PerWordVoiceFlow 偶发读帧超时已由已合并的 PR #28 修复，该注意事项失效 | 2026-10-15 | 53e3615 | — | [261016-0c5-agents-md-54-teste2e-story-perwordvoicef](./quick/261016-0c5-agents-md-54-teste2e-story-perwordvoicef/) |
+| 261024-njn | scripts/install.ps1 一次性安装器（布局拷贝/配置生成/uv venv/防火墙/证书到期说明）+ tests/test-install.js 冒烟 | 2026-10-25 | 8961739 | — | .planning/quick/261024-njn-scripts-install-ps1-d-hta-bin-service-exe-pkg-web-static-web |
+| 261024-njo | scripts/hta.ps1 安装目录日常启停（start/stop/status，WMI 拉起防句柄继承，G1 守卫）+ 七步冒烟梯子全过 | 2026-10-25 | 7d625a6 | — | .planning/quick/261024-njo-hta-ps1-1-start-stop-status-start-env-scripts-start-detached |
+| 261024-njp | scripts/deploy.ps1 升级/回滚（preflight→TEMP 构建→stop→备份→换新→start 健康门→失败提示回滚）+ tests/test-deploy-ps1.js A-F 全绿 | 2026-10-25 | 32f4c74 | — | .planning/quick/261024-njp-scripts-deploy-ps1-go-build-windows-cgo-enabled-0-ldflags-s |
 
 ### Roadmap Evolution
 
