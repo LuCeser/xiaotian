@@ -13,9 +13,10 @@
 #      repo's bin\ - that exe belongs to run.ps1 on the dev machine.
 #   c. Stop the running instance via the install dir's hta.ps1 (as a
 #      SUBPROCESS - see Invoke-Hta for why a dot-call would be fatal).
-#   d. Back the CURRENT bin\web\python up to versions\prev BEFORE any swap,
-#      so prev always holds a complete old version. Single slot: an existing
-#      prev is discarded first, which also makes re-running deploy idempotent.
+#   d. Back the CURRENT bin\web\python + hta.ps1 up to versions\prev BEFORE
+#      any swap, so prev always holds a complete old version. Single slot: an
+#      existing prev is discarded first, which also makes re-running deploy
+#      idempotent.
 #   e. Swap in the new binary, a WHOLE-TREE web\static replace (no merge -
 #      files deleted upstream must not linger) and the new top-level
 #      third_party\python *.py scripts (top-level files only).
@@ -23,20 +24,30 @@
 #      up to 10s for the new process to own the health listener, so deploy
 #      runs no second health probe. Failure prints a single copy-paste
 #      rollback command - the old version is sitting in versions\prev.
+#   g. Refresh the install dir's hta.ps1 from the repo's scripts\hta.ps1 -
+#      LAST, after the gate. deploy.ps1 itself swaps only bin\web\python, so
+#      without this a fixed control script never reaches installs that only
+#      ever run deploy (install.ps1 refreshes it just on -Force re-runs).
+#      After the gate on purpose: the new binary is validated under the OLD
+#      control script, and a broken NEW script cannot wedge deploy or
+#      rollback - it only bites the next manual start, and versions\prev
+#      holds the old one.
 #
-# "rollback" swaps versions\prev back into bin\web\python and restarts via
-# hta.ps1. prev is KEPT after a rollback, so rollback can be re-run.
+# "rollback" swaps versions\prev back into bin\web\python (plus hta.ps1 when
+# the backup carries it - older prev slots predate that backup) and restarts
+# via hta.ps1. prev is KEPT after a rollback, so rollback can be re-run.
 #
 # SAFETY INVARIANT (write-surface whitelist):
 #   The ONLY paths this script writes, replaces or deletes are:
 #     <InstallDir>\bin\, <InstallDir>\web\, <InstallDir>\python\,
-#     <InstallDir>\versions\   and the TEMP staging directory.
+#     <InstallDir>\versions\, <InstallDir>\hta.ps1 and the TEMP staging
+#     directory.
 #   It NEVER reads, writes or deletes config, secrets, certs, data
 #   directories or the venv. All runtime data lives OUTSIDE that swap
 #   surface, driven by config.yaml's python block keys (vocabDBPath /
 #   dataDir / cacheDir / manifestDir / envFile) - which is why swapping
-#   exactly these three directories upgrades the service with zero Go code
-#   changes. There is deliberately no wildcard delete at the InstallDir
+#   exactly these three directories (plus the hta.ps1 control script)
+#   upgrades the service with zero Go code changes. There is deliberately no wildcard delete at the InstallDir
 #   root: every Remove-Item names a specific subdirectory.
 #
 # Usage:
@@ -72,6 +83,7 @@ $Versions   = Join-Path $InstallDir 'versions'
 $Prev       = Join-Path $Versions 'prev'
 $StaticSrc  = Join-Path $RepoRoot 'pkg\web\static'
 $PySrc      = Join-Path $RepoRoot 'third_party\python'
+$HtaSrc     = Join-Path $RepoRoot 'scripts\hta.ps1'
 
 function Invoke-Hta {
     # Run the install dir's hta.ps1 as a SUBPROCESS and return its exit code.
@@ -92,6 +104,7 @@ function Invoke-Deploy {
     if (-not (Test-Path -LiteralPath $InstBinExe -PathType Leaf))      { $missing += "existing bin\service.exe not found: $InstBinExe (does this dir look like a real install?)" }
     if (-not (Test-Path -LiteralPath $StaticSrc -PathType Container))  { $missing += "repo static payload not found: $StaticSrc" }
     if (-not (Get-ChildItem -LiteralPath $PySrc -Filter '*.py' -File -ErrorAction SilentlyContinue)) { $missing += "repo python scripts not found: $PySrc\*.py" }
+    if (-not (Test-Path -LiteralPath $HtaSrc -PathType Leaf))         { $missing += "repo control script not found: $HtaSrc (the deploy refreshes the install dir's hta.ps1 from it)" }
     if ($missing.Count -gt 0) {
         foreach ($m in $missing) { Write-Host "[deploy.ps1] PREFLIGHT ERROR: $m" -ForegroundColor Red }
         Write-Host "[deploy.ps1] aborting before any change - the install directory is UNTOUCHED" -ForegroundColor Red
@@ -140,9 +153,9 @@ function Invoke-Deploy {
         exit 1
     }
 
-    # ---- d. Backup current bin\web\python into versions\prev BEFORE any
-    # swap, so prev always holds a COMPLETE old version. Single slot: an
-    # existing prev is discarded (idempotent re-runs).
+    # ---- d. Backup current bin\web\python (+ hta.ps1) into versions\prev
+    # BEFORE any swap, so prev always holds a COMPLETE old version. Single
+    # slot: an existing prev is discarded (idempotent re-runs).
     if (Test-Path -LiteralPath $Prev) {
         Write-Host "[deploy.ps1] discarding stale backup at versions\prev" -ForegroundColor Yellow
         Remove-Item -LiteralPath $Prev -Recurse -Force
@@ -152,6 +165,7 @@ function Invoke-Deploy {
     foreach ($dir in @($InstBin, $InstWeb, $InstPython)) {
         Copy-Item -LiteralPath $dir -Destination (Join-Path $Prev (Split-Path -Leaf $dir)) -Recurse -Force
     }
+    Copy-Item -LiteralPath $HtaPath -Destination (Join-Path $Prev 'hta.ps1') -Force
 
     # ---- e. Swap in the new bits (all inside the whitelist).
     Copy-Item -LiteralPath $newExe -Destination $InstBinExe -Force
@@ -174,6 +188,11 @@ function Invoke-Deploy {
         Write-Host "[deploy.ps1] service logs: $(Join-Path $InstallDir 'logs')" -ForegroundColor Yellow
         exit 1
     }
+    # ---- g. Refresh the control script LAST (header item g): the gate above
+    # validated the new binary under the OLD hta.ps1; a broken new script can
+    # only bite the next manual start, and versions\prev holds the old one.
+    Copy-Item -LiteralPath $HtaSrc -Destination $HtaPath -Force
+
     Write-Host "[deploy.ps1] deploy complete - new version is up (entry URLs printed by hta.ps1 above)" -ForegroundColor Green
 }
 
@@ -211,6 +230,12 @@ function Invoke-Rollback {
     foreach ($name in @('bin', 'web', 'python')) {
         Remove-Item -LiteralPath (Join-Path $InstallDir $name) -Recurse -Force
         Copy-Item -LiteralPath (Join-Path $Prev $name) -Destination (Join-Path $InstallDir $name) -Recurse -Force
+    }
+    # hta.ps1 is restored only when the backup carries it (older prev slots
+    # from before the refresh step do not); otherwise the current one stays.
+    $prevHta = Join-Path $Prev 'hta.ps1'
+    if (Test-Path -LiteralPath $prevHta -PathType Leaf) {
+        Copy-Item -LiteralPath $prevHta -Destination $HtaPath -Force
     }
 
     Write-Host "[deploy.ps1] starting the rolled-back version (hta.ps1 start)..." -ForegroundColor Cyan

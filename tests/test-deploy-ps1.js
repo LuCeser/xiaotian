@@ -12,14 +12,16 @@
 //
 // Sections:
 //   0. PS parser gate on scripts/deploy.ps1 (zero parse errors)
-//   A. deploy success -> versions\prev holds the complete old version, the
-//      bin/web/python swap surface is fully refreshed, five forbidden-zone
-//      sentinels (config/secrets/certs/data/venv) byte-identical, stub calls
-//      exactly [stop, start]
+//   A. deploy success -> versions\prev holds the complete old version (incl.
+//      hta.ps1), the bin/web/python swap surface is fully refreshed, the
+//      install hta.ps1 refreshed from the repo (AFTER the health gate), five
+//      forbidden-zone sentinels (config/secrets/certs/data/venv)
+//      byte-identical, stub calls exactly [stop, start]
 //   B. failed health gate -> nonzero exit, output carries a rollback hint,
-//      new code already in place at that moment
-//   C. rollback (continues from A's fixture) -> old version restored, prev
-//      kept, cumulative stub calls [stop, start, stop, start]
+//      new code already in place at that moment, hta.ps1 NOT refreshed
+//   C. rollback (continues from A's fixture) -> old version restored (incl.
+//      the backed-up hta.ps1), prev kept, cumulative stub calls
+//      [stop, start, stop, start]
 //   D. rollback with no versions\prev -> nonzero, "nothing to roll back to"
 //   E. preflight refusal (no hta.ps1) -> nonzero, output mentions hta,
 //      bin\service.exe still the old bytes (zero install-dir changes)
@@ -103,6 +105,27 @@ const SENTINELS = {
   'venv/Scripts/python.exe': 'KEEP-VENV',
 };
 
+// Stub hta.ps1: append each received subcommand to <install>\hta-calls.log;
+// start exits per HTA_STUB_START_EXIT (default 0), stop always exits 0 -
+// the same exit-code contract the real scripts/hta.ps1 defines. Module-level
+// because deploy now REFRESHES the install hta.ps1 from the repo (scenario
+// A asserts that), and later scenarios re-seed this stub so their
+// stop/start keep hitting the recorder instead of the real script (which
+// would refuse the fake config and wreck the call log).
+const STUB_HTA = [
+  "param([Parameter(Position = 0)][string]$Command = 'status')",
+  "$ErrorActionPreference = 'Stop'",
+  '$root = Split-Path -Parent $MyInvocation.MyCommand.Definition',
+  "Add-Content -Path (Join-Path $root 'hta-calls.log') -Value $Command",
+  "if ($Command -eq 'start') {",
+  '  $code = 0',
+  '  if ($env:HTA_STUB_START_EXIT) { $code = [int]$env:HTA_STUB_START_EXIT }',
+  '  exit $code',
+  '}',
+  'exit 0',
+  '',
+].join('\r\n');
+
 function makeFixture(instDir, opts = {}) {
   const write = (rel, content) => {
     const p = path.join(instDir, ...rel.split('/'));
@@ -116,25 +139,7 @@ function makeFixture(instDir, opts = {}) {
   // Forbidden-zone sentinels: deploy must never touch these five trees.
   for (const [rel, content] of Object.entries(SENTINELS)) write(rel, content);
   if (!opts.noHta) {
-    // Stub hta.ps1: append each received subcommand to <install>\hta-calls.log;
-    // start exits per HTA_STUB_START_EXIT (default 0), stop always exits 0 -
-    // the same exit-code contract the real scripts/hta.ps1 defines.
-    write(
-      'hta.ps1',
-      [
-        "param([Parameter(Position = 0)][string]$Command = 'status')",
-        "$ErrorActionPreference = 'Stop'",
-        '$root = Split-Path -Parent $MyInvocation.MyCommand.Definition',
-        "Add-Content -Path (Join-Path $root 'hta-calls.log') -Value $Command",
-        "if ($Command -eq 'start') {",
-        '  $code = 0',
-        '  if ($env:HTA_STUB_START_EXIT) { $code = [int]$env:HTA_STUB_START_EXIT }',
-        '  exit $code',
-        '}',
-        'exit 0',
-        '',
-      ].join('\r\n'),
-    );
+    write('hta.ps1', STUB_HTA);
   }
   return instDir;
 }
@@ -224,10 +229,15 @@ try {
       'OLD-PY',
       'prev must hold the old python scripts',
     );
+    assert.strictEqual(
+      fs.readFileSync(path.join(instA, 'versions', 'prev', 'hta.ps1'), 'utf8'),
+      STUB_HTA,
+      'prev must hold the old hta.ps1 (the stub) for rollback',
+    );
     assert.deepStrictEqual(
       fs.readdirSync(path.join(instA, 'versions', 'prev')).sort(),
-      ['bin', 'python', 'web'],
-      'versions\\prev top level must be exactly bin, python, web',
+      ['bin', 'hta.ps1', 'python', 'web'],
+      'versions\\prev top level must be exactly bin, hta.ps1, python, web',
     );
 
     // The installed seat carries the NEW binary.
@@ -265,9 +275,27 @@ try {
     // Forbidden zones untouched.
     assertSentinels(instA, 'scenario A');
 
+    // The control script is refreshed from the repo - AFTER the gate, so
+    // both stub calls below ran against the OLD script, and the install now
+    // carries the real one.
+    assert.strictEqual(
+      fs.readFileSync(path.join(instA, 'hta.ps1'), 'utf8'),
+      fs.readFileSync(path.join(repoRoot, 'scripts', 'hta.ps1'), 'utf8'),
+      'deploy must refresh the install hta.ps1 from the repo',
+    );
+
     // Stub hta calls in the contractual order.
     assert.deepStrictEqual(readCalls(instA), ['stop', 'start']);
-    console.log('PASS section A: deploy success - prev holds OLD-*, swap surface refreshed, sentinels intact, calls [stop, start]');
+
+    // Re-seed a stand-in "refreshed real script" for scenario C: still the
+    // stub contract (so C's rollback stop/start keep recording into the same
+    // log), but distinct bytes so C can prove rollback restored the
+    // BACKED-UP script rather than keeping whatever was installed.
+    fs.writeFileSync(
+      path.join(instA, 'hta.ps1'),
+      STUB_HTA + '# stand-in for the refreshed real script\r\n',
+    );
+    console.log('PASS section A: deploy success - prev holds OLD-*, swap surface + hta.ps1 refreshed, sentinels intact, calls [stop, start]');
   }
 
   // -------------------------------------------------------------------------
@@ -287,7 +315,12 @@ try {
       'NEW-BIN',
       'the swap has already happened when the health gate fails',
     );
-    console.log('PASS section B: failed health gate exits nonzero with rollback hint, new code in place');
+    assert.strictEqual(
+      fs.readFileSync(path.join(instB, 'hta.ps1'), 'utf8'),
+      STUB_HTA,
+      'a failed health gate must NOT refresh hta.ps1 (the refresh runs last)',
+    );
+    console.log('PASS section B: failed health gate exits nonzero with rollback hint, new code in place, hta.ps1 not refreshed');
   }
 
   // -------------------------------------------------------------------------
@@ -316,13 +349,18 @@ try {
       'OLD-PY',
       'rollback must restore the old python scripts',
     );
+    assert.strictEqual(
+      fs.readFileSync(path.join(instA, 'hta.ps1'), 'utf8'),
+      STUB_HTA,
+      'rollback must restore the backed-up hta.ps1 (not keep the stand-in)',
+    );
     assertSentinels(instA, 'scenario C');
     assert.ok(
       fs.existsSync(path.join(instA, 'versions', 'prev')),
       'versions\\prev must be kept after rollback (re-rollback stays possible)',
     );
     assert.deepStrictEqual(readCalls(instA), ['stop', 'start', 'stop', 'start']);
-    console.log('PASS section C: rollback restores OLD-*, prev kept, calls [stop, start, stop, start]');
+    console.log('PASS section C: rollback restores OLD-* + hta.ps1, prev kept, calls [stop, start, stop, start]');
   }
 
   // -------------------------------------------------------------------------
