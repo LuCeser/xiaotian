@@ -145,14 +145,16 @@ func TestDefaultConfig(t *testing.T) {
 	t.Run("python defaults per D-02/D-03/D-04", func(t *testing.T) {
 		// Interpreter and ScriptsDir are intentionally empty in DefaultConfig
 		// — they are deployment-specific and must come from env/file. The
-		// non-empty defaults below are the only ones the plan locks in.
-		if cfg.Python.VocabScript != "vocab_manager.py" {
-			t.Errorf("Python.VocabScript = %q, want %q (D-03 vendor)",
-				cfg.Python.VocabScript, "vocab_manager.py")
+		// non-empty defaults below are the only ones the plan locks in. The
+		// script defaults carry the directory prefix because the bridge
+		// launches them VERBATIM (no ScriptsDir join).
+		if cfg.Python.VocabScript != "third_party/python/vocab_manager.py" {
+			t.Errorf("Python.VocabScript = %q, want %q (D-03 vendor, verbatim path)",
+				cfg.Python.VocabScript, "third_party/python/vocab_manager.py")
 		}
-		if cfg.Python.PregenScript != "pregenerate_dictation.py" {
-			t.Errorf("Python.PregenScript = %q, want %q (D-03 vendor)",
-				cfg.Python.PregenScript, "pregenerate_dictation.py")
+		if cfg.Python.PregenScript != "third_party/python/pregenerate_dictation.py" {
+			t.Errorf("Python.PregenScript = %q, want %q (D-03 vendor, verbatim path)",
+				cfg.Python.PregenScript, "third_party/python/pregenerate_dictation.py")
 		}
 		if cfg.Python.DueTimeout != 10*time.Second {
 			t.Errorf("Python.DueTimeout = %v, want 10s", cfg.Python.DueTimeout)

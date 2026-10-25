@@ -513,12 +513,16 @@ type PythonConfig struct {
 	// CWD. Empty is rejected by Validate.
 	ScriptsDir string `json:"scriptsDir" mapstructure:"scriptsDir"`
 
-	// VocabScript is the filename of the vocab_manager script inside
-	// ScriptsDir. Default "vocab_manager.py". Empty is rejected by Validate.
+	// VocabScript is the script path the bridge launches VERBATIM (no
+	// ScriptsDir join) — the directory prefix is part of the value. Relative
+	// paths resolve against the process CWD (repo root). Default
+	// "third_party/python/vocab_manager.py". Empty is rejected by Validate.
 	VocabScript string `json:"vocabScript" mapstructure:"vocabScript"`
 
-	// PregenScript is the filename of the pregenerate_dictation script inside
-	// ScriptsDir. Default "pregenerate_dictation.py". Empty is rejected by
+	// PregenScript is the script path the bridge launches VERBATIM (no
+	// ScriptsDir join) — the directory prefix is part of the value. Relative
+	// paths resolve against the process CWD (repo root). Default
+	// "third_party/python/pregenerate_dictation.py". Empty is rejected by
 	// Validate.
 	PregenScript string `json:"pregenScript" mapstructure:"pregenScript"`
 
@@ -954,8 +958,8 @@ func DefaultConfig() Config {
 			Timeout: 30 * time.Second,
 		},
 		Python: PythonConfig{
-			VocabScript:   "vocab_manager.py",
-			PregenScript:  "pregenerate_dictation.py",
+			VocabScript:   "third_party/python/vocab_manager.py",
+			PregenScript:  "third_party/python/pregenerate_dictation.py",
 			DueTimeout:    10 * time.Second,
 			ReviewTimeout: 10 * time.Second,
 			PregenTimeout: 120 * time.Second,
