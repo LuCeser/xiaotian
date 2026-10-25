@@ -570,6 +570,35 @@ const scopeExpect = function (overrides) {
     scopeExpect({ unverified: 1 }),
     'P2-1 an attribution on an unread textbook is 待核实, never 暂不自动安排');
 
+  // PR #88 P1 — the REAL degraded readback, not a hand-built one: the
+  // post-save GET /words answers 200 with its attribution projection
+  // failed server-side, so each word carries textbooks:null (the Go
+  // handler's failure branch, pinned in textbooks_test.go). The pre-fix
+  // client read that null as 「无归属」 and guessed the supplementary
+  // default / paused-ready promises; now it is 待核实.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['apple']), [
+    { word: 'apple', participates: true, textbooks: null },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ unverified: 1 }),
+    'P1 attribution degraded (textbooks null): never guessed 已加入范围');
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('', false, ['star']), [
+    { word: 'star', participates: true, textbooks: null },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ unverified: 1 }),
+    'P1 attribution degraded: the lesson-less supplementary default never fires');
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['lake']), [
+    { word: 'lake', participates: false, textbooks: null },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ unverified: 1 }),
+    'P1 attribution degraded: a paused word never gets the pausedReady guess');
+  // The other side of the distinction: a SUCCEEDED projection that
+  // verified no attribution ([] , not null) keeps its meaning.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('', false, ['star']), [
+    { word: 'star', participates: true, textbooks: [] },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ joined: 1 }),
+    'a VERIFIED empty attribution ([]) still joins as 补充词汇');
+
   // PR #87 复审 P2-2 — paused words: pausedReady separates 「恢复参与后
   // 即可安排」 (a source already qualifies) from the honest 「还需课次已学
   // 或加入默写范围」.
@@ -794,6 +823,33 @@ const renderScopeBanner = function (overrides) {
   });
   assert(pausedReady.indexOf('恢复参与后即可安排默写') >= 0,
     'a paused word an include already qualifies keeps the restore-and-schedule promise');
+
+  // PR #88 P1 at the render level: the post-save read SUCCEEDED but its
+  // attribution projection failed server-side (the real degraded GET /words
+  // — 200 with textbooks:null). The banner must say 资格待核实, never the
+  // joined 可安排默写 nor the paused 恢复参与后即可安排默写 guess.
+  const p1Saved = [
+    { word: 'apple', participates: true, textbooks: null },
+    { word: 'lake', participates: false, textbooks: null },
+  ];
+  const p1Banner = renderScopeBanner({
+    rows: [
+      { index: 0, word: 'apple', meaning: '苹果', lesson: '第5课', status: 'exists', checked: true },
+      { index: 1, word: 'lake', meaning: '湖', lesson: '第7课', status: 'exists', checked: true },
+    ],
+    groupResults: [
+      { group: { lesson: '第5课', includeInScope: false, words: ['apple'] }, ok: true },
+      { group: { lesson: '第7课', includeInScope: false, words: ['lake'] }, ok: true },
+    ],
+    postSave: p1Saved,
+    booksAfter: SCOPE_BOOKS_AFTER,
+  });
+  assert(p1Banner.indexOf('资格待核实 2 词') >= 0,
+    'a degraded attribution read renders 资格待核实 for every word');
+  assert(p1Banner.indexOf('可安排默写') < 0,
+    'a degraded attribution read never renders 可安排默写');
+  assert(p1Banner.indexOf('恢复参与后即可安排默写。') < 0,
+    'a degraded attribution read never promises 恢复参与后即可安排默写');
 })();
 
 // ----------------------------------------------------------------------

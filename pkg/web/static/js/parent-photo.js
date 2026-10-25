@@ -4762,7 +4762,9 @@
    * client's cached books (PR #87 复审 P2): the payload knows neither
    * participates nor the word's other sources, and a stale cached prefix
    * can neither admit nor hold a word — such words count 资格待核实
-   * (unverified) instead. Pure.
+   * (unverified) instead. Same for a read whose attribution projection
+   * failed server-side (textbooks:null, PR #88 P1): [] is a VERIFIED
+   * no-attribution, null is unknown. Pure.
    */
   function summarizeAssignScope(book, groupResults, postSave, books) {
     var out = {
@@ -4807,6 +4809,16 @@
           out.unverified += 1;
           return;
         }
+        // PR #88 P1: the post-save read can SUCCEED while its attribution
+        // projection failed server-side — GET /words then answers 200 with
+        // textbooks:null (the degraded marker), not []. Only a real array
+        // is a verified source list; null means attribution is UNKNOWN, so
+        // neither the supplementary-default join, nor a hold, nor a
+        // paused-ready promise may be read out of it — 待核实.
+        if (saved.textbooks == null) {
+          out.unverified += 1;
+          return;
+        }
         // Post-save truth: participates composes with scope (AND), and
         // ANY textbook source can admit the word (US-33: one learned
         // assignment among several suffices; a sticky or foreign include
@@ -4815,7 +4827,7 @@
         var learnedHit = false;
         var allCovered = true;
         var targetLesson = '';
-        var entries = saved.textbooks || [];
+        var entries = saved.textbooks;
         entries.forEach(function (a) {
           if (!a) {
             return;
