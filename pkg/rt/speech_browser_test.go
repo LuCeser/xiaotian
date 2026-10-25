@@ -1838,7 +1838,7 @@ func TestCloseSnapshotBrowser(t *testing.T) {
 			t.Fatalf("review batches = %d, want 0 (no fallback without the check stage)", got)
 		}
 		m.TurnManager.mu.Lock()
-		closedFlag, pending := m.closed, len(m.checkWrites)
+		closedFlag, pending := m.TurnManager.closed, len(m.checkWrites)
 		m.TurnManager.mu.Unlock()
 		if !closedFlag || pending != 0 {
 			t.Fatalf("closed=%v admissions=%d, want true/0", closedFlag, pending)
@@ -1895,7 +1895,7 @@ func TestDuplicateSubmitBrowser(t *testing.T) {
 		t.Fatalf("review batches = %d, want 0 — the duplicate submit never saves", got)
 	}
 	m.TurnManager.mu.Lock()
-	closedFlag, pending := m.closed, len(m.checkWrites)
+	closedFlag, pending := m.TurnManager.closed, len(m.checkWrites)
 	m.TurnManager.mu.Unlock()
 	if !closedFlag || pending != 0 {
 		t.Fatalf("closed=%v admissions=%d, want true/0", closedFlag, pending)
@@ -1940,7 +1940,7 @@ func TestClosedControlBrowser(t *testing.T) {
 			t.Fatalf("controls after the close = %d, want unchanged %d", got, before)
 		}
 		m.TurnManager.mu.Lock()
-		closedFlag, epoch := m.closed, m.epoch
+		closedFlag, epoch := m.TurnManager.closed, m.epoch
 		m.TurnManager.mu.Unlock()
 		if !closedFlag {
 			t.Fatal("the close did not stand")
@@ -1979,7 +1979,7 @@ func TestClosedControlBrowser(t *testing.T) {
 				res.WSCloseCount, res.LateFramesAfterClose)
 		}
 		m.TurnManager.mu.Lock()
-		closedFlag := m.closed
+		closedFlag := m.TurnManager.closed
 		m.TurnManager.mu.Unlock()
 		if !closedFlag {
 			t.Fatal("the raced close never landed")
