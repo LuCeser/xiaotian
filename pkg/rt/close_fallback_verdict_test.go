@@ -14,6 +14,12 @@ import (
 // once on the fresh version. A verdict committed after the snapshot thus
 // still gets its fallback; an already-admitted FORMAL submit owns the one
 // FSRS write and the fallback saves nothing on top of the submitted row.
+//
+// 1.15 口径：本文件的断言落在真实持久结果（fake 行状态、FSRS 批次、读回
+// 调用记录）上，内存 closed 不作为兜底完成的证据。真实 SQLite 与真实连
+// 接的对应证明由 RB(TestCloseFallbackAfterAcceptedWrites)、
+// RB(TestCloseFallbackMultipleWrites)（确定性撤销红）与
+// RB(TestCloseFallbackVersusSubmit)（真实回执与 review_logs）持有。
 func TestCloseFallbackAfterVerdictCommit(t *testing.T) {
 	t.Run("a verdict committed after the snapshot still gets its fallback", func(t *testing.T) {
 		words := newFakeWords(ttCards("苹果", "香蕉"))
