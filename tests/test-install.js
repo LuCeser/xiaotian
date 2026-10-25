@@ -205,6 +205,8 @@ try {
     assert.ok(cfg.includes(`keyFile: '${path.join(instDir, 'certs', 'hta-lan-key.pem')}'`), 'tls.keyFile must point at the copied key');
     assert.ok(cfg.includes(`interpreter: '${path.join(instDir, 'venv', 'Scripts', 'python.exe')}'`), 'interpreter must be the Windows-layout venv python');
     assert.ok(cfg.includes(`scriptsDir: '${path.join(instDir, 'python')}'`), 'scriptsDir must be the install python dir');
+    assert.ok(cfg.includes(`vocabScript: '${path.join(instDir, 'python', 'vocab_manager.py')}'`), 'vocabScript must be the full install path (bridge launches it verbatim)');
+    assert.ok(cfg.includes(`pregenScript: '${path.join(instDir, 'python', 'pregenerate_dictation.py')}'`), 'pregenScript must be the full install path (bridge launches it verbatim)');
     const dataDir = path.join(instDir, 'data');
     assert.ok(cfg.includes(`vocabDBPath: '${path.join(dataDir, 'vocab.db')}'`), 'vocabDBPath must live in the data dir');
     assert.ok(cfg.includes(`dataDir: '${dataDir}'`), 'dataDir must be absolute');
