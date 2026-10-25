@@ -200,9 +200,21 @@
     this._drainInWatchdog = false;
   }
 
-  /** Attach the shared AudioContext (created by RTCapture's gesture). */
+  /**
+   * Attach the shared AudioContext (created by RTCapture's gesture). A NEW
+   * context is a NEW clock domain: the gapless-scheduling cursor measured on
+   * the previous context's clock is meaningless against this one. Without
+   * the reset, a 「再练一组」 restart after a natural ending (whose
+   * releaseSharedResources — deliberately no stopNow — keeps the old cursor)
+   * schedules the fresh session's first chunks at the OLD context's final
+   * cursor, tens of seconds into the new context's future: nothing sounds,
+   * no onended ever fires and the server's playback-ack wait kills the
+   * classroom (finish.spec.js J16 found it; stopNow already zeroes the
+   * cursor, so the explicit-end restart path was never affected).
+   */
   RTCPlayback.prototype.setAudioContext = function (ctx) {
     this.audioCtx = ctx;
+    this._cursor = 0;
   };
 
   /** Append a page-level observation to the shared ordered trace. */

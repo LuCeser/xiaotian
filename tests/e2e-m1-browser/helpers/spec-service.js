@@ -13,8 +13,10 @@
 //
 // The strict stub (127.0.0.1:18285) stays SHARED for the whole run — the
 // per-test services all point voice.baseUrl at it via the config template.
-// Specs reset its requests, violations and scripts at both boundaries, so
-// no test depends on file execution order or an earlier test's cleanup.
+// Because smoke.spec.js (alphabetically between the new files) asserts the
+// stub recorded ZERO requests, every spec using this helper must
+// stubReset() when it ends: reset clears requests/violations/scripts so the
+// next spec starts from a clean, strictly-scripted slate.
 //
 // Node test: spec-service.test.js (stub-control roundtrip against an
 // in-process stub — the Go boot path is covered by service-launcher tests
@@ -22,7 +24,8 @@
 'use strict';
 
 const path = require('node:path');
-const { launchService } = require('./service-launcher');
+const { execFileSync } = require('node:child_process');
+const { launchService, resolvePython } = require('./service-launcher');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const TEMPLATE = path.join(__dirname, '..', 'config.m1-e2e.yaml');
@@ -30,11 +33,15 @@ const STUB_BASE = 'http://127.0.0.1:18285';
 
 /**
  * Launch one isolated real service for a single test. Returns
- *   { url, stop, seedWords, listWords, listLessons }
+ *   { url, stop, seedWords, deleteWords, listWords, listLessons }
  *   url        — http://127.0.0.1:<port>/ (absolute: these pages do NOT use
  *                the config baseURL, whose 18290 instance is not this one)
  *   stop()     — idempotent teardown (kills the child, removes its temp root)
  *   seedWords({category, unit, entries}) — real REST → Python → SQLite write
+ *   deleteWords({category, words}) — the parent's real confirmed delete
+ *                (DELETE /words → python delete-words --confirm; the payload
+ *                carries {"deleted": N}) — the mid-session word removal the
+ *                J14 partial-save leg stages through the product surface
  *   listWords({category}) / listLessons() — real read path for assertions
  */
 async function startSpecService() {
@@ -54,11 +61,29 @@ async function startSpecService() {
     seedWords({ category, unit, entries }) {
       return json('/words', { method: 'POST', body: JSON.stringify({ category, unit, entries }) });
     },
+    deleteWords({ category, words }) {
+      return json('/words', { method: 'DELETE', body: JSON.stringify({ category, words }) });
+    },
     listWords({ category }) {
       return json('/words?category=' + encodeURIComponent(category));
     },
     listLessons() {
       return json('/lessons');
+    },
+    // The in-progress REST projection intentionally hides answers. Read
+    // ONLY this launcher's isolated database, in SQLite read-only mode.
+    readLessonCards(lessonId) {
+      const script = [
+        'import json, pathlib, sqlite3, sys',
+        'uri = pathlib.Path(sys.argv[1]).resolve().as_uri() + "?mode=ro"',
+        'with sqlite3.connect(uri, uri=True) as db:',
+        ' row = db.execute("SELECT cards FROM lessons WHERE lesson_id = ?", (sys.argv[2],)).fetchone()',
+        ' if row is None: raise RuntimeError("lesson not persisted")',
+        ' print(row[0])',
+      ].join('\n');
+      return JSON.parse(execFileSync(resolvePython(REPO_ROOT),
+        ['-c', script, path.join(svc.root, 'vocab.db'), lessonId],
+        { encoding: 'utf8', timeout: 5000 }));
     },
   };
 }

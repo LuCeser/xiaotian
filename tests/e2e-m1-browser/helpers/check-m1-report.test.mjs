@@ -33,7 +33,7 @@ const TITLES = [
   ['smoke.spec.js', 'real pages and REST use one fresh isolated service without vendor traffic'],
   ['subject-playback.spec.js', 'J05 mid-ask button pick: real epoch switch, no turn_start, natural new-opening ack'],
   ['voice-input.spec.js', 'synthetic mic rides the production capture path: format, silence, isolation, release'],
-  ['finish.spec.js', 'J15 active end stops the classroom: ask-park, mid-greeting, listening'],
+  ['finish.spec.js', 'J15 active end stops the classroom: ask-park, mid-answer, mid-greeting, listening'],
   ['finish.spec.js', 'J13+J14 last word → one check entry, masked answers, real check submit, natural end'],
   ['finish.spec.js', 'J16 finish chinese, reload → the english classroom opens on its own words, both submit independently'],
   ['finish.spec.js', 'J16 empty vocabulary ends through the real no-due result'],

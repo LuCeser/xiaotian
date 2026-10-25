@@ -14,7 +14,10 @@
 //   J14 check & end — the REAL 对/错 buttons, one submit, honest
 //                     review_result + saved copy, the summary fully acked
 //                     BEFORE session_ended(lesson_complete), mic + playback
-//                     resources released, uplink frozen;
+//                     resources released, uplink frozen; plus the same tail
+//                     under a REAL partial save (the parent deletes a word
+//                     mid-check) — the honest 1/2 copy everywhere, never a
+//                     dressed-up success;
 //   J15/J16 follow in later tests of this file (主动结束、完成后再开/换科).
 'use strict';
 
@@ -80,6 +83,23 @@ async function waitIndex(page, pred, label) {
     return at >= 0;
   }, { timeoutMs: 30000, label });
   return at;
+}
+
+/**
+ * J14's WS-release wait (review PR #72 P1): after the session's terminal
+ * message the page itself must close the WebSocket. The server's read loop
+ * only exits on OUR disconnect, so a socket left open keeps the connection,
+ * its server-side session manager and heartbeat alive until the page
+ * unloads — and an in-page restart orphans it outright (connect replaces
+ * client.ws). Waits for the socket's real close EVENT after fromI, then
+ * proves the production client's socket object reached CLOSED: silence on
+ * the wire proves nothing (the server simply keeps waiting).
+ */
+async function awaitSocketClosed(page, fromI, label) {
+  await waitWs(page, (log) => log.some((e) => e.i > fromI && e.kind === 'close'),
+    { timeoutMs: 30000, label: label + ': the page closed the WebSocket' });
+  expect(await page.evaluate(() => window.__rtTutor.client.ws.readyState),
+    label + ': the production socket object is CLOSED (3)').toBe(3);
 }
 
 /**
@@ -186,7 +206,7 @@ async function ttsCountStable() {
   return { first, second, stable: first === second };
 }
 
-test('J15 active end stops the classroom: ask-park, mid-greeting, listening', async ({ page }) => {
+test('J15 active end stops the classroom: ask-park, mid-answer, mid-greeting, listening', async ({ page }) => {
   await installRtObserver(page);
   await installFakeMic(page);
   // BOTH subjects hold due words → the generic entry parks on the subject ask.
@@ -197,15 +217,18 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
     const seed = await svc.seedWords({ category, unit, entries: words.map((word) => ({ word })) });
     expect(seed.ok, 'seed ' + category).toBeTruthy();
   }
-  const askStreaming = (log) => log.some((e) => e.dir === 'in' && e.type === 'subject_ask')
-    && log.some((e) => e.dir === 'in' && e.type === 'audio_start')
-    && log.some((e) => e.dir === 'in' && e.kind === 'binary' && e.bytes > 0);
+  const askStreamingFrom = (fromI) => (log) =>
+    log.some((e) => e.dir === 'in' && e.type === 'subject_ask' && e.i > fromI)
+    && log.some((e) => e.dir === 'in' && e.type === 'audio_start' && e.i > fromI)
+    && log.some((e) => e.dir === 'in' && e.kind === 'binary' && e.bytes > 0 && e.i > fromI);
+  // Log indices start at 0, so "from the very beginning" is -1.
 
-  // ---- 选科中: the page offers NO end affordance before session_ready — the
-  // 结束 button is still disabled while the ask parks. The child's only exit
-  // is leaving the page; that must stop the ask with no classroom created.
-  // The whole ask is scripted: an in-flight round may legitimately finish
-  // synthesizing, but NOTHING new may follow once the socket is gone.
+  // ---- 选科中 (PR #72 review P2): the clarify is a live session phase, so
+  // the 结束 button is offered the MOMENT the ask appears — the child's exit
+  // from the question is a real end_session, never "leave the page". The
+  // whole ask is scripted: an in-flight round may legitimately finish
+  // synthesizing, but NOTHING new may follow once the session is gone, and
+  // the ended ask must leave no classroom behind.
   await stubScripts({
     asr: [], llm: [], image: [],
     tts: [
@@ -216,16 +239,74 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
   });
   await page.goto(svc.url + 'tutor/');
   await page.locator('#rt-start').click();
-  await waitWs(page, askStreaming, { label: 'ask audio streaming' });
+  await waitWs(page, askStreamingFrom(-1), { label: 'ask audio streaming' });
   await expect(page.locator('#rt-subject-ask')).toBeVisible();
-  await expect(page.locator('#rt-end'), 'no end button pre-session_ready').toBeDisabled();
+  await expect(page.locator('#rt-end'), 'the ask phase offers the explicit end').toBeEnabled();
   expect(await lessonsNow(), 'no classroom row while parked on the ask').toHaveLength(0);
-  await page.reload();
-  await page.waitForTimeout(1500); // let the server see the dead socket
-  expect(await lessonsNow(), 'leaving the ask creates no classroom').toHaveLength(0);
+  await page.locator('#rt-end').click();
+  const end1I = await waitIndex(page, (e) => e.dir === 'out' && e.type === 'end_session',
+    'end_session sent from the ask park');
+  const ended1I = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'client_end', 'session_ended(client_end) from the ask park');
+  expect(ended1I, 'the goodbye follows the end_session that caused it').toBeGreaterThan(end1I);
+  await waitWs(page, async () => (await playbackState(page)).activeSourceKeys.length === 0,
+    { label: 'the ask-park end stopped the live ask audio' });
+  for (const t of (await micInfo(page)).tracks) expect(t.state, 'mic released by the ask-park end').toBe('ended');
+  await expect(page.locator('#rt-subject-ask'), 'a stopped session retires the clarify panel').toBeHidden();
+  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'session_ready'),
+    'no classroom ever opened from the ended ask').toHaveLength(0);
+  await awaitSocketClosed(page, ended1I, 'the ask-park end');
+  expect(await lessonsNow(), 'ending the ask creates no classroom').toHaveLength(0);
+  await page.waitForTimeout(1200);
+  expect((await controls(page)).filter((e) => e.i > ended1I && e.dir === 'in' && e.type !== 'pong'),
+    'no control frame follows the goodbye').toEqual([]);
   const afterAsk = await ttsCountStable();
-  expect(afterAsk.stable, 'no vendor traffic revives after the page left (' + afterAsk.first + '→' + afterAsk.second + ')').toBe(true);
+  expect(afterAsk.stable, 'no vendor traffic revives after the end (' + afterAsk.first + '→' + afterAsk.second + ')').toBe(true);
   expect(afterAsk.second, 'at most the one scripted ask round was served').toBeLessThanOrEqual(3);
+  expect((await stubState()).violations).toEqual([]);
+
+  // ---- 取词中 (PR #72 review P2): a BUTTON pick runs the whole classroom
+  // init on the transport's read loop, so an end_session behind it can only
+  // land AFTER session_ready — the one browser-reachable window where the
+  // subject binding and the due-word fetch (取词/建课) run OFF the read loop
+  // is the VOICE answer: the spoken 英语 rides a turn goroutine while the
+  // transport stays free. The end click lands just after the answer clip
+  // finishes sounding — inside the 700 ms VAD hangover, before the answer
+  // turn dispatches — and races the whole binding→fetch→建行 pipeline.
+  // Whichever side the scheduler lets win, the convergent invariant is the
+  // acceptance: no session_ready, no lesson row, no new announcement (the
+  // narrower in-fetch interleavings stay pinned by pkg/rt's own races).
+  // No reload between legs, so the restarted connection reuses the epoch 0 /
+  // t1-s* ledger keys of leg 1's ask — every round assertion rides the
+  // bounded *Since helpers (ws log index + player-trace slice), never the
+  // unbounded first-match forms (same discipline as the J16 practice leg).
+  await stubScripts({
+    asr: [{ content: '英语' }], llm: [], image: [],
+    tts: [
+      { ms: 1200, match: '都有要默写的词语' },
+      { ms: 1200, match: '想先默写哪一科' },
+      { ms: 1200, match: '也可以点屏幕上的按钮' },
+    ],
+  });
+  const mark2 = (await playbackState(page)).trace.length;
+  await page.locator('#rt-start').click();
+  await waitWs(page, askStreamingFrom(ended1I), { label: 'ask audio streaming (voice-answer leg)' });
+  const ask2 = await awaitRound(page, ended1I, 3, 'ask (voice-answer leg)');
+  await ackedSince(page, ask2, ended1I, mark2, 'ask (voice-answer leg)');
+  await expect(page.locator('#rt-end'), 'the re-asked clarify offers the end again').toBeEnabled();
+  await page.waitForTimeout(1000); // past the 500 ms echo tail + poll margin
+  await playPcm16(page, CONFIRM_CLIP, 16000); // the spoken 英语 answer (stub-scripted)
+  await page.locator('#rt-end').click(); // the answer is still inside its hangover
+  const ended2I = await waitIndexSince(page, ended1I, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'client_end', 'session_ended(client_end) with the answer in flight');
+  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'session_ready'),
+    'the racing answer never opened a classroom').toHaveLength(0);
+  expect(await lessonsNow(), 'the racing answer created no lesson row').toHaveLength(0);
+  await awaitSocketClosed(page, ended2I, 'the mid-answer end');
+  for (const t of (await micInfo(page)).tracks) expect(t.state, 'mic released by the mid-answer end').toBe('ended');
+  const afterAnswer = await ttsCountStable();
+  expect(afterAnswer.stable, 'no vendor traffic revives after the end').toBe(true);
+  expect(afterAnswer.second, 'at most the two scripted ask rounds were served').toBeLessThanOrEqual(6);
   expect((await stubState()).violations).toEqual([]);
 
   // ---- 播报中: end MID-GREETING playback → the goodbye, the classroom row
@@ -238,18 +319,18 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
     tts: [{ ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }, { ms: 1200 }],
   });
   await page.locator('#rt-start').click();
-  await waitWs(page, askStreaming, { label: 'ask audio streaming (2nd session)' });
+  await waitWs(page, askStreamingFrom(ended2I), { label: 'ask audio streaming (3rd session)' });
   await page.locator('#rt-subject-en').click();
-  const readyI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+  const ready3I = await waitIndexSince(page, ended2I, (e) => e.dir === 'in' && e.type === 'session_ready'
     && e.msg.category === 'english'
     && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2,
   'the picked english classroom opens');
   await waitWs(page, (log) => log.some((e) => e.dir === 'in' && e.kind === 'binary' && e.bytes > 0
-    && e.i > readyI), { label: 'greeting audio streaming' });
+    && e.i > ready3I), { label: 'greeting audio streaming' });
   await page.locator('#rt-end').click();
-  const ended2I = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
+  const ended3I = await waitIndexSince(page, ready3I, (e) => e.dir === 'in' && e.type === 'session_ended'
     && e.msg.reason === 'client_end', 'session_ended(client_end) mid-greeting');
-  expect(ended2I, 'the goodbye follows the classroom it closes').toBeGreaterThan(readyI);
+  expect(ended3I, 'the goodbye follows the classroom it closes').toBeGreaterThan(ready3I);
   await waitWs(page, async () => (await playbackState(page)).activeSourceKeys.length === 0,
     { label: 'the explicit end cleared every live audio source' });
   expect(await page.evaluate(() => window.__rtTutor.capture.isCapturing),
@@ -258,11 +339,12 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
   expect(rowsAfter, 'the classroom row stands — no re-created classroom').toHaveLength(1);
   expect(rowsAfter[0]).toMatchObject({ category: 'english', word_count: 2, lesson_id: 'e2e-m1-browser' });
   await page.waitForTimeout(1200);
-  expect((await controls(page)).filter((e) => e.i > ended2I && e.dir === 'in' && e.type !== 'pong'),
+  expect((await controls(page)).filter((e) => e.i > ended3I && e.dir === 'in' && e.type !== 'pong'),
     'no control frame follows the goodbye — no new opening').toEqual([]);
+  await awaitSocketClosed(page, ended3I, 'the explicit mid-greeting end');
   const afterMid = await ttsCountStable();
   expect(afterMid.stable, 'no vendor traffic revives after the end').toBe(true);
-  expect(afterMid.second, 'at most the ask + greeting rounds were served').toBeLessThanOrEqual(9);
+  expect(afterMid.second, 'at most the ask + greeting rounds were served').toBeLessThanOrEqual(12);
   expect((await stubState()).violations).toEqual([]);
 
   // ---- 收听中: the full greeting acks, listening settles, THEN end — no
@@ -275,24 +357,29 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
       { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
     ],
   });
+  // Same key-collision discipline as leg 2: the resumed classroom's greeting
+  // reuses the epoch 0 / t1-s* keys of the earlier asks on this document.
+  const mark4 = (await playbackState(page)).trace.length;
   await page.locator('#rt-start').click();
-  const ready3I = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
-    && e.msg.category === 'english' && e.i > ended2I, 'the english classroom resumes directly');
-  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'subject_ask' && e.i > ended2I),
+  const ready4I = await waitIndexSince(page, ended3I, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'english', 'the english classroom resumes directly');
+  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'subject_ask' && e.i > ended3I),
     'an in-page restart never re-asks the subject').toHaveLength(0);
-  const greeting = await awaitRound(page, ready3I, 3, 'greeting (resume)');
-  await awaitAcked(page, greeting, 'greeting (resume)');
+  const greeting = await awaitRound(page, ready4I, 3, 'greeting (resume)');
+  await ackedSince(page, greeting, ended3I, mark4, 'greeting (resume)');
   await page.locator('#rt-end').click();
-  const ended3I = await waitIndex(page, (e) => e.i > ended2I && e.dir === 'in' && e.type === 'session_ended'
+  const ended4I = await waitIndexSince(page, ended3I, (e) => e.dir === 'in' && e.type === 'session_ended'
     && e.msg.reason === 'client_end', 'session_ended(client_end) while listening');
   await page.waitForTimeout(1200);
   const log = await controls(page);
   expect(log.filter((e) => e.dir === 'in' && e.type === 'lesson_update'),
     'no confirm ever advanced a word in this spec').toHaveLength(0);
-  // ping/pong is the transport keepalive (the socket stays open after
-  // client_end); every OTHER downlink frame must stop at the goodbye.
-  expect(log.filter((e) => e.i > ended3I && e.dir === 'in' && e.type !== 'pong'),
+  // ping/pong is the transport keepalive and may race the goodbye; every
+  // OTHER downlink frame must stop at it. The page then closes the socket
+  // itself — J14's release contract reaches the explicit end too.
+  expect(log.filter((e) => e.i > ended4I && e.dir === 'in' && e.type !== 'pong'),
     'no server frame after the goodbye').toEqual([]);
+  await awaitSocketClosed(page, ended4I, 'the explicit listening end');
   for (const t of (await micInfo(page)).tracks) expect(t.state, 'mic released by the end').toBe('ended');
   const frozen = await wsStats(page);
   await page.waitForTimeout(1200);
@@ -300,7 +387,7 @@ test('J15 active end stops the classroom: ask-park, mid-greeting, listening', as
     .toBe(frozen.outBinaryFrames);
   const afterListen = await ttsCountStable();
   expect(afterListen.stable, 'no vendor traffic revives after the end').toBe(true);
-  expect(afterListen.second, 'at most the scripted rounds were served').toBeLessThanOrEqual(12);
+  expect(afterListen.second, 'at most the scripted rounds were served').toBeLessThanOrEqual(15);
   expect((await stubState()).violations, 'the strict stub saw only scripted traffic').toEqual([]);
   expect(await lessonsNow(), 'still exactly the one english row').toHaveLength(1);
 });
@@ -410,6 +497,10 @@ test('J13+J14 last word → one check entry, masked answers, real check submit, 
     .toBe(frozen.outBinaryFrames);
   expect((await controls(page)).filter((e) => e.i > endedI && e.dir === 'in'),
     'no server frame after session_ended').toEqual([]);
+  // J14 (review P1): silence after the goodbye is NOT release evidence —
+  // the server read loop simply keeps waiting. The transport itself must
+  // close: the real close event, then the production socket at CLOSED.
+  await awaitSocketClosed(page, endedI, 'the natural ending');
 
   // J13 closing invariants: ONE check entry, no advance past the boundary, no
   // word 3 anywhere, exact vendor traffic consumed.
@@ -425,6 +516,143 @@ test('J13+J14 last word → one check entry, masked answers, real check submit, 
   expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
 
   // Persistence: one submitted english row with the real verdict counts.
+  const lessonRows = await lessonsNow();
+  expect(lessonRows).toHaveLength(1);
+  expect(lessonRows[0]).toMatchObject({
+    category: 'english', word_count: 2, lesson_id: 'e2e-m1-browser',
+    stage: 'submitted', correct: 2, wrong: 0,
+  });
+});
+
+// J14's save-failure leg (review PR #72 P2): the only product-real way a
+// BROWSER journey can stage a save failure — SubmitReview goes Python/SQLite
+// and the stub layer cannot inject one — is the parent surface itself: while
+// the check panel waits for the verdicts, DELETE /words really removes one
+// of the two cards, so the submit's `review` batch finds it gone and skips
+// it (updated 1 of 2 requested, missing 1). The page must then narrate the
+// PARTIAL save honestly in every channel — resultText, banner, and the
+// teacher's spoken summary — and the ending must still complete. (The hard
+// error path — the python subprocess itself failing — has no browser-layer
+// trigger; that boundary belongs to the Go tests.)
+test('J14 partial save: the parent deletes a word mid-check → the honest 1/2 copy, the ending still completes', async ({ page }) => {
+  await installRtObserver(page);
+  await installFakeMic(page);
+  const words = ['e2e-fin-ps-a', 'e2e-fin-ps-b'];
+  const seed = await svc.seedWords({
+    category: 'english', unit: 'e2e-m1-fin-ps', entries: words.map((word) => ({ word })),
+  });
+  expect(seed.ok, 'english seed').toBeTruthy();
+
+  // Same deterministic corpus as the J13+J14 journey, EXCEPT the battle
+  // summary gains a THIRD sentence: 「全部都写对了，你真棒！」 ends at ！, so
+  // the partial-save suffix 「本次保存 1/2 个。」 is its own speakable
+  // sentence (splitSentences) — the tts FIFO must script it too.
+  await stubScripts({
+    asr: [{ content: '好了' }, { content: '好了' }],
+    llm: [
+      { content: '{"intent":"confirm","reply":"好"}' },
+      { content: '{"intent":"confirm","reply":"好"}' },
+    ],
+    image: [],
+    tts: [
+      { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
+      { ms: 1200, match: '第 2 个词' },
+      { ms: 1200, match: '全都写完啦' }, { ms: 1200, match: '我们一起检查' },
+      { ms: 1200, match: '都默写完了' }, { ms: 1200, match: '全部都写对了' },
+      { ms: 1200, match: '本次保存 1/2' },
+    ],
+  });
+
+  // The lesson reaches its check stage through the REAL journey: greeting
+  // fully acked, two 好了 confirms, the check bridge acked and settled.
+  await page.goto(svc.url + 'tutor/');
+  await page.locator('#rt-start').click();
+  const readyI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'english'
+    && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2
+    && e.msg.lesson.words.every((w) => w === ''), 'session_ready: english, answers masked');
+  const greeting = await awaitRound(page, readyI, 3, 'greeting');
+  await awaitAcked(page, greeting, 'greeting');
+  await childSaysDone(page);
+  const lu1I = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'lesson_update'
+    && e.msg.current_index === 1, 'first 好了 advances to word 2');
+  const word2 = await awaitRound(page, lu1I, 1, 'word-2 announcement');
+  await awaitAcked(page, word2, 'word-2 announcement');
+  await childSaysDone(page);
+  let csI = -1;
+  await waitWs(page, (log) => {
+    const lu = log.find((e) => e.dir === 'in' && e.type === 'lesson_update' && e.msg.current_index === 2);
+    const cs = log.find((e) => e.dir === 'in' && e.type === 'check_started');
+    if (lu && cs && cs.i > lu.i) { csI = cs.i; return true; }
+    return false;
+  }, { timeoutMs: 30000, label: 'boundary lesson_update precedes check_started' });
+  const started = (await controls(page)).find((e) => e.type === 'check_started');
+  expect(started.msg.words).toEqual(words);
+  const bridge = await awaitRound(page, csI, 2, 'check bridge');
+  await awaitAcked(page, bridge, 'check bridge');
+
+  // THE REAL SAVE FAILURE: the parent deletes word 2 through the real parent
+  // REST surface. The classroom keeps its in-session snapshot and drives on;
+  // only the submit's FSRS write will find the card gone.
+  const del = await svc.deleteWords({ category: 'english', words: [words[1]] });
+  expect(del.ok, 'parent delete REST call').toBeTruthy();
+  expect(del.body && del.body.deleted, 'one card really deleted mid-check').toBe(1);
+
+  // J14's tail under the partial save: real verdicts, one submit, the
+  // HONEST review_result sets — 2 requested / 1 updated / 1 missing, never
+  // a fabricated full success (S-05, prohibition P3).
+  const rows = page.locator('#rt-check .rt-check-row');
+  for (let i = 0; i < words.length; i++) {
+    await rows.nth(i).locator('.rt-check-btn', { hasText: /^对$/ }).click();
+    await waitWs(page, (log) => log.some((e) => e.dir === 'out' && e.type === 'check_verdict'
+      && e.msg.word_index === i)
+      && log.some((e) => e.dir === 'in' && e.type === 'check_verdicts'
+        && (e.msg.verdicts || []).some((v) => v.word_index === i && v.manual && v.correct)),
+    { label: 'verdict ' + (i + 1) + ' tapped and echoed' });
+  }
+  await expect(page.locator('#rt-check .rt-check-submit')).toBeEnabled();
+  await page.locator('#rt-check .rt-check-submit').click();
+  const submitI = await waitIndex(page, (e) => e.dir === 'out' && e.type === 'check_submit',
+    'check_submit sent');
+  const resI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'review_result'
+    && e.msg.requested === 2 && e.msg.updated === 1 && e.msg.missing === 1
+    && e.msg.unchecked === false,
+  'honest review_result: 2 requested, only 1 really saved');
+  expect(resI).toBeGreaterThan(submitI);
+
+  // The ending still completes — the summary (now THREE sentences, the last
+  // one the partial-save note) fully acked by the production player before
+  // session_ended(lesson_complete).
+  const summary = await awaitRound(page, resI, 3, 'battle summary with the honest 1/2 sentence');
+  await awaitAcked(page, summary, 'battle summary', { settle: false });
+  const lastAckI = Math.max(...(await controls(page))
+    .filter((e) => e.dir === 'out' && e.type === 'sentence_ack'
+      && summary.sids.includes(e.msg.sentence_id))
+    .map((e) => e.i));
+  const endedI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'lesson_complete', 'session_ended(lesson_complete) despite the partial save');
+  expect(endedI, 'the goodbye still follows the summary\'s last real ack').toBeGreaterThan(lastAckI);
+  await awaitSocketClosed(page, endedI, 'the partial-save ending');
+
+  // Honest copy in EVERY channel: the panel's resultText, the banner, and
+  // the teacher really SPOKE the partial save (the third summary sentence
+  // reached the vendor — not just the screen).
+  expect((await observe(page)).check.resultText, 'the panel\'s honest partial-save copy')
+    .toBe('保存了 1 / 2 个，别担心，下次会补上。');
+  await expect(page.locator('#rt-banner')).toContainText('今天的 2 个词都默写完了');
+  await expect(page.locator('#rt-banner'))
+    .toContainText('保存了 1 / 2 个，别担心，下次会补上。');
+  await expect(page.locator('#rt-banner .rt-practice-btn'), 'the ending still offers 再练一组')
+    .toBeVisible();
+  const state = await stubState();
+  const spoken = state.requests.filter((r) => r.category === 'tts').map((r) => r.text);
+  expect(spoken.some((t) => t.includes('本次保存 1/2 个')),
+    'the teacher really SPOKE the partial save').toBe(true);
+  expect(state.remaining.tts, 'every scripted sentence served, none extra').toBe(0);
+  expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
+
+  // The classroom row still lands — the VERDICTS were real (2 对); only the
+  // FSRS refresh went 1/2, and that is review_result's story, not the row's.
   const lessonRows = await lessonsNow();
   expect(lessonRows).toHaveLength(1);
   expect(lessonRows[0]).toMatchObject({
@@ -525,9 +753,10 @@ test('J16 finish chinese, reload → the english classroom opens on its own word
   await page.goto(svc.url + 'tutor/');
   await page.locator('#rt-start').click();
   const zhReadyI = await openViaAsk(page, '#rt-subject-zh', 'e2e-m1-browser-chinese', zhWords);
-  await driveLessonToNaturalEnd(page, zhWords, zhReadyI, { onGreetingSettled: installMatchedTail });
+  const zhEndedI = await driveLessonToNaturalEnd(page, zhWords, zhReadyI, { onGreetingSettled: installMatchedTail });
   await waitWs(page, async () => (await observe(page)).playbackResourceReleased === true,
     { label: 'chinese lesson drained and released' });
+  await awaitSocketClosed(page, zhEndedI, 'the chinese lesson');
   const zhRows = await lessonsNow();
   expect(zhRows).toHaveLength(1);
   expect(zhRows[0]).toMatchObject({ category: 'chinese', word_count: 2, lesson_id: 'e2e-m1-browser-chinese', stage: 'submitted', correct: 2 });
@@ -544,7 +773,8 @@ test('J16 finish chinese, reload → the english classroom opens on its own word
   expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'subject_ask'),
     'no subject ask on the restart').toHaveLength(0);
   await expect(page.locator('#rt-progress-text')).toHaveText('第 1 / 2 个词');
-  await driveLessonToNaturalEnd(page, enWords, enReadyI);
+  const enEndedI = await driveLessonToNaturalEnd(page, enWords, enReadyI);
+  await awaitSocketClosed(page, enEndedI, 'the english lesson (fresh page)');
 
   // Subject isolation, vendor-side: nothing spoken after the reload names a
   // chinese word; the english greeting names its own first word.
@@ -564,6 +794,237 @@ test('J16 finish chinese, reload → the english classroom opens on its own word
     .toMatchObject({ category: 'chinese', word_count: 2, stage: 'submitted', correct: 2 });
   expect(rows.find((r) => r.lesson_id === 'e2e-m1-browser'))
     .toMatchObject({ category: 'english', word_count: 2, stage: 'submitted', correct: 2 });
+});
+
+// ---------------------------------------------------------------------------
+// J16's in-page reopen (review PR #72 P2): the reload leg above proves the
+// OTHER subject opens on a fresh page; the leg below proves the COMPLETED
+// page can re-initiate ITSELF — a real 「再练一组」 tap on the SAME document,
+// player and flags still warm from leg 1.
+//
+// The practice connection restarts the server's id namespace from scratch
+// (fresh session → epoch 0, turn 1 — the SAME t1-s* ledger keys as leg 1),
+// so every first-match helper would shadow leg-2 evidence with leg-1
+// entries. The *Since helpers below bound the ws log (index > fromI) and
+// the player trace (slice at the tap) instead — leg-2 evidence must live
+// entirely after the tap.
+async function waitIndexSince(page, fromI, pred, label) {
+  let at = -1;
+  await waitWs(page, (log) => {
+    const hit = log.find((e) => e.i > fromI && pred(e));
+    if (hit) at = hit.i;
+    return at >= 0;
+  }, { timeoutMs: 30000, label });
+  return at;
+}
+
+async function ackedSince(page, round, fromI, traceMark, label, { settle = true } = {}) {
+  await waitWs(page, (log) => {
+    const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack' && e.i > fromI
+      && e.msg.epoch === round.epoch && round.sids.includes(e.msg.sentence_id));
+    return acks.length === round.sids.length;
+  }, { timeoutMs: 30000, label: label + ' acked by the production player (this round)' });
+  const since = (await playbackState(page)).trace.slice(traceMark);
+  for (const sid of round.sids) {
+    expect(playedBeforeAck(since, round.epoch, sid), label + ': real onended before ack ' + sid).toBe(true);
+  }
+  if (settle) {
+    await waitWs(page, (log) => listeningAfterPlayback(log.filter((e) => e.i > fromI), round.epoch, round.sids),
+      { label: label + ': listening only after the last ack (this round)' });
+  }
+}
+
+// The practice tail: the same manual 对/错 gate, but the wrap line is ONE
+// sentence, review_result reports the practice-record counts, and the ending
+// is practice_complete with NO 再练一组 (one tap = one set, bounded loop).
+async function practiceSubmitNaturalEnd(page, words, fromI, traceMark) {
+  const rows = page.locator('#rt-check .rt-check-row');
+  for (let i = 0; i < words.length; i++) {
+    await rows.nth(i).locator('.rt-check-btn', { hasText: /^对$/ }).click();
+    await waitWs(page, (log) => log.some((e) => e.i > fromI && e.dir === 'out' && e.type === 'check_verdict'
+      && e.msg.word_index === i)
+      && log.some((e) => e.i > fromI && e.dir === 'in' && e.type === 'check_verdicts'
+        && (e.msg.verdicts || []).some((v) => v.word_index === i && v.manual && v.correct)),
+    { label: 'practice verdict ' + (i + 1) + ' tapped and echoed' });
+  }
+  await expect(page.locator('#rt-check .rt-check-submit')).toBeEnabled();
+  await page.locator('#rt-check .rt-check-submit').click();
+
+  const submitI = await waitIndexSince(page, fromI, (e) => e.dir === 'out' && e.type === 'check_submit',
+    'practice check_submit sent');
+  const resI = await waitIndexSince(page, fromI, (e) => e.dir === 'in' && e.type === 'review_result'
+    && e.msg.requested === words.length && e.msg.updated === words.length && e.msg.unchecked === false,
+  'honest practice review_result: ' + words.length + ' recorded');
+  expect(resI).toBeGreaterThan(submitI);
+
+  const summary = await awaitRound(page, resI, 1, 'practice wrap line');
+  await ackedSince(page, summary, fromI, traceMark, 'practice wrap line', { settle: false });
+  const lastAckI = Math.max(...(await controls(page))
+    .filter((e) => e.i > fromI && e.dir === 'out' && e.type === 'sentence_ack'
+      && summary.sids.includes(e.msg.sentence_id))
+    .map((e) => e.i));
+  const endedI = await waitIndexSince(page, fromI, (e) => e.dir === 'in' && e.type === 'session_ended'
+    && e.msg.reason === 'practice_complete', 'session_ended(practice_complete)');
+  expect(endedI, 'the wrap ending follows the wrap line\'s last real ack').toBeGreaterThan(lastAckI);
+
+  await expect(page.locator('#rt-banner')).toContainText('这组练习完成啦');
+  expect((await observe(page)).check.resultText, 'the practice records saved — honest copy')
+    .toBe('学习记录保存好了，' + words.length + ' 个词都记上啦。');
+  await expect(page.locator('#rt-banner .rt-practice-btn'), 'no second practice button (bounded loop)')
+    .toHaveCount(0);
+  return endedI;
+}
+
+test('J16 finish → real 再练一组: in-page second round, fresh progress/audio/acks, released again', async ({ page }) => {
+  await installRtObserver(page);
+  await installFakeMic(page);
+  const zhWords = ['e2e-fin-rz-a', 'e2e-fin-rz-b'];
+  const zhWords2 = ['e2e-fin-rz-c', 'e2e-fin-rz-d'];
+  const seed = await svc.seedWords({
+    category: 'chinese', unit: 'e2e-m1-j16r', entries: zhWords.map((word) => ({ word })),
+  });
+  expect(seed.ok, 'chinese seed').toBeTruthy();
+
+  // One FIFO for BOTH rounds (only chinese is due → leg 1 opens DIRECTLY, no
+  // ask race — every sentence is deterministic, so matched entries pin the
+  // whole journey): leg 1 = greeting 3 + word-2 1 + bridge 2 + summary 2;
+  // practice = greeting 3 + word-2 1 + bridge 2 + wrap 1.
+  const confirmJson = { content: '{"intent":"confirm","reply":"好"}' };
+  await stubScripts({
+    asr: [{ content: '好了' }, { content: '好了' }, { content: '好了' }, { content: '好了' }],
+    llm: [confirmJson, confirmJson, confirmJson, confirmJson],
+    image: [],
+    tts: [
+      { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
+      { ms: 1200, match: '第 2 个词' },
+      { ms: 1200, match: '全都写完啦' }, { ms: 1200, match: '我们一起检查' },
+      { ms: 1200, match: '都默写完了' }, { ms: 1200, match: '全部都写对了' },
+      { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
+      { ms: 1200, match: '第 2 个词' },
+      { ms: 1200, match: '全都写完啦' }, { ms: 1200, match: '我们一起检查' },
+      { ms: 1200, match: '这组练习' },
+    ],
+  });
+
+  // Leg 1: finish the chinese daily lesson naturally.
+  await page.goto(svc.url + 'tutor/');
+  await page.locator('#rt-start').click();
+  const zhReadyI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'chinese' && e.msg.lesson.id === 'e2e-m1-browser-chinese'
+    && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2
+    && e.msg.lesson.words.every((w) => w === ''), 'chinese opens directly (one subject due)');
+  const zhEndedI = await driveLessonToNaturalEnd(page, zhWords, zhReadyI);
+  await waitWs(page, async () => (await observe(page)).playbackResourceReleased === true,
+    { label: 'chinese lesson drained and released' });
+  await awaitSocketClosed(page, zhEndedI, 'the daily lesson (leg 1)');
+  const zhRows = await lessonsNow();
+  expect(zhRows).toHaveLength(1);
+  expect(zhRows[0]).toMatchObject({ category: 'chinese', word_count: 2, stage: 'submitted', correct: 2 });
+
+  // The in-page reopen. A same-document marker proves no navigation sneaks in;
+  // the tap bounds (ws log + player trace) scope every leg-2 assertion.
+  await page.evaluate(() => { window.__j16SameDoc = true; });
+  const beforeTap = await controls(page);
+  const tapI = beforeTap.length ? beforeTap[beforeTap.length - 1].i : 0;
+  const traceMark = (await playbackState(page)).trace.length;
+  // The parent adds two fresh chinese words (real REST) — today's dictated
+  // words are excluded from a practice pick, so these are the practice set.
+  const seed2 = await svc.seedWords({
+    category: 'chinese', unit: 'e2e-m1-j16r-2', entries: zhWords2.map((word) => ({ word })),
+  });
+  expect(seed2.ok, 'practice-set seed').toBeTruthy();
+
+  await page.locator('#rt-banner .rt-practice-btn').click();
+  expect((await observe(page)).playbackResourceReleased, 'the restart re-armed the release latch').toBe(false);
+  // Review P1, the leak's sharpest shape: the in-page reopen must not
+  // orphan leg 1's connection. The finished lesson's socket closed BEFORE
+  // the practice session_init went out — the page never leaves a live ws
+  // behind for connect() to overwrite.
+  const initI = await waitIndexSince(page, tapI, (e) => e.dir === 'out' && e.type === 'session_init',
+    'the practice connection sent its own session_init');
+  expect((await controls(page)).find((e) => e.kind === 'close' && e.i > zhEndedI && e.i < initI),
+    'the finished lesson\'s socket closed before the practice connection opened').toBeTruthy();
+
+  // The practice classroom: chinese (the resolved subject rides the re-init),
+  // its OWN r0x- row, its own words, index back from 1 — nothing of the
+  // finished lesson carried over.
+  const pReadyI = await waitIndexSince(page, tapI, (e) => e.dir === 'in' && e.type === 'session_ready'
+    && e.msg.category === 'chinese' && /^r0x-/.test(e.msg.lesson.id || '')
+    && Array.isArray(e.msg.lesson.words) && e.msg.lesson.words.length === 2
+    && e.msg.lesson.words.every((w) => w === ''), 'the practice classroom opens in-page (r0x-, masked)');
+  expect((await controls(page)).filter((e) => e.dir === 'in' && e.type === 'subject_ask'),
+    'no subject ask anywhere in the journey').toHaveLength(0);
+  await expect(page.locator('#rt-progress-text')).toHaveText('第 1 / 2 个词');
+
+  const greeting = await awaitRound(page, pReadyI, 3, 'practice greeting');
+  await ackedSince(page, greeting, tapI, traceMark, 'practice greeting');
+
+  // Two confirms on the practice set; the pick order is random, so the check
+  // stage's own words list is the authority for the verdict taps.
+  let pWords = null;
+  for (let i = 1; i <= 2; i++) {
+    await childSaysDone(page);
+    const luI = await waitIndexSince(page, tapI, (e) => e.dir === 'in' && e.type === 'lesson_update'
+      && e.msg.current_index === i, 'practice confirm ' + i + ' advances to index ' + i);
+    if (i < 2) {
+      const next = await awaitRound(page, luI, 1, 'practice word-2 announcement');
+      await ackedSince(page, next, tapI, traceMark, 'practice word-2 announcement');
+    } else {
+      const csI = await waitIndexSince(page, tapI, (e) => e.dir === 'in' && e.type === 'check_started'
+        && e.msg.reason === 'dictation_done' && e.i > luI, 'the last practice confirm opens the check stage');
+      const started = (await controls(page)).find((e) => e.type === 'check_started' && e.i > tapI);
+      pWords = started.msg.words;
+      expect([...pWords].sort()).toEqual([...zhWords2].sort());
+      const bridge = await awaitRound(page, csI, 2, 'practice check bridge');
+      await ackedSince(page, bridge, tapI, traceMark, 'practice check bridge');
+    }
+  }
+  const endedI = await practiceSubmitNaturalEnd(page, pWords, tapI, traceMark);
+
+  // Released AGAIN on the same page, and still the same document.
+  await waitWs(page, async () => (await observe(page)).playbackResourceReleased === true,
+    { label: 'the practice round drained and released again' });
+  expect(await page.evaluate(() => window.__j16SameDoc === true), 'no reload — the same document').toBe(true);
+  expect((await observe(page)).terminalDraining).toBe(true);
+  expect((await playbackState(page)).activeSourceKeys).toEqual([]);
+  for (const t of (await micInfo(page)).tracks) expect(t.state, 'mic released again').toBe('ended');
+  const frozen = await wsStats(page);
+  await page.waitForTimeout(1200);
+  expect((await wsStats(page)).outBinaryFrames, 'uplink frozen after the practice ending')
+    .toBe(frozen.outBinaryFrames);
+  const final = await controls(page);
+  expect(final.filter((e) => e.dir === 'in' && e.type === 'error'),
+    'the in-page restart never tripped an error (fresh epoch adopted)').toEqual([]);
+  expect(final.filter((e) => e.i > endedI && e.dir === 'in'),
+    'no server frame after session_ended').toEqual([]);
+  // J14 release, whole-document shape: the practice round's socket closed
+  // too, and open/close parity holds on the SAME document — every
+  // connection this page opened was closed by the page itself, none left
+  // for unload to reap (review P1: 每轮遗留真实连接).
+  await awaitSocketClosed(page, endedI, 'the practice round');
+  const evts = await controls(page);
+  const opens = evts.filter((e) => e.kind === 'open').length;
+  const closes = evts.filter((e) => e.kind === 'close').length;
+  expect(opens, 'this document opened exactly two connections').toBe(2);
+  expect(closes, 'every connection the page opened was closed by the page').toBe(opens);
+  // Old acks never reused: every post-tap ack belongs to the practice round
+  // (greeting 3 + word-2 1 + bridge 2 + wrap 1) — none rides leg 1's keys.
+  expect(final.filter((e) => e.i > tapI && e.dir === 'out' && e.type === 'sentence_ack'),
+    'every post-tap ack belongs to the practice round').toHaveLength(7);
+
+  // Independent progress: the daily row stands untouched, the practice row is
+  // its own r0x- row with its own words.
+  const rows = await lessonsNow();
+  expect(rows).toHaveLength(2);
+  expect(rows.find((r) => r.lesson_id === 'e2e-m1-browser-chinese'))
+    .toMatchObject({ category: 'chinese', word_count: 2, stage: 'submitted', correct: 2 });
+  const practiceRow = rows.find((r) => /^r0x-/.test(r.lesson_id));
+  expect(practiceRow, 'the practice round landed its own row').toBeTruthy();
+  expect(practiceRow).toMatchObject({ category: 'chinese', word_count: 2, stage: 'submitted', correct: 2 });
+
+  const state = await stubState();
+  expect(state.remaining.tts, 'every scripted sentence served, none extra').toBe(0);
+  expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
 });
 
 test('J16 empty vocabulary ends through the real no-due result', async ({ page }) => {
@@ -590,6 +1051,7 @@ test('J16 empty vocabulary ends through the real no-due result', async ({ page }
 
   await expect(page.locator('#rt-banner')).toContainText('词库暂无到期词');
   await expect(page.locator('#rt-banner .rt-practice-btn'), 'the page can start again').toBeVisible();
+  await awaitSocketClosed(page, endedI, 'the no-due ending');
   expect(await lessonsNow(), 'no empty classroom row was created').toHaveLength(0);
   const state = await stubState();
   expect(state.remaining.tts).toBe(0);

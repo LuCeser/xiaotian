@@ -20,6 +20,11 @@
  *   - Issue #6: buildTextbookReceipt buckets every row into exactly
  *     新增/合并/待处理差异/失败 (+未核对/未提交 honesty buckets) and the
  *     summary counts are the tally of the item list (AC-6).
+ *   - Issue #81 P2: summarizeAssignScope derives the 默写安排 receipt
+ *     from the POST-SAVE word entries and every eligibility source
+ *     (participates, include_in_scope on any textbook, learned prefixes
+ *     from the fresh book read); scheduleHint never answers a direct
+ *     join with the 全部未勾选 contradiction.
  */
 'use strict';
 
@@ -38,6 +43,8 @@ const {
   isCommittable,
   planAssignments,
   buildTextbookReceipt,
+  summarizeAssignScope,
+  scheduleHint,
 } = global.window;
 
 let failures = 0;
@@ -411,6 +418,159 @@ function catOf(receipt, word) {
     unassigned: [],
   });
   eq(catOf(unverified, 'river'), 'unverified', 'an unverifiable raced word reports 未核对');
+})();
+
+// ----------------------------------------------------------------------
+// summarizeAssignScope — the 默写安排 receipt verdict from the POST-SAVE
+// entries and every eligibility source (Issue #81 P2: the old count rode
+// this import's group payloads alone, so a participates=0 word could show
+// 可安排默写 and an explicitly included but unlearned word could show
+// 暂不自动安排).
+// ----------------------------------------------------------------------
+
+// The receipt's book view: lessons [第1课,第5课,第7课], learned 2 (第1课
+// and 第5课 are inside the learned prefix, 第7课 is not).
+const SCOPE_BOOK = { id: 9, name: '书A', lessons: ['第1课', '第5课', '第7课'], learnedLessons: 2 };
+const SCOPE_BOOKS_AFTER = [
+  SCOPE_BOOK,
+  // A second textbook whose FIRST lesson is learned (US-33's other
+  // source: one learned assignment among several admits the word).
+  { id: 2, name: '书B', lessons: ['B课', 'A课'], learnedLessons: 1 },
+];
+const scopeGroupResults = function (lesson, includeInScope, words) {
+  return [{ group: { lesson: lesson, includeInScope: includeInScope, words: words }, ok: true }];
+};
+
+(function () {
+  // Post-save baseline: a word whose saved entry sits in the target
+  // book's learned prefix is schedulable, not joined/held.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第5课', false, ['apple']), [
+    { word: 'apple', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] },
+  ], SCOPE_BOOKS_AFTER),
+    { schedulable: 1, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 0, unlearnedNames: [] },
+    'a saved entry inside the learned prefix counts 可安排默写');
+
+  // P2 headline: an explicit includeInScope on an UNLEARNED lesson joins
+  // the range (the pre-fix code filed it under 暂不自动安排).
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', true, ['lake']), [
+    { word: 'lake', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: true }] },
+  ], SCOPE_BOOKS_AFTER),
+    { schedulable: 0, joined: 1, heldUnlearned: 0, heldPending: 0, paused: 0, unlearnedNames: [] },
+    'an explicit include on an unlearned lesson counts 已加入范围');
+
+  // All sources: the target book's lesson is unlearned, but the word's
+  // entry on 书B sits inside 书B's learned prefix → schedulable.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['river']), [
+    {
+      word: 'river', participates: true,
+      textbooks: [
+        { id: 9, name: '书A', lesson: '第7课', includeInScope: false },
+        { id: 2, name: '书B', lesson: 'B课', includeInScope: false },
+      ],
+    },
+  ], SCOPE_BOOKS_AFTER),
+    { schedulable: 1, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 0, unlearnedNames: [] },
+    'a learned entry on ANOTHER textbook admits the word');
+
+  // participates composes with scope (AND): a moved-out word is paused,
+  // never 可安排默写, even with a learned lesson.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第5课', false, ['sun']), [
+    { word: 'sun', participates: false, textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] },
+  ], SCOPE_BOOKS_AFTER),
+    { schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 1, unlearnedNames: [] },
+    'a participates=0 word counts 已移出课堂参与, not 可安排默写');
+
+  // Fresh progress beats the client's stale book copy: the book object
+  // still claims learned=2, the post-save read says 1 — 第5课 moved out
+  // of the learned prefix, so the word is held, not schedulable.
+  const staleBook = { id: 9, name: '书A', lessons: ['第1课', '第5课', '第7课'], learnedLessons: 2 };
+  eq(summarizeAssignScope(staleBook, scopeGroupResults('第5课', false, ['moon']), [
+    { word: 'moon', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] },
+  ], [
+    { id: 9, name: '书A', lessons: ['第1课', '第5课', '第7课'], learnedLessons: 1 },
+  ]),
+    { schedulable: 0, joined: 0, heldUnlearned: 1, heldPending: 0, paused: 0, unlearnedNames: ['第5课'] },
+    'the fresh learned prefix decides, not the stale client book');
+
+  // A saved empty lesson without an include stays 待确认.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('', false, ['star']), [
+    { word: 'star', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '', includeInScope: false }] },
+  ], SCOPE_BOOKS_AFTER),
+    { schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 1, paused: 0, unlearnedNames: [] },
+    'an empty saved lesson without an include stays 课次待确认');
+
+  // Degraded (the post-save fetch failed): the assign payloads decide,
+  // but an explicit include joins for ANY lesson shape — the non-empty-
+  // lesson ignore was the P2 defect.
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', true, ['lake']), null, null),
+    { schedulable: 0, joined: 1, heldUnlearned: 0, heldPending: 0, paused: 0, unlearnedNames: [] },
+    'degraded: an include payload joins even with a non-empty lesson');
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['lake']), null, null),
+    { schedulable: 0, joined: 0, heldUnlearned: 1, heldPending: 0, paused: 0, unlearnedNames: ['第7课'] },
+    'degraded: an unlearned lesson without an include is held');
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('', false, ['star']), null, null),
+    { schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 1, paused: 0, unlearnedNames: [] },
+    'degraded: an empty lesson without an include stays 待确认');
+
+  // Failed groups are never counted (they are 失败 under 保存结果).
+  eq(summarizeAssignScope(SCOPE_BOOK, [
+    { group: { lesson: '第5课', includeInScope: false, words: ['apple'] }, ok: false, error: '网络错误' },
+  ], [
+    { word: 'apple', participates: true, textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] },
+  ], SCOPE_BOOKS_AFTER),
+    { schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 0, unlearnedNames: [] },
+    'a failed assign group is never counted as scheduled');
+})();
+
+// ----------------------------------------------------------------------
+// scheduleHint — the state line's ONE scheduling note (Issue #81 P2: with
+// 待确认 words lifted by the 直接加入默写范围 checkbox, the line used to
+// fall through to the 「全部未勾选……不会保存」 contradiction).
+// ----------------------------------------------------------------------
+
+(function () {
+  // The P2 scenario: a textbook WITH progress, every checked word an
+  // empty-lesson direct-join (includePending on) — a save WILL land them
+  // in the scope, so the all-unchecked error must not fire.
+  const joined = scheduleHint({
+    mode: 9, book: SCOPE_BOOK, learned: 2,
+    schedulable: 0, joined: 1, heldUnlearned: 0, heldPending: 0,
+    unlearnedNames: [], withinNames: [],
+  }, true);
+  assert(joined.tone === 'good', 'the direct-join hint is good, not an error');
+  assert(joined.text.indexOf('全部未勾选') < 0,
+    'the direct-join hint never claims 全部未勾选');
+  assert(joined.text.indexOf('直接加入默写范围') >= 0 && joined.text.indexOf('1 词') >= 0,
+    'the direct-join hint names the joined count');
+
+  // Regression guard: zero counts with word rows really are all
+  // unchecked — the honest error keeps firing.
+  const unchecked = scheduleHint({
+    mode: 9, book: SCOPE_BOOK, learned: 2,
+    schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0,
+    unlearnedNames: [], withinNames: [],
+  }, true);
+  assert(unchecked.text.indexOf('全部未勾选') >= 0,
+    'zero counts with word rows still report 全部未勾选');
+
+  // The pre-existing verdicts keep their exact sentences.
+  eq(scheduleHint({ mode: 'none' }, false),
+    { tone: 'good', text: '补充词汇保存后默认加入默写范围。' },
+    'supplementary vocabulary keeps its note');
+  eq(scheduleHint({
+    mode: 9, book: SCOPE_BOOK, learned: 2,
+    schedulable: 3, heldUnlearned: 0, heldPending: 0,
+    withinNames: ['第5课'], unlearnedNames: [],
+  }, true),
+    { tone: 'good', text: '课次「第5课」已学到，保存后即可安排默写，无需再确认进度。' },
+    'a fully schedulable batch keeps the no-re-ask sentence');
+  eq(scheduleHint({
+    mode: 9, book: SCOPE_BOOK, learned: 1,
+    schedulable: 0, joined: 0, heldUnlearned: 2, heldPending: 0,
+    withinNames: [], unlearnedNames: ['第5课'],
+  }, true),
+    { tone: 'warn', text: '课次「第5课」尚未学到：保存后这部分词暂不自动安排默写，进度不受影响。' },
+    'an unlearned batch keeps the warn sentence');
 })();
 
 // ----------------------------------------------------------------------

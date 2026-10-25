@@ -39,10 +39,27 @@
  *   - Not-yet-learned lessons store fine but stay out of automatic
  *     selection (the #4 scope predicate enforces this server-side; the
  *     receipt says so honestly, AC4).
-  *   - Rows without a lesson: the page-level 「待确认课次的词直接加入默写范围」
-  *     checkbox is the explicit include-in-scope handling; supplementary
+ *   - Rows without a lesson: the page-level 「待确认课次的词直接加入默写范围」
+ *     checkbox is the explicit include-in-scope handling; supplementary
  *     classification never requires inventing a lesson (AC5).
  *   - 不指定教材 keeps the exact Issue #3 supplementary flow.
+ *
+ * Contract (Issue #81, the A 并排核对 workspace — on top of #3/#5/#7/#8):
+ *   - Once a file is picked the tab becomes a two-column workspace on wide
+ *     screens: LEFT 材料与学习安排 (the original photo large beside the
+ *     review, the 教材归属 panel, the 释义补充 bar), RIGHT 词条核对 (the
+ *     editable rows with 单词/释义 visually primary, 课次 secondary, the
+ *     status cell separate) + the footer actions. Narrow screens stack in
+ *     the same task order: 材料 → 学习安排 → 词条 → 操作.
+ *   - A compact state line above the workspace states 教材 · 已学进度 ·
+ *     本批词数 · 本批课次 and the honest scheduling note (已学到 → 保存后
+ *     可安排默写; 未学到 → 暂不自动安排). It is INFORMATION ONLY — known
+ *     progress is silently reused, the UI never asks about it.
+ *   - The receipt separates 保存结果 (the per-item buckets, unchanged
+ *     wording) from 默写安排 (counts + reasons + a next-step hint) —
+ *     never one flat "success".
+ *   - PDF runs show the CURRENT page render in the left column (PdfPage-
+ *     Runner blobs) with the page status bar right under it.
  *
  * Contract (Issue #7 acceptance criteria, on top):
  *   - A scanned PDF picked here splits INTO PAGES IN THE BROWSER
@@ -1027,20 +1044,89 @@
     this.formError.hidden = true;
     this.form.appendChild(this.formError);
 
+    // ------------------------------------------------------------------
+    // Issue #81 — the A 并排核对 workspace. Hidden until a file is picked
+    // (before that the compact pick form above is the whole tab); the form
+    // carries photo-workspace-open / photo-workspace-active classes so CSS
+    // can drop the small thumbnail once the large 本次材料 view shows.
+    //   state line (教材 · 进度 · 本批词数 · 本批课次 + honest hint)
+    //   grid:  LEFT  材料与学习安排 (photo/PDF page + status + 教材归属
+    //          panel + 释义补充 bar)   RIGHT  词条核对 (table, poem/
+    //          passage/other cards, footer actions)
+    // Narrow screens: one column in the same task order.
+    // ------------------------------------------------------------------
+    this.workspace = document.createElement('div');
+    this.workspace.className = 'photo-workspace';
+    this.workspace.hidden = true;
+
+    this.stateLine = document.createElement('div');
+    this.stateLine.className = 'photo-state-line';
+    // Deliberately NOT an aria-live region: it rebuilds on every keystroke
+    // (a polite announcer would chatter); the commit banner already owns
+    // the role=status announcements.
+    this.stateLine.hidden = true;
+    this.workspace.appendChild(this.stateLine);
+
+    var grid = document.createElement('div');
+    grid.className = 'photo-workspace-grid';
+
+    var sourceCol = document.createElement('aside');
+    sourceCol.className = 'photo-col-source';
+    sourceCol.setAttribute('aria-label', '材料与学习安排');
+    var sourceInner = document.createElement('div');
+    sourceInner.className = 'photo-col-source-inner';
+    sourceCol.appendChild(sourceInner);
+
+    var sourceCard = document.createElement('section');
+    sourceCard.className = 'photo-source-card';
+    var sourceLabel = document.createElement('h4');
+    sourceLabel.className = 'photo-source-label';
+    sourceLabel.textContent = '本次材料';
+    sourceCard.appendChild(sourceLabel);
+    this.sourceView = document.createElement('div');
+    this.sourceView.className = 'photo-source-view';
+    this.sourceView.hidden = true;
+    this.sourceImg = document.createElement('img');
+    this.sourceImg.className = 'photo-source-img';
+    this.sourceImg.alt = '词表照片大图预览';
+    this.sourceView.appendChild(this.sourceImg);
+    sourceCard.appendChild(this.sourceView);
+    // The caption + zoom row sits OUTSIDE the image frame: a picked PDF
+    // has its name here from the moment of selection, before any page
+    // render exists.
+    var sourceFoot = document.createElement('div');
+    sourceFoot.className = 'photo-source-foot';
+    this.sourceCaption = document.createElement('span');
+    this.sourceCaption.className = 'photo-source-caption';
+    this.zoomBtn = document.createElement('button');
+    this.zoomBtn.type = 'button';
+    this.zoomBtn.className = 'photo-source-zoom-btn';
+    this.zoomBtn.textContent = '放大查看';
+    this.zoomBtn.hidden = true;
+    sourceFoot.appendChild(this.sourceCaption);
+    sourceFoot.appendChild(this.zoomBtn);
+    sourceCard.appendChild(sourceFoot);
+    var sourceNote = document.createElement('p');
+    sourceNote.className = 'photo-source-note';
+    sourceNote.textContent = '原图只在本机预览，用于对照核对；核对时可随时放大。';
+    sourceCard.appendChild(sourceNote);
+    sourceInner.appendChild(sourceCard);
+
     // Per-page status bar (Issue #7): one chip per PDF page (页码 + 状态，
     // failed pages carry a 重试该页 button) plus the whole-file summary
     // and a 停止 button while a run is in flight. Hidden for photos.
+    // Issue #81: it rides the 本次材料 column, right under the page render.
     this.pdfBar = document.createElement('div');
     this.pdfBar.className = 'pdf-status-bar';
     this.pdfBar.hidden = true;
-    this.form.appendChild(this.pdfBar);
+    sourceInner.appendChild(this.pdfBar);
 
-    // Textbook attribution panel (Issue #5): rendered between the picker
-    // and the review table after each recognition; hidden until then.
+    // Textbook attribution panel (Issue #5): the 学习安排 half of the left
+    // column once a recognition exists; hidden until then.
     this.textbookPanel = document.createElement('div');
     this.textbookPanel.className = 'photo-textbook-panel';
     this.textbookPanel.hidden = true;
-    this.form.appendChild(this.textbookPanel);
+    sourceInner.appendChild(this.textbookPanel);
 
     // Supplement affordance (Issue #8): one strip under the textbook panel
     // — 补充缺失释义（N 词）/ 重试生成（N 词） plus the honesty note when
@@ -1049,7 +1135,24 @@
     this.meaningBar = document.createElement('div');
     this.meaningBar.className = 'photo-meaning-bar';
     this.meaningBar.hidden = true;
-    this.form.appendChild(this.meaningBar);
+    sourceInner.appendChild(this.meaningBar);
+
+    grid.appendChild(sourceCol);
+
+    var reviewCol = document.createElement('section');
+    reviewCol.className = 'photo-col-review';
+    reviewCol.setAttribute('aria-label', '词条核对');
+    var reviewHead = document.createElement('div');
+    reviewHead.className = 'photo-review-head';
+    var reviewTitle = document.createElement('h4');
+    reviewTitle.className = 'photo-review-title';
+    reviewTitle.textContent = '词条核对';
+    var reviewNote = document.createElement('p');
+    reviewNote.className = 'photo-review-note';
+    reviewNote.textContent = '对照原图，直接修改单词或释义，确认后一次保存。';
+    reviewHead.appendChild(reviewTitle);
+    reviewHead.appendChild(reviewNote);
+    reviewCol.appendChild(reviewHead);
 
     // Review table: rendered after recognition; every row editable.
     this.preview = document.createElement('div');
@@ -1058,29 +1161,33 @@
     this.previewHint.className = 'preview-empty';
     this.previewHint.textContent = '选择照片或 PDF 后点「开始识别」';
     this.preview.appendChild(this.previewHint);
-    this.form.appendChild(this.preview);
+    reviewCol.appendChild(this.preview);
 
     // Issue #11: the mixed-page poem cards and the display-only others
     // render as their own sections right under the 词语 table (a poem is
     // one whole work, not a table row; others never join the commit).
     // Issue #13: the passage cards sit between them — one whole original
     // with its 自然段 and the practice-range picker, never table rows.
+    // Issue #81: they stay in the 词条核对 column, below the table.
     this.poemHost = document.createElement('div');
     this.poemHost.className = 'photo-poem-host';
     this.poemHost.hidden = true;
-    this.form.appendChild(this.poemHost);
+    reviewCol.appendChild(this.poemHost);
     this.passageHost = document.createElement('div');
     this.passageHost.className = 'photo-passage-host';
     this.passageHost.hidden = true;
-    this.form.appendChild(this.passageHost);
+    reviewCol.appendChild(this.passageHost);
     this.othersHost = document.createElement('div');
     this.othersHost.className = 'photo-others-host';
     this.othersHost.hidden = true;
-    this.form.appendChild(this.othersHost);
+    reviewCol.appendChild(this.othersHost);
 
-    // 确认添加（{n} 个） + 放弃识别结果.
+    // 确认添加（{n} 个） + 放弃识别结果, with the draft's save-note above.
     var actions = document.createElement('div');
     actions.className = 'photo-actions';
+    this.commitHint = document.createElement('p');
+    this.commitHint.className = 'photo-commit-hint';
+    this.commitHint.hidden = true;
     this.commitBtn = kit.buildLoadingButton
       ? kit.buildLoadingButton('确认添加（0 个）')
       : this.buildFallbackButton('确认添加（0 个）');
@@ -1090,9 +1197,14 @@
     this.discardBtn.className = 'btn btn-secondary';
     this.discardBtn.textContent = '放弃识别结果';
     this.discardBtn.hidden = true;
+    actions.appendChild(this.commitHint);
     actions.appendChild(this.commitBtn);
     actions.appendChild(this.discardBtn);
-    this.form.appendChild(actions);
+    reviewCol.appendChild(actions);
+
+    grid.appendChild(reviewCol);
+    this.workspace.appendChild(grid);
+    this.form.appendChild(this.workspace);
 
     // Result banner host (rendered after each commit).
     this.banner = document.createElement('div');
@@ -1128,6 +1240,13 @@
     // Issue #8: a supplement run is in flight (the affordance disables
     // and says 生成中 rather than queueing a second overlapping call).
     this.meaningBusy = false;
+    // Issue #81: the 本次材料 large view. sourceKind 'photo' shares the
+    // picker's object URL (owned by handleFilePicked/clearPickUI);
+    // 'pdf' owns this.pdfPageURL (one page render at a time, revoked on
+    // every swap) and this.sourcePageNo (which page the caption tracks).
+    this.sourceKind = '';
+    this.pdfPageURL = null;
+    this.sourcePageNo = 0;
 
     var self = this;
     this.pickBtn.addEventListener('click', function () {
@@ -1145,6 +1264,14 @@
     });
     this.discardBtn.addEventListener('click', function () {
       self.handleDiscard();
+    });
+    // Issue #81: the 放大查看 toggle (the image itself taps too — the
+    // button is the focusable affordance, never a hover-only trick).
+    this.zoomBtn.addEventListener('click', function () {
+      self.toggleSourceZoom();
+    });
+    this.sourceImg.addEventListener('click', function () {
+      self.toggleSourceZoom();
     });
 
     container.appendChild(this.form);
@@ -1211,6 +1338,327 @@
     this.thumb.hidden = true;
     this.thumb.removeAttribute('src');
     this.recognizeBtn.disabled = true;
+    // Issue #81: the large 本次材料 view mirrors the pick — drop it here
+    // (the photo object URL's own revoke stays handleFilePicked's job).
+    if (this.sourceKind === 'photo') {
+      this.sourceKind = '';
+      this.sourceImg.removeAttribute('src');
+      this.sourceView.hidden = true;
+      this.setSourceCaption('');
+    }
+    this.syncWorkspace();
+  };
+
+  PhotoAddForm.prototype.clearPdfSource = function () {
+    if (this.pdfPageURL) {
+      URL.revokeObjectURL(this.pdfPageURL);
+      this.pdfPageURL = null;
+    }
+    if (this.sourceKind === 'pdf') {
+      this.sourceKind = '';
+      this.sourcePageNo = 0;
+      this.sourceImg.removeAttribute('src');
+      this.sourceView.hidden = true;
+      // The picked PDF's name stays the caption while the file is in play.
+      this.setSourceCaption(this.currentFile ? this.currentFile.name : '');
+    }
+  };
+
+  /**
+   * showPdfPageBlob (Issue #81) — feed the left column's 本次材料 view with
+   * the page PdfPageRunner just rendered: one object URL at a time (the
+   * previous page's is revoked on the swap), caption 第 N 页. The blob is
+   * the SAME one the recognize call gets; the draft stays client-side.
+   */
+  PhotoAddForm.prototype.showPdfPageBlob = function (blob, pageNo) {
+    if (this.pdfPageURL) {
+      URL.revokeObjectURL(this.pdfPageURL);
+    }
+    this.pdfPageURL = URL.createObjectURL(blob);
+    this.sourceKind = 'pdf';
+    this.sourcePageNo = pageNo;
+    this.sourceImg.alt = '第 ' + pageNo + ' 页大图预览';
+    this.sourceImg.src = this.pdfPageURL;
+    this.sourceView.hidden = false;
+    this.setSourceCaption('第 ' + pageNo + ' 页 · 识别中…');
+    this.syncWorkspace();
+  };
+
+  PhotoAddForm.prototype.setSourceCaption = function (text) {
+    this.sourceCaption.textContent = text;
+  };
+
+  /**
+   * toggleSourceZoom (Issue #81) — the CSS zoom affordance: 放大查看 drops
+   * the max-height cap so a dense word list becomes readable beside the
+   * review; 还原 puts the compact frame back.
+   */
+  PhotoAddForm.prototype.toggleSourceZoom = function () {
+    if (this.sourceView.hidden) {
+      return;
+    }
+    var zoomed = this.sourceView.classList.toggle('photo-source-zoomed');
+    this.zoomBtn.textContent = zoomed ? '还原' : '放大查看';
+  };
+
+  /**
+   * syncWorkspace (Issue #81) — ONE owner of the workspace visibility:
+   * open once a file is picked, a PDF run is in play, or a draft exists;
+   * the ACTIVE class (draft) additionally hides the small picker
+   * thumbnail — the large 本次材料 view has taken over.
+   */
+  PhotoAddForm.prototype.syncWorkspace = function () {
+    var hasDraft = !!(this.rows.length || this.poemRows.length || this.passageRows.length);
+    var open = !!(this.currentFile || this.pdfState || hasDraft);
+    this.workspace.hidden = !open;
+    this.form.classList.toggle('photo-workspace-open', open);
+    this.form.classList.toggle('photo-workspace-active', hasDraft);
+    // The zoom toggle only makes sense over a live image.
+    this.zoomBtn.hidden = this.sourceView.hidden;
+    if (this.sourceView.hidden) {
+      this.sourceView.classList.remove('photo-source-zoomed');
+      this.zoomBtn.textContent = '放大查看';
+    }
+  };
+
+  /**
+   * draftLessonNames — the distinct non-empty lessons across EVERY content
+   * kind of the draft (words, poems, passages), in appearance order. The
+   * state line's 本批课次 fact and the progress verdict read this.
+   */
+  PhotoAddForm.prototype.draftLessonNames = function () {
+    var pool = this.rows.concat(this.poemRows).concat(this.passageRows);
+    return distinctRowLessons(pool);
+  };
+
+  /**
+   * schedulePreview — the state line / save-note's honest pre-commit
+   * estimate of what the commit will be able to schedule (the RECEIPT
+   * re-derives the truth from the actual assign results — this is the
+   * informational twin). Verdict per lesson name follows the server's
+   * scope rule: 已学 = 在课次表内且位置 ≤ 已学完第 N 课（含）; 课表外 and
+   * 待确认 never count as learned; 加入范围 (the include checkbox) lifts
+   * the 待确认 group; 补充词汇 (no textbook) default in.
+   */
+  PhotoAddForm.prototype.schedulePreview = function () {
+    var mode = this.bookChoice;
+    var rows = mode === 'none' ? this.submittableRows() : this.committedRows();
+    var book = (mode !== 'none' && mode !== 'new') ? this.chosenBook() : null;
+    var lessons = (book && book.lessons) || [];
+    var learned = (book && book.learnedLessons) || 0;
+    var out = {
+      mode: mode, book: book, learned: learned, total: lessons.length,
+      schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0,
+      unlearnedNames: [], withinNames: [],
+    };
+    rows.forEach(function (r) {
+      var lesson = metaField(r.lesson);
+      if (mode === 'none') {
+        out.joined += 1; // 补充词汇默认加入范围
+        return;
+      }
+      if (!lesson) {
+        if (this.includePending) {
+          out.joined += 1;
+        } else {
+          out.heldPending += 1;
+        }
+        return;
+      }
+      var idx = lessons.indexOf(lesson);
+      if (idx >= 0 && idx + 1 <= learned) {
+        out.schedulable += 1;
+        if (out.withinNames.indexOf(lesson) < 0) {
+          out.withinNames.push(lesson);
+        }
+      } else {
+        out.heldUnlearned += 1;
+        if (out.unlearnedNames.indexOf(lesson) < 0) {
+          out.unlearnedNames.push(lesson);
+        }
+      }
+    }, this);
+    return out;
+  };
+
+  /**
+   * updateStateLine — the compact facts above the workspace: 教材 · 已学
+   * 进度 · 本批词数 · 本批课次, plus ONE honest scheduling note. Known
+   * progress inside the batch is stated as a fact (「已学到，保存后即可安排
+   * 默写」) — never a question; exceeding/unknown progress says 暂不自动
+   * 安排. Pure text (no inputs) so it is safe to rebuild on every edit.
+   */
+  PhotoAddForm.prototype.updateStateLine = function () {
+    var hasDraft = !!(this.rows.length || this.poemRows.length || this.passageRows.length);
+    if (!hasDraft) {
+      this.stateLine.hidden = true;
+      clearEl(this.stateLine);
+      return;
+    }
+    this.stateLine.hidden = false;
+    clearEl(this.stateLine);
+
+    var sched = this.schedulePreview();
+    var bookName = '';
+    if (sched.mode === 'none') {
+      bookName = '未指定（补充词汇）';
+    } else if (sched.mode === 'new') {
+      bookName = '新建教材' + (this.readCreateForm().name ? '「' + this.readCreateForm().name + '」' : '');
+    } else {
+      bookName = sched.book ? sched.book.name : '已选教材';
+    }
+    var self = this;
+    var addFact = function (label, value) {
+      var fact = document.createElement('span');
+      fact.className = 'photo-state-fact';
+      var lab = document.createElement('span');
+      lab.textContent = label;
+      var val = document.createElement('strong');
+      val.textContent = value;
+      fact.appendChild(lab);
+      fact.appendChild(val);
+      self.stateLine.appendChild(fact);
+    };
+
+    addFact('教材', bookName);
+    if (sched.mode !== 'none' && sched.book) {
+      addFact('进度', global.progressLabel
+        ? global.progressLabel(sched.book)
+        : (sched.learned ? '已学完第 ' + sched.learned + ' 课' : '尚未登记'));
+    }
+    var count = this.rows.length + ' 词';
+    if (this.poemRows.length) {
+      count += ' · ' + this.poemRows.length + ' 首古诗';
+    }
+    if (this.passageRows.length) {
+      count += ' · ' + this.passageRows.length + ' 篇课文';
+    }
+    addFact('本批', count);
+    var lessons = this.draftLessonNames();
+    addFact('课次', lessons.length ? lessons.join('、') : '全部待确认');
+
+    var hint = document.createElement('p');
+    hint.className = 'photo-state-hint';
+    var verdict = scheduleHint(sched, this.rows.length > 0);
+    hint.className += ' photo-state-hint-' + verdict.tone;
+    hint.textContent = verdict.text;
+    this.stateLine.appendChild(hint);
+    if (sched.heldPending && sched.mode !== 'none') {
+      var pend = document.createElement('p');
+      pend.className = 'photo-state-hint photo-state-hint-neutral';
+      pend.textContent = sched.includePending
+        ? '待确认课次的 ' + sched.heldPending + ' 词已勾选直接加入默写范围。'
+        : '待确认课次的 ' + sched.heldPending + ' 词暂不自动安排，可指定课次或勾选直接加入范围。';
+      this.stateLine.appendChild(pend);
+    }
+  };
+
+  /**
+   * scheduleHint — the state line's ONE scheduling note as a pure
+   * verdict {tone, text} over schedulePreview's counts (updateStateLine
+   * renders it; window-exposed for the Node tests). Branch order mirrors
+   * schedulePreview: none/new first, then progress verdicts; the
+   * direct-join branch (P2) must fire BEFORE the all-unchecked note —
+   * joined > 0 means a save WILL land words in the scope, so 「全部未
+   * 勾选……不会保存」 must never contradict the footer's 「N 词将加入
+   * 默写范围」.
+   */
+  function scheduleHint(sched, hasRows) {
+    if (sched.mode === 'none') {
+      return { tone: 'good', text: '补充词汇保存后默认加入默写范围。' };
+    }
+    if (sched.mode === 'new' || (sched.book && !sched.learned)) {
+      return {
+        tone: 'warn',
+        text: '这本教材还没有已学进度：保存后暂不自动安排默写，之后在「教材管理」登记进度即可。',
+      };
+    }
+    if (sched.schedulable && !sched.heldUnlearned && !sched.heldPending) {
+      return {
+        tone: 'good',
+        text: '课次' + quoteList(sched.withinNames) + '已学到，保存后即可安排默写，无需再确认进度。',
+      };
+    }
+    if (sched.heldUnlearned) {
+      var text = '课次' + quoteList(sched.unlearnedNames) +
+        '尚未学到：保存后这部分词暂不自动安排默写，进度不受影响。';
+      if (sched.schedulable) {
+        text += '其余 ' + sched.schedulable + ' 词课次已学，保存后即可安排。';
+      }
+      return { tone: 'warn', text: text };
+    }
+    if (sched.schedulable) {
+      return {
+        tone: 'good',
+        text: '课次' + quoteList(sched.withinNames) + '已学到，保存后即可安排默写；其余词课次待确认。',
+      };
+    }
+    if (sched.heldPending) {
+      return { tone: 'neutral', text: '本批词全部待确认课次，保存后暂不自动安排默写。' };
+    }
+    if (sched.joined) {
+      // Checked 待确认 words lifted by the page-level 直接加入默写范围
+      // checkbox: they save INTO the scope, so the all-unchecked error
+      // below must not fire (P2: the state line once claimed 全部未勾选
+      // while the footer promised N 词将加入默写范围).
+      return {
+        tone: 'good',
+        text: '待确认课次的 ' + sched.joined + ' 词已勾选直接加入默写范围，保存后即可安排默写。',
+      };
+    }
+    if (hasRows) {
+      // Every count zero with word rows on display: they are all unchecked.
+      return {
+        tone: 'neutral',
+        text: '本批词语条目全部未勾选——取消勾选的内容不会保存。',
+      };
+    }
+    // Poems/passages only: their own scope notes cover them.
+    return {
+      tone: 'neutral',
+      text: '本批为整篇内容（古诗/课文），学习范围随教材已学进度生效。',
+    };
+  }
+
+  /** 「A」「B」 lesson-name quoting for the state line / save note. */
+  function quoteList(names) {
+    return names.map(function (n) { return '「' + n + '」'; }).join('、');
+  }
+
+  /**
+   * updateCommitHint — the footer's save-note (the prototype's one-line
+   * 保存后… note): what the commit WILL do for scheduling, stated before
+   * the parent presses 确认添加. Informational only.
+   */
+  PhotoAddForm.prototype.updateCommitHint = function () {
+    var hasDraft = !!(this.rows.length || this.poemRows.length || this.passageRows.length);
+    this.commitHint.hidden = !hasDraft;
+    if (!hasDraft) {
+      this.commitHint.textContent = '';
+      return;
+    }
+    var sched = this.schedulePreview();
+    var parts = [];
+    if (sched.schedulable) {
+      parts.push(sched.schedulable + ' 词可安排默写（课次已学）');
+    }
+    if (sched.joined && sched.mode === 'none') {
+      parts.push(sched.joined + ' 词将加入默写范围（补充词汇）');
+    } else if (sched.joined) {
+      parts.push(sched.joined + ' 词将加入默写范围（已勾选直接加入）');
+    }
+    if (sched.heldUnlearned) {
+      parts.push(sched.heldUnlearned + ' 词暂不自动安排（课次' + quoteList(sched.unlearnedNames) + '尚未学到）');
+    }
+    if (sched.heldPending) {
+      parts.push(sched.heldPending + ' 词暂不自动安排（课次待确认）');
+    }
+    // Nothing to say (poems/passages only, or nothing checked): the note
+    // hides rather than stating a vacuous scheduling promise.
+    this.commitHint.hidden = parts.length === 0;
+    this.commitHint.textContent = parts.length
+      ? '保存后：' + parts.join('；') + '。'
+      : '';
   };
 
   PhotoAddForm.prototype.handleFilePicked = function () {
@@ -1234,12 +1682,24 @@
         Math.max(1, Math.round(file.size / (1024 * 1024))) + ' MB）';
       this.thumb.hidden = true;
       this.thumb.removeAttribute('src');
+      // Issue #81: a PDF replaces any photo source view — the page renders
+      // will take the 本次材料 column once 开始识别 runs.
+      if (this.sourceKind === 'photo') {
+        this.sourceKind = '';
+        this.sourceImg.removeAttribute('src');
+        this.sourceView.hidden = true;
+      }
       if (!(global.PdfPageRunner && global.PdfPageRunner.isAvailable())) {
         this.recognizeBtn.disabled = true;
         this.showFormError('PDF 支持未加载，请刷新页面或改用照片导入');
+        this.syncWorkspace();
         return;
       }
       this.recognizeBtn.disabled = false;
+      // Issue #81: the left column fills with page renders once 开始识别
+      // runs; until then the status bar carries the file's story.
+      this.setSourceCaption(file.name);
+      this.syncWorkspace();
       return;
     }
     if (verdict.code !== 'not-pdf') {
@@ -1262,6 +1722,16 @@
     this.thumb.src = URL.createObjectURL(file);
     this.thumb.hidden = false;
     this.recognizeBtn.disabled = false;
+    // Issue #81: the SAME object URL feeds the large 本次材料 view — the
+    // parent reads the original photo beside the entries from the moment
+    // the file is picked, before recognition even runs.
+    this.clearPdfSource();
+    this.sourceKind = 'photo';
+    this.sourceImg.alt = '词表照片大图预览';
+    this.sourceImg.src = this.thumb.src;
+    this.sourceView.hidden = false;
+    this.setSourceCaption(file.name);
+    this.syncWorkspace();
   };
 
   /**
@@ -1275,7 +1745,11 @@
       global.PdfPageRunner.close(this.pdfState.doc);
     }
     this.pdfState = null;
+    // Issue #81: the page render dies with the document — the left column
+    // reverts to the photo (if one is still picked) or the empty note.
+    this.clearPdfSource();
     this.renderPdfBar();
+    this.syncWorkspace();
   };
 
   /**
@@ -1471,6 +1945,7 @@
           panelRendered: false,
         };
         self.renderPdfBar();
+        self.syncWorkspace();
         // ONE library snapshot classifies every page as it lands (the run
         // can take minutes; raced duplicates stay honest through the
         // server's UNIQUE + the post-commit reconciliation — the photo
@@ -1557,6 +2032,10 @@
         if (!blob) {
           throw new Error('这页压缩后仍然太大');
         }
+        // Issue #81: the page being recognized shows large in the 本次材料
+        // column while the run continues — the parent reviews against the
+        // very render the model is reading.
+        self.showPdfPageBlob(blob, pageNo);
         return self.recognizePhoto(blob, self.draftCategory);
       })
       .then(function (data) {
@@ -1591,11 +2070,17 @@
         if (self.rows.length || self.poemRows.length || self.passageRows.length) {
           self.renderPreview();
         }
+        if (self.sourcePageNo === pageNo) {
+          self.setSourceCaption('第 ' + pageNo + ' 页 · 已识别');
+        }
         self.renderPdfBar();
       })
       .catch(function (err) {
         state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
           (err && err.message) || '识别失败');
+        if (self.sourcePageNo === pageNo) {
+          self.setSourceCaption('第 ' + pageNo + ' 页 · 识别失败');
+        }
         self.renderPdfBar();
       });
   };
@@ -1942,6 +2427,7 @@
     });
 
     this.renderTextbookDetail(detailHost);
+    this.updateStateLine();
   };
 
   /**
@@ -2081,12 +2567,18 @@
     include.checked = this.includePending;
     include.addEventListener('change', function () {
       self.includePending = include.checked;
+      // Issue #81: the checkbox changes WHAT WILL BE SCHEDULED — the state
+      // line and the save-note follow immediately (no table rebuild).
+      self.updateStateLine();
+      self.updateCommitHint();
     });
     var includeText = document.createElement('span');
     includeText.textContent = '待确认课次的词直接加入默写范围（不受进度限制）';
     includeLabel.appendChild(include);
     includeLabel.appendChild(includeText);
     host.appendChild(includeLabel);
+
+    this.updateStateLine();
   };
 
   /** Read the 新建教材 mini-form's values back (name + five meta fields). */
@@ -2140,6 +2632,11 @@
   PhotoAddForm.prototype.renderPreview = function () {
     var self = this;
     clearEl(this.preview);
+    // Issue #81: every structural preview change re-derives the workspace
+    // visibility and the state line (the line is pure text — the caret-
+    // preserving edit path onRowEdited refreshes it in place too).
+    this.syncWorkspace();
+    this.updateStateLine();
     // Issue #11/#13: a poems-only or passages-only draft is a real
     // preview — the hint shows only when EVERY content kind is empty.
     if (!this.rows.length && !this.poemRows.length && !this.passageRows.length) {
@@ -2173,13 +2670,30 @@
 
     var thead = document.createElement('thead');
     var headRow = document.createElement('tr');
+    // Issue #81: 单词/释义 carry the visual weight (photo-th-primary);
+    // 课次/状态 are deliberately secondary (photo-th-secondary) — the
+    // teaching info and the verdict read beside the content, not in it.
     var headers = textbookMode
-      ? ['加入', '单词', '释义（原文）', '课次', '状态']
-      : ['加入', '单词', '释义（原文）', '状态'];
-    headers.forEach(function (text) {
+      ? [
+        { text: '加入' },
+        { text: '单词', cls: 'photo-th-primary' },
+        { text: '释义（原文）', cls: 'photo-th-primary' },
+        { text: '课次', cls: 'photo-th-secondary' },
+        { text: '状态', cls: 'photo-th-secondary' },
+      ]
+      : [
+        { text: '加入' },
+        { text: '单词', cls: 'photo-th-primary' },
+        { text: '释义（原文）', cls: 'photo-th-primary' },
+        { text: '状态', cls: 'photo-th-secondary' },
+      ];
+    headers.forEach(function (def) {
       var th = document.createElement('th');
       th.setAttribute('scope', 'col');
-      th.textContent = text;
+      th.textContent = def.text;
+      if (def.cls) {
+        th.className = def.cls;
+      }
       headRow.appendChild(th);
     });
     thead.appendChild(headRow);
@@ -2378,6 +2892,8 @@
       lessonInput.disabled = row.status === 'invalid';
       lessonInput.addEventListener('input', function () {
         self.poemRows[i].lesson = lessonInput.value;
+        self.updateStateLine();
+        self.updateCommitHint();
       });
       bottom.appendChild(lessonInput);
     }
@@ -2682,6 +3198,8 @@
       lessonInput.disabled = row.status === 'invalid';
       lessonInput.addEventListener('input', function () {
         self.passageRows[i].lesson = lessonInput.value;
+        self.updateStateLine();
+        self.updateCommitHint();
       });
       bottom.appendChild(lessonInput);
     }
@@ -2901,6 +3419,9 @@
     check.addEventListener('change', function () {
       self.rows[i].checked = check.checked;
       self.updateCommitButton();
+      // Issue #81: the state line's schedulable counts ride the checked
+      // set — keep it honest when the parent unchecks a row.
+      self.updateStateLine();
     });
     checkHit.appendChild(check);
     checkCell.appendChild(checkHit);
@@ -2909,7 +3430,9 @@
     var wordCell = document.createElement('td');
     var wordInput = document.createElement('input');
     wordInput.type = 'text';
-    wordInput.className = 'form-input photo-cell-input';
+    // Issue #81: the word face reads as the row's headline (photo-word-
+    // input carries the weight); the cell stays td#2 for the e2e contract.
+    wordInput.className = 'form-input photo-cell-input photo-word-input';
     wordInput.value = row.word;
     wordInput.setAttribute('aria-label', '单词 第 ' + (i + 1) + ' 行');
     wordInput.addEventListener('input', function () {
@@ -2971,7 +3494,7 @@
       lessonCell.className = 'photo-lesson-cell';
       var lessonInput = document.createElement('input');
       lessonInput.type = 'text';
-      lessonInput.className = 'form-input photo-cell-input';
+      lessonInput.className = 'form-input photo-cell-input photo-lesson-input';
       lessonInput.setAttribute('list', 'parent-photo-lesson-options');
       lessonInput.setAttribute('aria-label', '课次 第 ' + (i + 1) + ' 行');
       lessonInput.placeholder = '待确认';
@@ -2979,6 +3502,11 @@
       lessonInput.disabled = !committable;
       lessonInput.addEventListener('input', function () {
         self.rows[i].lesson = lessonInput.value;
+        // Issue #81: the lesson feeds the state line's 本批课次 + progress
+        // verdict — the line is pure text, so it syncs live without ever
+        // rebuilding the table (the caret stays in this input).
+        self.updateStateLine();
+        self.updateCommitHint();
       });
       lessonCell.appendChild(lessonInput);
       tr.appendChild(lessonCell);
@@ -3117,6 +3645,9 @@
       }
     }
     this.updateCommitButton();
+    // Issue #81: the state line's counts/verdicts follow the edit — text
+    // only, the inputs keep the caret (same reason this sync exists).
+    this.updateStateLine();
     // Issue #8: edits change the eligible/failed counts — the affordance
     // label follows without a full re-render (same caret-preserving reason
     // this sync exists).
@@ -3147,6 +3678,9 @@
         : '确认添加（0 个）';
     }
     this.commitBtn.disabled = n === 0 && m === 0 && k === 0;
+    // Issue #81: the footer save-note counts exactly what this label is
+    // about to commit — refresh them together.
+    this.updateCommitHint();
   };
 
   PhotoAddForm.prototype.submittableRows = function () {
@@ -3713,17 +4247,35 @@
             }).map(function (r) { return r.word; });
 
             return self.runAssignments(book, groups).then(function (results) {
-              return {
-                book: book,
-                addOutcome: outcome,
-                submittedRows: addRows,
-                adoptRows: adoptRows,
-                editResults: editResults,
-                fresh: fresh,
-                groups: groups,
-                groupResults: results,
-                unassigned: unassigned,
-              };
+              // Issue #81 P2: the receipt's 默写安排 verdict must come
+              // from the POST-SAVE truth — the assigns just rewrote the
+              // entries, and the books' progress may have moved since the
+              // client cached it. Re-read both (null on failure ⇒ the
+              // receipt degrades to the assign payloads, never a guess).
+              var postWords = self.fetchWords(self.draftCategory)
+                .catch(function () { return null; });
+              var postBooks = self.fetchTextbooks
+                ? self.fetchTextbooks(self.draftCategory)
+                  .catch(function () { return null; })
+                : Promise.resolve(null);
+              return Promise.all([postWords, postBooks]).then(function (after) {
+                if (after[0]) {
+                  self.existingWords = after[0];
+                }
+                return {
+                  book: book,
+                  addOutcome: outcome,
+                  submittedRows: addRows,
+                  adoptRows: adoptRows,
+                  editResults: editResults,
+                  fresh: fresh,
+                  groups: groups,
+                  groupResults: results,
+                  unassigned: unassigned,
+                  postSave: after[0],
+                  booksAfter: after[1],
+                };
+              });
             });
           });
         });
@@ -4198,6 +4750,189 @@
   }
 
   /**
+   * summarizeAssignScope (Issue #81) — the 默写安排 half of the textbook
+   * receipt, derived from the ACTUAL assign results (ok groups only: a
+   * failed group's words are already 失败 under 保存结果 and are never
+   * counted as scheduled here). With a post-save snapshot the verdict is
+   * computed PER WORD from the saved entries and EVERY source, mirroring
+   * the server's scope rule (card_repo's ScopeEligibleOnly twin):
+   * participates × (includeInScope on ANY textbook ∨ a lesson inside ANY
+   * textbook's learned prefix ∨ no attribution at all). Without one
+   * (snapshot fetch failed) it degrades to the assign payloads — still
+   * honoring an explicit includeInScope for ANY lesson shape. Pure.
+   */
+  function summarizeAssignScope(book, groupResults, postSave, books) {
+    var lessons = (book && book.lessons) || [];
+    var learned = (book && book.learnedLessons) || 0;
+    var out = {
+      schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 0,
+      unlearnedNames: [],
+    };
+    // The learned prefixes as the SERVER has them now (post-save), keyed
+    // by textbook id — the receipt must not judge eligibility by the
+    // client's possibly stale pre-save copy of the target book.
+    var learnedByBook = {};
+    (books || []).forEach(function (b) {
+      if (!b || !b.id) {
+        return;
+      }
+      var set = {};
+      (b.lessons || []).slice(0, Math.max(0, b.learnedLessons || 0))
+        .forEach(function (name) { set[name] = true; });
+      learnedByBook[b.id] = set;
+    });
+    if (book && book.id && !learnedByBook[book.id]) {
+      var target = {};
+      lessons.slice(0, Math.max(0, learned)).forEach(function (name) {
+        target[name] = true;
+      });
+      learnedByBook[book.id] = target;
+    }
+    var byWord = {};
+    (postSave || []).forEach(function (w) {
+      if (w && w.word) {
+        byWord[String(w.word).trim()] = w;
+      }
+    });
+
+    var verdictFromPayload = function (group, lesson) {
+      // Degraded truth: an explicit include joins the scope regardless of
+      // the lesson's shape or progress (the pre-fix code ignored it for
+      // non-empty lessons).
+      if (group.includeInScope) {
+        out.joined += 1;
+        return;
+      }
+      if (!lesson) {
+        out.heldPending += 1;
+        return;
+      }
+      var idx = lessons.indexOf(lesson);
+      if (idx >= 0 && idx + 1 <= learned) {
+        out.schedulable += 1;
+      } else {
+        out.heldUnlearned += 1;
+        if (out.unlearnedNames.indexOf(lesson) < 0) {
+          out.unlearnedNames.push(lesson);
+        }
+      }
+    };
+
+    (groupResults || []).forEach(function (r) {
+      if (!r || !r.ok || !r.group) {
+        return;
+      }
+      var group = r.group;
+      var groupLesson = metaField(group.lesson);
+      (group.words || []).forEach(function (word) {
+        var saved = postSave ? byWord[String(word).trim()] : null;
+        if (!saved) {
+          verdictFromPayload(group, groupLesson);
+          return;
+        }
+        // Post-save truth: participates composes with scope (AND), and
+        // ANY textbook source can admit the word (US-33: one learned
+        // assignment among several suffices; a sticky or foreign include
+        // joins the range just the same).
+        if (saved.participates === false) {
+          out.paused += 1;
+          return;
+        }
+        var includeHit = false;
+        var learnedHit = false;
+        var targetLesson = groupLesson;
+        var entries = saved.textbooks || [];
+        entries.forEach(function (a) {
+          if (!a) {
+            return;
+          }
+          if (a.includeInScope) {
+            includeHit = true;
+          }
+          var set = a.id != null ? learnedByBook[a.id] : null;
+          if (set && a.lesson && set[a.lesson]) {
+            learnedHit = true;
+          }
+          if (book && a.id === book.id) {
+            targetLesson = metaField(a.lesson);
+          }
+        });
+        if (includeHit) {
+          out.joined += 1;
+        } else if (learnedHit) {
+          out.schedulable += 1;
+        } else if (!entries.length) {
+          out.joined += 1; // nothing attributed → supplementary default
+        } else if (targetLesson) {
+          out.heldUnlearned += 1;
+          if (out.unlearnedNames.indexOf(targetLesson) < 0) {
+            out.unlearnedNames.push(targetLesson);
+          }
+        } else {
+          out.heldPending += 1;
+        }
+      });
+    });
+    return out;
+  }
+
+  /**
+   * renderScopeReceipt (Issue #81) — the visually separate 默写安排 block
+   * inside a result banner: real counts + reasons, beside (never merged
+   * into) the 保存结果 buckets. A sensible next step closes the block —
+   * what the parent can do NOW versus what unlocks later.
+   */
+  function renderScopeReceipt(box, scope) {
+    var total = scope.schedulable + scope.joined + scope.heldUnlearned +
+      scope.heldPending + (scope.paused || 0);
+    if (!total) {
+      return;
+    }
+    var scopeBox = document.createElement('div');
+    scopeBox.className = 'result-scope';
+    var title = document.createElement('p');
+    title.className = 'result-scope-title';
+    title.textContent = '默写安排';
+    scopeBox.appendChild(title);
+    var addLine = function (text, tone) {
+      var line = document.createElement('p');
+      line.className = 'result-scope-line result-scope-' + tone;
+      line.textContent = text;
+      scopeBox.appendChild(line);
+    };
+    if (scope.schedulable) {
+      addLine('可安排默写 ' + scope.schedulable + ' 词（课次已学）', 'good');
+    }
+    if (scope.joined) {
+      addLine('可安排默写 ' + scope.joined + ' 词（' +
+        (scope.mode === 'none' ? '补充词汇默认加入范围' : '已加入默写范围') + '）', 'good');
+    }
+    if (scope.heldUnlearned) {
+      addLine('暂不自动安排 ' + scope.heldUnlearned + ' 词（课次' +
+        quoteList(scope.unlearnedNames) + '尚未学到）', 'wait');
+    }
+    if (scope.heldPending) {
+      addLine('暂不自动安排 ' + scope.heldPending + ' 词（课次待确认）', 'wait');
+    }
+    if (scope.paused) {
+      addLine('暂不自动安排 ' + scope.paused + ' 词（已移出课堂参与，可在词库中恢复）', 'wait');
+    }
+    var next = document.createElement('p');
+    next.className = 'result-scope-line result-scope-next';
+    if (scope.schedulable || scope.joined) {
+      next.textContent = '下一步：这些词现在就能安排默写；其余词按进度或加入范围自动跟进。';
+    } else if (scope.heldUnlearned) {
+      next.textContent = '下一步：在「教材管理」中更新已学进度，这些词会自动进入默写安排。';
+    } else if (scope.paused) {
+      next.textContent = '下一步：这些词已移出课堂参与，在「词库」中恢复参与后即可安排默写。';
+    } else {
+      next.textContent = '下一步：在词库中为这些词指定课次，或加入默写范围。';
+    }
+    scopeBox.appendChild(next);
+    box.appendChild(scopeBox);
+  }
+
+  /**
    * appendPoemReceipt (Issue #11) — the poem half of BOTH commit banners:
    * one detail line per server outcome class (新增/已有/无法保存, per-poem
    * titles), and — on a transport failure — the honest 未保存 note (what
@@ -4411,6 +5146,20 @@
       box.appendChild(passagesSkipped);
     }
 
+    // Issue #81: 保存结果 above, 默写安排 below — visually separate. In
+    // this flow the words carry no textbook, so the scope truth is the
+    // server's add outcome: every landed new word defaults into the
+    // dictation range (补充词汇默认参与), unverified/failed ones are not
+    // counted as schedulable.
+    renderScopeReceipt(box, {
+      mode: 'none',
+      schedulable: 0,
+      joined: addedCount,
+      heldUnlearned: 0,
+      heldPending: 0,
+      unlearnedNames: [],
+    });
+
     var note = document.createElement('p');
     note.className = 'result-note';
     note.textContent = kit.SELECTION_NOTE_TEXT || '新词将按复习安排选入课堂，不一定是下一课。';
@@ -4451,17 +5200,13 @@
       unassigned: receipt.unassigned,
     });
 
-    // Which assigned lessons sit beyond the book's learned progress?
-    var learned = book && book.learnedLessons ? book.learnedLessons : 0;
-    var lessons = (book && book.lessons) || [];
-    var unlearnedNames = [];
-    receipt.groupResults.forEach(function (r) {
-      if (r.ok && r.group.lesson && lessons.indexOf(r.group.lesson) >= 0 &&
-        lessons.indexOf(r.group.lesson) + 1 > learned &&
-        unlearnedNames.indexOf(r.group.lesson) < 0) {
-        unlearnedNames.push(r.group.lesson);
-      }
-    });
+    // Issue #81: the 默写安排 verdict comes from the ACTUAL post-save
+    // state (summarizeAssignScope over the post-assign word entries, all
+    // eligibility sources and the fresh progress; assign payloads only
+    // when that re-read failed) — rendered as its own block below, never
+    // merged into the 保存结果 buckets.
+    var scope = summarizeAssignScope(book, receipt.groupResults, receipt.postSave, receipt.booksAfter);
+    scope.mode = 'textbook';
 
     var box = document.createElement('div');
     var partial = built.summary.failed > 0 || built.summary.pendingDiff > 0 ||
@@ -4527,13 +5272,11 @@
       box.appendChild(groupNote);
     }
 
-    if (unlearnedNames.length) {
-      var unlearnedNote = document.createElement('p');
-      unlearnedNote.className = 'result-note';
-      unlearnedNote.textContent = '课次「' + unlearnedNames.join('」「') +
-        '」尚未学到：这些词已保存，但不会自动选入默写范围；在教材管理中改进度后即可加入。';
-      box.appendChild(unlearnedNote);
-    }
+    // Issue #81: the separate 默写安排 block — actual saved scheduling
+    // (可安排默写 N 词 because 课次已学/已加入范围, M 词暂不自动安排
+    // because 课次尚未学到/待确认) with a next step, beside the 保存结果
+    // buckets above and never summarized as one success.
+    renderScopeReceipt(box, scope);
 
     // Issue #11: the poem outcomes + the honest classroom note — the
     // scope rule (已学进度) already governs poems server-side, but the
@@ -4628,6 +5371,11 @@
   global.isResolved = isResolved;
   global.planAssignments = planAssignments;
   global.buildTextbookReceipt = buildTextbookReceipt;
+  // Issue #81 P2: the 默写安排 receipt verdict + the state line's hint —
+  // pure over their inputs, so the Node unit tests pin the post-save
+  // eligibility contract (window.parseBatch precedent).
+  global.summarizeAssignScope = summarizeAssignScope;
+  global.scheduleHint = scheduleHint;
   // Issue #11: the whole-poem draft surfaces (the classifyPhotoEntries
   // kin — pure, so the Node unit test pins the contract).
   global.normalizePoemText = normalizePoemText;
