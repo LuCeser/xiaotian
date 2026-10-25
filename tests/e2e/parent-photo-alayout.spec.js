@@ -159,17 +159,29 @@ test('wide layout: side-by-side source/review, fact-only state line, separate �
       '课次「第2课」已学到，保存后即可安排默写，无需再确认进度。');
     await expectNoAsk(stateLine);
 
-    // Inline edits: re-type the word face and give two rows their own
-    // meanings (the same two surfaces later re-imported as conflicts).
+    // Inline edits: re-type each word face PER KEY into a DIFFERENT word
+    // (select-all + pressSequentially exercises the real focus/caret
+    // path — the per-key input handler's reclassify/sync, which fill()
+    // would bypass — while the face never passes through an empty
+    // transient that would uncheck the row). Distinct faces make the
+    // post-save assertions sensitive to a broken update path: echoing
+    // the recognized values back can no longer pass.
+    const retypeFace = async (input, face) => {
+      await input.click();
+      await page.keyboard.press('Control+a');
+      await input.pressSequentially(face);
+      await expect(input).toHaveValue(face);
+    };
     const row = (i) => page.locator(`.photo-row[data-row-index="${i}"]`);
-    const tigerWord = row(0).locator('input[aria-label="单词 第 1 行"]');
-    const tigerMeaning = row(0).locator('input[aria-label="释义 第 1 行"]');
-    await tigerWord.fill('tiger');
-    await tigerMeaning.fill('老虎（本次核对）');
-    await expect(tigerWord).toHaveValue('tiger');
-    await expect(tigerMeaning).toHaveValue('老虎（本次核对）');
-    await row(1).locator('input[aria-label="单词 第 2 行"]').fill('panda');
-    await row(1).locator('input[aria-label="释义 第 2 行"]').fill('熊猫（本次核对）');
+    await retypeFace(row(0).locator('input[aria-label="单词 第 1 行"]'), 'lioness');
+    await row(0).locator('input[aria-label="释义 第 1 行"]').fill('母狮（本次核对）');
+    await retypeFace(row(1).locator('input[aria-label="单词 第 2 行"]'), 'koala');
+    await row(1).locator('input[aria-label="释义 第 2 行"]').fill('树袋熊（本次核对）');
+    // The per-key edit path kept all three rows committable 新词 (the
+    // status cell is re-derived live without stealing the caret).
+    for (const i of [0, 1, 2]) {
+      await expect(row(i).locator('.photo-status')).toContainText('新词');
+    }
 
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
 
@@ -183,21 +195,30 @@ test('wide layout: side-by-side source/review, fact-only state line, separate �
     await expect(banner.locator('.result-scope-next')).toContainText('下一步：');
 
     // Persisted truth after a reload (client state gone), then the real
-    // classroom selection.
+    // classroom selection. The RENAMED faces are what landed — with the
+    // edited glosses and this textbook's ownership — and this import's
+    // unit holds exactly the three new faces (tiger/panda were re-typed
+    // away before the commit, so nothing saved them).
     await page.reload();
     const rows = await wordRows(req);
-    for (const word of ['tiger', 'panda', 'grape']) {
+    const mine = [...rows.values()]
+      .filter((w) => w.unit === UNITS.wide)
+      .map((w) => w.word)
+      .sort();
+    expect(mine).toEqual(['grape', 'koala', 'lioness']);
+    for (const word of ['lioness', 'koala', 'grape']) {
       const stored = rows.get(word);
       expect(stored, word + ' is stored').toBeTruthy();
-      const mine = (stored.textbooks || []).find((t) => t.name === BOOK_NAME);
-      expect(mine, word + ' carries this textbook').toBeTruthy();
-      expect(mine.lesson).toBe(LESSON);
+      const entry = (stored.textbooks || []).find((t) => t.name === BOOK_NAME);
+      expect(entry, word + ' carries this textbook').toBeTruthy();
+      expect(entry.lesson).toBe(LESSON);
     }
-    expect(rows.get('tiger').meaning).toBe('老虎（本次核对）');
-    expect(rows.get('panda').meaning).toBe('熊猫（本次核对）');
+    expect(rows.get('lioness').meaning).toBe('母狮（本次核对）');
+    expect(rows.get('koala').meaning).toBe('树袋熊（本次核对）');
+    expect(rows.get('grape').meaning).toBe('葡萄');
 
     const picked = await practiceSelection();
-    for (const word of ['tiger', 'panda', 'grape']) {
+    for (const word of ['lioness', 'koala', 'grape']) {
       expect(picked).toContain(word);
     }
   } finally {

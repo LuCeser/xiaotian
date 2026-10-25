@@ -1539,39 +1539,9 @@
 
     var hint = document.createElement('p');
     hint.className = 'photo-state-hint';
-    if (sched.mode === 'none') {
-      hint.className += ' photo-state-hint-good';
-      hint.textContent = '补充词汇保存后默认加入默写范围。';
-    } else if (sched.mode === 'new' || (sched.book && !sched.learned)) {
-      hint.className += ' photo-state-hint-warn';
-      hint.textContent = '这本教材还没有已学进度：保存后暂不自动安排默写，之后在「教材管理」登记进度即可。';
-    } else if (sched.schedulable && !sched.heldUnlearned && !sched.heldPending) {
-      hint.className += ' photo-state-hint-good';
-      hint.textContent = '课次' + quoteList(sched.withinNames) +
-        '已学到，保存后即可安排默写，无需再确认进度。';
-    } else if (sched.heldUnlearned) {
-      hint.className += ' photo-state-hint-warn';
-      hint.textContent = '课次' + quoteList(sched.unlearnedNames) +
-        '尚未学到：保存后这部分词暂不自动安排默写，进度不受影响。';
-      if (sched.schedulable) {
-        hint.textContent += '其余 ' + sched.schedulable + ' 词课次已学，保存后即可安排。';
-      }
-    } else if (sched.schedulable) {
-      hint.className += ' photo-state-hint-good';
-      hint.textContent = '课次' + quoteList(sched.withinNames) +
-        '已学到，保存后即可安排默写；其余词课次待确认。';
-    } else if (sched.heldPending) {
-      hint.className += ' photo-state-hint-neutral';
-      hint.textContent = '本批词全部待确认课次，保存后暂不自动安排默写。';
-    } else if (this.rows.length) {
-      // Every count zero with word rows on display: they are all unchecked.
-      hint.className += ' photo-state-hint-neutral';
-      hint.textContent = '本批词语条目全部未勾选——取消勾选的内容不会保存。';
-    } else {
-      // Poems/passages only: their own scope notes cover them.
-      hint.className += ' photo-state-hint-neutral';
-      hint.textContent = '本批为整篇内容（古诗/课文），学习范围随教材已学进度生效。';
-    }
+    var verdict = scheduleHint(sched, this.rows.length > 0);
+    hint.className += ' photo-state-hint-' + verdict.tone;
+    hint.textContent = verdict.text;
     this.stateLine.appendChild(hint);
     if (sched.heldPending && sched.mode !== 'none') {
       var pend = document.createElement('p');
@@ -1582,6 +1552,73 @@
       this.stateLine.appendChild(pend);
     }
   };
+
+  /**
+   * scheduleHint — the state line's ONE scheduling note as a pure
+   * verdict {tone, text} over schedulePreview's counts (updateStateLine
+   * renders it; window-exposed for the Node tests). Branch order mirrors
+   * schedulePreview: none/new first, then progress verdicts; the
+   * direct-join branch (P2) must fire BEFORE the all-unchecked note —
+   * joined > 0 means a save WILL land words in the scope, so 「全部未
+   * 勾选……不会保存」 must never contradict the footer's 「N 词将加入
+   * 默写范围」.
+   */
+  function scheduleHint(sched, hasRows) {
+    if (sched.mode === 'none') {
+      return { tone: 'good', text: '补充词汇保存后默认加入默写范围。' };
+    }
+    if (sched.mode === 'new' || (sched.book && !sched.learned)) {
+      return {
+        tone: 'warn',
+        text: '这本教材还没有已学进度：保存后暂不自动安排默写，之后在「教材管理」登记进度即可。',
+      };
+    }
+    if (sched.schedulable && !sched.heldUnlearned && !sched.heldPending) {
+      return {
+        tone: 'good',
+        text: '课次' + quoteList(sched.withinNames) + '已学到，保存后即可安排默写，无需再确认进度。',
+      };
+    }
+    if (sched.heldUnlearned) {
+      var text = '课次' + quoteList(sched.unlearnedNames) +
+        '尚未学到：保存后这部分词暂不自动安排默写，进度不受影响。';
+      if (sched.schedulable) {
+        text += '其余 ' + sched.schedulable + ' 词课次已学，保存后即可安排。';
+      }
+      return { tone: 'warn', text: text };
+    }
+    if (sched.schedulable) {
+      return {
+        tone: 'good',
+        text: '课次' + quoteList(sched.withinNames) + '已学到，保存后即可安排默写；其余词课次待确认。',
+      };
+    }
+    if (sched.heldPending) {
+      return { tone: 'neutral', text: '本批词全部待确认课次，保存后暂不自动安排默写。' };
+    }
+    if (sched.joined) {
+      // Checked 待确认 words lifted by the page-level 直接加入默写范围
+      // checkbox: they save INTO the scope, so the all-unchecked error
+      // below must not fire (P2: the state line once claimed 全部未勾选
+      // while the footer promised N 词将加入默写范围).
+      return {
+        tone: 'good',
+        text: '待确认课次的 ' + sched.joined + ' 词已勾选直接加入默写范围，保存后即可安排默写。',
+      };
+    }
+    if (hasRows) {
+      // Every count zero with word rows on display: they are all unchecked.
+      return {
+        tone: 'neutral',
+        text: '本批词语条目全部未勾选——取消勾选的内容不会保存。',
+      };
+    }
+    // Poems/passages only: their own scope notes cover them.
+    return {
+      tone: 'neutral',
+      text: '本批为整篇内容（古诗/课文），学习范围随教材已学进度生效。',
+    };
+  }
 
   /** 「A」「B」 lesson-name quoting for the state line / save note. */
   function quoteList(names) {
@@ -4210,17 +4247,35 @@
             }).map(function (r) { return r.word; });
 
             return self.runAssignments(book, groups).then(function (results) {
-              return {
-                book: book,
-                addOutcome: outcome,
-                submittedRows: addRows,
-                adoptRows: adoptRows,
-                editResults: editResults,
-                fresh: fresh,
-                groups: groups,
-                groupResults: results,
-                unassigned: unassigned,
-              };
+              // Issue #81 P2: the receipt's 默写安排 verdict must come
+              // from the POST-SAVE truth — the assigns just rewrote the
+              // entries, and the books' progress may have moved since the
+              // client cached it. Re-read both (null on failure ⇒ the
+              // receipt degrades to the assign payloads, never a guess).
+              var postWords = self.fetchWords(self.draftCategory)
+                .catch(function () { return null; });
+              var postBooks = self.fetchTextbooks
+                ? self.fetchTextbooks(self.draftCategory)
+                  .catch(function () { return null; })
+                : Promise.resolve(null);
+              return Promise.all([postWords, postBooks]).then(function (after) {
+                if (after[0]) {
+                  self.existingWords = after[0];
+                }
+                return {
+                  book: book,
+                  addOutcome: outcome,
+                  submittedRows: addRows,
+                  adoptRows: adoptRows,
+                  editResults: editResults,
+                  fresh: fresh,
+                  groups: groups,
+                  groupResults: results,
+                  unassigned: unassigned,
+                  postSave: after[0],
+                  booksAfter: after[1],
+                };
+              });
             });
           });
         });
@@ -4698,43 +4753,125 @@
    * summarizeAssignScope (Issue #81) — the 默写安排 half of the textbook
    * receipt, derived from the ACTUAL assign results (ok groups only: a
    * failed group's words are already 失败 under 保存结果 and are never
-   * counted as scheduled here). Verdict per group follows the server's
-   * scope rule: 课次已学 = 在课次表内且位置 ≤ 已学完第 N 课（含）; 课表外
-   * 与待确认永远不算已学; includeInScope (the 待确认直接加入 checkbox or
-   * a sticky earlier decision) joins the range regardless of progress.
-   * Pure over the receipt pieces — internal helper (the window-exposed
-   * tested surface stays exactly as it was).
+   * counted as scheduled here). With a post-save snapshot the verdict is
+   * computed PER WORD from the saved entries and EVERY source, mirroring
+   * the server's scope rule (card_repo's ScopeEligibleOnly twin):
+   * participates × (includeInScope on ANY textbook ∨ a lesson inside ANY
+   * textbook's learned prefix ∨ no attribution at all). Without one
+   * (snapshot fetch failed) it degrades to the assign payloads — still
+   * honoring an explicit includeInScope for ANY lesson shape. Pure.
    */
-  function summarizeAssignScope(book, groupResults) {
+  function summarizeAssignScope(book, groupResults, postSave, books) {
     var lessons = (book && book.lessons) || [];
     var learned = (book && book.learnedLessons) || 0;
     var out = {
-      schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0,
+      schedulable: 0, joined: 0, heldUnlearned: 0, heldPending: 0, paused: 0,
       unlearnedNames: [],
     };
-    (groupResults || []).forEach(function (r) {
-      if (!r || !r.ok || !r.group) {
+    // The learned prefixes as the SERVER has them now (post-save), keyed
+    // by textbook id — the receipt must not judge eligibility by the
+    // client's possibly stale pre-save copy of the target book.
+    var learnedByBook = {};
+    (books || []).forEach(function (b) {
+      if (!b || !b.id) {
         return;
       }
-      var n = (r.group.words || []).length;
-      var lesson = metaField(r.group.lesson);
+      var set = {};
+      (b.lessons || []).slice(0, Math.max(0, b.learnedLessons || 0))
+        .forEach(function (name) { set[name] = true; });
+      learnedByBook[b.id] = set;
+    });
+    if (book && book.id && !learnedByBook[book.id]) {
+      var target = {};
+      lessons.slice(0, Math.max(0, learned)).forEach(function (name) {
+        target[name] = true;
+      });
+      learnedByBook[book.id] = target;
+    }
+    var byWord = {};
+    (postSave || []).forEach(function (w) {
+      if (w && w.word) {
+        byWord[String(w.word).trim()] = w;
+      }
+    });
+
+    var verdictFromPayload = function (group, lesson) {
+      // Degraded truth: an explicit include joins the scope regardless of
+      // the lesson's shape or progress (the pre-fix code ignored it for
+      // non-empty lessons).
+      if (group.includeInScope) {
+        out.joined += 1;
+        return;
+      }
       if (!lesson) {
-        if (r.group.includeInScope) {
-          out.joined += n;
-        } else {
-          out.heldPending += n;
-        }
+        out.heldPending += 1;
         return;
       }
       var idx = lessons.indexOf(lesson);
       if (idx >= 0 && idx + 1 <= learned) {
-        out.schedulable += n;
+        out.schedulable += 1;
       } else {
-        out.heldUnlearned += n;
+        out.heldUnlearned += 1;
         if (out.unlearnedNames.indexOf(lesson) < 0) {
           out.unlearnedNames.push(lesson);
         }
       }
+    };
+
+    (groupResults || []).forEach(function (r) {
+      if (!r || !r.ok || !r.group) {
+        return;
+      }
+      var group = r.group;
+      var groupLesson = metaField(group.lesson);
+      (group.words || []).forEach(function (word) {
+        var saved = postSave ? byWord[String(word).trim()] : null;
+        if (!saved) {
+          verdictFromPayload(group, groupLesson);
+          return;
+        }
+        // Post-save truth: participates composes with scope (AND), and
+        // ANY textbook source can admit the word (US-33: one learned
+        // assignment among several suffices; a sticky or foreign include
+        // joins the range just the same).
+        if (saved.participates === false) {
+          out.paused += 1;
+          return;
+        }
+        var includeHit = false;
+        var learnedHit = false;
+        var targetLesson = groupLesson;
+        var entries = saved.textbooks || [];
+        entries.forEach(function (a) {
+          if (!a) {
+            return;
+          }
+          if (a.includeInScope) {
+            includeHit = true;
+          }
+          var set = a.id != null ? learnedByBook[a.id] : null;
+          if (set && a.lesson && set[a.lesson]) {
+            learnedHit = true;
+          }
+          if (book && a.id === book.id) {
+            targetLesson = metaField(a.lesson);
+          }
+        });
+        if (includeHit) {
+          out.joined += 1;
+        } else if (learnedHit) {
+          out.schedulable += 1;
+        } else if (!entries.length) {
+          out.joined += 1; // nothing attributed → supplementary default
+        } else if (targetLesson) {
+          out.heldUnlearned += 1;
+          if (out.unlearnedNames.indexOf(targetLesson) < 0) {
+            out.unlearnedNames.push(targetLesson);
+          }
+        } else {
+          out.heldPending += 1;
+        }
+      });
     });
     return out;
   }
@@ -4746,7 +4883,8 @@
    * what the parent can do NOW versus what unlocks later.
    */
   function renderScopeReceipt(box, scope) {
-    var total = scope.schedulable + scope.joined + scope.heldUnlearned + scope.heldPending;
+    var total = scope.schedulable + scope.joined + scope.heldUnlearned +
+      scope.heldPending + (scope.paused || 0);
     if (!total) {
       return;
     }
@@ -4767,7 +4905,7 @@
     }
     if (scope.joined) {
       addLine('可安排默写 ' + scope.joined + ' 词（' +
-        (scope.mode === 'none' ? '补充词汇默认加入范围' : '已勾选直接加入范围') + '）', 'good');
+        (scope.mode === 'none' ? '补充词汇默认加入范围' : '已加入默写范围') + '）', 'good');
     }
     if (scope.heldUnlearned) {
       addLine('暂不自动安排 ' + scope.heldUnlearned + ' 词（课次' +
@@ -4776,12 +4914,17 @@
     if (scope.heldPending) {
       addLine('暂不自动安排 ' + scope.heldPending + ' 词（课次待确认）', 'wait');
     }
+    if (scope.paused) {
+      addLine('暂不自动安排 ' + scope.paused + ' 词（已移出课堂参与，可在词库中恢复）', 'wait');
+    }
     var next = document.createElement('p');
     next.className = 'result-scope-line result-scope-next';
     if (scope.schedulable || scope.joined) {
       next.textContent = '下一步：这些词现在就能安排默写；其余词按进度或加入范围自动跟进。';
     } else if (scope.heldUnlearned) {
       next.textContent = '下一步：在「教材管理」中更新已学进度，这些词会自动进入默写安排。';
+    } else if (scope.paused) {
+      next.textContent = '下一步：这些词已移出课堂参与，在「词库」中恢复参与后即可安排默写。';
     } else {
       next.textContent = '下一步：在词库中为这些词指定课次，或加入默写范围。';
     }
@@ -5057,10 +5200,12 @@
       unassigned: receipt.unassigned,
     });
 
-    // Issue #81: the 默写安排 verdict comes from the ACTUAL assign results
-    // (summarizeAssignScope) — rendered as its own block below, never
+    // Issue #81: the 默写安排 verdict comes from the ACTUAL post-save
+    // state (summarizeAssignScope over the post-assign word entries, all
+    // eligibility sources and the fresh progress; assign payloads only
+    // when that re-read failed) — rendered as its own block below, never
     // merged into the 保存结果 buckets.
-    var scope = summarizeAssignScope(book, receipt.groupResults);
+    var scope = summarizeAssignScope(book, receipt.groupResults, receipt.postSave, receipt.booksAfter);
     scope.mode = 'textbook';
 
     var box = document.createElement('div');
@@ -5226,6 +5371,11 @@
   global.isResolved = isResolved;
   global.planAssignments = planAssignments;
   global.buildTextbookReceipt = buildTextbookReceipt;
+  // Issue #81 P2: the 默写安排 receipt verdict + the state line's hint —
+  // pure over their inputs, so the Node unit tests pin the post-save
+  // eligibility contract (window.parseBatch precedent).
+  global.summarizeAssignScope = summarizeAssignScope;
+  global.scheduleHint = scheduleHint;
   // Issue #11: the whole-poem draft surfaces (the classifyPhotoEntries
   // kin — pure, so the Node unit test pins the contract).
   global.normalizePoemText = normalizePoemText;
