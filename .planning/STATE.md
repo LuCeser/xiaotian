@@ -6,10 +6,10 @@ current_phase: 14
 current_phase_name: R1 对话接真实课堂
 status: planning
 stopped_at: Phase 13/13.1 完结（2026-10-11 用户决策，验收项单独处理），ready to plan Phase 14
-last_updated: "2026-10-15T16:40:14.537Z"
-last_activity: 2026-10-15
+last_updated: "2026-10-25T03:50:25.138Z"
+last_activity: 2026-10-16
 last_activity_desc: Completed quick task 261012-auz — Issue
-state_head: 53e3615ab322de1c9f7b873f02010d44f84505ca
+state_head: 68c25230f58680c88a8910e6f5dcf2d955e7724e
 progress:
   total_phases: 7
   completed_phases: 3
@@ -36,7 +36,7 @@ See: .planning/PROJECT.md (updated 2026-10-11)
 Phase: 14 — R1 对话接真实课堂
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-10-16 — Completed quick task 261016-0c5（AGENTS.md 删除 PerWordVoiceFlow 偶发闪断的过时提醒——闪断已由合并的 PR #28 修复，收尾 PR #28）；前值 2026-10-15 — Quick task 261015-ecc（CI lint v2 升级）规划完成但让位未执行：与并行会话 PR #23/#24 完全重复，用户拍板让位并转入核查那两个 PR
+Last activity: 2026-10-25 — Completed quick task 261025-fzp（README 增补「安装与部署（Windows 本机）」）；前值 2026-10-16 — Completed quick task 261016-0c5（AGENTS.md 删除 PerWordVoiceFlow 偶发闪断的过时提醒——闪断已由合并的 PR #28 修复，收尾 PR #28）
 Next: /gsd-plan-phase 14（Phase 13.2 维持 2026-10-09 搁置；Phase 13/13.1 本地人工验收项由用户按 13-FINAL-ACCEPTANCE-RUNBOOK 单独执行落账）
 
 「再练一组」账（G-13.1-local-4）：2026-10-09 用户报告测试不通过，登记于 [Phase 13.1 UAT](phases/13.1-three-stage-dictation-lesson/13.1-UAT.md) 测试 6；2026-10-10 13.3 真机 UAT-5 同链路（完结课总结页→再练一组→家长端「加练」记录＋「不调整复习计划」断言）通过，提示缺陷可能已被后续修复——2026-10-11 完结决策：重测关账留给用户单独处理，不随阶段关闭自动通过。
@@ -193,6 +193,7 @@ None yet.
 | 261024-njn | scripts/install.ps1 一次性安装器（布局拷贝/配置生成/uv venv/防火墙/证书到期说明）+ tests/test-install.js 冒烟 | 2026-10-25 | 8961739 | — | .planning/quick/261024-njn-scripts-install-ps1-d-hta-bin-service-exe-pkg-web-static-web |
 | 261024-njo | scripts/hta.ps1 安装目录日常启停（start/stop/status，WMI 拉起防句柄继承，G1 守卫）+ 七步冒烟梯子全过 | 2026-10-25 | 7d625a6 | — | .planning/quick/261024-njo-hta-ps1-1-start-stop-status-start-env-scripts-start-detached |
 | 261024-njp | scripts/deploy.ps1 升级/回滚（preflight→TEMP 构建→stop→备份→换新→start 健康门→失败提示回滚）+ tests/test-deploy-ps1.js A-F 全绿 | 2026-10-25 | 32f4c74 | — | .planning/quick/261024-njp-scripts-deploy-ps1-go-build-windows-cgo-enabled-0-ldflags-s |
+| 261025-fzp | README 增补「安装与部署（Windows 本机）」：install/hta/deploy 三件套用法与实战踩坑要点 | 2026-10-25 | 68c2523 | — | [261025-fzp-windows-readme-md-readme-md-windows-1-in](./quick/261025-fzp-windows-readme-md-readme-md-windows-1-in/) |
 
 ### Roadmap Evolution
 
