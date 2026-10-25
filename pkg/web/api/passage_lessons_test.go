@@ -127,7 +127,7 @@ func TestPassageLessonRecordsProjection(t *testing.T) {
 		t.Fatalf("passage store: %v", err)
 	}
 	h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, nil, receipts,
-		nil, nil, nil, passageStore, infra.PythonConfig{}, infra.NewNoOpLogger())
+		nil, nil, nil, nil, passageStore, infra.PythonConfig{}, infra.NewNoOpLogger())
 
 	paragraphID, passageID, _ := seedPassageAttempt(t, db, lessons, receipts, passageStore,
 		"r0w-20261019-080000", passage.Scope{Paragraphs: []int{2, 3}}, []bool{true, false})

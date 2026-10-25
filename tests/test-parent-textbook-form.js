@@ -71,3 +71,23 @@ const {
 }
 
 console.log('test-parent-textbook-form: all assertions passed');
+
+// 8. interpretProposalText — the Issue #82 confirm-line copy for a
+//    verified proposal (纯函数: response shape → display string).
+{
+  const { interpretProposalText, interpretCandidateText } = require('../pkg/web/static/js/parent-textbook.js');
+  assert.strictEqual(
+    interpretProposalText({ textbookName: '快乐英语', lesson: '第三单元', learnedLessons: 3 }),
+    '小天理解：《快乐英语》已学完「第三单元」——它和之前的课次都算已学',
+  );
+  assert.strictEqual(interpretProposalText(null), '');
+
+  // 9. interpretCandidateText — one minimal-confirmation button's label.
+  assert.strictEqual(
+    interpretCandidateText({ textbookName: '阳光英语', lesson: '第三单元', learnedLessons: 1 }),
+    '《阳光英语》：已学完「第三单元」',
+  );
+  assert.strictEqual(interpretCandidateText(null), '');
+}
+
+console.log('test-parent-textbook-form: interpret helpers passed');

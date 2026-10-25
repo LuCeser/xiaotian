@@ -253,6 +253,11 @@
       return fetchJSON('POST',
         '/api/v1/textbooks/' + encodeURIComponent(textbookId) + '/assign', payload);
     },
+    // Issue #82: one parent sentence → a VERIFIED progress proposal. The
+    // proposal is confirmed client-side; persistence stays on updateTextbook.
+    interpretProgress: function (message) {
+      return fetchJSON('POST', '/api/v1/textbooks/progress/interpret', { message: message });
+    },
   };
 
   // Issue #11 整首古诗 API wiring — ONE implementation feeds both
@@ -460,6 +465,7 @@
       createTextbook: textbookDeps.createTextbook,
       updateTextbook: textbookDeps.updateTextbook,
       assignWords: textbookDeps.assignWords,
+      interpretProgress: textbookDeps.interpretProgress,
       onMutated: function () {
         browse.refresh();
       },

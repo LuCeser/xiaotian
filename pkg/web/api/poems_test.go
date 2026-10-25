@@ -38,7 +38,7 @@ func newPoemTestHandler(t *testing.T) (http.Handler, *sql.DB) {
 		t.Fatalf("NewTextbookRepository: %v", err)
 	}
 	h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, textbooks, lessons, practice, receipts,
-		nil, nil, poems, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+		nil, nil, nil, poems, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 	return h, db
 }
 

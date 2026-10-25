@@ -40,7 +40,7 @@ func newPassageTestHandler(t *testing.T) (http.Handler, *sql.DB) {
 		t.Fatalf("NewTextbookRepository: %v", err)
 	}
 	h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, textbooks, lessons, practice, receipts,
-		nil, nil, nil, passages, infra.PythonConfig{}, infra.NewNoOpLogger())
+		nil, nil, nil, nil, passages, infra.PythonConfig{}, infra.NewNoOpLogger())
 	return h, db
 }
 
@@ -360,7 +360,7 @@ func TestListPassagesSubjectFilter(t *testing.T) {
 func TestPassagesUnavailableDegradedBoot(t *testing.T) {
 	_, lessons, practice, receipts := newLessonTestStores(t)
 	h := NewHandler(&fakeExecutor{}, &fakeCardRepo{}, nil, lessons, practice, receipts,
-		nil, nil, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
+		nil, nil, nil, nil, nil, infra.PythonConfig{}, infra.NewNoOpLogger())
 
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodPost, "/passages"},

@@ -1920,6 +1920,41 @@ body {
   min-width: 180px;
 }
 
+/* Issue #82 说进度 area: one sentence in, a verified proposal out. The
+   bordered card mirrors .textbook-row; the result lines/buttons stack in
+   one column (candidate buttons wrap like .textbook-controls). */
+.textbook-interpret {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+.textbook-interpret .form-field {
+  margin-bottom: 8px;
+}
+
+.textbook-interpret > .btn {
+  margin-bottom: 8px;
+}
+
+.textbook-interpret-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.textbook-interpret-result .form-hint {
+  margin: 0;
+}
+
+.textbook-interpret-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
 .textbook-create-form h4 {
   margin: 12px 0 8px;
   font-size: 14px;

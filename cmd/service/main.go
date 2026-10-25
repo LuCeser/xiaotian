@@ -569,6 +569,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// answers 503 generation_unavailable (same RT-10 degraded
 		// semantics as the recognizer above).
 		var meaningGen *ocr.MeaningGenerator
+		// Issue #82: the parent teaching-progress understanding pipeline.
+		// Nil when MIMO_API_KEY is absent — POST
+		// /textbooks/progress/interpret then answers 503
+		// interpretation_unavailable; the per-book progress selects stay
+		// the always-available manual path.
+		var progressGen *ocr.ProgressInterpreter
 		// 13.1-03: the check-stage photo OCR reader. Nil when MIMO_API_KEY is
 		// absent — the TurnManager answers photo_chunk with a coded
 		// photo_unavailable error and the check stage keeps working
@@ -672,6 +678,10 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// uses, type-converted onto the ocr.ChatReader seam (no image
 			// part is involved).
 			meaningGen = ocr.NewMeaningGenerator(
+				ocr.ChatReader(mimoChatter(mimoClient, cfg.Voice.ChatModel)))
+			// Issue #82: the progress interpreter rides the SAME text chat
+			// seam (one deployment shape with the supplement above).
+			progressGen = ocr.NewProgressInterpreter(
 				ocr.ChatReader(mimoChatter(mimoClient, cfg.Voice.ChatModel)))
 			logger.Info("voice command pipeline enabled",
 				infra.F("component", "infra.main"),
@@ -838,7 +848,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		// the word-list photo recognizer (nil without a vision key — the
 		// recognize route then answers 503, keeping the endpoint honest).
 		publicMux.Handle("/api/v1/", http.StripPrefix("/api/v1",
-			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, meaningGen, poemStore, passageStore, cfg.Python, logger)))
+			api.NewHandler(pyBridge, cardRepo, textbookRepo, lessonStore, practiceStore, receiptStore, wordlistOCR, meaningGen, progressGen, poemStore, passageStore, cfg.Python, logger)))
 		logger.Info("api v1 mounted",
 			infra.F("component", "infra.main"),
 			infra.F("route", "/api/v1/"),

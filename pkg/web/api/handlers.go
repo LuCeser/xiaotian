@@ -72,32 +72,36 @@ const maxStdoutDiagnosticRunes = 300
 // boot — they answer 503 poems_unavailable instead of 404ing). Since
 // Issue #13, passages is the Go-owned structured-original store behind
 // the /passages routes (nil on a degraded boot — they answer 503
-// passages_unavailable instead of 404ing).
+// passages_unavailable instead of 404ing). Since Issue #82, interpreter
+// carries the teaching-progress understanding pipeline (nil without an LLM
+// key — POST /textbooks/progress/interpret answers 503
+// interpretation_unavailable instead of 404ing).
 type handler struct {
-	exec       pybridge.Executor
-	cards      database.CardRepository
-	textbooks  database.TextbookRepository
-	logger     infra.Logger
-	lessons    *lesson.Store
-	practice   *lesson.PracticeStore
-	receipts   *lesson.ReceiptStore
-	recognizer *ocr.WordlistPipeline
-	generator  *ocr.MeaningGenerator
-	poems      *poem.Store
-	passages   *passage.Store
-	cfg        infra.PythonConfig
+	exec        pybridge.Executor
+	cards       database.CardRepository
+	textbooks   database.TextbookRepository
+	logger      infra.Logger
+	lessons     *lesson.Store
+	practice    *lesson.PracticeStore
+	receipts    *lesson.ReceiptStore
+	recognizer  *ocr.WordlistPipeline
+	generator   *ocr.MeaningGenerator
+	interpreter *ocr.ProgressInterpreter
+	poems       *poem.Store
+	passages    *passage.Store
+	cfg         infra.PythonConfig
 }
 
 // NewHandler builds the /api/v1 handler with its internal method-pattern
 // ServeMux. Logger may be nil (NewNoOpLogger is substituted, D-47) so
-// tests can construct the handler cheaply. recognizer and generator may
-// be nil (photo recognition / meaning supplement unavailable — see the
-// handler struct comment).
-func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, generator *ocr.MeaningGenerator, poems *poem.Store, passages *passage.Store, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
+// tests can construct the handler cheaply. recognizer, generator and
+// interpreter may be nil (photo recognition / meaning supplement / progress
+// interpretation unavailable — see the handler struct comment).
+func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks database.TextbookRepository, lessons *lesson.Store, practice *lesson.PracticeStore, receipts *lesson.ReceiptStore, recognizer *ocr.WordlistPipeline, generator *ocr.MeaningGenerator, interpreter *ocr.ProgressInterpreter, poems *poem.Store, passages *passage.Store, cfg infra.PythonConfig, logger infra.Logger) http.Handler {
 	if logger == nil {
 		logger = infra.NewNoOpLogger()
 	}
-	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, generator: generator, poems: poems, passages: passages, cfg: cfg, logger: logger}
+	h := &handler{exec: exec, cards: cards, textbooks: textbooks, lessons: lessons, practice: practice, receipts: receipts, recognizer: recognizer, generator: generator, interpreter: interpreter, poems: poems, passages: passages, cfg: cfg, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /words", h.listWords)
@@ -113,6 +117,9 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks
 	mux.HandleFunc("GET /textbooks", h.listTextbooks)
 	mux.HandleFunc("POST /textbooks", h.createTextbook)
 	mux.HandleFunc("PUT /textbooks/{id}", h.updateTextbook)
+	// Issue #82: one natural sentence → a VERIFIED progress proposal.
+	// Proposes only; persistence stays on the PUT above.
+	mux.HandleFunc("POST /textbooks/progress/interpret", h.interpretTextbookProgress)
 	mux.HandleFunc("POST /textbooks/{id}/assign", h.assignTextbookWords)
 	mux.HandleFunc("POST /textbooks/{id}/unassign", h.unassignTextbookWords)
 	mux.HandleFunc("POST /units/rename", h.renameUnit)

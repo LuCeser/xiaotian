@@ -2,8 +2,10 @@
  * @file Parent page — 教材管理 (Issue #4): textbook entities, batch
  *       lesson attribution and learned progress. Two modal surfaces:
  *
- *   TextbookUI.openManager(category) — the 教材管理 modal: list/create/
- *       edit textbooks, set 已学完第 N 课 progress, set 主教材.
+ *   TextbookUI.openManager(category) — the 教材管理 modal: the Issue #82
+ *       说进度 area (one sentence → verified proposal → the parent's
+ *       click persists through the ordinary PUT), plus list/create/edit
+ *       textbooks, set 已学完第 N 课 progress, set 主教材.
  *   TextbookUI.openAssign(cardIds, words) — the 批量指定 modal: give the
  *       selected words a textbook + lesson (or 待确认), or the parent's
  *       explicit include-in-scope override.
@@ -14,8 +16,9 @@
  * Supplementary words (no textbook) keep issue #2's participation switch
  * as their only gate.
  *
- * parseLessonsText / textbookMetaSummary / progressLabel are PURE and
- * exposed on the window for the Node unit test
+ * parseLessonsText / textbookMetaSummary / progressLabel /
+ * interpretProposalText / interpretCandidateText are PURE and exposed on
+ * the window for the Node unit test
  * (tests/test-parent-textbook-form.js — window.parseBatch precedent).
  *
  * Modals ride window.__parentModalKit (openModal/buildModalField exported
@@ -106,6 +109,36 @@
     return label;
   }
 
+  /**
+   * interpretProposalText — the confirm-line copy for one VERIFIED
+   * interpretation proposal (Issue #82). Pure; '' on a missing result.
+   */
+  function interpretProposalText(res) {
+    if (!res || !res.textbookName || !res.lesson) {
+      return '';
+    }
+    return '小天理解：《' + res.textbookName + '》已学完「' + res.lesson +
+      '」——它和之前的课次都算已学';
+  }
+
+  /**
+   * interpretCandidateText — one minimal-confirmation button's label (the
+   * ambiguous-book case: the parent picks the book explicitly). Pure.
+   */
+  function interpretCandidateText(c) {
+    if (!c || !c.textbookName || !c.lesson) {
+      return '';
+    }
+    return '《' + c.textbookName + '》：已学完「' + c.lesson + '」';
+  }
+
+  // Issue #82 late-reply guard: every EXPLICIT parent choice (submitting a
+  // new sentence, changing a progress select, confirming a proposal or a
+  // candidate) bumps this counter. A model reply that lands afterwards
+  // carries a stale epoch and is dropped — the model's late answer never
+  // overrides what the parent already chose.
+  var interpretEpoch = 0;
+
   // ------------------------------------------------------------------
   // Wired callbacks — set by TextbookUI.init from parent-app.js.
   // ------------------------------------------------------------------
@@ -115,6 +148,7 @@
     createTextbook: function () { return Promise.reject(new Error('未配置')); },
     updateTextbook: function () { return Promise.reject(new Error('未配置')); },
     assignWords: function () { return Promise.reject(new Error('未配置')); },
+    interpretProgress: function () { return Promise.reject(new Error('未配置')); },
     onMutated: function () {},
   };
 
@@ -233,15 +267,21 @@
       title: '教材管理',
       wide: true,
       build: function (body, actions, close) {
-        var listHost = document.createElement('div');
-        listHost.className = 'textbook-list';
-        body.appendChild(listHost);
-
         var hint = document.createElement('p');
         hint.className = 'form-hint';
         hint.textContent = '每本教材单独记录已学进度；已学完第 N 课包含第 N 课，之后的课次不会自动选入默写范围。进入默写范围表示可以被安排，不代表下一课练全部内容。';
         body.appendChild(hint);
 
+        var listHost = document.createElement('div');
+        listHost.className = 'textbook-list';
+
+        // Issue #82: the 说进度 area sits between the hint and the book
+        // list — one sentence proposes, the parent's click persists.
+        buildInterpretCard(body, function () {
+          renderManagerList(listHost, close);
+        });
+
+        body.appendChild(listHost);
         renderManagerList(listHost, close);
 
         var form = document.createElement('form');
@@ -360,6 +400,187 @@
     });
   }
 
+  // ------------------------------------------------------------------
+  // 说进度 area (Issue #82)
+  // ------------------------------------------------------------------
+
+  /** progressDoneLabel — the toast copy for one applied progress. Pure. */
+  function progressDoneLabel(bookName, lesson) {
+    return '《' + bookName + '》已学完「' + lesson + '」';
+  }
+
+  /**
+   * buildInterpretCard — one sentence in, a verified proposal out, the
+   * parent's explicit click persists through the ordinary PUT. The card
+   * PROPOSES only: nothing is written without 记住这个进度 / a candidate
+   * button, and updating progress here never starts a classroom.
+   *
+   * Late replies are dropped by the interpretEpoch guard (see its comment
+   * above): a model answer that lands after the parent made any explicit
+   * choice is stale and must not override it. A save failure keeps the
+   * proposal on screen — the toast says 未记住, never a success claim.
+   */
+  function buildInterpretCard(host, rerender) {
+    var card = document.createElement('div');
+    card.className = 'textbook-interpret';
+
+    var field = modalField('用一句话说明教学进度', 'tb-progress-say');
+    field.input.placeholder = '如：现在学到第三单元了';
+    card.appendChild(field.field);
+
+    var ask = document.createElement('button');
+    ask.type = 'button';
+    ask.className = 'btn btn-secondary';
+    ask.textContent = '小天理解';
+    card.appendChild(ask);
+
+    var out = document.createElement('div');
+    out.className = 'textbook-interpret-result';
+    out.setAttribute('aria-live', 'polite');
+    card.appendChild(out);
+
+    host.appendChild(card);
+
+    function clearOut() {
+      clearEl(out);
+    }
+
+    function renderLine(text) {
+      var p = document.createElement('p');
+      p.className = 'form-hint';
+      p.textContent = text;
+      out.appendChild(p);
+      return p;
+    }
+
+    /** apply — the parent's explicit confirm; the ordinary PUT persists. */
+    function apply(textbookId, learnedLessons, label, btn) {
+      interpretEpoch++; // this choice invalidates every in-flight reply
+      setLoading(btn, true);
+      deps.updateTextbook(textbookId, { learnedLessons: learnedLessons }).then(function () {
+        toast('已记住：' + label, 'success');
+        clearOut();
+        field.input.value = '';
+        deps.onMutated();
+        rerender();
+      }).catch(function (err) {
+        toast('保存失败，进度没有记住：' + ((err && err.message) || '未知错误'), 'error');
+      }).then(function () {
+        setLoading(btn, false);
+      });
+    }
+
+    function renderResult(res) {
+      clearOut();
+      if (!res) {
+        renderLine('没有听懂，请换个说法说明学到哪里。');
+        return;
+      }
+      if (res.status === 'proposed') {
+        renderLine(interpretProposalText(res));
+        var row = document.createElement('div');
+        row.className = 'textbook-interpret-actions';
+        var confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.className = 'btn btn-primary';
+        confirmBtn.textContent = '记住这个进度';
+        confirmBtn.addEventListener('click', function () {
+          apply(res.textbookId, res.learnedLessons,
+            progressDoneLabel(res.textbookName, res.lesson), confirmBtn);
+        });
+        row.appendChild(confirmBtn);
+        var rejectBtn = document.createElement('button');
+        rejectBtn.type = 'button';
+        rejectBtn.className = 'btn btn-secondary';
+        rejectBtn.textContent = '不对，重说';
+        rejectBtn.addEventListener('click', function () {
+          interpretEpoch++; // the parent's correction wins over any reply
+          clearOut();
+          field.input.focus();
+        });
+        row.appendChild(rejectBtn);
+        out.appendChild(row);
+        return;
+      }
+      if (res.status === 'not_progress') {
+        renderLine('这句话不是在说明教学进度。' + (res.reason ? res.reason + ' ' : '') +
+          '这里只负责记住教学进度；要开始默写请回到首页。');
+        return;
+      }
+      // unclear: the one necessary question, plus the minimal book choices.
+      if (res.reason) {
+        renderLine(res.reason);
+      }
+      (res.candidates || []).forEach(function (c) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-secondary';
+        btn.textContent = interpretCandidateText(c);
+        btn.addEventListener('click', function () {
+          apply(c.textbookId, c.learnedLessons,
+            progressDoneLabel(c.textbookName, c.lesson), btn);
+        });
+        out.appendChild(btn);
+      });
+      if (!res.candidates || !res.candidates.length) {
+        renderLine('也可以直接用下方每本教材的进度选择。');
+      }
+    }
+
+    function submitInterpret() {
+      var text = field.input.value.trim();
+      if (!text) {
+        clearOut();
+        renderLine('请先输入一句话，例如「现在学到第三单元了」。');
+        return;
+      }
+      var epoch = ++interpretEpoch;
+      clearOut();
+      var loadingLine = renderLine('小天正在理解…');
+      setLoading(ask, true);
+      deps.interpretProgress(text).then(function (res) {
+        if (epoch !== interpretEpoch) {
+          dropStale(loadingLine); // a late model reply never overrides the parent's choice
+          return;
+        }
+        renderResult(res);
+      }).catch(function (err) {
+        if (epoch !== interpretEpoch) {
+          dropStale(loadingLine);
+          return;
+        }
+        clearOut();
+        if (err && err.code === 'interpretation_unavailable') {
+          renderLine('理解服务暂不可用。可以直接用下方每本教材的进度选择，或稍后再试。');
+          return;
+        }
+        renderLine('理解失败：' + ((err && err.message) || '未知错误') +
+          '。可以再试一次，或直接用下方每本教材的进度选择。');
+      }).then(function () {
+        setLoading(ask, false);
+      });
+    }
+
+    /**
+     * dropStale — a stale reply's only cleanup: remove OUR loading line
+     * when it is still on screen. Never touch what a newer interaction
+     * rendered (a second submit's own line, a fresh proposal, …).
+     */
+    function dropStale(loadingLine) {
+      if (loadingLine.parentNode) {
+        loadingLine.parentNode.removeChild(loadingLine);
+      }
+    }
+
+    ask.addEventListener('click', submitInterpret);
+    field.input.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submitInterpret();
+      }
+    });
+  }
+
   /** The textbook list inside the manager modal. */
   function renderManagerList(host, close) {
     clearEl(host);
@@ -442,6 +663,7 @@
     }
     progressSelect.disabled = total === 0;
     progressSelect.addEventListener('change', function () {
+      interpretEpoch++; // an explicit select choice invalidates in-flight replies
       var n = parseInt(progressSelect.value, 10) || 0;
       setLoading(progressSelect, true);
       deps.updateTextbook(book.id, { learnedLessons: n }).then(function () {
@@ -718,6 +940,7 @@
       deps.createTextbook = wiring.createTextbook || deps.createTextbook;
       deps.updateTextbook = wiring.updateTextbook || deps.updateTextbook;
       deps.assignWords = wiring.assignWords || deps.assignWords;
+      deps.interpretProgress = wiring.interpretProgress || deps.interpretProgress;
       deps.onMutated = wiring.onMutated || deps.onMutated;
     },
     openManager: openManager,
@@ -728,4 +951,6 @@
   global.textbookMetaSummary = textbookMetaSummary;
   global.progressLabel = progressLabel;
   global.assignLabel = assignLabel;
+  global.interpretProposalText = interpretProposalText;
+  global.interpretCandidateText = interpretCandidateText;
 })(typeof window !== 'undefined' ? window : this);
