@@ -84,6 +84,41 @@ type TextbookRepository interface {
 	// attaches on an unscoped browse (building a whole-library IN-list for
 	// it would only re-parse N placeholders).
 	AllAssignments(ctx context.Context) (map[int64][]TextbookAssignment, error)
+
+	// BrowseScopes is the parent-browse verdict for the given cards: the
+	// same textbook gate dictation uses (textbookScopePredicate), plus the
+	// lesson the browse page should group under. Cards with no assignment
+	// are absent — callers treat absence as supplementary. A pre-migration
+	// database (tables missing) returns an empty map, never an error.
+	BrowseScopes(ctx context.Context, cardIDs []int64) (map[int64]CardScope, error)
+}
+
+// Scope reasons for CardScope. They are the textbook gate only —
+// participation is a separate switch dictation ANDs on afterwards.
+const (
+	// ScopeSupplementary: no textbook assignment. Eligible by default.
+	ScopeSupplementary = "supplementary"
+	// ScopeIncluded: a parent explicitly included the word, past lesson progress.
+	ScopeIncluded = "included"
+	// ScopeLearned: a lesson sits inside its textbook's learned prefix.
+	ScopeLearned = "learned"
+	// ScopeUnlearned: every named lesson is still beyond learned progress
+	// (or no longer on the lesson list). Held out of dictation.
+	ScopeUnlearned = "unlearned"
+	// ScopePending: assignments exist but every lesson is empty (待确认).
+	ScopePending = "pending"
+)
+
+// CardScope is one card's textbook gate as the browse page must show it.
+// InScope matches textbookScopePredicate (ignoring participation).
+// GroupLesson is the lesson to group under so the group does not contradict
+// InScope: the lesson that admits the word when one does, otherwise the
+// lesson that holds it out. Empty GroupLesson with a non-supplementary
+// reason is 待确认.
+type CardScope struct {
+	Reason      string
+	GroupLesson string
+	InScope     bool
 }
 
 // Compile-time interface satisfaction check (D-43).
@@ -302,6 +337,116 @@ func (r *sqliteTextbookRepository) AllAssignments(ctx context.Context) (map[int6
 		return map[int64][]TextbookAssignment{}, nil
 	}
 	return r.scanAssignments(ctx, assignmentsProjection+" ORDER BY a.card_id, a.textbook_id")
+}
+
+// lessonProgress is one textbook's explicit lesson order plus how many
+// of those lessons count as learned (已学完第 N 课包含第 N 课).
+type lessonProgress struct {
+	lessons []string
+	learned int
+}
+
+// BrowseScopes implements TextbookRepository.BrowseScopes.
+func (r *sqliteTextbookRepository) BrowseScopes(ctx context.Context, cardIDs []int64) (map[int64]CardScope, error) {
+	if len(cardIDs) == 0 {
+		return map[int64]CardScope{}, nil
+	}
+	exists, err := textbookTablesExist(ctx, r.db)
+	if err != nil {
+		return nil, errors.Wrap(err, "textbook tables probe")
+	}
+	if !exists {
+		return map[int64]CardScope{}, nil
+	}
+	assignments, err := r.AssignmentsByCardIDs(ctx, cardIDs)
+	if err != nil {
+		return nil, err
+	}
+	books, err := r.loadLessonProgress(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]CardScope, len(assignments))
+	for id, rows := range assignments {
+		out[id] = scopeVerdict(rows, books)
+	}
+	return out, nil
+}
+
+// loadLessonProgress reads every textbook's lesson list and learned prefix.
+func (r *sqliteTextbookRepository) loadLessonProgress(ctx context.Context) (map[int64]lessonProgress, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT id, lessons, learned_lessons FROM textbooks")
+	if err != nil {
+		return nil, errors.Wrap(err, "lesson progress")
+	}
+	defer rows.Close()
+	out := map[int64]lessonProgress{}
+	for rows.Next() {
+		var id int64
+		var learned int
+		var lessonsJSON string
+		if err := rows.Scan(&id, &lessonsJSON, &learned); err != nil {
+			return nil, errors.Wrap(err, "lesson progress: scan")
+		}
+		out[id] = lessonProgress{lessons: parseTextbookLessons(lessonsJSON), learned: learned}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.Wrap(err, "lesson progress: iteration")
+	}
+	return out, nil
+}
+
+// lessonLearned reports whether lesson is inside the book's learned prefix.
+// 已学完第 N 课包含第 N 课. A counter past the list clamps to the whole
+// list (the same clamp textbookScopePredicate uses). An empty lesson, a
+// missing book, or a name that is no longer on the list is not learned.
+func lessonLearned(lesson string, book lessonProgress, ok bool) bool {
+	if !ok || lesson == "" {
+		return false
+	}
+	limit := book.learned
+	if limit > len(book.lessons) {
+		limit = len(book.lessons)
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	for _, name := range book.lessons[:limit] {
+		if name == lesson {
+			return true
+		}
+	}
+	return false
+}
+
+// scopeVerdict is the textbook gate for one card. It mirrors
+// textbookScopePredicate's three branches (no assignment is not passed in —
+// the caller omits those cards) and picks GroupLesson so a browse group
+// cannot show a learned-looking label for a word the gate holds out, or
+// the reverse. One learned assignment admits the word (any source suffices)
+// and that admitting lesson is the group; otherwise the first named lesson
+// is the group that explains the hold.
+func scopeVerdict(assignments []TextbookAssignment, books map[int64]lessonProgress) CardScope {
+	for _, a := range assignments {
+		if a.IncludeInScope {
+			return CardScope{InScope: true, Reason: ScopeIncluded, GroupLesson: a.Lesson}
+		}
+	}
+	for _, a := range assignments {
+		if a.Lesson == "" {
+			continue
+		}
+		book, ok := books[a.TextbookID]
+		if lessonLearned(a.Lesson, book, ok) {
+			return CardScope{InScope: true, Reason: ScopeLearned, GroupLesson: a.Lesson}
+		}
+	}
+	for _, a := range assignments {
+		if a.Lesson != "" {
+			return CardScope{InScope: false, Reason: ScopeUnlearned, GroupLesson: a.Lesson}
+		}
+	}
+	return CardScope{InScope: false, Reason: ScopePending}
 }
 
 // textbookScopePredicate composes the Issue #4 eligibility SQL fragment

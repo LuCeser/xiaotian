@@ -293,3 +293,48 @@ func TestTextbookRoutes(t *testing.T) {
 		}
 	})
 }
+
+// TestListWordsScopeIgnoresUnitTag is the Issue #89 wire contract: GET /words
+// tells the browse page to group by the textbook lesson and to say the word
+// is held, even when the legacy unit tag still says unit 1 or is empty.
+// Progress has reached only unit 1; both words are assigned to unit 3.
+func TestListWordsScopeIgnoresUnitTag(t *testing.T) {
+	cards := &fakeCardRepo{cards: []database.Card{
+		{ID: 1, Word: "evening", Unit: "", Category: "english", Participates: true},
+		{ID: 2, Word: "afternoon", Unit: "unit 1", Category: "english", Participates: true},
+	}}
+	h, db := newTextbookTestHandler(t, &fakeExecutor{}, cards)
+	ensureTextbookTables(t, db)
+	seedTextbookRow(t, db, 1, "英语", `["unit 1","unit 3"]`, 1)
+	if _, err := db.Exec(
+		`INSERT INTO card_assignments (card_id, textbook_id, lesson) VALUES (1, 1, 'unit 3'), (2, 1, 'unit 3')`,
+	); err != nil {
+		t.Fatalf("seed assignments: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/words", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Words []struct {
+			Word        string `json:"word"`
+			Unit        string `json:"unit"`
+			ScopeReason string `json:"scope_reason"`
+			GroupLesson string `json:"group_lesson"`
+			InScope     bool   `json:"in_scope"`
+		} `json:"words"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Words) != 2 {
+		t.Fatalf("words = %+v", resp.Words)
+	}
+	for _, w := range resp.Words {
+		if w.InScope || w.ScopeReason != "unlearned" || w.GroupLesson != "unit 3" {
+			t.Fatalf("%s wire = %+v; want unlearned group unit 3 despite unit tag %q", w.Word, w, w.Unit)
+		}
+	}
+}

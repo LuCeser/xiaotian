@@ -341,8 +341,17 @@ type wordJSON struct {
 	// just carries the provenance.
 	MeaningSource string                        `json:"meaning_source"`
 	Textbooks     []database.TextbookAssignment `json:"textbooks"`
-	ID            int64                         `json:"id"`
-	Participates  bool                          `json:"participates"`
+	// ScopeReason / GroupLesson / InScope are the textbook gate the browse
+	// page groups and explains by (Issue #89). They follow the same rule as
+	// dictation eligibility. Participation stays a separate field: dictation
+	// requires both. ScopeReason is supplementary when the word has no
+	// textbook assignment; GroupLesson is then unused and the page groups
+	// by Unit.
+	ScopeReason  string `json:"scope_reason"`
+	GroupLesson  string `json:"group_lesson"`
+	ID           int64  `json:"id"`
+	InScope      bool   `json:"in_scope"`
+	Participates bool   `json:"participates"`
 }
 
 // wordsResponse is the GET /words response envelope.
@@ -422,28 +431,43 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 	// browse chips (教材·课次 / 待确认) need no second request. An
 	// UNFILTERED browse asks for the whole projection directly — building
 	// a whole-library IN-list for it would only re-parse N placeholders. A
-	// repo failure degrades to empty attribution (the words still render)
-	// — assignment data is presentational here, never load-bearing.
+	// repo failure degrades to empty attribution (the words still render).
+	//
+	// Issue #89: the browse group and the 「尚未学到」 line read this same
+	// textbook gate dictation uses. Scope failure degrades to supplementary
+	// (no hold line) only when attribution is also empty; a word that still
+	// carries assignments keeps an empty scope_reason so the page groups by
+	// the lesson without inventing eligibility.
+	ids := make([]int64, 0, len(cards))
+	for _, c := range cards {
+		ids = append(ids, c.ID)
+	}
 	attribution := make(map[int64][]database.TextbookAssignment, len(cards))
+	scopes := map[int64]database.CardScope{}
 	if h.textbooks != nil && len(cards) > 0 {
 		var byCard map[int64][]database.TextbookAssignment
-		var err error
+		var attrErr error
 		if category == "" && unit == "" && q == "" {
-			byCard, err = h.textbooks.AllAssignments(r.Context())
+			byCard, attrErr = h.textbooks.AllAssignments(r.Context())
 		} else {
-			ids := make([]int64, 0, len(cards))
-			for _, c := range cards {
-				ids = append(ids, c.ID)
-			}
-			byCard, err = h.textbooks.AssignmentsByCardIDs(r.Context(), ids)
+			byCard, attrErr = h.textbooks.AssignmentsByCardIDs(r.Context(), ids)
 		}
-		if err == nil {
+		if attrErr == nil {
 			attribution = byCard
 		} else {
 			h.logger.Warn("word attribution projection failed",
 				infra.F("component", "web/api"),
-				infra.ErrField(err),
+				infra.ErrField(attrErr),
 			)
+		}
+		var scopeErr error
+		scopes, scopeErr = h.textbooks.BrowseScopes(r.Context(), ids)
+		if scopeErr != nil {
+			h.logger.Warn("word scope projection failed",
+				infra.F("component", "web/api"),
+				infra.ErrField(scopeErr),
+			)
+			scopes = map[int64]database.CardScope{}
 		}
 	}
 
@@ -459,9 +483,22 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 			MeaningSource: c.MeaningSource,
 			Participates:  c.Participates,
 			Textbooks:     []database.TextbookAssignment{},
+			InScope:       true,
+			ScopeReason:   database.ScopeSupplementary,
 		}
 		if rows, ok := attribution[c.ID]; ok {
 			row.Textbooks = rows
+		}
+		if sc, ok := scopes[c.ID]; ok {
+			row.InScope = sc.InScope
+			row.ScopeReason = sc.Reason
+			row.GroupLesson = sc.GroupLesson
+		} else if len(row.Textbooks) > 0 {
+			// Assignments arrived and the verdict did not. Leave the reason
+			// empty so the page groups by the lesson and does not claim the
+			// word is supplementary.
+			row.InScope = false
+			row.ScopeReason = ""
 		}
 		words = append(words, row)
 	}
