@@ -339,19 +339,20 @@ type wordJSON struct {
 	// marker (Issue #8): the display rule is meaning non-empty AND
 	// meaning_source == "generated" — the client applies it, the wire
 	// just carries the provenance.
-	MeaningSource string                        `json:"meaning_source"`
-	Textbooks     []database.TextbookAssignment `json:"textbooks"`
+	MeaningSource string `json:"meaning_source"`
 	// ScopeReason / GroupLesson / InScope are the textbook gate the browse
 	// page groups and explains by (Issue #89). They follow the same rule as
 	// dictation eligibility. Participation stays a separate field: dictation
 	// requires both. ScopeReason is supplementary when the word has no
 	// textbook assignment; GroupLesson is then unused and the page groups
-	// by Unit.
-	ScopeReason  string `json:"scope_reason"`
-	GroupLesson  string `json:"group_lesson"`
-	ID           int64  `json:"id"`
-	InScope      bool   `json:"in_scope"`
-	Participates bool   `json:"participates"`
+	// by Unit. The two strings sit with the other strings, ahead of the
+	// slice: a slice between pointer fields extends the GC pointer prefix.
+	ScopeReason  string                        `json:"scope_reason"`
+	GroupLesson  string                        `json:"group_lesson"`
+	Textbooks    []database.TextbookAssignment `json:"textbooks"`
+	ID           int64                         `json:"id"`
+	InScope      bool                          `json:"in_scope"`
+	Participates bool                          `json:"participates"`
 }
 
 // wordsResponse is the GET /words response envelope.

@@ -342,14 +342,16 @@ func TestBrowseScopeMatchesDictationEligibility(t *testing.T) {
 	// browse page look like these words were already in the learned lesson.
 	// learned: lesson unit 1, tag also unit 1.
 	// extra: tag unit 1, no textbook assignment (supplementary).
+	// Strings first: govet fieldalignment counts pointer bytes through the
+	// last pointer, and an int64 ahead of them pulls that span out by 8.
 	seeds := []struct {
-		id         int64
 		word, unit string
+		id         int64
 	}{
-		{1, "evening", ""},
-		{2, "afternoon", "unit 1"},
-		{3, "learned", "unit 1"},
-		{4, "extra", "unit 1"},
+		{word: "evening", unit: "", id: 1},
+		{word: "afternoon", unit: "unit 1", id: 2},
+		{word: "learned", unit: "unit 1", id: 3},
+		{word: "extra", unit: "unit 1", id: 4},
 	}
 	for _, s := range seeds {
 		if _, err := db.Exec(
