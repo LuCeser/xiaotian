@@ -17,10 +17,11 @@
  *     the legacy unit tag, which lesson-owned words can still wear while
  *     the page shows them under their lesson (Issue #89).
  *   - Groups are built client-side. A word with textbook lesson ownership
- *     groups by that lesson (Issue #89 — the same record dictation reads),
- *     never by the legacy unit tag. A word with no textbook assignment
- *     still groups by its unit string (补充词汇). Groups left with zero
- *     rows by the search are hidden, not rendered empty.
+ *     groups by that lesson within its OWN textbook (Issue #89 — the same
+ *     record dictation reads; two books' same-named lessons are separate
+ *     groups), never by the legacy unit tag. A word with no textbook
+ *     assignment still groups by its unit string (补充词汇). Groups left
+ *     with zero rows by the search are hidden, not rendered empty.
  *   - Edit modal (编辑单词): only 单词 is required (D-08); category is
  *     read-only (D-07); 保存修改 → PUT /api/v1/words/{id} → toast +
  *     refresh.
@@ -47,75 +48,120 @@
   var PENDING_LESSON_LABEL = '待确认';
 
   /**
-   * lessonOwnership — the lesson the browse group must use, or null when
-   * the word has no textbook assignment and still groups by its unit tag.
-   * A non-supplementary scope_reason wins (including an empty group_lesson,
-   * which is 待确认). Without a verdict, the first named lesson on the
-   * word is the group so a just-assigned lesson still moves the row.
+   * lessonOwnership — the textbook lesson the browse group must use, as
+   * {bookId, bookName, lesson}, or null when the word has no textbook
+   * assignment and still groups by its unit tag. The lesson NAME alone
+   * cannot key a group: two textbooks can both carry 「第1课」 and their
+   * lessons are independent (课次属于教材), so the owning book rides
+   * along. A non-supplementary scope_reason wins (including an empty
+   * lesson, which is 待确认 — one shared bucket). Without a verdict, the
+   * first named assignment on the word is the group so a just-assigned
+   * lesson still moves the row.
    */
   function lessonOwnership(word) {
     if (!word) {
       return null;
     }
+    var entries = word.textbooks || [];
     var reason = word.scope_reason || '';
+    var lesson = '';
     if (reason && reason !== 'supplementary') {
-      return word.group_lesson || '';
-    }
-    var books = word.textbooks || [];
-    if (!books.length) {
+      lesson = word.group_lesson || '';
+    } else if (entries.length) {
+      for (var i = 0; i < entries.length; i++) {
+        if (entries[i] && entries[i].lesson) {
+          lesson = entries[i].lesson;
+          break;
+        }
+      }
+    } else {
       return null;
     }
-    var lesson = '';
-    for (var i = 0; i < books.length; i++) {
-      if (books[i] && books[i].lesson) {
-        lesson = books[i].lesson;
+    return owningAssignment(word, lesson);
+  }
+
+  /**
+   * owningAssignment — the assignment a lesson group keys by: the entry
+   * the server verdict named (group_lesson plus its group_textbook_id),
+   * else the first entry wearing that lesson. When the attribution
+   * projection is absent the wire's bare book id still keys the group
+   * (0 = unknown). An empty lesson is 待确认 and never claims a book.
+   */
+  function owningAssignment(word, lesson) {
+    if (!lesson) {
+      return { bookId: 0, bookName: '', lesson: '' };
+    }
+    var entries = word.textbooks || [];
+    var bookId = word.group_textbook_id || 0;
+    var wearing = null;
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      if (!entry || entry.lesson !== lesson) {
+        continue;
+      }
+      if (!wearing) {
+        wearing = entry;
+      }
+      if (bookId && entry.id === bookId) {
+        wearing = entry;
         break;
       }
     }
-    return lesson;
+    if (wearing) {
+      return { bookId: wearing.id || 0, bookName: wearing.name || '', lesson: lesson };
+    }
+    return { bookId: bookId, bookName: '', lesson: lesson };
   }
 
   /**
    * dictationStatusText — the parent-facing line when this word will not
    * be picked for dictation, or '' when the textbook gate and the
-   * participation switch both admit it. The lesson hold is stated even
-   * when participation is also off: the checkbox already shows that
-   * switch, and the lesson hold is the one a group header used to hide.
+   * participation switch both admit it. A removed word says so FIRST:
+   * eligibility is participates AND 课次门槛, so 「学到后自动加入」 would
+   * be a false promise while participates is off — learning the lesson
+   * alone would not bring the word back.
    */
   function dictationStatusText(word) {
     if (!word) {
       return '';
     }
+    if (word.participates === false) {
+      return '已移出默写范围';
+    }
     if (word.scope_reason === 'unlearned') {
       return '尚未学到，学到后自动加入';
     }
+    if (word.scope_reason === 'off_list') {
+      return '课次不在教材课次表里，不会随进度自动加入';
+    }
     if (word.scope_reason === 'pending') {
       return '课次待确认，指定后自动加入';
-    }
-    if (word.participates === false) {
-      return '已移出默写范围';
     }
     return '';
   }
 
   /**
    * groupBrowseWords — one group per lesson (words that have textbook
-   * ownership) or per unit tag (supplementary words). Order is first-seen;
+   * ownership) or per unit tag (supplementary words). A lesson group is
+   * keyed by its BOOK and lesson name together: two books' 「第1课」 are
+   * independent lessons, never one merged group. Order is first-seen;
    * orderBrowseGroups re-sorts lesson groups into teaching order.
    */
   function groupBrowseWords(words) {
     var groups = [];
     var index = Object.create(null);
     (words || []).forEach(function (word) {
-      var lesson = lessonOwnership(word);
+      var own = lessonOwnership(word);
       var key;
-      if (lesson !== null) {
-        key = 'lesson\u0000' + lesson;
+      if (own !== null) {
+        key = 'lesson\u0000' + own.bookId + '\u0000' + own.lesson;
         if (!Object.prototype.hasOwnProperty.call(index, key)) {
           index[key] = {
             kind: 'lesson',
-            unit: lesson,
-            label: lesson || PENDING_LESSON_LABEL,
+            unit: own.lesson,
+            bookId: own.bookId,
+            bookName: own.bookName,
+            label: own.lesson || PENDING_LESSON_LABEL,
             rows: [],
           };
           groups.push(index[key]);
@@ -139,19 +185,31 @@
   }
 
   /**
-   * orderBrowseGroups — lesson groups follow the textbooks' explicit
-   * lesson order (not dictionary order, not the legacy unit sort).
+   * orderBrowseGroups — lesson groups follow their OWN textbook's explicit
+   * lesson order: books in list order, each book's lessons in list order
+   * (not dictionary order, not the legacy unit sort, and never one global
+   * name order that would interleave two books' independent 「第1课」).
    * 待确认 follows the named lessons. Supplementary unit groups keep
    * first-seen order at the end.
    */
   function orderBrowseGroups(groups, books) {
     var rank = Object.create(null);
+    var bookName = Object.create(null);
+    var lessonName = Object.create(null);
     var n = 0;
     (books || []).forEach(function (book) {
-      var lessons = book && book.lessons ? book.lessons : [];
-      lessons.forEach(function (name) {
-        if (name && !Object.prototype.hasOwnProperty.call(rank, name)) {
-          rank[name] = n;
+      if (!book) {
+        return;
+      }
+      bookName[String(book.id)] = book.name || '';
+      (book.lessons || []).forEach(function (name) {
+        if (!name) {
+          return;
+        }
+        lessonName[name] = true;
+        var key = String(book.id) + '\u0000' + name;
+        if (!Object.prototype.hasOwnProperty.call(rank, key)) {
+          rank[key] = n;
           n += 1;
         }
       });
@@ -171,24 +229,48 @@
       named.push(group);
     });
     named.sort(function (a, b) {
-      var ra = Object.prototype.hasOwnProperty.call(rank, a.unit) ? rank[a.unit] : 100000;
-      var rb = Object.prototype.hasOwnProperty.call(rank, b.unit) ? rank[b.unit] : 100000;
+      var ka = String(a.bookId || 0) + '\u0000' + a.unit;
+      var kb = String(b.bookId || 0) + '\u0000' + b.unit;
+      var ra = Object.prototype.hasOwnProperty.call(rank, ka) ? rank[ka] : 100000;
+      var rb = Object.prototype.hasOwnProperty.call(rank, kb) ? rank[kb] : 100000;
       return ra - rb;
+    });
+    // A lesson name worn by TWO books names two independent groups — both
+    // carry their book so the headers cannot read as one lesson.
+    var byLesson = Object.create(null);
+    named.forEach(function (group) {
+      if (!group.unit) {
+        return;
+      }
+      if (!Object.prototype.hasOwnProperty.call(byLesson, group.unit)) {
+        byLesson[group.unit] = [];
+      }
+      byLesson[group.unit].push(group);
+    });
+    Object.keys(byLesson).forEach(function (lesson) {
+      var wearers = byLesson[lesson];
+      if (wearers.length < 2) {
+        return;
+      }
+      wearers.forEach(function (group) {
+        var name = group.bookName || bookName[String(group.bookId)] || '';
+        if (name) {
+          group.label = name + '·' + lesson;
+        }
+      });
     });
     // A supplementary unit tag that shares a name with a textbook lesson
     // is a different bucket. Prefix it so two headers do not both read
-    // 「unit 1」.
-    var lessonLabels = Object.create(null);
-    named.forEach(function (group) {
-      if (group && group.unit) {
-        lessonLabels[group.unit] = true;
-      }
+    // 「unit 1」 (a lesson group rendered below also claims the name, even
+    // when the books list itself failed to load).
+    Object.keys(byLesson).forEach(function (lesson) {
+      lessonName[lesson] = true;
     });
     units.forEach(function (group) {
       if (!group || !group.unit) {
         return;
       }
-      if (lessonLabels[group.unit] || Object.prototype.hasOwnProperty.call(rank, group.unit)) {
+      if (lessonName[group.unit]) {
         group.label = '补充 · ' + group.unit;
       }
     });
@@ -1066,7 +1148,11 @@
   BrowseView.prototype.buildGroup = function (group) {
     var self = this;
     var unit = group.unit;
-    var collapseKey = group.kind === 'lesson' ? ('课次:' + unit) : unit;
+    // A lesson group's collapse key carries its book: two books' 「第1课」
+    // are independent groups and must not collapse together.
+    var collapseKey = group.kind === 'lesson'
+      ? ('课次:' + (group.bookId || 0) + ':' + unit)
+      : unit;
 
     var wrap = document.createElement('div');
     wrap.className = 'unit-group';

@@ -345,14 +345,17 @@ type wordJSON struct {
 	// dictation eligibility. Participation stays a separate field: dictation
 	// requires both. ScopeReason is supplementary when the word has no
 	// textbook assignment; GroupLesson is then unused and the page groups
-	// by Unit. The two strings sit with the other strings, ahead of the
+	// by Unit. GroupTextbookID names the book GroupLesson came from — two
+	// books can share a lesson name, so the lesson alone cannot key a
+	// group. The two strings sit with the other strings, ahead of the
 	// slice: a slice between pointer fields extends the GC pointer prefix.
-	ScopeReason  string                        `json:"scope_reason"`
-	GroupLesson  string                        `json:"group_lesson"`
-	Textbooks    []database.TextbookAssignment `json:"textbooks"`
-	ID           int64                         `json:"id"`
-	InScope      bool                          `json:"in_scope"`
-	Participates bool                          `json:"participates"`
+	ScopeReason     string                        `json:"scope_reason"`
+	GroupLesson     string                        `json:"group_lesson"`
+	Textbooks       []database.TextbookAssignment `json:"textbooks"`
+	ID              int64                         `json:"id"`
+	GroupTextbookID int64                         `json:"group_textbook_id"`
+	InScope         bool                          `json:"in_scope"`
+	Participates    bool                          `json:"participates"`
 }
 
 // wordsResponse is the GET /words response envelope.
@@ -494,6 +497,7 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 			row.InScope = sc.InScope
 			row.ScopeReason = sc.Reason
 			row.GroupLesson = sc.GroupLesson
+			row.GroupTextbookID = sc.GroupTextbookID
 		} else if len(row.Textbooks) > 0 {
 			// Assignments arrived and the verdict did not. Leave the reason
 			// empty so the page groups by the lesson and does not claim the

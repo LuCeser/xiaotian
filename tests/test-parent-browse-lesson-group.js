@@ -118,15 +118,99 @@ assert.strictEqual(pendingGroups[0].kind, 'lesson');
 assert.strictEqual(pendingGroups[0].label, '待确认');
 assert.strictEqual(dictationStatusText(pending), '课次待确认，指定后自动加入');
 
-// Participation off on a learned word is visible; the lesson hold still
-// wins when both apply, because the checkbox already shows the switch.
+// Participation off says so FIRST, even when a lesson hold also applies:
+// eligibility is participates AND 课次门槛, so 「学到后自动加入」 would be
+// a false promise — learning the lesson alone would not bring the word
+// back while the parent's removal stands.
 assert.strictEqual(
   dictationStatusText({ participates: false, scope_reason: 'learned' }),
   '已移出默写范围',
 );
 assert.strictEqual(
   dictationStatusText({ participates: false, scope_reason: 'unlearned' }),
-  '尚未学到，学到后自动加入',
+  '已移出默写范围',
+);
+assert.strictEqual(
+  dictationStatusText({ participates: false, scope_reason: 'off_list' }),
+  '已移出默写范围',
+);
+
+// 课表外 (off_list): the lesson is no longer on the book's list — it never
+// becomes learned, so the hold line must not promise 学到后自动加入.
+const stray = {
+  id: 8,
+  word: 'stray',
+  category: 'english',
+  unit: '',
+  participates: true,
+  scope_reason: 'off_list',
+  group_lesson: '第9课',
+  group_textbook_id: 1,
+  textbooks: [{ id: 1, name: '英语', lesson: '第9课', includeInScope: false }],
+};
+assert.strictEqual(
+  dictationStatusText(stray),
+  '课次不在教材课次表里，不会随进度自动加入',
+);
+// It still groups under the stray lesson (the row explains itself there).
+const strayGroups = groupBrowseWords([stray]);
+assert.strictEqual(strayGroups[0].kind, 'lesson');
+assert.strictEqual(strayGroups[0].label, '第9课');
+
+// Two textbooks can both carry 「第1课」 — the lessons are independent
+// (课次属于教材): separate groups even under one shared name, each book's
+// own teaching order, and both same-named headers say which book is which.
+const twoBooks = [
+  { id: 1, name: '课内英语', lessons: ['第1课', '第2课'] },
+  { id: 2, name: '课外英语', lessons: ['第1课'] },
+];
+const inClassFirst = {
+  id: 9,
+  word: 'ant',
+  category: 'english',
+  unit: '',
+  participates: true,
+  scope_reason: 'learned',
+  group_lesson: '第1课',
+  group_textbook_id: 1,
+  textbooks: [{ id: 1, name: '课内英语', lesson: '第1课', includeInScope: false }],
+};
+const inClassSecond = {
+  id: 10,
+  word: 'apple',
+  category: 'english',
+  unit: '',
+  participates: true,
+  scope_reason: 'unlearned',
+  group_lesson: '第2课',
+  group_textbook_id: 1,
+  textbooks: [{ id: 1, name: '课内英语', lesson: '第2课', includeInScope: false }],
+};
+const afterClass = {
+  id: 11,
+  word: 'ape',
+  category: 'english',
+  unit: '',
+  participates: true,
+  scope_reason: 'unlearned',
+  group_lesson: '第1课',
+  group_textbook_id: 2,
+  textbooks: [{ id: 2, name: '课外英语', lesson: '第1课', includeInScope: false }],
+};
+// First-seen order deliberately interleaves the books; the sort must still
+// keep each book's lessons together in that book's own order.
+const two = orderBrowseGroups(
+  groupBrowseWords([inClassSecond, afterClass, inClassFirst]),
+  twoBooks,
+);
+assert.deepStrictEqual(
+  two.map((g) => ({ label: g.label, words: g.rows.map((w) => w.word) })),
+  [
+    { label: '课内英语·第1课', words: ['ant'] },
+    // 第2课 is worn by ONE book only — the plain name stays.
+    { label: '第2课', words: ['apple'] },
+    { label: '课外英语·第1课', words: ['ape'] },
+  ],
 );
 
 // Without a server verdict, a textbook assignment still beats the unit tag

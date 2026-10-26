@@ -260,15 +260,15 @@ func TestCardScopeEligibleOnly(t *testing.T) {
 		t.Fatalf("BrowseScopes: %v", err)
 	}
 	wantReason := map[int64]CardScope{
-		2:  {InScope: true, Reason: ScopeLearned, GroupLesson: "第1课"},
-		3:  {InScope: false, Reason: ScopeUnlearned, GroupLesson: "第2课"},
-		4:  {InScope: true, Reason: ScopeLearned, GroupLesson: "第3课"},
+		2:  {InScope: true, Reason: ScopeLearned, GroupLesson: "第1课", GroupTextbookID: 1},
+		3:  {InScope: false, Reason: ScopeUnlearned, GroupLesson: "第2课", GroupTextbookID: 1},
+		4:  {InScope: true, Reason: ScopeLearned, GroupLesson: "第3课", GroupTextbookID: 1},
 		5:  {InScope: false, Reason: ScopePending},
-		6:  {InScope: true, Reason: ScopeIncluded},
-		7:  {InScope: false, Reason: ScopeUnlearned, GroupLesson: "A课"},
-		8:  {InScope: true, Reason: ScopeLearned, GroupLesson: "B课"},
-		9:  {InScope: true, Reason: ScopeLearned, GroupLesson: "B课"},
-		10: {InScope: true, Reason: ScopeLearned, GroupLesson: "第1课"},
+		6:  {InScope: true, Reason: ScopeIncluded, GroupTextbookID: 1},
+		7:  {InScope: false, Reason: ScopeUnlearned, GroupLesson: "A课", GroupTextbookID: 2},
+		8:  {InScope: true, Reason: ScopeLearned, GroupLesson: "B课", GroupTextbookID: 2},
+		9:  {InScope: true, Reason: ScopeLearned, GroupLesson: "B课", GroupTextbookID: 2},
+		10: {InScope: true, Reason: ScopeLearned, GroupLesson: "第1课", GroupTextbookID: 1},
 	}
 	if _, ok := scopes[1]; ok {
 		t.Fatal("supplementary card 1 must be absent from BrowseScopes")
@@ -504,9 +504,9 @@ func TestBrowseScopeOffList(t *testing.T) {
 		t.Fatalf("BrowseScopes: %v", err)
 	}
 	want := map[int64]CardScope{
-		1: {InScope: false, Reason: ScopeOffList, GroupLesson: "第9课"},
-		2: {InScope: false, Reason: ScopeUnlearned, GroupLesson: "第2课"},
-		3: {InScope: false, Reason: ScopeUnlearned, GroupLesson: "第2课"},
+		1: {InScope: false, Reason: ScopeOffList, GroupLesson: "第9课", GroupTextbookID: 1},
+		2: {InScope: false, Reason: ScopeUnlearned, GroupLesson: "第2课", GroupTextbookID: 2},
+		3: {InScope: false, Reason: ScopeUnlearned, GroupLesson: "第2课", GroupTextbookID: 1},
 	}
 	for id, w := range want {
 		if scopes[id] != w {

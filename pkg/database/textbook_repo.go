@@ -119,11 +119,14 @@ const (
 // GroupLesson is the lesson to group under so the group does not contradict
 // InScope: the lesson that admits the word when one does, otherwise the
 // lesson that holds it out. Empty GroupLesson with a non-supplementary
-// reason is 待确认.
+// reason is 待确认. GroupTextbookID names the book that lesson came from —
+// two books can both carry 「第1课」, and their lessons are independent,
+// so the lesson name alone cannot key a group (Issue #89).
 type CardScope struct {
-	Reason      string
-	GroupLesson string
-	InScope     bool
+	Reason          string
+	GroupLesson     string
+	GroupTextbookID int64
+	InScope         bool
 }
 
 // Compile-time interface satisfaction check (D-43).
@@ -446,7 +449,7 @@ func lessonLearned(lesson string, book lessonProgress, ok bool) bool {
 func scopeVerdict(assignments []TextbookAssignment, books map[int64]lessonProgress) CardScope {
 	for _, a := range assignments {
 		if a.IncludeInScope {
-			return CardScope{InScope: true, Reason: ScopeIncluded, GroupLesson: a.Lesson}
+			return CardScope{InScope: true, Reason: ScopeIncluded, GroupLesson: a.Lesson, GroupTextbookID: a.TextbookID}
 		}
 	}
 	for _, a := range assignments {
@@ -455,7 +458,7 @@ func scopeVerdict(assignments []TextbookAssignment, books map[int64]lessonProgre
 		}
 		book, ok := books[a.TextbookID]
 		if lessonLearned(a.Lesson, book, ok) {
-			return CardScope{InScope: true, Reason: ScopeLearned, GroupLesson: a.Lesson}
+			return CardScope{InScope: true, Reason: ScopeLearned, GroupLesson: a.Lesson, GroupTextbookID: a.TextbookID}
 		}
 	}
 	for _, a := range assignments {
@@ -463,12 +466,12 @@ func scopeVerdict(assignments []TextbookAssignment, books map[int64]lessonProgre
 			continue
 		}
 		if book, ok := books[a.TextbookID]; ok && lessonOnList(a.Lesson, book) {
-			return CardScope{InScope: false, Reason: ScopeUnlearned, GroupLesson: a.Lesson}
+			return CardScope{InScope: false, Reason: ScopeUnlearned, GroupLesson: a.Lesson, GroupTextbookID: a.TextbookID}
 		}
 	}
 	for _, a := range assignments {
 		if a.Lesson != "" {
-			return CardScope{InScope: false, Reason: ScopeOffList, GroupLesson: a.Lesson}
+			return CardScope{InScope: false, Reason: ScopeOffList, GroupLesson: a.Lesson, GroupTextbookID: a.TextbookID}
 		}
 	}
 	return CardScope{InScope: false, Reason: ScopePending}
