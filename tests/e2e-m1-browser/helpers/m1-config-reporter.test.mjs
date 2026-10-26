@@ -11,6 +11,7 @@
 // Run: node --test tests/e2e-m1-browser/helpers/m1-config-reporter.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -54,6 +55,11 @@ test('env unset: plain local run keeps the bare list reporter', () => {
 });
 
 test('absolute env value passes through un-reanchored (path.resolve semantics)', () => {
-  const abs = path.join(path.sep, 'tmp', 'elsewhere', 'm1.json');
+  // Must be a genuinely absolute path (drive-qualified on Windows):
+  // path.resolve anchors a bare `\tmp\…` onto the current drive, so such a
+  // value would NOT pass through and the deepEqual would fail there.
+  // os.tmpdir() is absolute and normalized on every platform, so resolve
+  // returns it as-is.
+  const abs = path.join(os.tmpdir(), 'elsewhere', 'm1.json');
   assert.deepEqual(reporterWith(abs), [['list'], ['json', { outputFile: abs }]]);
 });
