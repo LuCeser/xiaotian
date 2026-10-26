@@ -112,6 +112,10 @@ type speechDriverResult struct {
 	// correction-submit-close scenario field (1.10a re-proof): the verdict
 	// taps the page actually sent.
 	VerdictTaps int `json:"verdictTaps"`
+
+	// practice-submit-close scenario field: the texts of any teacher
+	// sentence that landed after the close.
+	LateSentenceTexts []string `json:"lateSentenceTexts"`
 }
 
 var speechExpectedOpening = []string{
@@ -251,6 +255,8 @@ type speechBrowserFixture struct {
 	wordsOverride     WordSource
 	passages          PassageSource
 	poems             PoemSource
+	practice          PracticeSource
+	practiceStore     *lesson.PracticeStore
 	expectedSentences []string
 
 	mu       sync.Mutex
@@ -486,17 +492,20 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 	f.mu.Lock()
 	tts, probe, executor, ocrRead := f.tts, f.timerProbe, f.exec, f.ocrRead
 	words, receipts, passages, poems := f.wordsOverride, f.receipts, f.passages, f.poems
+	practice, practiceStore := f.practice, f.practiceStore
 	resumeHold, closeEntryHold, settleHold := f.resumeHold, f.closeEntryHold, f.settleHold
 	f.mu.Unlock()
 	if words == nil {
 		words = f.words
 	}
 	tm := NewTurnManager(f.asr, f.llm, &speechObservedTTS{inner: tts, fixture: f}, executor, TurnManagerConfig{
-		LessonID: "speech-browser-fixture",
-		Words:    words,
-		Receipts: receipts,
-		Passages: passages,
-		Poems:    poems,
+		LessonID:      "speech-browser-fixture",
+		Words:         words,
+		Receipts:      receipts,
+		Passages:      passages,
+		Poems:         poems,
+		Practice:      practice,
+		PracticeStore: practiceStore,
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
 	tm.checkResumeInterleave = resumeHold
 	tm.closeEntryInterleave = closeEntryHold
@@ -741,6 +750,51 @@ func (f *speechBrowserFixture) seedPoem() {
 	f.mu.Unlock()
 }
 
+// speechPracticeSource is the fixture's practice vocabulary seam: a fixed
+// card list the picker samples from (minus today's dictated words).
+type speechPracticeSource struct {
+	cards []database.Card
+}
+
+func (s speechPracticeSource) List(ctx context.Context, filter database.CardFilter) ([]database.Card, error) {
+	return s.cards, nil
+}
+
+// seedCompletedLesson closes the daily word lesson through the real
+// CompleteCheck (submitted+checked): a fresh connect short-circuits to
+// session_ended(lesson_complete) whose banner carries the 再练一组 entry.
+func (f *speechBrowserFixture) seedCompletedLesson() {
+	f.t.Helper()
+	f.seedCheckingWithManualVerdicts()
+	ctx := context.Background()
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	l, err := f.tools.GetLessonState(ctx, lessonID)
+	if err != nil {
+		f.t.Fatalf("read seeded lesson: %v", err)
+	}
+	if _, err := f.tools.CompleteCheck(ctx, lessonID, l.Version, "browser-seed-complete", false); err != nil {
+		f.t.Fatalf("seed completed lesson: %v", err)
+	}
+}
+
+// usePractice arms the practice inputs on this fixture: two fresh practice
+// cards (never today's dictated words) plus the REAL practice store on the
+// same temp SQLite.
+func (f *speechBrowserFixture) usePractice() {
+	f.t.Helper()
+	store, err := lesson.NewPracticeStore(f.db, infra.NewNoOpLogger())
+	if err != nil {
+		f.t.Fatalf("practice store: %v", err)
+	}
+	f.mu.Lock()
+	f.practice = speechPracticeSource{cards: []database.Card{
+		{Word: "练习甲", Meaning: "加练第一词", Category: "chinese"},
+		{Word: "练习乙", Meaning: "加练第二词", Category: "chinese"},
+	}}
+	f.practiceStore = store
+	f.mu.Unlock()
+}
+
 // scriptSpokenConfirm arms ONE spoken 写完了 turn: the synthetic tone rides
 // the production capture into the real VAD, the fake ASR answers 好了, and
 // the fake LLM classifies it to confirm.
@@ -795,10 +849,11 @@ func (g *speechOneGate) openUp() {
 	g.openOnce.Do(func() { close(g.release) })
 }
 
-// speechSubmitGate wraps the executor's CompleteCheck at the two formal-
-// submit control points (1.12a's window set, installed for 1.09's orderings):
-// before parks AHEAD of the real latch write; committed parks AFTER the real
-// write succeeded but BEFORE its result returns to the manager.
+// speechSubmitGate wraps the executor's checked CompleteCheck at the two
+// formal-submit control points (1.12a's window set, installed for 1.09's
+// orderings): before parks AHEAD of the real latch write; committed parks
+// AFTER the real write succeeded but BEFORE its result returns to the
+// manager. The unchecked close fallback stays transparent.
 type speechSubmitGate struct {
 	LessonExecutor
 	before    *speechOneGate
@@ -806,12 +861,12 @@ type speechSubmitGate struct {
 }
 
 func (g *speechSubmitGate) CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
-	if g.before != nil {
+	if !unchecked && g.before != nil {
 		g.before.arm()
 		g.before.wait()
 	}
 	res, err := g.LessonExecutor.CompleteCheck(ctx, lessonID, expectedVersion, requestID, unchecked)
-	if err == nil && g.committed != nil {
+	if !unchecked && err == nil && g.committed != nil {
 		g.committed.arm()
 		g.committed.wait()
 	}
@@ -2017,8 +2072,8 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 	reviewGate.openUp()
 	res := <-driver
 	if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
-		t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
-			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0 late=%q",
+			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences, res.LateSentenceTexts)
 	}
 	f.assertOriginalTasksExited()
 
@@ -2234,6 +2289,116 @@ func TestStreamResultBrowser(t *testing.T) {
 			res.WSCloseCount, res.LateFramesAfterClose)
 	}
 	f.assertOriginalTasksExited()
+}
+
+// TestPracticeSubmitBrowser 是 1.10b 的复验（review P1）：加练提交的接纳
+// 与保存责任经真实浏览器旅程——已提交词课堂短路结束后页面「再练一组」开
+// 新连接进加练课堂（cfg.Practice 假词源 + 真实 practice store，同临时
+// SQLite），加练开场与逐词播报全部自然 ACK，两次语音「写完了」推进，检
+// 查面板两行人工判定、真实 UI 提交——提交闩驻留时 goodbye 关闭，已接纳
+// 的保存（行翻转与 practice_logs 记录）完成，关闭后无迟到 review_result
+// 或总结。撤销验证：撤掉 submitPractice 的生产接纳后本测试红。
+func TestPracticeSubmitBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedCompletedLesson()
+	f.usePractice()
+	f.scriptSpokenConfirm()
+	f.scriptSpokenConfirm()
+	readGate := f.gateStateRead()
+	before, _ := f.gateCheckSubmit(true, false)
+	t.Cleanup(before.openUp)
+	t.Cleanup(readGate.openUp)
+
+	driver := f.runDriverAsync("practice-submit-close", 60*time.Second)
+	select {
+	case <-before.entered:
+	case <-time.After(45 * time.Second):
+		f.runDriver("practice-submit-close", 25*time.Second) // surface the scenario's stderr trace
+		t.Fatal("the practice submit never reached its pre-latch window")
+	}
+	readGate.hold()
+	// The PRACTICE connection is the SECOND manager (the first belongs to
+	// the completed short-circuit); its submit tripped the gate.
+	f.mu.Lock()
+	if len(f.managers) < 2 {
+		f.mu.Unlock()
+		t.Fatal("the practice connection's manager never appeared")
+	}
+	m := f.managers[1]
+	f.mu.Unlock()
+	m.handleEndSession(m.currentSender())
+	// With the production admission present, the fallback is waiting for the
+	// parked submit and has not reached its authoritative read. If admission
+	// is removed for the mutation check, wait until that fallback is parked at
+	// the read, then let it win the latch before releasing the formal submit.
+	m.TurnManager.mu.Lock()
+	admitted := len(m.checkWrites) == 1
+	practiceLessonID := m.tutor.lessonID
+	m.TurnManager.mu.Unlock()
+	if !admitted {
+		select {
+		case <-readGate.gate.entered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("uncoordinated fallback never reached its authoritative read")
+		}
+	}
+	readGate.openUp()
+	if !admitted && !waitFor(t, 10*time.Second, func() bool {
+		stored, err := f.tools.GetLessonState(context.Background(), practiceLessonID)
+		return err == nil && stored.Stage == lesson.StageSubmitted && stored.Unchecked
+	}) {
+		t.Fatal("uncoordinated fallback did not win the submit latch")
+	}
+	before.openUp()
+	res := <-driver
+	// Two closes: the completed short-circuit's own connection and the
+	// practice connection's goodbye — nothing may trail the LAST one.
+	if res.WSCloseCount != 2 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+		t.Fatalf("close=%d late review=%d late sentences=%d (texts %q), want 2/0/0",
+			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences, res.LateSentenceTexts)
+	}
+	// Two connections live in this journey (completed short-circuit + the
+	// practice classroom) — all handlers must be gone, none replaced.
+	if !waitFor(t, 15*time.Second, func() bool {
+		return f.handlerActive.Load() == 0 && f.handlerDone.Load() >= 1 &&
+			f.writerDone.Load() >= 1 &&
+			f.providerStarted.Load() == f.providerDone.Load() &&
+			f.announcementRun.Load() == f.announcementDone.Load()
+	}) {
+		t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+			f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
+			f.providerStarted.Load(), f.providerDone.Load(),
+			f.announcementRun.Load(), f.announcementDone.Load())
+	}
+
+	m.TurnManager.mu.Lock()
+	pending := len(m.checkWrites)
+	m.TurnManager.mu.Unlock()
+	stored, err := f.tools.GetLessonState(context.Background(), practiceLessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
+		t.Fatalf("stored stage=%q unchecked=%v, want the accepted practice submit's submitted+checked",
+			stored.Stage, stored.Unchecked)
+	}
+	records, err := f.practiceStore.ListPracticeByLesson(context.Background(), practiceLessonID)
+	if err != nil {
+		t.Fatalf("read stored practice records: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("stored practice records = %d, want both accepted words", len(records))
+	}
+	words := map[string]bool{}
+	for _, record := range records {
+		words[record.Word] = true
+	}
+	if !words["练习甲"] || !words["练习乙"] {
+		t.Fatalf("stored practice words = %v, want 练习甲 and 练习乙", words)
+	}
+	if pending != 0 {
+		t.Fatalf("completed check-write admissions = %d, want 0", pending)
+	}
 }
 
 func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Duration, extraArgs ...string) <-chan speechDriverResult {
