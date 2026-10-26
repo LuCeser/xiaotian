@@ -35,11 +35,14 @@
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
 const {
-  recognize, deleteUnit, textbooks, awaitReceipt, practiceSelection,
+  recognize, deleteWords, textbooks, awaitReceipt, practiceSelection,
 } = require('./helpers/photo-flow');
 
 const CAT = 'english';
-const UNIT = 'e2e-photo-textbook';
+// This suite's whole vocabulary (every fixture family it imports). The
+// textbook-mode commit writes NO unit tag (Issue #89), so the exact word
+// list is the suite's isolation key — before AND after each test.
+const WORDS = ['tiger', 'panda', 'grape', 'horse', 'sheep', 'cow', 'pig', 'bird', 'frog'];
 
 const FIXTURES = path.resolve(__dirname, 'fixtures');
 const FIXTURE_PEP = path.join(FIXTURES, 'photo-textbook-pep.png');
@@ -70,9 +73,9 @@ async function batchSetLesson(page, lesson) {
 }
 
 test('photo textbook: misread lesson is batch-corrected; the CONFIRMED result governs the attribution', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
-    await recognize(page, FIXTURE_PEP, UNIT);
+    await recognize(page, FIXTURE_PEP);
 
     // AC-2: the read-off-the-photo header shows every field it could read
     // and 待确认 for the one it could not — nothing fabricated.
@@ -124,22 +127,22 @@ test('photo textbook: misread lesson is batch-corrected; the CONFIRMED result go
     const grape = (assigns.get('grape') || []).find((t) => t.name === BOOK_PEP);
     expect(grape && grape.lesson).toBe('第2课');
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 
 test('photo textbook: two books built from photos keep independent progress', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
     // Photo 1 → the PEP book (created by test 1 when it ran; when it did
     // not, THIS recognize creates it — the flow works either way, only
     // the preselect differs). Photo 2 → the 冀教版 book, freshly created.
-    await recognize(page, FIXTURE_PEP, UNIT);
+    await recognize(page, FIXTURE_PEP);
     await batchSetLesson(page, '第1课');
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
     await awaitReceipt(page, BOOK_PEP, { 新增: 3 });
 
-    await recognize(page, FIXTURE_JIJIANG, UNIT);
+    await recognize(page, FIXTURE_JIJIANG);
     // 冀教版's header was read correctly — 第1课 stands, no correction.
     await expect(page.locator('input[aria-label="课次 第 1 行"]')).toHaveValue('第1课');
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
@@ -175,15 +178,15 @@ test('photo textbook: two books built from photos keep independent progress', as
       expect(picked).toContain(w);
     }
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 
 test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom until progress moves; a re-photo honestly preselects the existing book', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
     // Photo 1 → the 译林版 book with 第1课, then mark 第1课 learned.
-    await recognize(page, FIXTURE_LEXIN, UNIT);
+    await recognize(page, FIXTURE_LEXIN);
     await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
     await awaitReceipt(page, BOOK_LEXIN, { 新增: 2 });
@@ -195,7 +198,7 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
     // Photo 2 (same book, next lesson): the meta HONESTLY matches the
     // existing book — it is preselected, no re-asking of the background
     // (AC-2's 只按教材确认一次).
-    await recognize(page, FIXTURE_LEXIN2, UNIT);
+    await recognize(page, FIXTURE_LEXIN2);
     const select = page.locator('#parent-photo-textbook');
     await expect(select).not.toHaveValue('new');
     await expect(select).not.toHaveValue('none');
@@ -227,6 +230,6 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
     expect(picked).toContain('bird');
     expect(picked).toContain('frog');
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });

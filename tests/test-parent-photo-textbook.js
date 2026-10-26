@@ -42,6 +42,7 @@ const {
   distinctRowLessons,
   isCommittable,
   planAssignments,
+  commitUnit,
   buildTextbookReceipt,
   summarizeAssignScope,
   scheduleHint,
@@ -572,6 +573,30 @@ const scopeGroupResults = function (lesson, includeInScope, words) {
     { tone: 'warn', text: '课次「第5课」尚未学到：保存后这部分词暂不自动安排默写，进度不受影响。' },
     'an unlearned batch keeps the warn sentence');
 })();
+
+// ----------------------------------------------------------------------
+// Issue #89: textbook import must not stamp the form's 单元 onto the
+// batch. Afternoon filled 「unit 1」 and evening left it empty; both
+// lessons were unit 3. Both commits now write the same empty tag, and
+// the lesson assignment is the only 课次.
+// ----------------------------------------------------------------------
+{
+  eq(commitUnit({ bookChoice: 3, unitInput: { value: 'unit 1' } }), '',
+    'textbook import ignores a filled 单元');
+  eq(commitUnit({ bookChoice: 'new', unitInput: { value: 'unit 1' } }), '',
+    'a new textbook import ignores a filled 单元');
+  eq(commitUnit({ bookChoice: 3, unitInput: { value: '' } }), '',
+    'textbook import with an empty 单元 stays empty');
+  eq(
+    commitUnit({ bookChoice: 3, unitInput: { value: 'unit 1' } }),
+    commitUnit({ bookChoice: 3, unitInput: { value: '' } }),
+    'a filled 单元 and an empty 单元 write the same tag in textbook mode',
+  );
+  eq(commitUnit({ bookChoice: 'none', unitInput: { value: 'unit 1' } }), 'unit 1',
+    'supplementary import still keeps the 单元');
+  eq(commitUnit({ bookChoice: 'none', unitInput: { value: '  unit 1  ' } }), 'unit 1',
+    'supplementary import trims the 单元');
+}
 
 // ----------------------------------------------------------------------
 

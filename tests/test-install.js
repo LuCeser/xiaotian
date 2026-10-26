@@ -2,8 +2,9 @@
 //
 // Follows the tests/test-start-detached.js pattern: mkdtemp fixtures,
 // spawnSync, bounded timeouts, finally cleanup with a Windows handle-release
-// wait. Zero network: the venv step is driven by a stub uv.cmd that records
-// its arguments and fakes the venv\Scripts\python.exe artifact, so the uv
+// wait. Zero network: the venv step is driven by a stub uv (uv.cmd batch on
+// Windows, POSIX sh script elsewhere) that records its arguments and fakes
+// the venv\Scripts\python.exe artifact, so the uv
 // call contract (Makefile py-bootstrap shape, Tsinghua index) is asserted
 // without ever touching a real package index.
 //
@@ -129,23 +130,46 @@ try {
     write('.local-certs/hta-lan-key.pem', '-----BEGIN PRIVATE KEY-----\n!!!not-valid-base64!!!\n-----END PRIVATE KEY-----\n');
   }
 
-  // Stub uv.cmd: records its argument line plus the UV_INDEX_URL it saw, and
+  // Stub uv: records its argument line plus the UV_INDEX_URL it saw, and
   // materializes <target>\Scripts\python.exe for `uv venv ... <target>`.
-  write(
-    '../stub-uv.cmd',
-    [
-      '@echo off',
-      'echo ARGS: %*>> "%UV_STUB_LOG%"',
-      'echo UV_INDEX_URL=%UV_INDEX_URL%>> "%UV_STUB_LOG%"',
-      'if /I "%~1"=="venv" (',
-      '  if not exist "%~4\\Scripts" mkdir "%~4\\Scripts"',
-      '  type nul > "%~4\\Scripts\\python.exe"',
-      ')',
-      'exit /b 0',
-      '',
-    ].join('\r\n'),
-  );
-  fs.renameSync(path.join(srcDir, '..', 'stub-uv.cmd'), path.join(stubDir, 'uv.cmd'));
+  // Windows hosts get a uv.cmd batch stub; on non-Windows pwsh (Linux CI)
+  // Get-Command never resolves a .cmd, so there the stub is a POSIX sh script
+  // with the exec bit - same log lines, same fake venv artifact, keeping the
+  // real uv (present on some runners) out of the fixture.
+  if (process.platform === 'win32') {
+    write(
+      '../stub-uv.cmd',
+      [
+        '@echo off',
+        'echo ARGS: %*>> "%UV_STUB_LOG%"',
+        'echo UV_INDEX_URL=%UV_INDEX_URL%>> "%UV_STUB_LOG%"',
+        'if /I "%~1"=="venv" (',
+        '  if not exist "%~4\\Scripts" mkdir "%~4\\Scripts"',
+        '  type nul > "%~4\\Scripts\\python.exe"',
+        ')',
+        'exit /b 0',
+        '',
+      ].join('\r\n'),
+    );
+    fs.renameSync(path.join(srcDir, '..', 'stub-uv.cmd'), path.join(stubDir, 'uv.cmd'));
+  } else {
+    const stubPath = path.join(stubDir, 'uv');
+    fs.writeFileSync(
+      stubPath,
+      [
+        '#!/bin/sh',
+        'echo "ARGS: $*" >> "$UV_STUB_LOG"',
+        'echo "UV_INDEX_URL=$UV_INDEX_URL" >> "$UV_STUB_LOG"',
+        'if [ "$1" = "venv" ]; then',
+        '  mkdir -p "$4/Scripts"',
+        '  : > "$4/Scripts/python.exe"',
+        'fi',
+        'exit 0',
+        '',
+      ].join('\n'),
+    );
+    fs.chmodSync(stubPath, 0o755);
+  }
 
   const stubEnv = {
     PATH: stubDir + path.delimiter + process.env.PATH,
@@ -189,6 +213,15 @@ try {
       r.stdout.includes('Initializing vocab schema'),
       'installer must run the vocab schema init step (issue #78)',
     );
+    if (process.platform !== 'win32') {
+      // Regression guard (main CI run 40347156585): pwsh exists on this host
+      // but Get-NetTCPConnection does not - the advisory port probe must skip
+      // silently (exit 0, no cmdlet errors) instead of failing the install.
+      assert.ok(
+        !r.stdout.includes('Get-NetTCPConnection') && !r.stderr.includes('Get-NetTCPConnection'),
+        'non-Windows pwsh: port probe must degrade to a silent skip, not fail the install',
+      );
+    }
     console.log('PASS section 1: positive run exit 0, full install layout present');
   }
 
@@ -298,7 +331,13 @@ try {
   // ---------------------------------------------------------------------------
 
   {
-    const devPort = runInstaller([...baseArgs.slice(0, baseArgs.indexOf('-PublicPort') + 1), '8080'], stubEnv);
+    // Explicit -InstallDir/-SourceDir (same as every other run): the omitted
+    // dirs used to fall back to the D:\hta default, which dies on pwsh/Linux
+    // at Join-Path before parameter validation even runs.
+    const devPort = runInstaller([
+      '-SkipFirewall', '-LanIp', '192.0.2.10', '-PublicPort', '8080', '-HealthPort', '9444',
+      '-InstallDir', instDir, '-SourceDir', srcDir,
+    ], stubEnv);
     assert.notStrictEqual(devPort.status, 0, '-PublicPort 8080 must be refused');
     assert.ok(/8080/.test(devPort.stdout) && /development-reserved/.test(devPort.stdout),
       `refusal must name the dev-reserved port:\n${devPort.stdout}`);

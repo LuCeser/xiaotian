@@ -253,10 +253,21 @@ try {
     if ($PublicPort -eq $HealthPort) {
         Fail "-PublicPort and -HealthPort must differ (both are $PublicPort)"
     }
-    foreach ($portSpec in @(@{ Name = '-PublicPort'; Value = $PublicPort }, @{ Name = '-HealthPort'; Value = $HealthPort })) {
-        $listeners = @(Get-NetTCPConnection -LocalPort $portSpec.Value -State Listen -ErrorAction SilentlyContinue)
-        if ($listeners.Count -gt 0) {
-            Write-Host "WARNING: port $($portSpec.Value) already has a listener (PID(s) $(($listeners.OwningProcess | Sort-Object -Unique) -join ',')) - the service may fail to bind; consider a different $($portSpec.Name)" -ForegroundColor Yellow
+    # Advisory port-in-use probe (WARNING only, never a gate). Get-NetTCPConnection
+    # ships with the Windows NetTCPIP module: on Linux/macOS pwsh (CI runners) the
+    # command itself is not found, which -ErrorAction SilentlyContinue cannot
+    # suppress (CommandNotFoundException is terminating). Gate on cmdlet
+    # availability and skip the probe entirely when it is missing or fails.
+    if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+        foreach ($portSpec in @(@{ Name = '-PublicPort'; Value = $PublicPort }, @{ Name = '-HealthPort'; Value = $HealthPort })) {
+            try {
+                $listeners = @(Get-NetTCPConnection -LocalPort $portSpec.Value -State Listen -ErrorAction SilentlyContinue)
+            } catch {
+                $listeners = @()
+            }
+            if ($listeners.Count -gt 0) {
+                Write-Host "WARNING: port $($portSpec.Value) already has a listener (PID(s) $(($listeners.OwningProcess | Sort-Object -Unique) -join ',')) - the service may fail to bind; consider a different $($portSpec.Name)" -ForegroundColor Yellow
+            }
         }
     }
 

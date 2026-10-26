@@ -7,10 +7,10 @@
  *
  * Why a separate file: the three photo/scope suites are edited by another
  * lane, so these cases live here instead of being appended to them. Every
- * test builds its OWN data (own unit, own unique book name) so it passes
- * standalone, and every finally-cleanup deletes only this suite's unit
- * (deleteUnit is unit-scoped; books have no DELETE route by design, so the
- * names are chosen to never collide with another suite's books).
+ * test builds its OWN data (own words, own unique book name) so it passes
+ * standalone, and every finally-cleanup deletes only this suite's words
+ * (deleteWords is word-scoped; books have no DELETE route by design, so
+ * the names are chosen to never collide with another suite's books).
  *
  * Meta-collision note: matchTextbookForMeta preselects an EXISTING book by
  * the recognized meta. The books this suite creates deliberately clear the
@@ -42,11 +42,15 @@
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
 const {
-  recognize, deleteUnit, textbooks, wordRows, awaitReceipt, practiceSelection,
+  recognize, deleteWords, textbooks, wordRows, awaitReceipt, practiceSelection,
 } = require('./helpers/photo-flow');
 
 const CAT = 'english';
-const UNIT = 'e2e-uat-gaps';
+// This suite's whole vocabulary: the PEP fixture's faces plus its own
+// REST-seeded words. The textbook-mode commit writes NO unit tag
+// (Issue #89), so the exact word list is the suite's isolation key —
+// before AND after each test.
+const WORDS = ['tiger', 'panda', 'grape', 'uatGapPend1', 'uatGapPend2'];
 
 const FIXTURES = path.resolve(__dirname, 'fixtures');
 const FIXTURE_PEP = path.join(FIXTURES, 'photo-textbook-pep.png');
@@ -102,7 +106,7 @@ async function createBook(request, name, lessons) {
 async function seedWords(request, words, meaning) {
   const resp = await request.post('/api/v1/words', {
     data: {
-      category: CAT, unit: UNIT,
+      category: CAT,
       entries: words.map((w) => ({ word: w, meaning })),
     },
   });
@@ -134,9 +138,9 @@ async function assignThroughUI(page, words, textbookLabel, lessonLabel, include)
 }
 
 test('T21: blank lesson + include-in-scope commits as 课次待确认 scope and is not progress-gated', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
-    await recognize(page, FIXTURE_PEP, UNIT);
+    await recognize(page, FIXTURE_PEP);
 
     // The task's related 补充词汇 note lives on the 不指定教材 branch (not on
     // the textbook path): verify it there, then move to 新建教材 for the
@@ -180,14 +184,14 @@ test('T21: blank lesson + include-in-scope commits as 课次待确认 scope and 
       expect(picked).toContain(w);
     }
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 
 test('T18: 新建教材 is established only at commit — empty name refused, no book before submit', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
-    await recognize(page, FIXTURE_PEP, UNIT);
+    await recognize(page, FIXTURE_PEP);
 
     // Explicitly pick 新建教材… (the preselect may already point at another
     // suite's PEP book).
@@ -225,24 +229,24 @@ test('T18: 新建教材 is established only at commit — empty name refused, no
     expect(created).toBeTruthy();
     expect(created.lessons).toEqual(['第2课']);
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 
 test('T24-b: 保留词库释义 keeps the library meaning, merges the source, and never renders in 无教材模式', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
     // One word already in the library with a DIFFERENT reading than the
     // photo's — the conflict vehicle.
     const seed = await request.post('/api/v1/words', {
       data: {
-        category: CAT, unit: UNIT,
+        category: CAT,
         entries: [{ word: 'tiger', meaning: '词库老虎', example: '' }],
       },
     });
     expect(seed.ok()).toBeTruthy();
 
-    await recognize(page, FIXTURE_PEP, UNIT);
+    await recognize(page, FIXTURE_PEP);
     const conflict = page.locator('.photo-row-conflict');
     await expect(conflict).toHaveCount(1);
     await expect(conflict).toContainText('词库释义：词库老虎');
@@ -272,12 +276,12 @@ test('T24-b: 保留词库释义 keeps the library meaning, merges the source, an
     const assign = (rows.get('tiger').textbooks || []).find((t) => t.name === BOOK3);
     expect(assign && assign.lesson).toBe('第2课');
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 
 test('T15: 待确认 + 直接加入范围 through the browse modal admits the word into real selection', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
     // This suite's own words and book (no fixture family shared).
     await seedWords(request, PEND_WORDS, '待确认e2e');
@@ -308,7 +312,7 @@ test('T15: 待确认 + 直接加入范围 through the browse modal admits the wo
       expect(picked).toContain(w);
     }
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 

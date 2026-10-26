@@ -731,8 +731,24 @@
    * #7, ADR-0004 #6 — a whole textbook commits without the parent
    * splitting it by hand).
    */
+  /**
+   * commitUnit — the unit tag written by an add call.
+   * Textbook mode assigns each word its own lesson afterwards; stamping
+   * the form's single 单元 onto the whole batch is what made one import
+   * land in 「unit 1」 and the next in 「未分组」 while both lessons were
+   * unit 3. In textbook mode the tag stays empty. Supplementary adds
+   * (不指定教材) still use the field.
+   */
+  function commitUnit(form) {
+    if (form && form.bookChoice && form.bookChoice !== 'none') {
+      return '';
+    }
+    var input = form && form.unitInput;
+    return input && input.value ? String(input.value).trim() : '';
+  }
+
   function submitChunked(form, rows) {
-    var unit = form.unitInput ? form.unitInput.value.trim() : '';
+    var unit = commitUnit(form);
     var outcome = { added: 0, skipped: 0 };
     var chain = Promise.resolve();
     global.chunkBatch(rows, MAX_BATCH_ENTRIES).forEach(function (part) {
@@ -982,6 +998,7 @@
     // 单元 — same shared-datalist field as the other add forms.
     var unit = kit.buildUnitField ? kit.buildUnitField('parent-unit-photo') : null;
     this.unitInput = unit ? unit.input : null;
+    this.unitField = unit ? unit.field : null;
     if (unit) {
       this.form.appendChild(unit.field);
     }
@@ -2263,6 +2280,7 @@
     this.detectedMeta = null;
     this.bookChoice = 'none';
     this.includePending = false;
+    this.syncUnitField();
     this.renderTextbookPanelReset();
     this.renderPreview();
     this.discardBtn.hidden = true;
@@ -2437,8 +2455,22 @@
    * creation). Also hosts the batch lesson toolbar + the include checkbox
    * whenever a textbook is chosen.
    */
+  /**
+   * The 单元 field is the supplementary organizer. While a textbook is
+   * chosen, the per-word lesson is the only 课次, so the field is hidden
+   * and commitUnit ignores whatever it still contains.
+   */
+  PhotoAddForm.prototype.syncUnitField = function () {
+    if (!this.unitField) {
+      return;
+    }
+    var textbook = this.bookChoice && this.bookChoice !== 'none';
+    this.unitField.hidden = !!textbook;
+  };
+
   PhotoAddForm.prototype.renderTextbookDetail = function (host) {
     var self = this;
+    this.syncUnitField();
     clearEl(host);
     if (this.bookChoice === 'none') {
       var noneNote = document.createElement('p');
@@ -5370,6 +5402,7 @@
   global.isCommittable = isCommittable;
   global.isResolved = isResolved;
   global.planAssignments = planAssignments;
+  global.commitUnit = commitUnit;
   global.buildTextbookReceipt = buildTextbookReceipt;
   // Issue #81 P2: the 默写安排 receipt verdict + the state line's hint —
   // pure over their inputs, so the Node unit tests pin the post-save
