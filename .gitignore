@@ -70,6 +70,8 @@ nul
 
 # GSD/tool runtime state (2026-10-06 root cleanup)
 .gsd/
+# Agent-harness runtime state (quota/phase/checkpoint handoffs) — machine-local.
+.harness/
 /skills-lock.json
 .planning/state.json
 .planning/milestone.lock
