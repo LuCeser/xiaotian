@@ -15,6 +15,8 @@ const {
   groupBrowseWords,
   orderBrowseGroups,
   dictationStatusText,
+  supplementaryDeletePlan,
+  unitRenameTouchesLesson,
 } = global;
 
 const books = [{
@@ -31,6 +33,7 @@ const books = [{
 const evening = {
   id: 1,
   word: 'evening',
+  category: 'english',
   unit: '',
   participates: true,
   scope_reason: 'unlearned',
@@ -40,6 +43,7 @@ const evening = {
 const afternoon = {
   id: 2,
   word: 'afternoon',
+  category: 'english',
   unit: 'unit 1',
   participates: true,
   scope_reason: 'unlearned',
@@ -49,6 +53,7 @@ const afternoon = {
 const learned = {
   id: 3,
   word: 'learned',
+  category: 'english',
   unit: 'unit 1',
   participates: true,
   scope_reason: 'learned',
@@ -58,6 +63,7 @@ const learned = {
 const extra = {
   id: 4,
   word: 'extra',
+  category: 'english',
   unit: 'unit 1',
   participates: true,
   scope_reason: 'supplementary',
@@ -75,7 +81,7 @@ assert.deepStrictEqual(
   [
     { kind: 'lesson', label: 'unit 1', words: ['learned'] },
     { kind: 'lesson', label: 'unit 3', words: ['evening', 'afternoon'] },
-    { kind: 'unit', label: 'unit 1', words: ['extra'] },
+    { kind: 'unit', label: '补充 · unit 1', words: ['extra'] },
   ],
 );
 
@@ -134,5 +140,49 @@ const assignedOnly = {
 const fallback = groupBrowseWords([assignedOnly]);
 assert.strictEqual(fallback[0].kind, 'lesson');
 assert.strictEqual(fallback[0].label, 'unit 3');
+
+// A supplementary unit that is not a lesson name keeps its own label.
+const plain = orderBrowseGroups(groupBrowseWords([
+  { id: 7, word: 'plain', unit: 'week-1', participates: true, scope_reason: 'supplementary', textbooks: [] },
+]), books);
+assert.strictEqual(plain[0].label, 'week-1');
+
+// The supplementary header that shares a lesson name must count and
+// delete only its own row. GET /units would say 3 (afternoon, learned,
+// extra all wear unit 1) and a {category, unit} delete would remove the
+// lesson-owned words the page shows under unit 1 and unit 3.
+const extraGroup = groups.find((g) => g.label === '补充 · unit 1');
+assert.deepStrictEqual(supplementaryDeletePlan(extraGroup), {
+  count: 1,
+  requests: [{ category: 'english', words: ['extra'] }],
+});
+assert.strictEqual(
+  unitRenameTouchesLesson([evening, afternoon, learned, extra], 'unit 1'),
+  true,
+);
+assert.strictEqual(unitRenameTouchesLesson([extra], 'unit 1'), false);
+
+// A supplementary-only unit still names every row, split at the 100-word
+// delete cap, and does not look like a lesson rename.
+const bulk = [];
+for (let i = 0; i < 101; i++) {
+  bulk.push({
+    id: 100 + i,
+    word: 'w' + i,
+    category: i < 100 ? 'english' : 'chinese',
+    unit: 'week-9',
+    participates: true,
+    scope_reason: 'supplementary',
+    textbooks: [],
+  });
+}
+const bulkGroup = groupBrowseWords(bulk)[0];
+const bulkPlan = supplementaryDeletePlan(bulkGroup);
+assert.strictEqual(bulkPlan.count, 101);
+assert.deepStrictEqual(bulkPlan.requests, [
+  { category: 'english', words: bulk.slice(0, 100).map((w) => w.word) },
+  { category: 'chinese', words: ['w100'] },
+]);
+assert.strictEqual(unitRenameTouchesLesson(bulk, 'week-9'), false);
 
 console.log('test-parent-browse-lesson-group: all assertions passed');

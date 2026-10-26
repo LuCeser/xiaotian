@@ -11,9 +11,11 @@
  *   - Search debounces 300ms (vanilla setTimeout/clearTimeout) then calls
  *     GET /api/v1/words?q=; clearing restores the unfiltered list.
  *   - Unit header: 48px aria-expanded toggle (chevron ▾/▸ + unit name +
- *     count badge {n} 个单词 from GET /api/v1/units); collapse state
+ *     count badge {n} 个单词 from the rows in that group); collapse state
  *     persists in localStorage under parent.units.collapsed (JSON array
- *     of unit names, re-applied on every render).
+ *     of unit names, re-applied on every render). GET /api/v1/units counts
+ *     the legacy unit tag, which lesson-owned words can still wear while
+ *     the page shows them under their lesson (Issue #89).
  *   - Groups are built client-side. A word with textbook lesson ownership
  *     groups by that lesson (Issue #89 — the same record dictation reads),
  *     never by the legacy unit tag. A word with no textbook assignment
@@ -173,7 +175,81 @@
       var rb = Object.prototype.hasOwnProperty.call(rank, b.unit) ? rank[b.unit] : 100000;
       return ra - rb;
     });
+    // A supplementary unit tag that shares a name with a textbook lesson
+    // is a different bucket. Prefix it so two headers do not both read
+    // 「unit 1」.
+    var lessonLabels = Object.create(null);
+    named.forEach(function (group) {
+      if (group && group.unit) {
+        lessonLabels[group.unit] = true;
+      }
+    });
+    units.forEach(function (group) {
+      if (!group || !group.unit) {
+        return;
+      }
+      if (lessonLabels[group.unit] || Object.prototype.hasOwnProperty.call(rank, group.unit)) {
+        group.label = '补充 · ' + group.unit;
+      }
+    });
     return named.concat(pending, units);
+  }
+
+  var DELETE_WORDS_BATCH = 100;
+
+  /**
+   * supplementaryDeletePlan — DELETE bodies for one supplementary group.
+   * Only the group's own rows are named. A {category, unit} delete would
+   * also remove lesson-owned cards that still carry the same unit string
+   * and are shown under their lesson (Issue #89). Words mode is capped at
+   * 100 per request, so a long group is split.
+   */
+  function supplementaryDeletePlan(group) {
+    var buckets = Object.create(null);
+    var order = [];
+    var count = 0;
+    var rows = (group && group.rows) || [];
+    rows.forEach(function (word) {
+      if (!word || !word.category || !word.word) {
+        return;
+      }
+      if (!Object.prototype.hasOwnProperty.call(buckets, word.category)) {
+        buckets[word.category] = [];
+        order.push(word.category);
+      }
+      buckets[word.category].push(word.word);
+      count += 1;
+    });
+    var requests = [];
+    order.forEach(function (category) {
+      var words = buckets[category];
+      for (var i = 0; i < words.length; i += DELETE_WORDS_BATCH) {
+        requests.push({
+          category: category,
+          words: words.slice(i, i + DELETE_WORDS_BATCH),
+        });
+      }
+    });
+    return { count: count, requests: requests };
+  }
+
+  /**
+   * unitRenameTouchesLesson — true when any loaded card wears this unit
+   * string but groups by a textbook lesson. Renaming the unit tag would
+   * rewrite that hidden string; the group's own rows must be edited
+   * instead.
+   */
+  function unitRenameTouchesLesson(words, unit) {
+    for (var i = 0; i < (words || []).length; i++) {
+      var word = words[i];
+      if (!word || (word.unit || '') !== unit) {
+        continue;
+      }
+      if (lessonOwnership(word) !== null) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** groupHoldText — the hold line when every row shares one, else ''. */
@@ -976,27 +1052,15 @@
     return orderBrowseGroups(groupBrowseWords(this.words), this.textbooks);
   };
 
-  /** Count-badge value for a unit from the GET /units response, or null. */
-  BrowseView.prototype.countForUnit = function (unit) {
-    for (var i = 0; i < this.units.length; i++) {
-      var entry = this.units[i];
-      if (entry && entry.unit === unit && typeof entry.count === 'number') {
-        return entry.count;
-      }
-    }
-    return null;
-  };
-
   /**
-   * Unit ops act on {category, unit} server-side. In the 全部 view with
-   * an active search, the group's visible rows may only cover SOME of
-   * the categories holding that unit — renaming/deleting from the badge
-   * count then would not match the dialog's exact-scope copy (T-09-05),
-   * so the header actions are withheld in that one combination. Word
-   * rows keep their per-word 编辑/删除 everywhere.
+   * Unit rename/delete follow the rows in the group. A search hides some
+   * of those rows, so the header actions are withheld until the list is
+   * unfiltered — the confirm copy would otherwise name a different set
+   * than the one on screen (T-09-05). Word rows keep their per-word
+   * 编辑/删除 everywhere.
    */
   BrowseView.prototype.unitOpsAllowed = function () {
-    return this.query === '' || this.category !== '';
+    return this.query === '';
   };
 
   BrowseView.prototype.buildGroup = function (group) {
@@ -1033,18 +1097,13 @@
       name.title = group.label || unit;
     }
 
-    // Count badge. Supplementary named units still use GET /api/v1/units.
-    // Lesson groups must not: that count is the legacy unit tag, which
-    // disagrees with the lesson these rows actually belong to.
+    // Count badge is the rows in this group. GET /api/v1/units counts the
+    // legacy unit tag, which lesson-owned words can still wear while the
+    // page shows them under their lesson.
     var badge = document.createElement('span');
     badge.className = 'unit-count';
-    var count = group.rows.length;
-    if (group.kind !== 'lesson' && unit !== '') {
-      var fromServer = this.countForUnit(unit);
-      if (fromServer !== null) {
-        count = fromServer;
-      }
-    }
+    var deletePlan = group.kind === 'lesson' ? null : supplementaryDeletePlan(group);
+    var count = deletePlan ? deletePlan.count : group.rows.length;
     badge.textContent = count + ' 个单词';
 
     toggle.appendChild(chevron);
@@ -1062,7 +1121,7 @@
       renameBtn.className = 'unit-action';
       renameBtn.textContent = '重命名';
       renameBtn.addEventListener('click', function () {
-        self.openRenameModal(unit);
+        self.openRenameModal(group);
       });
 
       var deleteBtn = document.createElement('button');
@@ -1070,7 +1129,7 @@
       deleteBtn.className = 'unit-action unit-action-danger';
       deleteBtn.textContent = '删除';
       deleteBtn.addEventListener('click', function () {
-        self.openDeleteUnitModal(unit, count);
+        self.openDeleteUnitModal(group);
       });
 
       header.appendChild(renameBtn);
@@ -2136,23 +2195,6 @@
   // pairing with Plan 09-05: no delete request exists outside this path).
   // ------------------------------------------------------------------
 
-  /**
-   * Distinct categories present among a unit's rows in the current view.
-   * Mutation endpoints require a category; in the 全部 view a merged
-   * unit may span both, so the flow iterates the categories actually
-   * held by the group (with the browse category scoped, this is always
-   * exactly that one category).
-   */
-  BrowseView.prototype.categoriesForUnit = function (unit) {
-    var seen = [];
-    this.words.forEach(function (word) {
-      if ((word.unit || '') === unit && seen.indexOf(word.category) === -1) {
-        seen.push(word.category);
-      }
-    });
-    return seen;
-  };
-
   /** Run one mutation per category, sequentially, failing fast. */
   BrowseView.prototype.runPerCategory = function (categories, perform) {
     return categories.reduce(function (chain, category) {
@@ -2165,13 +2207,22 @@
   /**
    * Rename modal (重命名单元): 将「{old}」重命名为 + input + 确认重命名
    * / 取消 (loading state on confirm) → POST /api/v1/units/rename with
-   * the group's category scope. A not_found response surfaces the
+   * the group's category scope, or per-row edits when the unit string is
+   * also worn by lesson-owned cards. A not_found response surfaces the
    * backend message in an Error toast (Pitfall 2); generic failures show
    * 保存失败：{message}。
    */
-  BrowseView.prototype.openRenameModal = function (unit) {
+  BrowseView.prototype.openRenameModal = function (group) {
     var self = this;
-    var categories = this.categoriesForUnit(unit);
+    var unit = group.unit;
+    var rows = group.rows || [];
+    var touchesLesson = unitRenameTouchesLesson(this.words, unit);
+    var categories = [];
+    rows.forEach(function (word) {
+      if (word && word.category && categories.indexOf(word.category) === -1) {
+        categories.push(word.category);
+      }
+    });
 
     openModal({
       title: '重命名单元',
@@ -2218,9 +2269,22 @@
             return;
           }
           setLoading(confirmBtn, true);
-          self.runPerCategory(categories, function (category) {
-            return self.renameUnit(unit, newName, category);
-          }).then(function () {
+          var rename;
+          if (touchesLesson) {
+            // The unit string is also worn by lesson-owned cards. Rewrite
+            // only this group's rows so those cards keep the tag the page
+            // no longer groups by.
+            rename = rows.reduce(function (chain, word) {
+              return chain.then(function () {
+                return self.editWord(word.id, { word: word.word, unit: newName });
+              });
+            }, Promise.resolve());
+          } else {
+            rename = self.runPerCategory(categories, function (category) {
+              return self.renameUnit(unit, newName, category);
+            });
+          }
+          rename.then(function () {
             close();
             toast('已重命名', 'success');
             self.refresh();
@@ -2300,13 +2364,16 @@
 
   /**
    * Destructive delete-unit confirm (删除单元): exact-count copy (n from
-   * the badge) → DELETE /api/v1/words with {category, unit} per category
-   * the group holds. Failure keeps the dialog open with the backend
-   * message and re-renders the true state.
+   * the badge) → DELETE /api/v1/words with the group's own word list.
+   * {category, unit} would also delete lesson-owned cards that still
+   * wear the same unit string (Issue #89). Failure keeps the dialog
+   * open with the backend message and re-renders the true state.
    */
-  BrowseView.prototype.openDeleteUnitModal = function (unit, count) {
+  BrowseView.prototype.openDeleteUnitModal = function (group) {
     var self = this;
-    var categories = this.categoriesForUnit(unit);
+    var unit = group.unit;
+    var plan = supplementaryDeletePlan(group);
+    var count = plan.count;
 
     openModal({
       title: '删除单元',
@@ -2331,12 +2398,14 @@
           }
           setLoading(confirmBtn, true);
           var deleted = 0;
-          self.runPerCategory(categories, function (category) {
-            return self.deleteWords({ category: category, unit: unit })
-              .then(function (result) {
-                deleted += (result && result.deleted) || 0;
-              });
-          }).then(function () {
+          plan.requests.reduce(function (chain, req) {
+            return chain.then(function () {
+              return self.deleteWords({ category: req.category, words: req.words })
+                .then(function (result) {
+                  deleted += (result && result.deleted) || 0;
+                });
+            });
+          }, Promise.resolve()).then(function () {
             close();
             toast('已删除 ' + deleted + ' 个单词', 'success');
             self.refresh();
@@ -2361,6 +2430,8 @@
   global.orderBrowseGroups = orderBrowseGroups;
   global.dictationStatusText = dictationStatusText;
   global.lessonOwnership = lessonOwnership;
+  global.supplementaryDeletePlan = supplementaryDeletePlan;
+  global.unitRenameTouchesLesson = unitRenameTouchesLesson;
   // Shared modal builders for sibling components (parent-textbook.js
   // mounts its modals through the same focus-trapped host — the
   // __parentFormKit precedent).
