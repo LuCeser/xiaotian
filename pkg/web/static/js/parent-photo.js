@@ -849,12 +849,15 @@
         return;
       }
       var snap = Object.prototype.hasOwnProperty.call(byWord, row.word) ? byWord[row.word] : null;
-      if (!snap || !snap.id) {
-        return; // no resolved card → no honest assignment (receipt says so)
+      if (!snap || !snap.id || !Array.isArray(snap.textbooks)) {
+        // No resolved card, or GET /words could not project its existing
+        // attributions: there is no honest includeInScope value to send.
+        // false could clear an explicit include; true could invent one.
+        return;
       }
       var lesson = metaField(row.lesson);
       var sticky = false;
-      (snap.textbooks || []).forEach(function (a) {
+      snap.textbooks.forEach(function (a) {
         if (a && a.id === bookId && a.includeInScope) {
           sticky = true;
         }
@@ -4235,15 +4238,19 @@
             self.existingWords = fresh;
           }
           var idByWord = {};
+          var attributionKnownByWord = {};
           (fresh || []).forEach(function (w) {
             if (w && w.word) {
-              idByWord[String(w.word).trim()] = w.id;
+              var word = String(w.word).trim();
+              idByWord[word] = w.id;
+              attributionKnownByWord[word] = Array.isArray(w.textbooks);
             }
           });
           return self.runAdoptEdits(adoptRows, idByWord).then(function (editResults) {
             var groups = planAssignments(committed, fresh || [], book.id, self.includePending);
             var unassigned = committed.filter(function (r) {
-              return !Object.prototype.hasOwnProperty.call(idByWord, r.word);
+              return !Object.prototype.hasOwnProperty.call(idByWord, r.word) ||
+                !attributionKnownByWord[r.word];
             }).map(function (r) { return r.word; });
 
             return self.runAssignments(book, groups).then(function (results) {

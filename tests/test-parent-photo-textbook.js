@@ -31,9 +31,11 @@
  *     other sources).
  *   - PR #87 复审 P2-2: 「恢复参与后即可安排」 is promised (pausedReady)
  *     only for paused words some source ALREADY qualifies.
- *   - The renderTextbookCommitResult wiring: the banner's 默写安排 lines
- *     must come from receipt.postSave/receipt.booksAfter (dropping those
- *     args at the call site turns the assertions red).
+ *   - The real fetchWords → addAndAssign →
+ *     renderTextbookCommitResult flow: the banner's 默写安排 lines must
+ *     come from the post-save reads, and a pre-assignment
+ *     textbooks:null must never emit an assign payload that can clear an
+ *     existing explicit include.
  */
 'use strict';
 
@@ -42,6 +44,7 @@ const path = require('node:path');
 // Minimal window shim, then load parent-photo.js the way
 // tests/test-parent-photo-classify.js does.
 global.window = global;
+require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-pdf-core.js'));
 require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-photo.js'));
 
 const {
@@ -220,6 +223,17 @@ const BOOK = 9;
     { index: 0, word: 'ghost', meaning: '', lesson: '第1课', status: 'new', checked: true },
   ], SNAP, BOOK, false);
   eq(partial, [], 'a word without a resolved id forms no group');
+
+  // A resolved card whose attribution projection failed is equally
+  // unsafe to assign: false could clear an existing explicit include,
+  // while true could invent one. Wait for a verified source list.
+  const unknownAttribution = planAssignments([
+    { index: 0, word: 'lake', meaning: '湖', lesson: '第7课', status: 'exists', checked: true },
+  ], [
+    { id: 15, word: 'lake', textbooks: null },
+  ], BOOK, false);
+  eq(unknownAttribution, [],
+    'a word with unknown attribution forms no assignment group');
 
   // Nothing committable → no calls at all.
   eq(planAssignments([], SNAP, BOOK, true), [], 'no rows → no assignment calls');
@@ -854,8 +868,96 @@ const renderScopeBanner = function (overrides) {
 
 // ----------------------------------------------------------------------
 
-if (failures) {
-  console.error('parent-photo-textbook: ' + failures + ' of ' + checks + ' checks failed');
-  process.exit(1);
+// addAndAssign → renderTextbookCommitResult — run the real async method
+// chain rather than hand-building its receipt. This is deliberately a
+// tiny in-memory server: assignWords mutates the stored include flag, so
+// an unsafe includeInScope:false request is observable on the second
+// GET /words and in the rendered result.
+async function testCommitDataFlow() {
+  global.document = { createElement: makeScopeNode };
+
+  const knownRow = {
+    index: 0, word: 'apple', meaning: '苹果', lesson: '第5课', status: 'exists', checked: true,
+  };
+  const knownForm = Object.create(PhotoAddForm.prototype);
+  knownForm.rows = [knownRow];
+  knownForm.banner = makeScopeNode('div');
+  knownForm.draftCategory = 'english';
+  knownForm.includePending = false;
+  knownForm.fetchWords = function () {
+    return Promise.resolve([
+      { id: 11, word: 'apple', meaning: '苹果', participates: true,
+        textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] },
+    ]);
+  };
+  knownForm.fetchTextbooks = function () { return Promise.resolve(SCOPE_BOOKS_AFTER); };
+  knownForm.assignWords = function () { return Promise.resolve({ updated: 1 }); };
+  knownForm.editWord = null;
+
+  const knownReceipt = await knownForm.addAndAssign(SCOPE_BOOK, [knownRow]);
+  knownForm.renderTextbookCommitResult(knownReceipt);
+  const knownBanner = scopeTextOf(knownForm.banner);
+  assert(knownBanner.indexOf('可安排默写 1 词（课次已学）') >= 0,
+    'real data flow renders scheduling from addAndAssign post-save reads');
+
+  const degradedRow = {
+    index: 0, word: 'lake', meaning: '湖', lesson: '第7课', status: 'exists', checked: true,
+  };
+  let storedInclude = true;
+  let wordReads = 0;
+  const assignPayloads = [];
+  const degradedForm = Object.create(PhotoAddForm.prototype);
+  degradedForm.rows = [degradedRow];
+  degradedForm.banner = makeScopeNode('div');
+  degradedForm.draftCategory = 'english';
+  degradedForm.includePending = false;
+  degradedForm.fetchWords = function () {
+    wordReads++;
+    if (wordReads === 1) {
+      // Exact degraded GET /words wire shape from textbooks_test.go:
+      // the card is known, its attribution is not.
+      return Promise.resolve([
+        { id: 15, word: 'lake', meaning: '湖', participates: true, textbooks: null },
+      ]);
+    }
+    // The projection recovers for the post-save read, exposing whether
+    // the intervening assignment silently cleared the stored decision.
+    return Promise.resolve([
+      { id: 15, word: 'lake', meaning: '湖', participates: true,
+        textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: storedInclude }] },
+    ]);
+  };
+  degradedForm.fetchTextbooks = function () { return Promise.resolve(SCOPE_BOOKS_AFTER); };
+  degradedForm.assignWords = function (bookID, payload) {
+    assignPayloads.push({ bookID: bookID, payload: payload });
+    storedInclude = payload.includeInScope;
+    return Promise.resolve({ updated: 1 });
+  };
+  degradedForm.editWord = null;
+
+  const degradedReceipt = await degradedForm.addAndAssign(SCOPE_BOOK, [degradedRow]);
+  degradedForm.renderTextbookCommitResult(degradedReceipt);
+  const degradedBanner = scopeTextOf(degradedForm.banner);
+  eq(assignPayloads, [],
+    'real degraded flow sends no assignment when existing attribution is unknown');
+  eq(storedInclude, true,
+    'real degraded flow preserves the parent explicit include decision');
+  eq(degradedReceipt.unassigned, ['lake'],
+    'real degraded flow reports the source as unassigned');
+  assert(degradedBanner.indexOf('失败 1 个') >= 0 &&
+    degradedBanner.indexOf('词库读取失败，未能指定课次') >= 0,
+    'real degraded flow renders an honest assignment failure');
 }
-console.log('parent-photo-textbook: all ' + checks + ' checks passed');
+
+// ----------------------------------------------------------------------
+
+testCommitDataFlow().then(function () {
+  if (failures) {
+    console.error('parent-photo-textbook: ' + failures + ' of ' + checks + ' checks failed');
+    process.exit(1);
+  }
+  console.log('parent-photo-textbook: all ' + checks + ' checks passed');
+}).catch(function (err) {
+  console.error(err && err.stack || err);
+  process.exit(1);
+});
