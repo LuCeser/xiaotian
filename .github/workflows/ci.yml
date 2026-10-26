@@ -100,13 +100,18 @@ jobs:
 
       - run: npm test
 
-      # list reporter for the log, JSON for the mandatory-case check below.
+      # list reporter for the log, json for the mandatory-case check below.
+      # The json reporter is attached by tests/playwright.m1.config.js itself
+      # when PLAYWRIGHT_JSON_OUTPUT_NAME is set (resolved against the repo
+      # root) — do NOT pass --reporter here: a CLI override would drop the
+      # config's outputFile option and misplace the report (PR #91 ENOENT:
+      # Playwright joins the NAME onto the config dir, i.e. tests/reports/).
       # Playwright's own exit code fails the job on any failed test; the
       # check step catches the OTHER failure modes — a green run whose cases
       # never executed (browser/Python/launcher missing → all skipped), a
       # required case deleted/renamed while filler keeps counts up, or a
       # test.fail() expected failure that stats.expected counts as fine.
-      - run: npm run e2e:m1 -- --reporter=list,json
+      - run: npm run e2e:m1
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: reports/m1-results.json
       - name: Verify the B-layer core set actually ran (no silent pass)
