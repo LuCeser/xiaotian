@@ -32,10 +32,13 @@
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
 const {
-  recognize, deleteUnit, wordRows, textbooks, awaitReceipt, practiceSelection,
+  recognize, deleteWords, wordRows, textbooks, awaitReceipt, practiceSelection,
 } = require('./helpers/photo-flow');
 
-const UNIT = 'e2e-pdf-import';
+// This suite's whole vocabulary (both PDF fixtures' pages). The
+// textbook-mode commit writes NO unit tag (Issue #89), so the exact word
+// list is the suite's isolation key — before AND after each test.
+const WORDS = ['pen', 'bag', 'cat', 'dog', 'bird', 'fish', 'goat', 'frog', 'duck', 'horse'];
 
 const FIXTURES = path.resolve(__dirname, 'fixtures');
 const PDF_TEXTBOOK = path.join(FIXTURES, 'pdf-textbook.pdf');
@@ -58,9 +61,9 @@ async function wordValues(page) {
 
 test.describe('Issue #7 acceptance', () => {
 test('whole textbook, cross-lesson: page-grouped preview, cross-page duplicate flagged, per-page lesson batch, real DB + classroom scope', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
-    await recognize(page, PDF_TEXTBOOK, UNIT);
+    await recognize(page, PDF_TEXTBOOK);
 
     // All four pages done; the bar says so honestly (AC-3).
     await expect(page.locator('.pdf-page-chip[data-status="done"]')).toHaveCount(4, { timeout: 60_000 });
@@ -131,14 +134,14 @@ test('whole textbook, cross-lesson: page-grouped preview, cross-page duplicate f
       expect(picked, w).not.toContain(w);
     }
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 
 test('partial failure: page 2 fails with its reason, completed pages keep their rows, 重试该页 lands the page back in order', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
-    await recognize(page, PDF_RETRY, UNIT);
+    await recognize(page, PDF_RETRY);
 
     // 2 done, 1 failed — the summary never claims a whole-file success.
     await expect(page.locator('.pdf-page-chip[data-status="done"]')).toHaveCount(2, { timeout: 60_000 });
@@ -174,12 +177,12 @@ test('partial failure: page 2 fails with its reason, completed pages keep their 
     const mine = (rows.get('duck').textbooks || []).filter((t) => t.name === BOOK_BEISHIDA);
     expect(mine[0].lesson).toBe('第2课');
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 
 test('limits: over-cap size refused at pick, over-cap page count refused at open, damaged PDF says unreadable — nothing processed', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
     await page.goto('/parent.html');
     await page.getByRole('tab', { name: '词库' }).click();
@@ -218,7 +221,7 @@ test('limits: over-cap size refused at pick, over-cap page count refused at open
     await expect(page.locator('.pdf-page-chip')).toHaveCount(0);
     await expect(page.locator('tr.photo-row')).toHaveCount(0);
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 });
