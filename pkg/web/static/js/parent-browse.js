@@ -14,10 +14,11 @@
  *     count badge {n} 个单词 from GET /api/v1/units); collapse state
  *     persists in localStorage under parent.units.collapsed (JSON array
  *     of unit names, re-applied on every render).
- *   - Groups are built client-side from the word list; the grouping key
- *     is the whole unit string (flat strings, prefix-agnostic per D-09).
- *     Groups left with zero rows by the search are hidden, not rendered
- *     empty (zero-one-many row).
+ *   - Groups are built client-side. A word with textbook lesson ownership
+ *     groups by that lesson (Issue #89 — the same record dictation reads),
+ *     never by the legacy unit tag. A word with no textbook assignment
+ *     still groups by its unit string (补充词汇). Groups left with zero
+ *     rows by the search are hidden, not rendered empty.
  *   - Edit modal (编辑单词): only 单词 is required (D-08); category is
  *     read-only (D-07); 保存修改 → PUT /api/v1/words/{id} → toast +
  *     refresh.
@@ -38,8 +39,159 @@
   var COLLAPSE_STORAGE_KEY = 'parent.units.collapsed';
   var SKELETON_ROWS = 3;
 
-  /** Header label for rows whose unit is the empty string. */
+  /** Header label for supplementary rows whose unit is the empty string. */
   var UNGROUPED_LABEL = '未分组';
+  /** Header label for textbook rows whose lesson is still empty. */
+  var PENDING_LESSON_LABEL = '待确认';
+
+  /**
+   * lessonOwnership — the lesson the browse group must use, or null when
+   * the word has no textbook assignment and still groups by its unit tag.
+   * A non-supplementary scope_reason wins (including an empty group_lesson,
+   * which is 待确认). Without a verdict, the first named lesson on the
+   * word is the group so a just-assigned lesson still moves the row.
+   */
+  function lessonOwnership(word) {
+    if (!word) {
+      return null;
+    }
+    var reason = word.scope_reason || '';
+    if (reason && reason !== 'supplementary') {
+      return word.group_lesson || '';
+    }
+    var books = word.textbooks || [];
+    if (!books.length) {
+      return null;
+    }
+    var lesson = '';
+    for (var i = 0; i < books.length; i++) {
+      if (books[i] && books[i].lesson) {
+        lesson = books[i].lesson;
+        break;
+      }
+    }
+    return lesson;
+  }
+
+  /**
+   * dictationStatusText — the parent-facing line when this word will not
+   * be picked for dictation, or '' when the textbook gate and the
+   * participation switch both admit it. The lesson hold is stated even
+   * when participation is also off: the checkbox already shows that
+   * switch, and the lesson hold is the one a group header used to hide.
+   */
+  function dictationStatusText(word) {
+    if (!word) {
+      return '';
+    }
+    if (word.scope_reason === 'unlearned') {
+      return '尚未学到，学到后自动加入';
+    }
+    if (word.scope_reason === 'pending') {
+      return '课次待确认，指定后自动加入';
+    }
+    if (word.participates === false) {
+      return '已移出默写范围';
+    }
+    return '';
+  }
+
+  /**
+   * groupBrowseWords — one group per lesson (words that have textbook
+   * ownership) or per unit tag (supplementary words). Order is first-seen;
+   * orderBrowseGroups re-sorts lesson groups into teaching order.
+   */
+  function groupBrowseWords(words) {
+    var groups = [];
+    var index = Object.create(null);
+    (words || []).forEach(function (word) {
+      var lesson = lessonOwnership(word);
+      var key;
+      if (lesson !== null) {
+        key = 'lesson\u0000' + lesson;
+        if (!Object.prototype.hasOwnProperty.call(index, key)) {
+          index[key] = {
+            kind: 'lesson',
+            unit: lesson,
+            label: lesson || PENDING_LESSON_LABEL,
+            rows: [],
+          };
+          groups.push(index[key]);
+        }
+      } else {
+        var unit = (word && word.unit) || '';
+        key = 'unit\u0000' + unit;
+        if (!Object.prototype.hasOwnProperty.call(index, key)) {
+          index[key] = {
+            kind: 'unit',
+            unit: unit,
+            label: unit || UNGROUPED_LABEL,
+            rows: [],
+          };
+          groups.push(index[key]);
+        }
+      }
+      index[key].rows.push(word);
+    });
+    return groups;
+  }
+
+  /**
+   * orderBrowseGroups — lesson groups follow the textbooks' explicit
+   * lesson order (not dictionary order, not the legacy unit sort).
+   * 待确认 follows the named lessons. Supplementary unit groups keep
+   * first-seen order at the end.
+   */
+  function orderBrowseGroups(groups, books) {
+    var rank = Object.create(null);
+    var n = 0;
+    (books || []).forEach(function (book) {
+      var lessons = book && book.lessons ? book.lessons : [];
+      lessons.forEach(function (name) {
+        if (name && !Object.prototype.hasOwnProperty.call(rank, name)) {
+          rank[name] = n;
+          n += 1;
+        }
+      });
+    });
+    var named = [];
+    var pending = [];
+    var units = [];
+    (groups || []).forEach(function (group) {
+      if (!group || group.kind !== 'lesson') {
+        units.push(group);
+        return;
+      }
+      if (!group.unit) {
+        pending.push(group);
+        return;
+      }
+      named.push(group);
+    });
+    named.sort(function (a, b) {
+      var ra = Object.prototype.hasOwnProperty.call(rank, a.unit) ? rank[a.unit] : 100000;
+      var rb = Object.prototype.hasOwnProperty.call(rank, b.unit) ? rank[b.unit] : 100000;
+      return ra - rb;
+    });
+    return named.concat(pending, units);
+  }
+
+  /** groupHoldText — the hold line when every row shares one, else ''. */
+  function groupHoldText(rows) {
+    var text = '';
+    for (var i = 0; i < (rows || []).length; i++) {
+      var line = dictationStatusText(rows[i]);
+      if (!line) {
+        return '';
+      }
+      if (!text) {
+        text = line;
+      } else if (text !== line) {
+        return '';
+      }
+    }
+    return text;
+  }
 
   /** Clear a container via the firstChild-removeChild loop (Pattern 4). */
   function clearContainer(container) {
@@ -348,6 +500,7 @@
     this.poems = [];
     this.passages = [];
     this.units = [];
+    this.textbooks = [];
     this.fetchSeq = 0;    // stale-response guard for debounced refetches
     this.debounceTimer = null;
     this.selectedIds = {};
@@ -654,15 +807,20 @@
         self.renderError(err);
       });
     }
+    var booksPromise = typeof this.fetchTextbooks === 'function'
+      ? this.fetchTextbooks(this.category).catch(function () { return []; })
+      : Promise.resolve([]);
     return Promise.all([
       this.fetchWords(this.category, this.query),
       this.fetchUnits(this.category),
+      booksPromise,
     ]).then(function (results) {
       if (seq !== self.fetchSeq) {
         return;
       }
       self.words = Array.isArray(results[0]) ? results[0] : [];
       self.units = Array.isArray(results[1]) ? results[1] : [];
+      self.textbooks = Array.isArray(results[2]) ? results[2] : [];
       var visible = {};
       self.words.forEach(function (word) { visible[String(word.id)] = true; });
       Object.keys(self.selectedIds).forEach(function (id) {
@@ -810,22 +968,12 @@
   };
 
   /**
-   * Group the word list client-side. The grouping key is the whole unit
-   * string (D-09 flat strings, prefix-agnostic); rows whose unit is the
-   * empty string land in one 未分组 group. Order follows the server's.
+   * Group the word list client-side. Textbook-owned words group by the
+   * lesson dictation reads (group_lesson); supplementary words group by
+   * the unit tag. Lesson groups then follow textbook teaching order.
    */
   BrowseView.prototype.groupWords = function () {
-    var groups = [];
-    var index = {};
-    this.words.forEach(function (word) {
-      var key = word.unit || '';
-      if (!Object.prototype.hasOwnProperty.call(index, key)) {
-        index[key] = { unit: key, rows: [] };
-        groups.push(index[key]);
-      }
-      index[key].rows.push(word);
-    });
-    return groups;
+    return orderBrowseGroups(groupBrowseWords(this.words), this.textbooks);
   };
 
   /** Count-badge value for a unit from the GET /units response, or null. */
@@ -854,9 +1002,11 @@
   BrowseView.prototype.buildGroup = function (group) {
     var self = this;
     var unit = group.unit;
+    var collapseKey = group.kind === 'lesson' ? ('课次:' + unit) : unit;
 
     var wrap = document.createElement('div');
     wrap.className = 'unit-group';
+    wrap.setAttribute('data-group-kind', group.kind || 'unit');
     wrap.setAttribute('data-unit', unit);
 
     var header = document.createElement('div');
@@ -875,22 +1025,25 @@
 
     var name = document.createElement('span');
     name.className = 'unit-name';
-    name.textContent = unit || UNGROUPED_LABEL;
+    name.textContent = group.label || (unit || UNGROUPED_LABEL);
     // UI-SPEC long-text row: the full name stays available beyond the
     // single-line ellipsis (hover/tap-hold tooltip; assistive tech reads
     // the untruncated textContent regardless).
     if (unit) {
-      name.title = unit;
+      name.title = group.label || unit;
     }
 
-    // Count badge: {n} 个单词 from GET /api/v1/units (category-scoped;
-    // the all-categories view merges by name). The 未分组 group has no
-    // units entry — its row count is the honest count there.
+    // Count badge. Supplementary named units still use GET /api/v1/units.
+    // Lesson groups must not: that count is the legacy unit tag, which
+    // disagrees with the lesson these rows actually belong to.
     var badge = document.createElement('span');
     badge.className = 'unit-count';
-    var count = unit !== '' ? this.countForUnit(unit) : group.rows.length;
-    if (count === null) {
-      count = group.rows.length;
+    var count = group.rows.length;
+    if (group.kind !== 'lesson' && unit !== '') {
+      var fromServer = this.countForUnit(unit);
+      if (fromServer !== null) {
+        count = fromServer;
+      }
     }
     badge.textContent = count + ' 个单词';
 
@@ -900,10 +1053,10 @@
     header.appendChild(toggle);
 
     // Inline header actions (UI-SPEC Unit group row): 重命名 + 删除 —
-    // 44px hit areas via padding. Rendered only for named units and only
-    // when the exact-scope dialog copy can be guaranteed (see
-    // unitOpsAllowed); 未分组 has no {category, unit} target.
-    if (unit !== '' && this.unitOpsAllowed()) {
+    // 44px hit areas via padding. Only supplementary named units have a
+    // {category, unit} target. A lesson group is textbook ownership;
+    // renaming it here would edit the legacy tag and leave the lesson.
+    if (group.kind !== 'lesson' && unit !== '' && this.unitOpsAllowed()) {
       var renameBtn = document.createElement('button');
       renameBtn.type = 'button';
       renameBtn.className = 'unit-action';
@@ -931,7 +1084,7 @@
     });
 
     function applyCollapse(names) {
-      var isCollapsed = names.indexOf(unit) !== -1;
+      var isCollapsed = names.indexOf(collapseKey) !== -1;
       body.hidden = isCollapsed;
       chevron.textContent = isCollapsed ? '▸' : '▾';
       toggle.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
@@ -940,9 +1093,9 @@
 
     toggle.addEventListener('click', function () {
       var names = readCollapsedNames();
-      var idx = names.indexOf(unit);
+      var idx = names.indexOf(collapseKey);
       if (idx === -1) {
-        names.push(unit);
+        names.push(collapseKey);
       } else {
         names.splice(idx, 1);
       }
@@ -951,6 +1104,13 @@
     });
 
     wrap.appendChild(header);
+    var hold = groupHoldText(group.rows);
+    if (hold) {
+      var holdLine = document.createElement('p');
+      holdLine.className = 'unit-hold';
+      holdLine.textContent = hold;
+      wrap.appendChild(holdLine);
+    }
     wrap.appendChild(body);
     return wrap;
   };
@@ -1085,6 +1245,14 @@
     chips.forEach(function (chip) {
       row.appendChild(chip);
     });
+    var scopeText = dictationStatusText(word);
+    if (scopeText) {
+      var scope = document.createElement('span');
+      scope.className = 'word-scope-status';
+      scope.setAttribute('data-scope', word.scope_reason || '');
+      scope.textContent = scopeText;
+      row.appendChild(scope);
+    }
     row.appendChild(participationLabel);
     row.appendChild(actions);
     return row;
@@ -1877,14 +2045,32 @@
         meaningField.input.value = word.meaning || '';
         var exampleField = buildModalField('例句', 'edit-example', true);
         exampleField.input.value = word.example || '';
-        var unitField = buildModalField('单元', 'edit-unit', false);
-        unitField.input.setAttribute('list', 'unit-options');
-        unitField.input.value = word.unit || '';
-
         form.appendChild(wordField.field);
         form.appendChild(meaningField.field);
         form.appendChild(exampleField.field);
-        form.appendChild(unitField.field);
+
+        // Issue #89: once a word has textbook lesson ownership, the unit
+        // tag is not a second lesson. Editing it here used to look like
+        // 指定课次 had done nothing. The lesson is changed with 指定教材课次.
+        var unitField = null;
+        var hasLesson = (word.textbooks && word.textbooks.length) ||
+          (word.scope_reason && word.scope_reason !== 'supplementary');
+        if (hasLesson) {
+          var lessonNote = document.createElement('p');
+          lessonNote.className = 'form-hint';
+          var names = (word.textbooks || []).map(function (entry) {
+            return (entry.name || '教材') + (entry.lesson ? '·' + entry.lesson : '·待确认');
+          }).join('、');
+          var status = dictationStatusText(word);
+          lessonNote.textContent = '课次以教材归属为准' + (names ? '（' + names + '）' : '') + '。' +
+            (status ? status + '。' : '') + '修改课次请用「指定教材课次」。';
+          form.appendChild(lessonNote);
+        } else {
+          unitField = buildModalField('单元', 'edit-unit', false);
+          unitField.input.setAttribute('list', 'unit-options');
+          unitField.input.value = word.unit || '';
+          form.appendChild(unitField.field);
+        }
 
         var cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
@@ -1912,12 +2098,15 @@
             return;
           }
           setLoading(saveBtn, true);
-          self.editWord(word.id, {
+          var payload = {
             word: newWord,
             meaning: meaningField.input.value.trim(),
             example: exampleField.input.value,
-            unit: unitField.input.value.trim(),
-          }).then(function () {
+          };
+          if (unitField) {
+            payload.unit = unitField.input.value.trim();
+          }
+          self.editWord(word.id, payload).then(function () {
             close();
             toast('已保存', 'success');
             self.refresh();
@@ -2168,6 +2357,10 @@
   // Window-or-module-global tail (state-manager.js convention) so Node
   // tests can require this file later.
   global.BrowseView = BrowseView;
+  global.groupBrowseWords = groupBrowseWords;
+  global.orderBrowseGroups = orderBrowseGroups;
+  global.dictationStatusText = dictationStatusText;
+  global.lessonOwnership = lessonOwnership;
   // Shared modal builders for sibling components (parent-textbook.js
   // mounts its modals through the same focus-trapped host — the
   // __parentFormKit precedent).
