@@ -439,6 +439,131 @@ func TestBrowseScopeMatchesDictationEligibility(t *testing.T) {
 	}
 }
 
+// TestBrowseScopeOffList pins 课表外 (CONTEXT.md Language): an assignment
+// whose lesson name is no longer on the book's lesson list NEVER becomes
+// learned — advancing progress to the whole list still holds the word out,
+// so the verdict must say off_list (never the 学到后自动加入 promise that
+// unlearned carries). A card that also wears an on-list unlearned lesson
+// (another book — one lesson per book) reports THAT hold — progress can
+// still admit it.
+func TestBrowseScopeOffList(t *testing.T) {
+	db := newTestDBWithCards(t)
+	if _, err := db.Exec(`DELETE FROM cards`); err != nil {
+		t.Fatalf("clear cards: %v", err)
+	}
+	for i, word := range []string{"stray", "both", "later"} {
+		if _, err := db.Exec(
+			"INSERT INTO cards (id, word, meaning, unit, category, fsrs_card) VALUES (?, ?, '', '', 'english', '{}')",
+			int64(i+1), word,
+		); err != nil {
+			t.Fatalf("seed %s: %v", word, err)
+		}
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE textbooks (
+			id INTEGER PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'english',
+			edition TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL DEFAULT '',
+			grade TEXT NOT NULL DEFAULT '', volume TEXT NOT NULL DEFAULT '',
+			module TEXT NOT NULL DEFAULT '', lessons TEXT NOT NULL DEFAULT '[]',
+			learned_lessons INTEGER NOT NULL DEFAULT 0, is_primary INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE TABLE card_assignments (
+			id INTEGER PRIMARY KEY, card_id INTEGER NOT NULL, textbook_id INTEGER NOT NULL,
+			lesson TEXT NOT NULL DEFAULT '', include_in_scope INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE(card_id, textbook_id)
+		);
+		INSERT INTO textbooks (id, name, category, lessons, learned_lessons) VALUES
+			(1, '主教材', 'english', '["第1课","第2课"]', 1),
+			(2, '课外教材', 'english', '["第2课"]', 0);
+		INSERT INTO card_assignments (card_id, textbook_id, lesson) VALUES
+			(1, 1, '第9课'),
+			(2, 1, '第9课'),
+			(2, 2, '第2课'),
+			(3, 1, '第2课');
+	`); err != nil {
+		t.Fatalf("seed textbook tables: %v", err)
+	}
+
+	cardsRepo, err := NewCardRepository(db, nil)
+	if err != nil {
+		t.Fatalf("NewCardRepository: %v", err)
+	}
+	booksRepo, err := NewTextbookRepository(db, nil)
+	if err != nil {
+		t.Fatalf("NewTextbookRepository: %v", err)
+	}
+	ctx := context.Background()
+
+	// T1 learned=1: 第1课 learned, 第2课 beyond progress, 第9课 off the
+	// list; T2 unlearned. Card 2's hold is its ON-LIST lesson (T2's 第2课),
+	// not the first assignment's off-list one.
+	scopes, err := booksRepo.BrowseScopes(ctx, []int64{1, 2, 3})
+	if err != nil {
+		t.Fatalf("BrowseScopes: %v", err)
+	}
+	want := map[int64]CardScope{
+		1: {InScope: false, Reason: ScopeOffList, GroupLesson: "第9课"},
+		2: {InScope: false, Reason: ScopeUnlearned, GroupLesson: "第2课"},
+		3: {InScope: false, Reason: ScopeUnlearned, GroupLesson: "第2课"},
+	}
+	for id, w := range want {
+		if scopes[id] != w {
+			t.Fatalf("card %d scope = %+v, want %+v", id, scopes[id], w)
+		}
+	}
+
+	// T1 progress to the WHOLE list: card 3 unlocks, card 2 honestly keeps
+	// its named hold (T2 has not moved), and the off-list card NEVER does —
+	// 课表外永远不算已学.
+	if _, err = db.Exec("UPDATE textbooks SET learned_lessons = 2 WHERE id = 1"); err != nil {
+		t.Fatalf("bump T1 progress: %v", err)
+	}
+	scopes, err = booksRepo.BrowseScopes(ctx, []int64{1, 2, 3})
+	if err != nil {
+		t.Fatalf("BrowseScopes after bump: %v", err)
+	}
+	if scopes[1].InScope || scopes[1].Reason != ScopeOffList {
+		t.Fatalf("off-list card after whole-list progress = %+v; want still off_list", scopes[1])
+	}
+	if scopes[2].Reason != ScopeUnlearned || scopes[2].GroupLesson != "第2课" {
+		t.Fatalf("card 2 after T1 bump = %+v; want its on-list hold unchanged", scopes[2])
+	}
+	if !scopes[3].InScope || scopes[3].Reason != ScopeLearned {
+		t.Fatalf("card 3 after whole-list progress = %+v; want learned", scopes[3])
+	}
+	eligible := map[int64]bool{}
+	cards, err := cardsRepo.List(ctx, CardFilter{ScopeEligibleOnly: true})
+	if err != nil {
+		t.Fatalf("List after bump: %v", err)
+	}
+	for _, c := range cards {
+		eligible[c.ID] = true
+	}
+	if eligible[1] {
+		t.Fatal("off-list card entered dictation selection after progress covered the whole list")
+	}
+	if eligible[2] {
+		t.Fatal("card 2 entered selection before its named on-list lesson was learned")
+	}
+	if !eligible[3] {
+		t.Fatalf("on-list card missing from selection after progress covered it: %v", eligible)
+	}
+
+	// T2 catches up: card 2's named hold lifts — the verdict told the truth.
+	if _, err = db.Exec("UPDATE textbooks SET learned_lessons = 1 WHERE id = 2"); err != nil {
+		t.Fatalf("bump T2 progress: %v", err)
+	}
+	scopes, err = booksRepo.BrowseScopes(ctx, []int64{2})
+	if err != nil {
+		t.Fatalf("BrowseScopes after T2 bump: %v", err)
+	}
+	if !scopes[2].InScope || scopes[2].Reason != ScopeLearned {
+		t.Fatalf("card 2 after T2 progress = %+v; want learned", scopes[2])
+	}
+}
+
 // TestCardScopeOnLegacyDB pins the degraded read: a database with cards
 // but no textbook tables keeps every card eligible (the pre-#4 behavior,
 // same contract as the missing participates column).

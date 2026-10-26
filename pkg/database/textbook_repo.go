@@ -102,9 +102,14 @@ const (
 	ScopeIncluded = "included"
 	// ScopeLearned: a lesson sits inside its textbook's learned prefix.
 	ScopeLearned = "learned"
-	// ScopeUnlearned: every named lesson is still beyond learned progress
-	// (or no longer on the lesson list). Held out of dictation.
+	// ScopeUnlearned: every named lesson is still beyond learned progress.
+	// Held out of dictation until progress reaches it.
 	ScopeUnlearned = "unlearned"
+	// ScopeOffList: every named lesson is 课表外 — no longer on its
+	// textbook's lesson list. Like pending it never becomes learned;
+	// only editing the book's lesson list or re-assigning the word admits
+	// it (CONTEXT.md: 课表外永远不算已学).
+	ScopeOffList = "off_list"
 	// ScopePending: assignments exist but every lesson is empty (待确认).
 	ScopePending = "pending"
 )
@@ -396,6 +401,17 @@ func (r *sqliteTextbookRepository) loadLessonProgress(ctx context.Context) (map[
 	return out, nil
 }
 
+// lessonOnList reports whether lesson is still on the book's lesson list
+// at all (课表外 = named but absent — CONTEXT.md: 永远不算已学).
+func lessonOnList(lesson string, book lessonProgress) bool {
+	for _, name := range book.lessons {
+		if name == lesson {
+			return true
+		}
+	}
+	return false
+}
+
 // lessonLearned reports whether lesson is inside the book's learned prefix.
 // 已学完第 N 课包含第 N 课. A counter past the list clamps to the whole
 // list (the same clamp textbookScopePredicate uses). An empty lesson, a
@@ -424,8 +440,9 @@ func lessonLearned(lesson string, book lessonProgress, ok bool) bool {
 // the caller omits those cards) and picks GroupLesson so a browse group
 // cannot show a learned-looking label for a word the gate holds out, or
 // the reverse. One learned assignment admits the word (any source suffices)
-// and that admitting lesson is the group; otherwise the first named lesson
-// is the group that explains the hold.
+// and that admitting lesson is the group. Holds prefer a lesson that is
+// still on its book's list (progress can admit it) over an off-list one
+// (课表外 never becomes learned — a different, honest reason).
 func scopeVerdict(assignments []TextbookAssignment, books map[int64]lessonProgress) CardScope {
 	for _, a := range assignments {
 		if a.IncludeInScope {
@@ -442,8 +459,16 @@ func scopeVerdict(assignments []TextbookAssignment, books map[int64]lessonProgre
 		}
 	}
 	for _, a := range assignments {
-		if a.Lesson != "" {
+		if a.Lesson == "" {
+			continue
+		}
+		if book, ok := books[a.TextbookID]; ok && lessonOnList(a.Lesson, book) {
 			return CardScope{InScope: false, Reason: ScopeUnlearned, GroupLesson: a.Lesson}
+		}
+	}
+	for _, a := range assignments {
+		if a.Lesson != "" {
+			return CardScope{InScope: false, Reason: ScopeOffList, GroupLesson: a.Lesson}
 		}
 	}
 	return CardScope{InScope: false, Reason: ScopePending}
