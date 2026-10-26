@@ -63,6 +63,22 @@ process.env.NO_PROXY = process.env.NO_PROXY
   : '127.0.0.1,localhost';
 process.env.no_proxy = process.env.NO_PROXY;
 
+// Machine-readable report contract (ci.yml job m1-browser-e2e →
+// scripts/check-m1-report.mjs). Playwright ≥1.4x treats
+// PLAYWRIGHT_JSON_OUTPUT_NAME as a BARE report name joined onto the json
+// reporter's default outputDir — the CONFIG FILE's directory (tests/) when
+// the reporter comes from the CLI. With `--reporter=list,json` the run in PR
+// #91's CI therefore wrote tests/reports/m1-results.json while the checker
+// read reports/ at the repo root → ENOENT. Attaching the reporter HERE with
+// an outputFile resolved against repoRoot makes the plain local command
+// (`PLAYWRIGHT_JSON_OUTPUT_NAME=… npm run e2e:m1`) land the file exactly
+// where the checker looks; Playwright's outputReport() creates the parent
+// directory on demand. A CLI --reporter=json override would drop this
+// outputFile option, so CI must NOT pass --reporter to this line.
+const m1JsonReport = process.env.PLAYWRIGHT_JSON_OUTPUT_NAME
+  ? path.resolve(repoRoot, process.env.PLAYWRIGHT_JSON_OUTPUT_NAME)
+  : undefined;
+
 module.exports = defineConfig({
   testDir: './e2e-m1-browser',
   // Explicit per-spec match: each plan step appends its spec file here, so
@@ -83,7 +99,7 @@ module.exports = defineConfig({
   // remain serialized even though classroom databases are per test.
   workers: 1,
   maxFailures: process.env.CI ? undefined : 1,
-  reporter: [['list']],
+  reporter: m1JsonReport ? [['list'], ['json', { outputFile: m1JsonReport }]] : [['list']],
   use: {
     baseURL: SERVICE,
     launchOptions: {
