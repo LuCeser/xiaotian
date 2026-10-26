@@ -6,8 +6,11 @@
 // copies that once travelled spec-to-spec have one home.
 //
 // Conventions these helpers encode (do not fork them back into a spec):
-//   - recognize() always fills the suite's UNIT into the 单元 field so the
-//     finally-cleanup deletes exactly that suite's words (T-09-12 hygiene).
+//   - recognize() never fills the 单元 field: these suites commit in
+//     textbook mode, where the per-word lesson is the only 课次 and the
+//     unit tag stays empty (Issue #89). Suite isolation therefore rides
+//     on the WORD list, not a unit tag: every spec deletes exactly its
+//     own words (deleteWords) in before/finally (T-09-12 hygiene).
 //   - awaitReceipt() asserts the Issue #6 per-category summary shape
 //     (教材「…」：新增 N 个，合并 M 个 …).
 //   - practiceSelection() probes the ISOLATED service's /rt (hard-coded
@@ -23,7 +26,7 @@ const WebSocket = require('ws');
  *  Issue #10: the SAME entry now requires the subject radio — these suites
  *  import English word lists, so they select 英语 (the pre-#10 default
  *  became an explicit pick, never a silent one). */
-async function recognize(page, file, unit) {
+async function recognize(page, file) {
   await page.goto('/parent.html');
   await page.getByRole('tab', { name: '词库' }).click();
   await page.locator('#addSection').waitFor();
@@ -31,17 +34,22 @@ async function recognize(page, file, unit) {
   const panel = page.locator('#add-panel-photo');
   await panel.waitFor();
   await panel.locator('input[name="parent-category-photo"][value="english"]').check();
-  await panel.getByRole('combobox', { name: '单元', exact: true }).fill(unit);
   await page.locator('#parent-photo-file').setInputFiles(file);
   await page.getByRole('button', { name: '开始识别' }).click();
   await page.locator('.photo-row').first().waitFor({ timeout: 30_000 });
   return panel;
 }
 
-/** DELETE one unit through the real API (404 = already gone). */
-async function deleteUnit(request, unit) {
+/** DELETE one suite's words through the real API (failures swallowed —
+ *  cleanup must never mask the test's own verdict). Textbook-mode commits
+ *  carry no unit tag (Issue #89), so the exact word list is the only
+ *  per-suite isolation key left. */
+async function deleteWords(request, words) {
+  if (!words || !words.length) {
+    return;
+  }
   await request.delete('/api/v1/words', {
-    data: { category: 'english', unit },
+    data: { category: 'english', words },
   }).catch(() => {});
 }
 
@@ -109,7 +117,7 @@ function practiceSelection() {
 
 module.exports = {
   recognize,
-  deleteUnit,
+  deleteWords,
   wordRows,
   textbooks,
   awaitReceipt,
