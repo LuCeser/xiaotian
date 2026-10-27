@@ -742,6 +742,108 @@
   }
 
   /**
+   * Issue #80 §2.3: one selection carries at most MAX_PHOTO_FILES photos
+   * (each one walks the ordinary per-image compress + recognize path, so
+   * the cap bounds the run, not the memory — one photo is resident at a
+   * time, the PDF-page precedent).
+   */
+  var MAX_PHOTO_FILES = 20;
+
+  /** A picker file's photo-ness (the two MIME types the flow accepts). */
+  function isPhotoFile(file) {
+    return !!file && (file.type === 'image/png' || file.type === 'image/jpeg');
+  }
+
+  /**
+   * validatePhotoSelection — the WHOLE-selection gate (Issue #80 §2.3):
+   * one PDF alone, or 1..MAX_PHOTO_FILES photos alone; anything mixed
+   * (PDF + photo, two PDFs) or alien is refused WHOLE — nothing is
+   * processed, matching the PDF pre-load gate's honest-refusal shape.
+   * Pure: takes the picker's file shapes, never the FileList itself.
+   *   { ok: true, kind: 'pdf' | 'photos', files: [...] }
+   *   { ok: false, code: 'unsupported'|'mixed'|'photo-too-many'|
+   *                   'pdf-too-large', message }
+   */
+  function validatePhotoSelection(files) {
+    var list = Array.prototype.slice.call(files || []).filter(Boolean);
+    if (!list.length) {
+      return { ok: false, code: 'empty', message: '' };
+    }
+    var photos = [];
+    var pdf = null;
+    for (var i = 0; i < list.length; i++) {
+      var f = list[i];
+      var pdfVerdict = global.validatePdfFile
+        ? global.validatePdfFile(f)
+        : { ok: false, code: 'not-pdf' };
+      if (pdfVerdict.ok || pdfVerdict.code === 'pdf-too-large') {
+        pdf = { file: f, verdict: pdfVerdict };
+      } else if (isPhotoFile(f)) {
+        photos.push(f);
+      } else {
+        return {
+          ok: false,
+          code: 'unsupported',
+          message: '只支持 PNG / JPEG 照片或 PDF 扫描件，请换一个文件',
+        };
+      }
+    }
+    if (pdf && list.length > 1) {
+      return {
+        ok: false,
+        code: 'mixed',
+        message: '一次只能选择一个 PDF，或最多 ' + MAX_PHOTO_FILES +
+          ' 张照片，不能混选；请分开分批上传',
+      };
+    }
+    if (pdf) {
+      if (!pdf.verdict.ok) {
+        return { ok: false, code: pdf.verdict.code, message: pdf.verdict.message };
+      }
+      return { ok: true, kind: 'pdf', files: [pdf.file] };
+    }
+    if (photos.length > MAX_PHOTO_FILES) {
+      return {
+        ok: false,
+        code: 'photo-too-many',
+        limit: MAX_PHOTO_FILES,
+        message: '一次最多选择 ' + MAX_PHOTO_FILES + ' 张照片（选中 ' +
+          photos.length + ' 张），请分批上传',
+      };
+    }
+    return { ok: true, kind: 'photos', files: photos };
+  }
+
+  /**
+   * mergePhotoMetas — the multi-photo book header (Issue #80 §2.2): a
+   * field later photos read fills ONLY what earlier photos left empty;
+   * two DIFFERENT non-empty readings void the field (待确认 — the backfill
+   * must never pick a winner between contradicting photos). lesson rides
+   * along for the panel's display; the book backfill reads only the five
+   * META_FIELDS. Pure.
+   */
+  function mergePhotoMetas(metas) {
+    var merged = {};
+    META_KEYS.concat(['lesson']).forEach(function (key) {
+      var seen = '';
+      var conflict = false;
+      (metas || []).forEach(function (meta) {
+        var value = meta ? metaField(meta[key]) : '';
+        if (!value) {
+          return;
+        }
+        if (!seen) {
+          seen = value;
+        } else if (seen !== value) {
+          conflict = true;
+        }
+      });
+      merged[key] = conflict ? '' : seen;
+    });
+    return merged;
+  }
+
+  /**
    * appendMissingLessons — keep existing order, append unseen names from
    * incoming in order (Issue #80: import never inserts into the middle).
    */
@@ -1093,10 +1195,11 @@
       this.form.appendChild(unit.field);
     }
 
-    // Photo/PDF picker row: one file at a time (Issue #3 settles the
-    // single-file limit; Issue #7 adds the scanned PDF — pages split in
-    // the browser, ADR-0004). The .pdf extension rides accept because
-    // iPad Safari sometimes hands a PDF an empty MIME type.
+    // Photo/PDF picker row: photos may come SEVERAL AT A TIME (Issue #80
+    // §2.3 — up to 20, one recognition per photo, the PDF-page merge
+    // machinery); a PDF stays one file whose pages split in the browser
+    // (Issue #7, ADR-0004). The .pdf extension rides accept because iPad
+    // Safari sometimes hands a PDF an empty MIME type.
     var pickField = document.createElement('div');
     pickField.className = 'form-field';
     var pickLabel = document.createElement('label');
@@ -1104,12 +1207,13 @@
     pickLabel.textContent = '词表照片／扫描 PDF';
     var pickHint = document.createElement('p');
     pickHint.className = 'form-hint';
-    pickHint.textContent = '拍摄或选择一张英语单词表或语文词语表照片（PNG / JPEG），或整本扫描 PDF（最多 100 页），无需裁图。';
+    pickHint.textContent = '拍摄或选择英语单词表或语文词语表照片（PNG / JPEG，一次最多 20 张），或整本扫描 PDF（最多 100 页，单份），无需裁图。';
     var pickRow = document.createElement('div');
     pickRow.className = 'photo-pick-row';
     this.fileInput = document.createElement('input');
     this.fileInput.type = 'file';
     this.fileInput.accept = 'image/png,image/jpeg,application/pdf,.pdf';
+    this.fileInput.multiple = true;
     this.fileInput.className = 'photo-file-input';
     this.fileInput.id = 'parent-photo-file';
     this.pickBtn = document.createElement('button');
@@ -1344,6 +1448,17 @@
     // panelRendered }. doc stays open for page retries until discard /
     // commit reset / a new file; rows themselves live in this.rows.
     this.pdfState = null;
+    // Issue #80 §2.3: the multi-photo run — { files, plan, aborted,
+    // metaDone, panelRendered } (the pdfState kin; the photo index is the
+    // page number, so mergePageRows and the retry bar ride unchanged).
+    // pickedPhotos carries the PICK (1 photo too — the plain flow just
+    // reads files[0] through it); photoBatch only exists while a
+    // multi-photo run is in play.
+    this.pickedPhotos = [];
+    this.photoBatch = null;
+    // The per-photo book headers read so far (mergePhotoMetas' input);
+    // detectedMeta is their merged view.
+    this.detectedMetaList = [];
     // Issue #8: a supplement run is in flight (the affordance disables
     // and says 生成中 rather than queueing a second overlapping call).
     this.meaningBusy = false;
@@ -1772,19 +1887,46 @@
       : '';
   };
 
+  /**
+   * handleFilePicked — the WHOLE selection goes through
+   * validatePhotoSelection (Issue #80 §2.3): one PDF, or 1..20 photos; a
+   * mixed or over-cap selection is refused whole (nothing processed). One
+   * photo keeps the plain single-photo flow; several start the batch run
+   * at 开始识别. A new valid pick always releases the previous photo run —
+   * its retries never outlive it.
+   */
   PhotoAddForm.prototype.handleFilePicked = function () {
-    var file = this.fileInput.files && this.fileInput.files[0];
+    var files = this.fileInput.files
+      ? Array.prototype.slice.call(this.fileInput.files) : [];
     this.showFormError('');
-    this.currentFile = file || null;
-    if (!file) {
+    if (!files.length) {
+      this.currentFile = null;
+      this.pickedPhotos = [];
       this.clearPickUI();
       this.releasePdf();
       return;
     }
-    var verdict = (global.validatePdfFile || function () {
-      return { ok: false, code: 'not-pdf' };
-    })(file);
-    if (verdict.ok) {
+    var verdict = validatePhotoSelection(files);
+    if (!verdict.ok) {
+      if (verdict.code === 'empty') {
+        this.currentFile = null;
+        this.pickedPhotos = [];
+        this.clearPickUI();
+        this.releasePdf();
+        return;
+      }
+      // pdf-too-large / mixed / photo-too-many / unsupported: refuse
+      // BEFORE anything is processed (the PDF gate's honest-refusal shape).
+      this.currentFile = null;
+      this.pickedPhotos = [];
+      this.clearPickUI();
+      this.showFormError(verdict.message);
+      return;
+    }
+    if (verdict.kind === 'pdf') {
+      var file = verdict.files[0];
+      this.pickedPhotos = [];
+      this.currentFile = file;
       // Issue #7: a scanned PDF. No thumbnail (a PDF is not an <img>); the
       // page plan replaces it once 开始识别 runs. A new file always
       // releases the previous run's doc — page retries never outlive it.
@@ -1813,24 +1955,21 @@
       this.syncWorkspace();
       return;
     }
-    if (verdict.code !== 'not-pdf') {
-      // pdf-too-large: refuse BEFORE loading, nothing is processed (AC-3).
-      this.currentFile = null;
-      this.clearPickUI();
-      this.showFormError(verdict.message);
-      return;
-    }
-    if (file.type !== 'image/png' && file.type !== 'image/jpeg') {
-      this.currentFile = null;
-      this.clearPickUI();
-      this.showFormError('只支持 PNG / JPEG 照片或 PDF 扫描件，请换一个文件');
-      return;
-    }
-    this.fileMeta.textContent = file.name + '（' + Math.max(1, Math.round(file.size / 1024)) + ' KB）';
+    // Photos (one or many — one photo rides the plain flow, many the
+    // batch run; either way the pick is the same shape from here on).
+    var photos = verdict.files;
+    var first = photos[0];
+    this.currentFile = first;
+    this.pickedPhotos = photos;
+    var totalKb = photos.reduce(function (sum, f) { return sum + (f.size || 0); }, 0) / 1024;
+    this.fileMeta.textContent = photos.length === 1
+      ? first.name + '（' + Math.max(1, Math.round(first.size / 1024)) + ' KB）'
+      : photos.length + ' 张照片（共 ' + Math.max(1, Math.round(totalKb / 1024)) + ' MB，从「' +
+        first.name + '」开始）';
     if (this.thumb.src) {
       URL.revokeObjectURL(this.thumb.src);
     }
-    this.thumb.src = URL.createObjectURL(file);
+    this.thumb.src = URL.createObjectURL(first);
     this.thumb.hidden = false;
     this.recognizeBtn.disabled = false;
     // Issue #81: the SAME object URL feeds the large 本次材料 view — the
@@ -1841,7 +1980,9 @@
     this.sourceImg.alt = '词表照片大图预览';
     this.sourceImg.src = this.thumb.src;
     this.sourceView.hidden = false;
-    this.setSourceCaption(file.name);
+    this.setSourceCaption(photos.length === 1
+      ? first.name
+      : '共 ' + photos.length + ' 张照片，从「' + first.name + '」开始');
     this.syncWorkspace();
   };
 
@@ -5584,6 +5725,10 @@
   global.lessonsNamedOnPhoto = lessonsNamedOnPhoto;
   global.recommendLesson = recommendLesson;
   global.appendMissingLessons = appendMissingLessons;
+  global.MAX_PHOTO_FILES = MAX_PHOTO_FILES;
+  global.validatePhotoSelection = validatePhotoSelection;
+  global.mergePhotoMetas = mergePhotoMetas;
+  global.isPhotoFile = isPhotoFile;
   global.isCommittable = isCommittable;
   global.isResolved = isResolved;
   global.planAssignments = planAssignments;
