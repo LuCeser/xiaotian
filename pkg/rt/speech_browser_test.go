@@ -440,18 +440,12 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 		llm:                    newFakeLLM(),
 		// Two non-zero sawtooth chunks per sentence (~250ms each at 24kHz
 		// s16le): audible-length PCM so real playback and onended are stable.
-		// The inter-chunk delay mirrors the real TTS first-packet latency
-		// (participation e2e does the same): connWriter's two select-fed
-		// queues do not ORDER control vs audio frames (the issue-69-alt1
-		// step-15 defect), so a zero-delay fake lets the first PCM chunk
-		// race ahead of audio_start and the page drops it (empty-sentence
-		// ack). The ordering fix itself is step 14–15's frame queue, not a
-		// fixture workaround.
-		tts: func() *fakeTTS {
-			tts := newFakeTTS(2, 12000)
-			tts.delay = 30 * time.Millisecond
-			return tts
-		}(),
+		// Zero inter-chunk delay: the fixture must NOT slow the supplier to
+		// smuggle ordering past connWriter (路径 A 单元 1 门禁) — the wire
+		// itself carries control and PCM in enqueue order (conn.go's single
+		// outbound FIFO), and the driver's round observation rejects both a
+		// missing chunk and a chunk outside its start/end window.
+		tts: newFakeTTS(2, 12000),
 		words: &fakeWordSource{
 			dueByCat:  map[string][]lesson.Word{"chinese": due},
 			peekByCat: map[string][]lesson.Word{"chinese": due[:1]},
