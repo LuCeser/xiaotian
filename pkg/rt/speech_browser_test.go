@@ -2103,61 +2103,135 @@ func TestClosedControlBrowser(t *testing.T) {
 }
 
 // TestCorrectionSubmitBrowser 是 1.10a 的复验（review P1）：更正提交的接
-// 纳与保存责任经真实浏览器旅程——重连补检课堂（自然 ACK 恢复播报）、人工
-// 改判、真实 UI 提交按钮——在提交闩驻留时关闭，已接纳的 diff 保存与回执
-// 仍然完成，关闭后没有迟到的 review_result 或总结播报。撤销验证：撤掉
-// submitCorrections 的生产接纳后本测试红（提交被拒、行不落 diff）。
+// 纳与保存责任经真实浏览器旅程。两个顺序各自一条业务断言（复盘第 3 节
+// 第 3 项——种子已是 submitted，兜底让位不能再当证明）：
+//   - 提交先接纳：提交闩（diff 写）驻留时关闭，已接纳的 diff 保存与回
+//     执仍然完成，行落在 submitted+checked、版本 +3；
+//   - 密封先于提交：改判落库后、提交点按前的延迟窗口内关闭（真实告
+//     别），迟到的提交经生产入口 submitCorrections 探针（消息路径由更
+//     早的 alive 门槛持有）——查封的登记不接纳：零 diff 批、unchecked
+//     标记保留、版本停在 +2。
+// 撤销验证：撤掉 submitCorrections 的生产接纳后，「密封先于提交」子测试
+// 红（diff 落库、标记被清）。
 func TestCorrectionSubmitBrowser(t *testing.T) {
-	f := newSpeechBrowserFixture(t)
-	f.seedCorrection()
-	reviewGate := f.gateReviewWrite()
+	t.Run("submit admitted before the close", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedCorrection()
+		reviewGate := f.gateReviewWrite()
 
-	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
-	seeded, err := f.tools.GetLessonState(context.Background(), lessonID)
-	if err != nil {
-		t.Fatalf("read seeded lesson: %v", err)
-	}
+		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+		seeded, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read seeded lesson: %v", err)
+		}
 
-	driver := f.runDriverAsync("correction-submit-close", 45*time.Second)
-	select {
-	case <-reviewGate.entered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the correction diff write never reached its review gate")
-	}
-	m := f.waitFirstManager(5 * time.Second)
-	// The goodbye close claims the accepted correction (its admission covers
-	// the diff write, the receipt and the marker reset) while the diff write
-	// is parked AHEAD of the real save.
-	m.handleEndSession(m.currentSender())
-	reviewGate.openUp()
-	res := <-driver
-	if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
-		t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0 late=%q",
-			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences, res.LateSentenceTexts)
-	}
-	f.assertOriginalTasksExited()
+		driver := f.runDriverAsync("correction-submit-close", 45*time.Second)
+		select {
+		case <-reviewGate.entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the correction diff write never reached its review gate")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		// The goodbye close claims the accepted correction (its admission covers
+		// the diff write, the receipt and the marker reset) while the diff write
+		// is parked AHEAD of the real save.
+		m.handleEndSession(m.currentSender())
+		reviewGate.openUp()
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0 late=%q",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences, res.LateSentenceTexts)
+		}
+		f.assertOriginalTasksExited()
 
-	if got := len(f.words.submissions()); got != 1 || len(f.words.submissions()[0]) != 1 {
-		t.Fatalf("correction diff batches = %v, want exactly the one-word diff", f.words.submissions())
-	}
-	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
-	if err != nil {
-		t.Fatalf("read stored lesson: %v", err)
-	}
-	if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
-		t.Fatalf("stored stage=%q unchecked=%v, want the marker cleared by the accepted correction", stored.Stage, stored.Unchecked)
-	}
-	// Two manual verdicts (v+2) then the marker reset (+1): the diff's own
-	// review write lands in the vocabulary store, not the lesson row.
-	if stored.Version != seeded.Version+3 {
-		t.Fatalf("stored version = %d, want seeded %d + 2 verdicts + 1 marker reset", stored.Version, seeded.Version)
-	}
-	m.TurnManager.mu.Lock()
-	pending := len(m.checkWrites)
-	m.TurnManager.mu.Unlock()
-	if pending != 0 {
-		t.Fatalf("completed check-write admissions = %d, want 0", pending)
-	}
+		if got := len(f.words.submissions()); got != 1 || len(f.words.submissions()[0]) != 1 {
+			t.Fatalf("correction diff batches = %v, want exactly the one-word diff", f.words.submissions())
+		}
+		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
+			t.Fatalf("stored stage=%q unchecked=%v, want the marker cleared by the accepted correction", stored.Stage, stored.Unchecked)
+		}
+		// Two manual verdicts (v+2) then the marker reset (+1): the diff's own
+		// review write lands in the vocabulary store, not the lesson row.
+		if stored.Version != seeded.Version+3 {
+			t.Fatalf("stored version = %d, want seeded %d + 2 verdicts + 1 marker reset", stored.Version, seeded.Version)
+		}
+		m.TurnManager.mu.Lock()
+		pending := len(m.checkWrites)
+		m.TurnManager.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
+
+	t.Run("close seals before the submit", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedCorrection()
+
+		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+		seeded, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read seeded lesson: %v", err)
+		}
+
+		// --submit-delay-ms leaves the window between the two taps and the
+		// submit tap; the close lands there, after both tap writes committed
+		// (tm.tutor.version = seeded+2). The page's own submit click rides a
+		// dead connection — the late submit below probes the production entry
+		// in-process instead.
+		driver := f.runDriverAsync("correction-submit-close", 45*time.Second, "--submit-delay-ms", "3000")
+		m := f.waitFirstManager(5 * time.Second)
+		if !waitFor(t, 30*time.Second, func() bool {
+			m.TurnManager.mu.Lock()
+			defer m.TurnManager.mu.Unlock()
+			return m.tutor != nil && m.tutor.version >= seeded.Version+2
+		}) {
+			t.Fatal("the correction taps never landed their verdict writes")
+		}
+		m.handleEndSession(m.currentSender())
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
+
+		// A submit arriving past the sealed close cannot ride the message
+		// path — handleCheckSubmit's alive gate (a strictly earlier refusal)
+		// owns that path, and a read-gate rendezvous inside submitCorrections
+		// dies to the close's turnCancel. So the late submit probes the
+		// production ENTRY submitCorrections itself (the read loop's
+		// last-message equivalent for this gate): 1.10a's admission is the
+		// independent second gate — a sealed registry admits nothing.
+		m.submitCorrections(m.currentSender(), CheckSubmitMsg{
+			Type: TypeCheckSubmit, RequestID: "late-correction-after-close",
+		})
+		// 拿掉接纳的变异会让 finishCorrections 走异步 goroutine：给这个未被
+		// 拒绝的提交一个有界窗口把 diff 真正落库，「没有发生」才是业务断言。
+		waitFor(t, 3*time.Second, func() bool { return len(f.words.submissions()) > 0 })
+
+		if got := len(f.words.submissions()); got != 0 {
+			t.Fatalf("correction diff batches = %v, want none — a sealed registry admits no submit", f.words.submissions())
+		}
+		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		if stored.Stage != lesson.StageSubmitted || !stored.Unchecked {
+			t.Fatalf("stored stage=%q unchecked=%v, want the marker kept for the next correction session", stored.Stage, stored.Unchecked)
+		}
+		if stored.Version != seeded.Version+2 {
+			t.Fatalf("stored version = %d, want seeded %d + the two taps only (no marker reset)", stored.Version, seeded.Version)
+		}
+		m.TurnManager.mu.Lock()
+		pending := len(m.checkWrites)
+		m.TurnManager.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
 }
 
 // TestPassageSubmitBrowser 是 1.10d 的复验（review P1）：短文提交的接纳与
