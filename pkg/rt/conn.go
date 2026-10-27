@@ -389,8 +389,8 @@ func stripOriginPort(origin string) string {
 // 供应商的第一块 PCM 抢在 audio_start 之前（页面丢块）。容量与配额语义留给
 // 单元 2 的统一帧队列，这里只做最小的 FIFO 有序发送。
 type outboundFrame struct {
-	mt   int
 	data []byte
+	mt   int
 }
 
 // connWriter is the per-connection single-writer send pump. Control and
@@ -427,12 +427,12 @@ func newConnWriter(conn *websocket.Conn, queueSize int, logger infra.Logger) *co
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &connWriter{
-		conn:    conn,
-		frames:  make(chan outboundFrame, queueSize),
-		logger:  logger,
-		ctx:     ctx,
-		cancel:  cancel,
-		done:    make(chan struct{}),
+		conn:   conn,
+		frames: make(chan outboundFrame, queueSize),
+		logger: logger,
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 }
 
