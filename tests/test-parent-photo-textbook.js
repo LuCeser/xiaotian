@@ -60,6 +60,10 @@ const {
   distinctRowLessons,
   lessonsNamedOnPhoto,
   recommendLesson,
+  recommendForDraftPage,
+  fillRecommendedLessons,
+  applyBatchLesson,
+  applyPickedLesson,
   appendMissingLessons,
   isCommittable,
   planAssignments,
@@ -218,6 +222,79 @@ const BOOKS = [
     ['第1课', '第2课', '第3课'], 'append missing only, keep order');
   eq(appendMissingLessons(['第1课'], ['第3单元', 'Unit 3']),
     ['第1课', '第3单元', 'Unit 3'], '第3单元 and Unit 3 stay distinct');
+
+  // recommendForDraftPage: the matched candidate book's list is the
+  // previous-lesson fallback; an unmatched (or absent) header never
+  // invents one.
+  const BOOKS2 = [{ id: 7, name: '书七', edition: '人教版PEP', stage: '', grade: '三年级', volume: '', module: '', lessons: ['第1课', '第2课'] }];
+  eq(recommendForDraftPage(BOOKS2, { edition: '人教版PEP', grade: '三年级' },
+    { entries: [{ word: 'a', lesson: '' }] }, []),
+    { lesson: '第2课', source: 'previous-lesson' }, 'matched book feeds the last-lesson fallback');
+  eq(recommendForDraftPage([], null, { entries: [{ word: 'a', lesson: '' }] }, []),
+    { lesson: '', source: 'none' }, 'new-book draft with no signal stays none');
+})();
+
+// ----------------------------------------------------------------------
+// fillRecommendedLessons / applyBatchLesson / applyPickedLesson
+// (Issue #80 §3.2 — memory-only row stamping; a row object never leaves
+// with a lesson it did not earn, and no request machinery runs here)
+// ----------------------------------------------------------------------
+
+(function () {
+  // A row with its own recognized lesson keeps it and is marked 识别;
+  // an empty row takes the page recommendation; no recommendation → the
+  // lesson stays the honest empty string (待确认).
+  const stamped = fillRecommendedLessons([
+    { word: 'a', lesson: '第2课', status: 'new' },
+    { word: 'b', lesson: '', status: 'new' },
+    { word: 'c', lesson: '  ', status: 'new' },
+  ], { lesson: '第9课', source: 'recognized' });
+  eq(stamped.map(function (r) { return [r.word, r.lesson, r.lessonOrigin]; }), [
+    ['a', '第2课', 'recognized'],
+    ['b', '第9课', 'recognized'],
+    ['c', '第9课', 'recognized'],
+  ], 'own lesson wins; a blank-only lesson is empty and takes the recommendation');
+  eq(fillRecommendedLessons([{ word: 'a', lesson: '' }], { lesson: '', source: 'none' })[0].lesson,
+    '', 'no recommendation keeps the empty lesson an empty string');
+  // Purity: the input rows are never mutated.
+  const input = [{ word: 'a', lesson: '', status: 'new' }];
+  fillRecommendedLessons(input, { lesson: '第1课', source: 'photo-order' });
+  eq(input[0].lesson, '', 'fillRecommendedLessons does not mutate its input');
+
+  const rows = [
+    { word: 'a', lesson: '第1课', status: 'new', checked: true },
+    { word: 'b', lesson: '', status: 'new', checked: false },
+    { word: 'c', lesson: '', status: 'exists', checked: true },
+    { word: 'd', lesson: '', status: 'invalid', reason: 'empty-word', checked: false },
+    { word: 'e', lesson: '', status: 'conflict', checked: true, resolution: 'adopt' },
+    { word: 'f', lesson: '', status: 'conflict', checked: true, resolution: '' },
+  ];
+
+  // 整批: every committable CHECKED row (加入 set) takes the lesson.
+  const batch = applyBatchLesson(rows, '第5课');
+  eq(batch.map(function (r) { return r.lesson; }),
+    ['第5课', '', '第5课', '', '第5课', ''],
+    'batch apply covers checked committable rows only');
+  eq(rows[0].lesson, '第1课', 'batch apply does not mutate its input rows');
+  eq(batch.filter(function (r) { return r.lesson === '第5课'; })
+    .every(function (r) { return r.lessonOrigin === 'parent'; }),
+    true, 'batch apply stamps origin parent (the 推荐 badge stops)');
+
+  // 多选: the pick is separate from 加入 — a picked-but-unchecked row
+  // still takes the lesson (memory-only; committing stays 加入's call).
+  const picked = applyBatchLesson([], '第5课');
+  eq(picked, [], 'batch apply over no rows is empty');
+  const pickedRows = rows.map(function (r, i) {
+    return i === 1 || i === 4 ? Object.assign({}, r, { lessonPicked: true }) : r;
+  });
+  const applied = applyPickedLesson(pickedRows, '第7课');
+  eq(applied.map(function (r) { return r.lesson; }),
+    ['第1课', '第7课', '', '', '第7课', ''],
+    'picked apply covers picked committable rows, checked or not');
+  // The unpicked row that already carries a lesson keeps it untouched
+  // (identity preserved — not a copy).
+  eq(applied[3].lesson, '', 'an invalid row never takes a picked lesson');
+  eq(applied[5].lesson, '', 'an unresolved conflict never takes a picked lesson');
 })();
 
 // ----------------------------------------------------------------------

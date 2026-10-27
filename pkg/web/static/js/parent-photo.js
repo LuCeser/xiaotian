@@ -911,6 +911,19 @@
   }
 
   /**
+   * recommendForDraftPage — one freshly recognized page's recommendation
+   * with the honest inputs of the moment (Issue #80 §3.1): the page's own
+   * header + entries, the lesson list of the book the CURRENT merged meta
+   * actually matches (the preselect candidate — nothing is chosen yet at
+   * recognize time), and the run's earlier pages' recommendations in
+   * order. Pure; recommendLesson does the deciding, nothing is written.
+   */
+  function recommendForDraftPage(books, meta, photo, priorRecs) {
+    var candidate = matchTextbookForMeta(books, meta);
+    return recommendLesson(photo, (candidate && candidate.lessons) || [], priorRecs || []);
+  }
+
+  /**
    * appendMissingLessons — keep existing order, append unseen names from
    * incoming in order (Issue #80: import never inserts into the middle).
    */
@@ -2212,11 +2225,10 @@
           // Issue #80 §3.1: one recommendation per photo fills the rows
           // whose own lesson is empty (memory-only; nothing is written).
           // parsed.meta IS the photo's textbook header (parseRecognized's
-          // shape) — recommendLesson reads it as photo.textbook.
-          var candidateBook = matchTextbookForMeta(self.books, self.detectedMeta);
-          self.rows = fillRecommendedLessons(self.rows, recommendLesson(
-            { textbook: parsed.meta, entries: entries },
-            (candidateBook && candidateBook.lessons) || [], []));
+          // shape); recommendForDraftPage reads it as photo.textbook.
+          self.rows = fillRecommendedLessons(self.rows, recommendForDraftPage(
+            self.books, self.detectedMeta,
+            { textbook: parsed.meta, entries: entries }, []));
           self.poemRows = classifyPoemDrafts(parsed.poems, self.existingPoems);
           self.passageRows = classifyPassageDrafts(parsed.passages, self.existingPassages);
           self.otherSections = parsed.others.map(function (o) {
@@ -2542,8 +2554,17 @@
       }
       state.metaDone = true;
     }
-    var classified = global.classifyPhotoEntries(parsed.entries, this.existingWords);
-    this.rows = global.mergePageRows(this.rows, pageNo, classified);
+    // Issue #80 §3.1: the page's own recommendation stamps its rows before
+    // the merge — every row keeps the lesson the photo itself carried, the
+    // empties take the page's default, and the run's earlier pages feed
+    // the photo-order fallback. Memory-only; a retried page re-derives it.
+    state.lessonRecs = state.lessonRecs || [];
+    var rec = recommendForDraftPage(this.books, this.detectedMeta,
+      { textbook: parsed.meta, entries: parsed.entries }, state.lessonRecs);
+    state.lessonRecs.push(rec);
+    var stamped = fillRecommendedLessons(
+      global.classifyPhotoEntries(parsed.entries, this.existingWords), rec);
+    this.rows = global.mergePageRows(this.rows, pageNo, stamped);
     // Issue #11: the page's poems and display-only others replace
     // their own page segments (a retry never duplicates either).
     // Issue #13: the passages replace their own segment the same way.
@@ -3194,6 +3215,12 @@
       }
       next[i].checked = this.rows[i].checked !== false && isCommittable(next[i], textbookMode);
       next[i].lesson = this.rows[i].lesson || '';
+      // Issue #80 §3.2: the recommendation origin (识别/推荐 badges) and
+      // the multi-select 选中 state ride every re-classification — an edit
+      // must never silently drop the parent's picks or relabel a row's
+      // lesson source.
+      next[i].lessonOrigin = this.rows[i].lessonOrigin || '';
+      next[i].lessonPicked = !!this.rows[i].lessonPicked;
       // Issue #7: the page tag rides every re-classification — the
       // preview's page grouping and mergePageRows' segment replace read it.
       next[i].page = this.rows[i].page || 0;
@@ -6035,6 +6062,10 @@
   global.distinctRowLessons = distinctRowLessons;
   global.lessonsNamedOnPhoto = lessonsNamedOnPhoto;
   global.recommendLesson = recommendLesson;
+  global.recommendForDraftPage = recommendForDraftPage;
+  global.fillRecommendedLessons = fillRecommendedLessons;
+  global.applyBatchLesson = applyBatchLesson;
+  global.applyPickedLesson = applyPickedLesson;
   global.appendMissingLessons = appendMissingLessons;
   global.MAX_PHOTO_FILES = MAX_PHOTO_FILES;
   global.validatePhotoSelection = validatePhotoSelection;
