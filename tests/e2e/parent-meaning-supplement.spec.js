@@ -32,9 +32,12 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
-const { recognize, deleteUnit, wordRows, awaitReceipt } = require('./helpers/photo-flow');
+const { recognize, deleteWords, wordRows, awaitReceipt } = require('./helpers/photo-flow');
 
-const UNIT = 'e2e-photo-meaning';
+// This suite's whole vocabulary (all three fixtures). The textbook-mode
+// commit writes NO unit tag (Issue #89), so the exact word list is the
+// suite's isolation key — before AND after each test.
+const WORDS = ['mango', 'peach', 'kiwi', 'melon', 'camel', 'deer', 'goat', 'wolf', 'corn', 'beanpod'];
 
 const FIXTURES = path.resolve(__dirname, 'fixtures');
 const FIXTURE_WAIYAN = path.join(FIXTURES, 'photo-meaning-waiyan.png');
@@ -57,9 +60,9 @@ function genButton(page) {
 
 test.describe('Issue #8 acceptance', () => {
 test('meaning supplement: fills only the blanks, marks them, and the real write keeps the source', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
-    await recognize(page, FIXTURE_WAIYAN, UNIT);
+    await recognize(page, FIXTURE_WAIYAN);
 
     // The read header prefills the 新建教材 form (its own meta family).
     await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
@@ -99,14 +102,14 @@ test('meaning supplement: fills only the blanks, marks them, and the real write 
     await expect(page.locator('[data-word="melon"] .word-src-badge')).toBeVisible();
     await expect(page.locator('[data-word="mango"] .word-src-badge')).toHaveCount(0);
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 
 test('meaning supplement: parent edit keeps the marker, cancel falls back to missing, and a never-answered row still commits', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
-    await recognize(page, FIXTURE_BSDA, UNIT);
+    await recognize(page, FIXTURE_BSDA);
     await expect(page.locator('#parent-photo-tb-name')).toHaveValue(BOOK_BSDA);
     await expect(genButton(page)).toContainText('补充缺失释义（3 词）');
 
@@ -142,14 +145,14 @@ test('meaning supplement: parent edit keeps the marker, cancel falls back to mis
     expect(words.get('wolf').meaning_source).toBe('material'); // 保留缺失
     expect(words.get('camel').meaning_source).toBe('material');
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 
 test('meaning supplement: a failed generation is reported honestly and the retry succeeds', async ({ page, request }) => {
-  await deleteUnit(request, UNIT);
+  await deleteWords(request, WORDS);
   try {
-    await recognize(page, FIXTURE_SHANLV, UNIT);
+    await recognize(page, FIXTURE_SHANLV);
     await expect(page.locator('#parent-photo-tb-name')).toHaveValue(BOOK_SHANLV);
     await expect(genButton(page)).toContainText('补充缺失释义（1 词）');
 
@@ -174,7 +177,7 @@ test('meaning supplement: a failed generation is reported honestly and the retry
     expect(words.get('beanpod').meaning).toBe('n. 豆荚');
     expect(words.get('beanpod').meaning_source).toBe('generated');
   } finally {
-    await deleteUnit(request, UNIT);
+    await deleteWords(request, WORDS);
   }
 });
 });

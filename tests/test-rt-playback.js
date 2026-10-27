@@ -478,6 +478,47 @@ FakeTimers.prototype.pendingMs = function () {
 }
 
 // ---------------------------------------------------------------------------
+// 7b. Restart on a FRESH AudioContext: setAudioContext resets the scheduling
+// cursor (J16 再练一组 after a natural ending — releaseSharedResources keeps
+// the old cursor; only stopNow zeroes it, so the explicit-end restart was
+// never affected).
+// ---------------------------------------------------------------------------
+{
+  const pb = makePlayback();
+  // Session 1 schedules 60 s of audio, then ends NATURALLY (every source's
+  // real onended → drain 'drained' → release: ledger cleared, audioCtx
+  // dropped — the cursor survives on the old clock).
+  pb.onTurnStart(1, 1);
+  pb.onAudioStart(1, 's1');
+  for (let i = 0; i < 600; i++) pb.onAudioChunk(chunkBuffer(2400)); // 6 s each
+  pb.onAudioEnd(1, 's1');
+  for (const src of pb.audioCtx.sources) src.onended();
+  assert.ok(pb._cursor > 100, 'session 1 leaves a large cursor on its clock');
+  pb.releaseSharedResources();
+
+  // Session 2 (再练一组): a FRESH context whose clock starts over. The first
+  // chunk must schedule at NOW + lead — not at the dead clock's cursor.
+  pb.resetSession();
+  pb.setAudioContext(new FakeAudioContext());
+  pb.onTurnStart(1, 0); // fresh connection restarts the id namespace
+  pb.onAudioStart(0, 't1-s0');
+  pb.onAudioChunk(chunkBuffer(2400));
+  const ctx = pb.audioCtx;
+  const scheduled = ctx.sources[ctx.sources.length - 1].startTimes[0];
+  assert.ok(scheduled <= ctx.currentTime + 0.5,
+    'first restart chunk schedules on the new clock (' + scheduled.toFixed(2)
+    + ' vs now ' + ctx.currentTime.toFixed(2) + '), not the old cursor');
+  // And it still acks through the real onended, not the old ledger. Session
+  // 1's natural ending acked first (its own real onendeds), so the restart's
+  // evidence is its OWN key acking exactly once — through THIS source.
+  pb.onAudioEnd(0, 't1-s0');
+  ctx.sources[ctx.sources.length - 1].onended();
+  const restartAcks = pb.testClient.sends.filter((m) => m.type === 'sentence_ack'
+    && m.epoch === 0 && m.sentence_id === 't1-s0');
+  assert.strictEqual(restartAcks.length, 1, 'the restart round acks its own key exactly once');
+}
+
+// ---------------------------------------------------------------------------
 // 8-10. drainNaturally + watchdog (13-11, T-13-24b) — async contract
 // ---------------------------------------------------------------------------
 (async function testDrainContracts() {

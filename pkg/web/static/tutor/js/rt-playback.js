@@ -200,9 +200,21 @@
     this._drainInWatchdog = false;
   }
 
-  /** Attach the shared AudioContext (created by RTCapture's gesture). */
+  /**
+   * Attach the shared AudioContext (created by RTCapture's gesture). A NEW
+   * context is a NEW clock domain: the gapless-scheduling cursor measured on
+   * the previous context's clock is meaningless against this one. Without
+   * the reset, a 「再练一组」 restart after a natural ending (whose
+   * releaseSharedResources — deliberately no stopNow — keeps the old cursor)
+   * schedules the fresh session's first chunks at the OLD context's final
+   * cursor, tens of seconds into the new context's future: nothing sounds,
+   * no onended ever fires and the server's playback-ack wait kills the
+   * classroom (finish.spec.js J16 found it; stopNow already zeroes the
+   * cursor, so the explicit-end restart path was never affected).
+   */
   RTCPlayback.prototype.setAudioContext = function (ctx) {
     this.audioCtx = ctx;
+    this._cursor = 0;
   };
 
   /** Append a page-level observation to the shared ordered trace. */
@@ -243,10 +255,37 @@
   };
 
   /**
+   * A NEW /rt connection begins (the page's start flow). The previous
+   * session's teardown (stopEverything or the terminal drain) already
+   * stopped its audio — clear any stragglers silently, and CRITICALLY drop
+   * the epoch: every server session numbers epochs from 0, so a page whose
+   * player epoch was bumped (a subject pick, an interrupt) must ADOPT the
+   * next connection's fresh epoch space (onAudioStart) instead of rejecting
+   * its announcement audio as "stale" — announcements carry no turn_start,
+   * so nothing else would ever move the epoch back down (J15/J16: the
+   * in-page restart after 结束 otherwise died on playback_ack_timeout).
+   */
+  RTCPlayback.prototype.resetSession = function () {
+    if (this._sources.length) this.stopNow();
+    this._ledger.clear();
+    this._epoch = null;
+    this._turnFirstAudioDone = false;
+    this._sentenceId = null;
+    this._sentenceEndSeen = false;
+    this._acceptingAudio = false;
+    this._currentKey = null;
+  };
+
+  /**
    * First audio chunk of one sentence announced. A stale epoch (older than
    * the current turn's) is ignored outright.
    */
   RTCPlayback.prototype.onAudioStart = function (epoch, sentenceId) {
+    if (this._epoch === null) {
+      // First announcement after resetSession: adopt the new connection's
+      // epoch space wholesale (see resetSession).
+      this._epoch = epoch;
+    }
     if (epoch !== this._epoch) return;
     var key = ledgerKey(epoch, sentenceId);
     this._sentenceId = sentenceId;

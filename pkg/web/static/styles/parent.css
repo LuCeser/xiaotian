@@ -1231,6 +1231,33 @@ body {
   white-space: nowrap;
 }
 
+/* Issue #89: a lesson group whose words are all held out of dictation
+   keeps the reason visible even when the group is collapsed. */
+.unit-hold {
+  margin: 0 12px 8px;
+  padding: 6px 10px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--warning-strong);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+}
+
+.word-scope-status {
+  flex-basis: 100%;
+  order: 6;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--warning-strong);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  padding: 4px 8px;
+}
+
 /* Inline header actions (重命名 / 删除, Plan 09-07 Task 2) — 44px hit
    areas via padding; destructive variant uses the destructive role. */
 .unit-action {

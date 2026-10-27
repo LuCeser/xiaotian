@@ -12,8 +12,9 @@
  * Test-data isolation: ONE textbook is REST-created for this suite (the
  * fixture's PEP meta family is what matchTextbookForMeta preselects) and
  * its meta is neutralized in afterAll so later suites that reuse the same
- * fixture still take their own 新建教材 path. Every test imports into its
- * own unit and deletes exactly that unit in finally.
+ * fixture still take their own 新建教材 path. Every test deletes exactly
+ * this suite's words in finally (textbook-mode commits carry no unit tag
+ * since Issue #89 — the word list is the isolation key).
  *
  * Acceptance coverage (Issue #81):
  *   1. ≥1024px: source and review columns are genuinely side by side; the
@@ -31,7 +32,7 @@
 const { test, expect, request } = require('@playwright/test');
 const path = require('node:path');
 const {
-  recognize, deleteUnit, wordRows, textbooks, awaitReceipt, practiceSelection,
+  recognize, deleteWords, wordRows, textbooks, awaitReceipt, practiceSelection,
 } = require('./helpers/photo-flow');
 
 const CAT = 'english';
@@ -45,13 +46,11 @@ const BOOK_NAME = 'Issue81并排核对·人教版PEP·三年级·上册·Unit 3'
 const LESSONS = ['第1课', '第2课', '第3课'];
 const LESSON = '第2课';
 
-const UNITS = {
-  wide: 'e2e-alayout-wide',
-  reimport: 'e2e-alayout-reimport',
-  unlearned: 'e2e-alayout-unlearned',
-  discard: 'e2e-alayout-discard',
-  narrow: 'e2e-alayout-narrow',
-};
+// This suite's whole vocabulary: the PEP fixture's three faces plus the
+// two faces the wide test re-types them into. The textbook-mode commit
+// writes NO unit tag (Issue #89), so the exact word list is the suite's
+// isolation key — before AND after each test.
+const WORDS = ['tiger', 'panda', 'grape', 'lioness', 'koala'];
 
 // One API context for the suite-scoped textbook (the per-test `request`
 // fixture only lives for its own test).
@@ -125,10 +124,10 @@ async function expectNoAsk(stateLine) {
 }
 
 test('wide layout: side-by-side source/review, fact-only state line, separate 默写安排 receipt, persisted edits feed the classroom', async ({ page, request: req }) => {
-  await deleteUnit(req, UNITS.wide);
+  await deleteWords(req, WORDS);
   await page.setViewportSize({ width: 1280, height: 900 });
   try {
-    await recognize(page, FIXTURE_PEP, UNITS.wide);
+    await recognize(page, FIXTURE_PEP);
 
     // The workspace replaces the compact picker once a file is chosen.
     const workspace = page.locator('.photo-workspace');
@@ -196,13 +195,14 @@ test('wide layout: side-by-side source/review, fact-only state line, separate �
 
     // Persisted truth after a reload (client state gone), then the real
     // classroom selection. The RENAMED faces are what landed — with the
-    // edited glosses and this textbook's ownership — and this import's
-    // unit holds exactly the three new faces (tiger/panda were re-typed
-    // away before the commit, so nothing saved them).
+    // edited glosses and this textbook's ownership — and this suite's
+    // book holds exactly the three new faces (tiger/panda were re-typed
+    // away before the commit, so nothing saved them). The commit writes
+    // no unit tag any more (Issue #89), so ownership is the check.
     await page.reload();
     const rows = await wordRows(req);
     const mine = [...rows.values()]
-      .filter((w) => w.unit === UNITS.wide)
+      .filter((w) => (w.textbooks || []).some((t) => t.name === BOOK_NAME))
       .map((w) => w.word)
       .sort();
     expect(mine).toEqual(['grape', 'koala', 'lioness']);
@@ -222,17 +222,17 @@ test('wide layout: side-by-side source/review, fact-only state line, separate �
       expect(picked).toContain(word);
     }
   } finally {
-    await deleteUnit(req, UNITS.wide);
+    await deleteWords(req, WORDS);
   }
 });
 
 test('duplicate re-import: 合并 3, stable card ids, known progress stays a fact', async ({ page, request: req }) => {
-  await deleteUnit(req, UNITS.reimport);
+  await deleteWords(req, WORDS);
   try {
-    // First import in THIS test's unit. Depending on whether the wide test
+    // First import in THIS test. Depending on whether the wide test
     // already saved the fixture, this is 新增 or 合并 — either way the
     // second upload below is a real duplicate.
-    await recognize(page, FIXTURE_PEP, UNITS.reimport);
+    await recognize(page, FIXTURE_PEP);
     await keepAllConflicts(page);
     await expect(page.getByRole('button', { name: '确认添加（3 个）' })).toBeVisible();
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
@@ -245,7 +245,7 @@ test('duplicate re-import: 合并 3, stable card ids, known progress stays a fac
     // The SAME fixture again: all three are duplicates → one 合并 3 line,
     // and no progress question appears anywhere — the state line repeats
     // the known-progress fact.
-    await recognize(page, FIXTURE_PEP, UNITS.reimport);
+    await recognize(page, FIXTURE_PEP);
     const stateLine = page.locator('.photo-state-line');
     await expect(stateLine.locator('.photo-state-hint-good')).toContainText(
       '课次「第2课」已学到，保存后即可安排默写，无需再确认进度。');
@@ -263,12 +263,12 @@ test('duplicate re-import: 合并 3, stable card ids, known progress stays a fac
     }
     expect(after.size).toBe(before.size);
   } finally {
-    await deleteUnit(req, UNITS.reimport);
+    await deleteWords(req, WORDS);
   }
 });
 
 test('unlearned lesson: warn state line + 暂不自动安排 receipt, saved words, progress untouched', async ({ page, request: req }) => {
-  await deleteUnit(req, UNITS.unlearned);
+  await deleteWords(req, WORDS);
   // learnedLessons=1 means only 第1课 is learned, so the fixture's 第2课
   // is beyond progress. The import must NOT advance the book's progress.
   const setProgress = await req.put('/api/v1/textbooks/' + bookId, {
@@ -277,7 +277,7 @@ test('unlearned lesson: warn state line + 暂不自动安排 receipt, saved word
   expect(setProgress.ok()).toBeTruthy();
 
   try {
-    await recognize(page, FIXTURE_PEP, UNITS.unlearned);
+    await recognize(page, FIXTURE_PEP);
 
     const stateLine = page.locator('.photo-state-line');
     await expect(stateLine.locator('.photo-state-hint-warn')).toContainText(
@@ -305,18 +305,18 @@ test('unlearned lesson: warn state line + 暂不自动安排 receipt, saved word
       expect(rows.has(word), word + ' is saved').toBe(true);
     }
   } finally {
-    await deleteUnit(req, UNITS.unlearned);
+    await deleteWords(req, WORDS);
   }
 });
 
 test('放弃识别结果 writes nothing (API snapshot unchanged)', async ({ page, request: req }) => {
-  await deleteUnit(req, UNITS.discard);
+  await deleteWords(req, WORDS);
   const snapshot = (map) => JSON.stringify(
     [...map.entries()].sort(([a], [b]) => a.localeCompare(b)));
   const before = snapshot(await wordRows(req));
 
   try {
-    await recognize(page, FIXTURE_PEP, UNITS.discard);
+    await recognize(page, FIXTURE_PEP);
     await expect(page.locator('.photo-row')).toHaveCount(3);
 
     await page.getByRole('button', { name: '放弃识别结果' }).click();
@@ -325,12 +325,12 @@ test('放弃识别结果 writes nothing (API snapshot unchanged)', async ({ page
 
     expect(snapshot(await wordRows(req))).toBe(before);
   } finally {
-    await deleteUnit(req, UNITS.discard);
+    await deleteWords(req, WORDS);
   }
 });
 
 test('narrow 390×844: no page overflow, primary actions reachable, 16px inputs', async ({ page, request: req }) => {
-  await deleteUnit(req, UNITS.narrow);
+  await deleteWords(req, WORDS);
   // Restore a known-progress book for the narrow check.
   const setProgress = await req.put('/api/v1/textbooks/' + bookId, {
     data: { learnedLessons: 2 },
@@ -339,7 +339,7 @@ test('narrow 390×844: no page overflow, primary actions reachable, 16px inputs'
 
   try {
     await page.setViewportSize({ width: 390, height: 844 });
-    await recognize(page, FIXTURE_PEP, UNITS.narrow);
+    await recognize(page, FIXTURE_PEP);
     await keepAllConflicts(page);
 
     // The table may scroll INSIDE .preview-scroll; the document itself
@@ -372,6 +372,6 @@ test('narrow 390×844: no page overflow, primary actions reachable, 16px inputs'
 
     await page.screenshot({ path: test.info().outputPath('narrow-alayout.png'), fullPage: true });
   } finally {
-    await deleteUnit(req, UNITS.narrow);
+    await deleteWords(req, WORDS);
   }
 });
