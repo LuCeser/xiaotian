@@ -20,8 +20,9 @@
 // 数据的库重复执行不丢数据（幂等）。去掉 init 子命令后它变红（argparse
 // 拒绝未知子命令，退出码非 0）。需要仓库标准 venv（third_party/python/
 // .venv，见 Makefile py-bootstrap）或 HTA_PYTHON_INTERPRETER 指向的解释
-// 器；都没有时跳过 —— CI 的 build-and-test 作业不装 venv，安装器侧由
-// tests/test-install.js 的断言覆盖。
+// 器；都没有时跳过。CI 的 build-and-test 作业不装 venv（该处跳过），
+// 跨语言建表/读取/幂等断言由装了 venv 的 m1-browser-e2e 作业跑本测试
+// 覆盖；安装器调用契约由 tests/test-install.js 的断言覆盖。
 package database
 
 import (
@@ -89,7 +90,9 @@ func vocabTestInterpreter(t *testing.T) string {
 		if _, err := exec.LookPath(p); err == nil {
 			return p
 		}
-		t.Skipf("HTA_PYTHON_INTERPRETER=%q is not executable", p)
+		// 显式指定的解释器不可用是配置错误，不是「环境没有 venv」：硬失败，
+		// 绝不允许静默跳过（CI 的 m1 作业据此探测 venv 是否真的就绪）。
+		t.Fatalf("HTA_PYTHON_INTERPRETER=%q is set but not executable", p)
 	}
 	root := repoRoot(t)
 	for _, cand := range []string{
