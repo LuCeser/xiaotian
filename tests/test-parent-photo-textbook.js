@@ -38,6 +38,8 @@ require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-phot
 const {
   classifyPhotoEntries,
   matchTextbookForMeta,
+  preselectBookChoice,
+  isPhotoTextbookMode,
   distinctLessons,
   distinctRowLessons,
   lessonsNamedOnPhoto,
@@ -144,6 +146,23 @@ const BOOKS = [
   // back EMPTY (no .lesson to read) — pinned so the mistake is loud.
   eq(distinctRowLessons(['第1课', '第2课']), [],
     'distinctRowLessons over bare strings is empty (shape guard)');
+})();
+
+// ----------------------------------------------------------------------
+// preselectBookChoice / isPhotoTextbookMode (Issue #80 §2.2)
+// ----------------------------------------------------------------------
+
+(function () {
+  eq(preselectBookChoice(BOOKS, {
+    edition: '人教版PEP', stage: '', grade: '三年级', volume: '上册', module: 'Unit 1-3',
+  }), 2, 'meta match → existing id');
+  eq(preselectBookChoice(BOOKS, {
+    edition: '译林版', stage: '', grade: '三年级', volume: '上册', module: '',
+  }), 'unset', 'books exist but no match → unset');
+  eq(preselectBookChoice([], { edition: '人教版PEP', grade: '三年级' }), 'new', 'no books → new');
+  eq(preselectBookChoice([], null), 'none', 'no books and no meta → none');
+  assert(!isPhotoTextbookMode('unset'), 'unset is not textbook mode');
+  assert(isPhotoTextbookMode('new'), 'new is textbook mode');
 })();
 
 // ----------------------------------------------------------------------

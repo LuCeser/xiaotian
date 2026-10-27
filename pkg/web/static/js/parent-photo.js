@@ -661,6 +661,11 @@
     return v == null ? '' : String(v).trim();
   }
 
+  /** True when the parent chose a concrete textbook target (not 补充 / 请选择). */
+  function isPhotoTextbookMode(choice) {
+    return choice !== 'none' && choice !== 'unset';
+  }
+
   /**
    * distinctLessons — the distinct non-empty trimmed lesson NAMES, keeping
    * first-appearance order (teaching order is explicit; never sorted).
@@ -810,7 +815,7 @@
    * (不指定教材) still use the field.
    */
   function commitUnit(form) {
-    if (form && form.bookChoice && form.bookChoice !== 'none') {
+    if (form && isPhotoTextbookMode(form.bookChoice)) {
       return '';
     }
     var input = form && form.unitInput;
@@ -900,6 +905,21 @@
       }
     });
     return bestScore > 0 ? best : null;
+  }
+
+  /** Issue #80: memory-only preselect for the textbook dropdown. */
+  function preselectBookChoice(books, meta) {
+    var hit = matchTextbookForMeta(books, meta);
+    if (hit) {
+      return hit.id;
+    }
+    if (books && books.length) {
+      return 'unset';
+    }
+    if (meta) {
+      return 'new';
+    }
+    return 'none';
   }
 
   /**
@@ -1318,7 +1338,7 @@
     this.draftCategory = '';
     this.detectedMeta = null; // the READ-off-the-photo textbook header
     this.books = []; // the draft's subject's textbooks (panel list)
-    this.bookChoice = 'none'; // 'none' | 'new' | a textbook id (number)
+    this.bookChoice = 'unset'; // 'unset' | 'none' | 'new' | textbook id
     this.includePending = false; // 待确认课次的词直接加入默写范围
     // Issue #7: while a PDF is in play — { doc, plan, aborted, metaDone,
     // panelRendered }. doc stays open for page retries until discard /
@@ -1929,7 +1949,6 @@
           return;
         }
         self.detectedMeta = meta;
-        self.bookChoice = 'none';
         self.includePending = false;
         // Snapshot the REAL libraries for classification; load the textbook
         // list in parallel for the attribution panel. All ride the DRAFT's
@@ -2348,8 +2367,9 @@
     this.passageRows = [];
     this.existingPassages = [];
     this.detectedMeta = null;
-    this.bookChoice = 'none';
+    this.bookChoice = 'unset';
     this.includePending = false;
+    this.photoBatch = null;
     this.syncUnitField();
     this.renderTextbookPanelReset();
     this.renderPreview();
@@ -2376,7 +2396,7 @@
 
   /** The chosen book object (null for 'none'/'new'/not found). */
   PhotoAddForm.prototype.chosenBook = function () {
-    if (this.bookChoice === 'none' || this.bookChoice === 'new') {
+    if (!isPhotoTextbookMode(this.bookChoice) || this.bookChoice === 'new') {
       return null;
     }
     var id = this.bookChoice;
@@ -2464,16 +2484,10 @@
       this.textbookPanel.appendChild(errNote);
     }
 
-    // Preselect: honest match → that book; recognized header, no match →
-    // 新建教材; nothing readable → 不指定 (the plain #3 flow).
+    // Preselect (Issue #80): honest match → that book; books exist but no
+    // match → 请选择; no books yet → 新建; nothing readable → 补充词汇.
     var preselect = matchTextbookForMeta(this.books, this.detectedMeta);
-    if (preselect) {
-      this.bookChoice = preselect.id;
-    } else if (this.detectedMeta) {
-      this.bookChoice = 'new';
-    } else {
-      this.bookChoice = 'none';
-    }
+    this.bookChoice = preselectBookChoice(this.books, this.detectedMeta);
 
     // 教材 select.
     var bookField = document.createElement('div');
@@ -2486,11 +2500,13 @@
     bookSelect.id = 'parent-photo-textbook';
     bookSelect.setAttribute('aria-label', '教材归属');
     [
+      { value: 'unset', text: '请选择教材' },
       { value: 'none', text: '不指定教材（作为补充词汇）' },
       { value: 'new', text: '新建教材…' },
     ].concat(this.books.map(function (b) {
       var summary = global.textbookMetaSummary ? global.textbookMetaSummary(b) : '';
-      return { value: String(b.id), text: b.name + (summary ? '（' + summary + '）' : '') };
+      var rec = preselect && preselect.id === b.id ? '（推荐）' : '';
+      return { value: String(b.id), text: b.name + rec + (summary ? '（' + summary + '）' : '') };
     })).forEach(function (opt) {
       var o = document.createElement('option');
       o.value = opt.value;
@@ -2509,7 +2525,8 @@
 
     bookSelect.addEventListener('change', function () {
       self.bookChoice = bookSelect.value === 'new' ? 'new'
-        : (bookSelect.value === 'none' ? 'none' : parseInt(bookSelect.value, 10));
+        : (bookSelect.value === 'none' ? 'none'
+          : (bookSelect.value === 'unset' ? 'unset' : parseInt(bookSelect.value, 10)));
       self.renderTextbookDetail(detailHost);
       self.renderPreview(); // lesson column visibility follows the choice
     });
@@ -2534,7 +2551,7 @@
     if (!this.unitField) {
       return;
     }
-    var textbook = this.bookChoice && this.bookChoice !== 'none';
+    var textbook = isPhotoTextbookMode(this.bookChoice);
     this.unitField.hidden = !!textbook;
   };
 
@@ -2542,6 +2559,13 @@
     var self = this;
     this.syncUnitField();
     clearEl(host);
+    if (this.bookChoice === 'unset') {
+      var unsetNote = document.createElement('p');
+      unsetNote.className = 'photo-meta-line photo-meta-warn';
+      unsetNote.textContent = '请选择已有教材或新建教材后再确认添加。';
+      host.appendChild(unsetNote);
+      return;
+    }
     if (this.bookChoice === 'none') {
       var noneNote = document.createElement('p');
       noneNote.className = 'photo-meta-line';
@@ -2699,7 +2723,7 @@
 
   /** Re-run classification over the CURRENT (edited) row values. */
   PhotoAddForm.prototype.reclassify = function () {
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
     var entries = this.rows.map(function (r) {
       return { word: r.word, meaning: r.meaning, lesson: r.lesson };
     });
@@ -2765,7 +2789,7 @@
       this.renderOthersPreview();
       return;
     }
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
 
     var table = document.createElement('table');
     table.className = 'preview-table photo-preview-table';
@@ -2861,7 +2885,7 @@
     if (!this.poemRows.length) {
       return;
     }
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
 
     var head = document.createElement('h4');
     head.className = 'photo-section-title';
@@ -3071,7 +3095,7 @@
     if (!this.passageRows.length) {
       return;
     }
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
 
     var head = document.createElement('h4');
     head.className = 'photo-section-title';
@@ -3720,7 +3744,7 @@
    */
   PhotoAddForm.prototype.onRowEdited = function () {
     this.reclassify();
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
     var rowEls = this.preview.querySelectorAll('.photo-row');
     for (var i = 0; i < rowEls.length && i < this.rows.length; i++) {
       var row = this.rows[i];
@@ -3758,7 +3782,8 @@
 
   PhotoAddForm.prototype.updateCommitButton = function () {
     var label = this.commitBtn.querySelector('.btn-label');
-    var n = this.bookChoice !== 'none' ? this.committedRows().length : this.submittableRows().length;
+    var n = isPhotoTextbookMode(this.bookChoice)
+      ? this.committedRows().length : this.submittableRows().length;
     // Issue #11/#13: checked poem and passage drafts ride the SAME
     // commit; the label names every kind honestly. Word-only drafts keep
     // the established label verbatim (确认添加（N 个） — specs pin it).
@@ -3779,7 +3804,8 @@
         ? '确认添加（' + parts.join(' · ') + '）'
         : '确认添加（0 个）';
     }
-    this.commitBtn.disabled = n === 0 && m === 0 && k === 0;
+    this.commitBtn.disabled = (n === 0 && m === 0 && k === 0) ||
+      (this.bookChoice === 'unset' && this.textbookDepsReady());
     // Issue #81: the footer save-note counts exactly what this label is
     // about to commit — refresh them together.
     this.updateCommitHint();
@@ -3924,7 +3950,7 @@
    *  lesson-assigned (exists) and parent-RESOLVED conflicts (Issue #6);
    *  unresolved conflicts, invalid and unchecked rows never do. */
   PhotoAddForm.prototype.committedRows = function () {
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
     return this.rows.filter(function (r) {
       return isCommittable(r, textbookMode) && r.checked !== false;
     });
@@ -3949,7 +3975,11 @@
     this.showFormError('');
     this.reclassify();
 
-    if (this.bookChoice !== 'none' && this.textbookDepsReady()) {
+    if (this.bookChoice === 'unset' && this.textbookDepsReady()) {
+      this.showFormError('请先选择教材或新建教材后再确认');
+      return;
+    }
+    if (isPhotoTextbookMode(this.bookChoice) && this.textbookDepsReady()) {
       this.handleTextbookCommit();
       return;
     }
@@ -5505,6 +5535,8 @@
   global.PhotoAddForm = PhotoAddForm;
   global.classifyPhotoEntries = classifyPhotoEntries;
   global.matchTextbookForMeta = matchTextbookForMeta;
+  global.preselectBookChoice = preselectBookChoice;
+  global.isPhotoTextbookMode = isPhotoTextbookMode;
   global.distinctLessons = distinctLessons;
   global.distinctRowLessons = distinctRowLessons;
   global.lessonsNamedOnPhoto = lessonsNamedOnPhoto;
