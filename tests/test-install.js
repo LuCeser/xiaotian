@@ -11,6 +11,7 @@
 // Sections:
 //   0. PS 5.1 parser gate on scripts/install.ps1 (zero parse errors)
 //   1. positive run -> full install layout (11 artifact classes)
+//   1b. init argv guard for a spaced install dir (spaced db path, quoted-or-not)
 //   2. generated config key-by-key assertions (ports, absolute paths,
 //      TLS pair, double allowedOrigins, forceStudentMode, no /opt/hta)
 //   3. stub uv call contract (--python 3.12 venv + pip install -r, index URL)
@@ -63,6 +64,29 @@ function mustExist(p, label) {
   assert.ok(fs.existsSync(p), `expected to exist: ${label || p} (${p})`);
 }
 
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Issue #78 guard (review fix): assert the vocab `init` subcommand was really
+// invoked, not just that the banner printed (deleting install.ps1's
+// `& $venvPython ... init` call while keeping the banner must turn this red).
+// The POSIX recording python stub logs its argv as `... --db <dbPath> init`.
+// The db path may contain spaces (install dir under a spaced prefix) and may
+// arrive wrapped in quotes depending on how the native argument was passed, so
+// match `--db` then the real path (optionally quoted) then a final `init`
+// token. Hard-coding the expected path keeps the match unambiguous even when
+// the path itself contains spaces (the original `\S+` matcher broke on them).
+function assertInitInvoked(pyLog, installDir, label) {
+  const expectedDb = path.join(installDir, 'data', 'vocab.db');
+  const db = escapeRe(expectedDb);
+  const re = new RegExp(`\\s--db\\s+(?:"${db}"|'${db}'|${db})\\s+init\\s*$`);
+  assert.ok(
+    re.test(pyLog),
+    `${label}: installer must invoke vocab_manager.py with the init subcommand (recorded args: ${JSON.stringify(pyLog.trim())})`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Section 0: parser gate - install.ps1 must parse with zero errors.
 // ---------------------------------------------------------------------------
@@ -90,6 +114,7 @@ function mustExist(p, label) {
 
 const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-install-src-'));
 const instDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-install-dst-'));
+const spacedInstDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-install dst-'));
 const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-install-stub-'));
 const stubLog = path.join(stubDir, 'uv-stub.log');
 const pyStubLog = path.join(stubDir, 'py-stub.log');
@@ -235,16 +260,11 @@ try {
       'installer must run the vocab schema init step (issue #78)',
     );
     // Issue #78 guard: assert the `init` subcommand was actually invoked, not
-    // just that the banner printed (deleting install.ps1's `& $venvPython ...
-    // init` call while keeping the banner must turn this red). The POSIX
-    // recording python stub (see fixture build) logs its argv; on Windows the
-    // fake python.exe cannot be a text script, so this guard is POSIX-only.
+    // just that the banner printed. On Windows the fake python.exe cannot be a
+    // text script, so this guard is POSIX-only.
     if (process.platform !== 'win32') {
       const pyLog = fs.readFileSync(pyStubLog, 'utf8');
-      assert.ok(
-        /\s--db\s+\S+\s+init\s*$/.test(pyLog),
-        `installer must invoke vocab_manager.py with the init subcommand (recorded args: ${JSON.stringify(pyLog.trim())})`,
-      );
+      assertInitInvoked(pyLog, instDir, 'section 1');
     }
     if (process.platform !== 'win32') {
       // Regression guard (main CI run 40347156585): pwsh exists on this host
@@ -256,6 +276,42 @@ try {
       );
     }
     console.log('PASS section 1: positive run exit 0, full install layout present');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Section 1b: init argv guard survives a spaced install dir
+  // ---------------------------------------------------------------------------
+  //
+  // Regression guard for the section-1 `--db <path> init` assertion fix: when
+  // the install dir (hence the vocab db path) contains spaces, the recorded
+  // argv carries a spaced path, and a `\S+` path matcher would misread it and
+  // report a false failure. Reuse the same source payload and stub uv/python,
+  // but install into a spaced temp dir and re-check the init invocation against
+  // the real (spaced) db path.
+  {
+    const spacedArgs = [
+      '-SkipFirewall',
+      '-LanIp', '192.0.2.10',
+      '-PublicPort', '9443',
+      '-HealthPort', '9444',
+      '-InstallDir', spacedInstDir,
+      '-SourceDir', srcDir,
+    ];
+    // Fresh recording log so the assertion is unambiguous (section 1's line is
+    // already in pyStubLog; the stub only ever appends).
+    const spacedPyLog = path.join(stubDir, 'py-stub-spaced.log');
+    const spacedEnv = { ...stubEnv, PY_STUB_LOG: spacedPyLog };
+    const r = runInstaller(spacedArgs, spacedEnv);
+    assert.strictEqual(r.status, 0, `spaced install exit ${r.status}\nSTDOUT:\n${r.stdout}\nSTDERR:\n${r.stderr}`);
+    assert.ok(
+      r.stdout.includes('Initializing vocab schema'),
+      'spaced install must run the vocab schema init step',
+    );
+    if (process.platform !== 'win32') {
+      const pyLog = fs.readFileSync(spacedPyLog, 'utf8');
+      assertInitInvoked(pyLog, spacedInstDir, 'section 1b (spaced install dir)');
+    }
+    console.log('PASS section 1b: init argv guard holds for a spaced install dir');
   }
 
   // ---------------------------------------------------------------------------
@@ -395,7 +451,7 @@ try {
 } finally {
   // Give Windows a moment to release handles held by the spawned shells.
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
-  for (const dir of [srcDir, instDir, stubDir]) {
+  for (const dir of [srcDir, instDir, spacedInstDir, stubDir]) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
