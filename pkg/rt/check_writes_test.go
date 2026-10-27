@@ -32,8 +32,9 @@ func TestCheckWriteAdmission(t *testing.T) {
 
 		waited := make(chan struct{})
 		go func() {
-			waitCheckWrites(claim.checkWrites)
-			close(waited)
+			if waitCheckWrites(claim.checkWrites) {
+				close(waited)
+			}
 		}()
 		select {
 		case <-waited:

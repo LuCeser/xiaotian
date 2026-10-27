@@ -1,6 +1,22 @@
 package rt
 
-import "sync"
+import (
+	"context"
+	"sync"
+	"time"
+)
+
+// checkPersistTimeout bounds one accepted check-stage save end-to-end
+// (latch write, downstream persistence, receipts). The context outlives the
+// turn's cancellation (1.09) but must not wait without limit when the pool
+// is starved.
+const checkPersistTimeout = 90 * time.Second
+
+// checkPersistContext derives the independent, bounded context for one
+// accepted save tied to turnCtx's lifetime but not its cancellation.
+func checkPersistContext(turnCtx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(turnCtx), checkPersistTimeout)
+}
 
 // checkWriteAdmission represents one persistence operation accepted before
 // closing sealed the session. Its done signal is independent from presentation
@@ -37,9 +53,20 @@ func (tm *TurnManager) completeCheckWrite(w *checkWriteAdmission) {
 	})
 }
 
-// waitCheckWrites waits without holding either TurnManager lock.
-func waitCheckWrites(writes []*checkWriteAdmission) {
-	for _, w := range writes {
-		<-w.done
+// waitCheckWrites waits without holding either TurnManager lock. Returns
+// false when checkPersistTimeout elapses before every admission completes.
+func waitCheckWrites(writes []*checkWriteAdmission) bool {
+	if len(writes) == 0 {
+		return true
 	}
+	timer := time.NewTimer(checkPersistTimeout)
+	defer timer.Stop()
+	for _, w := range writes {
+		select {
+		case <-w.done:
+		case <-timer.C:
+			return false
+		}
+	}
+	return true
 }
