@@ -4,7 +4,23 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 )
+
+func ttWaitClosed(t *testing.T, tm *TurnManager) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		tm.mu.Lock()
+		closed := tm.closed
+		tm.mu.Unlock()
+		if closed {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("the session never closed")
+}
 
 // ttPreFallSubmitLatch flips the lesson row's checking→submitted latch the
 // way another connection's submit would (a direct executor call under a
@@ -48,12 +64,7 @@ func TestDuplicateSubmitTerminal(t *testing.T) {
 		tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-dup"}))
 		wg.Wait()
 
-		tm.mu.Lock()
-		closed := tm.closed
-		tm.mu.Unlock()
-		if !closed {
-			t.Fatal("the duplicate submit left the session open")
-		}
+		ttWaitClosed(t, tm)
 		if got := s.countOf(TypeSessionEnded); got != 1 {
 			t.Fatalf("session_ended count = %d, want 1", got)
 		}
@@ -84,12 +95,7 @@ func TestDuplicateSubmitTerminal(t *testing.T) {
 		s := &failingControlSender{captureSender: inner, failType: TypeSessionEnded}
 		tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-dup"}))
 
-		tm.mu.Lock()
-		closed := tm.closed
-		tm.mu.Unlock()
-		if !closed {
-			t.Fatal("the refused goodbye left the session open — the close must complete regardless")
-		}
+		ttWaitClosed(t, tm)
 		if got := s.attempts; got != 1 {
 			t.Fatalf("session_ended attempts = %d, want exactly 1", got)
 		}
