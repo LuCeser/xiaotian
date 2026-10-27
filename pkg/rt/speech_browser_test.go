@@ -888,6 +888,47 @@ func (g *speechOneGate) release() {
 	g.openOnce.Do(func() { close(g.released) })
 }
 
+// speechChHit waits (bounded) for one hit observation and returns it — it
+// never releases and never Fatals: the timeout only bounds the OBSERVATION
+// (计划 §5.1), the caller owns the reclaim-then-assert order.
+func speechChHit(entered <-chan struct{}, timeout time.Duration) bool {
+	select {
+	case <-entered:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// speechGateHit is speechChHit for a mounted control point.
+func speechGateHit(g *speechOneGate, timeout time.Duration) bool {
+	return speechChHit(g.entered, timeout)
+}
+
+// reclaimAndFail is the failure half of §5.1: release EVERY held control
+// point, wait (bounded) for the driver task's own exit, and only then fail
+// carrying both observations. t.Cleanup stays the last resort — it must
+// never replace this reclaim-before-assert.
+func (f *speechBrowserFixture) reclaimAndFail(driver <-chan speechDriverResult, releases []func(), format string, args ...any) {
+	f.t.Helper()
+	for _, release := range releases {
+		release()
+	}
+	ok, errMsg := false, "no driver result within the reclaim bound"
+	if driver != nil {
+		select {
+		case res, got := <-driver:
+			if got {
+				ok, errMsg = res.OK, res.Err
+			} else {
+				errMsg = "the driver goroutine ended without a result (runDriver's own Fatal fired first)"
+			}
+		case <-time.After(90 * time.Second):
+		}
+	}
+	f.t.Fatalf(format+" [reclaimed; driver ok=%v err=%v]", append(args, ok, errMsg)...)
+}
+
 // speechSubmitGate wraps the executor's checked CompleteCheck at the two
 // formal-submit control points (1.12a's window set, installed for 1.09's
 // orderings): before parks AHEAD of the real latch write; committed parks
@@ -1124,10 +1165,8 @@ func TestCloseTransportFailure(t *testing.T) {
 
 	settled := f.watchAnnouncementSettled(60 * time.Second)
 	driver := f.runDriverAsync("close-after-opening", 45*time.Second, "--hold-ms", "1000")
-	select {
-	case <-settled:
-	case <-time.After(10 * time.Second):
-		t.Fatal("opening did not settle before the close test")
+	if !speechChHit(settled, 10*time.Second) {
+		f.reclaimAndFail(driver, nil, "opening did not settle before the close test")
 	}
 	m := f.waitFirstManager(5 * time.Second)
 	cancelCount := ttArmCancelCounting(m.TurnManager)
@@ -1151,14 +1190,12 @@ func TestCloseDuringScreenVerdict(t *testing.T) {
 	t.Cleanup(verdictGate.release)
 
 	driver := f.runDriverAsync("screen-verdict-close", 45*time.Second)
-	select {
-	case <-verdictGate.entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("screen verdict did not reach the real persistence gate")
+	if !speechGateHit(verdictGate, 10*time.Second) {
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "screen verdict did not reach the real persistence gate")
 	}
 	m := f.waitFirstManager(5 * time.Second)
 	if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
-		t.Fatal("test close did not obtain session ownership")
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "test close did not obtain session ownership")
 	}
 	verdictGate.release()
 	res := <-driver
@@ -1195,14 +1232,12 @@ func TestCloseDuringVoiceVerdict(t *testing.T) {
 	t.Cleanup(verdictGate.release)
 
 	driver := f.runDriverAsync("voice-verdict-close", 45*time.Second)
-	select {
-	case <-verdictGate.entered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("spoken verdict did not reach the real persistence gate — the natural voice turn never landed")
+	if !speechGateHit(verdictGate, 30*time.Second) {
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "spoken verdict did not reach the real persistence gate — the natural voice turn never landed")
 	}
 	m := f.waitFirstManager(5 * time.Second)
 	if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
-		t.Fatal("test close did not obtain session ownership")
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "test close did not obtain session ownership")
 	}
 	verdictGate.release()
 	res := <-driver
@@ -1263,10 +1298,8 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 		t.Cleanup(writesGate.release)
 
 		driver := f.runDriverAsync("ocr-prefill-close", 45*time.Second)
-		select {
-		case <-writesGate.entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("OCR prefill batch did not reach the first real persistence gate")
+		if !speechGateHit(writesGate, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){writesGate.release}, "OCR prefill batch did not reach the first real persistence gate")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 
@@ -1283,7 +1316,7 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 			t.Fatalf("cross-connection manual verdict: %v", err)
 		}
 		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
-			t.Fatal("test close did not obtain session ownership")
+			f.reclaimAndFail(driver, []func(){writesGate.release}, "test close did not obtain session ownership")
 		}
 		writesGate.release()
 		res := <-driver
@@ -1322,14 +1355,12 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 		t.Cleanup(ocrGate.release)
 
 		driver := f.runDriverAsync("ocr-prefill-close", 45*time.Second)
-		select {
-		case <-ocrGate.entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the real OCR vision call never started")
+		if !speechGateHit(ocrGate, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){ocrGate.release}, "the real OCR vision call never started")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
-			t.Fatal("test close did not obtain session ownership")
+			f.reclaimAndFail(driver, []func(){ocrGate.release}, "test close did not obtain session ownership")
 		}
 		ocrGate.release()
 		res := <-driver
@@ -1394,10 +1425,8 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		t.Cleanup(before.release)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
-		select {
-		case <-before.entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the formal submit never reached the real latch write")
+		if !speechGateHit(before, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){before.release}, "the formal submit never reached the real latch write")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
@@ -1414,10 +1443,8 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		t.Cleanup(committed.release)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
-		select {
-		case <-committed.entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the formal submit never committed its latch write")
+		if !speechGateHit(committed, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){committed.release}, "the formal submit never committed its latch write")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
@@ -1434,12 +1461,7 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		t.Cleanup(before.release)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
-		var persistReached bool
-		select {
-		case <-before.entered:
-			persistReached = true
-		case <-time.After(30 * time.Second):
-		}
+		persistReached := speechGateHit(before, 30*time.Second)
 		m := f.waitFirstManager(5 * time.Second)
 		if persistReached {
 			if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
@@ -1497,10 +1519,8 @@ func TestCloseFallbackAfterAcceptedWrites(t *testing.T) {
 	t.Cleanup(verdictGate.release)
 
 	driver := f.runDriverAsync("screen-verdict-close", 45*time.Second)
-	select {
-	case <-verdictGate.entered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the screen verdict did not reach the real persistence gate")
+	if !speechGateHit(verdictGate, 30*time.Second) {
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "the screen verdict did not reach the real persistence gate")
 	}
 	m := f.waitFirstManager(5 * time.Second)
 	// The goodbye close claims the fallback while the accepted verdict write
@@ -1570,15 +1590,11 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 
 	driver := f.runDriverAsync("ocr-prefill-close", 45*time.Second)
 	m := f.waitFirstManager(5 * time.Second)
-	select {
-	case <-verdictGate.entered:
-	case res := <-driver:
-		t.Fatalf("driver finished before the batch: ok=%v err=%s", res.OK, res.Err)
-	case <-time.After(30 * time.Second):
+	if !speechGateHit(verdictGate, 30*time.Second) {
 		m.TurnManager.mu.Lock()
 		pending := len(m.checkWrites)
 		m.TurnManager.mu.Unlock()
-		t.Fatalf("the prefill batch never hit the gate: admissions=%d", pending)
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "the prefill batch never hit the gate: admissions=%d", pending)
 	}
 	// The batch's ONE admission is registered before its first write parks.
 	if !waitFor(t, 10*time.Second, func() bool {
@@ -1586,7 +1602,7 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 		defer m.TurnManager.mu.Unlock()
 		return len(m.checkWrites) == 1
 	}) {
-		t.Fatal("the prefill batch was never admitted")
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "the prefill batch was never admitted")
 	}
 	// Hold the read gate NOW: the fixture/resume reads are long past, the
 	// parked batch issues no reads, so the fallback's read is the first one
@@ -1612,21 +1628,17 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 			l, err := f.tools.GetLessonState(context.Background(), lessonID)
 			return err == nil && l.Stage == lesson.StageSubmitted && l.Unchecked
 		}) {
-			t.Fatal("the un-waited fallback never won the latch on the stale version")
+			f.reclaimAndFail(driver, []func(){verdictGate.release}, "the un-waited fallback never won the latch on the stale version")
 		}
 	}
 	// 有等待的实现：兜底仍阻塞在登记上，读门无人到达。先放行批次，两笔
 	// 预填以 v+1、v+2 落库；登记完成后兜底的权威读才第一次到达读门——
 	// 等到 entered 再放行，它读到 v+2 并以新版本赢闩。
 	verdictGate.release()
-	if !skippedWait {
-		select {
-		case <-readGate.gate.entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the waiting fallback's authoritative read never arrived")
-		}
-		readGate.release()
+	if !skippedWait && !speechGateHit(readGate.gate, 30*time.Second) {
+		f.reclaimAndFail(driver, []func(){readGate.release}, "the waiting fallback's authoritative read never arrived")
 	}
+	readGate.release()
 	res := <-driver
 	if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 || res.LateOcrResults != 0 {
 		t.Fatalf("close=%d late echoes=%d late ocr=%d, want 1/0/0",
@@ -1719,10 +1731,8 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		t.Cleanup(readGate.release)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
-		select {
-		case <-before.entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the formal submit never reached its pre-latch window")
+		if !speechGateHit(before, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){before.release, readGate.release}, "the formal submit never reached its pre-latch window")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		// The goodbye close claims the fallback while the ACCEPTED submit is
@@ -1745,14 +1755,12 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 				l := storedLesson(f)
 				return l.Stage == lesson.StageSubmitted && l.Unchecked
 			}) {
-				t.Fatal("the un-waited fallback never won the submit latch")
+				f.reclaimAndFail(driver, []func(){before.release}, "the un-waited fallback never won the submit latch")
 			}
 		} else {
 			before.release()
-			select {
-			case <-readGate.gate.entered:
-			case <-time.After(30 * time.Second):
-				t.Fatal("the waiting fallback's authoritative read never arrived")
+			if !speechGateHit(readGate.gate, 30*time.Second) {
+				f.reclaimAndFail(driver, []func(){readGate.release}, "the waiting fallback's authoritative read never arrived")
 			}
 			readGate.release()
 		}
@@ -1794,10 +1802,8 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		t.Cleanup(committed.release)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
-		select {
-		case <-committed.entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the formal submit never committed its latch write")
+		if !speechGateHit(committed, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){committed.release}, "the formal submit never committed its latch write")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		m.handleEndSession(m.currentSender())
@@ -1839,10 +1845,8 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		t.Cleanup(verdictGate.release)
 
 		driver := f.runDriverAsync("screen-verdict-close", 45*time.Second)
-		select {
-		case <-verdictGate.entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the screen verdict did not reach the persistence gate")
+		if !speechGateHit(verdictGate, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){verdictGate.release}, "the screen verdict did not reach the persistence gate")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		m.handleEndSession(m.currentSender())
@@ -1896,19 +1900,17 @@ func TestCloseSnapshotBrowser(t *testing.T) {
 	t.Run("presentation landing inside the close window still gets its fallback", func(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		f.seedCheckingWithOutcomes()
-		atResume, resumeProceed := make(chan struct{}), make(chan struct{})
-		atCloseEntry, closeProceed := make(chan struct{}), make(chan struct{})
-		var resumeOnce, closeOnce sync.Once
+		resumeGate, closeGate := newSpeechOneGate(), newSpeechOneGate()
 		f.mu.Lock()
-		f.resumeHold = func() { resumeOnce.Do(func() { close(atResume) }); <-resumeProceed }
-		f.closeEntryHold = func() { closeOnce.Do(func() { close(atCloseEntry) }); <-closeProceed }
+		f.resumeHold = func() { resumeGate.hit(); resumeGate.wait() }
+		f.closeEntryHold = func() { closeGate.hit(); closeGate.wait() }
 		f.mu.Unlock()
+		t.Cleanup(resumeGate.release)
+		t.Cleanup(closeGate.release)
 
 		driver := f.runDriverAsync("resume-close-window", 45*time.Second)
-		select {
-		case <-atResume:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the resume never reached its pre-presentation window")
+		if !speechGateHit(resumeGate, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){resumeGate.release, closeGate.release}, "the resume never reached its pre-presentation window")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		// The goodbye parks inside the close entry (init-write lock held,
@@ -1920,26 +1922,22 @@ func TestCloseSnapshotBrowser(t *testing.T) {
 			m.handleEndSession(m.currentSender())
 			close(closeDone)
 		}()
-		select {
-		case <-atCloseEntry:
-		case <-time.After(10 * time.Second):
-			t.Fatal("the close never entered its claim window")
+		if !speechGateHit(closeGate, 10*time.Second) {
+			f.reclaimAndFail(driver, []func(){resumeGate.release, closeGate.release}, "the close never entered its claim window")
 		}
 		// Release the presentation INTO the window: the tutor flips to
 		// checking and check_started ships before the claim decides.
-		close(resumeProceed)
+		resumeGate.release()
 		if !waitFor(t, 10*time.Second, func() bool {
 			m.TurnManager.mu.Lock()
 			defer m.TurnManager.mu.Unlock()
 			return m.tutor != nil && m.tutor.checking
 		}) {
-			t.Fatal("the resume presentation never landed inside the close window")
+			f.reclaimAndFail(driver, []func(){closeGate.release}, "the resume presentation never landed inside the close window")
 		}
-		close(closeProceed)
-		select {
-		case <-closeDone:
-		case <-time.After(10 * time.Second):
-			t.Fatal("the close never finished after the presentation")
+		closeGate.release()
+		if !speechChHit(closeDone, 10*time.Second) {
+			f.reclaimAndFail(driver, nil, "the close never finished after the presentation")
 		}
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateFramesAfterClose != 0 {
@@ -1974,24 +1972,22 @@ func TestCloseSnapshotBrowser(t *testing.T) {
 	t.Run("a close winning the window refuses the presentation and keeps checking", func(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		f.seedChecking()
-		atResume, resumeProceed := make(chan struct{}), make(chan struct{})
-		var resumeOnce sync.Once
+		resumeGate := newSpeechOneGate()
 		f.mu.Lock()
-		f.resumeHold = func() { resumeOnce.Do(func() { close(atResume) }); <-resumeProceed }
+		f.resumeHold = func() { resumeGate.hit(); resumeGate.wait() }
 		f.mu.Unlock()
+		t.Cleanup(resumeGate.release)
 
 		driver := f.runDriverAsync("resume-close-window", 45*time.Second)
-		select {
-		case <-atResume:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the resume never reached its pre-presentation window")
+		if !speechGateHit(resumeGate, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){resumeGate.release}, "the resume never reached its pre-presentation window")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		// The goodbye runs to completion while the presentation is still
 		// parked: the claim saw no checking classroom, so no fallback exists
 		// and the late presentation is refused outright.
 		m.handleEndSession(m.currentSender())
-		close(resumeProceed)
+		resumeGate.release()
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateFramesAfterClose != 0 {
 			t.Fatalf("close=%d late frames=%d, want 1/0", res.WSCloseCount, res.LateFramesAfterClose)
@@ -2049,10 +2045,8 @@ func TestDuplicateSubmitBrowser(t *testing.T) {
 	t.Cleanup(before.release)
 
 	driver := f.runDriverAsync("check-submit-close", 45*time.Second)
-	select {
-	case <-before.entered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the formal submit never reached its pre-latch window")
+	if !speechGateHit(before, 30*time.Second) {
+		f.reclaimAndFail(driver, []func(){before.release}, "the formal submit never reached its pre-latch window")
 	}
 	m := f.waitFirstManager(5 * time.Second)
 	// While THIS session's submit is parked ahead of its latch write, another
@@ -2201,10 +2195,8 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 		}
 
 		driver := f.runDriverAsync("correction-submit-close", 45*time.Second)
-		select {
-		case <-reviewGate.entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the correction diff write never reached its review gate")
+		if !speechGateHit(reviewGate, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){reviewGate.release}, "the correction diff write never reached its review gate")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		// The goodbye close claims the accepted correction (its admission covers
@@ -2326,11 +2318,8 @@ func TestPassageSubmitBrowser(t *testing.T) {
 		t.Cleanup(before.release)
 
 		driver := f.runDriverAsync("passage-submit-close", 45*time.Second)
-		select {
-		case <-before.entered:
-		case <-time.After(30 * time.Second):
-			f.runDriver("passage-submit-close", 20*time.Second)
-			t.Fatal("the passage submit never reached its pre-latch window")
+		if !speechGateHit(before, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){before.release}, "the passage submit never reached its pre-latch window")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		m.handleEndSession(m.currentSender())
@@ -2417,10 +2406,8 @@ func TestPassageSubmitBrowser(t *testing.T) {
 				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
 		}
 
-		select {
-		case <-fallbackHold.entered:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the unchecked fallback never reached CompleteCheck before the probe")
+		if !speechGateHit(fallbackHold, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){fallbackHold.release}, "the unchecked fallback never reached CompleteCheck before the probe")
 		}
 
 		// Probe the production entry while the registry is sealed and the
@@ -2485,11 +2472,8 @@ func TestPoemSubmitBrowser(t *testing.T) {
 		t.Cleanup(before.release)
 
 		driver := f.runDriverAsync("poem-submit-close", 45*time.Second)
-		select {
-		case <-before.entered:
-		case <-time.After(30 * time.Second):
-			f.runDriver("poem-submit-close", 20*time.Second)
-			t.Fatal("the poem submit never reached its pre-latch window")
+		if !speechGateHit(before, 30*time.Second) {
+			f.reclaimAndFail(driver, []func(){before.release}, "the poem submit never reached its pre-latch window")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		m.handleEndSession(m.currentSender())
@@ -2612,25 +2596,19 @@ func TestPlaybackSettleBrowser(t *testing.T) {
 	f := newSpeechBrowserFixture(t)
 	f.seedChecking()
 	probe := f.useTimerProbe()
-	settleHit := make(chan struct{})
-	settleRelease := make(chan struct{})
-	var settleOnce sync.Once
+	settleGate := newSpeechOneGate()
 	f.mu.Lock()
-	f.settleHold = func() {
-		settleOnce.Do(func() { close(settleHit) })
-		<-settleRelease
-	}
+	f.settleHold = func() { settleGate.hit(); settleGate.wait() }
 	f.mu.Unlock()
+	t.Cleanup(settleGate.release)
 
 	driver := f.runDriverAsync("resume-close-window", 45*time.Second)
 	m := f.waitFirstManager(5 * time.Second)
-	select {
-	case <-settleHit:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the naturally-acked announcement never reached its settle window")
+	if !speechGateHit(settleGate, 30*time.Second) {
+		f.reclaimAndFail(driver, []func(){settleGate.release}, "the naturally-acked announcement never reached its settle window")
 	}
 	m.handleEndSession(m.currentSender())
-	close(settleRelease)
+	settleGate.release()
 	res := <-driver
 	if res.WSCloseCount != 1 || res.LateFramesAfterClose != 0 {
 		t.Fatalf("close=%d late frames=%d, want 1/0", res.WSCloseCount, res.LateFramesAfterClose)
@@ -2663,10 +2641,8 @@ func TestStreamResultBrowser(t *testing.T) {
 
 	driver := f.runDriverAsync("resume-close-window", 45*time.Second)
 	m := f.waitFirstManager(5 * time.Second)
-	select {
-	case <-g.entered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the resume stream never parked between its chunks")
+	if !speechChHit(g.entered, 30*time.Second) {
+		f.reclaimAndFail(driver, []func(){func() { close(g.release) }}, "the resume stream never parked between its chunks")
 	}
 	m.handleEndSession(m.currentSender())
 	close(g.release)
@@ -2697,11 +2673,8 @@ func TestPracticeSubmitBrowser(t *testing.T) {
 	t.Cleanup(readGate.release)
 
 	driver := f.runDriverAsync("practice-submit-close", 60*time.Second)
-	select {
-	case <-before.entered:
-	case <-time.After(45 * time.Second):
-		f.runDriver("practice-submit-close", 25*time.Second) // surface the scenario's stderr trace
-		t.Fatal("the practice submit never reached its pre-latch window")
+	if !speechGateHit(before, 45*time.Second) {
+		f.reclaimAndFail(driver, []func(){before.release}, "the practice submit never reached its pre-latch window")
 	}
 	readGate.hold()
 	// The PRACTICE connection is the SECOND manager (the first belongs to
@@ -2709,7 +2682,7 @@ func TestPracticeSubmitBrowser(t *testing.T) {
 	f.mu.Lock()
 	if len(f.managers) < 2 {
 		f.mu.Unlock()
-		t.Fatal("the practice connection's manager never appeared")
+		f.reclaimAndFail(driver, []func(){before.release, readGate.release}, "the practice connection's manager never appeared")
 	}
 	m := f.managers[1]
 	f.mu.Unlock()
@@ -2722,19 +2695,15 @@ func TestPracticeSubmitBrowser(t *testing.T) {
 	admitted := len(m.checkWrites) == 1
 	practiceLessonID := m.tutor.lessonID
 	m.TurnManager.mu.Unlock()
-	if !admitted {
-		select {
-		case <-readGate.gate.entered:
-		case <-time.After(10 * time.Second):
-			t.Fatal("uncoordinated fallback never reached its authoritative read")
-		}
+	if !admitted && !speechGateHit(readGate.gate, 10*time.Second) {
+		f.reclaimAndFail(driver, []func(){before.release, readGate.release}, "uncoordinated fallback never reached its authoritative read")
 	}
 	readGate.release()
 	if !admitted && !waitFor(t, 10*time.Second, func() bool {
 		stored, err := f.tools.GetLessonState(context.Background(), practiceLessonID)
 		return err == nil && stored.Stage == lesson.StageSubmitted && stored.Unchecked
 	}) {
-		t.Fatal("uncoordinated fallback did not win the submit latch")
+		f.reclaimAndFail(driver, []func(){before.release}, "uncoordinated fallback did not win the submit latch")
 	}
 	before.release()
 	res := <-driver
@@ -2974,11 +2943,11 @@ func TestSpeechBrowserFaultControls(t *testing.T) {
 
 		driver := f.runDriverAsync("held-fixture", 45*time.Second, "--hold-ms", "500")
 		if !waitFor(t, 5*time.Second, func() bool { return hits() > 0 }) {
-			t.Fatal("send-site control point never hit")
+			f.reclaimAndFail(driver, []func(){release, restore}, "send-site control point never hit")
 		}
-		f.waitOneManager(5 * time.Second)
 		release()
 		restore()
+		f.waitOneManager(5 * time.Second)
 		<-driver
 		f.assertOriginalTasksExited()
 	})
@@ -2994,11 +2963,11 @@ func TestSpeechBrowserFaultControls(t *testing.T) {
 
 		driver := f.runDriverAsync("held-fixture", 45*time.Second, "--hold-ms", "500")
 		if !waitFor(t, 5*time.Second, func() bool { return waits() > 0 }) {
-			t.Fatal("pump consumption control point never hit")
+			f.reclaimAndFail(driver, []func(){release, restore}, "pump consumption control point never hit")
 		}
-		f.waitOneManager(5 * time.Second)
 		release()
 		restore()
+		f.waitOneManager(5 * time.Second)
 		<-driver
 		f.assertOriginalTasksExited()
 	})
@@ -3014,10 +2983,10 @@ func TestSpeechBrowserFaultControls(t *testing.T) {
 
 		driver := f.runDriverAsync("held-fixture", 45*time.Second, "--hold-ms", "500")
 		if !waitFor(t, 5*time.Second, func() bool { return gated.holdHits() > 0 }) {
-			t.Fatal("provider-return control point never hit")
+			f.reclaimAndFail(driver, []func(){release}, "provider-return control point never hit")
 		}
-		f.waitOneManager(5 * time.Second)
 		release()
+		f.waitOneManager(5 * time.Second)
 		<-driver
 		f.assertOriginalTasksExited()
 	})
