@@ -61,7 +61,9 @@ func TestPracticeSubmitPresentationLifetime(t *testing.T) {
 	cancel() // accepted persistence must outlive the turn context
 	done := make(chan struct{})
 	go func() {
-		tm.finishPracticeSubmit(s, ctx, cancel, epoch, ttLessonID, ttCards("苹果"), lesson.CompleteCheckResult{
+		persistCtx, persistDone := checkPersistContext(ctx)
+		defer persistDone()
+		tm.finishPracticeSubmit(s, persistCtx, ctx, cancel, epoch, ttLessonID, ttCards("苹果"), lesson.CompleteCheckResult{
 			Verdicts: []lesson.CheckVerdict{{WordIndex: 0, Correct: true, Manual: true}},
 			Outcomes: map[string]lesson.WordOutcome{"0": {Outcome: outcomeConfirmed}},
 		}, "practice-race", write)

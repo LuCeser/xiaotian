@@ -724,7 +724,7 @@ func (tm *TurnManager) runAcceptedPassageSubmit(s Sender, ctx context.Context, c
 		return nil
 	})
 
-	tm.finishPassageSubmit(s, ctx, cancel, epoch, ref, lessonID, total, res, requestID, write)
+	tm.finishPassageSubmit(s, persistCtx, ctx, cancel, epoch, ref, lessonID, total, res, requestID, write)
 }
 
 // finishPassageSubmit runs on its own goroutine (the ACK-gated ending
@@ -734,10 +734,8 @@ func (tm *TurnManager) runAcceptedPassageSubmit(s Sender, ctx context.Context, c
 // two-phase kind=passage receipt, ship the honest review_result, then speak
 // the wrap line through the ACK gate and end with session_ended
 // (lesson_complete).
-func (tm *TurnManager) finishPassageSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref passageRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
+func (tm *TurnManager) finishPassageSubmit(s Sender, persistCtx context.Context, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref passageRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
-	persistCtx, persistDone := checkPersistContext(ctx)
-	defer persistDone()
 
 	correct := 0
 	for _, v := range res.Verdicts {

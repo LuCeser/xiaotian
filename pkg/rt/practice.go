@@ -441,7 +441,7 @@ func (tm *TurnManager) runAcceptedPracticeSubmit(s Sender, ctx context.Context, 
 		return nil
 	})
 
-	tm.finishPracticeSubmit(s, ctx, cancel, epoch, lessonID, wordsList, res, requestID, write)
+	tm.finishPracticeSubmit(s, persistCtx, ctx, cancel, epoch, lessonID, wordsList, res, requestID, write)
 }
 
 // finishPracticeSubmit runs on its own goroutine (the ACK-gated ending
@@ -452,10 +452,8 @@ func (tm *TurnManager) runAcceptedPracticeSubmit(s Sender, ctx context.Context, 
 // two-phase save receipt — whose saved/failed expresses the PRACTICE
 // STORAGE result (practice_logs), NOT an FSRS write (practice never enters
 // the FSRS schedule, D-11).
-func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, lessonID string, wordsList []lesson.Word, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
+func (tm *TurnManager) finishPracticeSubmit(s Sender, persistCtx context.Context, ctx context.Context, cancel context.CancelFunc, epoch uint64, lessonID string, wordsList []lesson.Word, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
-	persistCtx, persistDone := checkPersistContext(ctx)
-	defer persistDone()
 
 	// The D-02 matrix over the STORED readback — the same single rating
 	// discipline as the main submit (never a second table, Pitfall 1).

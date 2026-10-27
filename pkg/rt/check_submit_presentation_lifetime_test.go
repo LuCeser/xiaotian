@@ -26,9 +26,14 @@ func TestCheckSubmitPresentationLifetime(t *testing.T) {
 		close(hit)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	frozen := formalCheckSubmitFrozen{lessonID: tm.tutor.lessonID, category: tm.tutor.category}
+	tm.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
-		tm.finishCheckSubmit(s, ctx, cancel, epoch, map[string]string{"苹果": "good"}, 1, 1, "submit-race", nil)
+		persistCtx, persistDone := checkPersistContext(ctx)
+		defer persistDone()
+		tm.finishCheckSubmit(s, persistCtx, ctx, cancel, epoch, frozen, map[string]string{"苹果": "good"}, 1, 1, "submit-race", nil)
 		close(done)
 	}()
 	ttAwaitGate(t, hit, "check submit presentation probe was not reached")
@@ -71,9 +76,14 @@ func TestCheckSubmitSummaryLifetime(t *testing.T) {
 		close(hit)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	frozen := formalCheckSubmitFrozen{lessonID: tm.tutor.lessonID, category: tm.tutor.category}
+	tm.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
-		tm.finishCheckSubmit(s, ctx, cancel, epoch, map[string]string{"苹果": "good"}, 1, 1, "summary-race", nil)
+		persistCtx, persistDone := checkPersistContext(ctx)
+		defer persistDone()
+		tm.finishCheckSubmit(s, persistCtx, ctx, cancel, epoch, frozen, map[string]string{"苹果": "good"}, 1, 1, "summary-race", nil)
 		close(done)
 	}()
 	ttAwaitGate(t, hit, "check submit summary probe was not reached")
@@ -126,7 +136,9 @@ func TestCorrectionSubmitPresentationLifetime(t *testing.T) {
 	cancel() // accepted persistence must outlive the turn context
 	done := make(chan struct{})
 	go func() {
-		tm.finishCorrections(s, ctx, cancel, correctionInputs{
+		persistCtx, persistDone := checkPersistContext(ctx)
+		defer persistDone()
+		tm.finishCorrections(s, persistCtx, ctx, cancel, correctionInputs{
 			epoch: epoch, lessonID: ttLessonID, version: version,
 			requestID: "correction-race", changed: map[string]string{"苹果": "good"}, total: 1, correct: 1,
 			write: write,

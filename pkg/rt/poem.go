@@ -545,7 +545,7 @@ func (tm *TurnManager) runAcceptedPoemSubmit(s Sender, ctx context.Context, canc
 		return nil
 	})
 
-	tm.finishPoemSubmit(s, ctx, cancel, epoch, ref, lessonID, total, res, requestID, write)
+	tm.finishPoemSubmit(s, persistCtx, ctx, cancel, epoch, ref, lessonID, total, res, requestID, write)
 }
 
 // finishPoemSubmit runs on its own goroutine (the ACK-gated ending blocks;
@@ -554,10 +554,8 @@ func (tm *TurnManager) runAcceptedPoemSubmit(s Sender, ctx context.Context, canc
 // poem_practice_logs row bracketed by the two-phase kind=poem receipt, ship
 // the honest review_result, then speak the wrap line through the ACK gate
 // and end with session_ended(lesson_complete).
-func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref poemRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
+func (tm *TurnManager) finishPoemSubmit(s Sender, persistCtx context.Context, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref poemRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
-	persistCtx, persistDone := checkPersistContext(ctx)
-	defer persistDone()
 
 	correct := 0
 	for _, v := range res.Verdicts {

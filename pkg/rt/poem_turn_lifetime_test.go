@@ -86,7 +86,9 @@ func TestPoemSubmitPresentationLifetime(t *testing.T) {
 	cancel() // accepted persistence must outlive the turn context
 	done := make(chan struct{})
 	go func() {
-		tm.finishPoemSubmit(s, ctx, cancel, epoch, ref, ttLessonID, 4, lesson.CompleteCheckResult{
+		persistCtx, persistDone := checkPersistContext(ctx)
+		defer persistDone()
+		tm.finishPoemSubmit(s, persistCtx, ctx, cancel, epoch, ref, ttLessonID, 4, lesson.CompleteCheckResult{
 			Verdicts: []lesson.CheckVerdict{{WordIndex: 0, Correct: true, Manual: true}},
 		}, "poem-race", write)
 		close(done)
