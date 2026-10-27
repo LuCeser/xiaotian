@@ -1,3 +1,6 @@
+// 补充回归（路径 A 单元 1）：TestPracticeSubmitPresentationLifetime 在测试
+// 里自登 admitCheckWriteLocked，撤掉 practice 生产接纳不会变红，不计入
+// 1.10b 保存接纳证明；真实旅程见 TestPracticeSubmitBrowser（rtbrowser）。
 package rt
 
 import (

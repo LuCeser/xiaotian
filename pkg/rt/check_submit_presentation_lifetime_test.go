@@ -1,3 +1,7 @@
+// 补充回归（路径 A 单元 1）：TestCorrectionSubmitPresentationLifetime 等在
+// 测试里自登 admitCheckWriteLocked（或不经生产 submit 入口），撤掉对应生
+// 产接纳不会变红，不计入 1.10a/1.09 保存接纳证明；真实旅程见
+// TestCorrectionSubmitBrowser、TestAcceptedSubmitSurvivesClose（rtbrowser）。
 package rt
 
 import (
