@@ -1354,6 +1354,9 @@
     this.sourceKind = '';
     this.pdfPageURL = null;
     this.sourcePageNo = 0;
+    // 页 vs 张 — the run-driven source view's noun; showPdfPageBlob (and
+    // the multi-photo runner) sets it per run.
+    this.sourceNoun = '页';
 
     var self = this;
     this.pickBtn.addEventListener('click', function () {
@@ -1483,6 +1486,7 @@
     }
     this.pdfPageURL = URL.createObjectURL(blob);
     this.sourceKind = 'pdf';
+    this.sourceNoun = '页';
     this.sourcePageNo = pageNo;
     this.sourceImg.alt = '第 ' + pageNo + ' 页大图预览';
     this.sourceImg.src = this.pdfPageURL;
@@ -2044,6 +2048,8 @@
           throw new Error(plan.message);
         }
         self.pdfState = {
+          kind: 'pdf',
+          noun: '页',
           doc: opened.doc,
           plan: plan,
           aborted: false,
@@ -2078,12 +2084,12 @@
           self.books = loaded[1] || [];
           self.existingPoems = loaded[2] || [];
           self.existingPassages = loaded[3] || [];
-          return self.runPdfPages();
+          return self.runPages();
         });
       })
       .then(function (summary) {
         self.setBusy(false);
-        self.finishPdfRun(summary);
+        self.finishRun(summary);
       })
       .catch(function (err) {
         self.setBusy(false);
@@ -2096,13 +2102,25 @@
   };
 
   /**
-   * runPdfPages — run every PENDING page of the plan sequentially
+   * runState — the run currently owning the page bar / retry machinery.
+   * Whichever exists first wins; the pick/recognize releases keep the
+   * run kinds mutually exclusive.
+   */
+  PhotoAddForm.prototype.runState = function () {
+    return this.pdfState || this.photoBatch || null;
+  };
+
+  /**
+   * runPages — run every PENDING page of the plan sequentially
    * (onlyPageNo: the single-page retry path). The chain never rejects:
    * per-page failures are recorded on the plan; the loop keeps going.
    */
-  PhotoAddForm.prototype.runPdfPages = function (onlyPageNo) {
+  PhotoAddForm.prototype.runPages = function (onlyPageNo) {
     var self = this;
-    var state = this.pdfState;
+    var state = this.runState();
+    if (!state) {
+      return Promise.resolve(null);
+    }
     var chain = Promise.resolve();
     state.plan.pages.forEach(function (page) {
       if (onlyPageNo && page.no !== onlyPageNo) {
@@ -2118,6 +2136,54 @@
     return chain.then(function () {
       return global.planSummary(state.plan);
     });
+  };
+
+  /**
+   * landRecognized — the shared post-recognize landing of ONE page:
+   * parse, merge the page's segment into every content kind, settle
+   * cross-page duplicates, render the panel ONCE with the first rows.
+   * metaMerger folds the page's header into detectedMeta (the PDF run's
+   * merger keeps the first-win rule).
+   */
+  PhotoAddForm.prototype.landRecognized = function (data, pageNo, state, metaMerger) {
+    var parsed = parseRecognized(data);
+    if (parsed.meta) {
+      var merged = metaMerger(parsed.meta);
+      if (merged) {
+        this.detectedMeta = merged;
+      }
+      state.metaDone = true;
+    }
+    var classified = global.classifyPhotoEntries(parsed.entries, this.existingWords);
+    this.rows = global.mergePageRows(this.rows, pageNo, classified);
+    // Issue #11: the page's poems and display-only others replace
+    // their own page segments (a retry never duplicates either).
+    // Issue #13: the passages replace their own segment the same way.
+    this.poemRows = mergePagePoems(this.poemRows, pageNo, parsed.poems, this.existingPoems);
+    this.passageRows = mergePagePassages(this.passageRows, pageNo, parsed.passages, this.existingPassages);
+    this.otherSections = mergePageOthers(this.otherSections, pageNo, parsed.others);
+    state.plan = global.applyPageEvent(state.plan, pageNo, 'done');
+    // The textbook panel renders with the FIRST rows that land: its
+    // preselect fixes bookChoice, so the reclassify below (and any
+    // mid-run edit) sees the real textbook mode — the ordering the
+    // photo flow gets for free by rendering the panel right after its
+    // single recognition. A retry never rebuilds it.
+    if (!state.panelRendered &&
+        (this.rows.length || this.poemRows.length || this.passageRows.length)) {
+      this.renderTextbookPanel('');
+      state.panelRendered = true;
+    }
+    // Settle cross-page duplicates NOW — the 与第 N 行重复 verdicts
+    // come from classifyPhotoEntries over the whole merged array, and
+    // the preview should show them the moment the page lands.
+    this.reclassify();
+    if (this.rows.length || this.poemRows.length || this.passageRows.length) {
+      this.renderPreview();
+    }
+    if (this.sourcePageNo === pageNo) {
+      this.setSourceCaption('第 ' + pageNo + ' ' + state.noun + ' · 已识别');
+    }
+    this.renderPdfBar();
   };
 
   /**
@@ -2145,82 +2211,55 @@
         return self.recognizePhoto(blob, self.draftCategory);
       })
       .then(function (data) {
-        var parsed = parseRecognized(data);
-        if (!state.metaDone && parsed.meta) {
-          self.detectedMeta = parsed.meta;
-          state.metaDone = true;
-        }
-        var classified = global.classifyPhotoEntries(parsed.entries, self.existingWords);
-        self.rows = global.mergePageRows(self.rows, pageNo, classified);
-        // Issue #11: the page's poems and display-only others replace
-        // their own page segments (a retry never duplicates either).
-        // Issue #13: the passages replace their own segment the same way.
-        self.poemRows = mergePagePoems(self.poemRows, pageNo, parsed.poems, self.existingPoems);
-        self.passageRows = mergePagePassages(self.passageRows, pageNo, parsed.passages, self.existingPassages);
-        self.otherSections = mergePageOthers(self.otherSections, pageNo, parsed.others);
-        state.plan = global.applyPageEvent(state.plan, pageNo, 'done');
-        // The textbook panel renders with the FIRST rows that land: its
-        // preselect fixes bookChoice, so the reclassify below (and any
-        // mid-run edit) sees the real textbook mode — the ordering the
-        // photo flow gets for free by rendering the panel right after its
-        // single recognition. A retry never rebuilds it.
-        if (!state.panelRendered &&
-            (self.rows.length || self.poemRows.length || self.passageRows.length)) {
-          self.renderTextbookPanel('');
-          state.panelRendered = true;
-        }
-        // Settle cross-page duplicates NOW — the 与第 N 行重复 verdicts
-        // come from classifyPhotoEntries over the whole merged array, and
-        // the preview should show them the moment the page lands.
-        self.reclassify();
-        if (self.rows.length || self.poemRows.length || self.passageRows.length) {
-          self.renderPreview();
-        }
-        if (self.sourcePageNo === pageNo) {
-          self.setSourceCaption('第 ' + pageNo + ' 页 · 已识别');
-        }
-        self.renderPdfBar();
+        self.landRecognized(data, pageNo, state, function (meta) {
+          // PDF: one document, one header — the first page that read one
+          // settles it (the pre-#80 semantics, unchanged).
+          return state.metaDone ? null : meta;
+        });
       })
       .catch(function (err) {
         state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
           (err && err.message) || '识别失败');
         if (self.sourcePageNo === pageNo) {
-          self.setSourceCaption('第 ' + pageNo + ' 页 · 识别失败');
+          self.setSourceCaption('第 ' + pageNo + ' ' + state.noun + ' · 识别失败');
         }
         self.renderPdfBar();
       });
   };
 
   /**
-   * finishPdfRun — the after-run surface. A run with failed pages says so
-   * (never a whole-file success); an all-failed run leaves the honest
-   * empty preview; otherwise the textbook panel renders ONCE (a retry
-   * must not rebuild it out from under the parent's choices).
+   * finishRun — the after-run surface (the noun keeps the wording
+   * honest). A run with failed pages says so (never a whole-file
+   * success); an all-failed run leaves the honest empty preview;
+   * otherwise the textbook panel renders ONCE (a retry must not rebuild
+   * it out from under the parent's choices).
    */
-  PhotoAddForm.prototype.finishPdfRun = function (summary) {
+  PhotoAddForm.prototype.finishRun = function (summary) {
     var kit = global.__parentFormKit || {};
-    if (!this.pdfState) {
+    var state = this.runState();
+    if (!state) {
       return;
     }
+    var noun = state.noun;
     // Issue #11/#13: a poems-only or passages-only run is a real result
     // too — emptiness is judged over EVERY content kind.
     if (!this.rows.length && !this.poemRows.length && !this.passageRows.length) {
       this.resetEntries();
       this.renderPreviewHint(summary && summary.failed > 0
-        ? '这一轮没有一页识别成功，请检查文件后重试'
+        ? '这一轮没有一' + noun + '识别成功，请检查文件后重试'
         : '这次处理没有识别到词表内容');
       return;
     }
-    if (!this.pdfState.panelRendered) {
+    if (!state.panelRendered) {
       this.renderTextbookPanel('');
-      this.pdfState.panelRendered = true;
+      state.panelRendered = true;
     }
     this.renderPreview();
     this.discardBtn.hidden = false;
     if (summary && summary.failed > 0) {
-      this.showFormError('有 ' + summary.failed + ' 页识别失败（在上方状态条可重试失败页）；已完成页的结果不受影响。');
+      this.showFormError('有 ' + summary.failed + ' ' + noun + '识别失败（在上方状态条可重试失败' + noun + '）；已完成' + noun + '的结果不受影响。');
       if (kit.showToast) {
-        kit.showToast('有 ' + summary.failed + ' 页识别失败，可单独重试', 'error');
+        kit.showToast('有 ' + summary.failed + ' ' + noun + '识别失败，可单独重试', 'error');
       }
     }
   };
@@ -2232,7 +2271,7 @@
    */
   PhotoAddForm.prototype.handlePdfRetryPage = function (pageNo) {
     var self = this;
-    var state = this.pdfState;
+    var state = this.runState();
     if (!state || this.recognizeBtn.disabled) {
       return;
     }
@@ -2240,9 +2279,9 @@
     state.plan = global.retryPage(state.plan, pageNo);
     this.showFormError('');
     this.setBusy(true);
-    this.runPdfPages(pageNo).then(function (summary) {
+    this.runPages(pageNo).then(function (summary) {
       self.setBusy(false);
-      self.finishPdfRun(summary);
+      self.finishRun(summary);
     });
   };
 
@@ -2254,16 +2293,16 @@
    */
   PhotoAddForm.prototype.handlePdfResume = function () {
     var self = this;
-    var state = this.pdfState;
+    var state = this.runState();
     if (!state || this.recognizeBtn.disabled) {
       return;
     }
     state.aborted = false;
     this.showFormError('');
     this.setBusy(true);
-    this.runPdfPages().then(function (summary) {
+    this.runPages().then(function (summary) {
       self.setBusy(false);
-      self.finishPdfRun(summary);
+      self.finishRun(summary);
     });
   };
 
@@ -2275,19 +2314,20 @@
    */
   PhotoAddForm.prototype.renderPdfBar = function () {
     var self = this;
-    var state = this.pdfState;
+    var state = this.runState();
     if (!state) {
       this.pdfBar.hidden = true;
       clearEl(this.pdfBar);
       return;
     }
+    var noun = state.noun;
     this.pdfBar.hidden = false;
     clearEl(this.pdfBar);
 
     var summary = global.planSummary(state.plan);
     var line = document.createElement('p');
     line.className = 'pdf-summary-line';
-    line.textContent = '共 ' + summary.total + ' 页：成功 ' + summary.done +
+    line.textContent = '共 ' + summary.total + ' ' + noun + '：成功 ' + summary.done +
       '，失败 ' + summary.failed +
       (summary.pending ? '，待处理 ' + summary.pending : '') +
       (summary.running ? '，识别中 ' + summary.running : '');
@@ -2301,15 +2341,15 @@
       chip.setAttribute('data-page', String(page.no));
       chip.setAttribute('data-status', page.status);
       if (page.error) {
-        chip.title = '第 ' + page.no + ' 页：' + page.error;
+        chip.title = '第 ' + page.no + ' ' + noun + '：' + page.error;
       }
-      chip.textContent = '第 ' + page.no + ' 页';
+      chip.textContent = '第 ' + page.no + ' ' + noun;
       if (page.status === 'failed') {
         var retry = document.createElement('button');
         retry.type = 'button';
         retry.className = 'btn btn-secondary pdf-retry-btn';
         retry.textContent = '重试';
-        retry.setAttribute('aria-label', '重试第 ' + page.no + ' 页');
+        retry.setAttribute('aria-label', '重试第 ' + page.no + ' ' + noun);
         retry.addEventListener('click', function () {
           self.handlePdfRetryPage(page.no);
         });
@@ -2323,7 +2363,7 @@
       var stop = document.createElement('button');
       stop.type = 'button';
       stop.className = 'btn btn-secondary pdf-stop-btn';
-      stop.textContent = '停止（保留已完成页）';
+      stop.textContent = '停止（保留已完成' + noun + '）';
       stop.addEventListener('click', function () {
         state.aborted = true;
       });
@@ -2336,7 +2376,7 @@
       var resume = document.createElement('button');
       resume.type = 'button';
       resume.className = 'btn btn-secondary pdf-resume-btn';
-      resume.textContent = '继续处理（剩 ' + summary.pending + ' 页）';
+      resume.textContent = '继续处理（剩 ' + summary.pending + ' ' + noun + '）';
       resume.addEventListener('click', function () {
         self.handlePdfResume();
       });
@@ -2829,7 +2869,7 @@
     // Issue #7: PDF rows group under per-page header rows (页码 + that
     // page's status + a 本页批量课次 mini-toolbar). Photo rows (no page
     // tag) render flat, exactly as before.
-    var hasPages = this.pdfState && this.rows.some(function (r) { return r.page; });
+    var hasPages = this.runState() && this.rows.some(function (r) { return r.page; });
     if (hasPages) {
       global.rowsByPage(this.rows).forEach(function (group) {
         if (group.no) {
@@ -3481,6 +3521,8 @@
    */
   PhotoAddForm.prototype.buildPageHeadRow = function (group, colCount) {
     var self = this;
+    var state = this.runState();
+    var noun = state ? state.noun : '页';
     var tr = document.createElement('tr');
     tr.className = 'pdf-page-head';
     var td = document.createElement('td');
@@ -3488,19 +3530,19 @@
 
     var label = document.createElement('span');
     label.className = 'pdf-page-label';
-    label.textContent = '第 ' + group.no + ' 页（' + group.rows.length + ' 条）';
+    label.textContent = '第 ' + group.no + ' ' + noun + '（' + group.rows.length + ' 条）';
     td.appendChild(label);
 
     var lessonInput = document.createElement('input');
     lessonInput.type = 'text';
     lessonInput.className = 'form-input pdf-page-lesson';
     lessonInput.setAttribute('list', 'parent-photo-lesson-options');
-    lessonInput.setAttribute('aria-label', '第 ' + group.no + ' 页课次');
-    lessonInput.placeholder = '本页课次（如 第5课）';
+    lessonInput.setAttribute('aria-label', '第 ' + group.no + ' ' + noun + '课次');
+    lessonInput.placeholder = '本' + noun + '课次（如 第5课）';
     var apply = document.createElement('button');
     apply.type = 'button';
     apply.className = 'btn btn-secondary pdf-page-lesson-apply';
-    apply.textContent = '应用到本页';
+    apply.textContent = '应用到本' + noun;
     apply.addEventListener('click', function () {
       self.rows = global.applyLessonToPage(self.rows, group.no, lessonInput.value.trim());
       self.renderPreview();
