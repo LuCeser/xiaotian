@@ -844,6 +844,73 @@
   }
 
   /**
+   * fillRecommendedLessons — stamp ONE freshly recognized photo's rows
+   * with the recommendation (Issue #80 §3.2): a row that landed with its
+   * own lesson keeps it (origin 'recognized'); an empty row takes the
+   * photo's recommended lesson and source; no recommendation anywhere →
+   * the row stays an honest 空（待确认, origin 'none'）. Memory-only: it
+   * returns NEW row copies and never touches the inputs. Pure.
+   */
+  function fillRecommendedLessons(rows, rec) {
+    return (rows || []).map(function (row) {
+      if (!row) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      var own = metaField(copy.lesson);
+      if (own) {
+        copy.lesson = own;
+        copy.lessonOrigin = 'recognized';
+      } else if (rec && metaField(rec.lesson)) {
+        copy.lesson = metaField(rec.lesson);
+        copy.lessonOrigin = rec.source || 'recognized';
+      } else {
+        copy.lesson = '';
+        copy.lessonOrigin = 'none';
+      }
+      return copy;
+    });
+  }
+
+  /**
+   * applyBatchLesson — the 整批指定 path (Issue #80 §3.2): one lesson
+   * onto every committable CHECKED row (the 加入 set — the whole
+   * submittable batch), origin 'parent' (the 推荐 badge stops applying).
+   * Returns a NEW array; untouched rows keep their identity. Pure.
+   */
+  function applyBatchLesson(rows, lesson) {
+    return mapParentLesson(rows, lesson, function (row) {
+      return isCommittable(row, true) && row.checked !== false;
+    });
+  }
+
+  /**
+   * applyPickedLesson — the 多选指定 path (Issue #80 §3.2): the row's
+   * 选中 (lessonPicked) is deliberately SEPARATE from 加入 — a picked but
+   * unchecked row still takes the lesson (it is memory-only; whether it
+   * commits stays the 加入 checkbox's call). Pure.
+   */
+  function applyPickedLesson(rows, lesson) {
+    return mapParentLesson(rows, lesson, function (row) {
+      return !!row.lessonPicked && isCommittable(row, true);
+    });
+  }
+
+  /** The shared parent-assignment map: predicate rows get lesson+'parent'. */
+  function mapParentLesson(rows, lesson, predicate) {
+    var value = lesson == null ? '' : String(lesson);
+    return (rows || []).map(function (row) {
+      if (!row || !predicate(row)) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      copy.lesson = value;
+      copy.lessonOrigin = 'parent';
+      return copy;
+    });
+  }
+
+  /**
    * appendMissingLessons — keep existing order, append unseen names from
    * incoming in order (Issue #80: import never inserts into the middle).
    */
@@ -2139,6 +2206,14 @@
           self.existingPoems = loaded[2] || [];
           self.existingPassages = loaded[3] || [];
           self.rows = classifyPhotoEntries(entries, self.existingWords);
+          // Issue #80 §3.1: one recommendation per photo fills the rows
+          // whose own lesson is empty (memory-only; nothing is written).
+          // parsed.meta IS the photo's textbook header (parseRecognized's
+          // shape) — recommendLesson reads it as photo.textbook.
+          var candidateBook = matchTextbookForMeta(self.books, self.detectedMeta);
+          self.rows = fillRecommendedLessons(self.rows, recommendLesson(
+            { textbook: parsed.meta, entries: entries },
+            (candidateBook && candidateBook.lessons) || [], []));
           self.poemRows = classifyPoemDrafts(parsed.poems, self.existingPoems);
           self.passageRows = classifyPassageDrafts(parsed.passages, self.existingPassages);
           self.otherSections = parsed.others.map(function (o) {
