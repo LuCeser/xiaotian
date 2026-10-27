@@ -3,6 +3,7 @@ package rt
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -20,6 +21,18 @@ func ttWaitClosed(t *testing.T, tm *TurnManager) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatal("the session never closed")
+}
+
+func ttWaitFailingSessionEndedAttempt(t *testing.T, s *failingControlSender) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&s.attempts) == 1 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("session_ended attempts = %d, want 1", atomic.LoadInt32(&s.attempts))
 }
 
 // ttPreFallSubmitLatch flips the lesson row's checking→submitted latch the
@@ -65,6 +78,10 @@ func TestDuplicateSubmitTerminal(t *testing.T) {
 		wg.Wait()
 
 		ttWaitClosed(t, tm)
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) && s.countOf(TypeSessionEnded) < 1 {
+			time.Sleep(2 * time.Millisecond)
+		}
 		if got := s.countOf(TypeSessionEnded); got != 1 {
 			t.Fatalf("session_ended count = %d, want 1", got)
 		}
@@ -96,7 +113,8 @@ func TestDuplicateSubmitTerminal(t *testing.T) {
 		tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-dup"}))
 
 		ttWaitClosed(t, tm)
-		if got := s.attempts; got != 1 {
+		ttWaitFailingSessionEndedAttempt(t, s)
+		if got := atomic.LoadInt32(&s.attempts); got != 1 {
 			t.Fatalf("session_ended attempts = %d, want exactly 1", got)
 		}
 		if got := inner.countOf(TypeSessionEnded); got != 0 {
