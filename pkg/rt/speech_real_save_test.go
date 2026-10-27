@@ -124,16 +124,16 @@ type speechReadGate struct {
 func (g *speechReadGate) GetLessonState(ctx context.Context, lessonID string) (lesson.Lesson, error) {
 	if g.armed.Load() {
 		g.once.Do(func() {
-			g.gate.arm()
+			g.gate.hit()
 			g.gate.wait()
 		})
 	}
 	return g.LessonExecutor.GetLessonState(ctx, lessonID)
 }
 
-// hold arms the one-shot park; openUp (idempotent) releases the parked read.
+// hold arms the one-shot park; release (idempotent) releases the parked read.
 func (g *speechReadGate) hold()   { g.armed.Store(true) }
-func (g *speechReadGate) openUp() { g.gate.openUp() }
+func (g *speechReadGate) release() { g.gate.release() }
 
 // gateStateRead mounts the one-shot authoritative-read hold on every future
 // manager's executor chain (1.12a). The gate is passive until hold().
@@ -257,9 +257,47 @@ func (f *speechBrowserFixture) useRealFSRS(t *testing.T) *speechFSRSSource {
 
 // TestSpeechFixtureControlPoints 自检 1.12a 的控制设施：权威读回门在第
 // 一次 GetLessonState 命中并驻留、后续读直通；1.09 建立的提交两窗门在
-// before 与 committed 位置都能命中。全部控制点经 openUp 释放后没有滞留
+// before 与 committed 位置都能命中。全部控制点经 release 释放后没有滞留
 // 的等待方。
 func TestSpeechFixtureControlPoints(t *testing.T) {
+	t.Run("one gate separates hit from release", func(t *testing.T) {
+		g := newSpeechOneGate()
+
+		// release() must NEVER close entered (计划 §5.1): releasing a
+		// control point that was never hit is not — and must not
+		// fabricate — a hit observation.
+		g.release()
+		select {
+		case <-g.entered:
+			t.Fatal("release closed entered — 解除控制点伪造了命中")
+		default:
+		}
+		if got := g.hitCount(); got != 0 {
+			t.Fatalf("hit count after release-only = %d, want 0", got)
+		}
+
+		// A late arrival still passes straight through the spent gate and is
+		// honestly counted as a hit.
+		g.hit()
+		g.wait()
+		select {
+		case <-g.entered:
+		default:
+			t.Fatal("hit after release did not signal entered")
+		}
+		if got := g.hitCount(); got != 1 {
+			t.Fatalf("hit count = %d, want 1", got)
+		}
+
+		// Repeated hits keep counting (the multi-write batch observation)
+		// while entered stays single-shot and release stays idempotent.
+		g.hit()
+		g.release()
+		if got := g.hitCount(); got != 2 {
+			t.Fatalf("hit count = %d, want 2 (every arrival counts)", got)
+		}
+	})
+
 	t.Run("state read gate parks the first held read only", func(t *testing.T) {
 		exec := newFakeExecutor(ttLessonID, ttCards("苹果"))
 		g := &speechReadGate{LessonExecutor: exec, gate: newSpeechOneGate()}
@@ -299,11 +337,11 @@ func TestSpeechFixtureControlPoints(t *testing.T) {
 			t.Fatalf("held read returned while parked: %+v", l)
 		case <-time.After(100 * time.Millisecond):
 		}
-		g.openUp()
+		g.release()
 		select {
 		case <-first:
 		case <-time.After(5 * time.Second):
-			t.Fatal("the parked read never resumed after openUp")
+			t.Fatal("the parked read never resumed after release")
 		}
 		// The second read passes straight through — the hold is one-shot.
 		done := make(chan lesson.Lesson, 1)
@@ -339,7 +377,7 @@ func TestSpeechFixtureControlPoints(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("the submit never reached its before window")
 		}
-		g.before.openUp()
+		g.before.release()
 		select {
 		case <-g.committed.entered:
 		case <-time.After(5 * time.Second):
@@ -350,11 +388,11 @@ func TestSpeechFixtureControlPoints(t *testing.T) {
 			t.Fatalf("submit returned inside the committed window: %+v", r)
 		case <-time.After(100 * time.Millisecond):
 		}
-		g.committed.openUp()
+		g.committed.release()
 		select {
 		case <-res:
 		case <-time.After(5 * time.Second):
-			t.Fatal("the submit never resumed after openUp")
+			t.Fatal("the submit never resumed after release")
 		}
 	})
 }

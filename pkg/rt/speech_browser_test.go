@@ -302,13 +302,12 @@ type speechObservedTTS struct {
 
 type speechVerdictGate struct {
 	LessonExecutor
-	entered chan struct{}
-	release chan struct{}
+	gate *speechOneGate
 }
 
 func (g *speechVerdictGate) ApplyVerdict(ctx context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
-	close(g.entered)
-	<-g.release
+	g.gate.hit()
+	g.gate.wait()
 	return g.LessonExecutor.ApplyVerdict(ctx, lessonID, expectedVersion, requestID, verdict)
 }
 
@@ -317,14 +316,12 @@ func (g *speechVerdictGate) ApplyVerdict(ctx context.Context, lessonID string, e
 // first entry signals entered exactly once.
 type speechBatchGate struct {
 	LessonExecutor
-	entered     chan struct{}
-	release     chan struct{}
-	enteredOnce sync.Once
+	gate *speechOneGate
 }
 
 func (g *speechBatchGate) ApplyVerdict(ctx context.Context, lessonID string, expectedVersion int, requestID string, verdict lesson.CheckVerdict) (lesson.ApplyVerdictResult, error) {
-	g.enteredOnce.Do(func() { close(g.entered) })
-	<-g.release
+	g.gate.hit()
+	g.gate.wait()
 	return g.LessonExecutor.ApplyVerdict(ctx, lessonID, expectedVersion, requestID, verdict)
 }
 
@@ -332,15 +329,13 @@ func (g *speechBatchGate) ApplyVerdict(ctx context.Context, lessonID string, exp
 // scripted reply, so the prefill batch's ADMISSION happens only after the
 // hold releases (the close-first ordering of TestCloseDuringOcrPrefills).
 type speechHeldRead struct {
-	inner   *fakeOCRReader
-	entered chan struct{}
-	hold    chan struct{}
-	once    sync.Once
+	inner *fakeOCRReader
+	gate  *speechOneGate
 }
 
 func (h *speechHeldRead) read(ctx context.Context, systemPrompt, userPrompt string, imageJPEG []byte) (string, error) {
-	h.once.Do(func() { close(h.entered) })
-	<-h.hold
+	h.gate.hit()
+	h.gate.wait()
 	return h.inner.read(ctx, systemPrompt, userPrompt, imageJPEG)
 }
 
@@ -656,7 +651,7 @@ type speechReviewGate struct {
 
 func (g *speechReviewGate) SubmitReview(ctx context.Context, results map[string]string, category string) (ReviewWriteResult, error) {
 	g.once.Do(func() {
-		g.gate.arm()
+		g.gate.hit()
 		g.gate.wait()
 	})
 	return g.WordSource.SubmitReview(ctx, results, category)
@@ -847,42 +842,50 @@ func (f *speechBrowserFixture) scriptSpokenConfirm() {
 	f.llm.mu.Unlock()
 }
 
-func (f *speechBrowserFixture) gateScreenVerdict() (entered, release chan struct{}) {
+func (f *speechBrowserFixture) gateScreenVerdict() *speechOneGate {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	g := &speechVerdictGate{LessonExecutor: f.exec, entered: make(chan struct{}), release: make(chan struct{})}
+	g := &speechVerdictGate{LessonExecutor: f.exec, gate: newSpeechOneGate()}
 	f.exec = g
-	return g.entered, g.release
+	return g.gate
 }
 
 // gateOcrPrefillWrites gates a whole prefill BATCH: every ApplyVerdict parks
 // on the shared release, first entry signals once.
-func (f *speechBrowserFixture) gateOcrPrefillWrites() (entered, release chan struct{}) {
+func (f *speechBrowserFixture) gateOcrPrefillWrites() *speechOneGate {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	g := &speechBatchGate{LessonExecutor: f.exec, entered: make(chan struct{}), release: make(chan struct{})}
+	g := &speechBatchGate{LessonExecutor: f.exec, gate: newSpeechOneGate()}
 	f.exec = g
-	return g.entered, g.release
+	return g.gate
 }
 
-// speechOneGate is one reusable entered/release pair (first hit signals);
-// openUp is idempotent so a t.Cleanup can pair with an explicit release.
+// speechOneGate is one reusable hit/release control point: the first hit
+// signals entered once, every waiter parks on the same release, and hit and
+// release are STRICTLY separated (计划 §5.1) — release() never closes
+// entered, because releasing an unh-it control point must not fabricate the
+// hit observation. Both are idempotent so a t.Cleanup can pair with an
+// explicit call; hits counts every arrival (the hit observation) atomically.
 type speechOneGate struct {
 	entered  chan struct{}
-	release  chan struct{}
-	armOnce  sync.Once
+	released chan struct{}
+	hits     atomic.Int64
+	hitOnce  sync.Once
 	openOnce sync.Once
 }
 
 func newSpeechOneGate() *speechOneGate {
-	return &speechOneGate{entered: make(chan struct{}), release: make(chan struct{})}
+	return &speechOneGate{entered: make(chan struct{}), released: make(chan struct{})}
 }
 
-func (g *speechOneGate) arm()  { g.armOnce.Do(func() { close(g.entered) }) }
-func (g *speechOneGate) wait() { <-g.release }
-func (g *speechOneGate) openUp() {
-	g.arm()
-	g.openOnce.Do(func() { close(g.release) })
+func (g *speechOneGate) hit() {
+	g.hits.Add(1)
+	g.hitOnce.Do(func() { close(g.entered) })
+}
+func (g *speechOneGate) wait()      { <-g.released }
+func (g *speechOneGate) hitCount() int64 { return g.hits.Load() }
+func (g *speechOneGate) release() {
+	g.openOnce.Do(func() { close(g.released) })
 }
 
 // speechSubmitGate wraps the executor's checked CompleteCheck at the two
@@ -899,16 +902,16 @@ type speechSubmitGate struct {
 
 func (g *speechSubmitGate) CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
 	if unchecked && g.uncheckedBefore != nil {
-		g.uncheckedBefore.arm()
+		g.uncheckedBefore.hit()
 		g.uncheckedBefore.wait()
 	}
 	if !unchecked && g.before != nil {
-		g.before.arm()
+		g.before.hit()
 		g.before.wait()
 	}
 	res, err := g.LessonExecutor.CompleteCheck(ctx, lessonID, expectedVersion, requestID, unchecked)
 	if !unchecked && err == nil && g.committed != nil {
-		g.committed.arm()
+		g.committed.hit()
 		g.committed.wait()
 	}
 	return res, err
@@ -932,7 +935,7 @@ func (f *speechBrowserFixture) gateCheckSubmit(before, committed bool) (beforeGa
 }
 
 // gateUncheckedCompleteCheck parks the D-03 fallback's unchecked CompleteCheck
-// until openUp — so a late formal submit probe can run before the fallback
+// until release — so a late formal submit probe can run before the fallback
 // latch lands (passage classrooms only; poems skip the fallback).
 func (f *speechBrowserFixture) gateUncheckedCompleteCheck() *speechOneGate {
 	f.mu.Lock()
@@ -958,12 +961,12 @@ func (f *speechBrowserFixture) armPhotoOCR(replies ...string) *fakeOCRReader {
 
 // holdPhotoOCR arms the scripted reader behind a hold: the vision call parks
 // after entering, so the prefill batch only starts when the hold releases.
-func (f *speechBrowserFixture) holdPhotoOCR(replies ...string) (entered, release chan struct{}) {
+func (f *speechBrowserFixture) holdPhotoOCR(replies ...string) *speechOneGate {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	h := &speechHeldRead{inner: &fakeOCRReader{replies: replies}, entered: make(chan struct{}), hold: make(chan struct{})}
+	h := &speechHeldRead{inner: &fakeOCRReader{replies: replies}, gate: newSpeechOneGate()}
 	f.ocrRead = h.read
-	return h.entered, h.hold
+	return h.gate
 }
 
 // scriptVoiceCheckVerdict arms the fake providers for ONE spoken verdict turn:
@@ -1144,14 +1147,12 @@ func TestCloseTransportFailure(t *testing.T) {
 func TestCloseDuringScreenVerdict(t *testing.T) {
 	f := newSpeechBrowserFixture(t)
 	f.seedChecking()
-	entered, release := f.gateScreenVerdict()
-	var releaseOnce sync.Once
-	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
-	t.Cleanup(releaseGate)
+	verdictGate := f.gateScreenVerdict()
+	t.Cleanup(verdictGate.release)
 
 	driver := f.runDriverAsync("screen-verdict-close", 45*time.Second)
 	select {
-	case <-entered:
+	case <-verdictGate.entered:
 	case <-time.After(10 * time.Second):
 		t.Fatal("screen verdict did not reach the real persistence gate")
 	}
@@ -1159,7 +1160,7 @@ func TestCloseDuringScreenVerdict(t *testing.T) {
 	if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
 		t.Fatal("test close did not obtain session ownership")
 	}
-	releaseGate()
+	verdictGate.release()
 	res := <-driver
 	if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 {
 		t.Fatalf("close events=%d late verdict echoes=%d, want 1/0", res.WSCloseCount, res.LateVerdictEchoes)
@@ -1190,14 +1191,12 @@ func TestCloseDuringVoiceVerdict(t *testing.T) {
 	f := newSpeechBrowserFixture(t)
 	f.seedChecking()
 	f.scriptVoiceCheckVerdict("第一个词对了", 1)
-	entered, release := f.gateScreenVerdict()
-	var releaseOnce sync.Once
-	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
-	t.Cleanup(releaseGate)
+	verdictGate := f.gateScreenVerdict()
+	t.Cleanup(verdictGate.release)
 
 	driver := f.runDriverAsync("voice-verdict-close", 45*time.Second)
 	select {
-	case <-entered:
+	case <-verdictGate.entered:
 	case <-time.After(30 * time.Second):
 		t.Fatal("spoken verdict did not reach the real persistence gate — the natural voice turn never landed")
 	}
@@ -1205,7 +1204,7 @@ func TestCloseDuringVoiceVerdict(t *testing.T) {
 	if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
 		t.Fatal("test close did not obtain session ownership")
 	}
-	releaseGate()
+	verdictGate.release()
 	res := <-driver
 	if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 || res.LateTeacherSentences != 0 {
 		t.Fatalf("close=%d late echoes=%d late teacher sentences=%d, want 1/0/0",
@@ -1260,14 +1259,12 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		f.seedChecking()
 		f.armPhotoOCR(prefillReplies...)
-		entered, release := f.gateOcrPrefillWrites()
-		var releaseOnce sync.Once
-		releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
-		t.Cleanup(releaseGate)
+		writesGate := f.gateOcrPrefillWrites()
+		t.Cleanup(writesGate.release)
 
 		driver := f.runDriverAsync("ocr-prefill-close", 45*time.Second)
 		select {
-		case <-entered:
+		case <-writesGate.entered:
 		case <-time.After(30 * time.Second):
 			t.Fatal("OCR prefill batch did not reach the first real persistence gate")
 		}
@@ -1288,7 +1285,7 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
 			t.Fatal("test close did not obtain session ownership")
 		}
-		releaseGate()
+		writesGate.release()
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 || res.LateOcrResults != 0 || res.LateTeacherSentences != 0 {
 			t.Fatalf("close=%d late echoes=%d ocr=%d sentences=%d, want 1/0/0/0",
@@ -1321,14 +1318,12 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 	t.Run("batch arriving after close writes nothing", func(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		f.seedChecking()
-		entered, release := f.holdPhotoOCR(prefillReplies...)
-		var releaseOnce sync.Once
-		releaseHold := func() { releaseOnce.Do(func() { close(release) }) }
-		t.Cleanup(releaseHold)
+		ocrGate := f.holdPhotoOCR(prefillReplies...)
+		t.Cleanup(ocrGate.release)
 
 		driver := f.runDriverAsync("ocr-prefill-close", 45*time.Second)
 		select {
-		case <-entered:
+		case <-ocrGate.entered:
 		case <-time.After(30 * time.Second):
 			t.Fatal("the real OCR vision call never started")
 		}
@@ -1336,7 +1331,7 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
 			t.Fatal("test close did not obtain session ownership")
 		}
-		releaseHold()
+		ocrGate.release()
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 || res.LateOcrResults != 0 {
 			t.Fatalf("close=%d late echoes=%d ocr=%d, want 1/0/0",
@@ -1396,7 +1391,7 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		f.seedCheckingWithManualVerdicts()
 		before, _ := f.gateCheckSubmit(true, false)
-		t.Cleanup(before.openUp)
+		t.Cleanup(before.release)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
 		select {
@@ -1408,7 +1403,7 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
 			t.Fatal("test close did not obtain session ownership")
 		}
-		before.openUp()
+		before.release()
 		assertOutcome(t, f, m, <-driver)
 	})
 
@@ -1416,7 +1411,7 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		f.seedCheckingWithManualVerdicts()
 		_, committed := f.gateCheckSubmit(false, true)
-		t.Cleanup(committed.openUp)
+		t.Cleanup(committed.release)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
 		select {
@@ -1428,7 +1423,7 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
 			t.Fatal("test close did not obtain session ownership")
 		}
-		committed.openUp()
+		committed.release()
 		assertOutcome(t, f, m, <-driver)
 	})
 
@@ -1436,7 +1431,7 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		f.seedCheckingWithManualVerdicts()
 		before, _ := f.gateCheckSubmit(true, false)
-		t.Cleanup(before.openUp)
+		t.Cleanup(before.release)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
 		var persistReached bool
@@ -1455,7 +1450,7 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 			// pass this while the gate stays closed.
 			f.assertOriginalTasksExited()
 		}
-		before.openUp()
+		before.release()
 		if !persistReached {
 			t.Fatal("the formal submit never reached the parked latch write")
 		}
@@ -1498,14 +1493,12 @@ func TestCloseFallbackAfterAcceptedWrites(t *testing.T) {
 		f.expectedSentences = append([]string(nil), speechExpectedCheckResume...)
 		f.mu.Unlock()
 	}
-	entered, release := f.gateScreenVerdict()
-	var releaseOnce sync.Once
-	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
-	t.Cleanup(releaseGate)
+	verdictGate := f.gateScreenVerdict()
+	t.Cleanup(verdictGate.release)
 
 	driver := f.runDriverAsync("screen-verdict-close", 45*time.Second)
 	select {
-	case <-entered:
+	case <-verdictGate.entered:
 	case <-time.After(30 * time.Second):
 		t.Fatal("the screen verdict did not reach the real persistence gate")
 	}
@@ -1513,7 +1506,7 @@ func TestCloseFallbackAfterAcceptedWrites(t *testing.T) {
 	// The goodbye close claims the fallback while the accepted verdict write
 	// is parked AHEAD of the real SQLite write.
 	m.handleEndSession(m.currentSender())
-	releaseGate()
+	verdictGate.release()
 	res := <-driver
 	if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 {
 		t.Fatalf("close=%d late verdict echoes=%d, want 1/0", res.WSCloseCount, res.LateVerdictEchoes)
@@ -1559,17 +1552,15 @@ func TestCloseFallbackAfterAcceptedWrites(t *testing.T) {
 // 门 entered——只有撤掉 waitCheckWrites 的实现才会在这个窗口内到达权威读
 // （读到落库前的旧版本并闩住）；测试随即逼这个未等待的兜底先赢闩、再放行
 // 两笔写入，最终以版本/verdict 断言变红。有等待的实现走到另一条路：先放
-// 写入、再等 entered、再放读门，同一组断言变绿。「先 openUp 再等 entered」
-// 的旧会合会让 openUp 自己点亮 entered，既挡不住未等待的读、也会假绿。
+// 写入、再等 entered、再放读门，同一组断言变绿。「先 release 再等 entered」
+// 的旧会合会让 release 自己点亮 entered，既挡不住未等待的读、也会假绿。
 func TestCloseFallbackMultipleWrites(t *testing.T) {
 	f := newSpeechBrowserFixture(t)
 	f.seedCheckingWithOutcomes()
 	f.armPhotoOCR(`[{"text":"听写浏览器","confidence":0.95},{"text":"第二词","confidence":0.95}]`)
-	verdictEntered, verdictRelease := f.gateOcrPrefillWrites() // the batch's per-word ApplyVerdict hold
+	verdictGate := f.gateOcrPrefillWrites() // the batch's per-word ApplyVerdict hold
 	readGate := f.gateStateRead()
-	var releaseOnce sync.Once
-	releaseWrites := func() { releaseOnce.Do(func() { close(verdictRelease) }) }
-	t.Cleanup(releaseWrites)
+	t.Cleanup(verdictGate.release)
 
 	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
 	seeded, err := f.tools.GetLessonState(context.Background(), lessonID)
@@ -1580,7 +1571,7 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 	driver := f.runDriverAsync("ocr-prefill-close", 45*time.Second)
 	m := f.waitFirstManager(5 * time.Second)
 	select {
-	case <-verdictEntered:
+	case <-verdictGate.entered:
 	case res := <-driver:
 		t.Fatalf("driver finished before the batch: ok=%v err=%s", res.OK, res.Err)
 	case <-time.After(30 * time.Second):
@@ -1616,7 +1607,7 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 	case <-time.After(3 * time.Second):
 	}
 	if skippedWait {
-		readGate.openUp()
+		readGate.release()
 		if !waitFor(t, 10*time.Second, func() bool {
 			l, err := f.tools.GetLessonState(context.Background(), lessonID)
 			return err == nil && l.Stage == lesson.StageSubmitted && l.Unchecked
@@ -1627,14 +1618,14 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 	// 有等待的实现：兜底仍阻塞在登记上，读门无人到达。先放行批次，两笔
 	// 预填以 v+1、v+2 落库；登记完成后兜底的权威读才第一次到达读门——
 	// 等到 entered 再放行，它读到 v+2 并以新版本赢闩。
-	releaseWrites()
+	verdictGate.release()
 	if !skippedWait {
 		select {
 		case <-readGate.gate.entered:
 		case <-time.After(30 * time.Second):
 			t.Fatal("the waiting fallback's authoritative read never arrived")
 		}
-		readGate.openUp()
+		readGate.release()
 	}
 	res := <-driver
 	if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 || res.LateOcrResults != 0 {
@@ -1724,8 +1715,8 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		f.seedCheckingWithManualVerdicts()
 		readGate := f.gateStateRead()
 		before, _ := f.gateCheckSubmit(true, false)
-		t.Cleanup(before.openUp)
-		t.Cleanup(readGate.openUp)
+		t.Cleanup(before.release)
+		t.Cleanup(readGate.release)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
 		select {
@@ -1749,7 +1740,7 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		case <-time.After(3 * time.Second):
 		}
 		if skippedWait {
-			readGate.openUp()
+			readGate.release()
 			if !waitFor(t, 10*time.Second, func() bool {
 				l := storedLesson(f)
 				return l.Stage == lesson.StageSubmitted && l.Unchecked
@@ -1757,15 +1748,15 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 				t.Fatal("the un-waited fallback never won the submit latch")
 			}
 		} else {
-			before.openUp()
+			before.release()
 			select {
 			case <-readGate.gate.entered:
 			case <-time.After(30 * time.Second):
 				t.Fatal("the waiting fallback's authoritative read never arrived")
 			}
-			readGate.openUp()
+			readGate.release()
 		}
-		before.openUp()
+		before.release()
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
 			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
@@ -1800,7 +1791,7 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		probe := f.useRealFSRS(t)
 		f.seedCheckingWithManualVerdicts()
 		_, committed := f.gateCheckSubmit(false, true)
-		t.Cleanup(committed.openUp)
+		t.Cleanup(committed.release)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
 		select {
@@ -1810,7 +1801,7 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		m.handleEndSession(m.currentSender())
-		committed.openUp()
+		committed.release()
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
 			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
@@ -1844,20 +1835,18 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		probe := f.useRealFSRS(t)
 		f.seedCheckingWithOutcomes()
-		entered, release := f.gateScreenVerdict()
-		var releaseOnce sync.Once
-		releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
-		t.Cleanup(releaseGate)
+		verdictGate := f.gateScreenVerdict()
+		t.Cleanup(verdictGate.release)
 
 		driver := f.runDriverAsync("screen-verdict-close", 45*time.Second)
 		select {
-		case <-entered:
+		case <-verdictGate.entered:
 		case <-time.After(30 * time.Second):
 			t.Fatal("the screen verdict did not reach the persistence gate")
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		m.handleEndSession(m.currentSender())
-		releaseGate()
+		verdictGate.release()
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 {
 			t.Fatalf("close=%d late verdict echoes=%d, want 1/0", res.WSCloseCount, res.LateVerdictEchoes)
@@ -2057,7 +2046,7 @@ func TestDuplicateSubmitBrowser(t *testing.T) {
 	f := newSpeechBrowserFixture(t)
 	f.seedCheckingWithManualVerdicts()
 	before, _ := f.gateCheckSubmit(true, false)
-	t.Cleanup(before.openUp)
+	t.Cleanup(before.release)
 
 	driver := f.runDriverAsync("check-submit-close", 45*time.Second)
 	select {
@@ -2077,7 +2066,7 @@ func TestDuplicateSubmitBrowser(t *testing.T) {
 	if _, err := f.tools.CompleteCheck(context.Background(), lessonID, l.Version, "other-tab-submit", false); err != nil {
 		t.Fatalf("foreign submit latch: %v", err)
 	}
-	before.openUp()
+	before.release()
 	res := <-driver
 	if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
 		t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
@@ -2222,7 +2211,7 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 		// the diff write, the receipt and the marker reset) while the diff write
 		// is parked AHEAD of the real save.
 		m.handleEndSession(m.currentSender())
-		reviewGate.openUp()
+		reviewGate.release()
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
 			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0 late=%q",
@@ -2334,7 +2323,7 @@ func TestPassageSubmitBrowser(t *testing.T) {
 		f.seedPassage()
 		f.scriptSpokenConfirm()
 		before, _ := f.gateCheckSubmit(true, false)
-		t.Cleanup(before.openUp)
+		t.Cleanup(before.release)
 
 		driver := f.runDriverAsync("passage-submit-close", 45*time.Second)
 		select {
@@ -2345,7 +2334,7 @@ func TestPassageSubmitBrowser(t *testing.T) {
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		m.handleEndSession(m.currentSender())
-		before.openUp()
+		before.release()
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
 			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
@@ -2400,7 +2389,7 @@ func TestPassageSubmitBrowser(t *testing.T) {
 		f.seedPassage()
 		f.scriptSpokenConfirm()
 		fallbackHold := f.gateUncheckedCompleteCheck()
-		t.Cleanup(fallbackHold.openUp)
+		t.Cleanup(fallbackHold.release)
 
 		driver := f.runDriverAsync("passage-submit-close", 45*time.Second, "--submit-delay-ms", "15000")
 		m := f.waitFirstManager(5 * time.Second)
@@ -2451,7 +2440,7 @@ func TestPassageSubmitBrowser(t *testing.T) {
 			t.Fatalf("stored version = %d, want %d (verdicts only, no latch)", stored.Version, versionAfterVerdict)
 		}
 
-		fallbackHold.openUp()
+		fallbackHold.release()
 		if !waitFor(t, 5*time.Second, func() bool {
 			stored, err := f.tools.GetLessonState(context.Background(), lessonID)
 			return err == nil && stored.Stage == lesson.StageSubmitted && stored.Unchecked
@@ -2493,7 +2482,7 @@ func TestPoemSubmitBrowser(t *testing.T) {
 		f.seedPoem()
 		f.scriptSpokenConfirm()
 		before, _ := f.gateCheckSubmit(true, false)
-		t.Cleanup(before.openUp)
+		t.Cleanup(before.release)
 
 		driver := f.runDriverAsync("poem-submit-close", 45*time.Second)
 		select {
@@ -2504,7 +2493,7 @@ func TestPoemSubmitBrowser(t *testing.T) {
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		m.handleEndSession(m.currentSender())
-		before.openUp()
+		before.release()
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
 			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
@@ -2704,8 +2693,8 @@ func TestPracticeSubmitBrowser(t *testing.T) {
 	f.scriptSpokenConfirm()
 	readGate := f.gateStateRead()
 	before, _ := f.gateCheckSubmit(true, false)
-	t.Cleanup(before.openUp)
-	t.Cleanup(readGate.openUp)
+	t.Cleanup(before.release)
+	t.Cleanup(readGate.release)
 
 	driver := f.runDriverAsync("practice-submit-close", 60*time.Second)
 	select {
@@ -2740,14 +2729,14 @@ func TestPracticeSubmitBrowser(t *testing.T) {
 			t.Fatal("uncoordinated fallback never reached its authoritative read")
 		}
 	}
-	readGate.openUp()
+	readGate.release()
 	if !admitted && !waitFor(t, 10*time.Second, func() bool {
 		stored, err := f.tools.GetLessonState(context.Background(), practiceLessonID)
 		return err == nil && stored.Stage == lesson.StageSubmitted && stored.Unchecked
 	}) {
 		t.Fatal("uncoordinated fallback did not win the submit latch")
 	}
-	before.openUp()
+	before.release()
 	res := <-driver
 	// Two closes: the completed short-circuit's own connection and the
 	// practice connection's goodbye — nothing may trail the LAST one.
