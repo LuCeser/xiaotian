@@ -630,9 +630,18 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		cancel()
 		return
 	}
-	persistCtx := context.WithoutCancel(ctx)
+	requestID := m.RequestID
+	go tm.runAcceptedFormalCheckSubmit(s, ctx, cancel, epoch, write, lessonID, expected, requestID, total)
+}
 
-	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, m.RequestID, false)
+// runAcceptedFormalCheckSubmit runs off the WebSocket read loop: the latch
+// write and the rest of the accepted save must not block end_session or
+// transport teardown on the same connection.
+func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, lessonID string, expected int, requestID string, total int) {
+	persistCtx, persistDone := checkPersistContext(ctx)
+	defer persistDone()
+
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, requestID, false)
 	if err != nil {
 		// No save happened on this path (or the row was already another
 		// writer's): the admission ends with the attempt.
@@ -652,9 +661,11 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 				infra.F("code", ErrCodeDuplicateSubmit),
 				infra.F("duplicate", "check_submit_conflict"),
 			)
+			cancel()
 			return
 		}
 		tm.sendOpenError(s, ErrCodeProviderFailed, checkStoreFailedNotice, true)
+		cancel()
 		return
 	}
 	if res.Idempotent {
@@ -692,6 +703,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		if tm.tryTerminalClose(s, ReasonLessonComplete) {
 			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 		}
+		cancel()
 		return
 	}
 
@@ -718,7 +730,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		}
 	}
 
-	go tm.finishCheckSubmit(s, ctx, cancel, epoch, ratings, total, correct, m.RequestID, write)
+	tm.finishCheckSubmit(s, ctx, cancel, epoch, ratings, total, correct, requestID, write)
 }
 
 // sortedWordSet extracts a rating map's keys sorted — the receipt word-set
@@ -742,7 +754,8 @@ func sortedWordSet(m map[string]string) []string {
 // real outcome after) — a pure bypass that never alters the flow below.
 func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ratings map[string]string, total, correct int, requestID string, write *checkWriteAdmission) {
 	defer cancel()
-	persistCtx := context.WithoutCancel(ctx)
+	persistCtx, persistDone := checkPersistContext(ctx)
+	defer persistDone()
 
 	// Dictation-stage behavior data stays honestly reported (the D-01
 	// rewrite keeps outcomeCounts/hintAccounting as event fields).
@@ -1042,7 +1055,8 @@ type correctionInputs struct {
 // review_result, then the wrap line and the acked ending.
 func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel context.CancelFunc, in correctionInputs) {
 	defer cancel()
-	persistCtx := context.WithoutCancel(ctx)
+	persistCtx, persistDone := checkPersistContext(ctx)
+	defer persistDone()
 
 	requested := len(in.changed)
 	updated := 0
@@ -1205,9 +1219,16 @@ func (tm *TurnManager) persistUncheckedFallback(snap uncheckedCloseSnapshot, wri
 	// 1.11: wait OUTSIDE every lock for the accepted saves the claim
 	// captured, then read the authoritative row — the outcome must not
 	// depend on the snapshot's pre-close version.
-	waitCheckWrites(writes)
+	if !waitCheckWrites(writes) {
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeProviderFailed),
+			infra.F("at", "unchecked_fallback_wait"),
+		)
+		return
+	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), checkPersistTimeout)
+	defer cancel()
 	l, err := tm.exec.GetLessonState(ctx, snap.lessonID)
 	if err != nil {
 		tm.recorder.Emit(EventError,
@@ -1747,7 +1768,8 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 	// to its real outcome on the persist context; only the PRESENTATION stays
 	// bound to the original identity below (1.07b).
 	defer tm.completeCheckWrite(write)
-	persistCtx := context.WithoutCancel(ctx)
+	persistCtx, persistDone := checkPersistContext(ctx)
+	defer persistDone()
 
 	var (
 		correct bool
