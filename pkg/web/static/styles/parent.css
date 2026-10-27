@@ -247,6 +247,30 @@ body {
   margin-top: 4px;
 }
 
+.batch-edit-preview {
+  margin-top: 12px;
+  font-size: 14px;
+}
+
+.batch-edit-problem {
+  color: var(--warning-strong);
+  margin: 4px 0;
+}
+
+.batch-edit-summary {
+  margin: 8px 0 4px;
+  color: var(--muted);
+}
+
+.batch-edit-list {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.batch-edit-blocked {
+  color: var(--warning-strong);
+}
+
 /* Warning-tinted small text must use --warning-strong: the base --warning
    hue measures only 3.1:1 on white (AA needs 4.5:1 at 14px). */
 .form-error {
