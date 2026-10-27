@@ -40,6 +40,9 @@ const {
   matchTextbookForMeta,
   distinctLessons,
   distinctRowLessons,
+  lessonsNamedOnPhoto,
+  recommendLesson,
+  appendMissingLessons,
   isCommittable,
   planAssignments,
   commitUnit,
@@ -141,6 +144,44 @@ const BOOKS = [
   // back EMPTY (no .lesson to read) — pinned so the mistake is loud.
   eq(distinctRowLessons(['第1课', '第2课']), [],
     'distinctRowLessons over bare strings is empty (shape guard)');
+})();
+
+// ----------------------------------------------------------------------
+// recommendLesson / appendMissingLessons (Issue #80 §3.1 / §2.1)
+// ----------------------------------------------------------------------
+
+(function () {
+  const single = recommendLesson({
+    textbook: { lesson: '第2课' },
+    entries: [{ word: 'a', lesson: '第2课' }],
+  }, ['第1课'], []);
+  eq(single, { lesson: '第2课', source: 'recognized' }, 'one lesson on photo → recognized');
+
+  const multi = recommendLesson({
+    entries: [{ word: 'a', lesson: '第1课' }, { word: 'b', lesson: '第2课' }],
+  }, [], []);
+  eq(multi.source, 'none', 'two lessons on photo → no whole-photo default');
+  eq(multi.lesson, '', 'two lessons → empty default');
+
+  const carry = recommendLesson({ entries: [{ word: 'a', lesson: '' }] },
+    [], [{ lesson: '第3课', source: 'recognized' }]);
+  eq(carry, { lesson: '第3课', source: 'photo-order' }, 'empty photo inherits prior photo');
+
+  const last = recommendLesson({ entries: [] }, ['第1课', '第5课'], []);
+  eq(last, { lesson: '第5课', source: 'previous-lesson' }, 'empty batch uses last existing lesson');
+
+  const none = recommendLesson({ entries: [] }, [], []);
+  eq(none, { lesson: '', source: 'none' }, 'no signal → none');
+
+  eq(lessonsNamedOnPhoto({
+    textbook: { module: 'Unit 3', lesson: '第2课' },
+    entries: [{ word: 'x', lesson: '' }],
+  }), ['第2课'], 'module is not a lesson name');
+
+  eq(appendMissingLessons(['第1课'], ['第2课', '第1课', '第3课']),
+    ['第1课', '第2课', '第3课'], 'append missing only, keep order');
+  eq(appendMissingLessons(['第1课'], ['第3单元', 'Unit 3']),
+    ['第1课', '第3单元', 'Unit 3'], '第3单元 and Unit 3 stay distinct');
 })();
 
 // ----------------------------------------------------------------------

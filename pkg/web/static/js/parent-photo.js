@@ -690,6 +690,76 @@
     }));
   }
 
+  /**
+   * lessonsNamedOnPhoto — every non-empty lesson string on one recognition
+   * payload (page header + row lessons), deduped in first-seen order.
+   */
+  function lessonsNamedOnPhoto(photo) {
+    var names = [];
+    if (photo && photo.textbook) {
+      var pageLesson = metaField(photo.textbook.lesson);
+      if (pageLesson) {
+        names.push(pageLesson);
+      }
+    }
+    (photo && photo.entries || []).forEach(function (e) {
+      if (e && e.lesson != null) {
+        names.push(metaField(e.lesson));
+      }
+    });
+    return distinctLessons(names);
+  }
+
+  /**
+   * recommendLesson — per-photo default lesson (Issue #80 §3.1). Does not
+   * invent names absent from the recognition; module fields are ignored.
+   * priorRecommendedLessons: earlier photos' {lesson, source} in order.
+   */
+  function recommendLesson(photo, existingLessons, priorRecommendedLessons) {
+    var onPhoto = lessonsNamedOnPhoto(photo);
+    if (onPhoto.length === 1) {
+      return { lesson: onPhoto[0], source: 'recognized' };
+    }
+    if (onPhoto.length > 1) {
+      return { lesson: '', source: 'none' };
+    }
+    var prior = priorRecommendedLessons || [];
+    for (var i = prior.length - 1; i >= 0; i--) {
+      if (prior[i] && metaField(prior[i].lesson)) {
+        return { lesson: metaField(prior[i].lesson), source: 'photo-order' };
+      }
+    }
+    var list = existingLessons || [];
+    if (list.length) {
+      return { lesson: list[list.length - 1], source: 'previous-lesson' };
+    }
+    return { lesson: '', source: 'none' };
+  }
+
+  /**
+   * appendMissingLessons — keep existing order, append unseen names from
+   * incoming in order (Issue #80: import never inserts into the middle).
+   */
+  function appendMissingLessons(existing, incoming) {
+    var seen = {};
+    var out = [];
+    (existing || []).forEach(function (name) {
+      var v = metaField(name);
+      if (v && !seen[v]) {
+        seen[v] = true;
+        out.push(v);
+      }
+    });
+    (incoming || []).forEach(function (name) {
+      var v = metaField(name);
+      if (v && !seen[v]) {
+        seen[v] = true;
+        out.push(v);
+      }
+    });
+    return out;
+  }
+
   /** The two parent confirmations a 释义差异 row can carry (Issue #6). */
   var RESOLUTIONS = ['keep', 'adopt'];
 
@@ -5437,6 +5507,9 @@
   global.matchTextbookForMeta = matchTextbookForMeta;
   global.distinctLessons = distinctLessons;
   global.distinctRowLessons = distinctRowLessons;
+  global.lessonsNamedOnPhoto = lessonsNamedOnPhoto;
+  global.recommendLesson = recommendLesson;
+  global.appendMissingLessons = appendMissingLessons;
   global.isCommittable = isCommittable;
   global.isResolved = isResolved;
   global.planAssignments = planAssignments;
