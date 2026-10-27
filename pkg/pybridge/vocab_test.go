@@ -651,3 +651,78 @@ func TestVocabManagerRejectsUnboundedLimitAndLock(t *testing.T) {
 		}
 	})
 }
+
+// TestDesignateArgs covers designateArgs argv construction (Issue #80
+// 指定默写): the --db-before-subcommand ordering, the always-present
+// --textbook-id/--lesson pair, and the --fetch-lock-hours whole-hours
+// clamp shared with the due path.
+func TestDesignateArgs(t *testing.T) {
+	cfg := infra.PythonConfig{
+		VocabScript: "vocab_manager.py",
+		VocabDBPath: "/var/lib/hta/vocab.db",
+	}
+
+	cases := []struct {
+		name      string
+		opts      DesignateOpts
+		extraArgs []string
+	}{
+		{
+			name: "minimal",
+			opts: DesignateOpts{TextbookID: 3, Lesson: "第4单元"},
+			extraArgs: []string{
+				"--textbook-id", "3",
+				"--lesson", "第4单元",
+			},
+		},
+		{
+			name: "with whole lock hours",
+			opts: DesignateOpts{TextbookID: 3, Lesson: "第4单元", FetchLockHours: 6},
+			extraArgs: []string{
+				"--textbook-id", "3",
+				"--lesson", "第4单元",
+				"--fetch-lock-hours", "6",
+			},
+		},
+		{
+			name: "fractional lock hours truncate to whole",
+			opts: DesignateOpts{TextbookID: 9, Lesson: "Unit 3", FetchLockHours: 12.5},
+			extraArgs: []string{
+				"--textbook-id", "9",
+				"--lesson", "Unit 3",
+				"--fetch-lock-hours", "12",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argv := designateArgs(cfg, tc.opts)
+
+			if want := "vocab_manager.py"; argv[0] != want {
+				t.Errorf("argv[0] = %q, want %q", argv[0], want)
+			}
+			assertDBBeforeSubcommand(t, argv, "designate")
+
+			searchFrom := 4 // first index after the subcommand
+			for _, want := range tc.extraArgs {
+				idx := argvFind(argv[searchFrom:], want)
+				if idx < 0 {
+					t.Errorf("argv %v missing expected element %q after %q",
+						argv, want, "designate")
+					break
+				}
+				searchFrom += idx + 1
+			}
+
+			// FetchLockHours zero-value must NOT emit the flag (omit-when-
+			// zero contract; the script's 24h default applies).
+			if tc.opts.FetchLockHours == 0 {
+				if argvFind(argv, "--fetch-lock-hours") >= 0 {
+					t.Errorf("argv %v unexpectedly contains --fetch-lock-hours "+
+						"(zero-valued DesignateOpts.FetchLockHours must omit the flag)", argv)
+				}
+			}
+		})
+	}
+}

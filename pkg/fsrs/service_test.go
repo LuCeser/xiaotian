@@ -90,6 +90,10 @@ func (f *fakeExecutor) RunUnassignWords(_ context.Context, _ pybridge.UnassignWo
 	return pybridge.UnassignWordsResult{}, nil
 }
 
+func (f *fakeExecutor) RunDesignate(_ context.Context, _ pybridge.DesignateOpts) (pybridge.DesignateResult, error) {
+	return pybridge.DesignateResult{}, nil
+}
+
 // --- NewFSRSService validation ---
 
 func TestNewFSRSServiceValidation(t *testing.T) {

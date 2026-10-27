@@ -27,6 +27,7 @@ package pybridge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"strconv"
@@ -42,6 +43,12 @@ import (
 // FSRSConfig.DefaultWordCount's validated range [1, 100] and
 // vocab_manager.py MAX_CARD_LIMIT.
 const MaxDueLimit = 100
+
+// MaxDesignateLimit is the single-session cap on Issue #80 指定默写
+// selection (AC-11 单次最多 100 个). It must stay equal to
+// vocab_manager.py MAX_DESIGNATE_LIMIT; the script enforces it inside the
+// BEGIN IMMEDIATE transaction and reports the real total back.
+const MaxDesignateLimit = 100
 
 // MaxFetchLockHours is the upper bound on --fetch-lock-hours: ten
 // 366-day years. That stays far below datetime's year-9999 ceiling and
@@ -471,6 +478,74 @@ func (b *Bridge) RunUnlock(ctx context.Context, opts UnlockOpts) (UnlockResult, 
 	var result UnlockResult
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return UnlockResult{}, errors.Wrap(ErrPythonJSONParse, "run unlock")
+	}
+	return result, nil
+}
+
+// designateArgs builds the argv slice for the vocab_manager.py `designate`
+// subcommand (Issue #80 指定默写). The shape is:
+//
+//	[vocabScript, "--db", dbPath, "designate", "--textbook-id", T,
+//	 "--lesson", L, ["--fetch-lock-hours", N]]
+//
+// `--db` precedes the subcommand token (the top-level argparse contract
+// every vocab_manager.py command shares, see dueArgs). --textbook-id and
+// --lesson are ALWAYS present — RunDesignate pre-validates both — and
+// --fetch-lock-hours rides the same whole-hours clamp as the due path
+// (integerLockHours; <= 0 omits the flag so the script's 24h default
+// applies). Pure transform, no I/O, trivially unit-testable.
+func designateArgs(cfg infra.PythonConfig, opts DesignateOpts) []string {
+	args := []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "designate",
+		"--textbook-id", strconv.FormatInt(opts.TextbookID, 10),
+		"--lesson", opts.Lesson}
+	if n, ok := integerLockHours(opts.FetchLockHours); ok {
+		args = append(args, "--fetch-lock-hours", strconv.Itoa(n))
+	}
+	return args
+}
+
+// RunDesignate executes the vocab_manager.py `designate` subcommand and
+// returns the typed selection outcome (Issue #80 指定默写). It is the
+// selection+occupancy path for designated dictation sessions — the
+// classroom's explicit entry beside the automatic due/new selection.
+//
+// Lifecycle (same shape as RunUnlock, classification via classifyMgmtRun):
+//  1. Pre-validate opts (textbook id > 0, lesson non-empty — 待确认 can
+//     never be designated) BEFORE spawning any subprocess.
+//  2. Delegate to Bridge.run under cfg.DueTimeout (a selection+lock command
+//     kin to due, not a management mutation); logResult with
+//     command="designate".
+//  3. Classify into the pybridge sentinels (timeout / exit / empty /
+//     JSON-parse), then unmarshal the trailing JSON object.
+//
+// A nil error does NOT mean words were selected: occupied and too_many are
+// legitimate exit-0 outcomes reported through DesignateResult.Status — the
+// API layer branches on Status, never on the error alone. The not-found
+// diagnostics (unknown textbook id, lesson outside the list) print to
+// stdout with exit 1 and ride ExitError.Stdout for the caller's 404/400
+// mapping (the same Pitfall-2 chain as the other commands).
+func (b *Bridge) RunDesignate(ctx context.Context, opts DesignateOpts) (DesignateResult, error) {
+	if opts.TextbookID <= 0 {
+		return DesignateResult{}, fmt.Errorf("designate: textbook id must be > 0, got %d", opts.TextbookID)
+	}
+	if opts.Lesson == "" {
+		return DesignateResult{}, errors.New("designate: lesson is required (待确认 cannot be designated)")
+	}
+
+	start := time.Now()
+	args := designateArgs(b.cfg, opts)
+	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.DueTimeout,
+		b.cfg.Interpreter, args...)
+	defer b.logResult("designate", start, stdout, stderr, exitCode, err)
+
+	raw, clsErr := classifyMgmtRun("designate", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return DesignateResult{}, clsErr
+	}
+
+	var result DesignateResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return DesignateResult{}, errors.Wrap(ErrPythonJSONParse, "run designate")
 	}
 	return result, nil
 }
