@@ -64,6 +64,12 @@ const {
   fillRecommendedLessons,
   applyBatchLesson,
   applyPickedLesson,
+  clearLessonPicks,
+  pickAllLessons,
+  pickLessonGroup,
+  pickLessonRange,
+  lessonPickGroups,
+  lessonOriginLabel,
   appendMissingLessons,
   isCommittable,
   planAssignments,
@@ -295,6 +301,67 @@ const BOOKS = [
   // (identity preserved — not a copy).
   eq(applied[3].lesson, '', 'an invalid row never takes a picked lesson');
   eq(applied[5].lesson, '', 'an unresolved conflict never takes a picked lesson');
+})();
+
+// ----------------------------------------------------------------------
+// The 多选指定 pick helpers (Issue #80 §3.2 + 2026-10-27 feedback):
+// auto-clear after a successful apply, 全选/全部取消, per-lesson one-click
+// groups, Shift 连选 — all memory-only, all pure.
+// ----------------------------------------------------------------------
+
+(function () {
+  const ROWS2 = [
+    { word: 'a', lesson: '第1课', status: 'new', checked: true },
+    { word: 'b', lesson: '第1课', status: 'new', checked: true },
+    { word: 'c', lesson: '', status: 'new', checked: true },
+    { word: 'd', lesson: '', status: 'invalid', reason: 'empty-word', checked: false },
+    { word: 'e', lesson: '第2课', status: 'exists', checked: true },
+  ];
+  const picksOf = function (rows) {
+    return rows.map(function (r) { return !!r.lessonPicked; });
+  };
+
+  // 指定成功后自动清空选择: clearLessonPicks drops every pick.
+  const picked = pickLessonGroup(pickAllLessons(ROWS2, true), '第1课');
+  eq(picksOf(picked), [true, true, false, false, false],
+    'a lesson chip selects exactly that lesson\'s committable rows');
+  eq(picksOf(clearLessonPicks(picked)), [false, false, false, false, false],
+    'clearLessonPicks empties the selection');
+  eq(picksOf(ROWS2), [false, false, false, false, false],
+    'the pick helpers never mutate their input');
+
+  // 全选/全部取消 ride the committable verdict (invalid never picks).
+  eq(picksOf(pickAllLessons(ROWS2, true)), [true, true, true, false, true],
+    '全选 covers committable rows only');
+  eq(picksOf(pickAllLessons(pickAllLessons(ROWS2, true), false)),
+    [false, false, false, false, false], '全部取消 clears them again');
+
+  // The 待确认 chip: an empty lesson is a group of its own.
+  eq(picksOf(pickLessonGroup(ROWS2, '')), [false, false, true, false, false],
+    'the 待确认 chip selects the empty-lesson rows');
+  eq(picksOf(pickLessonGroup(ROWS2, ' 第1课 ')), [true, true, false, false, false],
+    'a chip name is trimmed before matching');
+
+  // Shift 连选: the inclusive range joins the pick, both directions.
+  eq(picksOf(pickLessonRange(ROWS2, 1, 3)), [false, true, true, false, false],
+    'shift range picks [1..3] committable rows');
+  eq(picksOf(pickLessonRange(ROWS2, 3, 0)), [true, true, true, false, false],
+    'a reversed range picks the same inclusive span');
+
+  // The chips model: first-appearance order, counts, 待确认 included.
+  eq(lessonPickGroups(ROWS2), [
+    { lesson: '第1课', count: 2 },
+    { lesson: '', count: 1 },
+    { lesson: '第2课', count: 1 },
+  ], 'lessonPickGroups lists distinct current lessons in row order');
+
+  // The 已分单元 marker: 识别/推荐/已指定 label the source; 待确认 none.
+  eq(lessonOriginLabel('recognized'), '识别', 'recognized → 识别');
+  eq(lessonOriginLabel('photo-order'), '推荐', 'photo-order → 推荐');
+  eq(lessonOriginLabel('previous-lesson'), '推荐', 'previous-lesson → 推荐');
+  eq(lessonOriginLabel('parent'), '已指定', 'parent → 已指定');
+  eq(lessonOriginLabel(''), '', 'no origin → no badge');
+  eq(lessonOriginLabel('none'), '', 'a none origin → no badge');
 })();
 
 // ----------------------------------------------------------------------

@@ -911,6 +911,107 @@
   }
 
   /**
+   * The 多选指定 pick helpers (Issue #80 §3.2 + 2026-10-27 feedback):
+   * picks are MEMORY-ONLY selection over committable rows, deliberately
+   * separate from 加入. All pure — new arrays, inputs untouched.
+   */
+  /** 指定成功后自动清空选择: every pick drops, rows keep their identity. */
+  function clearLessonPicks(rows) {
+    return (rows || []).map(function (row) {
+      if (!row || !row.lessonPicked) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      copy.lessonPicked = false;
+      return copy;
+    });
+  }
+
+  /** 全选/全部取消 over the committable rows only. */
+  function pickAllLessons(rows, picked) {
+    return (rows || []).map(function (row) {
+      if (!row || !isCommittable(row, true) || !!row.lessonPicked === !!picked) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      copy.lessonPicked = !!picked;
+      return copy;
+    });
+  }
+
+  /**
+   * 按识别单元分组一键选中: picked = exactly the committable rows whose
+   * CURRENT lesson equals the name ('' = the 待确认 group) — a chip's
+   * one-click selection replaces whatever was picked before.
+   */
+  function pickLessonGroup(rows, lesson) {
+    var name = lesson == null ? '' : String(lesson).trim();
+    return (rows || []).map(function (row) {
+      var want = !!row && isCommittable(row, true) && metaField(row.lesson) === name;
+      if (!row || !!row.lessonPicked === want) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      copy.lessonPicked = want;
+      return copy;
+    });
+  }
+
+  /** Shift 连选: every committable row in [min,max] joins the pick. */
+  function pickLessonRange(rows, fromIndex, toIndex) {
+    var lo = Math.min(fromIndex, toIndex);
+    var hi = Math.max(fromIndex, toIndex);
+    return (rows || []).map(function (row, i) {
+      if (!row || i < lo || i > hi || !isCommittable(row, true) || row.lessonPicked) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      copy.lessonPicked = true;
+      return copy;
+    });
+  }
+
+  /**
+   * lessonPickGroups — the chips model: the committable rows' distinct
+   * CURRENT lessons ('' shown as 待确认), first-appearance order, with
+   * counts. Pure.
+   */
+  function lessonPickGroups(rows) {
+    var order = [];
+    var byLesson = {};
+    (rows || []).forEach(function (row) {
+      if (!row || !isCommittable(row, true)) {
+        return;
+      }
+      var name = metaField(row.lesson);
+      if (!Object.prototype.hasOwnProperty.call(byLesson, name)) {
+        byLesson[name] = { lesson: name, count: 0 };
+        order.push(name);
+      }
+      byLesson[name].count += 1;
+    });
+    return order.map(function (name) { return byLesson[name]; });
+  }
+
+  /**
+   * lessonOriginLabel — the 已分单元 marker beside each row's lesson
+   * input: WHERE the current lesson came from. '' / 'none' render nothing
+   * (an honest 待确认 row carries no badge). Pure.
+   */
+  function lessonOriginLabel(origin) {
+    if (origin === 'recognized') {
+      return '识别';
+    }
+    if (origin === 'photo-order' || origin === 'previous-lesson') {
+      return '推荐';
+    }
+    if (origin === 'parent') {
+      return '已指定';
+    }
+    return '';
+  }
+
+  /**
    * recommendForDraftPage — one freshly recognized page's recommendation
    * with the honest inputs of the moment (Issue #80 §3.1): the page's own
    * header + entries, the lesson list of the book the CURRENT merged meta
@@ -1555,6 +1656,11 @@
     // 页 vs 张 — the run-driven source view's noun (PDF pages / Issue #80
     // photos); showPhotoSourceFile/showPdfPageBlob set it per run.
     this.sourceNoun = '页';
+    // Issue #80 §3.2: the 多选指定 transient state — the toolbar input's
+    // draft (survives the detail-host re-renders) and the Shift 连选
+    // anchor (the last plain-clicked pick row).
+    this.batchLessonDraft = '';
+    this.lastLessonPick = null;
 
     var self = this;
     this.pickBtn.addEventListener('click', function () {
@@ -2820,10 +2926,53 @@
     this.detectedMetaList = [];
     this.bookChoice = 'unset';
     this.includePending = false;
+    this.batchLessonDraft = '';
+    this.lastLessonPick = null;
+    this.lessonPickBar = null;
     this.syncUnitField();
     this.renderTextbookPanelReset();
     this.renderPreview();
     this.discardBtn.hidden = true;
+  };
+
+  /**
+   * syncLessonPickUi — the 多选指定 live sync (Issue #80 §3.2): the
+   * preview's pick checkboxes follow the row models (a Shift 连选 or chip
+   * click changed several at once), and the pick bar's counts/disabled
+   * states follow. No table rebuild — the picks must not steal any caret.
+   */
+  PhotoAddForm.prototype.syncLessonPickUi = function () {
+    var picks = this.preview.querySelectorAll('.photo-lesson-pick');
+    for (var i = 0; i < picks.length && i < this.rows.length; i++) {
+      var committable = isCommittable(this.rows[i], true);
+      picks[i].disabled = !committable;
+      picks[i].checked = committable && !!this.rows[i].lessonPicked;
+    }
+    var bar = this.lessonPickBar;
+    if (!bar) {
+      return;
+    }
+    var pickedCount = 0;
+    var committableCount = 0;
+    this.rows.forEach(function (row) {
+      if (!row || !isCommittable(row, true)) {
+        return;
+      }
+      committableCount += 1;
+      if (row.lessonPicked) {
+        pickedCount += 1;
+      }
+    });
+    if (bar.pickedBtn) {
+      bar.pickedBtn.textContent = '指定选中行（' + pickedCount + '）';
+      bar.pickedBtn.disabled = pickedCount === 0;
+    }
+    if (bar.allBtn) {
+      bar.allBtn.disabled = pickedCount === committableCount;
+    }
+    if (bar.noneBtn) {
+      bar.noneBtn.disabled = pickedCount === 0;
+    }
   };
 
   PhotoAddForm.prototype.renderPreviewHint = function (text) {
@@ -3120,10 +3269,14 @@
       }
     }
 
-    // Batch lesson toolbar (AC3): one lesson onto every CHECKED row. Free
-    // text with datalist suggestions — correcting a misread lesson to a
-    // name the list does not carry yet is the normal case, so the input
-    // never traps the parent inside the current options.
+    // Batch lesson toolbar (AC3 + Issue #80 §3.2 + 2026-10-27 feedback):
+    // one lesson input, two apply paths — 整批 (应用到勾选行, every
+    // committable CHECKED row) and 多选 (指定选中行, the picked rows —
+    // picks are separate from 加入). 指定成功后自动清空选择 and the input.
+    // Free text with datalist suggestions — correcting a misread lesson to
+    // a name the list does not carry yet is the normal case, so the input
+    // never traps the parent inside the current options. The typed draft
+    // survives the toolbar re-renders (batchLessonDraft).
     var toolbar = document.createElement('div');
     toolbar.className = 'photo-lesson-toolbar';
     var toolLabel = document.createElement('span');
@@ -3136,26 +3289,81 @@
     lessonInput.setAttribute('list', 'parent-photo-lesson-options');
     lessonInput.setAttribute('aria-label', '批量指定课次');
     lessonInput.placeholder = '如 第5课（留空＝待确认）';
+    lessonInput.value = this.batchLessonDraft || '';
+    lessonInput.addEventListener('input', function () {
+      self.batchLessonDraft = lessonInput.value;
+    });
+    var applyAfter = function () {
+      // 指定成功后自动清空选择（反馈 2026-10-27）— and the input too: the
+      // value just landed on rows, keeping it invites a mis-apply.
+      self.rows = clearLessonPicks(self.rows);
+      self.batchLessonDraft = '';
+      // Re-render rows so the per-row inputs reflect the batch value, and
+      // the detail host so the append-note matches the corrected lessons.
+      self.renderPreview();
+      self.renderTextbookDetail(host);
+    };
     var applyBtn = document.createElement('button');
     applyBtn.type = 'button';
     applyBtn.className = 'btn btn-secondary';
     applyBtn.textContent = '应用到勾选行';
     applyBtn.addEventListener('click', function () {
-      var lesson = lessonInput.value.trim();
-      self.rows.forEach(function (row) {
-        if (isCommittable(row, true) && row.checked !== false) {
-          row.lesson = lesson;
-        }
-      });
-      // Re-render rows so the per-row inputs reflect the batch value, and
-      // the detail host so the append-note matches the corrected lessons.
-      self.renderPreview();
-      self.renderTextbookDetail(host);
+      self.rows = applyBatchLesson(self.rows, lessonInput.value.trim());
+      applyAfter();
+    });
+    var pickedBtn = document.createElement('button');
+    pickedBtn.type = 'button';
+    pickedBtn.className = 'btn btn-secondary photo-lesson-picked-btn';
+    pickedBtn.textContent = '指定选中行';
+    pickedBtn.addEventListener('click', function () {
+      self.rows = applyPickedLesson(self.rows, lessonInput.value.trim());
+      applyAfter();
     });
     toolbar.appendChild(toolLabel);
     toolbar.appendChild(lessonInput);
     toolbar.appendChild(applyBtn);
+    toolbar.appendChild(pickedBtn);
     host.appendChild(toolbar);
+
+    // The pick helpers (反馈 2026-10-27): 全选/全部取消 over committable
+    // rows, and one chip per CURRENT lesson group (待确认 included) that
+    // one-click selects exactly that group — the re-assign-a-misread-unit
+    // flow: chip → type the right unit → 指定选中行.
+    var pickBar = document.createElement('div');
+    pickBar.className = 'photo-lesson-pickbar';
+    var allBtn = document.createElement('button');
+    allBtn.type = 'button';
+    allBtn.className = 'btn btn-secondary';
+    allBtn.textContent = '全选';
+    allBtn.addEventListener('click', function () {
+      self.rows = pickAllLessons(self.rows, true);
+      self.syncLessonPickUi();
+    });
+    var noneBtn = document.createElement('button');
+    noneBtn.type = 'button';
+    noneBtn.className = 'btn btn-secondary';
+    noneBtn.textContent = '全部取消';
+    noneBtn.addEventListener('click', function () {
+      self.rows = pickAllLessons(self.rows, false);
+      self.syncLessonPickUi();
+    });
+    pickBar.appendChild(allBtn);
+    pickBar.appendChild(noneBtn);
+    lessonPickGroups(this.rows).forEach(function (group) {
+      var chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'photo-lesson-chip';
+      chip.textContent = (group.lesson || '待确认') + ' · ' + group.count;
+      chip.title = '一键选中课次为「' + (group.lesson || '待确认') + '」的 ' + group.count + ' 行';
+      chip.addEventListener('click', function () {
+        self.rows = pickLessonGroup(self.rows, group.lesson);
+        self.syncLessonPickUi();
+      });
+      pickBar.appendChild(chip);
+    });
+    host.appendChild(pickBar);
+    this.lessonPickBar = { pickedBtn: pickedBtn, allBtn: allBtn, noneBtn: noneBtn };
+    this.syncLessonPickUi();
 
     // AC5: the explicit include-in-scope handling for lesson-less rows.
     var includeLabel = document.createElement('label');
@@ -3347,6 +3555,8 @@
     this.renderPoemPreview();
     this.renderPassagePreview();
     this.renderOthersPreview();
+    // Issue #80 §3.2: fresh row DOM → re-sync the pick checkboxes/bar.
+    this.syncLessonPickUi();
   };
 
   /**
@@ -4101,6 +4311,31 @@
       // confirmed lesson the book's list lacks.
       var lessonCell = document.createElement('td');
       lessonCell.className = 'photo-lesson-cell';
+
+      // 多选指定: the row's 选中 is SEPARATE from 加入 — it decides which
+      // rows the toolbar's 指定选中行 touches, never what commits. Shift
+      // 连选: shift-click extends the pick from the last clicked row.
+      var pickHit = document.createElement('label');
+      pickHit.className = 'inline-check-hit photo-lesson-pick-hit';
+      var pick = document.createElement('input');
+      pick.type = 'checkbox';
+      pick.className = 'photo-lesson-pick';
+      pick.id = 'parent-photo-lesson-pick-' + i;
+      pick.checked = !!row.lessonPicked;
+      pick.disabled = !committable;
+      pick.setAttribute('aria-label', '选中指定课次 第 ' + (i + 1) + ' 行');
+      pick.addEventListener('click', function (event) {
+        if (event.shiftKey && self.lastLessonPick != null && self.lastLessonPick !== i) {
+          self.rows = pickLessonRange(self.rows, self.lastLessonPick, i);
+        } else {
+          self.rows[i].lessonPicked = pick.checked;
+          self.lastLessonPick = i;
+        }
+        self.syncLessonPickUi();
+      });
+      pickHit.appendChild(pick);
+      lessonCell.appendChild(pickHit);
+
       var lessonInput = document.createElement('input');
       lessonInput.type = 'text';
       lessonInput.className = 'form-input photo-cell-input photo-lesson-input';
@@ -4111,6 +4346,14 @@
       lessonInput.disabled = !committable;
       lessonInput.addEventListener('input', function () {
         self.rows[i].lesson = lessonInput.value;
+        // Issue #80 §3.2: a hand-edited lesson is the parent's call — the
+        // 识别/推荐 badge gives way to 已指定 without a table rebuild.
+        self.rows[i].lessonOrigin = 'parent';
+        var badge = lessonCell.querySelector('.photo-lesson-origin');
+        if (badge) {
+          badge.textContent = lessonOriginLabel('parent');
+          badge.hidden = !badge.textContent;
+        }
         // Issue #81: the lesson feeds the state line's 本批课次 + progress
         // verdict — the line is pure text, so it syncs live without ever
         // rebuilding the table (the caret stays in this input).
@@ -4118,6 +4361,18 @@
         self.updateCommitHint();
       });
       lessonCell.appendChild(lessonInput);
+
+      // Issue #80 §3.2 + 2026-10-27 feedback: the 已分单元 marker — where
+      // the current lesson came from (识别/推荐/已指定); a 待确认 row
+      // carries no badge.
+      var originLabel = lessonOriginLabel(row.lessonOrigin);
+      if (originLabel) {
+        var originBadge = document.createElement('span');
+        originBadge.className = 'photo-lesson-origin photo-lesson-origin-' + row.lessonOrigin;
+        originBadge.textContent = originLabel;
+        originBadge.title = '课次来源：' + originLabel;
+        lessonCell.appendChild(originBadge);
+      }
       tr.appendChild(lessonCell);
     }
 
@@ -4246,6 +4501,13 @@
       var lessonEl = tr.querySelector('.photo-lesson-cell input');
       if (lessonEl) {
         lessonEl.disabled = !committable;
+      }
+      // Issue #80 §3.2: the pick checkbox rides the same verdict (and the
+      // reclassify-carried lessonPicked state).
+      var pickEl = tr.querySelector('.photo-lesson-pick');
+      if (pickEl) {
+        pickEl.disabled = !committable;
+        pickEl.checked = committable && !!row.lessonPicked;
       }
 
       var statusCell = tr.querySelector('.photo-status');
@@ -6066,6 +6328,12 @@
   global.fillRecommendedLessons = fillRecommendedLessons;
   global.applyBatchLesson = applyBatchLesson;
   global.applyPickedLesson = applyPickedLesson;
+  global.clearLessonPicks = clearLessonPicks;
+  global.pickAllLessons = pickAllLessons;
+  global.pickLessonGroup = pickLessonGroup;
+  global.pickLessonRange = pickLessonRange;
+  global.lessonPickGroups = lessonPickGroups;
+  global.lessonOriginLabel = lessonOriginLabel;
   global.appendMissingLessons = appendMissingLessons;
   global.MAX_PHOTO_FILES = MAX_PHOTO_FILES;
   global.validatePhotoSelection = validatePhotoSelection;

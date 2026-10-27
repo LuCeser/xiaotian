@@ -896,6 +896,59 @@ body {
   min-height: 44px; /* nested-control touch floor */
 }
 
+/* Issue #80 §3.2 — 多选指定 pick bar: 全选/全部取消 + per-lesson chips
+   (按识别单元分组一键选中). Chips ride the badge token family; the
+   44px floor is shared with .btn. */
+.photo-lesson-pickbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.photo-lesson-pickbar .btn {
+  min-height: 44px;
+}
+
+.photo-lesson-chip {
+  min-height: 44px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--badge-en-bg);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 已分单元 marker beside a row's lesson input (识别/推荐/已指定): the
+   meaning-source-badge's quiet pill, lesson-flavored. */
+.photo-lesson-origin {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--badge-en-bg);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.photo-lesson-origin-parent {
+  border-style: dashed; /* the parent's own hand, not the photo's reading */
+}
+
+/* The 选中 pick checkbox stacks under the lesson input inside the cell
+   (no extra table column — the e2e contract pins the header shape). */
+.photo-lesson-pick-hit {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+}
+
 .photo-include-toggle {
   display: flex;
   align-items: center;
