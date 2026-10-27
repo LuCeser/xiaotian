@@ -26,6 +26,11 @@
  *      (honestly preselected by meta match, AC-1) adds 第2课 words that
  *      stay OUT of real classroom selection until the progress moves
  *      (AC-4); the receipt says so.
+ *   4. 一次多选两张照片 (Issue #80) — ONE picker selection, two photos of
+ *      the same book: each photo's rows carry their own page lesson, the
+ *      确认 appends the missing lesson once at the END of the list
+ *      (appendLessons, never the whole list, never learnedLessons), and
+ *      NOTHING is written before 确认 (AC-01).
  *
  * Classroom probes: raw /rt practice session_init (mode=test full-reveal;
  * ≥1.1s apart — r0x lesson ids are second-granular, same-second probes
@@ -247,6 +252,73 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
     picked = await practiceSelection();
     expect(picked).toContain('bird');
     expect(picked).toContain('frog');
+  } finally {
+    await deleteWords(request, WORDS);
+  }
+});
+
+test('photo textbook: ONE pick of two photos — lessons append once in order, progress untouched, nothing written before 确认 (Issue #80 §2.3/§2.4)', async ({ page, request }) => {
+  await deleteWords(request, WORDS);
+  // Every textbook write this test's page issues (the import is the only
+  // writer here — the progress PUT of test 3 belongs to that test's page).
+  const textbookWrites = [];
+  page.on('request', (req) => {
+    if (req.method() === 'PUT' && /\/api\/v1\/textbooks\/\d+$/.test(req.url())) {
+      textbookWrites.push(req.postData() || '');
+    }
+  });
+  try {
+    // One picker selection, TWO fixture photos (Issue #80 §2.3): each
+    // photo walks its own recognize; the draft merges in photo order and
+    // each photo's rows carry that photo's page lesson.
+    await recognize(page, [FIXTURE_LEXIN, FIXTURE_LEXIN2]);
+    const select = page.locator('#parent-photo-textbook');
+    if ((await select.inputValue()) === 'unset') {
+      await select.selectOption('new');
+    }
+    await expect(page.locator('input[aria-label="课次 第 1 行"]')).toHaveValue('第1课');
+    await expect(page.locator('input[aria-label="课次 第 3 行"]')).toHaveValue('第2课');
+    const commitBtn = page.getByRole('button', { name: '确认添加（4 个）' });
+    await expect(commitBtn).toBeEnabled();
+
+    // AC-01 未按确认不写库：词库没有这四个词，教材名单与进度原样。
+    const wordsBefore = await wordAssignments(request);
+    expect(wordsBefore.get('cow')).toBeFalsy();
+    expect(wordsBefore.get('bird')).toBeFalsy();
+    const booksBefore = await textbooks(request);
+    const lexinBefore = booksBefore.find((b) => b.name === BOOK_LEXIN);
+    const lessonsBefore = lexinBefore ? lexinBefore.lessons : null;
+    const learnedBefore = lexinBefore ? lexinBefore.learnedLessons : 0;
+
+    await commitBtn.click();
+    await awaitReceipt(page, BOOK_LEXIN, { 新增: 4 });
+
+    // The append-only invariants (§2.1): both lessons present exactly
+    // once, in photo order at the END of the list, progress unchanged.
+    const booksAfter = await textbooks(request);
+    const lexinAfter = booksAfter.find((b) => b.name === BOOK_LEXIN);
+    expect(lexinAfter).toBeTruthy();
+    expect(lexinAfter.lessons).toEqual(['第1课', '第2课']);
+    expect(lexinAfter.lessons.indexOf('第1课'))
+      .toBe(lexinAfter.lessons.lastIndexOf('第1课'));
+    expect(lexinAfter.learnedLessons).toBe(learnedBefore);
+
+    // No import write ever carries the whole list or the progress (§2.4);
+    // an existing book's missing names ride appendLessons alone.
+    for (const body of textbookWrites) {
+      expect(body.includes('learnedLessons')).toBe(false);
+      expect(body.includes('"lessons"')).toBe(false);
+    }
+    if (lessonsBefore && lessonsBefore.indexOf('第2课') < 0) {
+      const appends = textbookWrites.filter((b) => b.includes('appendLessons'));
+      expect(appends.length).toBe(1);
+      expect(JSON.parse(appends[0]).appendLessons).toEqual(['第2课']);
+    }
+
+    // The stored attribution follows each photo's own lesson.
+    const assigns = await wordAssignments(request);
+    expect(((assigns.get('cow') || []).find((t) => t.name === BOOK_LEXIN) || {}).lesson).toBe('第1课');
+    expect(((assigns.get('frog') || []).find((t) => t.name === BOOK_LEXIN) || {}).lesson).toBe('第2课');
   } finally {
     await deleteWords(request, WORDS);
   }

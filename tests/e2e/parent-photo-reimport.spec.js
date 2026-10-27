@@ -111,6 +111,13 @@ test('one word, two books: a learned source admits it, an unlearned one never bl
     await recognize(page, FIXTURE_RENJIAO);
     await expect(page.locator('.photo-row-exists')).toHaveCount(1);
     await expect(page.locator('.photo-row-new')).toHaveCount(1);
+    // Issue #80 §2.2: 科普版 exists and the 仁爱版 header matches nothing —
+    // the panel STOPS at 请选择 (never a guessed 新建); the parent picks
+    // 新建教材 here (on a clean DB it preselects 新建 directly).
+    const bookSelect = page.locator('#parent-photo-textbook');
+    if ((await bookSelect.inputValue()) === 'unset') {
+      await bookSelect.selectOption('new');
+    }
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
     await awaitReceipt(page, BOOK_RENJIAO, { 新增: 1, 合并: 1 });
 
