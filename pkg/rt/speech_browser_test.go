@@ -251,12 +251,14 @@ type speechBrowserFixture struct {
 	exec              LessonExecutor
 	db                *sql.DB
 	dbPath            string
-	receipts          *lesson.ReceiptStore
-	wordsOverride     WordSource
-	passages          PassageSource
-	poems             PoemSource
-	practice          PracticeSource
-	practiceStore     *lesson.PracticeStore
+	receipts             *lesson.ReceiptStore
+	wordsOverride        WordSource
+	passages             PassageSource
+	poems                PoemSource
+	poemPracticeStore    *poem.PracticeStore
+	passagePracticeStore *passage.PracticeStore
+	practice             PracticeSource
+	practiceStore        *lesson.PracticeStore
 	expectedSentences []string
 	// expectedPCMPerSentence is the fake TTS's chunk count per sentence — the
 	// driver's round observation demands EXACTLY that many PCM frames inside
@@ -492,6 +494,7 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 	f.mu.Lock()
 	tts, probe, executor, ocrRead := f.tts, f.timerProbe, f.exec, f.ocrRead
 	words, receipts, passages, poems := f.wordsOverride, f.receipts, f.passages, f.poems
+	poemPractice, passagePractice := f.poemPracticeStore, f.passagePracticeStore
 	practice, practiceStore := f.practice, f.practiceStore
 	resumeHold, closeEntryHold, settleHold := f.resumeHold, f.closeEntryHold, f.settleHold
 	f.mu.Unlock()
@@ -501,11 +504,13 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 	tm := NewTurnManager(f.asr, f.llm, &speechObservedTTS{inner: tts, fixture: f}, executor, TurnManagerConfig{
 		LessonID:      "speech-browser-fixture",
 		Words:         words,
-		Receipts:      receipts,
-		Passages:      passages,
-		Poems:         poems,
-		Practice:      practice,
-		PracticeStore: practiceStore,
+		Receipts:        receipts,
+		Passages:        passages,
+		Poems:           poems,
+		PoemPractice:    poemPractice,
+		PassagePractice: passagePractice,
+		Practice:        practice,
+		PracticeStore:   practiceStore,
 	}, NewEventRecorder(infra.NewNoOpLogger(), "speech-browser"), infra.NewNoOpLogger())
 	tm.checkResumeInterleave = resumeHold
 	tm.closeEntryInterleave = closeEntryHold
@@ -775,6 +780,37 @@ func (f *speechBrowserFixture) seedCompletedLesson() {
 	if _, err := f.tools.CompleteCheck(ctx, lessonID, l.Version, "browser-seed-complete", false); err != nil {
 		f.t.Fatalf("seed completed lesson: %v", err)
 	}
+}
+
+// armPoemPassageSaveChain wires poem/passage practice stores and save
+// receipts on this fixture's temp SQLite — the production submit paths for
+// 1.10c/d, not the degraded zero-saved branch.
+func (f *speechBrowserFixture) armPoemPassageSaveChain() {
+	f.t.Helper()
+	ctx := context.Background()
+	if err := poem.Migrate(ctx, f.db); err != nil {
+		f.t.Fatalf("poem migrate: %v", err)
+	}
+	if err := passage.Migrate(ctx, f.db); err != nil {
+		f.t.Fatalf("passage migrate: %v", err)
+	}
+	poemStore, err := poem.NewPracticeStore(f.db, infra.NewNoOpLogger())
+	if err != nil {
+		f.t.Fatalf("poem practice store: %v", err)
+	}
+	passageStore, err := passage.NewPracticeStore(f.db, infra.NewNoOpLogger())
+	if err != nil {
+		f.t.Fatalf("passage practice store: %v", err)
+	}
+	receipts, err := lesson.NewReceiptStore(f.db, infra.NewNoOpLogger())
+	if err != nil {
+		f.t.Fatalf("receipt store: %v", err)
+	}
+	f.mu.Lock()
+	f.poemPracticeStore = poemStore
+	f.passagePracticeStore = passageStore
+	f.receipts = receipts
+	f.mu.Unlock()
 }
 
 // usePractice arms the practice inputs on this fixture: two fresh practice
@@ -1373,6 +1409,29 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 			t.Fatal("test close did not obtain session ownership")
 		}
 		committed.openUp()
+		assertOutcome(t, f, m, <-driver)
+	})
+
+	t.Run("connection exits while persist is still parked", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedCheckingWithManualVerdicts()
+		before, _ := f.gateCheckSubmit(true, false)
+
+		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
+		select {
+		case <-before.entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the formal submit never reached the parked latch write")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
+			t.Fatal("test close did not obtain session ownership")
+		}
+		// Release the persist gate only AFTER the original connection tasks
+		// have exited — a synchronous latch write in the read loop cannot
+		// pass this while the gate stays closed.
+		f.assertOriginalTasksExited()
+		before.openUp()
 		assertOutcome(t, f, m, <-driver)
 	})
 }
@@ -2239,11 +2298,12 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 //   - 提交先接纳：提交闩驻留时关闭，行落在 submitted+checked；
 //   - 密封先于提交：改判落库后、提交点按前的延迟窗口内关闭，迟到提交经
 //     生产入口 submitPassage 探针——仅 unchecked 兜底落库，无正式提交。
-// 撤销验证：撤掉 submitPassage 的 admitCheckWriteLocked 后「提交先接纳」
-// 子测试红（闩不入、行不落库）。
+// 撤销验证：撤掉 submitPassage 的 admitCheckWriteLocked 登记后
+// 「密封先于提交」子测试红（迟到正式提交把行推到 submitted+checked）。
 func TestPassageSubmitBrowser(t *testing.T) {
 	t.Run("submit admitted before the close", func(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
+		f.armPoemPassageSaveChain()
 		f.seedPassage()
 		f.scriptSpokenConfirm()
 		before, _ := f.gateCheckSubmit(true, false)
@@ -2291,10 +2351,25 @@ func TestPassageSubmitBrowser(t *testing.T) {
 		if pending != 0 {
 			t.Fatalf("completed check-write admissions = %d, want 0", pending)
 		}
+		recs, err := f.receipts.ListByLesson(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("list receipts: %v", err)
+		}
+		if len(recs) != 1 || recs[0].Kind != lesson.ReceiptKindPassage || recs[0].Status != lesson.ReceiptStatusSaved {
+			t.Fatalf("receipts = %+v, want one saved kind=passage receipt", recs)
+		}
+		got, ok, err := f.passagePracticeStore.LatestByRange(context.Background(), 77, false, []int{2})
+		if err != nil {
+			t.Fatalf("read passage practice: %v", err)
+		}
+		if !ok || got.LessonID != lessonID {
+			t.Fatalf("passage practice record = %+v ok=%v, want one row for this lesson", got, ok)
+		}
 	})
 
 	t.Run("close seals before the submit", func(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
+		f.armPoemPassageSaveChain()
 		f.seedPassage()
 		f.scriptSpokenConfirm()
 
@@ -2363,11 +2438,12 @@ func TestPassageSubmitBrowser(t *testing.T) {
 //   - 提交先接纳：提交闩驻留时关闭，行落在 submitted+checked；
 //   - 密封先于提交：两句改判落库后、提交点按前的延迟窗口内关闭，迟到提
 //     交经生产入口 submitPoem 探针——行仍停在 checking、版本不再前进。
-// 撤销验证：撤掉 submitPoem 的 admitCheckWriteLocked 后「提交先接纳」子测
-// 试红（闩不入、行不落库）。
+// 撤销验证：撤掉 submitPoem 的 admitCheckWriteLocked 登记后「密封先于提
+// 交」子测试红（行应停在 checking，变异后变为 submitted）。
 func TestPoemSubmitBrowser(t *testing.T) {
 	t.Run("submit admitted before the close", func(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
+		f.armPoemPassageSaveChain()
 		f.seedPoem()
 		f.scriptSpokenConfirm()
 		before, _ := f.gateCheckSubmit(true, false)
@@ -2415,10 +2491,25 @@ func TestPoemSubmitBrowser(t *testing.T) {
 		if pending != 0 {
 			t.Fatalf("completed check-write admissions = %d, want 0", pending)
 		}
+		recs, err := f.receipts.ListByLesson(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("list receipts: %v", err)
+		}
+		if len(recs) != 1 || recs[0].Kind != lesson.ReceiptKindPoem || recs[0].Status != lesson.ReceiptStatusSaved {
+			t.Fatalf("receipts = %+v, want one saved kind=poem receipt", recs)
+		}
+		rows, err := f.poemPracticeStore.ListByPoem(context.Background(), 77)
+		if err != nil {
+			t.Fatalf("read poem practice: %v", err)
+		}
+		if len(rows) != 1 || rows[0].LessonID != lessonID {
+			t.Fatalf("poem practice rows = %+v, want one row for this lesson", rows)
+		}
 	})
 
 	t.Run("close seals before the submit", func(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
+		f.armPoemPassageSaveChain()
 		f.seedPoem()
 		f.scriptSpokenConfirm()
 
