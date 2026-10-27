@@ -259,8 +259,21 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
 
 test('photo textbook: ONE pick of two photos — lessons append once in order, progress untouched, nothing written before 确认 (Issue #80 §2.3/§2.4)', async ({ page, request }) => {
   await deleteWords(request, WORDS);
-  // Every textbook write this test's page issues (the import is the only
-  // writer here — the progress PUT of test 3 belongs to that test's page).
+  // Independent setup: the 译林版 book already exists with 第1课 learned,
+  // so this test always exercises appendLessons — never suite-order luck.
+  const create = await request.post('/api/v1/textbooks', {
+    data: {
+      name: BOOK_LEXIN,
+      category: CAT,
+      edition: '译林版',
+      grade: '六年级',
+      volume: '下册',
+      module: 'Unit 5',
+      lessons: ['第1课'],
+      learnedLessons: 1,
+    },
+  });
+  expect(create.ok()).toBeTruthy();
   const textbookWrites = [];
   page.on('request', (req) => {
     if (req.method() === 'PUT' && /\/api\/v1\/textbooks\/\d+$/.test(req.url())) {
@@ -273,9 +286,9 @@ test('photo textbook: ONE pick of two photos — lessons append once in order, p
     // each photo's rows carry that photo's page lesson.
     await recognize(page, [FIXTURE_LEXIN, FIXTURE_LEXIN2]);
     const select = page.locator('#parent-photo-textbook');
-    if ((await select.inputValue()) === 'unset') {
-      await select.selectOption('new');
-    }
+    await expect(select).not.toHaveValue('new');
+    const bookId = await select.inputValue();
+    await expect(bookId).not.toBe('unset');
     await expect(page.locator('input[aria-label="课次 第 1 行"]')).toHaveValue('第1课');
     await expect(page.locator('input[aria-label="课次 第 3 行"]')).toHaveValue('第2课');
     const commitBtn = page.getByRole('button', { name: '确认添加（4 个）' });
@@ -287,8 +300,9 @@ test('photo textbook: ONE pick of two photos — lessons append once in order, p
     expect(wordsBefore.get('bird')).toBeFalsy();
     const booksBefore = await textbooks(request);
     const lexinBefore = booksBefore.find((b) => b.name === BOOK_LEXIN);
-    const lessonsBefore = lexinBefore ? lexinBefore.lessons : null;
-    const learnedBefore = lexinBefore ? lexinBefore.learnedLessons : 0;
+    expect(lexinBefore).toBeTruthy();
+    expect(lexinBefore.lessons).toEqual(['第1课']);
+    const learnedBefore = lexinBefore.learnedLessons;
 
     await commitBtn.click();
     await awaitReceipt(page, BOOK_LEXIN, { 新增: 4 });
@@ -309,11 +323,9 @@ test('photo textbook: ONE pick of two photos — lessons append once in order, p
       expect(body.includes('learnedLessons')).toBe(false);
       expect(body.includes('"lessons"')).toBe(false);
     }
-    if (lessonsBefore && lessonsBefore.indexOf('第2课') < 0) {
-      const appends = textbookWrites.filter((b) => b.includes('appendLessons'));
-      expect(appends.length).toBe(1);
-      expect(JSON.parse(appends[0]).appendLessons).toEqual(['第2课']);
-    }
+    const appends = textbookWrites.filter((b) => b.includes('appendLessons'));
+    expect(appends.length).toBe(1);
+    expect(JSON.parse(appends[0]).appendLessons).toEqual(['第2课']);
 
     // The stored attribution follows each photo's own lesson.
     const assigns = await wordAssignments(request);

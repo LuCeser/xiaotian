@@ -61,6 +61,8 @@ const {
   lessonsNamedOnPhoto,
   recommendLesson,
   recommendForDraftPage,
+  lessonRecsPriorToPage,
+  lessonsForRecommend,
   fillRecommendedLessons,
   applyBatchLesson,
   applyPickedLesson,
@@ -187,7 +189,7 @@ const BOOKS = [
     edition: '译林版', stage: '', grade: '三年级', volume: '上册', module: '',
   }), 'unset', 'books exist but no match → unset');
   eq(preselectBookChoice([], { edition: '人教版PEP', grade: '三年级' }), 'new', 'no books → new');
-  eq(preselectBookChoice([], null), 'none', 'no books and no meta → none');
+  eq(preselectBookChoice([], null), 'new', 'no books and no meta → still 新建 (§2.2)');
   assert(!isPhotoTextbookMode('unset'), 'unset is not textbook mode');
   assert(isPhotoTextbookMode('new'), 'new is textbook mode');
 })();
@@ -238,6 +240,19 @@ const BOOKS = [
     { lesson: '第2课', source: 'previous-lesson' }, 'matched book feeds the last-lesson fallback');
   eq(recommendForDraftPage([], null, { entries: [{ word: 'a', lesson: '' }] }, []),
     { lesson: '', source: 'none' }, 'new-book draft with no signal stays none');
+
+  // §3.1: photo-order fallback only looks at EARLIER photo indices.
+  const outOfOrder = [undefined, { lesson: '第2课', source: 'recognized' }];
+  eq(lessonRecsPriorToPage(outOfOrder, 1), [], 'photo 1 has no prior recs');
+  eq(recommendForDraftPage([], null, { entries: [{ word: 'a', lesson: '' }] },
+    lessonRecsPriorToPage(outOfOrder, 1), 'new'),
+    { lesson: '', source: 'none' }, 'retry photo 1 never borrows photo 2 lesson');
+
+  // §3.1: the parent's chosen textbook feeds previous-lesson, not OCR rematch.
+  eq(recommendForDraftPage(BOOKS2, { edition: '人教版PEP', grade: '三年级' },
+    { entries: [{ word: 'a', lesson: '' }] }, [], 7),
+    { lesson: '第2课', source: 'previous-lesson' }, 'chosen book id uses its lesson list');
+  eq(lessonsForRecommend(BOOKS2, 7), ['第1课', '第2课'], 'lessonsForRecommend reads the chosen book');
 })();
 
 // ----------------------------------------------------------------------
@@ -1461,6 +1476,51 @@ async function testAppendLessonsPayload() {
   ], null, [], []);
   eq(quietCalls, [], 'a fully-known book gets no update call at all');
 }
+
+// ----------------------------------------------------------------------
+// Issue #80 Codex fix1 — recognize/commit concurrency + receipt snapshot
+// ----------------------------------------------------------------------
+
+(function () {
+  const form = Object.create(PhotoAddForm.prototype);
+  form.bookChoice = 'new';
+  form.textbookDepsReady = function () { return true; };
+  form.rows = [{ word: 'a', status: 'new', checked: true }];
+  form.poemRows = [];
+  form.passageRows = [];
+  form.commitBtn = { disabled: true, querySelector: function () { return { textContent: '' }; } };
+  form.commitHint = { hidden: true };
+  form.textbookPanel = { hidden: true };
+  form.recognizeBusy = true;
+  form.commitInFlight = false;
+  form.updateCommitButton();
+  assert(form.commitBtn.disabled, 'updateCommitButton keeps commit off while recognizeBusy');
+
+  global.document = { createElement: makeScopeNode };
+  form.rows = [{ index: 0, word: 'mutated-after-commit', meaning: 'm', lesson: '第5课',
+    status: 'exists', checked: true }];
+  form.banner = makeScopeNode('div');
+  form.renderTextbookCommitResult({
+    book: SCOPE_BOOK,
+    receiptRows: [{ index: 0, word: 'apple', meaning: '苹果', lesson: '第5课',
+      status: 'exists', checked: true }],
+    submittedRows: [],
+    addOutcome: { added: 0, skipped: 0 },
+    fresh: [{ id: 11, word: 'apple', meaning: '苹果', textbooks: [] }],
+    editResults: [],
+    groups: [],
+    groupResults: scopeGroupResults('第5课', false, ['apple']),
+    unassigned: [],
+    postSave: [{ word: 'apple', participates: true,
+      textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] }],
+    booksAfter: SCOPE_BOOKS_AFTER,
+  });
+  const snapBanner = scopeTextOf(form.banner);
+  assert(snapBanner.indexOf('mutated-after-commit') < 0,
+    'renderTextbookCommitResult uses receiptRows, not live this.rows');
+  assert(snapBanner.indexOf('apple') >= 0,
+    'the snapshot word appears on the receipt');
+})();
 
 // ----------------------------------------------------------------------
 
