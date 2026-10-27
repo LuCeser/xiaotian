@@ -92,6 +92,10 @@ async function openPhotoTab(page) {
  * title to the unique value (纠错), pin the SUPPLEMENTARY path (不指定教
  * 材 — the recognized header would otherwise preselect 新建教材), and
  * return the panel. The textbook path rides its own assertions in test 1.
+ *
+ * Issue #89 order: pick 不指定教材 FIRST — the recognized header
+ * preselects 新建教材, and syncUnitField hides the 单元 input while any
+ * textbook is chosen, so the unit can only be filled on the 'none' branch.
  */
 async function recognizeMixedAndCorrect(page, title) {
   const panel = page.locator('#add-panel-photo');
@@ -100,8 +104,8 @@ async function recognizeMixedAndCorrect(page, title) {
   await panel.getByRole('button', { name: '开始识别' }).click();
   const card = panel.locator('.photo-passage-card[data-passage-index="0"]');
   await expect(card).toBeVisible({ timeout: 30_000 });
-  await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
   await panel.locator('select[aria-label="教材归属"]').selectOption('none');
+  await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
   await card.locator('input[aria-label="课文标题 第 1 篇"]').fill(title);
   return panel;
 }
@@ -122,7 +126,8 @@ function rtSessionInit(category) {
         category,
       }));
     });
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) return; // teacher audio rides binary frames; only control JSON here
       const msg = JSON.parse(String(data));
       if (msg.type === 'session_ready') {
         clearTimeout(fail);
@@ -179,9 +184,10 @@ test('mixed page: 区分展示, 纠错确认 stores the whole passage with its p
     await expect(card.locator('.photo-passage-paragraph-required')).toHaveCount(1);
 
     // 纠错 + confirm: the edited title rides the commit; both kinds go in
-    // ONE confirm (the supplementary path — 不指定教材).
-    await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
+    // ONE confirm (the supplementary path — 不指定教材). Issue #89: the
+    // unit input only exists on the 'none' branch, so pick it first.
     await panel.locator('select[aria-label="教材归属"]').selectOption('none');
+    await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
     await card.locator('input[aria-label="课文标题 第 1 篇"]').fill(title);
     await panel.getByRole('button', { name: /确认添加/ }).click();
     await expect(panel.locator('.result-banner .result-summary'))

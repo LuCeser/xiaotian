@@ -257,14 +257,23 @@ test('classroom: photo-imported words are selected for dictation', async ({ page
   try {
     await openPhotoTab(page);
     await recognize(page, FIXTURE_CLASSROOM);
+    // T-09-12 hygiene (the file header's own rule): pin the commit's unit
+    // so the finally deleteUnit really removes the words. Unfilled commits
+    // land in 未分组, the cleanup becomes a no-op, and a repeat/retry of
+    // this test then classifies sun/moon 已有 — 确认添加（2 个） never
+    // appears. The bare-list fixture preselects 不指定教材, the one branch
+    // where the 单元 input exists (#89).
+    await page.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_CLASSROOM);
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
     await expect(page.locator('.result-banner .result-summary')).toContainText('已添加 2 个', { timeout: 30_000 });
 
     // Real classroom start: raw /rt session_init (mode=test selects the
     // full-reveal lesson view — safe: this instance's DB is a per-run
-    // throwaway). session_ready carries the SELECTED words; it is sent
-    // before any announcement audio, so stubbed TTS traffic cannot race
-    // the assertion.
+    // throwaway). session_ready carries the SELECTED words. The teacher's
+    // greeting audio starts streaming IMMEDIATELY after session_ready and
+    // ws.close() needs a round trip, so binary PCM frames are still in
+    // flight when the message handler runs — only TEXT frames are control
+    // JSON (the #81 guard photo-flow.js/photo-chinese already carry).
     const ready = await new Promise((resolve, reject) => {
       const ws = new WebSocket('ws://127.0.0.1:18080/rt', {
         origin: 'http://127.0.0.1:18080',
@@ -278,7 +287,8 @@ test('classroom: photo-imported words are selected for dictation', async ({ page
           mode: 'test',
         }));
       });
-      ws.on('message', (data) => {
+      ws.on('message', (data, isBinary) => {
+        if (isBinary) return; // teacher audio rides binary frames; only control JSON here
         const msg = JSON.parse(String(data));
         if (msg.type === 'session_ready') {
           clearTimeout(fail);
