@@ -409,7 +409,7 @@ const SNAP = [
 const BOOK = 9;
 
 (function () {
-  const groups = planAssignments(ROWS, SNAP, BOOK, false);
+  const groups = planAssignments(ROWS, SNAP, BOOK);
   // Groups keyed by lesson in first-appearance order; unchecked/conflict/
   // invalid rows never assigned; exists rows DO get their lesson.
   eq(groups.map(function (g) { return g.lesson; }), ['第5课', '', '第7课'],
@@ -419,18 +419,17 @@ const BOOK = 9;
   eq(groups[1].cardIds, [13], 'an empty lesson forms the 待确认 group');
   eq(groups[2].cardIds, [15], 'an exists row is assignable, unresolved conflict/invalid/unchecked are not');
 
-  // includePending lifts ONLY the 待确认 group into scope.
-  const withInclude = planAssignments(ROWS, SNAP, BOOK, true);
-  const pending = withInclude.filter(function (g) { return g.lesson === ''; })[0];
-  eq(pending.includeInScope, true, 'includePending sets includeInScope on the 待确认 group');
-  const lessonGroups = withInclude.filter(function (g) { return g.lesson !== ''; });
-  assert(lessonGroups.every(function (g) { return g.includeInScope === false; }),
-    'rows with a real lesson never ride the include override');
+  // Issue #80 AC-06: an import NEVER grants 默写范围 — the 待确认 group
+  // stores with includeInScope:false and waits for the textbook's
+  // progress (加入范围 lives in 词库浏览, never in the import).
+  const ac06Groups = planAssignments(ROWS, SNAP, BOOK);
+  assert(ac06Groups.every(function (g) { return g.includeInScope === false; }),
+    'no import group ever carries includeInScope:true');
 
   // A word missing from the snapshot (id unknown) is skipped, not guessed.
   const partial = planAssignments([
     { index: 0, word: 'ghost', meaning: '', lesson: '第1课', status: 'new', checked: true },
-  ], SNAP, BOOK, false);
+  ], SNAP, BOOK);
   eq(partial, [], 'a word without a resolved id forms no group');
 
   // A resolved card whose attribution projection failed is equally
@@ -440,12 +439,12 @@ const BOOK = 9;
     { index: 0, word: 'lake', meaning: '湖', lesson: '第7课', status: 'exists', checked: true },
   ], [
     { id: 15, word: 'lake', textbooks: null },
-  ], BOOK, false);
+  ], BOOK);
   eq(unknownAttribution, [],
     'a word with unknown attribution forms no assignment group');
 
   // Nothing committable → no calls at all.
-  eq(planAssignments([], SNAP, BOOK, true), [], 'no rows → no assignment calls');
+  eq(planAssignments([], SNAP, BOOK), [], 'no rows → no assignment calls');
 })();
 
 // ----------------------------------------------------------------------
@@ -460,7 +459,7 @@ const BOOK = 9;
       ? Object.assign({}, r, { resolution: 'adopt', checked: true })
       : r;
   });
-  const groups = planAssignments(rows, SNAP, BOOK, false);
+  const groups = planAssignments(rows, SNAP, BOOK);
   const lesson7 = groups.filter(function (g) { return g.lesson === '第7课'; })[0];
   eq(lesson7.cardIds, [15, 16], 'a resolved conflict row merges its source with exists rows');
   eq(lesson7.words, ['lake', 'star'], 'the group words carry the resolved conflict');
@@ -479,12 +478,12 @@ const BOOK = 9;
       ? { id: w.id, word: w.word, textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: true }] }
       : w;
   });
-  const groups = planAssignments(ROWS, snapIncluded, BOOK, false);
+  const groups = planAssignments(ROWS, snapIncluded, BOOK);
   const lesson7 = groups.filter(function (g) { return g.lesson === '第7课'; })[0];
   eq(lesson7.includeInScope, true, 'an existing explicit include survives re-import');
 
   // The same include on a DIFFERENT book is not this import's business.
-  const otherBook = planAssignments(ROWS, snapIncluded, 8, false);
+  const otherBook = planAssignments(ROWS, snapIncluded, 8);
   const other7 = otherBook.filter(function (g) { return g.lesson === '第7课'; })[0];
   eq(other7.includeInScope, false, 'another book\'s include does not leak into this import');
 
@@ -499,7 +498,7 @@ const BOOK = 9;
       ? { id: w.id, word: w.word, textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: true }] }
       : w;
   });
-  const viaConflict = planAssignments(resolvedRows, starIncluded, BOOK, false);
+  const viaConflict = planAssignments(resolvedRows, starIncluded, BOOK);
   const conflictGroup = viaConflict.filter(function (g) {
     return g.lesson === '第7课' && g.words.indexOf('star') >= 0;
   })[0];
@@ -1278,7 +1277,6 @@ async function testCommitDataFlow() {
   knownForm.rows = [knownRow];
   knownForm.banner = makeScopeNode('div');
   knownForm.draftCategory = 'english';
-  knownForm.includePending = false;
   knownForm.fetchWords = function () {
     return Promise.resolve([
       { id: 11, word: 'apple', meaning: '苹果', participates: true,
@@ -1305,7 +1303,6 @@ async function testCommitDataFlow() {
   degradedForm.rows = [degradedRow];
   degradedForm.banner = makeScopeNode('div');
   degradedForm.draftCategory = 'english';
-  degradedForm.includePending = false;
   degradedForm.fetchWords = function () {
     wordReads++;
     if (wordReads === 1) {
@@ -1361,7 +1358,6 @@ async function testAdoptDegradedFlow() {
   form.rows = [row];
   form.banner = makeScopeNode('div');
   form.draftCategory = 'english';
-  form.includePending = false;
   form.fetchWords = function () {
     // The degraded wire shape from textbooks_test.go: the card is known,
     // its attribution is not — every read of this flow.
@@ -1393,15 +1389,14 @@ async function testAdoptDegradedFlow() {
   assert(banner.indexOf('释义已按照片更新') >= 0 && banner.indexOf('未能指定课次') >= 0,
     'the adopt banner keeps what did persist (edit) + the missing step (assign)');
 
-  // @80e3977 P3 的保护：待确认词 + includePending（归属已知时 payload 会带
-  // includeInScope:true）在 textbooks:null 下同样一个 payload 都不发。
+  // @80e3977 P3 的保护（Issue #80 后语义：导入永不发 includeInScope:true，
+  // 但待确认词同样要在 textbooks:null 下一个 payload 都不发）。
   const pendingRow = { index: 0, word: 'lake', meaning: '湖', lesson: '', status: 'exists', checked: true };
   const pendingPayloads = [];
   const pendingForm = Object.create(PhotoAddForm.prototype);
   pendingForm.rows = [pendingRow];
   pendingForm.banner = makeScopeNode('div');
   pendingForm.draftCategory = 'english';
-  pendingForm.includePending = true;
   pendingForm.fetchWords = function () {
     return Promise.resolve([
       { id: 15, word: 'lake', meaning: '湖', participates: true, textbooks: null },
@@ -1421,9 +1416,55 @@ async function testAdoptDegradedFlow() {
     'the suppressed include flow still reports the word as unassigned');
 }
 
+// Issue #80 §2.4：已有教材的确认走 appendLessons —— 请求只带本书还没有
+// 的课次名；不带整份名单、不带 learnedLessons（进度只在教材页改）。
+// 无新增且无回填时不发任何写请求。
+async function testAppendLessonsPayload() {
+  const book = {
+    id: 9, name: '书A', edition: '译林版', stage: '', grade: '六年级', volume: '', module: '',
+    lessons: ['第1课'], learnedLessons: 1,
+  };
+  const calls = [];
+  const form = Object.create(PhotoAddForm.prototype);
+  form.books = [book];
+  form.bookChoice = 9;
+  form.detectedMeta = { edition: '译林版', stage: '', grade: '六年级', volume: '下册', module: '' };
+  form.updateTextbook = function (id, patch) {
+    calls.push({ id: id, patch: patch });
+    return Promise.resolve(Object.assign({}, book, { volume: '下册', lessons: ['第1课', '第2课'] }));
+  };
+
+  const settled = await form.resolveTargetBook([
+    { word: 'a', lesson: '第1课', status: 'new', checked: true },
+    { word: 'b', lesson: '第2课', status: 'new', checked: true },
+    { word: 'c', lesson: '第1课', status: 'new', checked: false },
+  ], null, [], []);
+  eq(calls.length, 1, 'one update carries the append');
+  eq(calls[0].patch.appendLessons, ['第2课'], 'the payload carries ONLY the missing lesson names');
+  assert(!('lessons' in calls[0].patch), 'the payload never re-sends the whole list');
+  assert(!('learnedLessons' in calls[0].patch), 'the payload never touches progress');
+  eq(calls[0].patch.volume, '下册', 'an empty header field still backfills in the same call');
+  eq(settled.lessons, ['第1课', '第2课'], 'the in-memory book follows the server reply');
+
+  // Nothing missing, nothing to backfill → the confirm writes nothing.
+  const quietCalls = [];
+  const quiet = Object.create(PhotoAddForm.prototype);
+  quiet.books = [Object.assign({}, book, { volume: '下册' })];
+  quiet.bookChoice = 9;
+  quiet.detectedMeta = { edition: '译林版', stage: '', grade: '六年级', volume: '下册', module: '' };
+  quiet.updateTextbook = function (id, patch) {
+    quietCalls.push({ id: id, patch: patch });
+    return Promise.resolve({});
+  };
+  await quiet.resolveTargetBook([
+    { word: 'a', lesson: '第1课', status: 'new', checked: true },
+  ], null, [], []);
+  eq(quietCalls, [], 'a fully-known book gets no update call at all');
+}
+
 // ----------------------------------------------------------------------
 
-testCommitDataFlow().then(testAdoptDegradedFlow).then(function () {
+testCommitDataFlow().then(testAdoptDegradedFlow).then(testAppendLessonsPayload).then(function () {
   if (failures) {
     console.error('parent-photo-textbook: ' + failures + ' of ' + checks + ' checks failed');
     process.exit(1);

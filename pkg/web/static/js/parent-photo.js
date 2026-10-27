@@ -1212,10 +1212,10 @@
    * conflicts the parent RESOLVED (Issue #6), each with a card id
    * resolved from the post-commit library snapshot (unresolved conflicts
    * and invalid rows never reach a textbook). Groups keep
-   * first-appearance order. includePending=true (the page-level 「待确认
-   * 课次的词直接加入默写范围」checkbox) lifts ONLY the lesson-less group
-   * into scope — rows with a real lesson always ride the textbook's
-   * progress.
+   * first-appearance order. Issue #80 AC-06: an import never grants
+   * 默写范围 — includeInScope rides only the sticky rule below, so the
+   * lesson-less group stores as 待确认 and out-of-progress words wait
+   * for the textbook page's progress (加入范围 lives in 词库浏览).
    *
    * Sticky include (Issue #6 AC-4): snapshotRows is the GET /words shape
    * ({id, word, textbooks:[{id, lesson, includeInScope}]}); when the word
@@ -1224,7 +1224,7 @@
    * parent's explicit include (the assign upsert is last-write-wins, so
    * the preservation has to ride the payload). Pure.
    */
-  function planAssignments(rows, snapshotRows, bookId, includePending) {
+  function planAssignments(rows, snapshotRows, bookId) {
     var byWord = {};
     (snapshotRows || []).forEach(function (w) {
       if (w && w.word) {
@@ -1251,7 +1251,11 @@
           sticky = true;
         }
       });
-      var include = sticky || (includePending && !lesson);
+      // Issue #80 §2.4: an import NEVER grants scope — new words ride the
+      // textbook's progress (includeInScope: false); only a sticky
+      // include the word ALREADY carries on this book is re-sent, so a
+      // re-import cannot silently clear a parent's explicit include.
+      var include = sticky;
       var key = lesson + '\u0000' + (include ? '1' : '0');
       if (!Object.prototype.hasOwnProperty.call(byKey, key)) {
         byKey[key] = { lesson: lesson, includeInScope: include, cardIds: [], words: [] };
@@ -1627,7 +1631,6 @@
     this.detectedMeta = null; // the READ-off-the-photo textbook header
     this.books = []; // the draft's subject's textbooks (panel list)
     this.bookChoice = 'unset'; // 'unset' | 'none' | 'new' | textbook id
-    this.includePending = false; // 待确认课次的词直接加入默写范围
     // Issue #7: while a PDF is in play — { doc, plan, aborted, metaDone,
     // panelRendered }. doc stays open for page retries until discard /
     // commit reset / a new file; rows themselves live in this.rows.
@@ -1878,11 +1881,7 @@
         return;
       }
       if (!lesson) {
-        if (this.includePending) {
-          out.joined += 1;
-        } else {
-          out.heldPending += 1;
-        }
+        out.heldPending += 1;
         return;
       }
       var idx = lessons.indexOf(lesson);
@@ -1966,9 +1965,8 @@
     if (sched.heldPending && sched.mode !== 'none') {
       var pend = document.createElement('p');
       pend.className = 'photo-state-hint photo-state-hint-neutral';
-      pend.textContent = sched.includePending
-        ? '待确认课次的 ' + sched.heldPending + ' 词已勾选直接加入默写范围。'
-        : '待确认课次的 ' + sched.heldPending + ' 词暂不自动安排，可指定课次或勾选直接加入范围。';
+      pend.textContent = '待确认课次的 ' + sched.heldPending +
+        ' 词保存后暂不自动安排，可先指定课次；加入范围请到「词库」操作。';
       this.stateLine.appendChild(pend);
     }
   };
@@ -2299,7 +2297,6 @@
         }
         self.detectedMeta = meta;
         self.detectedMetaList = [meta];
-        self.includePending = false;
         // Snapshot the REAL libraries for classification; load the textbook
         // list in parallel for the attribution panel. All ride the DRAFT's
         // subject (a Chinese draft classifies against the 语文 word library
@@ -2925,7 +2922,6 @@
     this.detectedMeta = null;
     this.detectedMetaList = [];
     this.bookChoice = 'unset';
-    this.includePending = false;
     this.batchLessonDraft = '';
     this.lastLessonPick = null;
     this.lessonPickBar = null;
@@ -3364,27 +3360,6 @@
     host.appendChild(pickBar);
     this.lessonPickBar = { pickedBtn: pickedBtn, allBtn: allBtn, noneBtn: noneBtn };
     this.syncLessonPickUi();
-
-    // AC5: the explicit include-in-scope handling for lesson-less rows.
-    var includeLabel = document.createElement('label');
-    includeLabel.className = 'photo-include-toggle';
-    var include = document.createElement('input');
-    include.type = 'checkbox';
-    include.id = 'parent-photo-include';
-    include.checked = this.includePending;
-    include.addEventListener('change', function () {
-      self.includePending = include.checked;
-      // Issue #81: the checkbox changes WHAT WILL BE SCHEDULED — the state
-      // line and the save-note follow immediately (no table rebuild).
-      self.updateStateLine();
-      self.updateCommitHint();
-    });
-    var includeText = document.createElement('span');
-    includeText.textContent = '待确认课次的词直接加入默写范围（不受进度限制）';
-    includeLabel.appendChild(include);
-    includeLabel.appendChild(includeText);
-    host.appendChild(includeLabel);
-
     this.updateStateLine();
   };
 
@@ -5057,15 +5032,20 @@
       return Promise.resolve(book);
     }
     if (missing.length) {
-      patch.lessons = distinctLessons((book.lessons || []).concat(missing));
+      // Issue #80 §2.4: append-only — the request carries ONLY the names
+      // the book's list lacks (appendLessons); the server merges them
+      // inside BEGIN IMMEDIATE, never reordering or replacing the list.
+      // The whole-list lessons shape and learnedLessons stay OUT of an
+      // import update (progress is the textbook page's call alone).
+      patch.appendLessons = missing;
     }
     return this.updateTextbook(book.id, patch).then(function (updated) {
       // Keep the in-memory book current for the receipt's progress hint.
       if (updated && updated.lessons) {
         book.lessons = updated.lessons;
         book.learnedLessons = updated.learnedLessons;
-      } else if (patch.lessons) {
-        book.lessons = patch.lessons;
+      } else if (patch.appendLessons) {
+        book.lessons = appendMissingLessons(book.lessons || [], patch.appendLessons);
       }
       META_KEYS.forEach(function (key) {
         if (patch[key]) {
@@ -5123,7 +5103,7 @@
             }
           });
           return self.runAdoptEdits(adoptRows, idByWord).then(function (editResults) {
-            var groups = planAssignments(committed, fresh || [], book.id, self.includePending);
+            var groups = planAssignments(committed, fresh || [], book.id);
             var unassigned = committed.filter(function (r) {
               return !Object.prototype.hasOwnProperty.call(idByWord, r.word) ||
                 !attributionKnownByWord[r.word];
