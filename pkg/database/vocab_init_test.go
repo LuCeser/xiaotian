@@ -29,7 +29,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -58,18 +57,26 @@ func TestCountByUnit_MissingCardsTable(t *testing.T) {
 	}
 }
 
-// repoRoot 返回仓库根目录（本文件位于 pkg/database/ 下两层）。
+// repoRoot 返回仓库根目录：从测试进程的工作目录（go test 的包目录
+// pkg/database）逐级向上查找 go.mod。不用 runtime.Caller —— CI 设
+// GOFLAGS=-trimpath 时 Caller 返回模块路径（github.com/xiaotian/…）而非
+// 源码路径，随后 go.mod 检查必然失败。
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
 	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
-		t.Fatalf("repo root %s has no go.mod: %v", root, err)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("repo root not found: walked up from the test working directory without finding go.mod")
+		}
+		dir = parent
 	}
-	return root
 }
 
 // vocabTestInterpreter 定位带 fsrs 依赖的解释器：优先 HTA_PYTHON_INTERPRETER
