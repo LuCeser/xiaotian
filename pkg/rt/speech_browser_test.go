@@ -1596,8 +1596,10 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 // TestCloseFallbackVersusSubmit 是 1.12c 的验收：正式提交与关闭的三种顺
 // 序，全部经真实保存链路（useRealFSRS：SubmitReview 走真实 pybridge 落进
 // 本夹具的临时 SQLite，回执进同一库）核对持久结果——不只数 fake 调用。
-//   - 提交先接纳（latch 写前关闭）：关闭等已接纳的提交落库，读权威行
-//     submitted 后让位——只有提交自己的 kind=check 回执与 FSRS 批；
+//   - 提交先接纳（latch 写前关闭）：读门会合与多笔写入用例同一套——
+//     提交闩仍驻留时只有撤掉等待的兜底会到达权威读；有等待的实现先放
+//     提交落闩、再读权威行，submitted 后让位——只有提交自己的
+//     kind=check 回执与 FSRS 批；
 //   - 提交已落库、尚未返回（committed 窗口关闭）：同一让位语义，提交保
 //     存与回执完整；
 //   - 关闭先接纳：迟到的提交经生产入口被拒（零写入），兜底独占保存——
@@ -1634,8 +1636,10 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		probe := f.useRealFSRS(t)
 		f.seedCheckingWithManualVerdicts()
+		readGate := f.gateStateRead()
 		before, _ := f.gateCheckSubmit(true, false)
 		t.Cleanup(before.openUp)
+		t.Cleanup(readGate.openUp)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
 		select {
@@ -1645,9 +1649,36 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		}
 		m := f.waitFirstManager(5 * time.Second)
 		// The goodbye close claims the fallback while the ACCEPTED submit is
-		// parked ahead of its latch write; the fallback must wait for it,
-		// then yield to the submitted row it reads back.
+		// parked ahead of its latch write. 读门会合（复盘第 3 节第 2 项）：
+		// 提交闩仍驻留时，只有撤掉 waitCheckWrites 的兜底才会在这个窗口
+		// 到达权威读——放行读、逼它先赢闩，再放正式提交，行停在
+		// submitted+unchecked；有等待的实现放提交后才读，读到 submitted
+		// 让位。
+		readGate.hold()
 		m.handleEndSession(m.currentSender())
+		skippedWait := false
+		select {
+		case <-readGate.gate.entered:
+			skippedWait = true
+		case <-time.After(3 * time.Second):
+		}
+		if skippedWait {
+			readGate.openUp()
+			if !waitFor(t, 10*time.Second, func() bool {
+				l := storedLesson(f)
+				return l.Stage == lesson.StageSubmitted && l.Unchecked
+			}) {
+				t.Fatal("the un-waited fallback never won the submit latch")
+			}
+		} else {
+			before.openUp()
+			select {
+			case <-readGate.gate.entered:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the waiting fallback's authoritative read never arrived")
+			}
+			readGate.openUp()
+		}
 		before.openUp()
 		res := <-driver
 		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
