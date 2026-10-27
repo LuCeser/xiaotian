@@ -92,6 +92,7 @@ const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-install-src-'));
 const instDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-install-dst-'));
 const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaotian-install-stub-'));
 const stubLog = path.join(stubDir, 'uv-stub.log');
+const pyStubLog = path.join(stubDir, 'py-stub.log');
 
 function write(rel, content) {
   const p = path.join(srcDir, rel);
@@ -153,6 +154,24 @@ try {
     );
     fs.renameSync(path.join(srcDir, '..', 'stub-uv.cmd'), path.join(stubDir, 'uv.cmd'));
   } else {
+    // POSIX recording python stub: `uv venv` copies this into
+    // <venv>/Scripts/python.exe. When the installer's 6b step runs
+    // `& $venvPython $vocabScript --db $vocabDB init`, pwsh executes this
+    // sh script (exec bit + shebang), which records its args to $PY_STUB_LOG
+    // and exits 0. That lets the test assert the `init` subcommand was REALLY
+    // invoked (not merely that the "Initializing vocab schema" banner printed).
+    const pyStubPath = path.join(stubDir, 'python-stub');
+    fs.writeFileSync(
+      pyStubPath,
+      [
+        '#!/bin/sh',
+        'echo "ARGS: $*" >> "$PY_STUB_LOG"',
+        'exit 0',
+        '',
+      ].join('\n'),
+    );
+    fs.chmodSync(pyStubPath, 0o755);
+
     const stubPath = path.join(stubDir, 'uv');
     fs.writeFileSync(
       stubPath,
@@ -162,7 +181,8 @@ try {
         'echo "UV_INDEX_URL=$UV_INDEX_URL" >> "$UV_STUB_LOG"',
         'if [ "$1" = "venv" ]; then',
         '  mkdir -p "$4/Scripts"',
-        '  : > "$4/Scripts/python.exe"',
+        '  cp "$(dirname "$0")/python-stub" "$4/Scripts/python.exe"',
+        '  chmod +x "$4/Scripts/python.exe"',
         'fi',
         'exit 0',
         '',
@@ -174,6 +194,7 @@ try {
   const stubEnv = {
     PATH: stubDir + path.delimiter + process.env.PATH,
     UV_STUB_LOG: stubLog,
+    PY_STUB_LOG: pyStubLog,
   };
   const baseArgs = [
     '-SkipFirewall',
@@ -213,6 +234,18 @@ try {
       r.stdout.includes('Initializing vocab schema'),
       'installer must run the vocab schema init step (issue #78)',
     );
+    // Issue #78 guard: assert the `init` subcommand was actually invoked, not
+    // just that the banner printed (deleting install.ps1's `& $venvPython ...
+    // init` call while keeping the banner must turn this red). The POSIX
+    // recording python stub (see fixture build) logs its argv; on Windows the
+    // fake python.exe cannot be a text script, so this guard is POSIX-only.
+    if (process.platform !== 'win32') {
+      const pyLog = fs.readFileSync(pyStubLog, 'utf8');
+      assert.ok(
+        /\s--db\s+\S+\s+init\s*$/.test(pyLog),
+        `installer must invoke vocab_manager.py with the init subcommand (recorded args: ${JSON.stringify(pyLog.trim())})`,
+      );
+    }
     if (process.platform !== 'win32') {
       // Regression guard (main CI run 40347156585): pwsh exists on this host
       // but Get-NetTCPConnection does not - the advisory port probe must skip
