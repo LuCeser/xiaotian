@@ -311,10 +311,15 @@ test('textbook commit: poems ride the 新建教材 path with their own lesson an
     const card = panel.locator('.photo-poem-card[data-poem-index="0"]');
     await expect(card).toBeVisible({ timeout: 30_000 });
 
-    // The recognized header preselects 新建教材 (name prefilled from the
-    // meta); the poem card gains its OWN 课次 input in textbook mode —
+    // The recognized header lands the panel on 新建教材 (name prefilled
+    // from the meta; Issue #80 §2.2: with other 语文 books already on the
+    // shared DB it stops at 请选择 instead — the parent picks 新建 either
+    // way); the poem card gains its OWN 课次 input in textbook mode —
     // 第8课, distinct from the 词语's 第5课, proving per-poem lessons.
-    await expect(panel.locator('select[aria-label="教材归属"]')).toHaveValue('new');
+    const bookSelect = panel.locator('select[aria-label="教材归属"]');
+    if ((await bookSelect.inputValue()) === 'unset') {
+      await bookSelect.selectOption('new');
+    }
     await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
     await card.locator('input[aria-label="诗题 第 1 首"]').fill(title);
     await card.locator('input[aria-label="课次 第 1 首"]').fill('第8课');

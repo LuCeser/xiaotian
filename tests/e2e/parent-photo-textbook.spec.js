@@ -91,8 +91,14 @@ test('photo textbook: misread lesson is batch-corrected; the CONFIRMED result go
     await expect(meta).toContainText('模块 Unit 3');
     await expect(meta).toContainText('课次 第2课'); // the stub's MISREAD
 
-    // AC-1: no existing book matches → 新建教材 prefilled from the meta.
-    await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
+    // AC-1: no existing book matches the PEP header — Issue #80 §2.2 has
+    // the panel STOP at 请选择 once any book exists (suite order leaves
+    // 外研版/北师大版 behind), or preselect 新建 on a clean DB. The parent
+    // lands on 新建教材 either way, prefilled from the meta.
+    const select = page.locator('#parent-photo-textbook');
+    if ((await select.inputValue()) === 'unset') {
+      await select.selectOption('new');
+    }
     await expect(page.locator('#parent-photo-tb-name')).toHaveValue(BOOK_PEP);
 
     // AC-3: batch-correct the whole page to the lesson actually printed.
@@ -143,6 +149,12 @@ test('photo textbook: two books built from photos keep independent progress', as
     await awaitReceipt(page, BOOK_PEP, { 新增: 3 });
 
     await recognize(page, FIXTURE_JIJIANG);
+    // Books exist (PEP) but none matches 冀教版 — Issue #80 §2.2 stops at
+    // 请选择 instead of guessing 新建; the parent explicitly creates the
+    // new book, which restores the lesson column.
+    const select = page.locator('#parent-photo-textbook');
+    await expect(select).toHaveValue('unset');
+    await select.selectOption('new');
     // 冀教版's header was read correctly — 第1课 stands, no correction.
     await expect(page.locator('input[aria-label="课次 第 1 行"]')).toHaveValue('第1课');
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
@@ -187,7 +199,13 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
   try {
     // Photo 1 → the 译林版 book with 第1课, then mark 第1课 learned.
     await recognize(page, FIXTURE_LEXIN);
-    await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
+    // In suite order other books exist and none matches 译林版 — the
+    // panel stops at 请选择 (Issue #80 §2.2); standalone it preselects
+    // 新建 on the clean DB. Either way the parent lands on 新建教材.
+    const freshSelect = page.locator('#parent-photo-textbook');
+    if ((await freshSelect.inputValue()) === 'unset') {
+      await freshSelect.selectOption('new');
+    }
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
     await awaitReceipt(page, BOOK_LEXIN, { 新增: 2 });
     const books1 = await textbooks(request);

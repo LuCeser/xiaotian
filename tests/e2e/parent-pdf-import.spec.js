@@ -168,7 +168,16 @@ test('partial failure: page 2 fails with its reason, completed pages keep their 
       await heads.nth(i).locator('.pdf-page-lesson').fill(lessons[i]);
       await heads.nth(i).locator('.pdf-page-lesson-apply').click();
     }
-    await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
+    // Issue #80 §2.2: in suite order the earlier test's 外研版 book
+    // already exists and does NOT match this run's 北师大版 header — the
+    // panel then STOPS at 请选择 (never a guessed 新建); on a clean DB it
+    // preselects 新建 directly. The parent lands on 新建教材 either way
+    // before committing.
+    const select = page.locator('#parent-photo-textbook');
+    if ((await select.inputValue()) === 'unset') {
+      await select.selectOption('new');
+    }
+    await expect(page.locator('#parent-photo-tb-name')).toHaveValue(BOOK_BEISHIDA);
     await page.getByRole('button', { name: '确认添加（4 个）' }).click();
     await awaitReceipt(page, BOOK_BEISHIDA, { 新增: 4 });
 
