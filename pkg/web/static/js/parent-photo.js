@@ -4628,9 +4628,11 @@
    * buildTextbookReceipt — the Issue #6 per-item commit receipt. Buckets
    * every preview row into exactly one category:
    *   'added'       新增 — the word entered the library (verified or
-   *                  server-confirmed) and its source merged
-   *   'merged'      合并 — an already-present word whose source merged
-   *                  (exists, 保留/采用 resolution, raced-to-different)
+   *                  server-confirmed) and a successful assign response
+   *                  named it
+   *   'merged'      合并 — an already-present word a SUCCESSFUL assign
+   *                  response merged (exists, 保留/采用 resolution,
+   *                  raced-to-different)
    *   'pendingDiff' 待处理差异 — a conflict the parent did NOT resolve
    *   'failed'      失败 — something the parent must fix (add/edit/assign
    *                  step failed, or the card could not be resolved); the
@@ -4640,6 +4642,14 @@
    *   'excluded'    未提交 — invalid or unchecked rows (never failures)
    * summary is BY CONSTRUCTION the tally of items (AC-6: 汇总与实际结果
    * 一致). Pure — the caller supplies only server-truth pieces.
+   *
+   * PR #88 (ADR-0003: 回执汇总用服务器实际响应拼装): any wording that
+   * claims a merged source or a landed lesson (已合并来源/仅合并来源/仅指
+   * 定课次/已添加并指定课次) requires the word to appear in an ok:true
+   * assign result — never an else-fallthrough. A word no assign covered
+   * (textbooks:null, no card id — the payload skip in planAssignments) is
+   * a FAILURE whose note keeps what did persist (the edit, the add) and
+   * admits 未能指定课次, in the same voice as an explicit assign failure.
    */
   function buildTextbookReceipt(input) {
     var edited = {};
@@ -4649,12 +4659,18 @@
       }
     });
     var assignFailed = {};
+    var assignOk = {};
     (input.groupResults || []).forEach(function (r) {
-      if (r && !r.ok && r.group) {
-        (r.group.words || []).forEach(function (w) {
-          assignFailed[w] = { lesson: r.group.lesson || '', error: r.error || '未知错误' };
-        });
+      if (!r || !r.group) {
+        return;
       }
+      (r.group.words || []).forEach(function (w) {
+        if (r.ok) {
+          assignOk[w] = true; // the SERVER confirmed this word's assign
+        } else {
+          assignFailed[w] = { lesson: r.group.lesson || '', error: r.error || '未知错误' };
+        }
+      });
     });
     var snapMeaning = {};
     (input.fresh || []).forEach(function (w) {
@@ -4705,9 +4721,12 @@
           if (assignFailed[row.word]) {
             item.category = 'failed';
             item.note = assignFailNote(row.word, '并发已存在不同释义，保留原释义；');
-          } else {
+          } else if (assignOk[row.word]) {
             item.category = 'merged';
             item.note = '并发已存在不同释义，保留原释义，仅合并来源';
+          } else {
+            item.category = 'failed';
+            item.note = '并发已存在不同释义，保留原释义；词库读取失败，未能指定课次——可在词库中补指定';
           }
         } else if (assignFailed[row.word]) {
           item.category = 'failed';
@@ -4715,9 +4734,12 @@
         } else if (unassigned[row.word]) {
           item.category = 'failed';
           item.note = '词条已保存，但词库读取失败，未能指定课次——可在词库中补指定';
-        } else {
+        } else if (assignOk[row.word]) {
           item.category = 'added';
           item.note = '已添加并指定课次';
+        } else {
+          item.category = 'failed';
+          item.note = '词条已保存，未能指定课次——可在词库中补指定';
         }
       } else if (row.status === 'conflict' && row.resolution === 'adopt') {
         var edit = edited[row.word];
@@ -4727,9 +4749,12 @@
         } else if (assignFailed[row.word]) {
           item.category = 'failed';
           item.note = assignFailNote(row.word, '释义已按照片更新；');
-        } else {
+        } else if (assignOk[row.word]) {
           item.category = 'merged';
           item.note = '采用照片释义更新，已合并来源';
+        } else {
+          item.category = 'failed';
+          item.note = '释义已按照片更新；词库读取失败，未能指定课次——可在词库中补指定';
         }
       } else if (unassigned[row.word]) {
         item.category = 'failed';
@@ -4737,12 +4762,14 @@
       } else if (assignFailed[row.word]) {
         item.category = 'failed';
         item.note = assignFailNote(row.word);
-      } else if (row.status === 'conflict') {
+      } else if (assignOk[row.word]) {
         item.category = 'merged';
-        item.note = '保留词库释义，仅合并来源';
+        item.note = row.status === 'conflict'
+          ? '保留词库释义，仅合并来源'
+          : '词库已有，仅指定课次';
       } else {
-        item.category = 'merged';
-        item.note = '词库已有，仅指定课次';
+        item.category = 'failed';
+        item.note = '未能指定课次——可在词库中补指定';
       }
       items.push(item);
     });
@@ -4771,7 +4798,10 @@
    * can neither admit nor hold a word — such words count 资格待核实
    * (unverified) instead. Same for a read whose attribution projection
    * failed server-side (textbooks:null, PR #88 P1): [] is a VERIFIED
-   * no-attribution, null is unknown. Pure.
+   * no-attribution, null is unknown. Paused words follow the same rule
+   * (PR #88 复盘): a source on a textbook the post-save read missed can
+   * neither earn the 恢复参与后即可安排 promise nor pin the「还需课次
+   * 已学」condition — 资格待核实. Pure.
    */
   function summarizeAssignScope(book, groupResults, postSave, books) {
     var out = {
@@ -4857,14 +4887,22 @@
           }
         });
         if (saved.participates === false) {
-          out.paused += 1;
           // P2-2: 「恢复参与后即可安排」 holds only when some source
           // ALREADY qualifies the word — an explicit include, a learned
           // entry on a covered book, or no attribution at all. A paused
-          // word whose only source is unlearned (or unverifiable) still
-          // needs progress or an include after restoration.
-          if (includeHit || !entries.length || learnedHit) {
+          // word whose covered sources are all unlearned still needs
+          // progress or an include after restoration. PR #88 复盘: a
+          // paused word qualified only by an UNREAD textbook's source is
+          // 资格待核实 — that source may already qualify it, so neither
+          // the restore promise nor the「还需课次已学」condition may be
+          // stated as fact.
+          if (includeHit || learnedHit || !entries.length) {
+            out.paused += 1;
             out.pausedReady += 1;
+          } else if (!allCovered) {
+            out.unverified += 1;
+          } else {
+            out.paused += 1;
           }
           return;
         }
