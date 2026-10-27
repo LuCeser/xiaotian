@@ -75,8 +75,9 @@ async function openWordLib(page) {
  * One real classroom probe: a raw /rt practice session_init (mode=test —
  * the full-reveal lesson view; the student projection masks undictated
  * words to empty strings by design, 13.1-02). Resolves with
- * session_ready's selected words (sent before any turn/announcement audio,
- * so stubbed voice traffic cannot race the assertion).
+ * session_ready's selected words. Greeting audio streams right after
+ * session_ready and outlives the close handshake, so only TEXT frames
+ * are parsed (the #81 guard photo-flow.js already carries).
  */
 function practiceSelection() {
   return new Promise((resolve, reject) => {
@@ -93,7 +94,8 @@ function practiceSelection() {
         audio: { sampleRate: 16000, format: 's16le', channels: 1 },
       }));
     });
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) return; // teacher audio rides binary frames; only control JSON here
       const msg = JSON.parse(String(data));
       if (msg.type === 'session_ready') {
         clearTimeout(fail);

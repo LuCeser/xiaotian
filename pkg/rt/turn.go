@@ -428,6 +428,15 @@ type TurnManager struct {
 	// claim's one-critical-section contract from here.
 	closeEntryInterleave func()
 
+	// announceEntryInterleave (test seam, PR #60 review J15; nil in
+	// production) fires after runAnnouncementDisplayAt's entry gate has
+	// PASSED and the lock is down, right before speakTurn — the exact
+	// window where an end_session must still kill the announcement: a close
+	// does not bump the epoch, so speakTurn's epoch comparisons alone would
+	// wave a dead session's greeting through. The deterministic race tests
+	// land the end_session from here.
+	announceEntryInterleave func()
+
 	// photo is the in-flight upload's assembler buffer; nil when idle.
 	// PRIVACY P2: the decoded chunks live ONLY here until the one OCR call
 	// consumes them; close/cancel/over-cap/new-upload all discard.
@@ -1108,6 +1117,9 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 	tm.mu.Unlock()
 	if tm.speakTurnInterleave != nil {
 		tm.speakTurnInterleave()
+	}
+	if tm.announceEntryInterleave != nil {
+		tm.announceEntryInterleave()
 	}
 
 	ref := tm.speakTurn(s, turnID, epoch, spoken, display, purpose, ctx, cancel)

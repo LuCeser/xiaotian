@@ -55,6 +55,17 @@ async function deleteUnit(request, category, unit) {
   await request.delete('/api/v1/words', { data: { category, unit } }).catch(() => {});
 }
 
+/** This suite's 词语 vocabulary (the mixed fixture's two words). The
+ *  textbook-mode commit writes NO unit tag (Issue #89), so the word list
+ *  is that path's isolation key — same convention as the other #89-adapted
+ *  photo suites. */
+const WORDS_MIXED = ['美丽', '世界'];
+
+/** DELETE this suite's words through the real API. A 404 is fine. */
+async function deleteWords(request) {
+  await request.delete('/api/v1/words', { data: { category: CAT_ZH, words: WORDS_MIXED } }).catch(() => {});
+}
+
 /** Real poem rows (GET /poems) filtered by title prefix. */
 async function poemRows(request, title) {
   const resp = await request.get('/api/v1/poems?category=' + CAT_ZH);
@@ -78,6 +89,10 @@ async function openPhotoTab(page) {
  * title to the unique value (纠错), pin the SUPPLEMENTARY path (不指定教
  * 材 — the recognized header would otherwise preselect 新建教材), and
  * return the panel. The textbook path has its own test.
+ *
+ * Issue #89 order: pick 不指定教材 FIRST — the recognized header
+ * preselects 新建教材, and syncUnitField hides the 单元 input while any
+ * textbook is chosen, so the unit can only be filled on the 'none' branch.
  */
 async function recognizeMixedAndCorrect(page, title) {
   const panel = page.locator('#add-panel-photo');
@@ -86,8 +101,8 @@ async function recognizeMixedAndCorrect(page, title) {
   await panel.getByRole('button', { name: '开始识别' }).click();
   const card = panel.locator('.photo-poem-card[data-poem-index="0"]');
   await expect(card).toBeVisible({ timeout: 30_000 });
-  await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
   await panel.locator('select[aria-label="教材归属"]').selectOption('none');
+  await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
   await card.locator('input[aria-label="诗题 第 1 首"]').fill(title);
   // The 纠错 re-classification keeps the row committable — 'new' for a
   // first import (test 1 pins that), 'exists' when the same full text is
@@ -111,7 +126,8 @@ function rtSessionInit(category) {
         category,
       }));
     });
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) return; // teacher audio rides binary frames; only control JSON here
       const msg = JSON.parse(String(data));
       if (msg.type === 'session_ready') {
         clearTimeout(fail);
@@ -161,9 +177,10 @@ test('mixed page: 区分展示, 纠错确认 stores the whole poem; poems never 
     await expect(others.locator('input')).toHaveCount(0);
 
     // 纠错 + confirm: the edited title rides the commit; both kinds go in
-    // ONE confirm (the supplementary path — 不指定教材).
-    await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
+    // ONE confirm (the supplementary path — 不指定教材). Issue #89: the
+    // unit input only exists on the 'none' branch, so pick it first.
     await panel.locator('select[aria-label="教材归属"]').selectOption('none');
+    await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
     await card.locator('input[aria-label="诗题 第 1 首"]').fill(title);
     await panel.getByRole('button', { name: /确认添加/ }).click();
     await expect(panel.locator('.result-banner .result-summary'))
@@ -302,6 +319,7 @@ test('unified content view: 古诗 type filter, attribution and progress scope m
 
 test('textbook commit: poems ride the 新建教材 path with their own lesson and progress gate', async ({ page, request }) => {
   await deleteUnit(request, CAT_ZH, UNIT_IMPORT);
+  await deleteWords(request);
   try {
     const title = poemTitle();
     const panel = await openPhotoTab(page);
@@ -314,8 +332,9 @@ test('textbook commit: poems ride the 新建教材 path with their own lesson an
     // The recognized header preselects 新建教材 (name prefilled from the
     // meta); the poem card gains its OWN 课次 input in textbook mode —
     // 第8课, distinct from the 词语's 第5课, proving per-poem lessons.
+    // No 单元 fill: Issue #89 hides the unit input in textbook mode and
+    // the commit ignores it — cleanup rides on WORDS_MIXED instead.
     await expect(panel.locator('select[aria-label="教材归属"]')).toHaveValue('new');
-    await panel.getByRole('combobox', { name: '单元', exact: true }).fill(UNIT_IMPORT);
     await card.locator('input[aria-label="诗题 第 1 首"]').fill(title);
     await card.locator('input[aria-label="课次 第 1 首"]').fill('第8课');
     await panel.getByRole('button', { name: /确认添加/ }).click();
@@ -351,5 +370,6 @@ test('textbook commit: poems ride the 新建教材 path with their own lesson an
     await expect(poemCard.locator('.poem-scope')).toHaveText('课次尚未学到，暂不在学习范围');
   } finally {
     await deleteUnit(request, CAT_ZH, UNIT_IMPORT);
+    await deleteWords(request);
   }
 });

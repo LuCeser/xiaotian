@@ -63,26 +63,43 @@ process.env.NO_PROXY = process.env.NO_PROXY
   : '127.0.0.1,localhost';
 process.env.no_proxy = process.env.NO_PROXY;
 
+// Machine-readable report contract (ci.yml job m1-browser-e2e →
+// scripts/check-m1-report.mjs). Playwright ≥1.4x treats
+// PLAYWRIGHT_JSON_OUTPUT_NAME as a BARE report name joined onto the json
+// reporter's default outputDir — the CONFIG FILE's directory (tests/) when
+// the reporter comes from the CLI. With `--reporter=list,json` the run in PR
+// #91's CI therefore wrote tests/reports/m1-results.json while the checker
+// read reports/ at the repo root → ENOENT. Attaching the reporter HERE with
+// an outputFile resolved against repoRoot makes the plain local command
+// (`PLAYWRIGHT_JSON_OUTPUT_NAME=… npm run e2e:m1`) land the file exactly
+// where the checker looks; Playwright's outputReport() creates the parent
+// directory on demand. A CLI --reporter=json override would drop this
+// outputFile option, so CI must NOT pass --reporter to this line.
+const m1JsonReport = process.env.PLAYWRIGHT_JSON_OUTPUT_NAME
+  ? path.resolve(repoRoot, process.env.PLAYWRIGHT_JSON_OUTPUT_NAME)
+  : undefined;
+
 module.exports = defineConfig({
   testDir: './e2e-m1-browser',
   // Explicit per-spec match: each plan step appends its spec file here, so
-  // the m1 line never silently picks up another suite's specs (manual-entry,
-  // photo-entry, smoke, subject-playback, subject-scope, voice-input).
-  // The run-level service below serves the single read-only smoke test.
-  // Every stateful classroom test — steps 11–13 included — starts its own
-  // service, temp DB and data root through helpers/spec-service.js (plan §2
-  // 每用例独立数据库; the shared instance's lesson rows are first-content-wins
-  // per subject, so classroom specs must not share them). Specs reset the
-  // shared strict stub at their boundaries, so no assertion depends on file
-  // execution order or an earlier test's cleanup.
-  testMatch: /(smoke|subject-playback|voice-input|manual-entry|subject-scope|photo-entry)\.spec\.js$/,
+  // the m1 line never silently picks up another suite's specs (finish,
+  // manual-entry, photo-entry, smoke, subject-playback, subject-scope,
+  // voice-input). The run-level service below serves the single read-only
+  // smoke test. Every stateful classroom test — steps 11–13 included —
+  // starts its own service, temp DB and data root through
+  // helpers/spec-service.js (plan §2 每用例独立数据库; the shared
+  // instance's lesson rows are first-content-wins per subject, so classroom
+  // specs must not share them). Specs reset the shared strict stub at their
+  // boundaries, so no assertion depends on file execution order or an
+  // earlier test's cleanup.
+  testMatch: /(smoke|subject-playback|voice-input|manual-entry|subject-scope|photo-entry|finish)\.spec\.js$/,
   timeout: 60_000,
   retries: 0,
   // The strict vendor stub is shared, so its independently reset scripts
   // remain serialized even though classroom databases are per test.
   workers: 1,
   maxFailures: process.env.CI ? undefined : 1,
-  reporter: [['list']],
+  reporter: m1JsonReport ? [['list'], ['json', { outputFile: m1JsonReport }]] : [['list']],
   use: {
     baseURL: SERVICE,
     launchOptions: {

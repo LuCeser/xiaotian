@@ -11,13 +11,17 @@
  *   - Search debounces 300ms (vanilla setTimeout/clearTimeout) then calls
  *     GET /api/v1/words?q=; clearing restores the unfiltered list.
  *   - Unit header: 48px aria-expanded toggle (chevron ▾/▸ + unit name +
- *     count badge {n} 个单词 from GET /api/v1/units); collapse state
+ *     count badge {n} 个单词 from the rows in that group); collapse state
  *     persists in localStorage under parent.units.collapsed (JSON array
- *     of unit names, re-applied on every render).
- *   - Groups are built client-side from the word list; the grouping key
- *     is the whole unit string (flat strings, prefix-agnostic per D-09).
- *     Groups left with zero rows by the search are hidden, not rendered
- *     empty (zero-one-many row).
+ *     of unit names, re-applied on every render). GET /api/v1/units counts
+ *     the legacy unit tag, which lesson-owned words can still wear while
+ *     the page shows them under their lesson (Issue #89).
+ *   - Groups are built client-side. A word with textbook lesson ownership
+ *     groups by that lesson within its OWN textbook (Issue #89 — the same
+ *     record dictation reads; two books' same-named lessons are separate
+ *     groups), never by the legacy unit tag. A word with no textbook
+ *     assignment still groups by its unit string (补充词汇). Groups left
+ *     with zero rows by the search are hidden, not rendered empty.
  *   - Edit modal (编辑单词): only 单词 is required (D-08); category is
  *     read-only (D-07); 保存修改 → PUT /api/v1/words/{id} → toast +
  *     refresh.
@@ -38,8 +42,314 @@
   var COLLAPSE_STORAGE_KEY = 'parent.units.collapsed';
   var SKELETON_ROWS = 3;
 
-  /** Header label for rows whose unit is the empty string. */
+  /** Header label for supplementary rows whose unit is the empty string. */
   var UNGROUPED_LABEL = '未分组';
+  /** Header label for textbook rows whose lesson is still empty. */
+  var PENDING_LESSON_LABEL = '待确认';
+
+  /**
+   * lessonOwnership — the textbook lesson the browse group must use, as
+   * {bookId, bookName, lesson}, or null when the word has no textbook
+   * assignment and still groups by its unit tag. The lesson NAME alone
+   * cannot key a group: two textbooks can both carry 「第1课」 and their
+   * lessons are independent (课次属于教材), so the owning book rides
+   * along. A non-supplementary scope_reason wins (including an empty
+   * lesson, which is 待确认 — one shared bucket). Without a verdict, the
+   * first named assignment on the word is the group so a just-assigned
+   * lesson still moves the row.
+   */
+  function lessonOwnership(word) {
+    if (!word) {
+      return null;
+    }
+    var entries = word.textbooks || [];
+    var reason = word.scope_reason || '';
+    var lesson = '';
+    if (reason && reason !== 'supplementary') {
+      lesson = word.group_lesson || '';
+    } else if (entries.length) {
+      for (var i = 0; i < entries.length; i++) {
+        if (entries[i] && entries[i].lesson) {
+          lesson = entries[i].lesson;
+          break;
+        }
+      }
+    } else {
+      return null;
+    }
+    return owningAssignment(word, lesson);
+  }
+
+  /**
+   * owningAssignment — the assignment a lesson group keys by: the entry
+   * the server verdict named (group_lesson plus its group_textbook_id),
+   * else the first entry wearing that lesson. When the attribution
+   * projection is absent the wire's bare book id still keys the group
+   * (0 = unknown). An empty lesson is 待确认 and never claims a book.
+   */
+  function owningAssignment(word, lesson) {
+    if (!lesson) {
+      return { bookId: 0, bookName: '', lesson: '' };
+    }
+    var entries = word.textbooks || [];
+    var bookId = word.group_textbook_id || 0;
+    var wearing = null;
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      if (!entry || entry.lesson !== lesson) {
+        continue;
+      }
+      if (!wearing) {
+        wearing = entry;
+      }
+      if (bookId && entry.id === bookId) {
+        wearing = entry;
+        break;
+      }
+    }
+    if (wearing) {
+      return { bookId: wearing.id || 0, bookName: wearing.name || '', lesson: lesson };
+    }
+    return { bookId: bookId, bookName: '', lesson: lesson };
+  }
+
+  /**
+   * dictationStatusText — the parent-facing line when this word will not
+   * be picked for dictation, or '' when the textbook gate and the
+   * participation switch both admit it. A removed word says so FIRST:
+   * eligibility is participates AND 课次门槛, so 「学到后自动加入」 would
+   * be a false promise while participates is off — learning the lesson
+   * alone would not bring the word back.
+   */
+  function dictationStatusText(word) {
+    if (!word) {
+      return '';
+    }
+    if (word.participates === false) {
+      return '已移出默写范围';
+    }
+    if (word.scope_reason === 'unlearned') {
+      return '尚未学到，学到后自动加入';
+    }
+    if (word.scope_reason === 'off_list') {
+      return '课次不在教材课次表里，不会随进度自动加入';
+    }
+    if (word.scope_reason === 'pending') {
+      return '课次待确认，指定后自动加入';
+    }
+    return '';
+  }
+
+  /**
+   * groupBrowseWords — one group per lesson (words that have textbook
+   * ownership) or per unit tag (supplementary words). A lesson group is
+   * keyed by its BOOK and lesson name together: two books' 「第1课」 are
+   * independent lessons, never one merged group. Order is first-seen;
+   * orderBrowseGroups re-sorts lesson groups into teaching order.
+   */
+  function groupBrowseWords(words) {
+    var groups = [];
+    var index = Object.create(null);
+    (words || []).forEach(function (word) {
+      var own = lessonOwnership(word);
+      var key;
+      if (own !== null) {
+        key = 'lesson\u0000' + own.bookId + '\u0000' + own.lesson;
+        if (!Object.prototype.hasOwnProperty.call(index, key)) {
+          index[key] = {
+            kind: 'lesson',
+            unit: own.lesson,
+            bookId: own.bookId,
+            bookName: own.bookName,
+            label: own.lesson || PENDING_LESSON_LABEL,
+            rows: [],
+          };
+          groups.push(index[key]);
+        }
+      } else {
+        var unit = (word && word.unit) || '';
+        key = 'unit\u0000' + unit;
+        if (!Object.prototype.hasOwnProperty.call(index, key)) {
+          index[key] = {
+            kind: 'unit',
+            unit: unit,
+            label: unit || UNGROUPED_LABEL,
+            rows: [],
+          };
+          groups.push(index[key]);
+        }
+      }
+      index[key].rows.push(word);
+    });
+    return groups;
+  }
+
+  /**
+   * orderBrowseGroups — lesson groups follow their OWN textbook's explicit
+   * lesson order: books in list order, each book's lessons in list order
+   * (not dictionary order, not the legacy unit sort, and never one global
+   * name order that would interleave two books' independent 「第1课」).
+   * 待确认 follows the named lessons. Supplementary unit groups keep
+   * first-seen order at the end.
+   */
+  function orderBrowseGroups(groups, books) {
+    var rank = Object.create(null);
+    var bookName = Object.create(null);
+    var lessonName = Object.create(null);
+    var n = 0;
+    (books || []).forEach(function (book) {
+      if (!book) {
+        return;
+      }
+      bookName[String(book.id)] = book.name || '';
+      (book.lessons || []).forEach(function (name) {
+        if (!name) {
+          return;
+        }
+        lessonName[name] = true;
+        var key = String(book.id) + '\u0000' + name;
+        if (!Object.prototype.hasOwnProperty.call(rank, key)) {
+          rank[key] = n;
+          n += 1;
+        }
+      });
+    });
+    var named = [];
+    var pending = [];
+    var units = [];
+    (groups || []).forEach(function (group) {
+      if (!group || group.kind !== 'lesson') {
+        units.push(group);
+        return;
+      }
+      if (!group.unit) {
+        pending.push(group);
+        return;
+      }
+      named.push(group);
+    });
+    named.sort(function (a, b) {
+      var ka = String(a.bookId || 0) + '\u0000' + a.unit;
+      var kb = String(b.bookId || 0) + '\u0000' + b.unit;
+      var ra = Object.prototype.hasOwnProperty.call(rank, ka) ? rank[ka] : 100000;
+      var rb = Object.prototype.hasOwnProperty.call(rank, kb) ? rank[kb] : 100000;
+      return ra - rb;
+    });
+    // A lesson name worn by TWO books names two independent groups — both
+    // carry their book so the headers cannot read as one lesson.
+    var byLesson = Object.create(null);
+    named.forEach(function (group) {
+      if (!group.unit) {
+        return;
+      }
+      if (!Object.prototype.hasOwnProperty.call(byLesson, group.unit)) {
+        byLesson[group.unit] = [];
+      }
+      byLesson[group.unit].push(group);
+    });
+    Object.keys(byLesson).forEach(function (lesson) {
+      var wearers = byLesson[lesson];
+      if (wearers.length < 2) {
+        return;
+      }
+      wearers.forEach(function (group) {
+        var name = group.bookName || bookName[String(group.bookId)] || '';
+        if (name) {
+          group.label = name + '·' + lesson;
+        }
+      });
+    });
+    // A supplementary unit tag that shares a name with a textbook lesson
+    // is a different bucket. Prefix it so two headers do not both read
+    // 「unit 1」 (a lesson group rendered below also claims the name, even
+    // when the books list itself failed to load).
+    Object.keys(byLesson).forEach(function (lesson) {
+      lessonName[lesson] = true;
+    });
+    units.forEach(function (group) {
+      if (!group || !group.unit) {
+        return;
+      }
+      if (lessonName[group.unit]) {
+        group.label = '补充 · ' + group.unit;
+      }
+    });
+    return named.concat(pending, units);
+  }
+
+  var DELETE_WORDS_BATCH = 100;
+
+  /**
+   * supplementaryDeletePlan — DELETE bodies for one supplementary group.
+   * Only the group's own rows are named. A {category, unit} delete would
+   * also remove lesson-owned cards that still carry the same unit string
+   * and are shown under their lesson (Issue #89). Words mode is capped at
+   * 100 per request, so a long group is split.
+   */
+  function supplementaryDeletePlan(group) {
+    var buckets = Object.create(null);
+    var order = [];
+    var count = 0;
+    var rows = (group && group.rows) || [];
+    rows.forEach(function (word) {
+      if (!word || !word.category || !word.word) {
+        return;
+      }
+      if (!Object.prototype.hasOwnProperty.call(buckets, word.category)) {
+        buckets[word.category] = [];
+        order.push(word.category);
+      }
+      buckets[word.category].push(word.word);
+      count += 1;
+    });
+    var requests = [];
+    order.forEach(function (category) {
+      var words = buckets[category];
+      for (var i = 0; i < words.length; i += DELETE_WORDS_BATCH) {
+        requests.push({
+          category: category,
+          words: words.slice(i, i + DELETE_WORDS_BATCH),
+        });
+      }
+    });
+    return { count: count, requests: requests };
+  }
+
+  /**
+   * unitRenameTouchesLesson — true when any loaded card wears this unit
+   * string but groups by a textbook lesson. Renaming the unit tag would
+   * rewrite that hidden string; the group's own rows must be edited
+   * instead.
+   */
+  function unitRenameTouchesLesson(words, unit) {
+    for (var i = 0; i < (words || []).length; i++) {
+      var word = words[i];
+      if (!word || (word.unit || '') !== unit) {
+        continue;
+      }
+      if (lessonOwnership(word) !== null) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** groupHoldText — the hold line when every row shares one, else ''. */
+  function groupHoldText(rows) {
+    var text = '';
+    for (var i = 0; i < (rows || []).length; i++) {
+      var line = dictationStatusText(rows[i]);
+      if (!line) {
+        return '';
+      }
+      if (!text) {
+        text = line;
+      } else if (text !== line) {
+        return '';
+      }
+    }
+    return text;
+  }
 
   /** Clear a container via the firstChild-removeChild loop (Pattern 4). */
   function clearContainer(container) {
@@ -348,6 +658,7 @@
     this.poems = [];
     this.passages = [];
     this.units = [];
+    this.textbooks = [];
     this.fetchSeq = 0;    // stale-response guard for debounced refetches
     this.debounceTimer = null;
     this.selectedIds = {};
@@ -654,15 +965,20 @@
         self.renderError(err);
       });
     }
+    var booksPromise = typeof this.fetchTextbooks === 'function'
+      ? this.fetchTextbooks(this.category).catch(function () { return []; })
+      : Promise.resolve([]);
     return Promise.all([
       this.fetchWords(this.category, this.query),
       this.fetchUnits(this.category),
+      booksPromise,
     ]).then(function (results) {
       if (seq !== self.fetchSeq) {
         return;
       }
       self.words = Array.isArray(results[0]) ? results[0] : [];
       self.units = Array.isArray(results[1]) ? results[1] : [];
+      self.textbooks = Array.isArray(results[2]) ? results[2] : [];
       var visible = {};
       self.words.forEach(function (word) { visible[String(word.id)] = true; });
       Object.keys(self.selectedIds).forEach(function (id) {
@@ -810,53 +1126,37 @@
   };
 
   /**
-   * Group the word list client-side. The grouping key is the whole unit
-   * string (D-09 flat strings, prefix-agnostic); rows whose unit is the
-   * empty string land in one 未分组 group. Order follows the server's.
+   * Group the word list client-side. Textbook-owned words group by the
+   * lesson dictation reads (group_lesson); supplementary words group by
+   * the unit tag. Lesson groups then follow textbook teaching order.
    */
   BrowseView.prototype.groupWords = function () {
-    var groups = [];
-    var index = {};
-    this.words.forEach(function (word) {
-      var key = word.unit || '';
-      if (!Object.prototype.hasOwnProperty.call(index, key)) {
-        index[key] = { unit: key, rows: [] };
-        groups.push(index[key]);
-      }
-      index[key].rows.push(word);
-    });
-    return groups;
-  };
-
-  /** Count-badge value for a unit from the GET /units response, or null. */
-  BrowseView.prototype.countForUnit = function (unit) {
-    for (var i = 0; i < this.units.length; i++) {
-      var entry = this.units[i];
-      if (entry && entry.unit === unit && typeof entry.count === 'number') {
-        return entry.count;
-      }
-    }
-    return null;
+    return orderBrowseGroups(groupBrowseWords(this.words), this.textbooks);
   };
 
   /**
-   * Unit ops act on {category, unit} server-side. In the 全部 view with
-   * an active search, the group's visible rows may only cover SOME of
-   * the categories holding that unit — renaming/deleting from the badge
-   * count then would not match the dialog's exact-scope copy (T-09-05),
-   * so the header actions are withheld in that one combination. Word
-   * rows keep their per-word 编辑/删除 everywhere.
+   * Unit rename/delete follow the rows in the group. A search hides some
+   * of those rows, so the header actions are withheld until the list is
+   * unfiltered — the confirm copy would otherwise name a different set
+   * than the one on screen (T-09-05). Word rows keep their per-word
+   * 编辑/删除 everywhere.
    */
   BrowseView.prototype.unitOpsAllowed = function () {
-    return this.query === '' || this.category !== '';
+    return this.query === '';
   };
 
   BrowseView.prototype.buildGroup = function (group) {
     var self = this;
     var unit = group.unit;
+    // A lesson group's collapse key carries its book: two books' 「第1课」
+    // are independent groups and must not collapse together.
+    var collapseKey = group.kind === 'lesson'
+      ? ('课次:' + (group.bookId || 0) + ':' + unit)
+      : unit;
 
     var wrap = document.createElement('div');
     wrap.className = 'unit-group';
+    wrap.setAttribute('data-group-kind', group.kind || 'unit');
     wrap.setAttribute('data-unit', unit);
 
     var header = document.createElement('div');
@@ -875,23 +1175,21 @@
 
     var name = document.createElement('span');
     name.className = 'unit-name';
-    name.textContent = unit || UNGROUPED_LABEL;
+    name.textContent = group.label || (unit || UNGROUPED_LABEL);
     // UI-SPEC long-text row: the full name stays available beyond the
     // single-line ellipsis (hover/tap-hold tooltip; assistive tech reads
     // the untruncated textContent regardless).
     if (unit) {
-      name.title = unit;
+      name.title = group.label || unit;
     }
 
-    // Count badge: {n} 个单词 from GET /api/v1/units (category-scoped;
-    // the all-categories view merges by name). The 未分组 group has no
-    // units entry — its row count is the honest count there.
+    // Count badge is the rows in this group. GET /api/v1/units counts the
+    // legacy unit tag, which lesson-owned words can still wear while the
+    // page shows them under their lesson.
     var badge = document.createElement('span');
     badge.className = 'unit-count';
-    var count = unit !== '' ? this.countForUnit(unit) : group.rows.length;
-    if (count === null) {
-      count = group.rows.length;
-    }
+    var deletePlan = group.kind === 'lesson' ? null : supplementaryDeletePlan(group);
+    var count = deletePlan ? deletePlan.count : group.rows.length;
     badge.textContent = count + ' 个单词';
 
     toggle.appendChild(chevron);
@@ -900,16 +1198,16 @@
     header.appendChild(toggle);
 
     // Inline header actions (UI-SPEC Unit group row): 重命名 + 删除 —
-    // 44px hit areas via padding. Rendered only for named units and only
-    // when the exact-scope dialog copy can be guaranteed (see
-    // unitOpsAllowed); 未分组 has no {category, unit} target.
-    if (unit !== '' && this.unitOpsAllowed()) {
+    // 44px hit areas via padding. Only supplementary named units have a
+    // {category, unit} target. A lesson group is textbook ownership;
+    // renaming it here would edit the legacy tag and leave the lesson.
+    if (group.kind !== 'lesson' && unit !== '' && this.unitOpsAllowed()) {
       var renameBtn = document.createElement('button');
       renameBtn.type = 'button';
       renameBtn.className = 'unit-action';
       renameBtn.textContent = '重命名';
       renameBtn.addEventListener('click', function () {
-        self.openRenameModal(unit);
+        self.openRenameModal(group);
       });
 
       var deleteBtn = document.createElement('button');
@@ -917,7 +1215,7 @@
       deleteBtn.className = 'unit-action unit-action-danger';
       deleteBtn.textContent = '删除';
       deleteBtn.addEventListener('click', function () {
-        self.openDeleteUnitModal(unit, count);
+        self.openDeleteUnitModal(group);
       });
 
       header.appendChild(renameBtn);
@@ -931,7 +1229,7 @@
     });
 
     function applyCollapse(names) {
-      var isCollapsed = names.indexOf(unit) !== -1;
+      var isCollapsed = names.indexOf(collapseKey) !== -1;
       body.hidden = isCollapsed;
       chevron.textContent = isCollapsed ? '▸' : '▾';
       toggle.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
@@ -940,9 +1238,9 @@
 
     toggle.addEventListener('click', function () {
       var names = readCollapsedNames();
-      var idx = names.indexOf(unit);
+      var idx = names.indexOf(collapseKey);
       if (idx === -1) {
-        names.push(unit);
+        names.push(collapseKey);
       } else {
         names.splice(idx, 1);
       }
@@ -951,6 +1249,13 @@
     });
 
     wrap.appendChild(header);
+    var hold = groupHoldText(group.rows);
+    if (hold) {
+      var holdLine = document.createElement('p');
+      holdLine.className = 'unit-hold';
+      holdLine.textContent = hold;
+      wrap.appendChild(holdLine);
+    }
     wrap.appendChild(body);
     return wrap;
   };
@@ -1085,6 +1390,14 @@
     chips.forEach(function (chip) {
       row.appendChild(chip);
     });
+    var scopeText = dictationStatusText(word);
+    if (scopeText) {
+      var scope = document.createElement('span');
+      scope.className = 'word-scope-status';
+      scope.setAttribute('data-scope', word.scope_reason || '');
+      scope.textContent = scopeText;
+      row.appendChild(scope);
+    }
     row.appendChild(participationLabel);
     row.appendChild(actions);
     return row;
@@ -1877,14 +2190,32 @@
         meaningField.input.value = word.meaning || '';
         var exampleField = buildModalField('例句', 'edit-example', true);
         exampleField.input.value = word.example || '';
-        var unitField = buildModalField('单元', 'edit-unit', false);
-        unitField.input.setAttribute('list', 'unit-options');
-        unitField.input.value = word.unit || '';
-
         form.appendChild(wordField.field);
         form.appendChild(meaningField.field);
         form.appendChild(exampleField.field);
-        form.appendChild(unitField.field);
+
+        // Issue #89: once a word has textbook lesson ownership, the unit
+        // tag is not a second lesson. Editing it here used to look like
+        // 指定课次 had done nothing. The lesson is changed with 指定教材课次.
+        var unitField = null;
+        var hasLesson = (word.textbooks && word.textbooks.length) ||
+          (word.scope_reason && word.scope_reason !== 'supplementary');
+        if (hasLesson) {
+          var lessonNote = document.createElement('p');
+          lessonNote.className = 'form-hint';
+          var names = (word.textbooks || []).map(function (entry) {
+            return (entry.name || '教材') + (entry.lesson ? '·' + entry.lesson : '·待确认');
+          }).join('、');
+          var status = dictationStatusText(word);
+          lessonNote.textContent = '课次以教材归属为准' + (names ? '（' + names + '）' : '') + '。' +
+            (status ? status + '。' : '') + '修改课次请用「指定教材课次」。';
+          form.appendChild(lessonNote);
+        } else {
+          unitField = buildModalField('单元', 'edit-unit', false);
+          unitField.input.setAttribute('list', 'unit-options');
+          unitField.input.value = word.unit || '';
+          form.appendChild(unitField.field);
+        }
 
         var cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
@@ -1912,12 +2243,15 @@
             return;
           }
           setLoading(saveBtn, true);
-          self.editWord(word.id, {
+          var payload = {
             word: newWord,
             meaning: meaningField.input.value.trim(),
             example: exampleField.input.value,
-            unit: unitField.input.value.trim(),
-          }).then(function () {
+          };
+          if (unitField) {
+            payload.unit = unitField.input.value.trim();
+          }
+          self.editWord(word.id, payload).then(function () {
             close();
             toast('已保存', 'success');
             self.refresh();
@@ -1947,23 +2281,6 @@
   // pairing with Plan 09-05: no delete request exists outside this path).
   // ------------------------------------------------------------------
 
-  /**
-   * Distinct categories present among a unit's rows in the current view.
-   * Mutation endpoints require a category; in the 全部 view a merged
-   * unit may span both, so the flow iterates the categories actually
-   * held by the group (with the browse category scoped, this is always
-   * exactly that one category).
-   */
-  BrowseView.prototype.categoriesForUnit = function (unit) {
-    var seen = [];
-    this.words.forEach(function (word) {
-      if ((word.unit || '') === unit && seen.indexOf(word.category) === -1) {
-        seen.push(word.category);
-      }
-    });
-    return seen;
-  };
-
   /** Run one mutation per category, sequentially, failing fast. */
   BrowseView.prototype.runPerCategory = function (categories, perform) {
     return categories.reduce(function (chain, category) {
@@ -1976,13 +2293,22 @@
   /**
    * Rename modal (重命名单元): 将「{old}」重命名为 + input + 确认重命名
    * / 取消 (loading state on confirm) → POST /api/v1/units/rename with
-   * the group's category scope. A not_found response surfaces the
+   * the group's category scope, or per-row edits when the unit string is
+   * also worn by lesson-owned cards. A not_found response surfaces the
    * backend message in an Error toast (Pitfall 2); generic failures show
    * 保存失败：{message}。
    */
-  BrowseView.prototype.openRenameModal = function (unit) {
+  BrowseView.prototype.openRenameModal = function (group) {
     var self = this;
-    var categories = this.categoriesForUnit(unit);
+    var unit = group.unit;
+    var rows = group.rows || [];
+    var touchesLesson = unitRenameTouchesLesson(this.words, unit);
+    var categories = [];
+    rows.forEach(function (word) {
+      if (word && word.category && categories.indexOf(word.category) === -1) {
+        categories.push(word.category);
+      }
+    });
 
     openModal({
       title: '重命名单元',
@@ -2029,9 +2355,22 @@
             return;
           }
           setLoading(confirmBtn, true);
-          self.runPerCategory(categories, function (category) {
-            return self.renameUnit(unit, newName, category);
-          }).then(function () {
+          var rename;
+          if (touchesLesson) {
+            // The unit string is also worn by lesson-owned cards. Rewrite
+            // only this group's rows so those cards keep the tag the page
+            // no longer groups by.
+            rename = rows.reduce(function (chain, word) {
+              return chain.then(function () {
+                return self.editWord(word.id, { word: word.word, unit: newName });
+              });
+            }, Promise.resolve());
+          } else {
+            rename = self.runPerCategory(categories, function (category) {
+              return self.renameUnit(unit, newName, category);
+            });
+          }
+          rename.then(function () {
             close();
             toast('已重命名', 'success');
             self.refresh();
@@ -2111,13 +2450,16 @@
 
   /**
    * Destructive delete-unit confirm (删除单元): exact-count copy (n from
-   * the badge) → DELETE /api/v1/words with {category, unit} per category
-   * the group holds. Failure keeps the dialog open with the backend
-   * message and re-renders the true state.
+   * the badge) → DELETE /api/v1/words with the group's own word list.
+   * {category, unit} would also delete lesson-owned cards that still
+   * wear the same unit string (Issue #89). Failure keeps the dialog
+   * open with the backend message and re-renders the true state.
    */
-  BrowseView.prototype.openDeleteUnitModal = function (unit, count) {
+  BrowseView.prototype.openDeleteUnitModal = function (group) {
     var self = this;
-    var categories = this.categoriesForUnit(unit);
+    var unit = group.unit;
+    var plan = supplementaryDeletePlan(group);
+    var count = plan.count;
 
     openModal({
       title: '删除单元',
@@ -2142,12 +2484,14 @@
           }
           setLoading(confirmBtn, true);
           var deleted = 0;
-          self.runPerCategory(categories, function (category) {
-            return self.deleteWords({ category: category, unit: unit })
-              .then(function (result) {
-                deleted += (result && result.deleted) || 0;
-              });
-          }).then(function () {
+          plan.requests.reduce(function (chain, req) {
+            return chain.then(function () {
+              return self.deleteWords({ category: req.category, words: req.words })
+                .then(function (result) {
+                  deleted += (result && result.deleted) || 0;
+                });
+            });
+          }, Promise.resolve()).then(function () {
             close();
             toast('已删除 ' + deleted + ' 个单词', 'success');
             self.refresh();
@@ -2168,6 +2512,12 @@
   // Window-or-module-global tail (state-manager.js convention) so Node
   // tests can require this file later.
   global.BrowseView = BrowseView;
+  global.groupBrowseWords = groupBrowseWords;
+  global.orderBrowseGroups = orderBrowseGroups;
+  global.dictationStatusText = dictationStatusText;
+  global.lessonOwnership = lessonOwnership;
+  global.supplementaryDeletePlan = supplementaryDeletePlan;
+  global.unitRenameTouchesLesson = unitRenameTouchesLesson;
   // Shared modal builders for sibling components (parent-textbook.js
   // mounts its modals through the same focus-trapped host — the
   // __parentFormKit precedent).
