@@ -282,9 +282,15 @@ func TestTextbookRoutes(t *testing.T) {
 		if len(resp.Words) != 2 {
 			t.Fatalf("words = %+v", resp.Words)
 		}
-		if w := resp.Words[0]; !strings.Contains(string(w.Textbooks), "主教材") ||
-			!strings.Contains(string(w.Textbooks), "第1课") {
-			t.Fatalf("apple attribution = %s", w.Textbooks)
+		// Field equality, not substring (PR #88 复审 P3: a contains-check
+		// passes any JSON shape that merely mentions 主教材/第1课).
+		var got []database.TextbookAssignment
+		if err := json.Unmarshal(resp.Words[0].Textbooks, &got); err != nil {
+			t.Fatalf("apple attribution decode: %v", err)
+		}
+		if len(got) != 1 || got[0].TextbookName != "主教材" || got[0].Lesson != "第1课" ||
+			got[0].TextbookID != 4 || got[0].IncludeInScope {
+			t.Fatalf("apple attribution = %+v, want one {主教材 第1课 id:4 includeInScope:false}", got)
 		}
 		// A SUCCEEDED projection verified banana carries no attribution:
 		// the wire distinction is [] (verified none) vs null (unknown, the
