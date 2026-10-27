@@ -36,6 +36,10 @@
  *     come from the post-save reads, and a pre-assignment
  *     textbooks:null must never emit an assign payload that can clear an
  *     existing explicit include.
+ *   - PR #88 复盘路径 B: 合并类文案只认本次成功的 assign 响应（矩阵：
+ *     {exists, keep, adopt, added, raced} × {无 assign, 成功, 失败}）；
+ *     暂停词的来源教材不在保存后的教材读里时资格待核实，不写
+ *     「恢复参与后还需课次已学或加入默写范围」。
  */
 'use strict';
 
@@ -445,6 +449,138 @@ function catOf(receipt, word) {
 })();
 
 // ----------------------------------------------------------------------
+// PR #88 复盘路径 B — 合并类文案（已合并来源/仅合并来源/仅指定课次）只认
+// 本次成功的 assign 响应（ADR-0003：回执汇总用服务器实际响应拼装，不走
+// else 兜底）。矩阵：每个会写出合并类文案的场景 × {无 assign 结果, assign
+// 成功, assign 失败}。「无 assign 结果」列按真实管线构造：GET /words 答
+// textbooks:null → planAssignments 跳过该词 → unassigned 携带它 —— 不是
+// 清空 groupResults 却保留 unassigned:[] 的手工夹具（那正是三轮复审的
+// 假绿来源）。
+// ----------------------------------------------------------------------
+
+(function () {
+  const noteOf = function (receipt, word) {
+    const item = receipt.items.filter(function (i) { return i.word === word; })[0];
+    return item ? (item.note || '') : '(missing)';
+  };
+  const mergeWording = /已合并来源|仅合并来源|仅指定课次/;
+
+  // 每个场景只变 assign 一条腿；freshKnown/freshUnknown 与 groups 都是该
+  // 场景真实会出现的形状（只有 textbooks:null / 无 card id 才没有 assign）。
+  const columns = function (s) {
+    const build = function (kind) {
+      return buildTextbookReceipt({
+        rows: s.rows,
+        addRows: s.addRows,
+        addOutcome: s.addOutcome,
+        fresh: kind === 'none' ? s.freshUnknown : s.freshKnown,
+        editResults: s.editResults,
+        groups: kind === 'none' ? [] : s.groups,
+        groupResults: kind === 'ok'
+          ? [{ group: s.groups[0], ok: true, result: { updated: 1 } }]
+          : kind === 'fail'
+            ? [{ group: s.groups[0], ok: false, error: '网络错误' }]
+            : [],
+        unassigned: kind === 'none' ? [s.rows[0].word] : [],
+      });
+    };
+    return { ok: build('ok'), fail: build('fail'), none: build('none') };
+  };
+
+  const scenarios = [
+    {
+      name: 'exists',
+      rows: [{ index: 0, word: 'apple', meaning: '苹果', lesson: '第5课', status: 'exists', checked: true }],
+      addRows: [],
+      addOutcome: { added: 0, skipped: 0 },
+      editResults: [],
+      freshKnown: [{ id: 11, word: 'apple', meaning: '苹果', textbooks: [] }],
+      freshUnknown: [{ id: 11, word: 'apple', meaning: '苹果', textbooks: null }],
+      groups: [{ lesson: '第5课', includeInScope: false, cardIds: [11], words: ['apple'] }],
+      okCategory: 'merged',
+      okNote: '词库已有，仅指定课次',
+      failNote: '课次「第5课」指定失败：网络错误——可在词库中重试',
+      noneNote: '词库读取失败，未能指定课次——可在词库中补指定',
+    },
+    {
+      name: 'keep',
+      rows: [{ index: 0, word: 'star', meaning: '新星', lesson: '第5课', status: 'conflict', checked: true, resolution: 'keep' }],
+      addRows: [],
+      addOutcome: { added: 0, skipped: 0 },
+      editResults: [],
+      freshKnown: [{ id: 16, word: 'star', meaning: '新星', textbooks: [] }],
+      freshUnknown: [{ id: 16, word: 'star', meaning: '新星', textbooks: null }],
+      groups: [{ lesson: '第5课', includeInScope: false, cardIds: [16], words: ['star'] }],
+      okCategory: 'merged',
+      okNote: '保留词库释义，仅合并来源',
+      failNote: '课次「第5课」指定失败：网络错误——可在词库中重试',
+      noneNote: '词库读取失败，未能指定课次——可在词库中补指定',
+    },
+    {
+      name: 'adopt',
+      rows: [{ index: 0, word: 'star', meaning: '新星', lesson: '第5课', status: 'conflict', checked: true, resolution: 'adopt' }],
+      addRows: [],
+      addOutcome: { added: 0, skipped: 0 },
+      editResults: [{ word: 'star', ok: true }],
+      freshKnown: [{ id: 16, word: 'star', meaning: '新星', textbooks: [] }],
+      freshUnknown: [{ id: 16, word: 'star', meaning: '新星', textbooks: null }],
+      groups: [{ lesson: '第5课', includeInScope: false, cardIds: [16], words: ['star'] }],
+      okCategory: 'merged',
+      okNote: '采用照片释义更新，已合并来源',
+      failNote: '释义已按照片更新；课次「第5课」指定失败：网络错误——可在词库中重试',
+      noneNote: '释义已按照片更新；词库读取失败，未能指定课次——可在词库中补指定',
+    },
+    {
+      name: 'added',
+      rows: [{ index: 0, word: 'river', meaning: '河流', lesson: '第5课', status: 'new', checked: true }],
+      addRows: [{ index: 0, word: 'river', meaning: '河流', lesson: '第5课', status: 'new', checked: true }],
+      addOutcome: { added: 0, skipped: 1 },
+      editResults: [],
+      freshKnown: [{ id: 12, word: 'river', meaning: '河流', textbooks: [] }],
+      freshUnknown: [{ id: 12, word: 'river', meaning: '河流', textbooks: null }],
+      groups: [{ lesson: '第5课', includeInScope: false, cardIds: [12], words: ['river'] }],
+      okCategory: 'added',
+      okNote: '已添加并指定课次',
+      failNote: '词条已保存；课次「第5课」指定失败：网络错误——可在词库中重试',
+      noneNote: '词条已保存，但词库读取失败，未能指定课次——可在词库中补指定',
+    },
+    {
+      name: 'raced',
+      rows: [{ index: 0, word: 'river', meaning: '河流', lesson: '第5课', status: 'new', checked: true }],
+      addRows: [{ index: 0, word: 'river', meaning: '河流', lesson: '第5课', status: 'new', checked: true }],
+      addOutcome: { added: 0, skipped: 1 },
+      editResults: [],
+      freshKnown: [{ id: 12, word: 'river', meaning: '江', textbooks: [] }],
+      freshUnknown: [{ id: 12, word: 'river', meaning: '江', textbooks: null }],
+      groups: [{ lesson: '第5课', includeInScope: false, cardIds: [12], words: ['river'] }],
+      okCategory: 'merged',
+      okNote: '并发已存在不同释义，保留原释义，仅合并来源',
+      failNote: '并发已存在不同释义，保留原释义；课次「第5课」指定失败：网络错误——可在词库中重试',
+      noneNote: '并发已存在不同释义，保留原释义；词库读取失败，未能指定课次——可在词库中补指定',
+    },
+  ];
+
+  scenarios.forEach(function (s) {
+    const cols = columns(s);
+    const word = s.rows[0].word;
+
+    // assign 成功列：快乐路径不得被收窄误伤，类别与文案原样保留。
+    eq(catOf(cols.ok, word), s.okCategory, '矩阵 ' + s.name + ' + assign 成功：类别 ' + s.okCategory);
+    eq(noteOf(cols.ok, word), s.okNote, '矩阵 ' + s.name + ' + assign 成功：文案保持');
+    // assign 失败列：失败从来是失败，钉住文案与「不写合并」。
+    eq(catOf(cols.fail, word), 'failed', '矩阵 ' + s.name + ' + assign 失败：失败');
+    eq(noteOf(cols.fail, word), s.failNote, '矩阵 ' + s.name + ' + assign 失败：文案保持');
+    assert(!mergeWording.test(noteOf(cols.fail, word)), '矩阵 ' + s.name + ' + assign 失败：无合并类文案');
+    // 无 assign 结果列（textbooks:null）：失败，保留已落库的部分，不写合并。
+    eq(catOf(cols.none, word), 'failed', '矩阵 ' + s.name + ' + 无 assign：失败，不是合并');
+    eq(noteOf(cols.none, word), s.noneNote, '矩阵 ' + s.name + ' + 无 assign：文案点名已保存部分 + 未能指定课次');
+    assert(!mergeWording.test(noteOf(cols.none, word)), '矩阵 ' + s.name + ' + 无 assign：无合并类文案');
+    eq(cols.none.summary, { added: 0, merged: 0, pendingDiff: 0, failed: 1, unverified: 0, excluded: 0 },
+      '矩阵 ' + s.name + ' + 无 assign：单条批次不得汇总成成功');
+  });
+})();
+
+// ----------------------------------------------------------------------
 // summarizeAssignScope — the 默写安排 receipt verdict from the POST-SAVE
 // entries and every eligibility source (Issue #81 P2: the old count rode
 // this import's group payloads alone, so a participates=0 word could show
@@ -644,16 +780,29 @@ const scopeExpect = function (overrides) {
   ], SCOPE_BOOKS_AFTER),
     scopeExpect({ paused: 1, pausedReady: 0 }),
     'P2-2 a paused word whose only lesson is unlearned is NOT pausedReady');
-  // A paused word with a source on an UNREAD textbook: that source may or
-  // may not qualify it — the promise cannot be made.
+  // PR #88 复盘：暂停词的来源教材不在保存后的教材读里（书C 未读）——那个
+  // 来源可能已经满足资格，「恢复参与后还需课次已学」既承诺不了也否定不了。
+  // 资格待核实，而不是确定的 pausedReady=0（旧期望把错误句子写成了规格）。
   eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['river']), [
     {
       word: 'river', participates: false,
       textbooks: [{ id: 3, name: '书C', lesson: 'C课', includeInScope: false }],
     },
   ], SCOPE_BOOKS_AFTER),
-    scopeExpect({ paused: 1, pausedReady: 0 }),
-    'P2-2 a paused word qualified only by an unread textbook is NOT pausedReady');
+    scopeExpect({ unverified: 1 }),
+    'PR88 a paused word qualified only by an unread textbook is 资格待核实');
+  // 同一规则的一半覆盖一半未读：未读的那个来源可能已经满足资格。
+  eq(summarizeAssignScope(SCOPE_BOOK, scopeGroupResults('第7课', false, ['lake']), [
+    {
+      word: 'lake', participates: false,
+      textbooks: [
+        { id: 9, name: '书A', lesson: '第7课', includeInScope: false },
+        { id: 3, name: '书C', lesson: 'C课', includeInScope: false },
+      ],
+    },
+  ], SCOPE_BOOKS_AFTER),
+    scopeExpect({ unverified: 1 }),
+    'PR88 a paused word with one covered-unlearned and one unread source is 资格待核实');
 
   // Failed groups are never counted (they are 失败 under 保存结果).
   eq(summarizeAssignScope(SCOPE_BOOK, [
@@ -837,6 +986,23 @@ const renderScopeBanner = function (overrides) {
   });
   assert(pausedReady.indexOf('恢复参与后即可安排默写') >= 0,
     'a paused word an include already qualifies keeps the restore-and-schedule promise');
+
+  // PR #88 复盘 at the render level: a paused word whose only source sits
+  // on a textbook the post-save read missed (书C is not in booksAfter) —
+  // 资格待核实, never the definite「恢复参与后还需课次已学或加入默写范围」.
+  const pausedUnreadSaved = [
+    { word: 'river', participates: false, textbooks: [{ id: 3, name: '书C', lesson: 'C课', includeInScope: false }] },
+  ];
+  const pausedUnread = renderScopeBanner({
+    rows: [{ index: 0, word: 'river', meaning: '河', lesson: '第7课', status: 'exists', checked: true }],
+    groupResults: scopeGroupResults('第7课', false, ['river']),
+    postSave: pausedUnreadSaved,
+    booksAfter: SCOPE_BOOKS_AFTER,
+  });
+  assert(pausedUnread.indexOf('资格待核实 1 词') >= 0,
+    'a paused word on an unread textbook renders 资格待核实');
+  assert(pausedUnread.indexOf('恢复参与后还需课次已学或加入默写范围') < 0,
+    'an unread-textbook paused word never states the 还需课次已学 condition');
 
   // PR #88 P1 at the render level: the post-save read SUCCEEDED but its
   // attribution projection failed server-side (the real degraded GET /words
