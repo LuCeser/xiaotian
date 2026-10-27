@@ -577,6 +577,10 @@ func textbookUpdateArgs(cfg infra.PythonConfig, opts TextbookUpdateOpts) []strin
 		raw, _ := json.Marshal(opts.Lessons)
 		args = append(args, "--lessons", string(raw))
 	}
+	if opts.AppendLessons != nil {
+		raw, _ := json.Marshal(opts.AppendLessons)
+		args = append(args, "--append-lessons", string(raw))
+	}
 	if opts.LearnedLessons != nil {
 		args = append(args, "--learned-lessons", strconv.Itoa(*opts.LearnedLessons))
 	}
@@ -678,7 +682,7 @@ func (b *Bridge) RunTextbookUpdate(ctx context.Context, opts TextbookUpdateOpts)
 	}
 	if opts.Name == nil && opts.Edition == nil && opts.Stage == nil && opts.Grade == nil &&
 		opts.Volume == nil && opts.Module == nil && opts.Lessons == nil &&
-		opts.LearnedLessons == nil && !opts.SetPrimary {
+		opts.AppendLessons == nil && opts.LearnedLessons == nil && !opts.SetPrimary {
 		return TextbookMutationResult{}, errors.New("textbook-update: at least one change is required")
 	}
 	return runMgmt[TextbookMutationResult](b, ctx, "textbook-update", textbookUpdateArgs(b.cfg, opts))

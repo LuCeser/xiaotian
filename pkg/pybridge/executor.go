@@ -465,7 +465,10 @@ type TextbookUpdateOpts struct {
 	LearnedLessons *int
 	// Lessons, when non-nil, replaces the explicit lesson list.
 	Lessons []string
-	ID      int64
+	// AppendLessons, when non-nil, appends unseen names inside BEGIN
+	// IMMEDIATE (mutually exclusive with Lessons).
+	AppendLessons []string
+	ID            int64
 	// SetPrimary makes this textbook the category's primary, demoting the
 	// others in the same script transaction.
 	SetPrimary bool

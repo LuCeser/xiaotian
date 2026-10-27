@@ -1017,10 +1017,16 @@ def cmd_textbook_update(db, args):
             sets.append(f"{field} = ?")
             params.append(value)
     lessons = None
+    if args.lessons is not None and args.append_lessons is not None:
+        print("Error: --lessons and --append-lessons are mutually exclusive")
+        sys.exit(1)
     if args.lessons is not None:
         lessons = _validate_lessons(args.lessons)
         sets.append("lessons = ?")
         params.append(json.dumps(lessons, ensure_ascii=False))
+    append_lessons = None
+    if args.append_lessons is not None:
+        append_lessons = _validate_lessons(args.append_lessons)
     if args.learned_lessons is not None:
         try:
             current = json.loads(row["lessons"])
@@ -1034,6 +1040,25 @@ def cmd_textbook_update(db, args):
         params.append(args.learned_lessons)
 
     db.execute("BEGIN IMMEDIATE")
+    if append_lessons is not None:
+        fresh = db.execute("SELECT lessons FROM textbooks WHERE id = ?", (args.id,)).fetchone()
+        try:
+            current = json.loads(fresh["lessons"] if fresh else row["lessons"])
+        except (TypeError, ValueError):
+            current = []
+        seen = set(current)
+        merged = list(current)
+        for name in append_lessons:
+            if name not in seen:
+                seen.add(name)
+                merged.append(name)
+        if len(merged) > 200:
+            db.rollback()
+            print("Error: lesson list exceeds 200 after append")
+            sys.exit(1)
+        sets.append("lessons = ?")
+        params.append(json.dumps(merged, ensure_ascii=False))
+        lessons = merged
     if args.set_primary:
         db.execute(
             "UPDATE textbooks SET is_primary = 0 WHERE category = ? AND id != ?",
@@ -1368,6 +1393,8 @@ def main():
     for meta in ("edition", "stage", "grade", "volume", "module"):
         p_tb_update.add_argument(f"--{meta}", default=None, help=f"New {meta} (absent keeps current)")
     p_tb_update.add_argument("--lessons", default=None, help="New JSON lesson array (absent keeps current)")
+    p_tb_update.add_argument("--append-lessons", default=None,
+                             help="JSON array of lesson names to append (absent keeps current; exclusive with --lessons)")
     p_tb_update.add_argument("--learned-lessons", type=int, default=None,
                              help="已学完第 N 课 (0..len(lessons); includes lesson N)")
     p_tb_update.add_argument("--set-primary", action="store_true",

@@ -392,6 +392,7 @@ type TextbookUpdateRequest struct {
 	Module         *string  `json:"module"`
 	LearnedLessons *int     `json:"learnedLessons"`
 	Lessons        []string `json:"lessons"`
+	AppendLessons  []string `json:"appendLessons"`
 	SetPrimary     bool     `json:"setPrimary"`
 }
 
@@ -486,8 +487,16 @@ func validateTextbookUpdateRequest(req *TextbookUpdateRequest) string {
 			return fmt.Sprintf("%s exceeds %d characters", field.name, maxTextbookFieldRunes)
 		}
 	}
+	if req.Lessons != nil && req.AppendLessons != nil {
+		return "lessons and appendLessons are mutually exclusive"
+	}
 	if req.Lessons != nil {
 		if msg := validateTextbookLessons(req.Lessons); msg != "" {
+			return msg
+		}
+	}
+	if req.AppendLessons != nil {
+		if msg := validateTextbookLessons(req.AppendLessons); msg != "" {
 			return msg
 		}
 	}
@@ -496,7 +505,7 @@ func validateTextbookUpdateRequest(req *TextbookUpdateRequest) string {
 	}
 	changed := req.Name != nil || req.Edition != nil || req.Stage != nil ||
 		req.Grade != nil || req.Volume != nil || req.Module != nil ||
-		req.Lessons != nil || req.LearnedLessons != nil || req.SetPrimary
+		req.Lessons != nil || req.AppendLessons != nil || req.LearnedLessons != nil || req.SetPrimary
 	if !changed {
 		return "at least one change is required"
 	}

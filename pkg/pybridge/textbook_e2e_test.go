@@ -29,6 +29,7 @@ package pybridge
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -256,5 +257,106 @@ func TestE2E_DeleteWordsCleansAssignments(t *testing.T) {
 	}
 	if books != 1 {
 		t.Fatalf("textbook row vanished after delete-words (want survived)")
+	}
+}
+
+func tbReadLessonsProgress(t *testing.T, dbPath string, bookID int64) ([]string, int) {
+	t.Helper()
+	db := e2eOpenDB(t, dbPath)
+	var raw string
+	var learned int
+	if err := db.QueryRow(
+		"SELECT lessons, learned_lessons FROM textbooks WHERE id = ?", bookID,
+	).Scan(&raw, &learned); err != nil {
+		t.Fatalf("read textbook: %v", err)
+	}
+	var lessons []string
+	if err := json.Unmarshal([]byte(raw), &lessons); err != nil {
+		t.Fatalf("parse lessons: %v", err)
+	}
+	return lessons, learned
+}
+
+// TestE2E_AppendLessonsIsIdempotentAndKeepsProgress — import append path:
+// duplicate names are skipped; learned_lessons is untouched.
+func TestE2E_AppendLessonsIsIdempotentAndKeepsProgress(t *testing.T) {
+	ctx := context.Background()
+	b, _, cfg := e2eBridge(t, nil)
+	created, err := b.RunTextbookCreate(ctx, TextbookCreateOpts{
+		Name: "追加课次", Category: "english", Lessons: []string{"第1课"},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{
+		ID: created.ID, LearnedLessons: intPtr(1),
+	}); err != nil {
+		t.Fatalf("set progress: %v", err)
+	}
+	if _, err := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{
+		ID: created.ID, AppendLessons: []string{"第2课", "第1课"},
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	lessons, learned := tbReadLessonsProgress(t, cfg.VocabDBPath, created.ID)
+	if strings.Join(lessons, ",") != "第1课,第2课" {
+		t.Fatalf("lessons after append = %v, want [第1课 第2课]", lessons)
+	}
+	if learned != 1 {
+		t.Fatalf("learned_lessons = %d, want 1 unchanged", learned)
+	}
+	if _, err := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{
+		ID: created.ID, AppendLessons: []string{"第2课"},
+	}); err != nil {
+		t.Fatalf("re-append: %v", err)
+	}
+	lessons2, _ := tbReadLessonsProgress(t, cfg.VocabDBPath, created.ID)
+	if strings.Join(lessons2, ",") != "第1课,第2课" {
+		t.Fatalf("lessons after idempotent append = %v", lessons2)
+	}
+}
+
+// TestE2E_AppendLessonsConcurrentKeepsBoth — two appends in parallel both
+// land when each runs inside BEGIN IMMEDIATE on the latest list.
+func TestE2E_AppendLessonsConcurrentKeepsBoth(t *testing.T) {
+	ctx := context.Background()
+	b, _, cfg := e2eBridge(t, nil)
+	created, err := b.RunTextbookCreate(ctx, TextbookCreateOpts{
+		Name: "并发追加", Category: "english", Lessons: []string{"第1课"},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	errs := make(chan error, 2)
+	go func() {
+		_, e := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{
+			ID: created.ID, AppendLessons: []string{"第2课"},
+		})
+		errs <- e
+	}()
+	go func() {
+		_, e := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{
+			ID: created.ID, AppendLessons: []string{"第3课"},
+		})
+		errs <- e
+	}()
+	for i := 0; i < 2; i++ {
+		if e := <-errs; e != nil {
+			t.Fatalf("concurrent append: %v", e)
+		}
+	}
+	lessons, learned := tbReadLessonsProgress(t, cfg.VocabDBPath, created.ID)
+	want := []string{"第1课", "第2课", "第3课"}
+	if len(lessons) != 3 || lessons[0] != "第1课" {
+		t.Fatalf("lessons = %v, want 第1课 first plus two appends", lessons)
+	}
+	got := append([]string(nil), lessons...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("lessons set = %v, want %v", lessons, want)
+	}
+	if learned != 0 {
+		t.Fatalf("learned_lessons = %d, want 0", learned)
 	}
 }

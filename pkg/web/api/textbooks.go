@@ -162,6 +162,7 @@ func (h *handler) updateTextbook(w http.ResponseWriter, r *http.Request) {
 		Volume:         req.Volume,
 		Module:         req.Module,
 		Lessons:        req.Lessons,
+		AppendLessons:  req.AppendLessons,
 		LearnedLessons: req.LearnedLessons,
 		SetPrimary:     req.SetPrimary,
 	}
