@@ -22,6 +22,7 @@ require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-batc
 
 const {
   parseBatch, alignPastedEdits, previewBatchEdits, blockedEdits,
+  batchEditPrefillLine,
 } = global.window;
 
 let failures = 0;
@@ -123,6 +124,23 @@ const LIBRARY = SELECTED.concat([
     parseBatch('tiger\t虎').rows, [{ id: 11, word: 'tiger', meaning: '老虎' }]);
   eq(self.edits[0].kind, 'edit', 'a meaning-only edit on an owned face is a plain edit');
   eq(blockedEdits(self), [], 'own face never conflicts with itself');
+
+  // ADR-0003: identity is per category — English colour → color must not
+  // block on a Chinese homograph at another id.
+  const crossCat = previewBatchEdits(
+    [{ id: 30, word: 'colour', meaning: '颜色', category: 'english' }],
+    parseBatch('color\t颜色').rows,
+    [
+      { id: 30, word: 'colour', meaning: '颜色', category: 'english' },
+      { id: 40, word: 'color', meaning: '颜色', category: 'chinese' },
+    ]);
+  eq(blockedEdits(crossCat), [], 'a cross-category homograph is not an identity conflict');
+
+  // Prefill round-trip: a spaced word with empty meaning must not split on
+  // the space when the parent confirms other rows unchanged.
+  const line = batchEditPrefillLine('ice cream', '');
+  eq(parseBatch(line).rows, [{ word: 'ice cream', meaning: '' }],
+    'batchEditPrefillLine keeps spaced words intact');
 
   // The meaning cap mirrors the API (1000 runes — code points).
   const longMeaning = '长'.repeat(1001);

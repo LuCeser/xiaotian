@@ -66,6 +66,7 @@
     for (var i = 0; i < sel.length; i++) {
       edits.push({
         id: sel[i].id,
+        category: sel[i].category == null ? '' : String(sel[i].category),
         wordFrom: sel[i].word,
         wordTo: pasted[i].word,
         meaningFrom: sel[i].meaning == null ? '' : String(sel[i].meaning),
@@ -102,12 +103,13 @@
         unchanged: 0,
       };
     }
-    // The library's face → id map (last write wins is irrelevant here:
-    // faces are unique per category in a consistent snapshot).
+    // ADR-0003: identity is (word, category) — the index is scoped per
+    // subject so an English rename never collides with another category.
     var idByFace = {};
     (libraryWords || []).forEach(function (w) {
       if (w && w.word) {
-        idByFace[w.word] = w.id;
+        var cat = w.category == null ? '' : String(w.category);
+        idByFace[cat + '\0' + w.word] = w.id;
       }
     });
     var unchanged = 0;
@@ -122,17 +124,35 @@
       // ADR-0003: the new face may only be this card's own; a face the
       // library carries at another id belongs to another card's identity
       // and its history — the edit is blocked, never an overwrite.
+      var faceKey = (e.category || '') + '\0' + e.wordTo;
       if (faceChanged &&
-          Object.prototype.hasOwnProperty.call(idByFace, e.wordTo) &&
-          idByFace[e.wordTo] !== e.id) {
+          Object.prototype.hasOwnProperty.call(idByFace, faceKey) &&
+          idByFace[faceKey] !== e.id) {
         preview.blocked = 'identity-conflict';
-        preview.conflictId = idByFace[e.wordTo];
+        preview.conflictId = idByFace[faceKey];
       } else if (runeCount(e.meaningTo) > MAX_MEANING_RUNES) {
         preview.blocked = 'meaning-too-long';
       }
       return preview;
     });
     return { ok: true, edits: edits, unchanged: unchanged };
+  }
+
+  /**
+   * batchEditPrefillLine — one selected row's paste line. When the word
+   * contains spaces and the meaning is empty, a bare line would re-parse
+   * as word+meaning on the first space; word<TAB> keeps the round-trip.
+   */
+  function batchEditPrefillLine(word, meaning) {
+    var face = word == null ? '' : String(word);
+    var gloss = meaning == null ? '' : String(meaning);
+    if (gloss === '' && /\s/.test(face)) {
+      return face + '\t';
+    }
+    if (gloss === '') {
+      return face;
+    }
+    return face + '\t' + gloss;
   }
 
   /** Blocked-only helper for the UI's refusal line (pure). */
@@ -146,4 +166,5 @@
   global.alignPastedEdits = alignPastedEdits;
   global.previewBatchEdits = previewBatchEdits;
   global.blockedEdits = blockedEdits;
+  global.batchEditPrefillLine = batchEditPrefillLine;
 })(typeof window !== 'undefined' ? window : this);

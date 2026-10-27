@@ -517,6 +517,40 @@ func TestE2E_RunEditRoundTrip(t *testing.T) {
 	}
 }
 
+// TestE2E_EditWordConflictKeepsIdentity pins ADR-0003: renaming onto an
+// occupied (word, category) fails without clobbering either card or FSRS.
+func TestE2E_EditWordConflictKeepsIdentity(t *testing.T) {
+	b, _, cfg := e2eBridge(t, nil)
+	if _, err := b.RunAdd(context.Background(), AddOpts{
+		Category: "english", Unit: "id-conflict",
+		Entries: []AddEntry{
+			{Word: "colour", Meaning: "英式"},
+			{Word: "color", Meaning: "美式"},
+		},
+	}); err != nil {
+		t.Fatalf("RunAdd: %v", err)
+	}
+	before1 := fsrsCardBytes(t, cfg.VocabDBPath, "1")
+	before2 := fsrsCardBytes(t, cfg.VocabDBPath, "2")
+	taken := "color"
+	if _, err := b.RunEdit(context.Background(), EditOpts{ID: 1, Word: &taken}); err == nil {
+		t.Fatal("RunEdit: expected identity conflict, got success")
+	}
+	rows := listCards(t, mgmtListEnv(t, cfg.DataDir), cfg.VocabDBPath)
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	if rows[0]["word"] != "colour" || rows[1]["word"] != "color" {
+		t.Fatalf("words changed after conflict: %+v", rows)
+	}
+	if after := fsrsCardBytes(t, cfg.VocabDBPath, "1"); after != before1 {
+		t.Fatalf("card 1 fsrs changed: %q → %q", before1, after)
+	}
+	if after := fsrsCardBytes(t, cfg.VocabDBPath, "2"); after != before2 {
+		t.Fatalf("card 2 fsrs changed: %q → %q", before2, after)
+	}
+}
+
 func TestE2E_ParticipationExcludesDueAndPreservesFSRS(t *testing.T) {
 	b, _, cfg := e2eBridge(t, nil)
 	if _, err := b.RunAdd(context.Background(), AddOpts{

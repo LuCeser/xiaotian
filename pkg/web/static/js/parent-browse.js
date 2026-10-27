@@ -2384,8 +2384,11 @@
         paste.id = 'batch-edit-input';
         paste.rows = Math.min(10, Math.max(4, selected.length));
         paste.setAttribute('aria-label', '批量编辑粘贴');
+        var prefillLine = global.batchEditPrefillLine || function (word, meaning) {
+          return word + (meaning ? '\t' + meaning : '');
+        };
         var prefilled = selected.map(function (w) {
-          return w.word + (w.meaning ? '\t' + w.meaning : '');
+          return prefillLine(w.word, w.meaning);
         }).join('\n');
         paste.value = prefilled;
         body.appendChild(paste);

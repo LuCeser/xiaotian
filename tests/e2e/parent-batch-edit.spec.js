@@ -58,3 +58,50 @@ test('browse batch edit: preview then PUT updates both words', async ({ page, re
     await deleteUnit(request);
   }
 });
+
+test('browse batch edit: cancel writes nothing; identity conflict keeps both cards', async ({ page, request }) => {
+  await deleteUnit(request);
+  const add = await request.post('/api/v1/words', {
+    data: {
+      category: CAT,
+      unit: UNIT,
+      entries: [
+        { word: 'e2e-own-a', meaning: 'one' },
+        { word: 'e2e-own-b', meaning: 'two' },
+      ],
+    },
+  });
+  expect(add.ok()).toBeTruthy();
+  const listed = await (await request.get(`/api/v1/words?category=${CAT}&unit=${UNIT}`)).json();
+  try {
+    await page.goto('/parent.html');
+    await page.getByRole('tab', { name: '词库' }).click();
+    for (const w of ['e2e-own-a', 'e2e-own-b']) {
+      await page.locator(`.word-row[data-word="${w}"]`)
+        .getByRole('checkbox', { name: `选择 ${w}` }).check();
+    }
+    await page.locator('#bulk-edit-btn').click();
+    const dialog = page.locator('.modal-wide');
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: '取消' }).click();
+    await expect(dialog).toBeHidden();
+
+    await page.locator(`.word-row[data-word="e2e-own-a"]`)
+      .getByRole('checkbox', { name: '选择 e2e-own-a' }).check();
+    await page.locator('#bulk-edit-btn').click();
+    const conflictDlg = page.locator('.modal-wide');
+    await expect(conflictDlg).toBeVisible();
+    await conflictDlg.locator('#batch-edit-input').fill('e2e-own-b\tstolen');
+    await expect(conflictDlg.locator('.batch-edit-blocked')).toBeVisible();
+    await expect(conflictDlg.getByRole('button', { name: '确认修改' })).toBeDisabled();
+
+    const after = await (await request.get(`/api/v1/words?category=${CAT}&unit=${UNIT}`)).json();
+    const words = new Map((after.words || []).map((w) => [w.word, w]));
+    expect(words.get('e2e-own-a').word).toBe('e2e-own-a');
+    expect(words.get('e2e-own-b').word).toBe('e2e-own-b');
+    expect(words.get('e2e-own-a').id).toBeTruthy();
+    expect(words.get('e2e-own-b').id).toBeTruthy();
+  } finally {
+    await deleteUnit(request);
+  }
+});
