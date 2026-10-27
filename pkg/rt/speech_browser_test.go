@@ -1467,10 +1467,14 @@ func TestCloseFallbackAfterAcceptedWrites(t *testing.T) {
 // 判定（一个 OCR 预填批次内的两笔逐词写入，1.06 纪律下由一次登记覆盖）与
 // 关闭竞争——兜底先在锁外等批次完成，再读权威行：两笔写入已把版本连续推
 // 进两次，兜底用权威版本竞争一次成功，行 submitted+unchecked、两笔预填保
-// 留、FSRS 只有一批降级评分、关闭后没有迟到回显。读回门（1.12a）把「读
-// 权威」的时机握在测试手里：读门在批次仍驻留时打开——跳过等待的实现会在
-// 门放行处读到写入落库前的旧版本并闩住它，随后两笔写入全部冲突丢失（撤
-// 销验证的红证据即此断言）。
+// 留、FSRS 只有一批降级评分、关闭后没有迟到回显。
+//
+// 会合顺序（复盘第 5 节）：读门先 hold、再关闭，然后在写入闸仍关着时等读
+// 门 entered——只有撤掉 waitCheckWrites 的实现才会在这个窗口内到达权威读
+// （读到落库前的旧版本并闩住）；测试随即逼这个未等待的兜底先赢闩、再放行
+// 两笔写入，最终以版本/verdict 断言变红。有等待的实现走到另一条路：先放
+// 写入、再等 entered、再放读门，同一组断言变绿。「先 openUp 再等 entered」
+// 的旧会合会让 openUp 自己点亮 entered，既挡不住未等待的读、也会假绿。
 func TestCloseFallbackMultipleWrites(t *testing.T) {
 	f := newSpeechBrowserFixture(t)
 	f.seedCheckingWithOutcomes()
@@ -1515,14 +1519,37 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 	// The goodbye close claims the fallback while the batch's writes are
 	// parked AHEAD of their real SQLite commits.
 	m.handleEndSession(m.currentSender())
-	// Open the held read gate while the writes are STILL parked: the
-	// waiting fallback has not reached the gate yet; an implementation that
-	// skips the wait reads the PRE-write version here.
-	readGate.openUp()
-	// Release the batch: both prefill writes commit as v+1 and v+2; the
-	// waiting fallback then reads v+2 and wins the latch on the fresh
-	// version.
+	// 在写入闸仍关着时等读门 entered：只有没有等待的实现会在此窗口到达
+	// 权威读（撤销 waitCheckWrites 的变异形态）。等到了就放行读、逼这个
+	// 未等待的兜底用旧版本先赢闩，再放行两笔写入——第一笔冲突后走幂等闩
+	// 重放（verdict 丢失）、第二笔恰好撞上新版本落库，最终版本断言变红。
+	skippedWait := false
+	select {
+	case <-readGate.gate.entered:
+		skippedWait = true
+	case <-time.After(3 * time.Second):
+	}
+	if skippedWait {
+		readGate.openUp()
+		if !waitFor(t, 10*time.Second, func() bool {
+			l, err := f.tools.GetLessonState(context.Background(), lessonID)
+			return err == nil && l.Stage == lesson.StageSubmitted && l.Unchecked
+		}) {
+			t.Fatal("the un-waited fallback never won the latch on the stale version")
+		}
+	}
+	// 有等待的实现：兜底仍阻塞在登记上，读门无人到达。先放行批次，两笔
+	// 预填以 v+1、v+2 落库；登记完成后兜底的权威读才第一次到达读门——
+	// 等到 entered 再放行，它读到 v+2 并以新版本赢闩。
 	releaseWrites()
+	if !skippedWait {
+		select {
+		case <-readGate.gate.entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the waiting fallback's authoritative read never arrived")
+		}
+		readGate.openUp()
+	}
 	res := <-driver
 	if res.WSCloseCount != 1 || res.LateVerdictEchoes != 0 || res.LateOcrResults != 0 {
 		t.Fatalf("close=%d late echoes=%d late ocr=%d, want 1/0/0",
