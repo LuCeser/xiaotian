@@ -116,8 +116,15 @@ const { classifyPhotoEntries } = photo;
 
   plan = pdf.applyPageEvent(plan, 2, 'start');
   plan = pdf.applyPageEvent(plan, 2, 'fail', '识别服务超时');
+
   assert.strictEqual(plan.pages[1].status, 'failed');
   assert.strictEqual(plan.pages[1].error, '识别服务超时');
+
+  plan = pdf.createPagePlan(1);
+  plan = pdf.applyPageEvent(plan, 1, 'start');
+  assert.strictEqual(plan.pages[0].status, 'running');
+  plan = pdf.applyPageEvent(plan, 1, 'abort');
+  assert.strictEqual(plan.pages[0].status, 'pending');
 }
 
 // 9. retryPage: a failed page resets to pending (error cleared) so the

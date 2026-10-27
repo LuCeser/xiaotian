@@ -1021,11 +1021,54 @@
    */
   function recommendForDraftPage(books, meta, photo, priorRecs, bookChoice) {
     var lessons = lessonsForRecommend(books, bookChoice);
-    if (!lessons.length) {
-      var candidate = matchTextbookForMeta(books, meta);
-      lessons = (candidate && candidate.lessons) || [];
-    }
     return recommendLesson(photo, lessons, priorRecs || []);
+  }
+
+  /** True while a recognize run's epoch and draft subject still match. */
+  function recognizeRunStillValid(form, runEpoch, category) {
+    return runEpoch === form.recognizeEpoch && form.draftCategory === category;
+  }
+
+  /**
+   * applyRecognizeLibraryLoad — merge a library/textbook fetch into the
+   * draft ONLY while the run epoch and subject still match (Issue #80 P1).
+   * Returns false when the snapshot is stale and must be dropped.
+   */
+  function applyRecognizeLibraryLoad(form, runEpoch, category, loaded, entries) {
+    if (!recognizeRunStillValid(form, runEpoch, category)) {
+      return false;
+    }
+    form.existingWords = loaded[0] || [];
+    form.books = loaded[1] || [];
+    form.existingPoems = loaded[2] || [];
+    form.existingPassages = loaded[3] || [];
+    form.rows = classifyPhotoEntries(entries, form.existingWords);
+    form.rows = fillRecommendedLessons(form.rows, recommendForDraftPage(
+      form.books, form.detectedMeta,
+      { textbook: form.detectedMeta, entries: entries }, [],
+      form.bookChoice));
+    return true;
+  }
+
+  /** Entries for recommendLesson — recognized rows keep their OCR lesson. */
+  function entriesForPhotoPage(rows, pageNo) {
+    return (rows || []).filter(function (r) {
+      return (r.page || 1) === pageNo;
+    }).map(function (r) {
+      return {
+        word: r.word,
+        meaning: r.meaning,
+        lesson: r.lessonOrigin === 'recognized' ? (r.lesson || '') : '',
+      };
+    });
+  }
+
+  /** A running page whose result was dropped goes back to pending. */
+  function abandonRunningPage(state, pageNo) {
+    if (!state || !state.plan || !global.applyPageEvent) {
+      return;
+    }
+    state.plan = global.applyPageEvent(state.plan, pageNo, 'abort');
   }
 
   /**
@@ -1238,8 +1281,18 @@
       });
       return (chosen && chosen.lessons) || [];
     }
-    var candidate = matchTextbookForMeta(books, null);
-    return (candidate && candidate.lessons) || [];
+    return [];
+  }
+
+  /**
+   * createFormFieldValue — 新建教材 field: distinguish「从未编辑」from
+   *「家长明确清空」（batch 指定课次会重绘表单，不得用 OCR 填回）。
+   */
+  function createFormFieldValue(savedDraft, key, detectedValue) {
+    if (savedDraft && Object.prototype.hasOwnProperty.call(savedDraft, key)) {
+      return savedDraft[key];
+    }
+    return detectedValue || '';
   }
 
   /**
@@ -1765,6 +1818,7 @@
       if (this.photoBatch) {
         this.photoBatch.aborted = true;
       }
+      this.recognizeEpoch += 1;
       this.draftCategory = category;
       this.existingWords = [];
       this.existingPoems = [];
@@ -2371,19 +2425,10 @@
           poemsLoad,
           passagesLoad,
         ]).then(function (loaded) {
-          self.existingWords = loaded[0] || [];
-          self.books = loaded[1] || [];
-          self.existingPoems = loaded[2] || [];
-          self.existingPassages = loaded[3] || [];
-          self.rows = classifyPhotoEntries(entries, self.existingWords);
-          // Issue #80 §3.1: one recommendation per photo fills the rows
-          // whose own lesson is empty (memory-only; nothing is written).
-          // parsed.meta IS the photo's textbook header (parseRecognized's
-          // shape); recommendForDraftPage reads it as photo.textbook.
-          self.rows = fillRecommendedLessons(self.rows, recommendForDraftPage(
-            self.books, self.detectedMeta,
-            { textbook: parsed.meta, entries: entries }, [],
-            self.bookChoice));
+          if (!applyRecognizeLibraryLoad(self, runEpoch, category, loaded, entries)) {
+            self.setBusy(false);
+            return;
+          }
           self.poemRows = classifyPoemDrafts(parsed.poems, self.existingPoems);
           self.passageRows = classifyPassageDrafts(parsed.passages, self.existingPassages);
           self.otherSections = parsed.others.map(function (o) {
@@ -2445,6 +2490,7 @@
     this.releasePdf();
     this.releasePhotoBatch();
     this.beginRecognizeRun();
+    var runEpoch = this.recognizeEpoch;
     this.setBusy(true);
 
     global.PdfPageRunner.open(this.currentFile)
@@ -2488,6 +2534,9 @@
           poemsLoad,
           passagesLoad,
         ]).then(function (loaded) {
+          if (!recognizeRunStillValid(self, runEpoch, category)) {
+            return null;
+          }
           self.existingWords = loaded[0] || [];
           self.books = loaded[1] || [];
           self.existingPoems = loaded[2] || [];
@@ -2497,10 +2546,16 @@
       })
       .then(function (summary) {
         self.setBusy(false);
+        if (!recognizeRunStillValid(self, runEpoch, category)) {
+          return;
+        }
         self.finishRun(summary);
       })
       .catch(function (err) {
         self.setBusy(false);
+        if (!recognizeRunStillValid(self, runEpoch, category)) {
+          return;
+        }
         var message = (err && err.message) ? err.message : '未知错误';
         self.showFormError('PDF 处理失败：' + message + '。可以重试或换一个文件。');
         if (kit.showToast) {
@@ -2533,6 +2588,7 @@
     this.releasePdf();
     this.releasePhotoBatch();
     this.beginRecognizeRun();
+    var runEpoch = this.recognizeEpoch;
     this.setBusy(true);
     this.detectedMetaList = [];
 
@@ -2564,6 +2620,9 @@
       poemsLoad,
       passagesLoad,
     ]).then(function (loaded) {
+      if (!recognizeRunStillValid(self, runEpoch, category)) {
+        return null;
+      }
       self.existingWords = loaded[0] || [];
       self.books = loaded[1] || [];
       self.existingPoems = loaded[2] || [];
@@ -2571,9 +2630,15 @@
       return self.runPages();
     }).then(function (summary) {
       self.setBusy(false);
+      if (!recognizeRunStillValid(self, runEpoch, category)) {
+        return;
+      }
       self.finishRun(summary);
     }).catch(function (err) {
       self.setBusy(false);
+      if (!recognizeRunStillValid(self, runEpoch, category)) {
+        return;
+      }
       var message = (err && err.message) ? err.message : '未知错误';
       self.showFormError('照片处理失败：' + message + '。可以重试或换一批照片。');
       if (kit.showToast) {
@@ -2610,6 +2675,8 @@
       })
       .then(function (data) {
         if (runEpoch !== self.recognizeEpoch || !self.photoBatch || state.aborted) {
+          abandonRunningPage(state, pageNo);
+          self.renderPdfBar();
           return null;
         }
         self.landRecognized(data, pageNo, state, function (meta) {
@@ -2623,6 +2690,8 @@
       })
       .catch(function (err) {
         if (runEpoch !== self.recognizeEpoch || !self.photoBatch || state.aborted) {
+          abandonRunningPage(state, pageNo);
+          self.renderPdfBar();
           return;
         }
         state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
@@ -2804,6 +2873,8 @@
       })
       .then(function (data) {
         if (runEpoch !== self.recognizeEpoch || !self.pdfState || state.aborted) {
+          abandonRunningPage(state, pageNo);
+          self.renderPdfBar();
           return null;
         }
         self.landRecognized(data, pageNo, state, function (meta) {
@@ -2814,6 +2885,8 @@
       })
       .catch(function (err) {
         if (runEpoch !== self.recognizeEpoch || !self.pdfState || state.aborted) {
+          abandonRunningPage(state, pageNo);
+          self.renderPdfBar();
           return;
         }
         state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
@@ -3256,6 +3329,7 @@
       self.bookChoice = bookSelect.value === 'new' ? 'new'
         : (bookSelect.value === 'none' ? 'none'
           : (bookSelect.value === 'unset' ? 'unset' : parseInt(bookSelect.value, 10)));
+      self.refreshLessonRecommendations();
       self.renderTextbookDetail(detailHost);
       self.renderPreview(); // lesson column visibility follows the choice
     });
@@ -3321,8 +3395,8 @@
       // parent-textbook.js's summary join IS the prefill (one encoder for
       // 版本·学段·年级·上下册·模块; a missing script degrades to no prefill).
       var savedDraft = this.newBookDraft || {};
-      nameInput.value = savedDraft.name ||
-        (global.textbookMetaSummary ? global.textbookMetaSummary(this.detectedMeta) : '');
+      nameInput.value = createFormFieldValue(savedDraft, 'name',
+        global.textbookMetaSummary ? global.textbookMetaSummary(this.detectedMeta) : '');
       nameInput.setAttribute('aria-label', '教材名称');
       nameField.appendChild(nameLabel);
       nameField.appendChild(nameInput);
@@ -3339,8 +3413,8 @@
         input.className = 'form-input';
         input.id = 'parent-photo-tb-' + meta.key;
         input.placeholder = meta.ph;
-        input.value = savedDraft[meta.key] ||
-          (self.detectedMeta ? metaField(self.detectedMeta[meta.key]) : '');
+        input.value = createFormFieldValue(savedDraft, meta.key,
+          self.detectedMeta ? metaField(self.detectedMeta[meta.key]) : '');
         input.setAttribute('aria-label', meta.label);
         field.appendChild(label);
         field.appendChild(input);
@@ -3488,6 +3562,59 @@
     this.lessonPickBar = { pickedBtn: pickedBtn, allBtn: allBtn, noneBtn: noneBtn };
     this.syncLessonPickUi();
     this.updateStateLine();
+  };
+
+  /**
+   * refreshLessonRecommendations — after the parent changes the target
+   * book, re-derive §3.1 recommendations for rows the parent has not
+   * locked (lessonOrigin !== 'parent'; recognized rows keep OCR lesson).
+   */
+  PhotoAddForm.prototype.refreshLessonRecommendations = function () {
+    var state = this.runState();
+    var self = this;
+    if (state && state.lessonRecs && state.lessonRecs.length) {
+      var newRecs = [];
+      var pageCount = state.lessonRecs.length;
+      for (var p = 1; p <= pageCount; p++) {
+        var pageEntry = state.plan && state.plan.pages[p - 1];
+        if (pageEntry && pageEntry.status === 'pending') {
+          newRecs[p - 1] = state.lessonRecs[p - 1];
+          continue;
+        }
+        var prior = lessonRecsPriorToPage(newRecs, p);
+        newRecs[p - 1] = recommendForDraftPage(
+          this.books, this.detectedMeta,
+          { textbook: this.detectedMeta, entries: entriesForPhotoPage(this.rows, p) },
+          prior, this.bookChoice);
+      }
+      state.lessonRecs = newRecs;
+      this.rows = this.rows.map(function (row) {
+        if (row.lessonOrigin === 'parent') {
+          return row;
+        }
+        if (row.lessonOrigin === 'recognized' && metaField(row.lesson)) {
+          return row;
+        }
+        var rec = newRecs[(row.page || 1) - 1];
+        return fillRecommendedLessons([row], rec)[0];
+      });
+      return;
+    }
+    if (!this.rows.length) {
+      return;
+    }
+    var rec = recommendForDraftPage(this.books, this.detectedMeta,
+      { textbook: this.detectedMeta, entries: entriesForPhotoPage(this.rows, 1) },
+      [], this.bookChoice);
+    this.rows = this.rows.map(function (row) {
+      if (row.lessonOrigin === 'parent') {
+        return row;
+      }
+      if (row.lessonOrigin === 'recognized' && metaField(row.lesson)) {
+        return row;
+      }
+      return fillRecommendedLessons([row], rec)[0];
+    });
   };
 
   /** Read the 新建教材 mini-form's values back (name + five meta fields). */
@@ -5455,10 +5582,12 @@
         cancelBtn.addEventListener('click', close);
         actions.appendChild(cancelBtn);
         actions.appendChild(applyBtn);
+        var parseEdit = global.parseBatchForEdit || global.parseBatch;
         var render = function () {
-          var parsed = global.parseBatch(paste.value);
+          var parsed = parseEdit(paste.value);
           var preview = global.previewBatchEdits(picked, parsed.rows, library);
           clearEl(previewBox);
+          previewBox.dataset.ok = preview.ok ? 'true' : 'false';
           if (!preview.ok && preview.code === 'count-mismatch') {
             applyBtn.disabled = true;
             var mismatch = document.createElement('p');
@@ -5469,11 +5598,33 @@
             return;
           }
           var edits = preview.edits.filter(function (e) { return e.kind === 'edit'; });
+          var blocked = global.blockedEdits ? global.blockedEdits(preview) : edits.filter(
+            function (e) { return e.blocked; });
           var summary = document.createElement('p');
           summary.className = 'batch-edit-summary';
-          summary.textContent = edits.length + ' 处修改、' + preview.unchanged + ' 处不变。';
+          summary.textContent = edits.length + ' 处修改、' + preview.unchanged +
+            ' 处不变' + (blocked.length ? '、' + blocked.length + ' 处阻断' : '') + '。';
           previewBox.appendChild(summary);
-          applyBtn.disabled = !edits.some(function (e) { return !e.blocked; });
+          var list = document.createElement('ul');
+          list.className = 'batch-edit-list';
+          edits.forEach(function (e) {
+            var li = document.createElement('li');
+            var face = e.wordTo === e.wordFrom ? e.wordFrom
+              : (e.wordFrom + ' → ' + e.wordTo);
+            li.textContent = face + '（释义：' +
+              (e.meaningTo === e.meaningFrom ? '不变' : ('「' + (e.meaningFrom || '（空）') +
+                '」→「' + e.meaningTo + '」')) + '）' +
+              (e.blocked === 'identity-conflict'
+                ? ' — 已阻断：词面与另一个词（#' + e.conflictId + '）相同'
+                : (e.blocked === 'meaning-too-long' ? ' — 已阻断：释义超过 1000 字' : ''));
+            if (e.blocked) {
+              li.className = 'batch-edit-blocked';
+            }
+            list.appendChild(li);
+          });
+          previewBox.appendChild(list);
+          var applicable = edits.some(function (e) { return !e.blocked; });
+          applyBtn.disabled = !applicable;
         };
         paste.addEventListener('input', render);
         render();
@@ -5481,8 +5632,14 @@
           if (applyBtn.disabled) {
             return;
           }
-          var parsed = global.parseBatch(paste.value);
+          var parsed = parseEdit(paste.value);
           var preview = global.previewBatchEdits(picked, parsed.rows, library);
+          var pending = preview.edits.filter(function (e) {
+            return e.kind === 'edit' && !e.blocked;
+          });
+          if (!pending.length) {
+            return;
+          }
           preview.edits.forEach(function (e, i) {
             if (e.kind !== 'edit' || e.blocked) {
               return;
@@ -6584,6 +6741,10 @@
   global.lessonsNamedOnPhoto = lessonsNamedOnPhoto;
   global.recommendLesson = recommendLesson;
   global.recommendForDraftPage = recommendForDraftPage;
+  global.recognizeRunStillValid = recognizeRunStillValid;
+  global.applyRecognizeLibraryLoad = applyRecognizeLibraryLoad;
+  global.createFormFieldValue = createFormFieldValue;
+  global.entriesForPhotoPage = entriesForPhotoPage;
   global.lessonRecsPriorToPage = lessonRecsPriorToPage;
   global.lessonsForRecommend = lessonsForRecommend;
   global.fillRecommendedLessons = fillRecommendedLessons;

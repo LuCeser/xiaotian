@@ -61,6 +61,10 @@ const {
   lessonsNamedOnPhoto,
   recommendLesson,
   recommendForDraftPage,
+  recognizeRunStillValid,
+  applyRecognizeLibraryLoad,
+  createFormFieldValue,
+  entriesForPhotoPage,
   lessonRecsPriorToPage,
   lessonsForRecommend,
   fillRecommendedLessons,
@@ -231,13 +235,12 @@ const BOOKS = [
   eq(appendMissingLessons(['第1课'], ['第3单元', 'Unit 3']),
     ['第1课', '第3单元', 'Unit 3'], '第3单元 and Unit 3 stay distinct');
 
-  // recommendForDraftPage: the matched candidate book's list is the
-  // previous-lesson fallback; an unmatched (or absent) header never
-  // invents one.
+  // recommendForDraftPage: §3.1 previous-lesson only from the parent's
+  // chosen book — OCR meta match alone never supplies another book's list.
   const BOOKS2 = [{ id: 7, name: '书七', edition: '人教版PEP', stage: '', grade: '三年级', volume: '', module: '', lessons: ['第1课', '第2课'] }];
   eq(recommendForDraftPage(BOOKS2, { edition: '人教版PEP', grade: '三年级' },
     { entries: [{ word: 'a', lesson: '' }] }, []),
-    { lesson: '第2课', source: 'previous-lesson' }, 'matched book feeds the last-lesson fallback');
+    { lesson: '', source: 'none' }, 'unset bookChoice never borrows OCR-matched lessons');
   eq(recommendForDraftPage([], null, { entries: [{ word: 'a', lesson: '' }] }, []),
     { lesson: '', source: 'none' }, 'new-book draft with no signal stays none');
 
@@ -1476,6 +1479,111 @@ async function testAppendLessonsPayload() {
   ], null, [], []);
   eq(quietCalls, [], 'a fully-known book gets no update call at all');
 }
+
+// ----------------------------------------------------------------------
+// Issue #80 Codex fix2 — stale fetch, draft isolation, form clears, import edit
+// ----------------------------------------------------------------------
+
+(function () {
+  eq(createFormFieldValue({ edition: '' }, 'edition', '译林版'), '',
+    'parent-cleared edition stays empty on re-render');
+  eq(createFormFieldValue({}, 'edition', '译林版'), '译林版',
+    'never-edited field still prefills from OCR');
+
+  const form = Object.create(PhotoAddForm.prototype);
+  form.recognizeEpoch = 3;
+  form.draftCategory = 'english';
+  assert(!recognizeRunStillValid(form, 3, 'chinese'),
+    'category switch invalidates the in-flight library fetch');
+  form.recognizeEpoch = 4;
+  assert(!recognizeRunStillValid(form, 3, 'english'),
+    'epoch bump invalidates the in-flight library fetch');
+
+  const mergeForm = Object.create(PhotoAddForm.prototype);
+  mergeForm.recognizeEpoch = 1;
+  mergeForm.draftCategory = 'english';
+  mergeForm.detectedMeta = null;
+  mergeForm.bookChoice = 'unset';
+  mergeForm.rows = [];
+  assert(applyRecognizeLibraryLoad(mergeForm, 1, 'english',
+    [[{ id: 9, word: 'apple' }], [], [], []],
+    [{ word: 'apple', meaning: '苹果', lesson: '' }]),
+    'applyRecognizeLibraryLoad merges while the run is still valid');
+  eq(mergeForm.rows[0].word, 'apple', 'library merge lands rows on the draft');
+  mergeForm.recognizeEpoch = 2;
+  mergeForm.rows = [];
+  assert(!applyRecognizeLibraryLoad(mergeForm, 1, 'english',
+    [[{ id: 9, word: 'apple' }], [], [], []],
+    [{ word: 'apple', meaning: '苹果', lesson: '' }]),
+    'applyRecognizeLibraryLoad drops a stale fetch after epoch bump');
+  eq(mergeForm.rows.length, 0, 'stale fetch leaves the draft empty');
+
+  const fresh = Object.create(PhotoAddForm.prototype);
+  fresh.recognizeEpoch = 0;
+  fresh.rows = [{ word: 'stale' }];
+  fresh.bookChoice = 'new';
+  fresh.newBookDraft = { name: '草稿' };
+  function makeClearable() {
+    const kids = [];
+    return {
+      childNodes: kids,
+      appendChild: function (n) { kids.push(n); },
+      removeChild: function () {},
+      hidden: false,
+    };
+  }
+  fresh.preview = makeClearable();
+  fresh.textbookPanel = makeClearable();
+  fresh.workspace = { hidden: false };
+  fresh.discardBtn = { hidden: false };
+  fresh.renderPreviewHint = function () {};
+  fresh.renderTextbookPanelReset = function () {};
+  fresh.syncWorkspace = function () {};
+  fresh.renderPreview = function () {};
+  fresh.beginRecognizeRun();
+  assert(fresh.rows.length === 0, 'beginRecognizeRun clears draft rows');
+  assert(fresh.bookChoice === 'unset', 'beginRecognizeRun resets bookChoice');
+  assert(fresh.newBookDraft === null, 'beginRecognizeRun clears newBookDraft');
+  assert(fresh.recognizeEpoch === 1, 'beginRecognizeRun bumps recognizeEpoch');
+
+  const recBooks = [{ id: 7, name: '书七', edition: '人教版PEP', stage: '', grade: '三年级',
+    volume: '', module: '', lessons: ['第1课', '第2课'] }];
+  const recForm = Object.create(PhotoAddForm.prototype);
+  recForm.books = recBooks;
+  recForm.detectedMeta = { edition: '人教版PEP', grade: '三年级' };
+  recForm.bookChoice = 7;
+  recForm.rows = [
+    { word: 'a', lesson: '', lessonOrigin: 'none', page: 1, status: 'new' },
+  ];
+  recForm.refreshLessonRecommendations();
+  eq(recForm.rows[0].lesson, '第2课', 'hand-picked book re-fills previous-lesson recommendation');
+  eq(recForm.rows[0].lessonOrigin, 'previous-lesson', 'origin reflects the book-list fallback');
+})();
+
+require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-batch-edit.js'));
+
+(function () {
+  const picked = [
+    { id: 1, word: 'alpha', meaning: '甲', category: 'english' },
+    { id: 3, word: 'gamma', meaning: '丙', category: 'english' },
+  ];
+  const library = [
+    { id: 1, word: 'alpha', category: 'english' },
+    { id: 2, word: 'beta', category: 'english' },
+    { id: 1000001, word: 'gamma', category: 'english' },
+  ];
+  const preview = global.previewBatchEdits(
+    picked,
+    global.parseBatchForEdit('alpha\t甲 revised\nbeta\tstolen').rows,
+    library);
+  const blocked = preview.edits.filter(function (e) {
+    return e.kind === 'edit' && e.blocked;
+  });
+  assert(blocked.length === 1, 'import batch preview blocks the identity conflict');
+  assert(preview.edits.some(function (e) {
+    return e.kind === 'edit' && !e.blocked && e.wordTo === 'alpha';
+  }), 'import batch preview still allows the non-conflicting edit');
+})();
 
 // ----------------------------------------------------------------------
 // Issue #80 Codex fix1 — recognize/commit concurrency + receipt snapshot

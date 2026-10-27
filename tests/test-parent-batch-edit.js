@@ -21,7 +21,7 @@ require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-batc
 require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-batch-edit.js'));
 
 const {
-  parseBatch, alignPastedEdits, previewBatchEdits, blockedEdits,
+  parseBatch, parseBatchForEdit, alignPastedEdits, previewBatchEdits, blockedEdits,
   batchEditPrefillLine,
 } = global.window;
 
@@ -156,6 +156,25 @@ const LIBRARY = SELECTED.concat([
   eq(mismatch.ok, false, 'a mismatched preview refuses');
   eq(mismatch.code, 'count-mismatch', 'the refusal code rides along');
   eq(mismatch.edits, [], 'a refused preview carries no edits');
+
+  // parseBatchForEdit: the same face in two categories is two valid rows.
+  const homographPaste = 'color\t颜色\n' + 'color\t色彩';
+  eq(parseBatch(homographPaste).rows.length, 1, 'parseBatch dedupes bare faces');
+  eq(parseBatchForEdit(homographPaste).rows.length, 2,
+    'parseBatchForEdit keeps cross-category homographs for positional edit');
+  const homographPreview = previewBatchEdits(
+    [
+      { id: 10, word: 'color', meaning: '颜色', category: 'english' },
+      { id: 20, word: 'color', meaning: '色彩', category: 'chinese' },
+    ],
+    parseBatchForEdit(homographPaste).rows,
+    [
+      { id: 10, word: 'color', category: 'english' },
+      { id: 20, word: 'color', category: 'chinese' },
+    ]);
+  eq(homographPreview.ok, true, 'two homographs align without count mismatch');
+  eq(homographPreview.edits.filter(function (e) { return e.kind === 'edit'; }).length, 0,
+    'an unchanged homograph pair produces no edits');
 })();
 
 // ----------------------------------------------------------------------

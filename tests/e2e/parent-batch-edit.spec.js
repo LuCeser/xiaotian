@@ -72,7 +72,8 @@ test('browse batch edit: cancel writes nothing; identity conflict keeps both car
     },
   });
   expect(add.ok()).toBeTruthy();
-  const listed = await (await request.get(`/api/v1/words?category=${CAT}&unit=${UNIT}`)).json();
+  const before = await (await request.get(`/api/v1/words?category=${CAT}&unit=${UNIT}`)).json();
+  const snap = new Map((before.words || []).map((w) => [w.word, w]));
   try {
     await page.goto('/parent.html');
     await page.getByRole('tab', { name: '词库' }).click();
@@ -83,24 +84,42 @@ test('browse batch edit: cancel writes nothing; identity conflict keeps both car
     await page.locator('#bulk-edit-btn').click();
     const dialog = page.locator('.modal-wide');
     await expect(dialog).toBeVisible();
+    await dialog.locator('#batch-edit-input').fill('e2e-own-a\tedited-in-preview');
     await dialog.getByRole('button', { name: '取消' }).click();
     await expect(dialog).toBeHidden();
 
-    await page.locator(`.word-row[data-word="e2e-own-a"]`)
-      .getByRole('checkbox', { name: '选择 e2e-own-a' }).check();
+    const mid = await (await request.get(`/api/v1/words?category=${CAT}&unit=${UNIT}`)).json();
+    for (const w of ['e2e-own-a', 'e2e-own-b']) {
+      const row = (mid.words || []).find((x) => x.word === w);
+      expect(row.id).toBe(snap.get(w).id);
+      expect(row.meaning).toBe(snap.get(w).meaning);
+      if (snap.get(w).fsrs_card) {
+        expect(row.fsrs_card).toEqual(snap.get(w).fsrs_card);
+      }
+    }
+
+    await page.locator('.word-select:checked').uncheck({ force: true });
+    for (const w of ['e2e-own-a', 'e2e-own-b']) {
+      await page.locator(`.word-row[data-word="${w}"]`)
+        .getByRole('checkbox', { name: `选择 ${w}` }).check();
+    }
     await page.locator('#bulk-edit-btn').click();
     const conflictDlg = page.locator('.modal-wide');
     await expect(conflictDlg).toBeVisible();
-    await conflictDlg.locator('#batch-edit-input').fill('e2e-own-b\tstolen');
+    await conflictDlg.locator('#batch-edit-input').fill(
+      'e2e-own-b\tstolen\ne2e-own-b\ttwo');
     await expect(conflictDlg.locator('.batch-edit-blocked')).toBeVisible();
     await expect(conflictDlg.getByRole('button', { name: '确认修改' })).toBeDisabled();
 
     const after = await (await request.get(`/api/v1/words?category=${CAT}&unit=${UNIT}`)).json();
-    const words = new Map((after.words || []).map((w) => [w.word, w]));
-    expect(words.get('e2e-own-a').word).toBe('e2e-own-a');
-    expect(words.get('e2e-own-b').word).toBe('e2e-own-b');
-    expect(words.get('e2e-own-a').id).toBeTruthy();
-    expect(words.get('e2e-own-b').id).toBeTruthy();
+    for (const w of ['e2e-own-a', 'e2e-own-b']) {
+      const row = (after.words || []).find((x) => x.word === w);
+      expect(row.id).toBe(snap.get(w).id);
+      expect(row.meaning).toBe(snap.get(w).meaning);
+      if (snap.get(w).fsrs_card) {
+        expect(row.fsrs_card).toEqual(snap.get(w).fsrs_card);
+      }
+    }
   } finally {
     await deleteUnit(request);
   }

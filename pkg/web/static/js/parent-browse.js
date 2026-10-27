@@ -2410,8 +2410,9 @@
 
         // The preview re-derives from the CURRENT text on every input —
         // pure functions only, nothing written until 确认修改.
+        var parseEdit = global.parseBatchForEdit || global.parseBatch;
         var render = function () {
-          var parsed = global.parseBatch(paste.value);
+          var parsed = parseEdit(paste.value);
           var preview = global.previewBatchEdits(selected, parsed.rows, self.words);
           clearContainer(previewBox);
           previewBox.dataset.ok = preview.ok ? 'true' : 'false';
@@ -2465,7 +2466,7 @@
           if (applyBtn.disabled) {
             return;
           }
-          var parsed = global.parseBatch(paste.value);
+          var parsed = parseEdit(paste.value);
           var preview = global.previewBatchEdits(selected, parsed.rows, self.words);
           var pending = preview.edits.filter(function (e) {
             return e.kind === 'edit' && !e.blocked;

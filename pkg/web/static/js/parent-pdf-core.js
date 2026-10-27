@@ -109,6 +109,10 @@
       if (event === 'fail' && page.status === 'running') {
         return { no: page.no, status: 'failed', error: error || '识别失败' };
       }
+      // Stopped or superseded mid-flight — return to pending so 继续/重试 work.
+      if (event === 'abort' && page.status === 'running') {
+        return { no: page.no, status: 'pending', error: '' };
+      }
       return page;
     });
   }
