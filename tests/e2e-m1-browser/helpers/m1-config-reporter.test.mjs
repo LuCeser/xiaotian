@@ -11,6 +11,7 @@
 // Run: node --test tests/e2e-m1-browser/helpers/m1-config-reporter.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -44,9 +45,32 @@ test('env set: json reporter attached with outputFile anchored at the repo root'
   ]);
   // The exact ci.yml check step invocation: `node scripts/check-m1-report.mjs
   // reports/m1-results.json` from the repo root must read this very file.
+  // CI_NAME is slash-shaped (checker argv), but path.relative emits the
+  // PLATFORM separator (`reports\m1-results.json` on Windows), so a strict
+  // string equal fails there. Compare segment arrays: it still only passes
+  // when outputFile is exactly <repoRoot>/reports/m1-results.json — an
+  // outside-the-root result surfaces as a `..`/absolute segment and mismatches.
   const [name, options] = reporter[1];
   assert.equal(name, 'json');
-  assert.equal(path.relative(REPO_ROOT, options.outputFile), CI_NAME);
+  assert.deepEqual(
+    path.relative(REPO_ROOT, options.outputFile).split(path.sep),
+    CI_NAME.split('/'),
+  );
+});
+
+test('segment comparison holds under path.win32 semantics', () => {
+  // The chain above replayed with explicit Windows path semantics, so a
+  // POSIX-only run still proves Windows passes: resolve() accepts the
+  // forward-slash CI_NAME but re-separates to backslashes, which is exactly
+  // why the old plain string equal broke on Windows while segments match.
+  const winRoot = 'C:\\xiaotian';
+  const winOutputFile = path.win32.resolve(winRoot, CI_NAME);
+  assert.equal(winOutputFile, 'C:\\xiaotian\\reports\\m1-results.json');
+  assert.notEqual(path.win32.relative(winRoot, winOutputFile), CI_NAME);
+  assert.deepEqual(
+    path.win32.relative(winRoot, winOutputFile).split(path.win32.sep),
+    CI_NAME.split('/'),
+  );
 });
 
 test('env unset: plain local run keeps the bare list reporter', () => {
@@ -54,6 +78,11 @@ test('env unset: plain local run keeps the bare list reporter', () => {
 });
 
 test('absolute env value passes through un-reanchored (path.resolve semantics)', () => {
-  const abs = path.join(path.sep, 'tmp', 'elsewhere', 'm1.json');
+  // Must be a genuinely absolute path (drive-qualified on Windows):
+  // path.resolve anchors a bare `\tmp\…` onto the current drive, so such a
+  // value would NOT pass through and the deepEqual would fail there.
+  // os.tmpdir() is absolute and normalized on every platform, so resolve
+  // returns it as-is.
+  const abs = path.join(os.tmpdir(), 'elsewhere', 'm1.json');
   assert.deepEqual(reporterWith(abs), [['list'], ['json', { outputFile: abs }]]);
 });
