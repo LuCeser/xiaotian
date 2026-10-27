@@ -4650,6 +4650,25 @@
   }
 
   /**
+   * assignSucceededWords — words that landed in at least one ok:true assign
+   * slice (#88 path B: merge/指定课次 copy only rides a successful assign).
+   * Pure.
+   */
+  function assignSucceededWords(groupResults) {
+    var ok = {};
+    (groupResults || []).forEach(function (r) {
+      if (r && r.ok && r.group) {
+        (r.group.words || []).forEach(function (w) {
+          if (w) {
+            ok[w] = true;
+          }
+        });
+      }
+    });
+    return ok;
+  }
+
+  /**
    * buildTextbookReceipt — the Issue #6 per-item commit receipt. Buckets
    * every preview row into exactly one category:
    *   'added'       新增 — the word entered the library (verified or
@@ -4681,6 +4700,8 @@
         });
       }
     });
+    var assignOk = assignSucceededWords(input.groupResults);
+    var assignMissNote = '未能指定课次——可在词库中补指定';
     var snapMeaning = {};
     (input.fresh || []).forEach(function (w) {
       if (w && w.word) {
@@ -4730,9 +4751,12 @@
           if (assignFailed[row.word]) {
             item.category = 'failed';
             item.note = assignFailNote(row.word, '并发已存在不同释义，保留原释义；');
-          } else {
+          } else if (assignOk[row.word]) {
             item.category = 'merged';
             item.note = '并发已存在不同释义，保留原释义，仅合并来源';
+          } else {
+            item.category = 'failed';
+            item.note = '并发已存在不同释义，保留原释义；' + assignMissNote;
           }
         } else if (assignFailed[row.word]) {
           item.category = 'failed';
@@ -4740,9 +4764,12 @@
         } else if (unassigned[row.word]) {
           item.category = 'failed';
           item.note = '词条已保存，但词库读取失败，未能指定课次——可在词库中补指定';
-        } else {
+        } else if (assignOk[row.word]) {
           item.category = 'added';
           item.note = '已添加并指定课次';
+        } else {
+          item.category = 'failed';
+          item.note = '词条已保存；' + assignMissNote;
         }
       } else if (row.status === 'conflict' && row.resolution === 'adopt') {
         var edit = edited[row.word];
@@ -4752,9 +4779,12 @@
         } else if (assignFailed[row.word]) {
           item.category = 'failed';
           item.note = assignFailNote(row.word, '释义已按照片更新；');
-        } else {
+        } else if (assignOk[row.word]) {
           item.category = 'merged';
           item.note = '采用照片释义更新，已合并来源';
+        } else {
+          item.category = 'failed';
+          item.note = '释义已按照片更新；' + assignMissNote;
         }
       } else if (unassigned[row.word]) {
         item.category = 'failed';
@@ -4763,11 +4793,19 @@
         item.category = 'failed';
         item.note = assignFailNote(row.word);
       } else if (row.status === 'conflict') {
-        item.category = 'merged';
-        item.note = '保留词库释义，仅合并来源';
-      } else {
+        if (assignOk[row.word]) {
+          item.category = 'merged';
+          item.note = '保留词库释义，仅合并来源';
+        } else {
+          item.category = 'failed';
+          item.note = assignMissNote;
+        }
+      } else if (assignOk[row.word]) {
         item.category = 'merged';
         item.note = '词库已有，仅指定课次';
+      } else {
+        item.category = 'failed';
+        item.note = assignMissNote;
       }
       items.push(item);
     });
@@ -5404,6 +5442,7 @@
   global.planAssignments = planAssignments;
   global.commitUnit = commitUnit;
   global.buildTextbookReceipt = buildTextbookReceipt;
+  global.assignSucceededWords = assignSucceededWords;
   // Issue #81 P2: the 默写安排 receipt verdict + the state line's hint —
   // pure over their inputs, so the Node unit tests pin the post-save
   // eligibility contract (window.parseBatch precedent).

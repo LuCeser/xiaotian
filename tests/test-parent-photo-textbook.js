@@ -422,6 +422,82 @@ function catOf(receipt, word) {
 })();
 
 // ----------------------------------------------------------------------
+// buildTextbookReceipt — merge copy only after ok:true assign (#88 path B)
+// ----------------------------------------------------------------------
+
+(function () {
+  const adoptRow = [
+    { index: 0, word: 'star', meaning: '新星', lesson: '第5课', status: 'conflict', checked: true, resolution: 'adopt' },
+  ];
+  const adoptGroup = [{ lesson: '第5课', includeInScope: false, cardIds: [16], words: ['star'] }];
+  const adoptOk = buildTextbookReceipt({
+    rows: adoptRow,
+    addRows: [],
+    addOutcome: { added: 0, skipped: 0 },
+    fresh: SNAP,
+    editResults: [{ word: 'star', ok: true }],
+    groups: adoptGroup,
+    groupResults: [{ group: adoptGroup[0], ok: true, result: { updated: 1 } }],
+    unassigned: [],
+  });
+  eq(catOf(adoptOk, 'star'), 'merged', 'adopt + assign ok → 合并');
+
+  const adoptNoAssign = buildTextbookReceipt({
+    rows: adoptRow,
+    addRows: [],
+    addOutcome: { added: 0, skipped: 0 },
+    fresh: SNAP,
+    editResults: [{ word: 'star', ok: true }],
+    groups: [],
+    groupResults: [],
+    unassigned: [],
+  });
+  eq(catOf(adoptNoAssign, 'star'), 'failed', 'adopt without assign → 失败');
+  assert(/未能指定课次/.test(adoptNoAssign.items[0].note || ''), 'adopt no-assign names 未能指定课次');
+
+  const adoptAssignFail = buildTextbookReceipt({
+    rows: adoptRow,
+    addRows: [],
+    addOutcome: { added: 0, skipped: 0 },
+    fresh: SNAP,
+    editResults: [{ word: 'star', ok: true }],
+    groups: adoptGroup,
+    groupResults: [{ group: adoptGroup[0], ok: false, error: '网络错误' }],
+    unassigned: [],
+  });
+  eq(catOf(adoptAssignFail, 'star'), 'failed', 'adopt + assign fail → 失败');
+
+  const racedRow = [
+    { index: 0, word: 'river', meaning: '河流', lesson: '第5课', status: 'new', checked: true },
+  ];
+  const racedGroup = [{ lesson: '第5课', includeInScope: false, cardIds: [12], words: ['river'] }];
+  const racedMerged = buildTextbookReceipt({
+    rows: racedRow,
+    addRows: racedRow,
+    addOutcome: { added: 0, skipped: 1 },
+    fresh: [{ id: 12, word: 'river', meaning: '江', textbooks: [] }],
+    editResults: [],
+    groups: racedGroup,
+    groupResults: [{ group: racedGroup[0], ok: true, result: { updated: 1 } }],
+    unassigned: [],
+  });
+  eq(catOf(racedMerged, 'river'), 'merged', 'raced diff + assign ok → 合并');
+
+  const racedNoAssign = buildTextbookReceipt({
+    rows: racedRow,
+    addRows: racedRow,
+    addOutcome: { added: 0, skipped: 1 },
+    fresh: [{ id: 12, word: 'river', meaning: '江', textbooks: [] }],
+    editResults: [],
+    groups: [],
+    groupResults: [],
+    unassigned: [],
+  });
+  eq(catOf(racedNoAssign, 'river'), 'failed', 'raced diff without assign → 失败');
+  assert(/未能指定课次/.test(racedNoAssign.items[0].note || ''), 'raced no-assign names 未能指定课次');
+})();
+
+// ----------------------------------------------------------------------
 // summarizeAssignScope — the 默写安排 receipt verdict from the POST-SAVE
 // entries and every eligibility source (Issue #81 P2: the old count rode
 // this import's group payloads alone, so a participates=0 word could show
