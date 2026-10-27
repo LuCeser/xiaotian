@@ -115,10 +115,10 @@ func TestConsumeDesignationWinsExactlyOnce(t *testing.T) {
 		t.Fatalf("first ConsumeDesignation = %v, %v; want true, nil", won, err)
 	}
 	var status, consumedAt string
-	if err := db.QueryRow(
+	if scanErr := db.QueryRow(
 		"SELECT status, consumed_at FROM designations WHERE id = ?", created.ID,
-	).Scan(&status, &consumedAt); err != nil {
-		t.Fatalf("read consumed row: %v", err)
+	).Scan(&status, &consumedAt); scanErr != nil {
+		t.Fatalf("read consumed row: %v", scanErr)
 	}
 	if status != DesignationStatusConsumed || consumedAt == "" {
 		t.Fatalf("row = status %q consumed_at %q, want consumed with a timestamp", status, consumedAt)

@@ -1065,12 +1065,12 @@ type DesignationCard struct {
 // snapshot column; CreatedAt/ConsumedAt are SQLite datetime('now') strings
 // (ConsumedAt stays "" while pending).
 type Designation struct {
-	Cards      []DesignationCard
 	Lesson     string
 	Category   string
 	Status     string
 	CreatedAt  string
 	ConsumedAt string
+	Cards      []DesignationCard
 	ID         int64
 	TextbookID int64
 }
@@ -1078,9 +1078,9 @@ type Designation struct {
 // DesignationInput is CreateDesignation's payload: the designation's
 // textbook/lesson identity, its subject, and the selected card snapshot.
 type DesignationInput struct {
-	Cards      []DesignationCard
 	Lesson     string
 	Category   string
+	Cards      []DesignationCard
 	TextbookID int64
 }
 

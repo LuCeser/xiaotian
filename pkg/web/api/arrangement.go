@@ -38,8 +38,8 @@ const (
 // DesignationCreateRequest is the POST /designations body: the textbook id
 // and one lesson name from its list (待确认/课表外 cannot be designated).
 type DesignationCreateRequest struct {
-	TextbookID int64  `json:"textbookId"`
 	Lesson     string `json:"lesson"`
+	TextbookID int64  `json:"textbookId"`
 }
 
 // validateDesignationCreateRequest enforces the shape before any read or
@@ -141,10 +141,10 @@ func (h *handler) createDesignation(w http.ResponseWriter, r *http.Request) {
 // and counts only — NO word surfaces, the same leak-guard discipline as
 // the lessons routes' LessonSummary projection.
 type designationResponse struct {
-	ID         int64  `json:"id"`
-	TextbookID int64  `json:"textbookId"`
 	Lesson     string `json:"lesson"`
 	Category   string `json:"category"`
 	Status     string `json:"status"`
+	ID         int64  `json:"id"`
+	TextbookID int64  `json:"textbookId"`
 	WordCount  int    `json:"wordCount"`
 }

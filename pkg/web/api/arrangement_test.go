@@ -125,10 +125,10 @@ func TestCreateDesignationRoute(t *testing.T) {
 	t.Run("typed outcomes answer their own codes and store nothing", func(t *testing.T) {
 		cases := []struct {
 			name       string
-			result     pybridge.DesignateResult
-			wantStatus int
 			wantCode   string
 			wantBody   string
+			result     pybridge.DesignateResult
+			wantStatus int
 		}{
 			{
 				name:       "occupied",

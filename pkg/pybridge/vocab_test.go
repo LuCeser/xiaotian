@@ -664,8 +664,8 @@ func TestDesignateArgs(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		opts      DesignateOpts
 		extraArgs []string
+		opts      DesignateOpts
 	}{
 		{
 			name: "minimal",

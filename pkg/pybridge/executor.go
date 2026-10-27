@@ -535,13 +535,13 @@ type UnassignWordsResult struct {
 // fetch-lock window (the same --fetch-lock-hours contract as DueOpts —
 // zero omits the flag so the script's 24h default applies).
 type DesignateOpts struct {
-	// TextbookID scopes the selection. Forwarded as --textbook-id.
-	TextbookID int64
-
 	// Lesson names one lesson from the textbook's explicit list. Forwarded
 	// as --lesson. The empty string is invalid here (待确认 cannot be
 	// designated) and is rejected before any subprocess spawn.
 	Lesson string
+
+	// TextbookID scopes the selection. Forwarded as --textbook-id.
+	TextbookID int64
 
 	// FetchLockHours sets the occupancy window on the selected cards.
 	// Forwarded as --fetch-lock-hours; <= 0 omits the flag.
@@ -577,10 +577,10 @@ const (
 // Total is the eligible-card count the script saw for the branch it took.
 type DesignateResult struct {
 	Status     string          `json:"status"`
-	TextbookID int64           `json:"textbook_id"`
 	Lesson     string          `json:"lesson"`
-	Total      int             `json:"total"`
 	Cards      []DesignateCard `json:"cards"`
+	TextbookID int64           `json:"textbook_id"`
+	Total      int             `json:"total"`
 }
 
 // Sentinel errors returned by the pybridge layer. Callers MUST detect
