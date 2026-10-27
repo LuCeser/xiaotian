@@ -1115,9 +1115,86 @@ async function testCommitDataFlow() {
     'real degraded flow renders an honest assignment failure');
 }
 
+// PR #88 复盘路径 B 的数据流验证：conflict+adopt + 第一次 GET /words 即
+// textbooks:null（真实降级线体）→ editWord 成功、一个 assign payload 都不
+// 发、横幅不写「已合并来源」。只留 status:'exists' 的旧数据流测不出这条
+// （Codex @80e3977：新增流程测试只覆盖 exists，因此仍会假绿）。
+async function testAdoptDegradedFlow() {
+  global.document = { createElement: makeScopeNode };
+
+  const row = {
+    index: 0, word: 'star', meaning: '新星', lesson: '第5课',
+    status: 'conflict', checked: true, resolution: 'adopt',
+  };
+  const assignPayloads = [];
+  const editCalls = [];
+  const form = Object.create(PhotoAddForm.prototype);
+  form.rows = [row];
+  form.banner = makeScopeNode('div');
+  form.draftCategory = 'english';
+  form.includePending = false;
+  form.fetchWords = function () {
+    // The degraded wire shape from textbooks_test.go: the card is known,
+    // its attribution is not — every read of this flow.
+    return Promise.resolve([
+      { id: 16, word: 'star', meaning: '旧义', participates: true, textbooks: null },
+    ]);
+  };
+  form.fetchTextbooks = function () { return Promise.resolve(SCOPE_BOOKS_AFTER); };
+  form.assignWords = function (bookID, payload) {
+    assignPayloads.push({ bookID: bookID, payload: payload });
+    return Promise.resolve({ updated: 1 });
+  };
+  form.editWord = function (id, patch) {
+    editCalls.push({ id: id, patch: patch });
+    return Promise.resolve({});
+  };
+
+  const receipt = await form.addAndAssign(SCOPE_BOOK, [row]);
+  form.renderTextbookCommitResult(receipt);
+  const banner = scopeTextOf(form.banner);
+  eq(editCalls.length, 1, 'adopt over unknown attribution still runs the meaning edit');
+  eq(assignPayloads, [], 'adopt over unknown attribution sends NO assign payload');
+  eq(receipt.groups, [], 'planAssignments skips the adopted word entirely');
+  eq(receipt.unassigned, ['star'], 'the receipt carries the word as unassigned');
+  assert(banner.indexOf('合并 1 个') < 0 && banner.indexOf('已合并来源') < 0,
+    'the adopt banner never claims a merged source without a successful assign');
+  assert(banner.indexOf('失败 1 个') >= 0,
+    'the adopt banner reports the batch as a failure, not a success');
+  assert(banner.indexOf('释义已按照片更新') >= 0 && banner.indexOf('未能指定课次') >= 0,
+    'the adopt banner keeps what did persist (edit) + the missing step (assign)');
+
+  // @80e3977 P3 的保护：待确认词 + includePending（归属已知时 payload 会带
+  // includeInScope:true）在 textbooks:null 下同样一个 payload 都不发。
+  const pendingRow = { index: 0, word: 'lake', meaning: '湖', lesson: '', status: 'exists', checked: true };
+  const pendingPayloads = [];
+  const pendingForm = Object.create(PhotoAddForm.prototype);
+  pendingForm.rows = [pendingRow];
+  pendingForm.banner = makeScopeNode('div');
+  pendingForm.draftCategory = 'english';
+  pendingForm.includePending = true;
+  pendingForm.fetchWords = function () {
+    return Promise.resolve([
+      { id: 15, word: 'lake', meaning: '湖', participates: true, textbooks: null },
+    ]);
+  };
+  pendingForm.fetchTextbooks = function () { return Promise.resolve(SCOPE_BOOKS_AFTER); };
+  pendingForm.assignWords = function (bookID, payload) {
+    pendingPayloads.push({ bookID: bookID, payload: payload });
+    return Promise.resolve({ updated: 1 });
+  };
+  pendingForm.editWord = null;
+
+  const pendingReceipt = await pendingForm.addAndAssign(SCOPE_BOOK, [pendingRow]);
+  eq(pendingPayloads, [],
+    'a would-be includeInScope:true payload is suppressed when attribution is unknown');
+  eq(pendingReceipt.unassigned, ['lake'],
+    'the suppressed include flow still reports the word as unassigned');
+}
+
 // ----------------------------------------------------------------------
 
-testCommitDataFlow().then(function () {
+testCommitDataFlow().then(testAdoptDegradedFlow).then(function () {
   if (failures) {
     console.error('parent-photo-textbook: ' + failures + ' of ' + checks + ' checks failed');
     process.exit(1);
