@@ -892,11 +892,16 @@ func (g *speechOneGate) openUp() {
 // manager. The unchecked close fallback stays transparent.
 type speechSubmitGate struct {
 	LessonExecutor
-	before    *speechOneGate
-	committed *speechOneGate
+	before            *speechOneGate
+	committed         *speechOneGate
+	uncheckedBefore   *speechOneGate
 }
 
 func (g *speechSubmitGate) CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
+	if unchecked && g.uncheckedBefore != nil {
+		g.uncheckedBefore.arm()
+		g.uncheckedBefore.wait()
+	}
 	if !unchecked && g.before != nil {
 		g.before.arm()
 		g.before.wait()
@@ -924,6 +929,21 @@ func (f *speechBrowserFixture) gateCheckSubmit(before, committed bool) (beforeGa
 	}
 	f.exec = g
 	return beforeGate, committedGate
+}
+
+// gateUncheckedCompleteCheck parks the D-03 fallback's unchecked CompleteCheck
+// until openUp — so a late formal submit probe can run before the fallback
+// latch lands (passage classrooms only; poems skip the fallback).
+func (f *speechBrowserFixture) gateUncheckedCompleteCheck() *speechOneGate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g, ok := f.exec.(*speechSubmitGate)
+	if !ok {
+		g = &speechSubmitGate{LessonExecutor: f.exec}
+		f.exec = g
+	}
+	g.uncheckedBefore = newSpeechOneGate()
+	return g.uncheckedBefore
 }
 
 // armPhotoOCR wires the scripted fake OCR reader into every future manager's
@@ -1416,22 +1436,29 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		f.seedCheckingWithManualVerdicts()
 		before, _ := f.gateCheckSubmit(true, false)
+		t.Cleanup(before.openUp)
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
+		var persistReached bool
 		select {
 		case <-before.entered:
+			persistReached = true
 		case <-time.After(30 * time.Second):
-			t.Fatal("the formal submit never reached the parked latch write")
 		}
 		m := f.waitFirstManager(5 * time.Second)
-		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
-			t.Fatal("test close did not obtain session ownership")
+		if persistReached {
+			if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
+				t.Fatal("test close did not obtain session ownership")
+			}
+			// Release the persist gate only AFTER the original connection tasks
+			// have exited — a synchronous latch write in the read loop cannot
+			// pass this while the gate stays closed.
+			f.assertOriginalTasksExited()
 		}
-		// Release the persist gate only AFTER the original connection tasks
-		// have exited — a synchronous latch write in the read loop cannot
-		// pass this while the gate stays closed.
-		f.assertOriginalTasksExited()
 		before.openUp()
+		if !persistReached {
+			t.Fatal("the formal submit never reached the parked latch write")
+		}
 		assertOutcome(t, f, m, <-driver)
 	})
 }
@@ -2358,12 +2385,12 @@ func TestPassageSubmitBrowser(t *testing.T) {
 		if len(recs) != 1 || recs[0].Kind != lesson.ReceiptKindPassage || recs[0].Status != lesson.ReceiptStatusSaved {
 			t.Fatalf("receipts = %+v, want one saved kind=passage receipt", recs)
 		}
-		got, ok, err := f.passagePracticeStore.LatestByRange(context.Background(), 77, false, []int{2})
+		rows, err := f.passagePracticeStore.ListByRange(context.Background(), 77, false, []int{2})
 		if err != nil {
-			t.Fatalf("read passage practice: %v", err)
+			t.Fatalf("list passage practice: %v", err)
 		}
-		if !ok || got.LessonID != lessonID {
-			t.Fatalf("passage practice record = %+v ok=%v, want one row for this lesson", got, ok)
+		if len(rows) != 1 || rows[0].LessonID != lessonID {
+			t.Fatalf("passage practice rows = %+v, want one row for this lesson", rows)
 		}
 	})
 
@@ -2372,6 +2399,8 @@ func TestPassageSubmitBrowser(t *testing.T) {
 		f.armPoemPassageSaveChain()
 		f.seedPassage()
 		f.scriptSpokenConfirm()
+		fallbackHold := f.gateUncheckedCompleteCheck()
+		t.Cleanup(fallbackHold.openUp)
 
 		driver := f.runDriverAsync("passage-submit-close", 45*time.Second, "--submit-delay-ms", "15000")
 		m := f.waitFirstManager(5 * time.Second)
@@ -2399,26 +2428,43 @@ func TestPassageSubmitBrowser(t *testing.T) {
 				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
 		}
 
-		// Probe the production entry while the registry is sealed — before the
-		// D-03 fallback's async CompleteCheck(unchecked=true) can land.
+		select {
+		case <-fallbackHold.entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the unchecked fallback never reached CompleteCheck before the probe")
+		}
+
+		// Probe the production entry while the registry is sealed and the
+		// fallback latch is still parked — no unchecked row yet.
 		m.submitPassage(m.currentSender(), CheckSubmitMsg{
 			Type: TypeCheckSubmit, RequestID: "late-passage-after-close",
 		})
-		if !waitFor(t, 5*time.Second, func() bool {
-			stored, err := f.tools.GetLessonState(context.Background(), lessonID)
-			return err == nil && stored.Stage == lesson.StageSubmitted
-		}) {
-			t.Fatal("the passage unchecked fallback never settled after the close")
-		}
 
 		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
 		if err != nil {
 			t.Fatalf("read stored lesson: %v", err)
 		}
-		// A formal submit would flip unchecked=false; only the fallback's
-		// unchecked latch may move the row after a sealed close.
+		if stored.Stage != lesson.StageChecking {
+			t.Fatalf("stored stage=%q, want checking — a sealed registry admits no submit", stored.Stage)
+		}
+		if stored.Version != versionAfterVerdict {
+			t.Fatalf("stored version = %d, want %d (verdicts only, no latch)", stored.Version, versionAfterVerdict)
+		}
+
+		fallbackHold.openUp()
+		if !waitFor(t, 5*time.Second, func() bool {
+			stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+			return err == nil && stored.Stage == lesson.StageSubmitted && stored.Unchecked
+		}) {
+			t.Fatal("the passage unchecked fallback never settled after releasing the gate")
+		}
+
+		stored, err = f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson after fallback: %v", err)
+		}
 		if !stored.Unchecked {
-			t.Fatalf("stored unchecked=%v, want true — a sealed registry admits no formal submit", stored.Unchecked)
+			t.Fatalf("stored unchecked=%v, want true — only the fallback latch may move the row", stored.Unchecked)
 		}
 		if stored.Version != versionAfterVerdict+1 {
 			t.Fatalf("stored version = %d, want %d (one unchecked fallback latch only)",
