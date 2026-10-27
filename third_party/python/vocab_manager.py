@@ -24,6 +24,10 @@ from datetime import datetime, timezone, timedelta
 
 # Same ceiling as Go pybridge.MaxDueLimit / FSRS DefaultWordCount [1, 100].
 MAX_CARD_LIMIT = 100
+# Issue #80 指定默写: one designated dictation session covers at most this
+# many words (AC-11 单次最多 100 个). Must stay equal to Go
+# pybridge.MaxDesignateLimit.
+MAX_DESIGNATE_LIMIT = 100
 # Ten 366-day years. Must match Go pybridge.MaxFetchLockHours.
 MAX_FETCH_LOCK_HOURS = 24 * 366 * 10
 
@@ -563,6 +567,88 @@ def cmd_new(db, args):
         new_cards = new_cards[: args.limit]
 
     print(json.dumps(new_cards, ensure_ascii=False, indent=2))
+
+
+def cmd_designate(db, args):
+    """Issue #80 指定默写 selection: every participates=1 card assigned to
+    one (textbook, lesson), regardless of learned_lessons progress, FSRS
+    due dates or cards.unit (开放问题 3: 未学到的课次也包含). The lesson must
+    be a non-empty member of the textbook's list — 待确认 and 课表外 have no
+    lesson name to designate and cannot be practiced into via this path.
+
+    The select + occupancy check + lock write run inside ONE BEGIN IMMEDIATE
+    transaction: a concurrent designate on the same target either completes
+    first or reads the winner's committed locks and answers occupied, and any
+    unexpired fetch lock in the target rejects the WHOLE batch without
+    touching a single lock (占用沿用 fetch_locked_until). More than
+    MAX_DESIGNATE_LIMIT eligible cards is a typed rejection carrying the
+    real total — nothing is locked. Designate never writes learned_lessons,
+    include_in_scope, participates or review_logs."""
+    textbook = db.execute(
+        "SELECT id, name, lessons FROM textbooks WHERE id = ?",
+        (args.textbook_id,),
+    ).fetchone()
+    if textbook is None:
+        print(f"Error: textbook id not found: {args.textbook_id}")
+        sys.exit(1)
+    lesson = args.lesson.strip() if args.lesson else ""
+    try:
+        lessons = json.loads(textbook["lessons"])
+    except (TypeError, ValueError):
+        lessons = []
+    if not lesson or lesson not in lessons:
+        print(f"Error: lesson {lesson!r} is not in textbook {textbook['name']!r}'s lesson list")
+        sys.exit(1)
+
+    now = datetime.now(timezone.utc)
+    # Lock timestamps and the occupancy comparison share this format, so the
+    # string comparison below is chronological — the same contract cmd_due's
+    # SQL `fetch_locked_until <= ?` relies on.
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    lock_hours = args.fetch_lock_hours if args.fetch_lock_hours is not None else FETCH_LOCK_HOURS
+
+    db.execute("BEGIN IMMEDIATE")
+    rows = db.execute(
+        """SELECT c.id, c.word, c.meaning, c.example, c.unit, c.fetch_locked_until
+           FROM cards c
+           JOIN card_assignments a ON a.card_id = c.id
+           WHERE a.textbook_id = ? AND a.lesson = ? AND c.participates = 1
+           ORDER BY c.id""",
+        (args.textbook_id, lesson),
+    ).fetchall()
+
+    def report(payload):
+        # Rejection paths wrote nothing; commit just releases the immediate
+        # transaction so the connection stays usable.
+        db.commit()
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    if len(rows) > MAX_DESIGNATE_LIMIT:
+        report({"status": "too_many", "textbook_id": args.textbook_id,
+                "lesson": lesson, "total": len(rows)})
+        return
+    if any(r["fetch_locked_until"] and r["fetch_locked_until"] > now_str for r in rows):
+        report({"status": "occupied", "textbook_id": args.textbook_id,
+                "lesson": lesson, "total": len(rows)})
+        return
+
+    cards = [
+        {"id": r["id"], "word": r["word"], "meaning": r["meaning"],
+         "example": r["example"], "unit": r["unit"]}
+        for r in rows
+    ]
+    if rows:
+        locked_until = (now + timedelta(hours=lock_hours)).strftime("%Y-%m-%d %H:%M:%S")
+        ids = [r["id"] for r in rows]
+        placeholders = ",".join("?" for _ in ids)
+        db.execute(
+            f"UPDATE cards SET fetch_locked_until = ? WHERE id IN ({placeholders})",
+            [locked_until] + ids,
+        )
+    db.commit()
+    print(json.dumps({"status": "ok", "textbook_id": args.textbook_id,
+                      "lesson": lesson, "total": len(cards), "cards": cards},
+                     ensure_ascii=False, indent=2))
 
 
 def cmd_review(db, args):
@@ -1332,6 +1418,17 @@ def main():
     p_new.add_argument("--category", default="english", help="Category")
     p_new.add_argument("--limit", type=bounded_positive_int(MAX_CARD_LIMIT), help="Max cards to return")
 
+    # designate (Issue #80 指定默写)
+    p_designate = subparsers.add_parser(
+        "designate",
+        help="Select one textbook lesson's participates=1 cards for a designated dictation session",
+    )
+    p_designate.add_argument("--textbook-id", type=int, required=True)
+    p_designate.add_argument("--lesson", required=True,
+                             help="Lesson name from the textbook's list (待确认/课表外 cannot be designated)")
+    p_designate.add_argument("--fetch-lock-hours", type=bounded_positive_int(MAX_FETCH_LOCK_HOURS), default=None,
+                             help=f"Hours to lock the selected cards (default: {FETCH_LOCK_HOURS})")
+
     # review
     p_review = subparsers.add_parser("review", help="Record review results")
     p_review.add_argument("--results", help='JSON: {"word_or_id":"good|hard|again",...}')
@@ -1444,6 +1541,7 @@ def main():
         "add": cmd_add,
         "due": cmd_due,
         "new": cmd_new,
+        "designate": cmd_designate,
         "review": cmd_review,
         "stats": cmd_stats,
         "list": cmd_list,
