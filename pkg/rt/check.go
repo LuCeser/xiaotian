@@ -611,6 +611,24 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		return
 	}
 
+	tm.mu.Lock()
+	if tm.formalCheckSubmitPending {
+		tm.mu.Unlock()
+		tm.recorder.Emit(EventError,
+			infra.F("code", ErrCodeInvalidMessage),
+			infra.F("duplicate", "check_submit_inflight"),
+		)
+		return
+	}
+	frozen := formalCheckSubmitFrozen{
+		lessonID: lessonID,
+		category: tm.tutor.category,
+		words:    append([]lesson.Word(nil), tm.tutor.words...),
+	}
+	frozen.confirmed, frozen.timedOutN, frozen.hinted = tm.tutor.outcomeCounts()
+	frozen.hintWords, frozen.hintTotal = tm.tutor.hintAccounting()
+	tm.mu.Unlock()
+
 	// Latch: the stage transition. ONLY the first commit proceeds. The
 	// admission is taken in the SAME critical section that stores the turn
 	// cancel: a close can only land before the whole accepted save (this
@@ -622,6 +640,9 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	tm.mu.Lock()
 	write, writeAdmitted := tm.admitCheckWriteLocked()
 	epoch := tm.epoch
+	if writeAdmitted {
+		tm.formalCheckSubmitPending = true
+	}
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
 	if !writeAdmitted {
@@ -631,15 +652,31 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		return
 	}
 	requestID := m.RequestID
-	go tm.runAcceptedFormalCheckSubmit(s, ctx, cancel, epoch, write, lessonID, expected, requestID, total)
+	go tm.runAcceptedFormalCheckSubmit(s, ctx, cancel, epoch, write, frozen, expected, requestID, total)
+}
+
+// formalCheckSubmitFrozen captures dictation submit inputs at admission so a
+// session_init during the latch write cannot retarget ratings or receipts.
+type formalCheckSubmitFrozen struct {
+	lessonID                     string
+	category                     string
+	words                        []lesson.Word
+	confirmed, timedOutN, hinted int
+	hintWords, hintTotal         int
 }
 
 // runAcceptedFormalCheckSubmit runs off the WebSocket read loop: the latch
 // write and the rest of the accepted save must not block end_session or
 // transport teardown on the same connection.
-func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, lessonID string, expected int, requestID string, total int) {
+func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, frozen formalCheckSubmitFrozen, expected int, requestID string, total int) {
 	persistCtx, persistDone := checkPersistContext(ctx)
-	defer persistDone()
+	defer func() {
+		persistDone()
+		tm.mu.Lock()
+		tm.formalCheckSubmitPending = false
+		tm.mu.Unlock()
+	}()
+	lessonID := frozen.lessonID
 
 	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, requestID, false)
 	if err != nil {
@@ -718,11 +755,7 @@ func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Contex
 		tm.tutor.checking = false
 		return nil
 	})
-	tm.mu.Lock()
-	wordsCopy := make([]lesson.Word, len(tm.tutor.words))
-	copy(wordsCopy, tm.tutor.words)
-	tm.mu.Unlock()
-	ratings := checkRatings(wordsCopy, res.Verdicts, res.Outcomes)
+	ratings := checkRatings(frozen.words, res.Verdicts, res.Outcomes)
 	correct := 0
 	for _, v := range res.Verdicts {
 		if v.Correct {
@@ -730,7 +763,7 @@ func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Contex
 		}
 	}
 
-	tm.finishCheckSubmit(s, ctx, cancel, epoch, ratings, total, correct, requestID, write)
+	tm.finishCheckSubmit(s, persistCtx, ctx, cancel, epoch, frozen, ratings, total, correct, requestID, write)
 }
 
 // sortedWordSet extracts a rating map's keys sorted — the receipt word-set
@@ -752,19 +785,12 @@ func sortedWordSet(m map[string]string) []string {
 // SubmitReview call site the check stage owns. 13.3-01 brackets the write
 // with the two-phase save receipt (Begin pending before, Complete with the
 // real outcome after) — a pure bypass that never alters the flow below.
-func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ratings map[string]string, total, correct int, requestID string, write *checkWriteAdmission) {
+func (tm *TurnManager) finishCheckSubmit(s Sender, persistCtx context.Context, ctx context.Context, cancel context.CancelFunc, epoch uint64, frozen formalCheckSubmitFrozen, ratings map[string]string, total, correct int, requestID string, write *checkWriteAdmission) {
 	defer cancel()
-	persistCtx, persistDone := checkPersistContext(ctx)
-	defer persistDone()
-
-	// Dictation-stage behavior data stays honestly reported (the D-01
-	// rewrite keeps outcomeCounts/hintAccounting as event fields).
-	tm.mu.Lock()
-	confirmed, timedOutN, hinted := tm.tutor.outcomeCounts()
-	hintWords, hintTotal := tm.tutor.hintAccounting()
-	lessonID := tm.tutor.lessonID
-	category := tm.tutor.category
-	tm.mu.Unlock()
+	lessonID := frozen.lessonID
+	category := frozen.category
+	confirmed, timedOutN, hinted := frozen.confirmed, frozen.timedOutN, frozen.hinted
+	hintWords, hintTotal := frozen.hintWords, frozen.hintTotal
 
 	var (
 		requested  = len(ratings)
@@ -1018,7 +1044,10 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 		return
 	}
 
-	go tm.finishCorrections(s, ctx, cancel, correctionInputs{
+	persistCtx, persistDone := checkPersistContext(ctx)
+	go func() {
+		defer persistDone()
+		tm.finishCorrections(s, persistCtx, ctx, cancel, correctionInputs{
 		epoch:     epoch,
 		requestID: m.RequestID,
 		lessonID:  lessonID,
@@ -1028,7 +1057,8 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 		total:     total,
 		correct:   correct,
 		write:     write,
-	})
+		})
+	}()
 }
 
 // correctionInputs carries the diff result into the finishing goroutine.
@@ -1053,10 +1083,8 @@ type correctionInputs struct {
 // the summary ack, and the read loop must keep serving that ack): the
 // diff-only SubmitReview, the correction event, ClearUnchecked, the honest
 // review_result, then the wrap line and the acked ending.
-func (tm *TurnManager) finishCorrections(s Sender, ctx context.Context, cancel context.CancelFunc, in correctionInputs) {
+func (tm *TurnManager) finishCorrections(s Sender, persistCtx context.Context, ctx context.Context, cancel context.CancelFunc, in correctionInputs) {
 	defer cancel()
-	persistCtx, persistDone := checkPersistContext(ctx)
-	defer persistDone()
 
 	requested := len(in.changed)
 	updated := 0
