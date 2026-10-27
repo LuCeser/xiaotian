@@ -94,6 +94,16 @@ jobs:
       - run: python3 -m venv third_party/python/.venv
       - run: third_party/python/.venv/bin/pip install -r third_party/python/requirements.txt
 
+      # The cross-language init test (pkg/database TestVocabInitBootstrapsGoReadableSchema)
+      # needs the fsrs venv, which build-and-test never installs, so that job
+      # skips it. This job already built the venv above — run the test here with
+      # the interpreter pinned so a missing/broken venv fails loudly (the test
+      # t.Fatalf's on an explicit-but-unexecutable HTA_PYTHON_INTERPRETER)
+      # instead of silently skipping.
+      - run: go test ./pkg/database/ -run TestVocabInitBootstrapsGoReadableSchema -count=1 -v
+        env:
+          HTA_PYTHON_INTERPRETER: ${{ github.workspace }}/third_party/python/.venv/bin/python
+
       - run: npm ci
 
       - run: npx playwright install --with-deps chromium
