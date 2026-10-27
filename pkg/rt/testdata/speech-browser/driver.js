@@ -36,15 +36,22 @@ function emit(result) {
 }
 
 // inspectExpectedRound checks one connection's one announcement without
-// changing the page. The caller supplies the exact subtitle texts before the
-// browser starts; sentence IDs, epoch and turn ID must then agree across the
-// observed production frames. A binary frame counts for a sentence only when
-// it arrived between that sentence's start and end controls.
-function inspectExpectedRound(view, playback, expectedSentences) {
+// changing the page. The caller supplies the exact subtitle texts and the
+// expected PCM chunk count per sentence (the fixture's own TTS shape) before
+// the browser starts; sentence IDs, epoch and turn ID must then agree across
+// the observed production frames. A binary frame counts for a sentence only
+// when it arrived between that sentence's start and end controls — and the
+// observation REJECTS both a window that lost chunks (缺块) and any binary
+// frame outside every window (乱序: a chunk that raced its own audio_start or
+// trailed its audio_end).
+function inspectExpectedRound(view, playback, expectedSentences, expectedPcmPerSentence) {
   const reject = (reason) => ({ ok: false, reason });
   if (!Array.isArray(expectedSentences) || expectedSentences.length === 0
       || expectedSentences.some((text) => typeof text !== 'string' || text.length === 0)) {
     return reject('expected sentence list is empty or invalid');
+  }
+  if (!Number.isInteger(expectedPcmPerSentence) || expectedPcmPerSentence < 1) {
+    return reject('expected PCM chunks per sentence is missing or invalid');
   }
   const opens = view.filter((e) => e.dir === 'evt' && e.kind === 'open');
   if (opens.length !== 1) return reject('expected exactly one WebSocket connection, got ' + opens.length);
@@ -59,6 +66,7 @@ function inspectExpectedRound(view, playback, expectedSentences) {
   const turnId = first.turn_id;
   const seen = new Set();
   const sentences = [];
+  const windows = [];
   let lastAckIndex = -1;
   for (let n = 0; n < expectedSentences.length; n++) {
     const teacher = teachers[n];
@@ -86,17 +94,32 @@ function inspectExpectedRound(view, playback, expectedSentences) {
     const ack = acks[0];
     const pcm = connection.filter((e) => e.dir === 'in' && e.kind === 'binary'
       && e.i > start.i && e.i < end.i);
-    if (!(teacher.i < start.i && start.i < end.i && end.i < ack.i) || pcm.length === 0) {
+    if (!(teacher.i < start.i && start.i < end.i && end.i < ack.i)) {
       return reject('sentence ' + n + ' lacks ordered teacher/start/PCM/end/ack evidence');
+    }
+    if (pcm.length !== expectedPcmPerSentence) {
+      return reject('sentence ' + n + ' PCM chunks in its start/end window = ' + pcm.length
+        + ', want exactly ' + expectedPcmPerSentence + ' — a missing chunk is not natural playback');
     }
     if (!playedBeforeAck(playback.trace, epoch, msg.sentence_id)) {
       return reject('sentence ' + n + ' ACK did not follow native playback completion');
     }
+    windows.push({ start: start.i, end: end.i });
     lastAckIndex = Math.max(lastAckIndex, ack.i);
     sentences.push({
       text: msg.text, sentenceId: msg.sentence_id,
       pcmFrames: pcm.length, nativeCompletionBeforeAck: true,
     });
+  }
+
+  // 乱序: every binary frame of the round (anything before the final expected
+  // ACK) must sit strictly inside exactly one sentence window — a chunk that
+  // raced ahead of its audio_start or trailed its audio_end is a transport
+  // ordering defect, not something the page may silently absorb.
+  const strays = connection.filter((e) => e.dir === 'in' && e.kind === 'binary' && e.i < lastAckIndex
+    && !windows.some((w) => w.start < e.i && e.i < w.end));
+  if (strays.length > 0) {
+    return reject(strays.length + ' PCM chunk(s) landed outside every sentence start/end window (misordered transport)');
   }
 
   const listening = connection.filter((e) => e.dir === 'in' && e.type === 'state'
@@ -137,6 +160,7 @@ function checkSelf() {
   }
   const event = (i, dir, type, msg, kind = 'text') => ({ i, dir, type, msg, kind });
   const expected = ['第一句。', '第二句。'];
+  const pcmPerSentence = 2;
   const complete = [event(0, 'evt', undefined, null, 'open')];
   const trace = [];
   let i = 1;
@@ -146,27 +170,38 @@ function checkSelf() {
       { epoch: 7, turn_id: 9, sentence_id: sid, text: sentence }));
     complete.push(event(i++, 'in', 'audio_start', { epoch: 7, turn_id: 9, sentence_id: sid }));
     complete.push(event(i++, 'in', undefined, null, 'binary'));
+    complete.push(event(i++, 'in', undefined, null, 'binary'));
     complete.push(event(i++, 'in', 'audio_end', { epoch: 7, turn_id: 9, sentence_id: sid }));
     trace.push('onended:7:' + sid, 'ack:7:' + sid);
     complete.push(event(i++, 'out', 'sentence_ack', { epoch: 7, sentence_id: sid }));
   });
   complete.push(event(i++, 'in', 'state', { value: 'listening' }));
-  const valid = inspectExpectedRound(complete, { trace }, expected).ok;
+  const valid = inspectExpectedRound(complete, { trace }, expected, pcmPerSentence).ok;
   const missingRejected = !inspectExpectedRound(
     complete.filter((e) => !(e.type === 'teacher_sentence' && e.msg.text === expected[1])),
-    { trace }, expected).ok;
+    { trace }, expected, pcmPerSentence).ok;
+  // 缺块: sentence 2's window keeps only one of its two PCM chunks.
+  const secondStart = complete.findIndex((e, idx) => idx > 0 && e.type === 'audio_start' && e.msg.sentence_id === 's1');
+  const chunkMissing = complete.filter((e, idx) => !(idx === secondStart + 2 && e.kind === 'binary'));
+  const chunkMissingRejected = !inspectExpectedRound(chunkMissing, { trace }, expected, pcmPerSentence).ok;
+  // 乱序: one of sentence 2's chunks is moved AHEAD of its audio_start.
+  const chunkMisordered = complete.filter((e, idx) => !(idx === secondStart + 2 && e.kind === 'binary'));
+  chunkMisordered.splice(secondStart, 0, event(secondStart - 0.5, 'in', undefined, null, 'binary'));
+  const chunkMisorderedRejected = !inspectExpectedRound(chunkMisordered, { trace }, expected, pcmPerSentence).ok;
   const early = complete.slice();
   early.splice(4, 0, event(4.5, 'in', 'state', { value: 'listening' }));
-  const earlyListeningRejected = !inspectExpectedRound(early, { trace }, expected).ok;
+  const earlyListeningRejected = !inspectExpectedRound(early, { trace }, expected, pcmPerSentence).ok;
   if (!valid) violations.push('完整预期轮次未被观察断言接受');
   if (!missingRejected) violations.push('漏句未被观察断言拒绝');
+  if (!chunkMissingRejected) violations.push('缺块轮次未被观察断言拒绝');
+  if (!chunkMisorderedRejected) violations.push('乱序轮次未被观察断言拒绝');
   if (!earlyListeningRejected) violations.push('提前 listening 未被观察断言拒绝');
   return {
     ok: violations.length === 0,
     scenarios,
     micSource: 'fake-mic.js (synthetic getUserMedia, helpers 既有工具)',
     observer: 'rt-observe.js (read-only WebSocket/playback observation)',
-    observationAssertions: { valid, missingRejected, earlyListeningRejected },
+    observationAssertions: { valid, missingRejected, chunkMissingRejected, chunkMisorderedRejected, earlyListeningRejected },
     violations,
   };
 }
@@ -177,13 +212,13 @@ function checkSelf() {
 // 是真实的自然完成，不是发送完成或超时捷径。结果里逐句报告
 // playedBeforeAck（该句原生 onended 是否先于其 ACK——空播 ACK/丢块 ACK 在
 // 此必为 false）与合成麦克风被页面采用的情况。
-async function scenarioFixture({ page, url, timeoutMs, expectedSentences, preWaitMs = 0 }) {
+async function scenarioFixture({ page, url, timeoutMs, expectedSentences, expectedPcmPerSentence, preWaitMs = 0 }) {
   await page.goto(url);
   await page.locator('#rt-start').click();
   if (preWaitMs > 0) await page.waitForTimeout(preWaitMs);
   try {
     await waitWs(page, async (view) => inspectExpectedRound(
-      view, await playbackState(page), expectedSentences).ok,
+      view, await playbackState(page), expectedSentences, expectedPcmPerSentence).ok,
     { timeoutMs, label: 'complete expected opening playback before listening is restored' });
   } catch (err) {
     // 诊断增补：超时原语只带 trace 尾部，这里补齐 droppedChunks/麦克风状态，
@@ -197,7 +232,7 @@ async function scenarioFixture({ page, url, timeoutMs, expectedSentences, preWai
 
   const view = await wsView(page);
   const playback = await playbackState(page);
-  const round = inspectExpectedRound(view, playback, expectedSentences);
+  const round = inspectExpectedRound(view, playback, expectedSentences, expectedPcmPerSentence);
   if (!round.ok) throw new Error('expected playback observation rejected: ' + round.reason);
   const binaryDown = view.filter((e) => e.dir === 'in' && e.kind === 'binary');
   const pageAcks = view
@@ -409,7 +444,8 @@ async function scenarioResumeCloseWindow(args) {
 // scenario "correction-submit-close"（1.10a 复验）：重连补检课堂——恢复播
 // 报自然完成后，先点第一行的「错」与第二行的「对」（人工改判，凑出最小
 // diff），再点「检查完了，提交」；关闭由 Go 侧在提交闩驻留时触发，页面只
-// 观察 close 与迟到的 review_result/教师句。
+// 观察 close 与迟到的 review_result/教师句。--submit-delay-ms 在改判与提交
+// 之间留一个固定间隔（密封顺序复验用：Go 侧在该窗口内先落关闭）。
 async function scenarioCorrectionSubmitClose(args) {
   const opening = await scenarioFixture(args);
   const before = await wsView(args.page);
@@ -418,6 +454,7 @@ async function scenarioCorrectionSubmitClose(args) {
   const buttons = args.page.locator('.rt-check-row .rt-check-btn');
   await buttons.nth(1).click(); // 第一行的「错」—— the one-word diff this submit carries
   await buttons.nth(3).click(); // 第二行的「错」—— agrees with the derived hint: no diff
+  if (args.submitDelayMs > 0) await args.page.waitForTimeout(args.submitDelayMs);
   await args.page.locator('.rt-check-submit').click();
   await waitWs(args.page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
     { timeoutMs: args.timeoutMs, label: 'close racing the correction submit' });
@@ -439,7 +476,7 @@ async function scenarioPassageSubmitClose(args) {
   const { page, url, timeoutMs } = args;
   await page.goto(url + '?passage=77&scope=51');
   await page.locator('#rt-start').click();
-  await waitWs(page, async (view) => inspectExpectedRound(view, await playbackState(page), args.expectedSentences).ok,
+  await waitWs(page, async (view) => inspectExpectedRound(view, await playbackState(page), args.expectedSentences, args.expectedPcmPerSentence).ok,
     { timeoutMs, label: 'passage greeting played naturally' });
   await playPcm16(page, tonePcm16Base64());
   await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'check_started'),
@@ -468,7 +505,7 @@ async function scenarioPoemSubmitClose(args) {
   const { page, url, timeoutMs } = args;
   await page.goto(url + '?poem=77');
   await page.locator('#rt-start').click();
-  await waitWs(page, async (view) => inspectExpectedRound(view, await playbackState(page), args.expectedSentences).ok,
+  await waitWs(page, async (view) => inspectExpectedRound(view, await playbackState(page), args.expectedSentences, args.expectedPcmPerSentence).ok,
     { timeoutMs, label: 'poem greeting played naturally' });
   await playPcm16(page, tonePcm16Base64());
   await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'check_started'),
@@ -588,6 +625,8 @@ async function main() {
   const url = opt('--url');
   const timeoutMs = Number(opt('--timeout-ms') || 45000);
   const holdMs = Number(opt('--hold-ms') || 3000);
+  const submitDelayMs = Number(opt('--submit-delay-ms') || 0);
+  const expectedPcmPerSentence = Number(opt('--expected-pcm-per-sentence'));
   let expectedSentences;
   try {
     expectedSentences = JSON.parse(opt('--expected-sentences-json') || 'null');
@@ -608,7 +647,7 @@ async function main() {
     const page = await context.newPage();
     await installRtObserver(page);
     await installFakeMic(page);
-    result = await run({ page, url, timeoutMs, holdMs, expectedSentences });
+    result = await run({ page, url, timeoutMs, holdMs, submitDelayMs, expectedSentences, expectedPcmPerSentence });
     await context.close();
   } catch (err) {
     result = { ok: false, error: String((err && err.message) || err) };

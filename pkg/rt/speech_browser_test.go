@@ -258,6 +258,11 @@ type speechBrowserFixture struct {
 	practice          PracticeSource
 	practiceStore     *lesson.PracticeStore
 	expectedSentences []string
+	// expectedPCMPerSentence is the fake TTS's chunk count per sentence — the
+	// driver's round observation demands EXACTLY that many PCM frames inside
+	// every sentence window (缺块/乱序 both reject), so the fixture owns the
+	// number it actually synthesizes.
+	expectedPCMPerSentence int
 
 	mu       sync.Mutex
 	managers []*speechManagerTracker
@@ -424,14 +429,15 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 		{Word: "第二词", Meaning: "fixture 第二词"},
 	}
 	f := &speechBrowserFixture{
-		t:                 t,
-		db:                db,
-		dbPath:            dbPath,
-		tools:             tools,
-		exec:              tools,
-		expectedSentences: append([]string(nil), speechExpectedOpening...),
-		asr:               newFakeASR(),
-		llm:               newFakeLLM(),
+		t:                      t,
+		db:                     db,
+		dbPath:                 dbPath,
+		tools:                  tools,
+		exec:                   tools,
+		expectedSentences:      append([]string(nil), speechExpectedOpening...),
+		expectedPCMPerSentence: 2,
+		asr:                    newFakeASR(),
+		llm:                    newFakeLLM(),
 		// Two non-zero sawtooth chunks per sentence (~250ms each at 24kHz
 		// s16le): audible-length PCM so real playback and onended are stable.
 		// The inter-chunk delay mirrors the real TTS first-packet latency
@@ -1013,12 +1019,14 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		scenario == "poem-submit-close" {
 		f.mu.Lock()
 		sentences := append([]string(nil), f.expectedSentences...)
+		pcm := f.expectedPCMPerSentence
 		f.mu.Unlock()
 		expected, err := json.Marshal(sentences)
 		if err != nil {
 			f.t.Fatalf("encode expected opening: %v", err)
 		}
 		args = append(args, "--expected-sentences-json", string(expected))
+		args = append(args, "--expected-pcm-per-sentence", fmt.Sprint(pcm))
 	}
 	cmd := exec.CommandContext(ctx, "node", args...)
 	var out, errOut bytes.Buffer
@@ -2463,9 +2471,11 @@ func (f *speechBrowserFixture) runDriverCheck() {
 			Scenarios  []string `json:"scenarios"`
 			Violations []string `json:"violations"`
 			Assertions struct {
-				Valid                  bool `json:"valid"`
-				MissingRejected        bool `json:"missingRejected"`
-				EarlyListeningRejected bool `json:"earlyListeningRejected"`
+				Valid                   bool `json:"valid"`
+				MissingRejected         bool `json:"missingRejected"`
+				EarlyListeningRejected  bool `json:"earlyListeningRejected"`
+				ChunkMissingRejected    bool `json:"chunkMissingRejected"`
+				ChunkMisorderedRejected bool `json:"chunkMisorderedRejected"`
 			} `json:"observationAssertions"`
 		} `json:"selfCheck"`
 	}
@@ -2475,8 +2485,9 @@ func (f *speechBrowserFixture) runDriverCheck() {
 	if !res.OK {
 		f.t.Fatalf("driver self-check violations: %v", res.Check.Violations)
 	}
-	if !res.Check.Assertions.Valid || !res.Check.Assertions.MissingRejected || !res.Check.Assertions.EarlyListeningRejected {
-		f.t.Fatalf("driver observation self-check incomplete: %+v", res.Check.Assertions)
+	a := res.Check.Assertions
+	if !a.Valid || !a.MissingRejected || !a.EarlyListeningRejected || !a.ChunkMissingRejected || !a.ChunkMisorderedRejected {
+		f.t.Fatalf("driver observation self-check incomplete: %+v", a)
 	}
 	found := false
 	for _, s := range res.Check.Scenarios {
