@@ -396,9 +396,15 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 		cancel()
 		return
 	}
-	persistCtx := context.WithoutCancel(ctx)
+	requestID := m.RequestID
+	go tm.runAcceptedPracticeSubmit(s, ctx, cancel, epoch, write, lessonID, expected, requestID, wordsList)
+}
 
-	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, m.RequestID, false)
+func (tm *TurnManager) runAcceptedPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, lessonID string, expected int, requestID string, wordsList []lesson.Word) {
+	persistCtx, persistDone := checkPersistContext(ctx)
+	defer persistDone()
+
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, requestID, false)
 	if err != nil {
 		tm.completeCheckWrite(write)
 		cancel()
@@ -417,8 +423,6 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 		return
 	}
 	if res.Idempotent {
-		// The latch already fell elsewhere: nothing to write, nothing to
-		// replay (the honest no-op).
 		tm.mu.Lock()
 		tm.tutor.checking = false
 		tm.mu.Unlock()
@@ -437,7 +441,7 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 		return nil
 	})
 
-	go tm.finishPracticeSubmit(s, ctx, cancel, epoch, lessonID, wordsList, res, m.RequestID, write)
+	tm.finishPracticeSubmit(s, ctx, cancel, epoch, lessonID, wordsList, res, requestID, write)
 }
 
 // finishPracticeSubmit runs on its own goroutine (the ACK-gated ending
@@ -450,7 +454,8 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 // the FSRS schedule, D-11).
 func (tm *TurnManager) finishPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, lessonID string, wordsList []lesson.Word, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
-	persistCtx := context.WithoutCancel(ctx)
+	persistCtx, persistDone := checkPersistContext(ctx)
+	defer persistDone()
 
 	// The D-02 matrix over the STORED readback — the same single rating
 	// discipline as the main submit (never a second table, Pitfall 1).

@@ -679,9 +679,15 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 		cancel()
 		return
 	}
-	persistCtx := context.WithoutCancel(ctx)
+	requestID := m.RequestID
+	go tm.runAcceptedPassageSubmit(s, ctx, cancel, epoch, write, ref, lessonID, expected, requestID, total)
+}
 
-	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, m.RequestID, false)
+func (tm *TurnManager) runAcceptedPassageSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, ref passageRef, lessonID string, expected int, requestID string, total int) {
+	persistCtx, persistDone := checkPersistContext(ctx)
+	defer persistDone()
+
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, requestID, false)
 	if err != nil {
 		tm.completeCheckWrite(write)
 		cancel()
@@ -718,7 +724,7 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 		return nil
 	})
 
-	go tm.finishPassageSubmit(s, ctx, cancel, epoch, ref, lessonID, total, res, m.RequestID, write)
+	tm.finishPassageSubmit(s, ctx, cancel, epoch, ref, lessonID, total, res, requestID, write)
 }
 
 // finishPassageSubmit runs on its own goroutine (the ACK-gated ending
@@ -730,7 +736,8 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 // (lesson_complete).
 func (tm *TurnManager) finishPassageSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref passageRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
-	persistCtx := context.WithoutCancel(ctx)
+	persistCtx, persistDone := checkPersistContext(ctx)
+	defer persistDone()
 
 	correct := 0
 	for _, v := range res.Verdicts {
