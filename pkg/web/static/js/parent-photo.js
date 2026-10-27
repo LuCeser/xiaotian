@@ -1019,9 +1019,13 @@
    * recognize time), and the run's earlier pages' recommendations in
    * order. Pure; recommendLesson does the deciding, nothing is written.
    */
-  function recommendForDraftPage(books, meta, photo, priorRecs) {
-    var candidate = matchTextbookForMeta(books, meta);
-    return recommendLesson(photo, (candidate && candidate.lessons) || [], priorRecs || []);
+  function recommendForDraftPage(books, meta, photo, priorRecs, bookChoice) {
+    var lessons = lessonsForRecommend(books, bookChoice);
+    if (!lessons.length) {
+      var candidate = matchTextbookForMeta(books, meta);
+      lessons = (candidate && candidate.lessons) || [];
+    }
+    return recommendLesson(photo, lessons, priorRecs || []);
   }
 
   /**
@@ -1199,10 +1203,43 @@
     if (books && books.length) {
       return 'unset';
     }
-    if (meta) {
-      return 'new';
+    // §2.2: no books in this subject yet → 新建 (lesson-only wordlists
+    // without a page header still land in textbook mode, not 补充词汇).
+    return 'new';
+  }
+
+  /**
+   * lessonRecsPriorToPage — earlier photos' recommendations in photo
+   * order (Issue #80 §3.1). Sparse slots from out-of-order completion
+   * are skipped; only indices before pageNo count.
+   */
+  function lessonRecsPriorToPage(lessonRecs, pageNo) {
+    var prior = [];
+    var cap = Math.max(0, (pageNo || 0) - 1);
+    for (var i = 0; i < cap; i++) {
+      if (lessonRecs && lessonRecs[i]) {
+        prior.push(lessonRecs[i]);
+      }
     }
-    return 'none';
+    return prior;
+  }
+
+  /** Lessons list for recommendLesson's previous-lesson fallback. */
+  function lessonsForRecommend(books, bookChoice) {
+    if (bookChoice === 'new' || bookChoice === 'none' || bookChoice === 'unset') {
+      return [];
+    }
+    if (typeof bookChoice === 'number') {
+      var chosen = null;
+      (books || []).forEach(function (b) {
+        if (b && b.id === bookChoice) {
+          chosen = b;
+        }
+      });
+      return (chosen && chosen.lessons) || [];
+    }
+    var candidate = matchTextbookForMeta(books, null);
+    return (candidate && candidate.lessons) || [];
   }
 
   /**
@@ -1664,6 +1701,10 @@
     // anchor (the last plain-clicked pick row).
     this.batchLessonDraft = '';
     this.lastLessonPick = null;
+    this.newBookDraft = null;
+    this.recognizeBusy = false;
+    this.commitInFlight = false;
+    this.recognizeEpoch = 0;
 
     var self = this;
     this.pickBtn.addEventListener('click', function () {
@@ -2189,8 +2230,11 @@
    * the photo flow does — 开始识别 replaces it).
    */
   PhotoAddForm.prototype.releasePdf = function () {
-    if (this.pdfState && this.pdfState.doc && global.PdfPageRunner) {
-      global.PdfPageRunner.close(this.pdfState.doc);
+    if (this.pdfState) {
+      this.recognizeEpoch += 1;
+      if (this.pdfState.doc && global.PdfPageRunner) {
+        global.PdfPageRunner.close(this.pdfState.doc);
+      }
     }
     this.pdfState = null;
     // Issue #81: the page render dies with the document — the left column
@@ -2249,6 +2293,9 @@
       return;
     }
     this.draftCategory = category;
+    if (this.commitInFlight) {
+      return;
+    }
     if (this.isPickedPdf()) {
       this.handlePdfRecognize();
       return;
@@ -2262,6 +2309,10 @@
     var self = this;
     var kit = global.__parentFormKit || {};
     this.showFormError('');
+    this.releasePhotoBatch();
+    this.releasePdf();
+    this.beginRecognizeRun();
+    var runEpoch = this.recognizeEpoch;
     this.setBusy(true);
 
     var uploadBytes = null;
@@ -2279,7 +2330,7 @@
         // preview rows against a classification snapshot that no longer
         // matches the draft's subject. Drop it; the switch hint already
         // told the parent to 重新识别.
-        if (self.draftCategory !== category) {
+        if (runEpoch !== self.recognizeEpoch || self.draftCategory !== category) {
           self.setBusy(false);
           return;
         }
@@ -2331,7 +2382,8 @@
           // shape); recommendForDraftPage reads it as photo.textbook.
           self.rows = fillRecommendedLessons(self.rows, recommendForDraftPage(
             self.books, self.detectedMeta,
-            { textbook: parsed.meta, entries: entries }, []));
+            { textbook: parsed.meta, entries: entries }, [],
+            self.bookChoice));
           self.poemRows = classifyPoemDrafts(parsed.poems, self.existingPoems);
           self.passageRows = classifyPassageDrafts(parsed.passages, self.existingPassages);
           self.otherSections = parsed.others.map(function (o) {
@@ -2387,8 +2439,13 @@
     // every page's recognize call and the one library snapshot ride it.
     var category = this.draftCategory;
     this.showFormError('');
-    this.setBusy(true);
+    if (this.commitInFlight) {
+      return;
+    }
     this.releasePdf();
+    this.releasePhotoBatch();
+    this.beginRecognizeRun();
+    this.setBusy(true);
 
     global.PdfPageRunner.open(this.currentFile)
       .then(function (opened) {
@@ -2405,6 +2462,7 @@
           aborted: false,
           metaDone: false,
           panelRendered: false,
+          lessonRecs: [],
         };
         self.renderPdfBar();
         self.syncWorkspace();
@@ -2467,11 +2525,15 @@
     var category = this.draftCategory;
     var files = this.pickedPhotos;
     this.showFormError('');
-    this.setBusy(true);
+    if (this.commitInFlight) {
+      return;
+    }
     // A stale PDF run must not own the bar (runState prefers it) — the
     // same reset handlePdfRecognize gives itself.
     this.releasePdf();
     this.releasePhotoBatch();
+    this.beginRecognizeRun();
+    this.setBusy(true);
     this.detectedMetaList = [];
 
     this.photoBatch = {
@@ -2482,6 +2544,7 @@
       aborted: false,
       metaDone: false,
       panelRendered: false,
+      lessonRecs: [],
     };
     this.renderPdfBar();
     this.syncWorkspace();
@@ -2528,6 +2591,10 @@
   PhotoAddForm.prototype.runOnePhotoPage = function (pageNo) {
     var self = this;
     var state = this.photoBatch;
+    if (!state || state.aborted) {
+      return Promise.resolve(null);
+    }
+    var runEpoch = this.recognizeEpoch;
     var file = state.files[pageNo - 1];
     state.plan = global.applyPageEvent(state.plan, pageNo, 'start');
     this.renderPdfBar();
@@ -2542,6 +2609,9 @@
         return self.recognizePhoto(bytes, self.draftCategory);
       })
       .then(function (data) {
+        if (runEpoch !== self.recognizeEpoch || !self.photoBatch || state.aborted) {
+          return null;
+        }
         self.landRecognized(data, pageNo, state, function (meta) {
           // Photos: headers MERGE (§2.2) — later photos fill only fields
           // the earlier ones left empty; contradicting readings void the
@@ -2552,6 +2622,9 @@
         });
       })
       .catch(function (err) {
+        if (runEpoch !== self.recognizeEpoch || !self.photoBatch || state.aborted) {
+          return;
+        }
         state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
           (err && err.message) || '识别失败');
         if (self.sourcePageNo === pageNo) {
@@ -2591,6 +2664,7 @@
     if (this.photoBatch) {
       this.photoBatch.aborted = true;
       this.photoBatch = null;
+      this.recognizeEpoch += 1;
     }
     this.clearPdfSource();
     this.renderPdfBar();
@@ -2662,9 +2736,11 @@
     // empties take the page's default, and the run's earlier pages feed
     // the photo-order fallback. Memory-only; a retried page re-derives it.
     state.lessonRecs = state.lessonRecs || [];
+    var priorRecs = lessonRecsPriorToPage(state.lessonRecs, pageNo);
     var rec = recommendForDraftPage(this.books, this.detectedMeta,
-      { textbook: parsed.meta, entries: parsed.entries }, state.lessonRecs);
-    state.lessonRecs.push(rec);
+      { textbook: parsed.meta, entries: parsed.entries }, priorRecs,
+      this.bookChoice);
+    state.lessonRecs[pageNo - 1] = rec;
     var stamped = fillRecommendedLessons(
       global.classifyPhotoEntries(parsed.entries, this.existingWords), rec);
     this.rows = global.mergePageRows(this.rows, pageNo, stamped);
@@ -2709,6 +2785,10 @@
   PhotoAddForm.prototype.runOnePdfPage = function (pageNo) {
     var self = this;
     var state = this.pdfState;
+    if (!state || state.aborted) {
+      return Promise.resolve(null);
+    }
+    var runEpoch = this.recognizeEpoch;
     state.plan = global.applyPageEvent(state.plan, pageNo, 'start');
     this.renderPdfBar();
     return global.PdfPageRunner.renderPage(state.doc, pageNo)
@@ -2723,6 +2803,9 @@
         return self.recognizePhoto(blob, self.draftCategory);
       })
       .then(function (data) {
+        if (runEpoch !== self.recognizeEpoch || !self.pdfState || state.aborted) {
+          return null;
+        }
         self.landRecognized(data, pageNo, state, function (meta) {
           // PDF: one document, one header — the first page that read one
           // settles it (the pre-#80 semantics, unchanged).
@@ -2730,6 +2813,9 @@
         });
       })
       .catch(function (err) {
+        if (runEpoch !== self.recognizeEpoch || !self.pdfState || state.aborted) {
+          return;
+        }
         state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
           (err && err.message) || '识别失败');
         if (self.sourcePageNo === pageNo) {
@@ -2899,16 +2985,40 @@
 
   PhotoAddForm.prototype.setBusy = function (busy) {
     var kit = global.__parentFormKit || {};
+    this.recognizeBusy = !!busy;
     if (kit.setLoading) {
       kit.setLoading(this.recognizeBtn, busy);
     } else {
       this.recognizeBtn.disabled = busy;
     }
-    this.pickBtn.disabled = busy;
+    this.pickBtn.disabled = busy || this.commitInFlight;
     if (busy) {
       this.commitBtn.disabled = true;
     } else {
       this.updateCommitButton();
+    }
+  };
+
+  /**
+   * beginRecognizeRun — drop the previous draft and bump the epoch so
+   * late HTTP results from a released run cannot mutate the new draft.
+   */
+  PhotoAddForm.prototype.beginRecognizeRun = function () {
+    this.recognizeEpoch += 1;
+    this.resetEntries();
+    this.textbookPanel.hidden = true;
+    clearEl(this.preview);
+    this.renderPreviewHint('识别中…');
+    this.discardBtn.hidden = true;
+    if (this.pdfState) {
+      this.pdfState.panelRendered = false;
+      this.pdfState.lessonRecs = [];
+      this.pdfState.metaDone = false;
+    }
+    if (this.photoBatch) {
+      this.photoBatch.panelRendered = false;
+      this.photoBatch.lessonRecs = [];
+      this.photoBatch.metaDone = false;
     }
   };
 
@@ -2925,6 +3035,7 @@
     this.batchLessonDraft = '';
     this.lastLessonPick = null;
     this.lessonPickBar = null;
+    this.newBookDraft = null;
     this.syncUnitField();
     this.renderTextbookPanelReset();
     this.renderPreview();
@@ -3209,7 +3320,9 @@
       nameInput.id = 'parent-photo-tb-name';
       // parent-textbook.js's summary join IS the prefill (one encoder for
       // 版本·学段·年级·上下册·模块; a missing script degrades to no prefill).
-      nameInput.value = global.textbookMetaSummary ? global.textbookMetaSummary(this.detectedMeta) : '';
+      var savedDraft = this.newBookDraft || {};
+      nameInput.value = savedDraft.name ||
+        (global.textbookMetaSummary ? global.textbookMetaSummary(this.detectedMeta) : '');
       nameInput.setAttribute('aria-label', '教材名称');
       nameField.appendChild(nameLabel);
       nameField.appendChild(nameInput);
@@ -3226,11 +3339,22 @@
         input.className = 'form-input';
         input.id = 'parent-photo-tb-' + meta.key;
         input.placeholder = meta.ph;
-        input.value = self.detectedMeta ? metaField(self.detectedMeta[meta.key]) : '';
+        input.value = savedDraft[meta.key] ||
+          (self.detectedMeta ? metaField(self.detectedMeta[meta.key]) : '');
         input.setAttribute('aria-label', meta.label);
         field.appendChild(label);
         field.appendChild(input);
+        input.addEventListener('input', function () {
+          if (self.bookChoice === 'new') {
+            self.newBookDraft = self.readCreateForm();
+          }
+        });
         host.appendChild(field);
+      });
+      nameInput.addEventListener('input', function () {
+        if (self.bookChoice === 'new') {
+          self.newBookDraft = self.readCreateForm();
+        }
       });
 
       var lessonsNote = document.createElement('p');
@@ -3292,6 +3416,9 @@
     var applyAfter = function () {
       // 指定成功后自动清空选择（反馈 2026-10-27）— and the input too: the
       // value just landed on rows, keeping it invites a mis-apply.
+      if (self.bookChoice === 'new') {
+        self.newBookDraft = self.readCreateForm();
+      }
       self.rows = clearLessonPicks(self.rows);
       self.batchLessonDraft = '';
       // Re-render rows so the per-row inputs reflect the batch value, and
@@ -3509,6 +3636,24 @@
     }
     table.appendChild(tbody);
     this.preview.appendChild(table);
+
+    var checkedRows = this.rows.filter(function (r) {
+      return r.checked !== false && r.status !== 'invalid';
+    });
+    if (checkedRows.length && global.previewBatchEdits) {
+      var editBar = document.createElement('div');
+      editBar.className = 'photo-batch-edit-bar';
+      var editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'btn btn-secondary';
+      editBtn.id = 'photo-batch-edit-btn';
+      editBtn.textContent = '批量编辑勾选行（' + checkedRows.length + '）';
+      editBtn.addEventListener('click', function () {
+        self.openImportBatchEditModal();
+      });
+      editBar.appendChild(editBtn);
+      this.preview.appendChild(editBar);
+    }
 
     if (textbookMode) {
       // The shared lesson datalist: book lessons + the rows' current
@@ -4524,7 +4669,8 @@
         ? '确认添加（' + parts.join(' · ') + '）'
         : '确认添加（0 个）';
     }
-    this.commitBtn.disabled = (n === 0 && m === 0 && k === 0) ||
+    this.commitBtn.disabled = this.recognizeBusy || this.commitInFlight ||
+      (n === 0 && m === 0 && k === 0) ||
       (this.bookChoice === 'unset' && this.textbookDepsReady());
     // Issue #81: the footer save-note counts exactly what this label is
     // about to commit — refresh them together.
@@ -4687,7 +4833,7 @@
    * step's outcome lands in the receipt honestly.
    */
   PhotoAddForm.prototype.handleCommit = function () {
-    if (this.commitBtn.disabled) {
+    if (this.commitBtn.disabled || this.recognizeBusy || this.commitInFlight) {
       return;
     }
     var self = this;
@@ -4859,6 +5005,9 @@
     }
 
     this.setCommitBusy(true);
+    var receiptRowsSnapshot = this.rows.map(function (r) {
+      return Object.assign({}, r);
+    });
     // established tracks the step-1 result so a LATER step's failure can
     // still name what already persisted (per-step honesty: a partial
     // commit never renders as a plain failure with unreported writes).
@@ -4896,6 +5045,7 @@
         });
       })
       .then(function (receipt) {
+        receipt.receiptRows = receiptRowsSnapshot;
         self.renderTextbookCommitResult(receipt);
         self.onCommitted(receipt.addOutcome || {});
         // The textbook list changed (created/appended lessons/backfilled
@@ -5225,6 +5375,130 @@
    * 重试生成 once any previous attempt went unanswered; the note names
    * the unanswered count honestly (AC-5).
    */
+  /**
+   * openImportBatchEditModal (Issue #80 AC-09) — the browse batch-edit
+   * preview over the import draft's checked rows; 确认 applies to memory
+   * only (the ordinary 确认添加 persists).
+   */
+  PhotoAddForm.prototype.openImportBatchEditModal = function () {
+    var self = this;
+    var kit = global.__parentModalKit || {};
+    if (!kit.openModal || !global.previewBatchEdits) {
+      return;
+    }
+    var category = this.draftCategory || '';
+    var picked = [];
+    var library = (this.existingWords || []).slice();
+    this.rows.forEach(function (r, rowIndex) {
+      if (r.checked === false || r.status === 'invalid') {
+        return;
+      }
+      var existing = null;
+      (self.existingWords || []).forEach(function (w) {
+        if (w && w.word === r.word && (w.category || '') === category) {
+          existing = w;
+        }
+      });
+      var id = existing ? existing.id : (1000000 + rowIndex);
+      var entry = {
+        id: id,
+        word: r.word,
+        meaning: r.meaning || '',
+        category: category,
+        rowIndex: rowIndex,
+      };
+      picked.push(entry);
+      if (!existing) {
+        library.push({ id: id, word: r.word, meaning: r.meaning || '', category: category });
+      }
+    });
+    if (!picked.length || picked.length > 500) {
+      return;
+    }
+    var prefillLine = global.batchEditPrefillLine || function (word, meaning) {
+      return word + (meaning ? '\t' + meaning : '');
+    };
+
+    kit.openModal({
+      wide: true,
+      title: '批量编辑导入草稿（已勾选 ' + picked.length + ' 行）',
+      build: function (body, actions, close) {
+        var hint = document.createElement('p');
+        hint.className = 'form-hint';
+        hint.textContent = '按勾选顺序每行一个词；确认只改草稿，不写词库。';
+        body.appendChild(hint);
+        var paste = document.createElement('textarea');
+        paste.className = 'form-textarea';
+        paste.id = 'photo-batch-edit-input';
+        paste.rows = Math.min(10, Math.max(4, picked.length));
+        paste.value = picked.map(function (w) {
+          return prefillLine(w.word, w.meaning);
+        }).join('\n');
+        body.appendChild(paste);
+        var previewBox = document.createElement('div');
+        previewBox.className = 'batch-edit-preview';
+        body.appendChild(previewBox);
+        var applyBtn = kit.buildLoadingButton
+          ? kit.buildLoadingButton('应用到草稿', 'btn btn-primary')
+          : null;
+        if (!applyBtn) {
+          applyBtn = document.createElement('button');
+          applyBtn.type = 'button';
+          applyBtn.className = 'btn btn-primary';
+          applyBtn.textContent = '应用到草稿';
+        }
+        applyBtn.type = 'button';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = '取消';
+        cancelBtn.addEventListener('click', close);
+        actions.appendChild(cancelBtn);
+        actions.appendChild(applyBtn);
+        var render = function () {
+          var parsed = global.parseBatch(paste.value);
+          var preview = global.previewBatchEdits(picked, parsed.rows, library);
+          clearEl(previewBox);
+          if (!preview.ok && preview.code === 'count-mismatch') {
+            applyBtn.disabled = true;
+            var mismatch = document.createElement('p');
+            mismatch.className = 'batch-edit-problem';
+            mismatch.textContent = '行数不一致：粘贴 ' + preview.pasted + ' 行，已勾选 ' +
+              preview.selected + ' 行。';
+            previewBox.appendChild(mismatch);
+            return;
+          }
+          var edits = preview.edits.filter(function (e) { return e.kind === 'edit'; });
+          var summary = document.createElement('p');
+          summary.className = 'batch-edit-summary';
+          summary.textContent = edits.length + ' 处修改、' + preview.unchanged + ' 处不变。';
+          previewBox.appendChild(summary);
+          applyBtn.disabled = !edits.some(function (e) { return !e.blocked; });
+        };
+        paste.addEventListener('input', render);
+        render();
+        applyBtn.addEventListener('click', function () {
+          if (applyBtn.disabled) {
+            return;
+          }
+          var parsed = global.parseBatch(paste.value);
+          var preview = global.previewBatchEdits(picked, parsed.rows, library);
+          preview.edits.forEach(function (e, i) {
+            if (e.kind !== 'edit' || e.blocked) {
+              return;
+            }
+            var idx = picked[i].rowIndex;
+            self.rows[idx].word = e.wordTo;
+            self.rows[idx].meaning = e.meaningTo;
+          });
+          self.reclassify();
+          close();
+          self.renderPreview();
+        });
+      },
+    });
+  };
+
   PhotoAddForm.prototype.renderMeaningBar = function () {
     var self = this;
     this.meaningBar.hidden = true;
@@ -5423,13 +5697,18 @@
 
   PhotoAddForm.prototype.setCommitBusy = function (busy) {
     var kit = global.__parentFormKit || {};
+    this.commitInFlight = !!busy;
     if (kit.setLoading) {
       kit.setLoading(this.commitBtn, busy);
     } else {
       this.commitBtn.disabled = busy;
     }
-    this.recognizeBtn.disabled = busy || !this.currentFile;
+    this.recognizeBtn.disabled = busy || this.recognizeBusy || !this.currentFile;
+    this.pickBtn.disabled = busy || this.recognizeBusy;
     this.discardBtn.disabled = busy;
+    if (!busy) {
+      this.updateCommitButton();
+    }
   };
 
   /**
@@ -6122,7 +6401,7 @@
     var kit = global.__parentFormKit || {};
     var book = receipt.book;
     var built = buildTextbookReceipt({
-      rows: this.rows,
+      rows: receipt.receiptRows || this.rows,
       addRows: receipt.submittedRows,
       addOutcome: receipt.addOutcome,
       fresh: receipt.fresh,
@@ -6305,6 +6584,8 @@
   global.lessonsNamedOnPhoto = lessonsNamedOnPhoto;
   global.recommendLesson = recommendLesson;
   global.recommendForDraftPage = recommendForDraftPage;
+  global.lessonRecsPriorToPage = lessonRecsPriorToPage;
+  global.lessonsForRecommend = lessonsForRecommend;
   global.fillRecommendedLessons = fillRecommendedLessons;
   global.applyBatchLesson = applyBatchLesson;
   global.applyPickedLesson = applyPickedLesson;
