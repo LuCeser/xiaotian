@@ -34,6 +34,8 @@
 
   /** Mirrors the API cap: pkg/web/api/validate.go maxMeaningRunes = 1000. */
   var MAX_MEANING_RUNES = 1000;
+  /** Mirrors parent-batch-parser / validate.go maxWordRunes = 200. */
+  var MAX_WORD_RUNES = 200;
 
   /** Count Unicode code points (code points, not UTF-16 units). */
   function runeCount(text) {
@@ -162,9 +164,62 @@
     });
   }
 
+  /**
+   * parseBatchForEdit — the batch-edit paste contract: same line rules as
+   * parseBatch, but duplicate faces are allowed (ADR-0003: English color
+   * and 语文 color in one selection are distinct cards).
+   */
+  function parseBatchForEdit(text) {
+    var rows = [];
+    var errors = [];
+    var lines = String(text == null ? '' : text).split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var lineNumber = i + 1;
+      var line = lines[i].replace(/\r$/, '');
+      var tabIndex = line.indexOf('\t');
+      var trimmed = line.trim();
+      if (trimmed.charAt(0) === '#') {
+        continue;
+      }
+      if (trimmed === '' && tabIndex === -1) {
+        continue;
+      }
+      var word;
+      var meaning;
+      if (tabIndex !== -1) {
+        word = line.slice(0, tabIndex).trim();
+        meaning = line.slice(tabIndex + 1).trim();
+      } else {
+        var firstSpace = trimmed.match(/\s/);
+        if (firstSpace) {
+          word = trimmed.slice(0, firstSpace.index);
+          meaning = trimmed.slice(firstSpace.index).trim();
+        } else {
+          word = trimmed;
+          meaning = '';
+        }
+      }
+      if (word === '') {
+        errors.push({ line: lineNumber, reason: 'empty-word' });
+        continue;
+      }
+      if (word.indexOf(',') !== -1) {
+        errors.push({ line: lineNumber, reason: 'word-comma' });
+        continue;
+      }
+      if (runeCount(word) > MAX_WORD_RUNES) {
+        errors.push({ line: lineNumber, reason: 'word-too-long' });
+        continue;
+      }
+      rows.push({ word: word, meaning: meaning });
+    }
+    return { rows: rows, errors: errors };
+  }
+
   // Window-or-module-global tail (state-manager.js convention).
   global.alignPastedEdits = alignPastedEdits;
   global.previewBatchEdits = previewBatchEdits;
   global.blockedEdits = blockedEdits;
   global.batchEditPrefillLine = batchEditPrefillLine;
+  global.parseBatchForEdit = parseBatchForEdit;
 })(typeof window !== 'undefined' ? window : this);
