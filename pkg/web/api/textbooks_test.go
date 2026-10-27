@@ -272,11 +272,8 @@ func TestTextbookRoutes(t *testing.T) {
 		}
 		var resp struct {
 			Words []struct {
-				Word      string `json:"word"`
-				Textbooks []struct {
-					Name   string `json:"name"`
-					Lesson string `json:"lesson"`
-				} `json:"textbooks"`
+				Word      string          `json:"word"`
+				Textbooks json.RawMessage `json:"textbooks"`
 			} `json:"words"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -285,11 +282,67 @@ func TestTextbookRoutes(t *testing.T) {
 		if len(resp.Words) != 2 {
 			t.Fatalf("words = %+v", resp.Words)
 		}
-		if w := resp.Words[0]; len(w.Textbooks) != 1 || w.Textbooks[0].Name != "主教材" || w.Textbooks[0].Lesson != "第1课" {
-			t.Fatalf("apple attribution = %+v", w.Textbooks)
+		// Field equality, not substring (PR #88 复审 P3: a contains-check
+		// passes any JSON shape that merely mentions 主教材/第1课).
+		var got []database.TextbookAssignment
+		if err := json.Unmarshal(resp.Words[0].Textbooks, &got); err != nil {
+			t.Fatalf("apple attribution decode: %v", err)
 		}
-		if w := resp.Words[1]; len(w.Textbooks) != 0 {
-			t.Fatalf("banana attribution = %+v, want empty", w.Textbooks)
+		if len(got) != 1 || got[0].TextbookName != "主教材" || got[0].Lesson != "第1课" ||
+			got[0].TextbookID != 4 || got[0].IncludeInScope {
+			t.Fatalf("apple attribution = %+v, want one {主教材 第1课 id:4 includeInScope:false}", got)
+		}
+		// A SUCCEEDED projection verified banana carries no attribution:
+		// the wire distinction is [] (verified none) vs null (unknown, the
+		// degraded subtest below) — pin both, PR #88 P1.
+		if w := resp.Words[1]; strings.TrimSpace(string(w.Textbooks)) != "[]" {
+			t.Fatalf("banana attribution = %s, want [] (verified empty, not null)", w.Textbooks)
+		}
+	})
+
+	t.Run("GET /words emits textbooks null when the attribution projection fails", func(t *testing.T) {
+		// The real degraded readback (PR #88 P1): the cards read succeeds
+		// while the attribution query fails — a closed db after seeding
+		// makes AllAssignments error, so GET /words still answers 200 but
+		// every word's attribution is UNKNOWN. The words render; the
+		// textbook field must say null (待核实), never [] (无归属).
+		cards := &fakeCardRepo{cards: []database.Card{
+			{ID: 1, Word: "apple", Meaning: "苹果", Category: "english", Participates: true},
+			{ID: 2, Word: "banana", Meaning: "香蕉", Category: "english", Participates: false},
+		}}
+		h, db := newTextbookTestHandler(t, &fakeExecutor{}, cards)
+		ensureTextbookTables(t, db)
+		seedTextbookRow(t, db, 4, "主教材", `["第1课"]`, 1)
+		if _, err := db.Exec(
+			`INSERT INTO card_assignments (card_id, textbook_id, lesson, include_in_scope) VALUES (1, 4, '第1课', 1)`,
+		); err != nil {
+			t.Fatalf("seed assignment: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close db: %v", err)
+		}
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/words", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d (%s), want 200 with degraded attribution", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Words []struct {
+				Word      string          `json:"word"`
+				Textbooks json.RawMessage `json:"textbooks"`
+			} `json:"words"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(resp.Words) != 2 {
+			t.Fatalf("words = %+v, want both cards rendered", resp.Words)
+		}
+		for _, w := range resp.Words {
+			if strings.TrimSpace(string(w.Textbooks)) != "null" {
+				t.Fatalf("%s textbooks = %s, want null (attribution unknown, not [])", w.Word, w.Textbooks)
+			}
 		}
 	})
 }
