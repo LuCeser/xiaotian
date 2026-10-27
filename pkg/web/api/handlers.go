@@ -435,7 +435,11 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 	// browse chips (教材·课次 / 待确认) need no second request. An
 	// UNFILTERED browse asks for the whole projection directly — building
 	// a whole-library IN-list for it would only re-parse N placeholders. A
-	// repo failure degrades to empty attribution (the words still render).
+	// repo failure still answers 200 (the words render), but it is NOT an
+	// empty attribution: [] is reserved for a projection that VERIFIED the
+	// card has none, while a failed (or unwired) read emits textbooks:null
+	// so clients degrade eligibility to 资格待核实 instead of guessing
+	// "no attribution" (PR #88 P1).
 	//
 	// Issue #89: the browse group and the 「尚未学到」 line read this same
 	// textbook gate dictation uses. Scope failure degrades to supplementary
@@ -447,6 +451,7 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 		ids = append(ids, c.ID)
 	}
 	attribution := make(map[int64][]database.TextbookAssignment, len(cards))
+	attributionKnown := h.textbooks != nil
 	scopes := map[int64]database.CardScope{}
 	if h.textbooks != nil && len(cards) > 0 {
 		var byCard map[int64][]database.TextbookAssignment
@@ -459,6 +464,7 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 		if attrErr == nil {
 			attribution = byCard
 		} else {
+			attributionKnown = false
 			h.logger.Warn("word attribution projection failed",
 				infra.F("component", "web/api"),
 				infra.ErrField(attrErr),
@@ -486,12 +492,14 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 			Category:      c.Category,
 			MeaningSource: c.MeaningSource,
 			Participates:  c.Participates,
-			Textbooks:     []database.TextbookAssignment{},
 			InScope:       true,
 			ScopeReason:   database.ScopeSupplementary,
 		}
-		if rows, ok := attribution[c.ID]; ok {
-			row.Textbooks = rows
+		if attributionKnown {
+			row.Textbooks = []database.TextbookAssignment{}
+			if rows, ok := attribution[c.ID]; ok {
+				row.Textbooks = rows
+			}
 		}
 		if sc, ok := scopes[c.ID]; ok {
 			row.InScope = sc.InScope
