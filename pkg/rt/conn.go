@@ -36,11 +36,11 @@ const (
 	// 1C1G VPS.
 	DefaultHeartbeatInterval = 30 * time.Second
 
-	// defaultSendQueue is the per-connection send queue capacity for each
-	// direction (control and audio). Bounded queues keep per-connection
-	// memory inside the 150MB budget (T-13-02): audio overflows are
-	// dropped (real-time streams tolerate loss), control overflows error
-	// (control must not silently vanish).
+	// defaultSendQueue is the per-connection outbound frame queue capacity
+	// (control and PCM share ONE ordered queue). A bounded queue keeps
+	// per-connection memory inside the 150MB budget (T-13-02): audio
+	// overflows are dropped (real-time streams tolerate loss), control
+	// overflows error (control must not silently vanish).
 	defaultSendQueue = 256
 
 	// perMessageWriteTimeout bounds one outbound write; a stalled client
@@ -383,16 +383,28 @@ func stripOriginPort(origin string) string {
 	return u.String()
 }
 
+// outboundFrame is one queued wire message: a control message (TextMessage)
+// or one PCM chunk (BinaryMessage). 单元 1 前移的最小顺序保证（路径 A 复盘）：
+// 同一播报的控制帧与 PCM 按入队顺序写出——两条独立通道的 select 会让零延迟
+// 供应商的第一块 PCM 抢在 audio_start 之前（页面丢块）。容量与配额语义留给
+// 单元 2 的统一帧队列，这里只做最小的 FIFO 有序发送。
+type outboundFrame struct {
+	mt   int
+	data []byte
+}
+
 // connWriter is the per-connection single-writer send pump. Control and
-// audio flow through separate bounded channels; one goroutine owns every
-// WriteMessage call (the only gorilla-permitted writer), so the session
-// manager can call SendControl/SendAudio from any goroutine without locks.
+// audio flow through ONE bounded FIFO queue — the wire order is the enqueue
+// order, so an utterance's audio_start can never trail its first PCM chunk
+// (the double-select reordering defect the zero-delay fixture exposed); one
+// goroutine owns every WriteMessage call (the only gorilla-permitted
+// writer), so the session manager can call SendControl/SendAudio from any
+// goroutine without locks.
 type connWriter struct {
 	ctx           context.Context
 	logger        infra.Logger
 	reason        error
-	control       chan []byte
-	audio         chan []byte
+	frames        chan outboundFrame
 	cancel        context.CancelFunc
 	done          chan struct{}
 	conn          *websocket.Conn
@@ -416,8 +428,7 @@ func newConnWriter(conn *websocket.Conn, queueSize int, logger infra.Logger) *co
 	ctx, cancel := context.WithCancel(context.Background())
 	return &connWriter{
 		conn:    conn,
-		control: make(chan []byte, queueSize),
-		audio:   make(chan []byte, queueSize),
+		frames:  make(chan outboundFrame, queueSize),
 		logger:  logger,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -469,14 +480,9 @@ func (w *connWriter) run() {
 	for {
 		speechFaultPumpGateWait(w.ctx)
 		select {
-		case c := <-w.control:
-			if err := w.write(websocket.TextMessage, c); err != nil {
-				w.failSend("control", err)
-				return
-			}
-		case a := <-w.audio:
-			if err := w.write(websocket.BinaryMessage, a); err != nil {
-				w.failSend("audio", err)
+		case f := <-w.frames:
+			if err := w.write(f.mt, f.data); err != nil {
+				w.failSend(frameKind(f.mt), err)
 				return
 			}
 		case <-w.ctx.Done():
@@ -487,6 +493,14 @@ func (w *connWriter) run() {
 			return
 		}
 	}
+}
+
+// frameKind names a frame for failure logging by its WebSocket message type.
+func frameKind(mt int) string {
+	if mt == websocket.BinaryMessage {
+		return "audio"
+	}
+	return "control"
 }
 
 func (w *connWriter) write(mt int, data []byte) error {
@@ -500,18 +514,13 @@ func (w *connWriter) drainAndClose() {
 	deadline := time.Now().Add(drainGrace)
 	for time.Now().Before(deadline) {
 		select {
-		case c := <-w.control:
-			if err := w.write(websocket.TextMessage, c); err != nil {
-				w.publishWriteFailure(errors.Wrap(err, "rt: drain control frame"))
-				return
-			}
-		case a := <-w.audio:
-			if err := w.write(websocket.BinaryMessage, a); err != nil {
-				w.publishWriteFailure(errors.Wrap(err, "rt: drain audio frame"))
+		case f := <-w.frames:
+			if err := w.write(f.mt, f.data); err != nil {
+				w.publishWriteFailure(errors.Wrap(err, "rt: drain "+frameKind(f.mt)+" frame"))
 				return
 			}
 		default:
-			// Queues empty — no reason to burn the rest of the grace.
+			// Queue empty — no reason to burn the rest of the grace.
 			_ = w.conn.WriteControl(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 				time.Now().Add(time.Second))
@@ -562,9 +571,10 @@ func (w *connWriter) logWriteFailure(kind string, err error) {
 }
 
 // SendControl implements Sender. The message is marshaled immediately so
-// serialization errors surface at the call site; a saturated control queue
-// returns ErrControlQueueFull instead of blocking (control is too important
-// to drop and too small to deserve unbounded buffering).
+// serialization errors surface at the call site; a saturated queue returns
+// ErrControlQueueFull instead of blocking (control is too important to drop
+// and too small to deserve unbounded buffering — and it never displaces
+// already-queued PCM: the queue is FIFO).
 func (w *connWriter) SendControl(v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -580,7 +590,7 @@ func (w *connWriter) SendControl(v any) error {
 		return ErrWriterTerminated
 	}
 	select {
-	case w.control <- data:
+	case w.frames <- outboundFrame{mt: websocket.TextMessage, data: data}:
 		return nil
 	default:
 		return ErrControlQueueFull
@@ -588,10 +598,9 @@ func (w *connWriter) SendControl(v any) error {
 }
 
 // SendAudio implements Sender. The chunk is copied (audio buffers are
-// pooled and reused upstream); a saturated audio queue drops the chunk,
-// counts it, and returns nil — the real-time stream prefers a gap to a
-// stall, and the 150MB budget prefers a bounded queue to an unbounded one
-// (T-13-02).
+// pooled and reused upstream); a saturated queue drops the chunk, counts
+// it, and returns nil — the real-time stream prefers a gap to a stall, and
+// the 150MB budget prefers a bounded queue to an unbounded one (T-13-02).
 func (w *connWriter) SendAudio(b []byte) error {
 	// Test-build fault point at the real enqueue site (no-op in production).
 	if ferr := speechFaultInterceptSend("audio", b); ferr != nil {
@@ -605,7 +614,7 @@ func (w *connWriter) SendAudio(b []byte) error {
 		return ErrWriterTerminated
 	}
 	select {
-	case w.audio <- cp:
+	case w.frames <- outboundFrame{mt: websocket.BinaryMessage, data: cp}:
 		return nil
 	default:
 		n := w.droppedAudio.Add(1)

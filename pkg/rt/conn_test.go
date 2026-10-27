@@ -357,7 +357,8 @@ func TestWriterDelivers(t *testing.T) {
 		got[mt] = data
 	}
 
-	// Order between control and audio is unspecified (select); classify.
+	// Control and audio share one FIFO: the pong (enqueued first) may arrive
+	// before the audio, never after; classify to stay tolerant of both.
 	text, ok := got[websocket.TextMessage]
 	if !ok {
 		t.Fatalf("no TextMessage reply delivered (got %v)", got)
@@ -380,15 +381,16 @@ func TestWriterDelivers(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Writer backpressure (T-13-02): audio drops, control errors, neither blocks
+// Writer backpressure (T-13-02): one FIFO — audio drops, control errors,
+// neither blocks and control never displaces queued PCM
 // ---------------------------------------------------------------------------
 
 func TestWriterBackpressure(t *testing.T) {
 	sc, _ := newConnPair(t)
 	w := newConnWriter(sc, 2, nil) // queue size 2; pump deliberately NOT started
 
-	// Audio: fill 2, overflow 2 — every call returns nil, 2 counted drops,
-	// and the loop never blocks.
+	// Audio: fill the FIFO's 2 slots, overflow 2 — every call returns nil, 2
+	// counted drops, and the loop never blocks.
 	pcm := make([]byte, 8)
 	for i := 0; i < 4; i++ {
 		if err := w.SendAudio(pcm); err != nil {
@@ -399,12 +401,8 @@ func TestWriterBackpressure(t *testing.T) {
 		t.Errorf("droppedAudio = %d, want 2", got)
 	}
 
-	// Control: fill 2, third call errors — control never vanishes silently.
-	for i := 0; i < 2; i++ {
-		if err := w.SendControl(PongMsg{Type: TypePong}); err != nil {
-			t.Fatalf("SendControl #%d: %v", i, err)
-		}
-	}
+	// Control into the SAME saturated FIFO errors immediately — control
+	// never vanishes silently and never jumps the queued PCM (FIFO order).
 	if err := w.SendControl(PongMsg{Type: TypePong}); !errors.Is(err, ErrControlQueueFull) {
 		t.Errorf("saturated SendControl err = %v, want ErrControlQueueFull", err)
 	}
