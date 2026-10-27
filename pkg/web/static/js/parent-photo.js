@@ -1469,8 +1469,8 @@
     this.sourceKind = '';
     this.pdfPageURL = null;
     this.sourcePageNo = 0;
-    // 页 vs 张 — the run-driven source view's noun; showPdfPageBlob (and
-    // the multi-photo runner) sets it per run.
+    // 页 vs 张 — the run-driven source view's noun (PDF pages / Issue #80
+    // photos); showPhotoSourceFile/showPdfPageBlob set it per run.
     this.sourceNoun = '页';
 
     var self = this;
@@ -1526,6 +1526,11 @@
       // rendering pages of the closed document under the new subject).
       if (this.pdfState) {
         this.pdfState.aborted = true;
+      }
+      // Issue #80: the multi-photo run stops the same way — the rows it
+      // landed reset below; a re-recognize rebuilds the run.
+      if (this.photoBatch) {
+        this.photoBatch.aborted = true;
       }
       this.draftCategory = category;
       this.existingWords = [];
@@ -1892,8 +1897,8 @@
    * validatePhotoSelection (Issue #80 §2.3): one PDF, or 1..20 photos; a
    * mixed or over-cap selection is refused whole (nothing processed). One
    * photo keeps the plain single-photo flow; several start the batch run
-   * at 开始识别. A new valid pick always releases the previous photo run —
-   * its retries never outlive it.
+   * at 开始识别 (handlePhotoBatchRecognize). A new valid pick always
+   * releases the previous photo run — its retries never outlive it.
    */
   PhotoAddForm.prototype.handleFilePicked = function () {
     var files = this.fileInput.files
@@ -1904,6 +1909,7 @@
       this.pickedPhotos = [];
       this.clearPickUI();
       this.releasePdf();
+      this.releasePhotoBatch();
       return;
     }
     var verdict = validatePhotoSelection(files);
@@ -1913,6 +1919,7 @@
         this.pickedPhotos = [];
         this.clearPickUI();
         this.releasePdf();
+        this.releasePhotoBatch();
         return;
       }
       // pdf-too-large / mixed / photo-too-many / unsupported: refuse
@@ -1931,6 +1938,7 @@
       // page plan replaces it once 开始识别 runs. A new file always
       // releases the previous run's doc — page retries never outlive it.
       this.releasePdf();
+      this.releasePhotoBatch();
       this.fileMeta.textContent = file.name + '（' +
         Math.max(1, Math.round(file.size / (1024 * 1024))) + ' MB）';
       this.thumb.hidden = true;
@@ -1961,6 +1969,7 @@
     var first = photos[0];
     this.currentFile = first;
     this.pickedPhotos = photos;
+    this.releasePhotoBatch();
     var totalKb = photos.reduce(function (sum, f) { return sum + (f.size || 0); }, 0) / 1024;
     this.fileMeta.textContent = photos.length === 1
       ? first.name + '（' + Math.max(1, Math.round(first.size / 1024)) + ' KB）'
@@ -2057,6 +2066,12 @@
       this.handlePdfRecognize();
       return;
     }
+    // Issue #80 §2.3: several picked photos run one-by-one (the PDF page
+    // loop's shape); a single photo keeps the plain flow below verbatim.
+    if (this.pickedPhotos.length > 1) {
+      this.handlePhotoBatchRecognize();
+      return;
+    }
     var self = this;
     var kit = global.__parentFormKit || {};
     this.showFormError('');
@@ -2094,6 +2109,7 @@
           return;
         }
         self.detectedMeta = meta;
+        self.detectedMetaList = [meta];
         self.includePending = false;
         // Snapshot the REAL libraries for classification; load the textbook
         // list in parallel for the attribution panel. All ride the DRAFT's
@@ -2243,9 +2259,155 @@
   };
 
   /**
-   * runState — the run currently owning the page bar / retry machinery.
-   * Whichever exists first wins; the pick/recognize releases keep the
-   * run kinds mutually exclusive.
+   * handlePhotoBatchRecognize (Issue #80 §2.3) — the multi-photo run:
+   * one plan entry per picked photo, run one-by-one through the SAME
+   * compress + recognize + merge machinery a PDF page rides (the photo
+   * index is the page number; mergePageRows keeps photo order and makes a
+   * retried photo REPLACE its own segment). Only ONE photo is resident at
+   * a time (the large view's object URL is revoked on every swap — the
+   * PDF page-render precedent). One library snapshot classifies every
+   * photo as it lands, exactly like the PDF run.
+   */
+  PhotoAddForm.prototype.handlePhotoBatchRecognize = function () {
+    var self = this;
+    var kit = global.__parentFormKit || {};
+    var category = this.draftCategory;
+    var files = this.pickedPhotos;
+    this.showFormError('');
+    this.setBusy(true);
+    // A stale PDF run must not own the bar (runState prefers it) — the
+    // same reset handlePdfRecognize gives itself.
+    this.releasePdf();
+    this.releasePhotoBatch();
+    this.detectedMetaList = [];
+
+    this.photoBatch = {
+      kind: 'photo',
+      noun: '张',
+      files: files,
+      plan: global.createPagePlan(files.length),
+      aborted: false,
+      metaDone: false,
+      panelRendered: false,
+    };
+    this.renderPdfBar();
+    this.syncWorkspace();
+
+    var booksLoad = this.fetchTextbooks
+      ? this.fetchTextbooks(category).catch(function () { return null; })
+      : Promise.resolve(null);
+    var poemsLoad = this.fetchPoems
+      ? this.fetchPoems(category).catch(function () { return null; })
+      : Promise.resolve(null);
+    var passagesLoad = this.fetchPassages
+      ? this.fetchPassages(category).catch(function () { return null; })
+      : Promise.resolve(null);
+    Promise.all([
+      this.fetchWords(category).catch(function () { return []; }),
+      booksLoad,
+      poemsLoad,
+      passagesLoad,
+    ]).then(function (loaded) {
+      self.existingWords = loaded[0] || [];
+      self.books = loaded[1] || [];
+      self.existingPoems = loaded[2] || [];
+      self.existingPassages = loaded[3] || [];
+      return self.runPages();
+    }).then(function (summary) {
+      self.setBusy(false);
+      self.finishRun(summary);
+    }).catch(function (err) {
+      self.setBusy(false);
+      var message = (err && err.message) ? err.message : '未知错误';
+      self.showFormError('照片处理失败：' + message + '。可以重试或换一批照片。');
+      if (kit.showToast) {
+        kit.showToast('照片处理失败：' + message, 'error');
+      }
+    });
+  };
+
+  /**
+   * runOnePhotoPage — compress → recognize → merge ONE photo of the
+   * batch. The photo's classified rows replace its segment in this.rows
+   * (the photo index is the page number), so a retried photo never
+   * duplicates and other photos' edits survive.
+   */
+  PhotoAddForm.prototype.runOnePhotoPage = function (pageNo) {
+    var self = this;
+    var state = this.photoBatch;
+    var file = state.files[pageNo - 1];
+    state.plan = global.applyPageEvent(state.plan, pageNo, 'start');
+    this.renderPdfBar();
+    return this.prepareUpload(file)
+      .then(function (bytes) {
+        if (!bytes) {
+          throw new Error('这张照片压缩后仍然太大');
+        }
+        // The photo being recognized shows large in the 本次材料 column;
+        // the swap revokes the previous photo's URL — one image resident.
+        self.showPhotoSourceFile(file, pageNo);
+        return self.recognizePhoto(bytes, self.draftCategory);
+      })
+      .then(function (data) {
+        self.landRecognized(data, pageNo, state, function (meta) {
+          // Photos: headers MERGE (§2.2) — later photos fill only fields
+          // the earlier ones left empty; contradicting readings void the
+          // field instead of picking a winner.
+          self.detectedMetaList.push(meta);
+          var any = self.detectedMetaList.some(function (m) { return m; });
+          return any ? mergePhotoMetas(self.detectedMetaList) : null;
+        });
+      })
+      .catch(function (err) {
+        state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
+          (err && err.message) || '识别失败');
+        if (self.sourcePageNo === pageNo) {
+          self.setSourceCaption('第 ' + pageNo + ' ' + state.noun + ' · 识别失败');
+        }
+        self.renderPdfBar();
+      });
+  };
+
+  /**
+   * showPhotoSourceFile — the run-driven 本次材料 view for a photo of the
+   * batch: the SAME lifecycle as showPdfPageBlob (one object URL at a
+   * time, revoked on every swap; clearPdfSource owns the last revoke),
+   * noun 张.
+   */
+  PhotoAddForm.prototype.showPhotoSourceFile = function (file, pageNo) {
+    if (this.pdfPageURL) {
+      URL.revokeObjectURL(this.pdfPageURL);
+    }
+    this.pdfPageURL = URL.createObjectURL(file);
+    this.sourceKind = 'pdf'; // the run-driven view's shared lifecycle
+    this.sourceNoun = '张';
+    this.sourcePageNo = pageNo;
+    this.sourceImg.alt = '第 ' + pageNo + ' 张照片大图预览';
+    this.sourceImg.src = this.pdfPageURL;
+    this.sourceView.hidden = false;
+    this.setSourceCaption('第 ' + pageNo + ' ' + this.sourceNoun + ' · 识别中…');
+    this.syncWorkspace();
+  };
+
+  /**
+   * releasePhotoBatch — drop the multi-photo run: abort the loop, drop
+   * the plan/bar (the rows stay — a fresh pick keeps the old preview on
+   * screen exactly like the photo/PDF flows; 开始识别 replaces it).
+   */
+  PhotoAddForm.prototype.releasePhotoBatch = function () {
+    if (this.photoBatch) {
+      this.photoBatch.aborted = true;
+      this.photoBatch = null;
+    }
+    this.clearPdfSource();
+    this.renderPdfBar();
+    this.syncWorkspace();
+  };
+
+  /**
+   * runState — the run currently owning the page bar / retry machinery:
+   * the PDF run or the multi-photo run (Issue #80). Whichever exists
+   * first wins; the pick/recognize releases keep them mutually exclusive.
    */
   PhotoAddForm.prototype.runState = function () {
     return this.pdfState || this.photoBatch || null;
@@ -2253,8 +2415,10 @@
 
   /**
    * runPages — run every PENDING page of the plan sequentially
-   * (onlyPageNo: the single-page retry path). The chain never rejects:
-   * per-page failures are recorded on the plan; the loop keeps going.
+   * (onlyPageNo: the single-page retry path), dispatching each page to
+   * the run's own runner (PDF render / photo compress). The chain never
+   * rejects: per-page failures are recorded on the plan; the loop keeps
+   * going.
    */
   PhotoAddForm.prototype.runPages = function (onlyPageNo) {
     var self = this;
@@ -2271,7 +2435,9 @@
         if (state.aborted || page.status !== 'pending') {
           return null;
         }
-        return self.runOnePdfPage(page.no);
+        return state.kind === 'photo'
+          ? self.runOnePhotoPage(page.no)
+          : self.runOnePdfPage(page.no);
       });
     });
     return chain.then(function () {
@@ -2280,11 +2446,13 @@
   };
 
   /**
-   * landRecognized — the shared post-recognize landing of ONE page:
-   * parse, merge the page's segment into every content kind, settle
-   * cross-page duplicates, render the panel ONCE with the first rows.
-   * metaMerger folds the page's header into detectedMeta (the PDF run's
-   * merger keeps the first-win rule).
+   * landRecognized — the shared post-recognize landing of ONE page (PDF
+   * page or photo — Issue #80 rides the same machinery): parse, merge the
+   * page's segment into every content kind, settle cross-page duplicates,
+   * render the panel ONCE with the first rows. metaMerger (PDF: first
+   * page wins; photos: mergePhotoMetas) folds the header into
+   * detectedMeta, and metaLineSync keeps the panel's 识别到 line honest
+   * when a later photo changes it.
    */
   PhotoAddForm.prototype.landRecognized = function (data, pageNo, state, metaMerger) {
     var parsed = parseRecognized(data);
@@ -2292,6 +2460,7 @@
       var merged = metaMerger(parsed.meta);
       if (merged) {
         this.detectedMeta = merged;
+        this.syncMetaLine();
       }
       state.metaDone = true;
     }
@@ -2369,11 +2538,11 @@
   };
 
   /**
-   * finishRun — the after-run surface (the noun keeps the wording
-   * honest). A run with failed pages says so (never a whole-file
-   * success); an all-failed run leaves the honest empty preview;
-   * otherwise the textbook panel renders ONCE (a retry must not rebuild
-   * it out from under the parent's choices).
+   * finishRun — the after-run surface (PDF pages and Issue #80 photos
+   * alike; the noun keeps the wording honest). A run with failed pages
+   * says so (never a whole-file success); an all-failed run leaves the
+   * honest empty preview; otherwise the textbook panel renders ONCE (a
+   * retry must not rebuild it out from under the parent's choices).
    */
   PhotoAddForm.prototype.finishRun = function (summary) {
     var kit = global.__parentFormKit || {};
@@ -2406,9 +2575,9 @@
   };
 
   /**
-   * handlePdfRetryPage — one failed page again: pending → run → finish.
-   * Completed pages' rows are untouched (the merge replaces only the
-   * retried page's segment).
+   * handlePdfRetryPage — one failed page again (PDF page or photo):
+   * pending → run → finish. Completed pages' rows are untouched (the
+   * merge replaces only the retried page's segment).
    */
   PhotoAddForm.prototype.handlePdfRetryPage = function (pageNo) {
     var self = this;
@@ -2448,10 +2617,11 @@
   };
 
   /**
-   * renderPdfBar — the per-page status surface: one chip per page (页码 +
-   * 状态， title carries the failure reason), a 重试该页 button on failed
-   * chips, the whole-file summary line, and a 停止 button while running
-   * (AC-3 处理过程显示状态). textContent-only (Pitfall 10).
+   * renderPdfBar — the per-page status surface (PDF pages and Issue #80
+   * photos): one chip per page (页码/张号 + 状态， title carries the failure
+   * reason), a 重试 button on failed chips, the whole-run summary line,
+   * and a 停止 button while running (AC-3 处理过程显示状态).
+   * textContent-only (Pitfall 10).
    */
   PhotoAddForm.prototype.renderPdfBar = function () {
     var self = this;
@@ -2548,9 +2718,9 @@
     this.passageRows = [];
     this.existingPassages = [];
     this.detectedMeta = null;
+    this.detectedMetaList = [];
     this.bookChoice = 'unset';
     this.includePending = false;
-    this.photoBatch = null;
     this.syncUnitField();
     this.renderTextbookPanelReset();
     this.renderPreview();
@@ -2622,6 +2792,32 @@
   };
 
   /**
+   * metaLineText — the 识别到／未识别到 line's text (one encoder, two
+   * callers: the panel build and syncMetaLine's in-place refresh).
+   */
+  function metaLineText(meta) {
+    var parts = META_FIELDS.concat([{ key: 'lesson', label: '课次' }]).map(function (f) {
+      var value = meta ? metaField(meta[f.key]) : '';
+      return f.label + ' ' + (value || '待确认');
+    });
+    return (meta ? '识别到：' : '照片上未识别到教材信息（') +
+      parts.join(' · ') + (meta ? '' : '）');
+  }
+
+  /**
+   * syncMetaLine — refresh the panel's 识别到 line in place after a later
+   * photo of a multi-photo run merged more of the header (Issue #80 §2.2:
+   * the panel itself renders ONCE, but its header line stays honest).
+   */
+  PhotoAddForm.prototype.syncMetaLine = function () {
+    var line = this.textbookPanel
+      ? this.textbookPanel.querySelector('.photo-meta-first') : null;
+    if (line) {
+      line.textContent = metaLineText(this.detectedMeta);
+    }
+  };
+
+  /**
    * Build the attribution panel after a recognition. loadError carries the
    * textbook-list failure reason ('' when the list loaded fine). The
    * PRESELECT is honest: an existing book only when the meta actually
@@ -2648,14 +2844,11 @@
     this.textbookPanel.appendChild(title);
 
     // The read-off-the-photo header, 待确认 for every unread field (AC2).
+    // photo-meta-first lets syncMetaLine refresh it in place when a later
+    // photo of a multi-photo run merges more of the header (Issue #80).
     var metaLine = document.createElement('p');
-    metaLine.className = 'photo-meta-line';
-    var metaParts = META_FIELDS.concat([{ key: 'lesson', label: '课次' }]).map(function (f) {
-      var value = self.detectedMeta ? metaField(self.detectedMeta[f.key]) : '';
-      return f.label + ' ' + (value || '待确认');
-    });
-    metaLine.textContent = (this.detectedMeta ? '识别到：' : '照片上未识别到教材信息（') +
-      metaParts.join(' · ') + (this.detectedMeta ? '' : '）');
+    metaLine.className = 'photo-meta-line photo-meta-first';
+    metaLine.textContent = metaLineText(this.detectedMeta);
     this.textbookPanel.appendChild(metaLine);
 
     if (loadError) {
@@ -3008,8 +3201,9 @@
 
     var tbody = document.createElement('tbody');
     // Issue #7: PDF rows group under per-page header rows (页码 + that
-    // page's status + a 本页批量课次 mini-toolbar). Photo rows (no page
-    // tag) render flat, exactly as before.
+    // page's status + a 本页批量课次 mini-toolbar). Issue #80: a
+    // multi-photo run groups the same way (张号). Plain single-photo rows
+    // (no page tag) render flat, exactly as before.
     var hasPages = this.runState() && this.rows.some(function (r) { return r.page; });
     if (hasPages) {
       global.rowsByPage(this.rows).forEach(function (group) {
@@ -3653,12 +3847,13 @@
   };
 
   /**
-   * One page's header row (Issue #7): 页码 + the page's row count + the
-   * 本页批量课次 mini-toolbar (US-13/AC-6 — setting one lesson onto a
-   * whole page without touching other pages; the global toolbar stays
-   * available for cross-page selections). The lesson input shares the
-   * page-level datalist rendered right after the table. colCount is the
-   * table's live header count (the thead is the one owner of the shape).
+   * One page's header row (Issue #7): 页码/张号 + the page's row count +
+   * the 本页/本张批量课次 mini-toolbar (US-13/AC-6 — setting one lesson
+   * onto a whole page without touching other pages; the global toolbar
+   * stays available for cross-page selections). The lesson input shares
+   * the page-level datalist rendered right after the table. colCount is
+   * the table's live header count (the thead is the one owner of the
+   * shape).
    */
   PhotoAddForm.prototype.buildPageHeadRow = function (group, colCount) {
     var self = this;
@@ -4259,8 +4454,10 @@
   /** Shared post-success reset (both commit paths land here). */
   PhotoAddForm.prototype.resetAfterCommit = function () {
     this.currentFile = null;
+    this.pickedPhotos = [];
     this.fileInput.value = '';
     this.releasePdf();
+    this.releasePhotoBatch();
     this.clearPickUI();
     this.resetEntries();
   };
@@ -5671,6 +5868,7 @@
   PhotoAddForm.prototype.handleDiscard = function () {
     var kit = global.__parentFormKit || {};
     this.releasePdf();
+    this.releasePhotoBatch();
     this.resetEntries();
     this.showFormError('');
     if (kit.clearContainer) {
