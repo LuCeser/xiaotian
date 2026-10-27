@@ -1,3 +1,6 @@
+// 补充回归（路径 A 单元 1）：本文件内的 *SubmitPresentationLifetime 在测
+// 试里自登 admitCheckWriteLocked，撤掉 poem 生产接纳不会变红，不计入
+// 1.10c 保存接纳证明；真实旅程见 TestPoemSubmitBrowser（rtbrowser）。
 package rt
 
 import (

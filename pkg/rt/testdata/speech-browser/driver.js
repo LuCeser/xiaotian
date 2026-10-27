@@ -472,6 +472,7 @@ async function scenarioCorrectionSubmitClose(args) {
 // &scope= 打开本范围的行）。任务播报自然 ACK 后，向合成麦克风播放一段真
 // 实音调——生产采集→VAD→ASR→confirm 全真实——背默任务一次确认即进检查；
 // 桥接播报落后面板点「对」，再点提交；关闭由 Go 侧在提交闩驻留时触发。
+// --submit-delay-ms 在改判与提交之间留固定间隔（密封顺序复验用）。
 async function scenarioPassageSubmitClose(args) {
   const { page, url, timeoutMs } = args;
   await page.goto(url + '?passage=77&scope=51');
@@ -485,6 +486,7 @@ async function scenarioPassageSubmitClose(args) {
   const teachersBefore = before.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length;
   const reviewBefore = before.filter((e) => e.dir === 'in' && e.type === 'review_result').length;
   await page.locator('.rt-check-row .rt-check-btn').first().click();
+  if (args.submitDelayMs > 0) await args.page.waitForTimeout(args.submitDelayMs);
   await page.locator('.rt-check-submit').click();
   await waitWs(page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
     { timeoutMs, label: 'close racing the passage submit' });
@@ -500,7 +502,7 @@ async function scenarioPassageSubmitClose(args) {
 // scenario "poem-submit-close"（1.10c 复验）：古诗背默课堂（?poem= 打开整
 // 首背默行）。任务播报自然 ACK 后播放一段真实音调——生产采集→VAD→ASR→
 // confirm——整首诗一次确认进检查；面板点两句「对」，再点提交；关闭由 Go
-// 侧在提交闩驻留时触发。
+// 侧在提交闩驻留时触发。--submit-delay-ms 在改判与提交之间留固定间隔。
 async function scenarioPoemSubmitClose(args) {
   const { page, url, timeoutMs } = args;
   await page.goto(url + '?poem=77');
@@ -516,6 +518,7 @@ async function scenarioPoemSubmitClose(args) {
   const buttons = args.page.locator('.rt-check-row .rt-check-btn');
   await buttons.nth(0).click(); // 第一句「对」
   await buttons.nth(2).click(); // 第二句「对」
+  if (args.submitDelayMs > 0) await args.page.waitForTimeout(args.submitDelayMs);
   await args.page.locator('.rt-check-submit').click();
   await waitWs(page, (view) => view.some((e) => e.dir === 'evt' && e.kind === 'close'),
     { timeoutMs, label: 'close racing the poem submit' });

@@ -2235,119 +2235,246 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 }
 
 // TestPassageSubmitBrowser 是 1.10d 的复验（review P1）：短文提交的接纳与
-// 保存责任经真实浏览器旅程——?passage 打开本范围课堂、任务播报自然 ACK、
-// 一次语音「写完了」（合成音调→生产采集→VAD→ASR→confirm）进检查、人工判
-// 定、真实 UI 提交——在提交闩驻留时关闭，已接纳的保存（行翻转与练习记
-// 录）仍然完成，关闭后没有迟到的 review_result 或总结播报。撤销验证：撤
-// 掉 submitPassage 的生产接纳后本测试红（提交被拒、行不落库）。
+// 保存责任经真实浏览器旅程。两个顺序各自一条业务断言：
+//   - 提交先接纳：提交闩驻留时关闭，行落在 submitted+checked；
+//   - 密封先于提交：改判落库后、提交点按前的延迟窗口内关闭，迟到提交经
+//     生产入口 submitPassage 探针——仅 unchecked 兜底落库，无正式提交。
+// 撤销验证：撤掉 submitPassage 的 admitCheckWriteLocked 后「提交先接纳」
+// 子测试红（闩不入、行不落库）。
 func TestPassageSubmitBrowser(t *testing.T) {
-	f := newSpeechBrowserFixture(t)
-	f.seedPassage()
-	f.scriptSpokenConfirm()
-	before, _ := f.gateCheckSubmit(true, false)
-	t.Cleanup(before.openUp)
+	t.Run("submit admitted before the close", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedPassage()
+		f.scriptSpokenConfirm()
+		before, _ := f.gateCheckSubmit(true, false)
+		t.Cleanup(before.openUp)
 
-	driver := f.runDriverAsync("passage-submit-close", 45*time.Second)
-	select {
-	case <-before.entered:
-	case <-time.After(30 * time.Second):
-		f.runDriver("passage-submit-close", 20*time.Second) // surface the scenario's stderr trace
-		t.Fatal("the passage submit never reached its pre-latch window")
-	}
-	m := f.waitFirstManager(5 * time.Second)
-	m.handleEndSession(m.currentSender())
-	before.openUp()
-	res := <-driver
-	if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
-		t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
-			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
-	}
-	// The passage greeting runs on its own goroutine (not the starter
-	// wrapper), so announcementRun stays 0 by construction — assert the
-	// connection tasks directly, as the no-announcement orderings do.
-	if !waitFor(t, 15*time.Second, func() bool {
-		return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
-			f.writerDone.Load() == 1 &&
-			f.providerStarted.Load() == f.providerDone.Load() &&
-			f.announcementRun.Load() == f.announcementDone.Load()
-	}) {
-		t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
-			f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
-			f.providerStarted.Load(), f.providerDone.Load(),
-			f.announcementRun.Load(), f.announcementDone.Load())
-	}
+		driver := f.runDriverAsync("passage-submit-close", 45*time.Second)
+		select {
+		case <-before.entered:
+		case <-time.After(30 * time.Second):
+			f.runDriver("passage-submit-close", 20*time.Second)
+			t.Fatal("the passage submit never reached its pre-latch window")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		m.handleEndSession(m.currentSender())
+		before.openUp()
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
+		if !waitFor(t, 15*time.Second, func() bool {
+			return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
+				f.writerDone.Load() == 1 &&
+				f.providerStarted.Load() == f.providerDone.Load() &&
+				f.announcementRun.Load() == f.announcementDone.Load()
+		}) {
+			t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+				f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
+				f.providerStarted.Load(), f.providerDone.Load(),
+				f.announcementRun.Load(), f.announcementDone.Load())
+		}
 
-	m.TurnManager.mu.Lock()
-	lessonID := m.tutor.lessonID
-	pending := len(m.checkWrites)
-	m.TurnManager.mu.Unlock()
-	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
-	if err != nil {
-		t.Fatalf("read stored lesson: %v", err)
-	}
-	if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
-		t.Fatalf("stored stage=%q unchecked=%v, want the accepted passage submit's submitted+checked",
-			stored.Stage, stored.Unchecked)
-	}
-	if pending != 0 {
-		t.Fatalf("completed check-write admissions = %d, want 0", pending)
-	}
+		m.TurnManager.mu.Lock()
+		lessonID := m.tutor.lessonID
+		pending := len(m.checkWrites)
+		m.TurnManager.mu.Unlock()
+		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
+			t.Fatalf("stored stage=%q unchecked=%v, want the accepted passage submit's submitted+checked",
+				stored.Stage, stored.Unchecked)
+		}
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
+
+	t.Run("close seals before the submit", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedPassage()
+		f.scriptSpokenConfirm()
+
+		driver := f.runDriverAsync("passage-submit-close", 45*time.Second, "--submit-delay-ms", "15000")
+		m := f.waitFirstManager(5 * time.Second)
+		var lessonID string
+		var versionAfterVerdict int
+		if !waitFor(t, 30*time.Second, func() bool {
+			m.TurnManager.mu.Lock()
+			defer m.TurnManager.mu.Unlock()
+			if m.tutor == nil || len(m.tutor.checkVerdicts) == 0 {
+				return false
+			}
+			if !m.tutor.checkVerdicts[0].Manual {
+				return false
+			}
+			lessonID = m.tutor.lessonID
+			versionAfterVerdict = m.tutor.version
+			return true
+		}) {
+			t.Fatal("the passage verdict never landed")
+		}
+		m.handleEndSession(m.currentSender())
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
+
+		// Probe the production entry while the registry is sealed — before the
+		// D-03 fallback's async CompleteCheck(unchecked=true) can land.
+		m.submitPassage(m.currentSender(), CheckSubmitMsg{
+			Type: TypeCheckSubmit, RequestID: "late-passage-after-close",
+		})
+		if !waitFor(t, 5*time.Second, func() bool {
+			stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+			return err == nil && stored.Stage == lesson.StageSubmitted
+		}) {
+			t.Fatal("the passage unchecked fallback never settled after the close")
+		}
+
+		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		// A formal submit would flip unchecked=false; only the fallback's
+		// unchecked latch may move the row after a sealed close.
+		if !stored.Unchecked {
+			t.Fatalf("stored unchecked=%v, want true — a sealed registry admits no formal submit", stored.Unchecked)
+		}
+		if stored.Version != versionAfterVerdict+1 {
+			t.Fatalf("stored version = %d, want %d (one unchecked fallback latch only)",
+				stored.Version, versionAfterVerdict+1)
+		}
+		m.TurnManager.mu.Lock()
+		pending := len(m.checkWrites)
+		m.TurnManager.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
 }
 
 // TestPoemSubmitBrowser 是 1.10c 的复验（review P1）：古诗提交的接纳与保
-// 存责任经真实浏览器旅程——?poem=77 打开整首背默课堂、任务播报自然 ACK、
-// 一次语音「写完了」进检查、两句人工判定、真实 UI 提交——提交闩驻留时
-// goodbye 关闭，已接纳的保存（行翻转与古诗练习记录）完成，关闭后无迟到
-// review_result 或总结。撤销验证：撤掉 submitPoem 的生产接纳后本测试红。
+// 存责任经真实浏览器旅程。两个顺序各自一条业务断言：
+//   - 提交先接纳：提交闩驻留时关闭，行落在 submitted+checked；
+//   - 密封先于提交：两句改判落库后、提交点按前的延迟窗口内关闭，迟到提
+//     交经生产入口 submitPoem 探针——行仍停在 checking、版本不再前进。
+// 撤销验证：撤掉 submitPoem 的 admitCheckWriteLocked 后「提交先接纳」子测
+// 试红（闩不入、行不落库）。
 func TestPoemSubmitBrowser(t *testing.T) {
-	f := newSpeechBrowserFixture(t)
-	f.seedPoem()
-	f.scriptSpokenConfirm()
-	before, _ := f.gateCheckSubmit(true, false)
-	t.Cleanup(before.openUp)
+	t.Run("submit admitted before the close", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedPoem()
+		f.scriptSpokenConfirm()
+		before, _ := f.gateCheckSubmit(true, false)
+		t.Cleanup(before.openUp)
 
-	driver := f.runDriverAsync("poem-submit-close", 45*time.Second)
-	select {
-	case <-before.entered:
-	case <-time.After(30 * time.Second):
-		f.runDriver("poem-submit-close", 20*time.Second) // surface the scenario's stderr trace
-		t.Fatal("the poem submit never reached its pre-latch window")
-	}
-	m := f.waitFirstManager(5 * time.Second)
-	m.handleEndSession(m.currentSender())
-	before.openUp()
-	res := <-driver
-	if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
-		t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
-			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
-	}
-	if !waitFor(t, 15*time.Second, func() bool {
-		return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
-			f.writerDone.Load() == 1 &&
-			f.providerStarted.Load() == f.providerDone.Load() &&
-			f.announcementRun.Load() == f.announcementDone.Load()
-	}) {
-		t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
-			f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
-			f.providerStarted.Load(), f.providerDone.Load(),
-			f.announcementRun.Load(), f.announcementDone.Load())
-	}
+		driver := f.runDriverAsync("poem-submit-close", 45*time.Second)
+		select {
+		case <-before.entered:
+		case <-time.After(30 * time.Second):
+			f.runDriver("poem-submit-close", 20*time.Second)
+			t.Fatal("the poem submit never reached its pre-latch window")
+		}
+		m := f.waitFirstManager(5 * time.Second)
+		m.handleEndSession(m.currentSender())
+		before.openUp()
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
+		if !waitFor(t, 15*time.Second, func() bool {
+			return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
+				f.writerDone.Load() == 1 &&
+				f.providerStarted.Load() == f.providerDone.Load() &&
+				f.announcementRun.Load() == f.announcementDone.Load()
+		}) {
+			t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+				f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
+				f.providerStarted.Load(), f.providerDone.Load(),
+				f.announcementRun.Load(), f.announcementDone.Load())
+		}
 
-	m.TurnManager.mu.Lock()
-	lessonID := m.tutor.lessonID
-	pending := len(m.checkWrites)
-	m.TurnManager.mu.Unlock()
-	stored, err := f.tools.GetLessonState(context.Background(), lessonID)
-	if err != nil {
-		t.Fatalf("read stored lesson: %v", err)
-	}
-	if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
-		t.Fatalf("stored stage=%q unchecked=%v, want the accepted poem submit's submitted+checked",
-			stored.Stage, stored.Unchecked)
-	}
-	if pending != 0 {
-		t.Fatalf("completed check-write admissions = %d, want 0", pending)
-	}
+		m.TurnManager.mu.Lock()
+		lessonID := m.tutor.lessonID
+		pending := len(m.checkWrites)
+		m.TurnManager.mu.Unlock()
+		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		if stored.Stage != lesson.StageSubmitted || stored.Unchecked {
+			t.Fatalf("stored stage=%q unchecked=%v, want the accepted poem submit's submitted+checked",
+				stored.Stage, stored.Unchecked)
+		}
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
+
+	t.Run("close seals before the submit", func(t *testing.T) {
+		f := newSpeechBrowserFixture(t)
+		f.seedPoem()
+		f.scriptSpokenConfirm()
+
+		driver := f.runDriverAsync("poem-submit-close", 45*time.Second, "--submit-delay-ms", "15000")
+		m := f.waitFirstManager(5 * time.Second)
+		var lessonID string
+		var versionAfterVerdicts int
+		if !waitFor(t, 30*time.Second, func() bool {
+			m.TurnManager.mu.Lock()
+			defer m.TurnManager.mu.Unlock()
+			if m.tutor == nil || len(m.tutor.checkVerdicts) < 2 {
+				return false
+			}
+			for _, v := range m.tutor.checkVerdicts {
+				if !v.Manual {
+					return false
+				}
+			}
+			lessonID = m.tutor.lessonID
+			versionAfterVerdicts = m.tutor.version
+			return true
+		}) {
+			t.Fatal("the poem manual verdicts never landed")
+		}
+		m.handleEndSession(m.currentSender())
+		res := <-driver
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
+
+		m.submitPoem(m.currentSender(), CheckSubmitMsg{
+			Type: TypeCheckSubmit, RequestID: "late-poem-after-close",
+		})
+		waitFor(t, 3*time.Second, func() bool {
+			stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+			return err == nil && stored.Stage == lesson.StageSubmitted
+		})
+
+		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
+		if err != nil {
+			t.Fatalf("read stored lesson: %v", err)
+		}
+		if stored.Stage != lesson.StageChecking {
+			t.Fatalf("stored stage=%q, want checking — a sealed registry admits no submit", stored.Stage)
+		}
+		if stored.Version != versionAfterVerdicts {
+			t.Fatalf("stored version = %d, want %d (verdicts only, no latch)", stored.Version, versionAfterVerdicts)
+		}
+		m.TurnManager.mu.Lock()
+		pending := len(m.checkWrites)
+		m.TurnManager.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("completed check-write admissions = %d, want 0", pending)
+		}
+	})
 }
 
 // TestPlaybackSettleBrowser 是 1.14a 的验收：用自然播放夹具为
