@@ -441,7 +441,7 @@ func TestWordlistChinesePromptContract(t *testing.T) {
 		"拼音",           // the material's own annotation is transcribed
 		"不要求补写释义",      // no forced English-style gloss
 		"首列",           // #80: a per-row first-column lesson is read row by row
-		"逐行照读",          // #80: multi-lesson pages never collapse to one header lesson
+		"逐行照读",         // #80: multi-lesson pages never collapse to one header lesson
 		"完整的古诗",        // #11: whole poems are their own array
 		"整首保存",         // #11: a poem is saved as one work
 		"保留原有分行",       // #11: line breaks and order survive
