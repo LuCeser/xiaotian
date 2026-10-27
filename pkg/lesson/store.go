@@ -35,6 +35,10 @@ var (
 	// tool_requests result residue). Nothing is written to the database when
 	// it is returned.
 	ErrInvalidLesson = errors.New("lesson: invalid lesson arguments")
+
+	// ErrDesignationNotFound is returned when no designations row exists for
+	// the given id (ConsumeDesignation).
+	ErrDesignationNotFound = errors.New("lesson: designation not found")
 )
 
 // Table DDL constants — R0 classroom tables, Go-owned (13-PATTERNS.md).
@@ -110,6 +114,29 @@ var (
 	alterLessonsAddPassageScopeID = `ALTER TABLE lessons ADD COLUMN passage_scope_id INTEGER NOT NULL DEFAULT 0`
 	alterLessonsAddPassageWhole   = `ALTER TABLE lessons ADD COLUMN passage_whole INTEGER NOT NULL DEFAULT 0`
 	alterLessonsAddPassageParas   = `ALTER TABLE lessons ADD COLUMN passage_paragraphs TEXT NOT NULL DEFAULT '[]'`
+
+	// designationsDDL (Issue #80 指定默写): one row per CREATED designation.
+	// Selection and the fetch-lock claim live in the Python designate
+	// command; this row snapshots WHAT was selected so the classroom
+	// consumption replays exactly that list, never a re-query. status
+	// starts pending and flips to consumed exactly once, only after the
+	// lessons row write succeeded (ConsumeDesignation). The row never
+	// carries progress/include_in_scope/participates state — creation
+	// writes none of them (创建不写进度、加入标记和参与开关).
+	designationsDDL = `CREATE TABLE IF NOT EXISTS designations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    textbook_id INTEGER NOT NULL,
+    lesson TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    cards TEXT NOT NULL DEFAULT '[]',  -- JSON array of DesignationCard
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    consumed_at TEXT NOT NULL DEFAULT ''
+)`
+
+	// idxDesignationsPending serves the classroom's pending-designation
+	// probe (the consumption step, Issue #80 step 14).
+	idxDesignationsPending = `CREATE INDEX IF NOT EXISTS idx_designations_pending ON designations(status, id)`
 )
 
 // Word is one vocabulary card carried with the lesson row: the surface word,
@@ -172,6 +199,8 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		idxPracticeLogsDay,
 		receiptDDL, // 13.3-01 (ROADMAP SC-1): persistent save receipts, pending → saved/failed
 		idxReceiptsLesson,
+		designationsDDL, // Issue #80 指定默写: created designations, pending → consumed exactly once
+		idxDesignationsPending,
 	}
 
 	for _, stmt := range statements {
@@ -1003,4 +1032,161 @@ func decodeCardsJSON(raw string) ([]Word, error) {
 		cards = []Word{}
 	}
 	return cards, nil
+}
+
+// Designation status values — the two-phase designation lifecycle (Issue
+// #80 指定默写). pending = created (the designate command selected and
+// locked the words) but no classroom row written yet; consumed = the
+// lessons row landed and ConsumeDesignation flipped the row — exactly
+// once, never back.
+const (
+	DesignationStatusPending  = "pending"
+	DesignationStatusConsumed = "consumed"
+)
+
+// designationCardLimit is the single-session cap (AC-11 单次最多 100 个),
+// mirroring pybridge.MaxDesignateLimit and vocab_manager.py
+// MAX_DESIGNATE_LIMIT. The store re-validates so no caller can store an
+// oversized snapshot even if a bridge cap drifts.
+const designationCardLimit = 100
+
+// DesignationCard is one selected word inside a designation row: the card
+// identity plus the word/meaning/example ground truth the classroom row
+// needs. The json tags match pybridge.DesignateCard's payload so the api
+// layer maps the snapshot losslessly.
+type DesignationCard struct {
+	Word    string `json:"word"`
+	Meaning string `json:"meaning"`
+	Example string `json:"example"`
+	ID      int64  `json:"id"`
+}
+
+// Designation is one row of the designations table. Cards is the decoded
+// snapshot column; CreatedAt/ConsumedAt are SQLite datetime('now') strings
+// (ConsumedAt stays "" while pending).
+type Designation struct {
+	Cards      []DesignationCard
+	Lesson     string
+	Category   string
+	Status     string
+	CreatedAt  string
+	ConsumedAt string
+	ID         int64
+	TextbookID int64
+}
+
+// DesignationInput is CreateDesignation's payload: the designation's
+// textbook/lesson identity, its subject, and the selected card snapshot.
+type DesignationInput struct {
+	Cards      []DesignationCard
+	Lesson     string
+	Category   string
+	TextbookID int64
+}
+
+// CreateDesignation stores one CREATED designation as pending: the words
+// the designate command selected and locked, snapshotted together with the
+// textbook/lesson identity and the subject. It writes no progress,
+// include_in_scope or participates state — those columns belong to their
+// own owners (创建不写进度、加入标记和参与开关). Validation (identity
+// non-empty, 1..designationCardLimit cards) rejects before anything is
+// written; category is normalized like every lessons row ("" → english).
+func (s *Store) CreateDesignation(ctx context.Context, in DesignationInput) (Designation, error) {
+	if in.TextbookID <= 0 || in.Lesson == "" {
+		return Designation{}, errors.Wrap(ErrInvalidLesson,
+			"create designation: textbook_id and lesson must be non-empty")
+	}
+	if len(in.Cards) == 0 || len(in.Cards) > designationCardLimit {
+		return Designation{}, errors.Wrap(ErrInvalidLesson, fmt.Sprintf(
+			"create designation: cards must contain 1..%d entries, got %d",
+			designationCardLimit, len(in.Cards)))
+	}
+	cardsJSON, err := json.Marshal(in.Cards)
+	if err != nil {
+		return Designation{}, errors.Wrap(err, "create designation: marshal cards")
+	}
+	category := NormalizeCategory(in.Category)
+	res, err := s.db.ExecContext(ctx,
+		"INSERT INTO designations (textbook_id, lesson, category, cards, status, created_at, consumed_at) "+
+			"VALUES (?, ?, ?, ?, ?, datetime('now'), '')",
+		in.TextbookID, in.Lesson, category, string(cardsJSON), DesignationStatusPending,
+	)
+	if err != nil {
+		s.logger.Error("designation create: insert failed",
+			infra.F("component", "lesson/store"),
+			infra.F("textbook_id", in.TextbookID),
+			infra.F("lesson", in.Lesson),
+			infra.ErrField(err),
+		)
+		return Designation{}, errors.Wrap(err, "create designation: insert")
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Designation{}, errors.Wrap(err, "create designation: last insert id")
+	}
+	// Single-statement contract: the returned Designation carries what the
+	// INSERT wrote; created_at/consumed_at stay DB-side (read paths own
+	// them).
+	return Designation{
+		ID:         id,
+		TextbookID: in.TextbookID,
+		Lesson:     in.Lesson,
+		Category:   category,
+		Cards:      in.Cards,
+		Status:     DesignationStatusPending,
+	}, nil
+}
+
+// ConsumeDesignation flips a pending designation to consumed EXACTLY ONCE
+// (Issue #80): the WHERE status='pending' guard makes the first call the
+// only one that wins, and callers may invoke it only AFTER the classroom
+// (lessons) row write succeeded — 课堂行写入成功时才消费, a crash between
+// the two statements leaves the row pending and therefore re-consumable.
+// Returns true the first time; false with a nil error when the row was
+// already consumed (the deliberate no-win, not an error); false with
+// ErrDesignationNotFound when no such row exists.
+func (s *Store) ConsumeDesignation(ctx context.Context, id int64) (bool, error) {
+	if id <= 0 {
+		return false, errors.Wrap(ErrInvalidLesson, "consume designation: id must be positive")
+	}
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE designations SET status = ?, consumed_at = datetime('now') WHERE id = ? AND status = ?",
+		DesignationStatusConsumed, id, DesignationStatusPending,
+	)
+	if err != nil {
+		s.logger.Error("designation consume: update failed",
+			infra.F("component", "lesson/store"),
+			infra.F("designation_id", id),
+			infra.ErrField(err),
+		)
+		return false, errors.Wrap(err, "consume designation: update")
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, errors.Wrap(err, "consume designation: rows affected")
+	}
+	if n == 1 {
+		return true, nil
+	}
+	// Zero affected rows: already consumed or missing — distinguish so a
+	// caller never reads "nothing to do" as "never existed".
+	var status string
+	err = s.db.QueryRowContext(ctx,
+		"SELECT status FROM designations WHERE id = ?", id).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, errors.Wrap(ErrDesignationNotFound, fmt.Sprintf("consume designation %d", id))
+	}
+	if err != nil {
+		s.logger.Error("designation consume: read back failed",
+			infra.F("component", "lesson/store"),
+			infra.F("designation_id", id),
+			infra.ErrField(err),
+		)
+		return false, errors.Wrap(err, "consume designation: read back")
+	}
+	if status == DesignationStatusConsumed {
+		return false, nil // the idempotent no-win: the first consume is history
+	}
+	return false, errors.Wrap(ErrInvalidLesson,
+		fmt.Sprintf("consume designation %d: unexpected status %q", id, status))
 }
