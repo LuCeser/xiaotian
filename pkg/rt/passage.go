@@ -370,6 +370,8 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
 	tm.category = lesson.NormalizeCategory(p.Category)
 	tm.mu.Unlock()
 
+	installGen := tm.beginClassroomAttempt()
+
 	// Resume probe: this RANGE's latest attempt row — keyed by content +
 	// range, never the scope row id (a removed-and-re-added range keeps
 	// resuming its in-flight attempt).
@@ -386,10 +388,10 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
 			// mid-writing attempt re-announces the task (the range's own
 			// first-content-wins row continues).
 			if l.Stage == lesson.StageChecking {
-				tm.startCheckResume(s, l)
+				tm.startCheckResume(s, l, installGen)
 				return
 			}
-			tm.startPassageSession(s, l, p, *scope)
+			tm.startPassageSession(s, l, p, *scope, installGen)
 			return
 		}
 	}
@@ -418,7 +420,7 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
 		infra.F("paragraphs", len(texts)),
 		infra.F("whole", scope.Whole),
 	)
-	tm.startPassageSession(s, l, p, *scope)
+	tm.startPassageSession(s, l, p, *scope, installGen)
 }
 
 // passageIndexesEqual compares two paragraph index sets as sets (order and
@@ -445,7 +447,7 @@ func passageIndexesEqual(a, b []int) bool {
 // task. The greeting carries NO paragraph text, arms no timer, and its
 // display equals its spoken text (title/author/range are public identity,
 // not the answer).
-func (tm *TurnManager) startPassageSession(s Sender, l lesson.Lesson, p passage.Passage, scope passage.ScopeRow) {
+func (tm *TurnManager) startPassageSession(s Sender, l lesson.Lesson, p passage.Passage, scope passage.ScopeRow, installGen uint64) {
 	view := passageTaskView(p, scope)
 	tutor := newDictationTutor(l)
 	tutor.passage = &passageRef{
@@ -465,17 +467,23 @@ func (tm *TurnManager) startPassageSession(s Sender, l lesson.Lesson, p passage.
 		Passage:   view,
 	}
 	var epoch uint64
-	if !tm.applySessionEffect(func() error {
+	if !tm.applyClassroomInstallEffect(installGen, func() error {
+		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor) {
+			return errClassroomInstallStale
+		}
 		if err := s.SendControl(ready); err != nil {
 			return err
 		}
-		tm.tutor = tutor
 		tm.state = StateListening
 		tm.sessionReadyAt = time.Now()
 		tm.turnCancel = cancel
 		epoch = tm.epoch
 		return nil
 	}) {
+		cancel()
+		return
+	}
+	if tm.activeClassroomGen() != installGen {
 		cancel()
 		return
 	}

@@ -522,6 +522,14 @@ type TurnManager struct {
 	// connection while this holds is an in-flight retry — not a cross-
 	// connection latch replay — and must not spawn a competing save.
 	formalCheckSubmitPending bool
+
+	// classroomSeq / pendingClassroomGen / activeScope implement per-classroom
+	// identity on this connection (issue #69 rethink2 R1). Init reserves a
+	// generation before blocking I/O; install succeeds only for the latest
+	// reservation. Superseded scopes lose memory writeback rights.
+	classroomSeq        uint64
+	pendingClassroomGen uint64
+	activeScope         *classroomScope
 }
 
 // Compile-time check: TurnManager satisfies the transport's SessionManager
@@ -719,6 +727,8 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 		return
 	}
 
+	installGen := tm.beginClassroomAttempt()
+
 	if tm.cfg.Words == nil {
 		// T-13-14: fixed human wording; the adapter is wired by 13-10.
 		tm.sendError(s, ErrCodeLessonUnavailable, lessonUnavailableNotice, false)
@@ -754,7 +764,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 			return
 		}
 		if len(cards) == 0 {
-			tm.startNoDueSession(s, lessonID)
+			tm.startNoDueSession(s, lessonID, installGen)
 			return
 		}
 		// #68 / path B: the row write is serialized against every close path
@@ -790,17 +800,17 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 	case l.Stage == lesson.StageChecking:
 		// 13.1-04 (Pitfall 2): the check never finished and the close
 		// fallback never landed — reopen the check panel from the row.
-		tm.startCheckResume(s, l)
+		tm.startCheckResume(s, l, installGen)
 	case l.Stage == lesson.StageSubmitted && l.Unchecked:
 		// 13.1-04 (D-03): the fallback rated this lesson unchecked —
 		// reopen as the post-hoc correction instead of short-circuiting.
-		tm.startCheckCorrection(s, l)
+		tm.startCheckCorrection(s, l, installGen)
 	case l.CurrentIndex >= len(l.Cards):
 		// Legacy + normally completed rows short-circuit exactly as before
 		// (stage first, index second — the new branches never swallow them).
-		tm.startCompletedSession(s, l)
+		tm.startCompletedSession(s, l, installGen)
 	default:
-		tm.startDictationSession(s, l, false)
+		tm.startDictationSession(s, l, false, installGen)
 	}
 }
 
@@ -839,16 +849,19 @@ func normalizeSessionMode(mode string) string {
 // the teacher explain (zero due words — with the D-13 days variant when the
 // vocabulary's due data names the next review), and ends the session only
 // after the explanation's actual playback ack (or its bounded timeout).
-func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
+func (tm *TurnManager) startNoDueSession(s Sender, lessonID string, installGen uint64) {
 	// sessionCategory/lessonViewFor take tm.mu themselves: read them before
 	// the effect (both are session-constant after session_init).
 	category := tm.sessionCategory()
-	if !tm.applySessionEffect(func() error {
+	if !tm.applyClassroomInstallEffect(installGen, func() error {
 		// PR #60 review: the session may have closed under the init IO that
 		// led here — a closed session gets no session_ready and no spoken
 		// explanation (nothing may follow its session_ended); the bind and
 		// the enqueue are one hold, so the close can no longer land between
 		// them either.
+		if !tm.replaceActiveClassroomLocked(installGen, lessonID, nil) {
+			return errClassroomInstallStale
+		}
 		tm.state = StateListening
 		tm.sessionReadyAt = time.Now()
 		return s.SendControl(SessionReadyMsg{
@@ -882,13 +895,16 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string) {
 // startCompletedSession restores the completion state for an
 // already-finished lesson: session_ready then session_ended(lesson_complete)
 // — no summary replay, no second SubmitReview.
-func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
+func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson, installGen uint64) {
 	// Locked helpers read before the effect (session-constant values).
 	view, category := tm.lessonViewFor(l), tm.sessionCategory()
-	if !tm.applySessionEffect(func() error {
+	if !tm.applyClassroomInstallEffect(installGen, func() error {
 		// PR #60 review: same gate as the other starters — a closed session
 		// replays neither session_ready nor the completion session_ended;
 		// the bind and the enqueue are one hold.
+		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, nil) {
+			return errClassroomInstallStale
+		}
 		tm.state = StateListening
 		tm.sessionReadyAt = time.Now()
 		return s.SendControl(SessionReadyMsg{
@@ -914,21 +930,24 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson) {
 // structure where first-audible latency contains only the FSRS fetch and
 // the TTS first packet, no LLM call. practice (13.1-05) flips only the
 // submit-path flag; pacing, the check stage and the D-05 gate are identical.
-func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice bool) {
+func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice bool, installGen uint64) {
 	// Locked helpers read before the effect (session-constant values).
 	view, category := tm.lessonViewFor(l), tm.sessionCategory()
 	var first lesson.Word
 	var total int
 	var mode string
-	if !tm.applySessionEffect(func() error {
+	tutor := newDictationTutor(l)
+	tutor.practice = practice
+	if !tm.applyClassroomInstallEffect(installGen, func() error {
 		// PR #60 review: the subject-picked classroom's init runs on the
 		// answer turn's goroutine, so an end_session may have closed the
 		// session under the fetch/row IO — the closed check shares the hold
 		// that binds the tutor, so a closed session binds nothing, sends no
 		// session_ready and never greets; the bind and the enqueue are one
 		// hold, so the close can no longer land between them either.
-		tm.tutor = newDictationTutor(l)
-		tm.tutor.practice = practice
+		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor) {
+			return errClassroomInstallStale
+		}
 		tm.state = StateListening
 		tm.sessionReadyAt = time.Now()
 		first = tm.tutor.words[tm.tutor.currentIndex]

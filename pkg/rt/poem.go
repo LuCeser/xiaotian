@@ -210,6 +210,8 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
 	tm.category = lesson.CategoryChinese
 	tm.mu.Unlock()
 
+	installGen := tm.beginClassroomAttempt()
+
 	ctx := context.Background()
 	p, err := tm.cfg.Poems.FetchPoem(ctx, poemID)
 	switch {
@@ -247,10 +249,10 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
 			// mid-writing attempt re-announces the task (the poem's own
 			// first-content-wins row continues).
 			if l.Stage == lesson.StageChecking {
-				tm.startCheckResume(s, l)
+				tm.startCheckResume(s, l, installGen)
 				return
 			}
-			tm.startPoemSession(s, l, p)
+			tm.startPoemSession(s, l, p, installGen)
 			return
 		}
 	}
@@ -274,13 +276,13 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
 		return
 	}
 	tm.recorder.Emit(EventPoemStarted, infra.F("lines", len(p.Lines)))
-	tm.startPoemSession(s, l, p)
+	tm.startPoemSession(s, l, p, installGen)
 }
 
 // startPoemSession binds the FSM to the poem row and announces the task.
 // The greeting carries NO line text, arms no timer, and its display equals
 // its spoken text (title/author are public identity, not the answer).
-func (tm *TurnManager) startPoemSession(s Sender, l lesson.Lesson, p poem.Poem) {
+func (tm *TurnManager) startPoemSession(s Sender, l lesson.Lesson, p poem.Poem, installGen uint64) {
 	tutor := newDictationTutor(l)
 	tutor.poem = &poemRef{ID: l.PoemID, Title: p.Title, Author: p.Author}
 	total, category := len(tutor.words), tutor.category
@@ -295,17 +297,23 @@ func (tm *TurnManager) startPoemSession(s Sender, l lesson.Lesson, p poem.Poem) 
 		Poem:      poemTaskView(p),
 	}
 	var epoch uint64
-	if !tm.applySessionEffect(func() error {
+	if !tm.applyClassroomInstallEffect(installGen, func() error {
+		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor) {
+			return errClassroomInstallStale
+		}
 		if err := s.SendControl(ready); err != nil {
 			return err
 		}
-		tm.tutor = tutor
 		tm.state = StateListening
 		tm.sessionReadyAt = time.Now()
 		tm.turnCancel = cancel
 		epoch = tm.epoch
 		return nil
 	}) {
+		cancel()
+		return
+	}
+	if tm.activeClassroomGen() != installGen {
 		cancel()
 		return
 	}

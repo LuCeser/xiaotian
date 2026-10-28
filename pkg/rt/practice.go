@@ -219,6 +219,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 		// answers nothing.
 		return
 	}
+	installGen := tm.beginClassroomAttempt()
 	if tm.cfg.Practice == nil || tm.cfg.PracticeStore == nil {
 		// Honest degraded answer (lesson_unavailable class) — never a
 		// silent fallback into a due-word lesson.
@@ -298,7 +299,10 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 			Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
 			Category:  category,
 		}
-		if !tm.applySessionEffect(func() error {
+		if !tm.applyClassroomInstallEffect(installGen, func() error {
+			if !tm.replaceActiveClassroomLocked(installGen, lessonID, nil) {
+				return errClassroomInstallStale
+			}
 			if sendErr := s.SendControl(ready); sendErr != nil {
 				return sendErr
 			}
@@ -308,6 +312,10 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 			epoch = tm.epoch
 			return nil
 		}) {
+			cancel()
+			return
+		}
+		if tm.activeClassroomGen() != installGen {
 			cancel()
 			return
 		}
@@ -332,7 +340,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 		return
 	}
 	tm.recorder.Emit(EventPracticeStarted, infra.F("picked", len(picked)))
-	tm.startDictationSession(s, l, true)
+	tm.startDictationSession(s, l, true, installGen)
 }
 
 // practiceSummaryText builds the practice wrap line (13.1-05, D-13's third

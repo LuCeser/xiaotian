@@ -28,14 +28,18 @@ func TestStarterKeepsEpoch(t *testing.T) {
 		{
 			name: "dictation greeting",
 			start: func(tm *TurnManager, s Sender) {
+				gen := tm.beginClassroomAttempt()
 				tm.startDictationSession(s, lesson.Lesson{
 					LessonID: ttLessonID, Version: 1, Cards: ttCards("苹果"),
-				}, false)
+				}, false, gen)
 			},
 		},
 		{
-			name:  "no-due ending",
-			start: func(tm *TurnManager, s Sender) { tm.startNoDueSession(s, ttLessonID) },
+			name: "no-due ending",
+			start: func(tm *TurnManager, s Sender) {
+				gen := tm.beginClassroomAttempt()
+				tm.startNoDueSession(s, ttLessonID, gen)
+			},
 		},
 	}
 
