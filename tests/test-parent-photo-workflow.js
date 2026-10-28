@@ -64,7 +64,13 @@ async function testMultiPhotoEntryClearsViaRecognizeButton() {
   h.clickRecognize();
   assertRecognizeRunStarted(h.form, prev, 'multi photo 开始识别');
   assert(!!h.form.photoBatch, 'multi photo enters batch run state');
-  await flushPromises(12);
+  await flushPromises(20);
+  eq(h.form.rows.length, 2, 'multi photo run lands one row per photo');
+  assert(h.form.rows.every(function (r) { return r.word === 'alpha'; }),
+    'multi photo run merges each photo content into rows');
+  assert(h.form.photoBatch.plan.pages.every(function (p) { return p.status === 'done'; }),
+    'multi photo run marks every photo done');
+  eq(h.form.discardBtn.hidden, false, 'finishRun surfaces discard after the batch');
 }
 
 async function testPdfEntryClearsViaRecognizeButton() {
@@ -74,9 +80,13 @@ async function testPdfEntryClearsViaRecognizeButton() {
   var prev = h.form.recognizeEpoch;
   h.clickRecognize();
   assertRecognizeRunStarted(h.form, prev, 'PDF 开始识别');
-  await flushPromises(8);
-  assert(!!h.form.pdfState || h.form.rows.length >= 0,
-    'PDF path proceeds past beginRecognizeRun');
+  await flushPromises(20);
+  eq(h.form.rows.length, 1, 'PDF run lands the page rows');
+  assert(h.form.rows.length === 1 && h.form.rows[0].word === 'alpha',
+    'PDF run classifies the page content');
+  assert(h.form.pdfState.plan.pages.every(function (p) { return p.status === 'done'; }),
+    'PDF run marks the page done');
+  eq(h.form.discardBtn.hidden, false, 'finishRun surfaces discard after the PDF run');
 }
 
 function testTextbookChangeRefreshesRecommendations() {
@@ -167,7 +177,6 @@ async function testSinglePhotoRecognizeRegistersIdentity() {
 async function testMultiPhotoBatchRegistersPerPhotoIdentity() {
   var calls = 0;
   var h = mountWorkflowForm({
-    realBatchRun: true,
     recognizePhoto: function () {
       calls += 1;
       if (calls === 1) {
@@ -199,7 +208,6 @@ async function testMultiPhotoBatchRegistersPerPhotoIdentity() {
 async function testRetryReplacesPhotoIdentity() {
   var calls = 0;
   var h = mountWorkflowForm({
-    realBatchRun: true,
     recognizePhoto: function () {
       calls += 1;
       if (calls === 1) {

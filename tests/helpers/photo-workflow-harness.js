@@ -93,7 +93,6 @@ function installWorkflowGlobals(dom) {
  * @param {object} [options]
  * @param {object} [options.modalKit] — __parentModalKit (openModal spy)
  * @param {Function} [options.recognizePhoto]
- * @param {boolean} [options.realBatchRun] — run real runPages/finishRun (U3+)
  */
 function mountWorkflowForm(options) {
   options = options || {};
@@ -145,16 +144,6 @@ function mountWorkflowForm(options) {
   form.prepareUpload = function () {
     return Promise.resolve(new Uint8Array([0xff, 0xd8, 1]));
   };
-
-  if (!options.realBatchRun) {
-    form.runPages = function () {
-      return Promise.resolve({ pending: 0, running: 0, done: 1, failed: 0 });
-    };
-
-    form.finishRun = function () {
-      this.discardBtn.hidden = false;
-    };
-  }
 
   return {
     dom: dom,
