@@ -221,7 +221,7 @@ func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson, installGe
 // ACK gate. No due-fetch, no word timers, no rating write — those belong to
 // the paths that FINISH the check (handleCheckVerdict / handleCheckSubmit).
 func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason string, correction bool, installGen uint64) {
-	epoch := tm.currentEpoch()
+	preInstallEpoch := tm.currentEpoch()
 	if tm.checkResumeInterleave != nil {
 		tm.checkResumeInterleave()
 	}
@@ -250,13 +250,17 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 			Title: passageView.Title, Author: passageView.Author, Whole: passageView.Whole,
 			Paragraphs: append([]int(nil), passageView.Paragraphs...)}
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var announceEpoch uint64
 	if !tm.applyClassroomInstallEffect(installGen, func() error {
-		if tm.epoch != epoch {
+		if tm.epoch != preInstallEpoch {
 			return errClassroomInstallStale
 		}
-		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor) {
-			return errClassroomInstallStale
+		if err := tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor, s); err != nil {
+			return err
 		}
+		announceEpoch = tm.epoch
+		tm.turnCancel = cancel
 		tm.state, tm.sessionReadyAt = StateListening, time.Now()
 		if err := s.SendControl(SessionReadyMsg{Type: TypeSessionReady, SessionID: tm.session,
 			Audio: AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
@@ -269,32 +273,22 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 		}
 		return s.SendControl(CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: wireVerdicts(panelVerdicts)})
 	}) {
+		cancel()
 		return
 	}
 	if tm.activeClassroomGen() != installGen {
+		cancel()
 		return
 	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 	tm.recorder.Emit(EventCheckStarted, infra.F("total", len(words)))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	if !tm.applyTurnAt(epoch, func() error {
-		tm.turnCancel = cancel
-		return nil
-	}) {
-		cancel()
-		return
-	}
 	bridge := checkResumeBridgeText(len(words))
 	if correction {
 		bridge = checkCorrectionBridgeText(len(words))
 	}
-	// Own goroutine: handleSessionInit runs on the transport READ loop, and
-	// the announcement blocks on its playback ack — the same shape
-	// startDictationSession uses for the greeting (the ack must stay
-	// servable).
 	go tm.runStarterTask(func() {
-		tm.runAnnouncementAt(s, epoch, ctx, cancel, bridge, purposeCheckBridge, nil)
+		tm.runAnnouncementAt(s, announceEpoch, ctx, cancel, bridge, purposeCheckBridge, nil)
 	})
 }
 
