@@ -8,6 +8,9 @@ const path = require('node:path');
 
 global.window = global;
 require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-import-core.js'));
+// Issue #80 U6: the batch run machine drives the SHARED page plan, so the
+// page-level transitions (applyPageEvent) come from parent-pdf-core.
+require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-pdf-core.js'));
 
 const core = global;
 
@@ -102,6 +105,93 @@ function eq(actual, expected, label) {
   var gone = { word: 'cat', meaning: '猫', lesson: '', page: 1, entryIndex: 9 };
   assert(core.originalEntryForRow(state, gone) === null,
     'a stale out-of-range ordinal returns null, not a wrong entry');
+})();
+
+// ===== Issue #80 U6 — the batch run state machine (§3.2 transitions) =====
+// The batch facts (aborted / executing / invalidated) live beside the page
+// plan; page statuses move through parent-pdf-core's real page machine.
+
+function runStatuses(run) {
+  return run.plan.pages.map(function (p) { return p.status; }).join(',');
+}
+
+(function testBatchTransitions() {
+  var run = core.createImportRunState(core.createPagePlan(3));
+  eq(runStatuses(run), 'pending,pending,pending', 'fresh run starts all pending');
+  eq(run.aborted, false, 'fresh run is not stopped');
+  eq(run.executing, false, 'fresh run has no real execution');
+
+  core.beginImportRun(run); // 开始
+  eq(run.executing, true, '开始 marks real execution');
+
+  run.plan = core.applyPageEvent(run.plan, 1, 'start');
+  run.plan = core.applyPageEvent(run.plan, 1, 'done'); // 成功
+  run.plan = core.applyPageEvent(run.plan, 2, 'start');
+  run.plan = core.applyPageEvent(run.plan, 2, 'fail', '超时'); // 失败
+  run.plan = core.applyPageEvent(run.plan, 3, 'start'); // 第 3 张识别中
+
+  core.stopImportRun(run); // 停止
+  eq(run.aborted, true, '停止 sets the batch stop flag');
+  eq(run.executing, true, '停止 keeps the wind-down as real execution');
+  eq(runStatuses(run), 'done,failed,running',
+    'the in-flight page stays running until the wind-down settles');
+
+  core.settleImportRun(run); // 收尾
+  eq(run.executing, false, '收尾 ends the execution');
+  eq(runStatuses(run), 'done,failed,pending',
+    '停止后当前 running 项恢复 pending（迟到处理未触发也由收尾保证）');
+
+  eq(JSON.stringify(core.pendingImportPages(run)), '[3]',
+    '剩余工作只有 pending——done/failed 都不在继续范围');
+  core.resumeImportRun(run); // 继续
+  eq(runStatuses(run), 'done,failed,pending', '继续不重跑 done，也不动 failed');
+  eq(run.aborted, false, '继续 clears the stop flag');
+  eq(run.executing, true, '继续 restarts real execution');
+})();
+
+(function testNoOverlappingExecution() {
+  var run = core.createImportRunState(core.createPagePlan(2));
+  core.beginImportRun(run);
+  run.plan = core.applyPageEvent(run.plan, 1, 'start');
+  core.stopImportRun(run); // wind-down in flight
+  core.resumeImportRun(run); // must be a no-op while executing
+  eq(run.aborted, true, 'wind-down 期间继续不得清除停止标记');
+  eq(run.executing, true, 'wind-down 期间不得启动第二次执行');
+  core.retryImportPage(run, 1); // also a no-op while busy
+  eq(runStatuses(run), 'running,pending', 'busy 期间重试不得改动任何页');
+})();
+
+(function testRetryTouchesOnlyTargetPage() {
+  var run = core.createImportRunState(core.createPagePlan(3));
+  core.beginImportRun(run);
+  run.plan = core.applyPageEvent(run.plan, 1, 'start');
+  run.plan = core.applyPageEvent(run.plan, 1, 'done');
+  run.plan = core.applyPageEvent(run.plan, 2, 'start');
+  run.plan = core.applyPageEvent(run.plan, 2, 'fail', '超时');
+  run.plan = core.applyPageEvent(run.plan, 3, 'start');
+  run.plan = core.applyPageEvent(run.plan, 3, 'fail', '空识别');
+  core.settleImportRun(run);
+  core.retryImportPage(run, 3); // 重试
+  eq(runStatuses(run), 'done,failed,pending', '失败重试只处理目标张');
+  eq(run.executing, true, '重试也是一次真实执行');
+  run.plan = core.applyPageEvent(run.plan, 3, 'start');
+  run.plan = core.applyPageEvent(run.plan, 3, 'done');
+  core.settleImportRun(run);
+  eq(runStatuses(run), 'done,failed,done', '重试完成后其余 failed 保持原状');
+})();
+
+(function testInvalidateRun() {
+  var run = core.createImportRunState(core.createPagePlan(2));
+  core.beginImportRun(run);
+  run.plan = core.applyPageEvent(run.plan, 1, 'start');
+  core.invalidateImportRun(run); // 失效
+  eq(run.invalidated, true, '失效 marks the run dead');
+  eq(run.executing, false, '失效 ends the execution');
+  eq(runStatuses(run), 'pending,pending', '失效把识别中的页恢复为 pending');
+  core.resumeImportRun(run); // a dead run never resumes
+  eq(run.executing, false, '失效后的批次不可继续');
+  core.retryImportPage(run, 1); // nor retry
+  eq(runStatuses(run), 'pending,pending', '失效后的批次不可重试');
 })();
 
 if (failures) {
