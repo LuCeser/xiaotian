@@ -198,8 +198,8 @@ func derivedVerdicts(words []lesson.Word, outcomes map[string]lesson.WordOutcome
 // fallback write, or a row from before the fallback existed). The check
 // panel reopens from the STORED state and the student resumes exactly where
 // they left off.
-func (tm *TurnManager) startCheckResume(s Sender, l lesson.Lesson) {
-	tm.startCheckPanelSession(s, l, CheckStartedReasonResume, false)
+func (tm *TurnManager) startCheckResume(s Sender, l lesson.Lesson, installGen uint64) {
+	tm.startCheckPanelSession(s, l, CheckStartedReasonResume, false, installGen)
 }
 
 // startCheckCorrection reopens a SUBMITTED row carrying the D-03 unchecked
@@ -207,8 +207,8 @@ func (tm *TurnManager) startCheckResume(s Sender, l lesson.Lesson) {
 // this session is the post-hoc correction — the derived downgraded verdicts
 // show as pending hints and check_submit runs the diff-only correction
 // path.
-func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson) {
-	tm.startCheckPanelSession(s, l, CheckStartedReasonCorrection, true)
+func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson, installGen uint64) {
+	tm.startCheckPanelSession(s, l, CheckStartedReasonCorrection, true, installGen)
 }
 
 // startCheckPanelSession is the shared body of the two reconnect-into-check
@@ -220,8 +220,7 @@ func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson) {
 // the authoritative verdict echo, then speak the reason's bridge through the
 // ACK gate. No due-fetch, no word timers, no rating write — those belong to
 // the paths that FINISH the check (handleCheckVerdict / handleCheckSubmit).
-func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason string, correction bool) {
-	epoch := tm.currentEpoch()
+func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason string, correction bool, installGen uint64) {
 	if tm.checkResumeInterleave != nil {
 		tm.checkResumeInterleave()
 	}
@@ -239,18 +238,23 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	poemView := tm.poemViewForRow(l)
 	passageView := tm.passageViewForRow(l)
 	view, category := tm.lessonViewFor(l), tm.sessionCategory()
-	if !tm.applyTurnAt(epoch, func() error {
-		tm.tutor = newDictationTutor(l)
-		tm.tutor.completed, tm.tutor.checking = true, true
-		tm.tutor.correction, tm.tutor.checkVerdicts = correction, panelVerdicts
-		if poemView != nil {
-			tm.tutor.poem = &poemRef{ID: l.PoemID, Title: poemView.Title, Author: poemView.Author}
+	tutor := newDictationTutor(l)
+	tutor.completed, tutor.checking = true, true
+	tutor.correction, tutor.checkVerdicts = correction, panelVerdicts
+	if poemView != nil {
+		tutor.poem = &poemRef{ID: l.PoemID, Title: poemView.Title, Author: poemView.Author}
+	}
+	if passageView != nil {
+		tutor.passage = &passageRef{ID: passageView.ID, ScopeID: passageView.ScopeID,
+			Title: passageView.Title, Author: passageView.Author, Whole: passageView.Whole,
+			Paragraphs: append([]int(nil), passageView.Paragraphs...)}
+	}
+	var epoch uint64
+	if !tm.applyClassroomInstallEffect(installGen, func() error {
+		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor) {
+			return errClassroomInstallStale
 		}
-		if passageView != nil {
-			tm.tutor.passage = &passageRef{ID: passageView.ID, ScopeID: passageView.ScopeID,
-				Title: passageView.Title, Author: passageView.Author, Whole: passageView.Whole,
-				Paragraphs: append([]int(nil), passageView.Paragraphs...)}
-		}
+		epoch = tm.epoch
 		tm.state, tm.sessionReadyAt = StateListening, time.Now()
 		if err := s.SendControl(SessionReadyMsg{Type: TypeSessionReady, SessionID: tm.session,
 			Audio: AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
@@ -263,6 +267,9 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 		}
 		return s.SendControl(CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: wireVerdicts(panelVerdicts)})
 	}) {
+		return
+	}
+	if tm.activeClassroomGen() != installGen {
 		return
 	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
@@ -637,6 +644,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	// persist context — the save responsibility outlives the turn's
 	// cancellation, 1.09).
 	ctx, cancel := context.WithCancel(context.Background())
+	scopeGen := tm.activeClassroomGen()
 	tm.mu.Lock()
 	write, writeAdmitted := tm.admitCheckWriteLocked()
 	epoch := tm.epoch
@@ -652,7 +660,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		return
 	}
 	requestID := m.RequestID
-	go tm.runAcceptedFormalCheckSubmit(s, ctx, cancel, epoch, write, frozen, expected, requestID, total)
+	go tm.runAcceptedFormalCheckSubmit(s, ctx, cancel, epoch, scopeGen, write, frozen, expected, requestID, total)
 }
 
 // formalCheckSubmitFrozen captures dictation submit inputs at admission so a
@@ -668,7 +676,7 @@ type formalCheckSubmitFrozen struct {
 // runAcceptedFormalCheckSubmit runs off the WebSocket read loop: the latch
 // write and the rest of the accepted save must not block end_session or
 // transport teardown on the same connection.
-func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, frozen formalCheckSubmitFrozen, expected int, requestID string, total int) {
+func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, scopeGen uint64, write *checkWriteAdmission, frozen formalCheckSubmitFrozen, expected int, requestID string, total int) {
 	persistCtx, persistDone := checkPersistContext(ctx)
 	defer func() {
 		persistDone()
@@ -690,7 +698,7 @@ func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Contex
 			// duplicate path (no second write either way). The memory flip
 			// rides the session effect: a session that ended while the
 			// latch write ran keeps its dead tutor untouched.
-			tm.applySessionEffect(func() error {
+			tm.applyScopeSessionEffect(scopeGen, func() error {
 				tm.tutor.checking = false
 				return nil
 			})
@@ -729,7 +737,7 @@ func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Contex
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "check_submit_latch"),
 		)
-		tm.applySessionEffect(func() error {
+		tm.applyScopeSessionEffect(scopeGen, func() error {
 			tm.tutor.version = res.NewVersion
 			tm.tutor.checking = false
 			return nil
@@ -750,7 +758,7 @@ func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Contex
 	// session effect — an ended session keeps the dead tutor untouched —
 	// while finishCheckSubmit still runs, because its SubmitReview is part
 	// of the same accepted save and gates its own presentation.
-	tm.applySessionEffect(func() error {
+	tm.applyScopeSessionEffect(scopeGen, func() error {
 		tm.tutor.version = res.NewVersion
 		tm.tutor.checking = false
 		return nil
