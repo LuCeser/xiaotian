@@ -147,6 +147,7 @@ func TestSupersededClassroomSubmitCannotWriteBack(t *testing.T) {
 	words := newFakeWords(ttCards("苹果", "香蕉"))
 	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
 	tm, s := ttInitCheckingRow(t, exec, words)
+	tm.taskTrack = &serverTaskTracker{} // S1: whole-task settle for the waits below
 
 	hold := newHoldFirstCompleteCheck(exec)
 	tm.exec = hold
