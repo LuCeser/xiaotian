@@ -449,16 +449,19 @@ type TurnManager struct {
 	// binds category and resumes through continueSessionInit. Non-nil ONLY
 	// while the ask is live; the classroom has no lesson row yet.
 	pendingAsk *SessionInitMsg
-	// pendingAskInstallGen is the classroom generation reserved at the
-	// session_init that parked on subject clarify; continueSessionInit after
-	// a pick must install under THIS gen, not bump again (issue #69 R1).
-	pendingAskInstallGen uint64
 	// pendingAdvance is the one accepted dictation write that later turns
 	// and reconnect reconciliation must wait for before reading a target.
 	pendingAdvance *pendingDictationAdvance
 	// checkWrites is the set of persistence operations accepted before a
 	// close. Closing seals admission and snapshots this set atomically.
 	checkWrites map[*checkWriteAdmission]struct{}
+	// activeScope is the installed per-classroom identity of the latest
+	// reservation (issue #69 rethink2 R1): gen/lessonID/tutor plus the
+	// in-flight formal-save slot. Generations are reserved by
+	// classroomSeq / pendingClassroomGen (scalar tail below) before any
+	// blocking init I/O; install succeeds only for the latest reservation.
+	// Superseded scopes lose memory writeback rights.
+	activeScope *classroomScope
 	session     string
 	// state is one of StateListening/StateProcessing/StateSpeaking, or ""
 	// before session_init / after close.
@@ -483,6 +486,10 @@ type TurnManager struct {
 	audioObservation audioObservation
 	cfg              TurnManagerConfig
 
+	// pendingAskInstallGen is the classroom generation reserved at the
+	// session_init that parked on subject clarify; continueSessionInit after
+	// a pick must install under THIS gen, not bump again (issue #69 R1).
+	pendingAskInstallGen uint64
 	// timerGen is the monotonic per-word timer generation. EVERY
 	// arm/reset/stop increments it, so a callback already queued before the
 	// reset is dead on arrival even with the same epoch and word index
@@ -520,13 +527,11 @@ type TurnManager struct {
 	// checkWritesSealed flips in the close claim's critical section: once
 	// set, admitCheckWriteLocked refuses new admissions forever.
 	checkWritesSealed bool
-	// classroomSeq / pendingClassroomGen / activeScope implement per-classroom
-	// identity on this connection (issue #69 rethink2 R1). Init reserves a
-	// generation before blocking I/O; install succeeds only for the latest
-	// reservation. Superseded scopes lose memory writeback rights.
+	// classroomSeq / pendingClassroomGen reserve per-classroom generations
+	// on this connection (issue #69 rethink2 R1; the installed identity
+	// itself is activeScope above).
 	classroomSeq        uint64
 	pendingClassroomGen uint64
-	activeScope         *classroomScope
 }
 
 // Compile-time check: TurnManager satisfies the transport's SessionManager

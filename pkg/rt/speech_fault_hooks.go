@@ -80,16 +80,16 @@ func speechFaultSetSend(fn func(kind string, payload []byte) error) (restore fun
 	speechFaultState.mu.Unlock()
 	var once sync.Once
 	return func() {
-		once.Do(func() {
+			once.Do(func() {
+				speechFaultState.mu.Lock()
+				speechFaultState.send = nil
+				speechFaultState.mu.Unlock()
+			})
+		}, func() int {
 			speechFaultState.mu.Lock()
-			speechFaultState.send = nil
-			speechFaultState.mu.Unlock()
-		})
-	}, func() int {
-		speechFaultState.mu.Lock()
-		defer speechFaultState.mu.Unlock()
-		return speechFaultState.sendHits
-	}
+			defer speechFaultState.mu.Unlock()
+			return speechFaultState.sendHits
+		}
 }
 
 // speechFaultSetPumpGate installs the pump consumption gate; restore is
@@ -100,14 +100,14 @@ func speechFaultSetPumpGate(fn func() <-chan struct{}) (restore func(), waits fu
 	speechFaultState.mu.Unlock()
 	var once sync.Once
 	return func() {
-		once.Do(func() {
+			once.Do(func() {
+				speechFaultState.mu.Lock()
+				speechFaultState.pumpGate = nil
+				speechFaultState.mu.Unlock()
+			})
+		}, func() int {
 			speechFaultState.mu.Lock()
-			speechFaultState.pumpGate = nil
-			speechFaultState.mu.Unlock()
-		})
-	}, func() int {
-		speechFaultState.mu.Lock()
-		defer speechFaultState.mu.Unlock()
-		return speechFaultState.pumpWaits
-	}
+			defer speechFaultState.mu.Unlock()
+			return speechFaultState.pumpWaits
+		}
 }

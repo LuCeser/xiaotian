@@ -132,7 +132,7 @@ func (g *speechReadGate) GetLessonState(ctx context.Context, lessonID string) (l
 }
 
 // hold arms the one-shot park; release (idempotent) releases the parked read.
-func (g *speechReadGate) hold()   { g.armed.Store(true) }
+func (g *speechReadGate) hold()    { g.armed.Store(true) }
 func (g *speechReadGate) release() { g.gate.release() }
 
 // gateStateRead mounts the one-shot authoritative-read hold on every future

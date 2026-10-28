@@ -1059,15 +1059,15 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	go func() {
 		defer persistDone()
 		tm.finishCorrections(s, persistCtx, ctx, cancel, correctionInputs{
-		epoch:     epoch,
-		requestID: m.RequestID,
-		lessonID:  lessonID,
-		category:  lesson.NormalizeCategory(l.Category),
-		version:   l.Version,
-		changed:   changed,
-		total:     total,
-		correct:   correct,
-		write:     write,
+			epoch:     epoch,
+			requestID: m.RequestID,
+			lessonID:  lessonID,
+			category:  lesson.NormalizeCategory(l.Category),
+			version:   l.Version,
+			changed:   changed,
+			total:     total,
+			correct:   correct,
+			write:     write,
 		})
 	}()
 }

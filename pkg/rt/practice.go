@@ -299,8 +299,8 @@ func (tm *TurnManager) handlePracticeInit(s Sender, installGen uint64) {
 			Category:  category,
 		}
 		if !tm.applyClassroomInstallEffect(installGen, func() error {
-			if err := tm.replaceActiveClassroomLocked(installGen, lessonID, nil, s); err != nil {
-				return err
+			if installErr := tm.replaceActiveClassroomLocked(installGen, lessonID, nil, s); installErr != nil {
+				return installErr
 			}
 			if sendErr := s.SendControl(ready); sendErr != nil {
 				return sendErr

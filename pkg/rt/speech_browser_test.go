@@ -268,14 +268,14 @@ type speechBrowserFixture struct {
 	ln  net.Listener
 	srv *http.Server
 
-	asr               *fakeASR
-	llm               *fakeLLM
-	tts               TTSSynthesizer
-	words             *fakeWordSource
-	tools             *LessonTools
-	exec              LessonExecutor
-	db                *sql.DB
-	dbPath            string
+	asr                  *fakeASR
+	llm                  *fakeLLM
+	tts                  TTSSynthesizer
+	words                *fakeWordSource
+	tools                *LessonTools
+	exec                 LessonExecutor
+	db                   *sql.DB
+	dbPath               string
 	receipts             *lesson.ReceiptStore
 	wordsOverride        WordSource
 	passages             PassageSource
@@ -284,7 +284,7 @@ type speechBrowserFixture struct {
 	passagePracticeStore *passage.PracticeStore
 	practice             PracticeSource
 	practiceStore        *lesson.PracticeStore
-	expectedSentences []string
+	expectedSentences    []string
 	// expectedPCMPerSentence is the fake TTS's chunk count per sentence — the
 	// driver's round observation demands EXACTLY that many PCM frames inside
 	// every sentence window (缺块/乱序 both reject), so the fixture owns the
@@ -528,8 +528,8 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 		words = f.words
 	}
 	tm := NewTurnManager(f.asr, f.llm, &speechObservedTTS{inner: tts, fixture: f}, executor, TurnManagerConfig{
-		LessonID:      "speech-browser-fixture",
-		Words:         words,
+		LessonID:        "speech-browser-fixture",
+		Words:           words,
 		Receipts:        receipts,
 		Passages:        passages,
 		Poems:           poems,
@@ -913,7 +913,7 @@ func (g *speechOneGate) hit() {
 	g.hits.Add(1)
 	g.hitOnce.Do(func() { close(g.entered) })
 }
-func (g *speechOneGate) wait()      { <-g.released }
+func (g *speechOneGate) wait()           { <-g.released }
 func (g *speechOneGate) hitCount() int64 { return g.hits.Load() }
 func (g *speechOneGate) release() {
 	g.openOnce.Do(func() { close(g.released) })
@@ -1034,9 +1034,9 @@ func (f *speechBrowserFixture) reclaimAndFail(driver <-chan speechDriverResult, 
 // manager. The unchecked close fallback stays transparent.
 type speechSubmitGate struct {
 	LessonExecutor
-	before            *speechOneGate
-	committed         *speechOneGate
-	uncheckedBefore   *speechOneGate
+	before          *speechOneGate
+	committed       *speechOneGate
+	uncheckedBefore *speechOneGate
 }
 
 func (g *speechSubmitGate) CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
@@ -2402,6 +2402,7 @@ func TestClosedControlBrowser(t *testing.T) {
 //     别），迟到的提交经生产入口 submitCorrections 探针（消息路径由更
 //     早的 alive 门槛持有）——查封的登记不接纳：零 diff 批、unchecked
 //     标记保留、版本停在 +2。
+//
 // 撤销验证：撤掉 submitCorrections 的生产接纳后，「密封先于提交」子测试
 // 红（diff 落库、标记被清）。
 func TestCorrectionSubmitBrowser(t *testing.T) {
@@ -2534,6 +2535,7 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 //   - 提交先接纳：提交闩驻留时关闭，行落在 submitted+checked；
 //   - 密封先于提交：改判落库后、提交点按前的延迟窗口内关闭，迟到提交经
 //     生产入口 submitPassage 探针——仅 unchecked 兜底落库，无正式提交。
+//
 // 撤销验证：撤掉 submitPassage 的 admitCheckWriteLocked 登记后
 // 「密封先于提交」子测试红（迟到正式提交把行推到 submitted+checked）。
 func TestPassageSubmitBrowser(t *testing.T) {
@@ -2693,6 +2695,7 @@ func TestPassageSubmitBrowser(t *testing.T) {
 //   - 提交先接纳：提交闩驻留时关闭，行落在 submitted+checked；
 //   - 密封先于提交：两句改判落库后、提交点按前的延迟窗口内关闭，迟到提
 //     交经生产入口 submitPoem 探针——行仍停在 checking、版本不再前进。
+//
 // 撤销验证：撤掉 submitPoem 的 admitCheckWriteLocked 登记后「密封先于提
 // 交」子测试红（行应停在 checking，变异后变为 submitted）。
 func TestPoemSubmitBrowser(t *testing.T) {

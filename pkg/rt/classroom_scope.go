@@ -16,13 +16,13 @@ type formalCheckSubmitOp struct{}
 // generation even when the lesson row id is unchanged; superseded scopes
 // keep no memory writeback rights on the connection.
 type classroomScope struct {
-	gen      uint64
-	lessonID string
-	tutor    *DictationTutor
+	tutor *DictationTutor
 	// formalSubmit is non-nil while that scope's accepted formal save goroutine
 	// is in flight (admission through defer tail). Superseded scopes are
 	// dropped on replace; their ops never touch the active scope's slot.
 	formalSubmit *formalCheckSubmitOp
+	lessonID     string
+	gen          uint64
 }
 
 // releaseFormalCheckSubmitOp clears the in-flight slot only when it still
@@ -92,15 +92,9 @@ func (tm *TurnManager) activeClassroomGen() uint64 {
 	return tm.activeScope.gen
 }
 
-// scopeWritebackAllowed reports whether scopeGen may still mutate the
+// scopeWritebackAllowedLocked reports whether scopeGen may still mutate the
 // connection's current classroom memory (issue #69 R1 writeback half).
-func (tm *TurnManager) scopeWritebackAllowed(scopeGen uint64) bool {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	return tm.scopeWritebackAllowedLocked(scopeGen)
-}
-
-// scopeWritebackAllowedLocked is the locked form. Caller holds tm.mu.
+// Caller holds tm.mu.
 func (tm *TurnManager) scopeWritebackAllowedLocked(scopeGen uint64) bool {
 	return !tm.closed && tm.activeScope != nil && tm.activeScope.gen == scopeGen
 }
