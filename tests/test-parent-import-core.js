@@ -194,6 +194,117 @@ function runStatuses(run) {
   eq(runStatuses(run), 'pending,pending', '失效后的批次不可重试');
 })();
 
+// ===== Issue #80 U6 — 按钮统一规则（§3.2 的表 → 一个函数） =====
+
+(function testDecisionIdleRow() {
+  var run = core.createImportRunState(core.createPagePlan(3));
+  var d = core.importRunDecision(run);
+  eq(d.phase, 'idle', '尚未开始 → idle');
+  eq(d.busy, false, 'pending 页数本身不构成忙碌');
+  eq(d.remaining, 3, '剩余工作 = pending 数');
+  eq(d.saveAllowed, true, '无执行则不因运行状态禁止保存');
+  assert(d.actions.start.shown && d.actions.start.enabled, '尚未开始 → 开始识别可用');
+  assert(!d.actions.stop.shown, '尚未开始无停止按钮');
+  assert(!d.actions.resume.shown, '尚未开始无继续按钮');
+  assert(!d.actions.retry.shown, '尚未开始无重试按钮');
+})();
+
+(function testDecisionRunStopResumeEndRows() {
+  var run = core.createImportRunState(core.createPagePlan(3));
+  core.beginImportRun(run);
+  run.plan = core.applyPageEvent(run.plan, 1, 'start');
+  run.plan = core.applyPageEvent(run.plan, 1, 'done');
+  run.plan = core.applyPageEvent(run.plan, 2, 'start');
+  run.plan = core.applyPageEvent(run.plan, 2, 'fail', '超时');
+  run.plan = core.applyPageEvent(run.plan, 3, 'start');
+
+  var d = core.importRunDecision(run); // 行2 正在运行
+  eq(d.phase, 'running', '执行中 → running');
+  eq(d.busy, true, 'executing 是唯一的忙碌事实');
+  eq(d.saveAllowed, false, '运行中禁止保存');
+  eq(d.counts.done, 1, '成功计入 done');
+  eq(d.counts.failed, 1, '失败计入 failed');
+  assert(d.actions.stop.shown && d.actions.stop.enabled, '运行中 → 停止可用');
+  eq(d.actions.stop.label, '停止（保留已完成张）', '停止按钮说明保留已完成内容');
+  assert(d.actions.resume.shown && !d.actions.resume.enabled, '运行中 → 继续禁用');
+  assert(d.actions.retry.shown && !d.actions.retry.enabled, '运行中 → 重试禁用');
+  eq(JSON.stringify(d.failedPages), '[2]', '失败张列表供逐张重试渲染');
+
+  core.stopImportRun(run);
+  d = core.importRunDecision(run); // 行3 已停止、旧执行尚未收尾
+  eq(d.phase, 'stopping', '停止后收尾前 → stopping');
+  eq(d.busy, true, '收尾仍是真实执行');
+  eq(d.saveAllowed, false, '收尾期间禁止保存');
+  assert(d.actions.stop.shown && !d.actions.stop.enabled, '停止中 → 停止按钮禁用');
+  eq(d.actions.stop.label, '停止中…', '停止中按钮文案');
+  assert(d.actions.resume.shown && !d.actions.resume.enabled, '停止中 → 继续暂禁');
+  assert(d.actions.retry.shown && !d.actions.retry.enabled, '停止中 → 重试暂禁');
+
+  core.settleImportRun(run);
+  d = core.importRunDecision(run); // 行4 已停止、已收尾、仍有 pending
+  eq(d.phase, 'stopped', '收尾完成且仍有剩余 → stopped');
+  eq(d.busy, false, '收尾完成后不再忙碌');
+  eq(d.remaining, 1, '剩余 1 张');
+  eq(d.saveAllowed, true, '已停止可保存已完成内容');
+  assert(!d.actions.start.shown, '已有进度的批次不再显示开始识别');
+  assert(d.actions.resume.shown && d.actions.resume.enabled, '已收尾 → 继续处理可用');
+  eq(d.actions.resume.label, '继续处理（剩 1 张）', '继续按钮带剩余数量');
+  assert(d.actions.retry.shown && d.actions.retry.enabled, '已停止 → 失败张可单独重试');
+
+  core.resumeImportRun(run);
+  run.plan = core.applyPageEvent(run.plan, 3, 'start');
+  run.plan = core.applyPageEvent(run.plan, 3, 'done');
+  core.settleImportRun(run);
+  d = core.importRunDecision(run); // 行6 已结束、含 failed
+  eq(d.phase, 'failed', '结束且含失败 → failed');
+  assert(!d.actions.resume.shown, '无剩余不显示继续');
+  assert(d.actions.retry.shown && d.actions.retry.enabled, '失败结束 → 逐张重试可用');
+  eq(d.saveAllowed, true, '失败结束允许保存成功部分');
+
+  core.retryImportPage(run, 2);
+  run.plan = core.applyPageEvent(run.plan, 2, 'start');
+  run.plan = core.applyPageEvent(run.plan, 2, 'done');
+  core.settleImportRun(run);
+  d = core.importRunDecision(run); // 行5 全部 done
+  eq(d.phase, 'done', '全部完成 → done');
+  assert(!d.actions.start.shown && !d.actions.stop.shown &&
+    !d.actions.resume.shown && !d.actions.retry.shown, '全部完成 → 无运行按钮');
+})();
+
+(function testDecisionSettledWithoutAbortStillContinues() {
+  var run = core.createImportRunState(core.createPagePlan(3));
+  core.beginImportRun(run);
+  run.plan = core.applyPageEvent(run.plan, 1, 'start');
+  run.plan = core.applyPageEvent(run.plan, 1, 'done');
+  run.plan = core.applyPageEvent(run.plan, 2, 'start');
+  run.plan = core.applyPageEvent(run.plan, 2, 'fail', '超时');
+  core.settleImportRun(run); // 未按停止、自然收尾但仍有 pending（目标重试后的形态）
+  var d = core.importRunDecision(run);
+  eq(d.phase, 'stopped', '已有进度且仍有剩余 → 继续处理形态');
+  assert(!d.actions.start.shown && d.actions.resume.shown && d.actions.resume.enabled,
+    '不再显示开始识别，继续处理可用');
+})();
+
+(function testDecisionInvalidatedRow() {
+  var run = core.createImportRunState(core.createPagePlan(2));
+  core.beginImportRun(run);
+  core.invalidateImportRun(run);
+  var d = core.importRunDecision(run);
+  eq(d.phase, 'invalidated', '失效批次 → invalidated');
+  eq(d.busy, false, '失效不再忙碌');
+  assert(!d.actions.start.shown && !d.actions.stop.shown &&
+    !d.actions.resume.shown && !d.actions.retry.shown, '失效批次无任何运行按钮');
+})();
+
+(function testDecisionNounLabel() {
+  var run = core.createImportRunState(core.createPagePlan(2));
+  core.beginImportRun(run);
+  core.stopImportRun(run);
+  core.settleImportRun(run);
+  var d = core.importRunDecision(run, { noun: '页' });
+  eq(d.actions.resume.label, '继续处理（剩 2 页）', 'PDF 的名词是页');
+})();
+
 if (failures) {
   console.error('test-parent-import-core: ' + failures + ' of ' + checks + ' checks failed');
   process.exit(1);

@@ -291,6 +291,82 @@
     return c;
   }
 
+  /**
+   * importRunDecision — THE button rule: §3.2's table as one function, so
+   * no caller ever re-derives button state from scattered booleans and
+   * page counts again (U7/U8 render from this). opts.noun is 页 (PDF) or
+   * 张 (photos) — labels only, never the rule.
+   *
+   *   phase       §3.2 row                    buttons
+   *   idle        尚未开始                    开始识别
+   *   running     正在运行                    停止；继续/重试禁用；禁止保存
+   *   stopping    已停止、旧执行未收尾        停止中（禁用）；继续暂禁；禁止保存
+   *   stopped     已停止、已收尾、仍有剩余    继续处理；失败张可单独重试；可保存
+   *   failed      已结束、含 failed           逐张重试；可保存成功部分
+   *   done        全部完成                    无运行按钮
+   *   invalidated 失效                        无按钮（迟到结果由执行身份拒绝）
+   *
+   * saveAllowed is the RUN-level gate only (忙碌禁止保存); whether anything
+   * is committable at all stays the draft's own business (导入与进度分离 —
+   * nothing is written before the parent confirms).
+   */
+  function importRunDecision(state, opts) {
+    var noun = opts && opts.noun ? String(opts.noun) : '张';
+    var c = importRunCounts(state);
+    // 真实执行（含收尾）是唯一的忙碌事实——剩余工作绝不参与推断。
+    var busy = !!(state && state.executing);
+    var phase;
+    if (state && state.invalidated) {
+      phase = 'invalidated';
+    } else if (busy) {
+      phase = state.aborted ? 'stopping' : 'running';
+    } else if (c.pending > 0) {
+      // Settled with remaining work: virgin (no progress yet) shows 开始,
+      // anything with progress — stopped or partially retried — shows 继续.
+      phase = (c.done + c.failed + c.running === 0) ? 'idle' : 'stopped';
+    } else {
+      phase = c.failed > 0 ? 'failed' : 'done';
+    }
+    var failedPages = [];
+    ((state && state.plan && state.plan.pages) || []).forEach(function (page) {
+      if (page.status === 'failed') {
+        failedPages.push(page.no);
+      }
+    });
+    return {
+      phase: phase,
+      busy: busy,
+      remaining: c.pending,
+      counts: c,
+      failedPages: failedPages,
+      saveAllowed: !busy,
+      actions: {
+        start: {
+          shown: phase === 'idle',
+          enabled: phase === 'idle',
+          label: '开始识别',
+        },
+        stop: {
+          shown: phase === 'running' || phase === 'stopping',
+          enabled: phase === 'running',
+          label: phase === 'stopping'
+            ? '停止中…'
+            : '停止（保留已完成' + noun + '）',
+        },
+        resume: {
+          shown: phase === 'running' || phase === 'stopping' || phase === 'stopped',
+          enabled: phase === 'stopped',
+          label: '继续处理（剩 ' + c.pending + ' ' + noun + '）',
+        },
+        retry: {
+          shown: failedPages.length > 0,
+          enabled: failedPages.length > 0 && !busy,
+          pages: failedPages,
+        },
+      },
+    };
+  }
+
   global.createImportPhotoState = createImportPhotoState;
   global.clearImportPhotoState = clearImportPhotoState;
   global.setPhotoRecognition = setPhotoRecognition;
@@ -309,4 +385,5 @@
   global.invalidateImportRun = invalidateImportRun;
   global.pendingImportPages = pendingImportPages;
   global.importRunCounts = importRunCounts;
+  global.importRunDecision = importRunDecision;
 })(typeof window !== 'undefined' ? window : this);
