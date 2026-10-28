@@ -315,7 +315,13 @@ func TestSpeechFixtureControlPoints(t *testing.T) {
 		select {
 		case <-early:
 		case <-time.After(5 * time.Second):
-			t.Fatal("a passive read parked on an unheld gate")
+			// Nothing is parked (the gate is not held) — drain the in-flight
+			// read before failing so no goroutine outlives the assertion.
+			select {
+			case <-early:
+			case <-time.After(5 * time.Second):
+			}
+			t.Fatal("a passive read never finished on an unheld gate")
 		}
 
 		g.hold()
@@ -330,6 +336,14 @@ func TestSpeechFixtureControlPoints(t *testing.T) {
 		select {
 		case <-g.gate.entered:
 		case <-time.After(5 * time.Second):
+			// The gate is armed: the probing read may still be about to park.
+			// Release and drain it BEFORE failing (§5.1) — a bare Fatal would
+			// strand the goroutine on the channel with no reclaim.
+			g.release()
+			select {
+			case <-first:
+			case <-time.After(5 * time.Second):
+			}
 			t.Fatal("the first held read never hit the gate")
 		}
 		select {
@@ -375,12 +389,23 @@ func TestSpeechFixtureControlPoints(t *testing.T) {
 		select {
 		case <-g.before.entered:
 		case <-time.After(5 * time.Second):
+			g.before.release()
+			g.committed.release()
+			select {
+			case <-res:
+			case <-time.After(5 * time.Second):
+			}
 			t.Fatal("the submit never reached its before window")
 		}
 		g.before.release()
 		select {
 		case <-g.committed.entered:
 		case <-time.After(5 * time.Second):
+			g.committed.release()
+			select {
+			case <-res:
+			case <-time.After(5 * time.Second):
+			}
 			t.Fatal("the submit never reached its committed window")
 		}
 		select {

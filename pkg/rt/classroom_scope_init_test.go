@@ -16,6 +16,10 @@ type holdFirstDueFetch struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+	// openOnce makes openUp idempotent (§5.1): every failure path in the T2
+	// test reclaims through it, and a repeated release must pair safely with
+	// an explicit openUp instead of panicking on close-of-closed-channel.
+	openOnce sync.Once
 }
 
 func newHoldFirstDueFetch(inner WordSource) *holdFirstDueFetch {
@@ -32,7 +36,9 @@ func (h *holdFirstDueFetch) FetchDueWords(ctx context.Context, limit int, catego
 	return h.WordSource.FetchDueWords(ctx, limit, category)
 }
 
-func (h *holdFirstDueFetch) openUp() { close(h.release) }
+func (h *holdFirstDueFetch) openUp() {
+	h.openOnce.Do(func() { close(h.release) })
+}
 
 // ttInitCheckingRow opens a checking lesson through real session_init.
 func ttInitCheckingRow(t *testing.T, exec *fakeExecutor, words WordSource) (*TurnManager, *captureSender) {
@@ -146,7 +152,10 @@ func TestSupersededClassroomSubmitCannotWriteBack(t *testing.T) {
 
 	reclaimAndFail := func(msg string) {
 		hold.openUp()
-		waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) })
+		if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+			t.Fatalf("%s (reclaim: CompleteCheck calls=%d returned=%d never settled)",
+				msg, hold.callCount(), hold.returnedCount())
+		}
 		t.Fatal(msg)
 	}
 
@@ -192,8 +201,9 @@ func TestSupersededClassroomSubmitCannotWriteBack(t *testing.T) {
 	tm.mu.Unlock()
 
 	hold.openUp()
-	if !waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) }) {
-		reclaimAndFail(fmt.Sprintf("classroom A submit task never finished (calls=%d)", hold.callCount()))
+	if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+		reclaimAndFail(fmt.Sprintf("classroom A submit task never finished (calls=%d returned=%d)",
+			hold.callCount(), hold.returnedCount()))
 	}
 
 	tm.mu.Lock()
