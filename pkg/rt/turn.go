@@ -1018,8 +1018,15 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 }
 
 func (tm *TurnManager) runStarterTask(task func()) {
-	if tm.starterInterleave != nil {
-		tm.starterInterleave(task)
+	// Snapshot the seam under mu (never CALL it under the hold — a seam may
+	// park): the deterministic race tests arm starterInterleave while earlier
+	// starter goroutines are still in flight, so the read must not race the
+	// arm.
+	tm.mu.Lock()
+	interleave := tm.starterInterleave
+	tm.mu.Unlock()
+	if interleave != nil {
+		interleave(task)
 		return
 	}
 	task()

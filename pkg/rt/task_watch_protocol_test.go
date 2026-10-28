@@ -188,9 +188,13 @@ func TestReplacedClassroomTasksWaitedIndividually(t *testing.T) {
 	}
 
 	// B replaces the classroom (real production re-init); B's greeting
-	// starter is task 2, parked before it runs via the production seam.
+	// starter is task 2, parked before it runs via the production seam. The
+	// arm takes mu: A's earlier starter goroutines are still in flight and
+	// runStarterTask snapshots the seam under the same hold.
 	starter := newTtPark()
+	tm.mu.Lock()
 	tm.starterInterleave = func(task func()) { starter.hit(); starter.wait(); task() }
+	tm.mu.Unlock()
 	practice := &fakePracticeSource{cards: ptPracticeCards("cat", "dog")}
 	ps := newTestPracticeStore(t)
 	tm.cfg = TurnManagerConfig{
