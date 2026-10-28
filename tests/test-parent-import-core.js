@@ -317,6 +317,26 @@ function runStatuses(run) {
     !d.actions.resume.shown && !d.actions.retry.shown, '失效批次无任何运行按钮');
 })();
 
+(function testDecisionInvalidatedKeepsFailedPage() {
+  // Codex P2-2: 失效为终态。failed 页虽保留在计划里（清扫只动 running），
+  // 但重试转换对失效批次是 no-op——按钮不得承诺一个不会发生的动作。
+  var run = core.createImportRunState(core.createPagePlan(2));
+  core.beginImportRun(run);
+  run.plan = core.applyPageEvent(run.plan, 1, 'start');
+  run.plan = core.applyPageEvent(run.plan, 1, 'fail', '超时');
+  run.plan = core.applyPageEvent(run.plan, 2, 'start');
+  core.invalidateImportRun(run); // 失效：failed 页保留
+  eq(runStatuses(run), 'failed,pending', '失效保留 failed 页、只清扫 running');
+  var d = core.importRunDecision(run);
+  eq(d.phase, 'invalidated', '含失败页的失效批次仍为终态 invalidated');
+  eq(JSON.stringify(d.failedPages), '[1]', '失败页仍是计划事实（供原因展示）');
+  assert(!d.actions.retry.shown, '失效批次不显示重试按钮');
+  assert(!d.actions.retry.enabled, '失效批次重试不可用');
+  core.retryImportPage(run, 1); // 转换层面同样不得复活
+  eq(runStatuses(run), 'failed,pending', '失效批次重试是 no-op');
+  eq(run.executing, false, '失效批次重试不产生执行');
+})();
+
 (function testDecisionNounLabel() {
   var run = core.createImportRunState(core.createPagePlan(2));
   core.beginImportRun(run);

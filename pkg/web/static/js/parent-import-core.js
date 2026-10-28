@@ -342,6 +342,9 @@
         failedPages.push(page.no);
       }
     });
+    // 失效是终态：失败页虽留在计划里（失败原因仍要展示），重试转换对
+    // 失效批次是 no-op——按钮规则与终态一致，不得承诺不会发生的动作。
+    var retryOffered = failedPages.length > 0 && phase !== 'invalidated';
     return {
       phase: phase,
       busy: busy,
@@ -368,8 +371,8 @@
           label: '继续处理（剩 ' + c.pending + ' ' + noun + '）',
         },
         retry: {
-          shown: failedPages.length > 0,
-          enabled: failedPages.length > 0 && !busy,
+          shown: retryOffered,
+          enabled: retryOffered && !busy,
           pages: failedPages,
         },
       },
