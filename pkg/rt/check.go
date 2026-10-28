@@ -221,6 +221,7 @@ func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson, installGe
 // ACK gate. No due-fetch, no word timers, no rating write — those belong to
 // the paths that FINISH the check (handleCheckVerdict / handleCheckSubmit).
 func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason string, correction bool, installGen uint64) {
+	epoch := tm.currentEpoch()
 	if tm.checkResumeInterleave != nil {
 		tm.checkResumeInterleave()
 	}
@@ -249,12 +250,13 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 			Title: passageView.Title, Author: passageView.Author, Whole: passageView.Whole,
 			Paragraphs: append([]int(nil), passageView.Paragraphs...)}
 	}
-	var epoch uint64
 	if !tm.applyClassroomInstallEffect(installGen, func() error {
+		if tm.epoch != epoch {
+			return errClassroomInstallStale
+		}
 		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor) {
 			return errClassroomInstallStale
 		}
-		epoch = tm.epoch
 		tm.state, tm.sessionReadyAt = StateListening, time.Now()
 		if err := s.SendControl(SessionReadyMsg{Type: TypeSessionReady, SessionID: tm.session,
 			Audio: AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
