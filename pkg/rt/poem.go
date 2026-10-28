@@ -320,7 +320,9 @@ func (tm *TurnManager) startPoemSession(s Sender, l lesson.Lesson, p poem.Poem, 
 	// onAck is deliberately nil: the poem classroom arms NO per-word timer
 	// (不用单词短计时器把整首任务机械推进) — nothing counts down while the
 	// child writes.
-	go tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purposePoemGreeting, nil)
+	tm.goServerTask(func() {
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purposePoemGreeting, nil)
+	})
 }
 
 // buildPoemClassifyMessages assembles the poem writing-stage classification
@@ -507,7 +509,9 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 		return
 	}
 	requestID := m.RequestID
-	go tm.runAcceptedPoemSubmit(s, ctx, cancel, epoch, write, ref, lessonID, expected, requestID, total)
+	tm.goServerTask(func() {
+		tm.runAcceptedPoemSubmit(s, ctx, cancel, epoch, write, ref, lessonID, expected, requestID, total)
+	})
 }
 
 func (tm *TurnManager) runAcceptedPoemSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, ref poemRef, lessonID string, expected int, requestID string, total int) {

@@ -183,7 +183,9 @@ func (tm *TurnManager) handlePhotoChunk(s Sender, m PhotoChunkMsg) {
 	tm.mu.Unlock()
 
 	if final {
-		go tm.runCheckPhoto(s, jpeg)
+		tm.goServerTask(func() {
+			tm.runCheckPhoto(s, jpeg)
+		})
 	}
 }
 

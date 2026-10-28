@@ -490,7 +490,9 @@ func (tm *TurnManager) startPassageSession(s Sender, l lesson.Lesson, p passage.
 	// onAck is deliberately nil: the passage classroom arms NO per-word
 	// timer (背默推进不靠机械计时) — nothing counts down while the child
 	// writes.
-	go tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purposePassageGreeting, nil)
+	tm.goServerTask(func() {
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purposePassageGreeting, nil)
+	})
 }
 
 // buildPassageClassifyMessages assembles the passage writing-stage
@@ -686,7 +688,9 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 		return
 	}
 	requestID := m.RequestID
-	go tm.runAcceptedPassageSubmit(s, ctx, cancel, epoch, write, ref, lessonID, expected, requestID, total)
+	tm.goServerTask(func() {
+		tm.runAcceptedPassageSubmit(s, ctx, cancel, epoch, write, ref, lessonID, expected, requestID, total)
+	})
 }
 
 func (tm *TurnManager) runAcceptedPassageSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, ref passageRef, lessonID string, expected int, requestID string, total int) {

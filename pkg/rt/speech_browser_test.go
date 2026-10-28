@@ -541,6 +541,9 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 	tm.checkResumeInterleave = resumeHold
 	tm.closeEntryInterleave = closeEntryHold
 	tm.settleInterleave = settleHold
+	// S1: every manager observes its whole server tasks (submits, starters,
+	// close fallbacks) — settled waits ride this, not the verified fields.
+	tm.taskTrack = &serverTaskTracker{}
 	if ocrRead != nil {
 		// The production photo channel (ttBindPhoto's wiring, fixture-wide):
 		// the scripted reader under the REAL pipeline, so 拍照检查 rides the
@@ -959,13 +962,16 @@ func (f *speechBrowserFixture) speechConnectionsSettled() bool {
 }
 
 // speechServerTasksSettled reports whether every SERVER-side task of the
-// fixture has finished: the browser connections (multi-connection form), the
-// accepted dictation submit (scope formalSubmit is cleared in the task's
-// releaseFormalCheckSubmitOp, after its writeback/review_result/receipt), every
-// write the close claims wait on, and every CompleteCheck latch call —
-// checked submits of all kinds and the unchecked close fallback (the
-// fixture's bottom executor tracker). The driver's own exit is observed
-// separately by the caller.
+// fixture has finished: the browser connections (multi-connection form),
+// every CompleteCheck latch call still inside the executor (the fixture's
+// bottom tracker), and — the S1 whole-task observation — every server task
+// registered before its goroutine launched: the accepted submits of all
+// kinds, the init-continuation starters and BOTH close-fallback launches
+// (their handles are reserved by the close claim itself). A task parked
+// BEFORE its executor call counts as live, and a replaced classroom's task
+// stays registered on its connection until it truly exits — the old
+// activeScope.formalSubmit read missed both (第三轮第 4/5 项). The driver's
+// own exit is observed separately by the caller.
 func (f *speechBrowserFixture) speechServerTasksSettled() bool {
 	if !f.speechConnectionsSettled() {
 		return false
@@ -977,11 +983,7 @@ func (f *speechBrowserFixture) speechServerTasksSettled() bool {
 	mgrs := append([]*speechManagerTracker(nil), f.managers...)
 	f.mu.Unlock()
 	for _, m := range mgrs {
-		m.TurnManager.mu.Lock()
-		busy := len(m.checkWrites) > 0 ||
-			(m.TurnManager.activeScope != nil && m.TurnManager.activeScope.formalSubmit != nil)
-		m.TurnManager.mu.Unlock()
-		if busy {
+		if !m.TurnManager.serverTasksSettled() {
 			return false
 		}
 	}

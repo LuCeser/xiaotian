@@ -56,25 +56,21 @@ func (h *holdFirstCompleteCheck) openUp() {
 }
 
 // ttFormalSubmitSettled is the per-task completion observation for the formal
-// submit hold gate (review R0-P2). It needs BOTH halves:
+// submit hold gate (rethink3 S1). It needs BOTH halves:
 //   - returned >= calls observes EVERY checked CompleteCheck, so a mutation
 //     that lets a second submit task coexist (dedup removed) still waits for
 //     that task's executor call — the single-flight flag alone would not;
-//   - active scope formalSubmit cleared observes the accepted task's OWN tail:
-//     releaseFormalCheckSubmitOp runs only after writeback, review_result and
-//     receipt, so counting messages after the wait is deterministic. Counts
-//     alone would let the assertions race that tail (CompleteCheck returns
-//     before finishCheckSubmit sends anything).
+//   - serverTasksSettled observes each accepted task's WHOLE tail: the
+//     handle registered before the goroutine launched is released only
+//     after writeback, review_result, receipt and the summary tails (S1's
+//     taskDone), and a REPLACED classroom's task stays registered on the
+//     connection until it truly exits. The old activeScope.formalSubmit
+//     read missed both (rethink3 第三轮第 4/5 项) and is gone.
 func ttFormalSubmitSettled(tm *TurnManager, hold *holdFirstCompleteCheck) bool {
 	if calls := hold.callCount(); calls > 0 && hold.returnedCount() < calls {
 		return false
 	}
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.activeScope == nil {
-		return true
-	}
-	return tm.activeScope.formalSubmit == nil
+	return tm.serverTasksSettled()
 }
 
 func waitFormalSubmitSettled(t *testing.T, tm *TurnManager, hold *holdFirstCompleteCheck, timeout time.Duration) bool {
@@ -143,6 +139,7 @@ func TestCheckSubmitInFlightBlocksSameConnectionRetry(t *testing.T) {
 	words := newFakeWords(ttCards("苹果", "香蕉"))
 	tm, s, _, inner := ttDriveToCheck(t, ttCards("苹果", "香蕉"), words)
 	ttCheckAll(t, tm, s, 2)
+	tm.taskTrack = &serverTaskTracker{}
 
 	hold := newHoldFirstCompleteCheck(inner)
 	tm.exec = hold
@@ -199,6 +196,7 @@ func TestFormalCheckSubmitFreezesWordListAtAdmission(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	tm, s, _, inner := ttDriveToCheck(t, ttCards("苹果"), words)
 	ttCheckAll(t, tm, s, 1)
+	tm.taskTrack = &serverTaskTracker{}
 
 	hold := newHoldFirstCompleteCheck(inner)
 	tm.exec = hold

@@ -287,8 +287,10 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	if correction {
 		bridge = checkCorrectionBridgeText(len(words))
 	}
-	go tm.runStarterTask(func() {
-		tm.runAnnouncementAt(s, announceEpoch, ctx, cancel, bridge, purposeCheckBridge, nil)
+	tm.goServerTask(func() {
+		tm.runStarterTask(func() {
+			tm.runAnnouncementAt(s, announceEpoch, ctx, cancel, bridge, purposeCheckBridge, nil)
+		})
 	})
 }
 
@@ -665,7 +667,9 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	tm.mu.Unlock()
 
 	requestID := m.RequestID
-	go tm.runAcceptedFormalCheckSubmit(s, ctx, cancel, epoch, scopeGen, op, write, frozen, expected, requestID, total)
+	tm.goServerTask(func() {
+		tm.runAcceptedFormalCheckSubmit(s, ctx, cancel, epoch, scopeGen, op, write, frozen, expected, requestID, total)
+	})
 }
 
 // formalCheckSubmitFrozen captures dictation submit inputs at admission so a
@@ -1056,7 +1060,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	}
 
 	persistCtx, persistDone := checkPersistContext(ctx)
-	go func() {
+	tm.goServerTask(func() {
 		defer persistDone()
 		tm.finishCorrections(s, persistCtx, ctx, cancel, correctionInputs{
 			epoch:     epoch,
@@ -1069,7 +1073,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 			correct:   correct,
 			write:     write,
 		})
-	}()
+	})
 }
 
 // correctionInputs carries the diff result into the finishing goroutine.

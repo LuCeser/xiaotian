@@ -108,7 +108,9 @@ func (tm *TurnManager) startSubjectAsk(s Sender, m SessionInitMsg) {
 		return
 	}
 	tm.recorder.Emit(EventSubjectAsk)
-	go tm.runAnnouncementDisplayAt(s, askEpoch, ctx, cancel, subjectAskText, subjectAskText, purposeSubjectAsk, nil)
+	tm.goServerTask(func() {
+		tm.runAnnouncementDisplayAt(s, askEpoch, ctx, cancel, subjectAskText, subjectAskText, purposeSubjectAsk, nil)
+	})
 }
 
 // handleSubjectPick consumes the page's button answer to the clarify. A

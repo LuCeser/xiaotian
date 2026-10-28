@@ -462,7 +462,12 @@ type TurnManager struct {
 	// blocking init I/O; install succeeds only for the latest reservation.
 	// Superseded scopes lose memory writeback rights.
 	activeScope *classroomScope
-	session     string
+	// taskTrack (test seam, issue #69 rethink3 S1; nil in production) is the
+	// whole-task observation: handles are reserved before each server-task
+	// goroutine launches (the close fallback's inside the claim that decides
+	// it) and released only at the task's true end. See task_watch.go.
+	taskTrack *serverTaskTracker
+	session   string
 	// state is one of StateListening/StateProcessing/StateSpeaking, or ""
 	// before session_init / after close.
 	state string
@@ -891,8 +896,10 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string, installGen u
 	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
-	go tm.runStarterTask(func() {
-		tm.runNaturalEndingAt(s, epoch, ctx, cancel, tm.noDueWordsTextForNow(), purposeNoDue, ReasonNoDueWords)
+	tm.goServerTask(func() {
+		tm.runStarterTask(func() {
+			tm.runNaturalEndingAt(s, epoch, ctx, cancel, tm.noDueWordsTextForNow(), purposeNoDue, ReasonNoDueWords)
+		})
 	})
 }
 
@@ -989,9 +996,11 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 		// first word's text; the TTS input stays the raw greeting.
 		display = greetingMaskedText(total)
 	}
-	go tm.runStarterTask(func() {
-		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeGreeting, func() {
-			tm.announceAckedLocked()
+	tm.goServerTask(func() {
+		tm.runStarterTask(func() {
+			tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, spoken, display, purposeGreeting, func() {
+				tm.announceAckedLocked()
+			})
 		})
 	})
 }
@@ -1352,9 +1361,14 @@ func (tm *TurnManager) handlePing(s Sender, m PingMsg) {
 // owns nothing — nothing to send, nothing to persist.
 type closeClaim struct {
 	checkWrites []*checkWriteAdmission
-	fallback    uncheckedCloseSnapshot
-	owned       bool
-	hasFallback bool
+	// fallbackTask is the whole-task handle reserved in the SAME critical
+	// section that decided the fallback (S1: 兜底任务随关闭决策预留句柄，
+	// 锁外启动) — no observation window between the close decision and the
+	// task set; the goroutine launches outside the lock.
+	fallbackTask *serverTaskHandle
+	fallback     uncheckedCloseSnapshot
+	owned        bool
+	hasFallback  bool
 }
 
 // claimCloseLocked is the single ownership point of the session's close:
@@ -1385,6 +1399,10 @@ func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch, takeFallback bo
 			words:    append([]lesson.Word(nil), t.words...),
 		}
 		c.hasFallback = true
+		// S1: reserve the whole-task handle WITH the decision, still inside
+		// the claim's one critical section — the fallback's wait-set entry
+		// exists before the goroutine can be observed running.
+		c.fallbackTask = tm.beginServerTask()
 	}
 	tm.internalCloseLocked()
 	return c
@@ -1465,8 +1483,11 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 			// The fallback AWAITS the captured saves before it can decide —
 			// that wait must not block the close's caller (the read loop):
 			// the transport closes now, the owned persistence finishes on
-			// its own (路径 A 1.11; the awaits run outside every lock).
-			go tm.persistUncheckedFallback(c.fallback, c.checkWrites)
+			// its own (路径 A 1.11; the awaits run outside every lock) with its
+			// whole-task handle reserved by the claim (S1).
+			tm.goServerTaskReserved(c.fallbackTask, func() {
+				tm.persistUncheckedFallback(c.fallback, c.checkWrites)
+			})
 		}
 	}
 }
@@ -1533,8 +1554,11 @@ func (tm *TurnManager) Close(Sender) {
 			// Same 1.11 rule as handleEndSession: the close returns as soon
 			// as the transport is finalized; the owned fallback (waits for
 			// captured saves, one authoritative read, one latch competition)
-			// runs on its own goroutine with a bounded result.
-			go tm.persistUncheckedFallback(c.fallback, c.checkWrites)
+			// runs on its own goroutine with a bounded result and its
+			// whole-task handle reserved by the claim (S1).
+			tm.goServerTaskReserved(c.fallbackTask, func() {
+				tm.persistUncheckedFallback(c.fallback, c.checkWrites)
+			})
 		}
 	}
 }

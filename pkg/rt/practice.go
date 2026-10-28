@@ -319,7 +319,9 @@ func (tm *TurnManager) handlePracticeInit(s Sender, installGen uint64) {
 			return
 		}
 		tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-		go tm.runNaturalEndingAt(s, epoch, nctx, cancel, practiceAllPracticedNotice, purposeNoDue, ReasonClientEnd)
+		tm.goServerTask(func() {
+			tm.runNaturalEndingAt(s, epoch, nctx, cancel, practiceAllPracticedNotice, purposeNoDue, ReasonClientEnd)
+		})
 		return
 	}
 
@@ -404,7 +406,9 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 		return
 	}
 	requestID := m.RequestID
-	go tm.runAcceptedPracticeSubmit(s, ctx, cancel, epoch, write, lessonID, expected, requestID, wordsList)
+	tm.goServerTask(func() {
+		tm.runAcceptedPracticeSubmit(s, ctx, cancel, epoch, write, lessonID, expected, requestID, wordsList)
+	})
 }
 
 func (tm *TurnManager) runAcceptedPracticeSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, lessonID string, expected int, requestID string, wordsList []lesson.Word) {
