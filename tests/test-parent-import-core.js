@@ -158,7 +158,40 @@ function runStatuses(run) {
   eq(run.aborted, true, 'wind-down 期间继续不得清除停止标记');
   eq(run.executing, true, 'wind-down 期间不得启动第二次执行');
   core.retryImportPage(run, 1); // also a no-op while busy
+  eq(run.aborted, true, 'busy 期间重试不得清除停止标记');
   eq(runStatuses(run), 'running,pending', 'busy 期间重试不得改动任何页');
+})();
+
+(function testNoOverlappingBeginOrRetryDuringWindDown() {
+  // Codex P3: 旧用例重试的是 running 页——删掉守卫后底层 retryPage 也不
+  // 会动它，证明不了守卫存在。这里重试的是 failed 页：守卫若被删，
+  // retryPage 真会把它翻回 pending 并清掉停止标记。收尾（executing 仍
+  // 真）期间的再次开始同理必须 no-op。分别删 begin/retry 的 executing
+  // 守卫，本测试各自的断言变红。
+  var run = core.createImportRunState(core.createPagePlan(3));
+  core.beginImportRun(run);
+  run.plan = core.applyPageEvent(run.plan, 1, 'start');
+  run.plan = core.applyPageEvent(run.plan, 1, 'fail', '超时');
+  run.plan = core.applyPageEvent(run.plan, 2, 'start'); // 第 2 张在飞
+  core.stopImportRun(run); // 停止：收尾前 executing 仍为真
+
+  core.retryImportPage(run, 1); // 收尾前重试失败页 → 必须 no-op
+  eq(runStatuses(run), 'failed,running,pending', '收尾前重试：失败页保持 failed');
+  eq(run.aborted, true, '收尾前重试：不清除停止标记');
+  eq(run.executing, true, '收尾前重试：不产生第二次执行');
+
+  core.beginImportRun(run); // 收尾期间再次开始 → 必须 no-op
+  eq(run.aborted, true, '收尾期间再次开始不得清除停止标记');
+  eq(run.executing, true, '收尾期间再次开始不得重叠执行');
+  eq(runStatuses(run), 'failed,running,pending', '收尾期间再次开始不动任何页');
+  var d = core.importRunDecision(run);
+  eq(d.phase, 'stopping', '收尾期间仍是 stopping');
+  assert(d.actions.retry.shown && !d.actions.retry.enabled, '收尾期间重试暂禁');
+
+  core.settleImportRun(run); // 收尾完成后重试恢复可用
+  eq(runStatuses(run), 'failed,pending,pending', '收尾只清扫 running，失败页保留');
+  d = core.importRunDecision(run);
+  assert(d.actions.retry.shown && d.actions.retry.enabled, '收尾后失败页重试恢复可用');
 })();
 
 (function testRetryTouchesOnlyTargetPage() {
