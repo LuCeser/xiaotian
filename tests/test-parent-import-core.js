@@ -55,6 +55,55 @@ function eq(actual, expected, label) {
   eq(orig.meaning, '猫', 'original meaning from OCR');
 })();
 
+(function testStoredEntriesCarryOrdinal() {
+  var state = core.createImportPhotoState();
+  core.setPhotoRecognition(state, 1, {
+    meta: { grade: '三' },
+    entries: [
+      { word: 'bat', meaning: '甲', lesson: '第1课' },
+      { word: 'bat', meaning: '乙', lesson: '第2课' },
+    ],
+  });
+  var rec = core.getPhotoRecognition(state, 1);
+  eq(rec.entries[0].entryIndex, 0, 'stored entry 0 carries its ordinal');
+  eq(rec.entries[1].entryIndex, 1, 'stored entry 1 carries its ordinal');
+  eq(core.recognitionEntriesForPage(state, 1)[1].entryIndex, 1,
+    'entries export keeps the ordinal');
+})();
+
+(function testOrdinalLinksOwnEntryAfterWordEdit() {
+  var state = core.createImportPhotoState();
+  core.setPhotoRecognition(state, 1, {
+    meta: { grade: '三' },
+    entries: [
+      { word: 'bat', meaning: '甲', lesson: '第1课' },
+      { word: 'bat', meaning: '乙', lesson: '第2课' },
+    ],
+  });
+  // The parent corrected both word faces — the current word matches no
+  // stored entry; the ordinal must still find each row's OWN entry.
+  var row0 = { word: 'cat', meaning: '甲', lesson: '第1课', page: 1, entryIndex: 0 };
+  var row1 = { word: 'hat', meaning: '乙', lesson: '第2课', page: 1, entryIndex: 1 };
+  eq(core.originalEntryForRow(state, row0).word, 'bat',
+    'corrected word still links to its original OCR entry');
+  eq(core.originalEntryForRow(state, row1).lesson, '第2课',
+    'same-page duplicate word links to its OWN entry, not the first match');
+})();
+
+(function testUnstampedRowFallsBackToWordMatch() {
+  var state = core.createImportPhotoState();
+  core.setPhotoRecognition(state, 1, {
+    meta: { grade: '三' },
+    entries: [{ word: 'cat', meaning: '猫', lesson: '第2课' }],
+  });
+  var row = { word: 'cat', meaning: '猫', lesson: '', page: 1 };
+  eq(core.originalEntryForRow(state, row).lesson, '第2课',
+    'rows without the ordinal keep the word-match fallback');
+  var gone = { word: 'cat', meaning: '猫', lesson: '', page: 1, entryIndex: 9 };
+  assert(core.originalEntryForRow(state, gone) === null,
+    'a stale out-of-range ordinal returns null, not a wrong entry');
+})();
+
 if (failures) {
   console.error('test-parent-import-core: ' + failures + ' of ' + checks + ' checks failed');
   process.exit(1);

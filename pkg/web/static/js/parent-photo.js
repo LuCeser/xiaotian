@@ -1043,6 +1043,7 @@
     form.existingPoems = loaded[2] || [];
     form.existingPassages = loaded[3] || [];
     form.rows = classifyPhotoEntries(entries, form.existingWords);
+    stampEntryIndex(form.rows);
     form.rows = fillRecommendedLessons(form.rows, recommendForDraftPage(
       form.books, form.detectedMeta,
       { textbook: form.detectedMeta, entries: entries }, [],
@@ -1067,6 +1068,23 @@
         lesson: r.lessonOrigin === 'recognized' ? (r.lesson || '') : '',
       };
     });
+  }
+
+  /**
+   * stampEntryIndex (Issue #80 U3) — fix each freshly classified row's
+   * photo-local OCR ordinal: classifyPhotoEntries' index IS the entry's
+   * position within its photo, but mergePageRows re-indexes rows to their
+   * GLOBAL array position right after. The ordinal is the row's stable link
+   * to its original OCR entry (originalEntryForRow): it must be taken while
+   * it still means "position within the photo".
+   */
+  function stampEntryIndex(rows) {
+    (rows || []).forEach(function (row) {
+      if (row) {
+        row.entryIndex = row.index;
+      }
+    });
+    return rows;
   }
 
   /** A running page whose result was dropped goes back to pending. */
@@ -2833,6 +2851,7 @@
     state.lessonRecs[pageNo - 1] = rec;
     var stamped = fillRecommendedLessons(
       global.classifyPhotoEntries(parsed.entries, this.existingWords), rec);
+    stampEntryIndex(stamped);
     this.rows = global.mergePageRows(this.rows, pageNo, stamped);
     // Issue #11: the page's poems and display-only others replace
     // their own page segments (a retry never duplicates either).
@@ -3693,6 +3712,10 @@
       // Issue #7: the page tag rides every re-classification — the
       // preview's page grouping and mergePageRows' segment replace read it.
       next[i].page = this.rows[i].page || 0;
+      // Issue #80 U3: the photo-local OCR ordinal rides too — correcting a
+      // word face must never orphan the row from its original OCR entry
+      // (originalEntryForRow links by ordinal, not by the edited word).
+      next[i].entryIndex = this.rows[i].entryIndex;
       // Issue #8: provenance and the unanswered-attempt flag ride too —
       // editing a word never silently drops the 系统补充 marker or the
       // 生成失败 note (ADR-0005: edits do not change the source).

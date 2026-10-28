@@ -24,15 +24,25 @@
     return out;
   }
 
-  function copyEntry(entry) {
-    if (!entry) {
-      return { word: '', meaning: '', lesson: '' };
+  /**
+   * copyEntry — one entry copy plus, when known, its photo-local ordinal
+   * (entryIndex: the entry's position within ITS photo's entries — the
+   * stable identity word edits cannot erase; the row carries the same
+   * ordinal, so a reclassified row still links to ITS original entry even
+   * among same-page duplicate words).
+   */
+  function copyEntry(entry, entryIndex) {
+    var copy = { word: '', meaning: '', lesson: '' };
+    if (entry) {
+      copy.word = entry.word == null ? '' : String(entry.word);
+      copy.meaning = entry.meaning == null ? '' : String(entry.meaning);
+      copy.lesson = entry.lesson == null ? '' : String(entry.lesson);
     }
-    return {
-      word: entry.word == null ? '' : String(entry.word),
-      meaning: entry.meaning == null ? '' : String(entry.meaning),
-      lesson: entry.lesson == null ? '' : String(entry.lesson),
-    };
+    var idx = entry && entry.entryIndex != null ? entry.entryIndex : entryIndex;
+    if (idx != null) {
+      copy.entryIndex = Number(idx);
+    }
+    return copy;
   }
 
   function createImportPhotoState() {
@@ -55,7 +65,8 @@
       return;
     }
     var key = String(normalizePhotoPageNo(pageNo));
-    var entries = (parsed && parsed.entries ? parsed.entries : []).map(copyEntry);
+    var entries = (parsed && parsed.entries ? parsed.entries : []).map(
+      function (entry, i) { return copyEntry(entry, i); });
     state.photos[key] = {
       meta: parsed && parsed.meta ? copyMeta(parsed.meta) : null,
       entries: entries,
@@ -94,7 +105,7 @@
     if (!rec || !rec.entries) {
       return [];
     }
-    return rec.entries.map(copyEntry);
+    return rec.entries.map(function (entry) { return copyEntry(entry); });
   }
 
   function recognitionMetaForPage(state, pageNo) {
@@ -102,13 +113,27 @@
     return rec && rec.meta ? copyMeta(rec.meta) : null;
   }
 
-  /** Original OCR row for a preview row (survives reclassify edits). */
+  /**
+   * Original OCR row for a preview row. Primary link: the row's photo-local
+   * entryIndex ordinal (stamped at landing, carried by reclassify/edits) —
+   * the parent may have corrected the word face, and same-page duplicate
+   * words must link to their OWN entries, so the CURRENT word is not an
+   * identity. Word matching remains only as the fallback for rows that
+   * predate the ordinal.
+   */
   function originalEntryForRow(state, row) {
     if (!row) {
       return null;
     }
     var rec = getPhotoRecognition(state, row.page);
     if (!rec || !rec.entries) {
+      return null;
+    }
+    if (row.entryIndex != null) {
+      var idx = Number(row.entryIndex);
+      if (idx >= 0 && idx < rec.entries.length) {
+        return copyEntry(rec.entries[idx]);
+      }
       return null;
     }
     var word = row.word == null ? '' : String(row.word);
