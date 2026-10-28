@@ -6,6 +6,11 @@ import "github.com/pkg/errors"
 // install effect; the install entry maps it to TurnEffectStale.
 var errClassroomInstallStale = errors.New("rt: stale classroom install")
 
+// formalCheckSubmitOp identifies one accepted formal dictation check_submit on
+// its owning classroom scope (issue #69 rethink2 R2). Pointer identity is the
+// operation id; only that operation's completion may clear the scope slot.
+type formalCheckSubmitOp struct{}
+
 // classroomScope is the private per-classroom identity on one WebSocket
 // connection (issue #69 rethink2 R1). Each successful install gets a fresh
 // generation even when the lesson row id is unchanged; superseded scopes
@@ -14,6 +19,23 @@ type classroomScope struct {
 	gen      uint64
 	lessonID string
 	tutor    *DictationTutor
+	// formalSubmit is non-nil while that scope's accepted formal save goroutine
+	// is in flight (admission through defer tail). Superseded scopes are
+	// dropped on replace; their ops never touch the active scope's slot.
+	formalSubmit *formalCheckSubmitOp
+}
+
+// releaseFormalCheckSubmitOp clears the in-flight slot only when it still
+// belongs to op (old operations must not clear a newer admission on B).
+func (tm *TurnManager) releaseFormalCheckSubmitOp(op *formalCheckSubmitOp) {
+	if op == nil {
+		return
+	}
+	tm.mu.Lock()
+	if tm.activeScope != nil && tm.activeScope.formalSubmit == op {
+		tm.activeScope.formalSubmit = nil
+	}
+	tm.mu.Unlock()
 }
 
 // beginClassroomAttempt reserves the next classroom generation before any

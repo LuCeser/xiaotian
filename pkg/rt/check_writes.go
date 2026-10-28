@@ -27,6 +27,8 @@ type checkWriteAdmission struct {
 }
 
 // admitCheckWriteLocked registers one accepted write. Caller holds tm.mu.
+// Formal dictation check_submit must take validity, snapshot, scope in-flight
+// dedup, and this registration in the same tm.mu hold (issue #69 R2).
 func (tm *TurnManager) admitCheckWriteLocked() (*checkWriteAdmission, bool) {
 	if tm.closed || tm.checkWritesSealed {
 		return nil, false

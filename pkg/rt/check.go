@@ -596,33 +596,54 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 		return
 	}
 
-	// Submit gate: every word index must carry a MANUAL verdict (OCR
-	// prefills from 13.1-03 do not satisfy this gate).
+	// Formal dictation submit: validity, snapshot, in-flight dedup, write
+	// registration, scope/epoch capture, and turn cancel install happen in ONE
+	// tm.mu critical section (issue #69 rethink2 R2).
+	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
-	lessonID := tm.tutor.lessonID
-	expected := tm.tutor.version
+	if tm.tutor == nil || tm.closed || !tm.tutor.checking {
+		tm.mu.Unlock()
+		cancel()
+		if tm.tutor != nil && !tm.closed && !tm.tutor.checking && tm.tutor.reviewSeen {
+			tm.recorder.Emit(EventError,
+				infra.F("code", ErrCodeInvalidMessage),
+				infra.F("duplicate", "check_submit"),
+			)
+			return
+		}
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
+		return
+	}
+	if tm.tutor.correction || tm.tutor.poem != nil || tm.tutor.passage != nil || tm.tutor.practice {
+		tm.mu.Unlock()
+		cancel()
+		tm.sendOpenError(s, ErrCodeInvalidMessage, checkStageClosedNotice, true)
+		return
+	}
 	total := len(tm.tutor.words)
-	manual := make(map[int]bool, total)
+	manualN := 0
 	for _, v := range tm.tutor.checkVerdicts {
 		if v.Manual {
-			manual[v.WordIndex] = true
+			manualN++
 		}
 	}
-	tm.mu.Unlock()
-	if len(manual) < total {
+	if manualN < total {
+		tm.mu.Unlock()
+		cancel()
 		tm.sendOpenError(s, ErrCodeInvalidMessage, checkSubmitIncompleteNotice, true)
 		return
 	}
-
-	tm.mu.Lock()
-	if tm.formalCheckSubmitPending {
+	if tm.activeScope == nil || tm.activeScope.formalSubmit != nil {
 		tm.mu.Unlock()
+		cancel()
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeInvalidMessage),
 			infra.F("duplicate", "check_submit_inflight"),
 		)
 		return
 	}
+	lessonID := tm.tutor.lessonID
+	expected := tm.tutor.version
 	frozen := formalCheckSubmitFrozen{
 		lessonID: lessonID,
 		category: tm.tutor.category,
@@ -630,33 +651,21 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	}
 	frozen.confirmed, frozen.timedOutN, frozen.hinted = tm.tutor.outcomeCounts()
 	frozen.hintWords, frozen.hintTotal = tm.tutor.hintAccounting()
-	tm.mu.Unlock()
-
-	// Latch: the stage transition. ONLY the first commit proceeds. The
-	// admission is taken in the SAME critical section that stores the turn
-	// cancel: a close can only land before the whole accepted save (this
-	// submit writes nothing) or after it registered (the latch write, the
-	// SubmitReview and its receipt then run to their real outcome on the
-	// persist context — the save responsibility outlives the turn's
-	// cancellation, 1.09).
-	ctx, cancel := context.WithCancel(context.Background())
-	scopeGen := tm.activeClassroomGen()
-	tm.mu.Lock()
+	scopeGen := tm.activeScope.gen
 	write, writeAdmitted := tm.admitCheckWriteLocked()
-	epoch := tm.epoch
-	if writeAdmitted {
-		tm.formalCheckSubmitPending = true
-	}
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
 	if !writeAdmitted {
-		// The session closed between the manual gate and the latch: the
-		// registry is sealed, nothing was accepted, nothing is written.
+		tm.mu.Unlock()
 		cancel()
 		return
 	}
+	op := &formalCheckSubmitOp{}
+	tm.activeScope.formalSubmit = op
+	epoch := tm.epoch
+	tm.turnCancel = cancel
+	tm.mu.Unlock()
+
 	requestID := m.RequestID
-	go tm.runAcceptedFormalCheckSubmit(s, ctx, cancel, epoch, scopeGen, write, frozen, expected, requestID, total)
+	go tm.runAcceptedFormalCheckSubmit(s, ctx, cancel, epoch, scopeGen, op, write, frozen, expected, requestID, total)
 }
 
 // formalCheckSubmitFrozen captures dictation submit inputs at admission so a
@@ -672,13 +681,11 @@ type formalCheckSubmitFrozen struct {
 // runAcceptedFormalCheckSubmit runs off the WebSocket read loop: the latch
 // write and the rest of the accepted save must not block end_session or
 // transport teardown on the same connection.
-func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, scopeGen uint64, write *checkWriteAdmission, frozen formalCheckSubmitFrozen, expected int, requestID string, total int) {
+func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, scopeGen uint64, op *formalCheckSubmitOp, write *checkWriteAdmission, frozen formalCheckSubmitFrozen, expected int, requestID string, total int) {
 	persistCtx, persistDone := checkPersistContext(ctx)
 	defer func() {
 		persistDone()
-		tm.mu.Lock()
-		tm.formalCheckSubmitPending = false
-		tm.mu.Unlock()
+		tm.releaseFormalCheckSubmitOp(op)
 	}()
 	lessonID := frozen.lessonID
 

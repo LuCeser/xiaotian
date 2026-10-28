@@ -520,13 +520,6 @@ type TurnManager struct {
 	// checkWritesSealed flips in the close claim's critical section: once
 	// set, admitCheckWriteLocked refuses new admissions forever.
 	checkWritesSealed bool
-	// formalCheckSubmitPending is true from the first accepted dictation
-	// check_submit until its accepted save goroutine finishes (latch write
-	// through presentation registration). A second check_submit on the SAME
-	// connection while this holds is an in-flight retry — not a cross-
-	// connection latch replay — and must not spawn a competing save.
-	formalCheckSubmitPending bool
-
 	// classroomSeq / pendingClassroomGen / activeScope implement per-classroom
 	// identity on this connection (issue #69 rethink2 R1). Init reserves a
 	// generation before blocking I/O; install succeeds only for the latest
