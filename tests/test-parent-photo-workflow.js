@@ -613,6 +613,10 @@ async function testBookSwitchRecomputesEveryChoice() {
   var form = h.form;
   eq(form.rows.length, 4, 'U4 切换: four rows land from the real recognize button');
   eq(form.bookChoice, 7, 'U4 切换: matching meta preselects book 7');
+  eq(form.rows[0].lesson, '第2课',
+    'U5 切换: first landing shows book 7 末课 before any textbook change');
+  eq(form.rows[0].lessonOrigin, 'previous-lesson',
+    'U5 切换: first landing origin is previous-lesson, not frozen recognized');
   // The parent's own calls ride REAL lesson inputs: one hand-set lesson,
   // one explicit clear (the empty string is the parent's call too).
   var inputs = form.preview.querySelectorAll('.photo-lesson-input');
@@ -685,19 +689,22 @@ async function testEarlierPhotoNeverBorrowsLaterHeaderLesson() {
   await flushPromises(30);
   var form = h.form;
   eq(form.rows.length, 2, 'U4 前张: both photos land their rows');
-  eq(form.rows[0].lesson, '', 'U4 前张: header-less photo 1 has no lesson of its own');
+  eq(form.bookChoice, 7,
+    'U5 前张: matchable meta on photo 2 preselects book 7 once the batch lands');
+  eq(form.rows[0].lesson, '第2课',
+    'U5 前张: header-less photo 1 immediately takes book 7 末课, not photo 2 第4课');
+  eq(form.rows[0].lessonOrigin, 'previous-lesson',
+    'U5 前张: photo 1 empty row origin is previous-lesson after meta arrives');
   eq(form.rows[1].lesson, '第4课', 'U4 前张: photo 2 keeps its own header lesson');
   eq(form.rows[1].lessonOrigin, 'recognized', 'U4 前张: photo 2 lesson origin recognized');
   eq(form.detectedMeta && form.detectedMeta.lesson, '第4课',
     'U4 前张: the merged batch meta DOES carry photo 2 课次 (the borrowing temptation)');
-  eq(String(form.bookChoice), 'unset',
-    'U4 前张: header-less first photo leaves the choice unset');
   var select = h.dom.document.getElementById('parent-photo-textbook');
-  select.value = '7';
+  select.value = '8';
   select.fire('change');
-  eq(form.rows[0].lesson, '第2课',
-    '前张刷新取所选教材末课（第2课），不借整批 meta 里后张的第4课');
-  eq(form.rows[0].lessonOrigin, 'previous-lesson', '前张刷新来源是 previous-lesson');
+  eq(form.rows[0].lesson, '单元B',
+    '前张切换教材后重算为书八末课，仍不借整批 meta 里后张的第4课');
+  eq(form.rows[0].lessonOrigin, 'previous-lesson', '前张切换后来源仍是 previous-lesson');
   eq(form.rows[1].lesson, '第4课', '后张自己的识别课次在刷新后保留');
 }
 
@@ -764,6 +771,86 @@ async function testPriorRecommendationsFollowPhotoOrderNotCompletionOrder() {
   eq(form.rows[2].lessonOrigin, 'photo-order', 'U4 前序: photo 3 refreshed origin photo-order');
 }
 
+/**
+ * Issue #80 U5 — first valid single-photo recognition preselects the book
+ * and stamps 末课 on lesson-empty rows without waiting for a change event.
+ */
+async function testFirstRecognitionPreselectThenRecommend() {
+  var h = mountWorkflowForm();
+  h.pickPhotos([fakePhoto()]);
+  h.clickRecognize();
+  await flushPromises(14);
+  var form = h.form;
+  eq(form.bookChoice, 7, 'U5 首识: meta match preselects book 7 on landing');
+  eq(form.rows[0].lesson, '第2课',
+    'U5 首识: lesson-empty row shows book 7 末课 immediately');
+  eq(form.rows[0].lessonOrigin, 'previous-lesson',
+    'U5 首识: empty OCR row origin is previous-lesson after preselect-first order');
+}
+
+/**
+ * Issue #80 U5 — a later photo landing must not reset the parent's textbook
+ * pick; only recommendations for new rows should follow the kept choice.
+ */
+async function testLaterPhotoLandingPreservesParentBookChoice() {
+  var calls = 0;
+  var h;
+  h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          entries: [{ word: 'p1', meaning: '壹', lesson: '' }],
+          textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+        });
+      }
+      var select = h.dom.document.getElementById('parent-photo-textbook');
+      select.value = '8';
+      select.fire('change');
+      return Promise.resolve({
+        entries: [{ word: 'p2', meaning: '贰', lesson: '' }],
+        textbook: { edition: '外研', stage: '', grade: '四年级', volume: '下册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto('one.jpg'), fakePhoto('two.jpg')]);
+  h.clickRecognize();
+  await flushPromises(30);
+  var form = h.form;
+  eq(form.bookChoice, 8,
+    'U5 后张: photo 2 landing does not overwrite the parent book choice');
+  eq(form.rows[0].lesson, '单元B',
+    'U5 后张: photo 1 keeps book 8 recommendation after photo 2 lands');
+  eq(form.rows[1].lesson, '单元B',
+    'U5 后张: photo 2 empty row follows the kept book 8 末课');
+}
+
+/**
+ * Issue #80 U5 — rebuilding the attribution panel must not clobber an
+ * explicit parent textbook choice (only the initial unset → preselect path).
+ */
+function testTextbookPanelRedrawPreservesParentBookChoice() {
+  var h = mountWorkflowForm();
+  var form = h.form;
+  form.books = [
+    { id: 7, name: '书七', edition: '人教版PEP', stage: '', grade: '三年级',
+      volume: '上册', module: '', lessons: ['第1课', '第2课'] },
+    { id: 8, name: '书八', edition: '外研', stage: '', grade: '四年级',
+      volume: '下册', module: '', lessons: ['单元A', '单元B'] },
+  ];
+  form.detectedMeta = { edition: '人教版PEP', grade: '三年级', volume: '上册' };
+  form.bookChoice = 8;
+  form.rows = [{
+    word: 'w', meaning: 'm', lesson: '单元B', lessonOrigin: 'previous-lesson',
+    status: 'new', checked: true, page: 1,
+  }];
+  form.renderTextbookPanel('');
+  eq(form.bookChoice, 8, 'U5 重绘: renderTextbookPanel keeps parent book 8');
+  var select = h.dom.document.getElementById('parent-photo-textbook');
+  eq(select.value, '8', 'U5 重绘: select reflects the kept parent choice');
+  eq(form.rows[0].lesson, '单元B', 'U5 重绘: row lesson untouched by panel rebuild');
+}
+
 (async function main() {
   await testSinglePhotoEntryClearsViaRecognizeButton();
   await testMultiPhotoEntryClearsViaRecognizeButton();
@@ -784,6 +871,9 @@ async function testPriorRecommendationsFollowPhotoOrderNotCompletionOrder() {
   await testBookSwitchRecomputesEveryChoice();
   await testEarlierPhotoNeverBorrowsLaterHeaderLesson();
   await testPriorRecommendationsFollowPhotoOrderNotCompletionOrder();
+  await testFirstRecognitionPreselectThenRecommend();
+  await testLaterPhotoLandingPreservesParentBookChoice();
+  testTextbookPanelRedrawPreservesParentBookChoice();
 
   if (failures) {
     console.error('test-parent-photo-workflow: ' + failures + ' of ' + checks + ' checks failed');
