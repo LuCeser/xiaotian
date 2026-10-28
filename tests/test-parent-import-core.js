@@ -192,6 +192,8 @@ function runStatuses(run) {
   eq(run.executing, false, '失效后的批次不可继续');
   core.retryImportPage(run, 1); // nor retry
   eq(runStatuses(run), 'pending,pending', '失效后的批次不可重试');
+  core.beginImportRun(run); // nor begin — 失效是终态
+  eq(run.executing, false, '失效后的批次不可重新开始');
 })();
 
 // ===== Issue #80 U6 — 按钮统一规则（§3.2 的表 → 一个函数） =====

@@ -154,7 +154,7 @@
   /**
    * The run-level facts the §3.2 button table needs, kept BESIDE the page
    * plan (parent-pdf-core owns the per-page statuses pending/running/done/
-   * failed; the transitions 开始/成功/失败 ride its applyPageEvent):
+   * failed; the page transitions 成功/失败 ride its applyPageEvent):
    *   plan        — the page plan this run drives (createPagePlan shape)
    *   aborted     — the parent STOPPED the batch (停止)
    *   executing   — an actual runner or its wind-down is in flight (真实执行)
@@ -177,9 +177,13 @@
     };
   }
 
-  /** 开始 — the batch starts executing (expects a fresh all-pending plan). */
+  /**
+   * 开始 — the batch starts executing (expects a fresh all-pending plan).
+   * 失效是终态：a superseded run is never resurrected — a new run gets a
+   * new state.
+   */
   function beginImportRun(state) {
-    if (!state || state.executing) {
+    if (!state || state.executing || state.invalidated) {
       return state; // no overlapping execution — ever
     }
     state.aborted = false;
