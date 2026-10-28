@@ -355,6 +355,126 @@ async function testPdfEntryRegistersPageSnapshots() {
     'PDF run marks both pages done');
 }
 
+/**
+ * Issue #80 U3 review P2-2: a PDF page that recognized nothing fails
+ * honestly (empty snapshot registered), and retrying it from the REAL
+ * status-bar chip REPLACES that existing snapshot — no append, no skip.
+ */
+async function testPdfRetryReplacesRegisteredSnapshot() {
+  var calls = 0;
+  var h = mountWorkflowForm({
+    pdfPageCount: 2,
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          entries: [{ word: 'a1', meaning: '壹', lesson: '第1课' }],
+          textbook: { edition: 'EA', grade: '三年级', volume: '上册' },
+        });
+      }
+      if (calls === 2) {
+        return Promise.resolve({
+          entries: [],
+          textbook: { edition: 'E2', grade: '四年级', volume: '下册' },
+        });
+      }
+      return Promise.resolve({
+        entries: [{ word: 'b9', meaning: '玖', lesson: '第9课' }],
+        textbook: { edition: 'EB', grade: '五年级', volume: '上册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePdf()]);
+  h.clickRecognize();
+  await flushPromises(30);
+  var form = h.form;
+  eq(form.pdfState.plan.pages[1].status, 'failed',
+    'empty PDF page fails honestly instead of a silent done');
+  var empty = global.getPhotoRecognition(form.importPhotoState, 2);
+  assert(!!empty, 'empty page still registers its (empty) identity slot');
+  if (empty) {
+    eq(empty.entries.length, 0, 'empty page snapshot carries no entries');
+    eq(empty.meta.edition, 'E2', 'empty page snapshot keeps its header meta');
+  }
+  assert(h.clickRetryPage(2), 'status bar renders the real retry chip for page 2');
+  await flushPromises(16);
+  var replaced = global.getPhotoRecognition(form.importPhotoState, 2);
+  assert(!!replaced, 'page 2 snapshot survives the retry');
+  if (replaced) {
+    eq(replaced.entries[0] ? replaced.entries[0].word : '',
+      'b9', 'retry REPLACES the existing page-2 snapshot with fresh content');
+    eq(replaced.entries[0] ? replaced.entries[0].lesson : '',
+      '第9课', 'retry replaces the OCR lesson too');
+    eq(replaced.meta.edition, 'EB', 'retry replaces the header meta too');
+  }
+  var kept1 = global.getPhotoRecognition(form.importPhotoState, 1);
+  assert(!!kept1, 'page 1 snapshot still present after the retry');
+  if (kept1) {
+    eq(kept1.entries[0].word, 'a1', 'retry leaves page 1 snapshot untouched');
+  }
+  eq(global.photoMetaListFromState(form.importPhotoState).length, 2,
+    'meta list never grows a duplicate slot for the retried page');
+  eq(form.detectedMetaList.length, 2, 'detectedMetaList has no appended slot after retry');
+  eq(form.pdfState.plan.pages[1].status, 'done', 'retried page settles done');
+  assert(form.rows.some(function (r) { return r.word === 'b9'; }),
+    'retried page rows land in the preview');
+}
+
+/** The photo-batch kin of the PDF retry-replace case (same real entries). */
+async function testPhotoRetryReplacesRegisteredSnapshot() {
+  var calls = 0;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          entries: [{ word: 's1', meaning: '壹', lesson: '第2课' }],
+          textbook: { edition: 'PA', grade: '三年级', volume: '上册' },
+        });
+      }
+      if (calls === 2) {
+        return Promise.resolve({
+          entries: [],
+          textbook: { edition: 'PB', grade: '四年级', volume: '下册' },
+        });
+      }
+      return Promise.resolve({
+        entries: [{ word: 's2', meaning: '贰', lesson: '第7课' }],
+        textbook: { edition: 'PC', grade: '五年级', volume: '上册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto('one.jpg'), fakePhoto('two.jpg')]);
+  h.clickRecognize();
+  await flushPromises(30);
+  var form = h.form;
+  eq(form.photoBatch.plan.pages[1].status, 'failed',
+    'empty photo fails honestly instead of a silent done');
+  var empty = global.getPhotoRecognition(form.importPhotoState, 2);
+  assert(!!empty, 'empty photo still registers its (empty) identity slot');
+  if (empty) {
+    eq(empty.entries.length, 0, 'empty photo snapshot carries no entries');
+  }
+  assert(h.clickRetryPage(2), 'status bar renders the real retry chip for photo 2');
+  await flushPromises(16);
+  var replaced = global.getPhotoRecognition(form.importPhotoState, 2);
+  assert(!!replaced, 'photo 2 snapshot survives the retry');
+  if (replaced) {
+    eq(replaced.entries[0] ? replaced.entries[0].word : '',
+      's2', 'retry REPLACES the existing photo-2 snapshot with fresh content');
+    eq(replaced.meta.edition, 'PC', 'retry replaces the header meta too');
+  }
+  var kept1 = global.getPhotoRecognition(form.importPhotoState, 1);
+  assert(!!kept1, 'photo 1 snapshot still present after the retry');
+  if (kept1) {
+    eq(kept1.entries[0].word, 's1', 'retry leaves photo 1 snapshot untouched');
+  }
+  eq(global.photoMetaListFromState(form.importPhotoState).length, 2,
+    'meta list never grows a duplicate slot for the retried photo');
+  eq(form.detectedMetaList.length, 2, 'detectedMetaList has no appended slot after retry');
+  eq(form.photoBatch.plan.pages[1].status, 'done', 'retried photo settles done');
+}
+
 (async function main() {
   await testSinglePhotoEntryClearsViaRecognizeButton();
   await testMultiPhotoEntryClearsViaRecognizeButton();
@@ -368,6 +488,8 @@ async function testPdfEntryRegistersPageSnapshots() {
   await testReclassifyKeepsOriginalEntryLink();
   await testWordEditKeepsOriginalEntryLink();
   await testPdfEntryRegistersPageSnapshots();
+  await testPdfRetryReplacesRegisteredSnapshot();
+  await testPhotoRetryReplacesRegisteredSnapshot();
 
   if (failures) {
     console.error('test-parent-photo-workflow: ' + failures + ' of ' + checks + ' checks failed');
