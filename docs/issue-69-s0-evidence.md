@@ -15,7 +15,7 @@
 | # | 级别/归属 | 生产入口（442d734） | 确定性交错 | 业务断言 | 对应变异 | 运行命令 | 状态 |
 |---|---|---|---|---|---|---|---|
 | 1 | P1 / S2 / T2 | `subject.go:164` takeSubjectAsk 锁内消费消息；`:205-208` finalizeSubjectAsk 二次加锁读共享 `pendingAskInstallGen`；预留 `turn.go:676/690` | A 语音 goroutine 在两半之间暂停；读循环处理 B 的 auto init 覆盖该字段；恢复 A | A 不借 B 的 gen 安装（无迟到 ready）；B 的预留不被清；B 能完成初始化 | generation 获取恢复为续接读共享字段 | `CGO_ENABLED=1 go test -race -count=1 ./pkg/rt -run 'TestLate.*Binding'` | **S2 已修**（65084b1/ac6727c：classroomInitRequest 一次临界区取走消息+学科+generation；迟到 epoch 通知现值门、行权威镜像准入门、加练分支同源；M1–M4 变异红） |
-| 2 | P1 / S3 / T1(关闭半边) | `turn.go:920` gen 检查与 `:927` tryTerminalClose 分离；`claimCloseLocked`（`:1364`）只查 closed/可选 epoch。同类：`check.go:751/997`（S5/S6） | A 过 920 检查后、927 关闭前暂停；B 安装并完成自然开场；恢复 A | B 保持活动；连接不提前结束；连接主动关闭仍有效；事件单次 | 只撤 claim 内 scope 校验 | `CGO_ENABLED=1 go test -race -count=1 ./pkg/rt -run '<S3 新用例>'` | 待修 |
+| 2 | P1 / S3 / T1(关闭半边) | `tryTerminalCloseForScope` + `claimCloseLocked` gateScope（`turn.go`）；课堂任务终态关闭入口；`tryTerminalCloseAt` 仍带 epoch。同类：`check.go` 重复提交/更正终态 | A completed 在 scoped 关闭前暂停；B 安装并完成自然开场；恢复 A | B 保持活动；连接不提前结束；客户端 goodbye 仍关闭；事件单次 | 只撤 claim 内 scope 校验 | `CGO_ENABLED=1 go test -race -count=1 ./pkg/rt -run 'TestStaleCompletedCloseCannotEndReplacementClassroom|TestClientGoodbyeStillClosesLiveClassroom'` | **S3 已修**（9dc6bc2/32c878e：gateScope+tryTerminalCloseForScope；completed 路径释放 init 锁；M1 变异红） |
 | 3 | P1 / S1 / §5.1 | 测试侧：`speech_browser_test.go` TestPassageSubmitBrowser/close seals：driver 断言 `:2637-2640`、读库 Fatal `:2652-2661` 均早于 `fallbackHold.release()`（`:2663`） | 兜底停在 uncheckedBefore（`:1043-1045`）持点不放，触发断言失败 | 失败须先释放→等任务与 driver→回收→再断言；goroutine 内 Fatal 不算红 | 测试协议证明：人为制造断言失败验证先回收 | `go test -tags=rtbrowser -count=1 ./pkg/rt -run 'TestPassageSubmitBrowser/close_seals_before_the_submit'` | **S1 已修**（320419a：三处 close-seals 重排为记录→释放→等待→断言；reclaim 顺序协议 M-C 变异红） |
 | 4 | P1 / S1 / T8,T9 | 测试观察：`speechServerTasksSettled`（`speech_browser_test.go:969`）依赖 `latchInFlight`（`:973`，tracker 在门内层，兜底停门上未计入）、`checkWrites`、`activeScope.formalSubmit`（`:982`）——兜底三者皆不在 | 连接退出（driver 已返回）后兜底仍持点；轮询 settled | settled 须为 false；释放后须观察到兜底整个任务退出（taskDone：结果/事件/清理） | 完成发布提前到 CompleteCheck 返回；观察缩回活动 scope | `go test -tags=rtbrowser -count=1 ./pkg/rt -run 'TestPassageSubmitBrowser'` | **S1 已修**（7ed3174：settled 改读 task_watch 整任务观察，兜底句柄在 claim 预留；M-A/M-B 变异红；passage close-seals 增「兜底停车时 settled 必为 false」断言） |
 | 5 | P2 / S1 / T4 | 测试观察：`check_submit_inflight_test.go:68` ttFormalSubmitSettled（returned≥calls＋activeScope.formalSubmit==nil）——漏被替换课堂任务与未进执行器的新任务 | 撤去重下第二条 goroutine 未执行即清槽；或 A 换课后 A 任务在途 | 逐任务等待：启动前登记、关闭决策预留句柄；全部退出后才断言 | 删 scope 去重（M4 线索）；观察缩回活动 scope | `CGO_ENABLED=1 go test -race -count=1 ./pkg/rt -run 'TestCheckSubmitInFlightBlocksSameConnectionRetry|TestFormalCheckSubmitFreezesWordListAtAdmission|TestHoldFirstCompleteCheckProtocol'` | **S1 已修**（7ed3174/320419a：ttFormalSubmitSettled 改整任务观察；TestReplacedClassroomTasksWaitedIndividually 逐任务等待，M-B 变异红；M4 去重变异复验仍留 S5） |
@@ -44,4 +44,13 @@
 - 测试（subject_request_test.go，四条确定性交错，-race）：迟到绑定不借 B 预约且 B 完成（验收原文）；迟到 epoch 通知跳过；加练学科同源；行权威不改活课堂学科。按 id 存行的 ttPerIDExecutor 修正 fake 单行串课。
 - 变异证明（去掉修复就红，业务断言、非超时）：M1 generation 恢复续接读共享字段→四用例红（迟到 ready/二 ack/借安装/学科改写）；M2 学科恢复读共享字段→fetch=auto、行 id 错、加练 auto 红；M3 撤 ack 现值门→二 ack 红；M4 撤行权威门→共享学科=chinese 红。
 - 顺带（d416a21）：S1 starterInterleave seam 的负载竞态（基线 d5915cd 全量 -race 同样报）——runStarterTask 快照加 mu、S1 用例挂载同锁；测试设施修复，非生产行为。
-- 未做（留后续步骤）：S3 关闭 claim 内 scope 校验、S4 真实浏览器验收、迟到续接 IO 早退/错误出口的请求门（failLessonInit、practice 降级 sendError 仍为会话门，归 S5/S6 结果消息身份）、同 lessonID 重入（S7）。
+- 未做（留后续步骤）：S4 真实浏览器验收、迟到续接 IO 早退/错误出口的请求门（failLessonInit、practice 降级 sendError 仍为会话门，归 S5/S6 结果消息身份）、同 lessonID 重入（S7）。
+
+## S3 完成记录（钉在 32c878e）
+
+- 统一关闭 claim 新增 `gateScope`/`scopeGen`：资格判断与密封、快照、closed 标记仍在同一 `claimCloseLocked` 临界区；连接 goodbye/transport 关闭保持 scope-free。
+- 课堂任务终态入口 `tryTerminalCloseForScope`：`startCompletedSession`、正式/更正重复提交终态；播报有效性路径仍用 `tryTerminalCloseAt(epoch)`。
+- `completedCloseInterleave` 测试 seam + 已完成重连在 scoped 关闭前释放 per-lesson `lockLessonInit`，使同连接换课交错可确定性复现。
+- 测试 `close_scope_claim_test.go`（-race）：过期 completed 关闭不得结束 B（pong 仍响应）；客户端 goodbye 仍单次关闭。M1 撤 claim scope 门→「session_ended after A's stale close = 1, want 0 — the superseded scope must not close B's live classroom」。
+- 终态入队失败单次语义：沿用 `TestCloseClaim`（`close_claim_test.go`），本步未改行为。
+- 未做：S4+、同 lessonID 重入（S7）。
