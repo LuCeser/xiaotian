@@ -8,31 +8,13 @@ import (
 	"time"
 )
 
-func ttWaitClosed(t *testing.T, tm *TurnManager) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		tm.mu.Lock()
-		closed := tm.closed
-		tm.mu.Unlock()
-		if closed {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatal("the session never closed")
-}
-
-func ttWaitFailingSessionEndedAttempt(t *testing.T, s *failingControlSender) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if atomic.LoadInt32(&s.attempts) == 1 {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("session_ended attempts = %d, want 1", atomic.LoadInt32(&s.attempts))
+// ttClosedNow reads the closed flag once (lock-guarded) — the observation
+// callers poll for and assert on themselves (§5.1: 等待 helper 返回观察
+// 结果，不在内部 Fatal).
+func ttClosedNow(tm *TurnManager) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.closed
 }
 
 // ttPreFallSubmitLatch flips the lesson row's checking→submitted latch the
@@ -55,10 +37,14 @@ func ttPreFallSubmitLatch(t *testing.T, tm *TurnManager, exec *fakeExecutor) {
 // attempted second, so a refused goodbye enqueue still completes the close
 // (the old send-first-then-close shape skipped it), no second save runs,
 // and nothing is answered past the terminal message.
+//
+// 完成判据（rethink2 §1.3）: closed、进入 SendControl、attempts==1 或 writer
+// 退出都不足以证明关闭流程完成——每次断言前都等该分支自己的完成观察
+// （closed + 唯一一次写出尝试 + EventSessionEnd 已记录）。
 func TestDuplicateSubmitTerminal(t *testing.T) {
 	t.Run("concurrent pings never answer past the terminal message", func(t *testing.T) {
 		words := newFakeWords(ttCards("苹果", "香蕉"))
-		tm, s, _, exec := ttDriveToCheck(t, ttCards("苹果", "香蕉"), words)
+		tm, s, log, exec := ttDriveToCheck(t, ttCards("苹果", "香蕉"), words)
 		ttCheckAll(t, tm, s, 2)
 		ttPreFallSubmitLatch(t, tm, exec)
 
@@ -77,10 +63,14 @@ func TestDuplicateSubmitTerminal(t *testing.T) {
 		tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-dup"}))
 		wg.Wait()
 
-		ttWaitClosed(t, tm)
-		deadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(deadline) && s.countOf(TypeSessionEnded) < 1 {
-			time.Sleep(2 * time.Millisecond)
+		settled := waitFor(t, 3*time.Second, func() bool {
+			return ttClosedNow(tm) && s.countOf(TypeSessionEnded) >= 1 &&
+				ttEventCount(t, log, EventSessionEnd) >= 1
+		})
+		closedNow := ttClosedNow(tm)
+		if !settled {
+			t.Fatalf("the duplicate submit never settled: closed=%v session_ended=%d end_events=%d",
+				closedNow, s.countOf(TypeSessionEnded), ttEventCount(t, log, EventSessionEnd))
 		}
 		if got := s.countOf(TypeSessionEnded); got != 1 {
 			t.Fatalf("session_ended count = %d, want 1", got)
@@ -112,8 +102,17 @@ func TestDuplicateSubmitTerminal(t *testing.T) {
 		s := &failingControlSender{captureSender: inner, failType: TypeSessionEnded}
 		tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-dup"}))
 
-		ttWaitClosed(t, tm)
-		ttWaitFailingSessionEndedAttempt(t, s)
+		// The refused terminal's completion: the ONE attempt went out AND the
+		// branch's EventSessionEnd record landed — attempts==1 alone would be
+		// an early read (§1.3).
+		settled := waitFor(t, 3*time.Second, func() bool {
+			return ttClosedNow(tm) && atomic.LoadInt32(&s.attempts) == 1 &&
+				ttEventCount(t, log, EventSessionEnd) >= 1
+		})
+		if !settled {
+			t.Fatalf("the refused terminal never settled: closed=%v attempts=%d end_events=%d",
+				ttClosedNow(tm), atomic.LoadInt32(&s.attempts), ttEventCount(t, log, EventSessionEnd))
+		}
 		if got := atomic.LoadInt32(&s.attempts); got != 1 {
 			t.Fatalf("session_ended attempts = %d, want exactly 1", got)
 		}

@@ -2,7 +2,9 @@ package rt
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,12 +12,18 @@ import (
 )
 
 // holdFirstCompleteCheck parks the first checked CompleteCheck until release.
+// callCount/returnedCount are ATOMIC (rethink2 R0 计数同步): the submit task
+// increments them on its own goroutine while the test body polls — if a
+// mutation shape ever lets a second submit through, the failure must land on
+// the BUSINESS assertion, not on a race report (计划 §5.3: race 报错不算
+// 合格红).
 type holdFirstCompleteCheck struct {
 	LessonExecutor
-	once    sync.Once
-	entered chan struct{}
-	release chan struct{}
-	calls   int
+	entered  chan struct{}
+	release  chan struct{}
+	calls    atomic.Int64
+	returned atomic.Int64
+	once     sync.Once
 }
 
 func newHoldFirstCompleteCheck(inner LessonExecutor) *holdFirstCompleteCheck {
@@ -28,21 +36,88 @@ func newHoldFirstCompleteCheck(inner LessonExecutor) *holdFirstCompleteCheck {
 
 func (h *holdFirstCompleteCheck) CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
 	if !unchecked {
-		h.calls++
-		if h.calls == 1 {
+		if n := h.calls.Add(1); n == 1 {
 			h.once.Do(func() { close(h.entered) })
 			<-h.release
 		}
 	}
-	return h.LessonExecutor.CompleteCheck(ctx, lessonID, expectedVersion, requestID, unchecked)
+	res, err := h.LessonExecutor.CompleteCheck(ctx, lessonID, expectedVersion, requestID, unchecked)
+	if !unchecked {
+		h.returned.Add(1)
+	}
+	return res, err
 }
 
-func (h *holdFirstCompleteCheck) openUp() { close(h.release) }
+func (h *holdFirstCompleteCheck) callCount() int64     { return h.calls.Load() }
+func (h *holdFirstCompleteCheck) returnedCount() int64 { return h.returned.Load() }
+func (h *holdFirstCompleteCheck) openUp()              { close(h.release) }
+
+// ttSubmitTaskSettled observes the accepted dictation submit task's own exit:
+// the connection-level pending flag is cleared in the task's defer, AFTER its
+// review_result and receipt finished — the completion observation §5.1 asks
+// for (closed/attempt counts alone never are one).
+func ttSubmitTaskSettled(tm *TurnManager) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return !tm.formalCheckSubmitPending
+}
+
+// TestHoldFirstCompleteCheckProtocol pins the hold gate's own execution
+// protocol (rethink2 R0): the hit and the release stay separated — release
+// never closes entered — and the call/return counts stay observable while
+// callers are still in flight (a plain int here goes red under -race).
+func TestHoldFirstCompleteCheckProtocol(t *testing.T) {
+	exec := newFakeExecutorNoRow(ttLessonID)
+	hold := newHoldFirstCompleteCheck(exec)
+
+	const parallel = 8
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < parallel; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = hold.CompleteCheck(context.Background(), ttLessonID, 1, "proto", false)
+		}()
+	}
+	close(start)
+	select {
+	case <-hold.entered:
+	case <-time.After(3 * time.Second):
+		hold.openUp()
+		wg.Wait()
+		t.Fatal("the first CompleteCheck never hit the hold")
+	}
+	// Read the counts while the other callers may still be mid-call: this is
+	// the observation the assertions rely on, so it must be race-free by
+	// construction, not by scheduling luck.
+	_ = hold.callCount()
+	_ = hold.returnedCount()
+	hold.openUp()
+	wg.Wait()
+	if got := hold.callCount(); got != parallel {
+		t.Fatalf("CompleteCheck calls = %d, want %d", got, parallel)
+	}
+	if got := hold.returnedCount(); got != parallel {
+		t.Fatalf("CompleteCheck returns = %d, want %d", got, parallel)
+	}
+
+	// Releasing a never-hit gate must not fabricate the hit (§5.1).
+	late := newHoldFirstCompleteCheck(exec)
+	late.openUp()
+	select {
+	case <-late.entered:
+		t.Fatal("release closed entered — 解除控制点伪造了命中")
+	default:
+	}
+}
 
 // TestCheckSubmitInFlightBlocksSameConnectionRetry pins issue #69 review P1:
 // a second check_submit on the same connection while the first accepted save
 // is still in its latch write must not spawn a second CompleteCheck or take
-// the cross-connection idempotent terminal close.
+// the cross-connection idempotent terminal close. 失败路径先回收：park 中的
+// 断言失败也要先 openUp 并等提交任务退出（§5.1）。
 func TestCheckSubmitInFlightBlocksSameConnectionRetry(t *testing.T) {
 	words := newFakeWords(ttCards("苹果", "香蕉"))
 	tm, s, _, inner := ttDriveToCheck(t, ttCards("苹果", "香蕉"), words)
@@ -51,31 +126,39 @@ func TestCheckSubmitInFlightBlocksSameConnectionRetry(t *testing.T) {
 	hold := newHoldFirstCompleteCheck(inner)
 	tm.exec = hold
 
+	reclaimAndFail := func(msg string) {
+		hold.openUp()
+		waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) })
+		t.Fatal(msg)
+	}
+
 	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-one"}))
 	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-one"}))
 
+	hit := false
 	select {
 	case <-hold.entered:
+		hit = true
 	case <-time.After(3 * time.Second):
-		t.Fatal("the first submit never reached CompleteCheck")
 	}
-	if hold.calls != 1 {
-		t.Fatalf("CompleteCheck calls while parked = %d, want 1 (the retry must not compete)", hold.calls)
+	if !hit {
+		reclaimAndFail("the first submit never reached CompleteCheck")
 	}
-	if got := s.countOf(TypeSessionEnded); got != 0 {
-		t.Fatalf("session_ended count = %d while in flight, want 0", got)
+	// Observations recorded BEFORE the failure assert, parked gate still held.
+	parkedCalls, parkedEnded := hold.callCount(), s.countOf(TypeSessionEnded)
+	if parkedCalls != 1 {
+		reclaimAndFail(fmt.Sprintf("CompleteCheck calls while parked = %d, want 1 (the retry must not compete)", parkedCalls))
+	}
+	if parkedEnded != 0 {
+		reclaimAndFail(fmt.Sprintf("session_ended count = %d while in flight, want 0", parkedEnded))
 	}
 
 	hold.openUp()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if hold.calls == 1 && s.countOf(TypeReviewResult) >= 1 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) }) {
+		t.Fatalf("the accepted submit task never finished (CompleteCheck calls=%d)", hold.callCount())
 	}
-	if hold.calls != 1 {
-		t.Fatalf("CompleteCheck calls after finish = %d, want exactly 1", hold.calls)
+	if got := hold.callCount(); got != 1 {
+		t.Fatalf("CompleteCheck calls after finish = %d, want exactly 1", got)
 	}
 	if got := s.countOf(TypeReviewResult); got != 1 {
 		t.Fatalf("review_result count = %d, want 1", got)
@@ -84,7 +167,8 @@ func TestCheckSubmitInFlightBlocksSameConnectionRetry(t *testing.T) {
 
 // TestFormalCheckSubmitFreezesWordListAtAdmission: mutating the live tutor
 // during the latch write must not change the rating batch assembled from the
-// admission snapshot.
+// admission snapshot. The frozen-batch assertion waits for the submit task's
+// OWN completion first (pending cleared ⇒ the save and its receipt landed).
 func TestFormalCheckSubmitFreezesWordListAtAdmission(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	tm, s, _, inner := ttDriveToCheck(t, ttCards("苹果"), words)
@@ -94,9 +178,15 @@ func TestFormalCheckSubmitFreezesWordListAtAdmission(t *testing.T) {
 	tm.exec = hold
 
 	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "freeze-req"}))
+	hit := false
 	select {
 	case <-hold.entered:
+		hit = true
 	case <-time.After(3 * time.Second):
+	}
+	if !hit {
+		hold.openUp()
+		waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) })
 		t.Fatal("submit never reached CompleteCheck")
 	}
 	tm.mu.Lock()
@@ -105,12 +195,8 @@ func TestFormalCheckSubmitFreezesWordListAtAdmission(t *testing.T) {
 	tm.mu.Unlock()
 	hold.openUp()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(words.submissions()) == 1 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) }) {
+		t.Fatalf("the accepted submit task never finished (CompleteCheck calls=%d)", hold.callCount())
 	}
 	subs := words.submissions()
 	if len(subs) != 1 {
