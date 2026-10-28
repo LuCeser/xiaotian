@@ -161,6 +161,13 @@ function mountWorkflowForm(options) {
     clickRecognize: function () {
       form.recognizeBtn.fire('click');
     },
+    /** The status bar's REAL run buttons (null when not rendered). */
+    barStop: function () {
+      return form.pdfBar.querySelector('.pdf-stop-btn') || null;
+    },
+    barResume: function () {
+      return form.pdfBar.querySelector('.pdf-resume-btn') || null;
+    },
     /** Click the status bar's REAL retry chip for one failed page. */
     clickRetryPage: function (pageNo) {
       var chip = null;

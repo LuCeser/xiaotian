@@ -5,6 +5,10 @@
  * retry chip REPLACING an existing snapshot, and word-edit → reclassify
  * keeping each row linked to its own OCR entry. Complements the
  * pure-function tests in test-parent-photo-textbook.js.
+ * Issue #80 U7 — stop/continue of the photo batch through the REAL bar
+ * buttons: 开始 → 停止（停止中）→ 收尾 → 继续, the stopped photo's late
+ * result never reaching the draft, 继续 running ONLY pending photos, and
+ * saving barred while an execution (wind-down included) is in flight.
  *
  * `node tests/test-parent-photo-workflow.js`
  */
@@ -1013,6 +1017,168 @@ function testTextbookPanelRedrawPreservesParentBookChoice() {
   eq(form.rows[0].lesson, '单元B', 'U5 重绘: row lesson untouched by panel rebuild');
 }
 
+/**
+ * Issue #80 U7 — the photo batch's stop/continue through the REAL bar
+ * buttons: 开始 → 停止（停止中）→ 收尾 → 继续. The stopped photo's late
+ * result never reaches the draft (no rows, no snapshot, back to pending);
+ * 继续 re-recognizes ONLY the pending photos (a done photo is never re-run);
+ * the parent's edit on a completed photo survives; saving stays barred
+ * while an execution — the stop's wind-down included — is in flight.
+ */
+async function testPhotoStopDropsLateResultAndResumeRunsOnlyPending() {
+  var calls = 0;
+  var gate = null;
+  var meta = { edition: '人教版PEP', grade: '三年级', volume: '上册' };
+  var results = [
+    { entries: [{ word: 'first', meaning: '壹', lesson: '第1课' }], textbook: meta },
+    null, // call 2 is gated: the in-flight photo when 停止 lands
+    { entries: [{ word: 'second', meaning: '贰', lesson: '第2课' }], textbook: meta },
+    { entries: [{ word: 'third', meaning: '叁', lesson: '第3课' }], textbook: meta },
+  ];
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 2) {
+        return new Promise(function (resolve) { gate = resolve; });
+      }
+      return Promise.resolve(results[calls - 1]);
+    },
+  });
+  h.pickPhotos([fakePhoto('1.jpg'), fakePhoto('2.jpg'), fakePhoto('3.jpg')]);
+  h.clickRecognize();
+  await flushPromises(14);
+  var form = h.form;
+  eq(calls, 2, 'U7 停止: photo 1 done, photo 2 recognize in flight');
+  eq(form.rows.length, 1, 'U7 停止: photo 1 rows landed');
+  eq(form.photoBatch.plan.pages[0].status, 'done', 'U7 停止: photo 1 done on the plan');
+  eq(form.photoBatch.plan.pages[1].status, 'running', 'U7 停止: photo 2 running');
+  var midRunResume = h.barResume();
+  assert(!!midRunResume && midRunResume.disabled,
+    'U7 停止: resume renders DISABLED while the run is executing');
+  if (midRunResume) {
+    midRunResume.fire('click');
+    await flushPromises(3);
+  }
+  eq(calls, 2, 'U7 停止: clicking the disabled resume starts no overlapping execution');
+  assert(form.commitBtn.disabled, 'U7 停止: save barred while the run executes');
+  var submits = 0;
+  form.submitWords = function () {
+    submits += 1;
+    return Promise.resolve({ results: [] });
+  };
+  form.commitBtn.fire('click');
+  eq(submits, 0, 'U7 停止: the real commit entry refuses while busy');
+
+  var stop = h.barStop();
+  assert(!!stop, 'U7 停止: the real stop button renders while executing');
+  if (stop) {
+    stop.fire('click');
+    stop = h.barStop();
+  }
+  eq(stop && stop.textContent, '停止中…',
+    'U7 停止: the bar shows 停止中 after the stop transition');
+  assert(!stop || stop.disabled, 'U7 停止: 停止中 leaves the stop control disabled');
+  assert(form.commitBtn.disabled, 'U7 停止: save stays barred during the wind-down');
+
+  gate({ entries: [{ word: 'late-word', meaning: '迟', lesson: '第9课' }], textbook: meta });
+  await flushPromises(14);
+  eq(form.rows.length, 1, 'U7 停止: the stopped photo late result never reaches the draft');
+  assert(!form.rows.some(function (r) { return r.word === 'late-word'; }),
+    'U7 停止: the late word is absent from the draft rows');
+  assert(!global.getPhotoRecognition(form.importPhotoState, 2),
+    'U7 停止: the dropped result registers no snapshot');
+  eq(form.photoBatch.plan.pages[1].status, 'pending',
+    'U7 停止: the stopped photo returns to pending');
+  eq(form.photoBatch.plan.pages[2].status, 'pending',
+    'U7 停止: the unstarted photo stays pending');
+  eq(calls, 2, 'U7 停止: the loop schedules no further photo after the stop');
+  eq(form.photoBatch.aborted, true, 'U7 停止: the run records the stop fact');
+  eq(form.photoBatch.executing, false, 'U7 停止: the wind-down settled (executing false)');
+
+  var lessonInputs = form.preview.querySelectorAll('.photo-lesson-input');
+  assert(lessonInputs.length >= 1, 'U7 继续: the landed row exposes its real lesson input');
+  lessonInputs[0].value = '家长课';
+  lessonInputs[0].fire('input');
+  eq(form.rows[0].lesson, '家长课', 'U7 继续: the parent edit lands on the done photo row');
+  eq(form.rows[0].lessonOrigin, 'parent', 'U7 继续: the edit origin is the parent');
+
+  var resume = h.barResume();
+  assert(!!resume && !resume.disabled,
+    'U7 继续: resume enabled once the wind-down settled');
+  if (resume) {
+    assert(resume.textContent.indexOf('剩 2 张') >= 0,
+      'U7 继续: the resume label names the remaining photos');
+  }
+  assert(!form.commitBtn.disabled,
+    'U7 继续: the settled stop allows saving the completed photo (§3.2)');
+  if (resume) {
+    resume.fire('click');
+  }
+  await flushPromises(24);
+  eq(calls, 4, 'U7 继续: resume re-recognized ONLY the 2 pending photos (done never re-run)');
+  eq(form.rows.length, 3, 'U7 继续: the pending photos land after resume');
+  assert(form.photoBatch.plan.pages.every(function (p) { return p.status === 'done'; }),
+    'U7 继续: every photo settles done');
+  eq(form.rows[0].lesson, '家长课', 'U7 继续: the parent edit survives the resume');
+  eq(form.rows[0].lessonOrigin, 'parent', 'U7 继续: the edit origin stays the parent');
+  assert(!h.barStop() && !h.barResume(),
+    'U7 继续: no run buttons once the batch is fully done');
+  eq(submits, 0, 'U7 继续: the busy-barred commit never submitted');
+}
+
+/**
+ * Issue #80 U7 — 停止 before ANY photo lands: the settle sweep returns every
+ * photo to pending, the run is NOT misread as virgin idle (继续 stays the
+ * action, the hint says 已停止 with the remaining count), and 继续 through
+ * the real button completes the batch.
+ */
+async function testPhotoStopBeforeFirstLandingThenResumeCompletes() {
+  var gate = null;
+  var first = true;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      if (first) {
+        first = false;
+        return new Promise(function (resolve) { gate = resolve; });
+      }
+      return Promise.resolve({
+        entries: [{ word: 'after-resume', meaning: '续', lesson: '第1课' }],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto('1.jpg'), fakePhoto('2.jpg')]);
+  h.clickRecognize();
+  await flushPromises(12);
+  var form = h.form;
+  var stop = h.barStop();
+  assert(!!stop, 'U7 早停: the stop button renders before anything lands');
+  if (stop) {
+    stop.fire('click');
+  }
+  gate({
+    entries: [{ word: 'dropped', meaning: '弃', lesson: '第9课' }],
+    textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+  });
+  await flushPromises(12);
+  eq(form.rows.length, 0, 'U7 早停: the dropped result leaves the draft empty');
+  assert(form.photoBatch.plan.pages.every(function (p) { return p.status === 'pending'; }),
+    'U7 早停: the settle sweep returns every photo to pending');
+  var hint = form.preview.querySelector('.preview-empty');
+  assert(!!hint && hint.textContent.indexOf('已停止') >= 0,
+    'U7 早停: the finish hint says 已停止 (remaining count), not 没有识别到词表内容');
+  var resume = h.barResume();
+  assert(!!resume && !resume.disabled,
+    'U7 早停: 继续 reachable after the early stop (not misread as idle)');
+  if (resume) {
+    resume.fire('click');
+  }
+  await flushPromises(24);
+  assert(form.photoBatch.plan.pages.every(function (p) { return p.status === 'done'; }),
+    'U7 早停: resume completes the whole batch');
+  eq(form.rows.length, 2, 'U7 早停: both photos land after resume');
+}
+
 (async function main() {
   await testSinglePhotoEntryClearsViaRecognizeButton();
   await testMultiPhotoEntryClearsViaRecognizeButton();
@@ -1041,6 +1207,8 @@ function testTextbookPanelRedrawPreservesParentBookChoice() {
   await testCommitVocabFailureRecoveryShowsEstablishedBook();
   await testLaterPhotoLandingPreservesParentBookChoice();
   testTextbookPanelRedrawPreservesParentBookChoice();
+  await testPhotoStopDropsLateResultAndResumeRunsOnlyPending();
+  await testPhotoStopBeforeFirstLandingThenResumeCompletes();
 
   if (failures) {
     console.error('test-parent-photo-workflow: ' + failures + ' of ' + checks + ' checks failed');
