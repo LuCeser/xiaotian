@@ -127,6 +127,23 @@
     });
   }
 
+  /**
+   * abortRunningPages (Issue #80 §3.2, U6) — the stop/invalidate sweep:
+   * every page still marked running returns to pending (error cleared) so
+   * 继续/重试 stay reachable once the run's wind-down settles; done and
+   * failed pages are untouched — stop never undoes finished work. The
+   * batch-level stop transition (parent-import-core) calls this; a NEW
+   * plan comes back (the mapPlan convention).
+   */
+  function abortRunningPages(plan) {
+    return mapPlan(plan, function (page) {
+      if (page.status === 'running') {
+        return { no: page.no, status: 'pending', error: '' };
+      }
+      return page;
+    });
+  }
+
   /** mapPlan — rebuild the plan with fn applied to each page entry. */
   function mapPlan(plan, fn) {
     if (!plan || !plan.pages) {
@@ -274,6 +291,7 @@
   global.createPagePlan = createPagePlan;
   global.applyPageEvent = applyPageEvent;
   global.retryPage = retryPage;
+  global.abortRunningPages = abortRunningPages;
   global.planSummary = planSummary;
   global.mergePageRows = mergePageRows;
   global.rowsByPage = rowsByPage;
