@@ -287,6 +287,25 @@ function runStatuses(run) {
     '不再显示开始识别，继续处理可用');
 })();
 
+(function testDecisionStoppedBeforeFirstPageLands() {
+  // Codex P2-1: begin → 首张 running → 停止 → 收尾。清扫后全部页回到
+  // pending，页状态看起来像「从未开始」——idle/stopped 只能由 aborted
+  // 事实区分（§3.2：已停止、执行已收尾、仍有 pending → 继续处理）。
+  var run = core.createImportRunState(core.createPagePlan(2));
+  core.beginImportRun(run);
+  run.plan = core.applyPageEvent(run.plan, 1, 'start');
+  core.stopImportRun(run);
+  core.settleImportRun(run);
+  eq(runStatuses(run), 'pending,pending', '首张完成前停止：收尾后全部页恢复 pending');
+  var d = core.importRunDecision(run);
+  eq(d.phase, 'stopped', '已停止、已收尾、仍有 pending → stopped（读 aborted 事实）');
+  assert(!d.actions.start.shown, '停止过的批次不显示开始识别');
+  assert(!d.actions.start.enabled, '停止过的批次开始识别不可用');
+  assert(d.actions.resume.shown, '已停止且有剩余 → 显示继续处理');
+  assert(d.actions.resume.enabled, '已停止且已收尾 → 继续处理可用');
+  eq(d.actions.resume.label, '继续处理（剩 2 张）', '继续按钮带剩余数量');
+})();
+
 (function testDecisionInvalidatedRow() {
   var run = core.createImportRunState(core.createPagePlan(2));
   core.beginImportRun(run);

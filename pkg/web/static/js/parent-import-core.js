@@ -325,9 +325,14 @@
     } else if (busy) {
       phase = state.aborted ? 'stopping' : 'running';
     } else if (c.pending > 0) {
-      // Settled with remaining work: virgin (no progress yet) shows 开始,
-      // anything with progress — stopped or partially retried — shows 继续.
-      phase = (c.done + c.failed + c.running === 0) ? 'idle' : 'stopped';
+      // Settled with remaining work: a virgin batch (never begun, no
+      // progress) shows 开始; anything else shows 继续. Page statuses alone
+      // cannot tell — a stop before the first page landed sweeps every page
+      // back to pending, looking virgin again — so the aborted fact decides
+      // (§3.2: 已停止、执行已收尾、仍有 pending → 继续处理).
+      phase = (c.done + c.failed + c.running === 0 && !state.aborted)
+        ? 'idle'
+        : 'stopped';
     } else {
       phase = c.failed > 0 ? 'failed' : 'done';
     }
