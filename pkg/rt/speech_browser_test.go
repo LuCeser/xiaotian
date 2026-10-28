@@ -960,8 +960,8 @@ func (f *speechBrowserFixture) speechConnectionsSettled() bool {
 
 // speechServerTasksSettled reports whether every SERVER-side task of the
 // fixture has finished: the browser connections (multi-connection form), the
-// accepted dictation submit (formalCheckSubmitPending is cleared in the
-// task's defer, after its writeback/review_result/receipt), every admitted
+// accepted dictation submit (scope formalSubmit is cleared in the task's
+// releaseFormalCheckSubmitOp, after its writeback/review_result/receipt), every
 // write the close claims wait on, and every CompleteCheck latch call —
 // checked submits of all kinds and the unchecked close fallback (the
 // fixture's bottom executor tracker). The driver's own exit is observed
@@ -978,7 +978,8 @@ func (f *speechBrowserFixture) speechServerTasksSettled() bool {
 	f.mu.Unlock()
 	for _, m := range mgrs {
 		m.TurnManager.mu.Lock()
-		busy := len(m.checkWrites) > 0 || m.formalCheckSubmitPending
+		busy := len(m.checkWrites) > 0 ||
+			(m.TurnManager.activeScope != nil && m.TurnManager.activeScope.formalSubmit != nil)
 		m.TurnManager.mu.Unlock()
 		if busy {
 			return false

@@ -60,8 +60,8 @@ func (h *holdFirstCompleteCheck) openUp() {
 //   - returned >= calls observes EVERY checked CompleteCheck, so a mutation
 //     that lets a second submit task coexist (dedup removed) still waits for
 //     that task's executor call — the single-flight flag alone would not;
-//   - !formalCheckSubmitPending observes the accepted task's OWN tail: its
-//     defer clears the flag only after the writeback, review_result and
+//   - active scope formalSubmit cleared observes the accepted task's OWN tail:
+//     releaseFormalCheckSubmitOp runs only after writeback, review_result and
 //     receipt, so counting messages after the wait is deterministic. Counts
 //     alone would let the assertions race that tail (CompleteCheck returns
 //     before finishCheckSubmit sends anything).
@@ -71,7 +71,10 @@ func ttFormalSubmitSettled(tm *TurnManager, hold *holdFirstCompleteCheck) bool {
 	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	return !tm.formalCheckSubmitPending
+	if tm.activeScope == nil {
+		return true
+	}
+	return tm.activeScope.formalSubmit == nil
 }
 
 func waitFormalSubmitSettled(t *testing.T, tm *TurnManager, hold *holdFirstCompleteCheck, timeout time.Duration) bool {
