@@ -2836,6 +2836,19 @@
       }
       state.metaDone = true;
     }
+    // A page that recognized NOTHING is an honest page FAILURE — the same
+    // rule the single-photo path applies (没有识别到词表), instead of a
+    // silent "done" page with no content. Its (empty) identity is still
+    // registered above, so re-running this page REPLACES its slot in the
+    // store (Issue #80 U3: retry replaces the photo's own record).
+    if (!parsed.entries.length && !parsed.poems.length && !parsed.passages.length) {
+      state.plan = global.applyPageEvent(state.plan, pageNo, 'fail', '没有识别到词表');
+      if (this.sourcePageNo === pageNo) {
+        this.setSourceCaption('第 ' + pageNo + ' ' + state.noun + ' · 识别失败');
+      }
+      this.renderPdfBar();
+      return;
+    }
     // Issue #80 §3.1: the page's own recommendation stamps its rows before
     // the merge — every row keeps the lesson the photo itself carried, the
     // empties take the page's default, and the run's earlier pages feed
