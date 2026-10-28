@@ -789,6 +789,168 @@ async function testFirstRecognitionPreselectThenRecommend() {
 }
 
 /**
+ * Issue #80 U5fix1 P1 — one photo with 第1课 + 第2课 rows keeps each OCR
+ * lesson through landRecognized (no whole-page default → refresh must not
+ * wipe unrecognized origins). Real recognize entry: single / multi / PDF.
+ */
+async function testMultiLessonSamePhotoPreservesOcrLessonsSingle() {
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      return Promise.resolve({
+        entries: [
+          { word: 'a', meaning: '甲', lesson: '第1课' },
+          { word: 'b', meaning: '乙', lesson: '第2课' },
+        ],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto()]);
+  h.clickRecognize();
+  await flushPromises(14);
+  var form = h.form;
+  eq(form.rows.length, 2, 'U5fix1 单张: two rows land');
+  eq(form.rows[0].lesson, '第1课', 'U5fix1 单张: row 1 keeps OCR 第1课');
+  eq(form.rows[1].lesson, '第2课', 'U5fix1 单张: row 2 keeps OCR 第2课');
+  eq(form.rows[0].lessonOrigin, 'recognized', 'U5fix1 单张: row 1 origin recognized');
+  eq(form.rows[1].lessonOrigin, 'recognized', 'U5fix1 单张: row 2 origin recognized');
+}
+
+async function testMultiLessonSamePhotoPreservesOcrLessonsMulti() {
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      return Promise.resolve({
+        entries: [
+          { word: 'a', meaning: '甲', lesson: '第1课' },
+          { word: 'b', meaning: '乙', lesson: '第2课' },
+        ],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto('one.jpg'), fakePhoto('two.jpg')]);
+  h.clickRecognize();
+  await flushPromises(30);
+  var form = h.form;
+  eq(form.rows.length, 4, 'U5fix1 多图: two photos × two lessons');
+  eq(form.rows[0].lesson, '第1课', 'U5fix1 多图: photo1 row1 第1课');
+  eq(form.rows[1].lesson, '第2课', 'U5fix1 多图: photo1 row2 第2课');
+  eq(form.rows[0].lessonOrigin, 'recognized', 'U5fix1 多图: photo1 row1 origin');
+  eq(form.rows[1].lessonOrigin, 'recognized', 'U5fix1 多图: photo1 row2 origin');
+}
+
+async function testMultiLessonSamePhotoPreservesOcrLessonsPdf() {
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      return Promise.resolve({
+        entries: [
+          { word: 'a', meaning: '甲', lesson: '第1课' },
+          { word: 'b', meaning: '乙', lesson: '第2课' },
+        ],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePdf()]);
+  h.clickRecognize();
+  await flushPromises(20);
+  var form = h.form;
+  eq(form.rows.length, 2, 'U5fix1 PDF: two lesson rows on one page');
+  eq(form.rows[0].lesson, '第1课', 'U5fix1 PDF: row 1 第1课');
+  eq(form.rows[1].lesson, '第2课', 'U5fix1 PDF: row 2 第2课');
+  eq(form.rows[0].lessonOrigin, 'recognized', 'U5fix1 PDF: row 1 origin recognized');
+  eq(form.rows[1].lessonOrigin, 'recognized', 'U5fix1 PDF: row 2 origin recognized');
+}
+
+/**
+ * Issue #80 U5fix1 P2 — when photo 1 lands header-less and photo 2 enables
+ * book preselect, the textbook select and detail must match bookChoice.
+ */
+async function testLatePreselectSyncsTextbookPanelUi() {
+  var calls = 0;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          entries: [{ word: 'p1a', meaning: '壹', lesson: '' }],
+        });
+      }
+      return Promise.resolve({
+        entries: [{ word: 'p2a', meaning: '贰', lesson: '' }],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册', lesson: '第4课' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto('one.jpg'), fakePhoto('two.jpg')]);
+  h.clickRecognize();
+  await flushPromises(30);
+  var form = h.form;
+  eq(form.bookChoice, 7, 'U5fix1 晚到预选: internal bookChoice is book 7');
+  var select = h.dom.document.getElementById('parent-photo-textbook');
+  eq(select.value, '7', 'U5fix1 晚到预选: select shows book 7, not unset');
+  var detail = form.bookDetailHost;
+  assert(detail && detail.textContent.indexOf('请选择已有教材') < 0,
+    'U5fix1 晚到预选: detail is not the unset placeholder');
+  assert(!form.commitBtn.disabled,
+    'U5fix1 晚到预选: commit enabled once a book is chosen');
+  eq(form.rows[0].lesson, '第2课',
+    'U5fix1 晚到预选: photo 1 still gets book 7 末课 recommendation');
+}
+
+/**
+ * Issue #80 U5fix1 P3 — create textbook succeeds, vocab add fails: recovery
+ * re-render must show the established book in the select (real commit btn).
+ */
+async function testCommitVocabFailureRecoveryShowsEstablishedBook() {
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      return Promise.resolve({
+        entries: [{ word: 'nw', meaning: '新', lesson: '第1课' }],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+      });
+    },
+  });
+  var form = h.form;
+  form.createTextbook = function (payload) {
+    return Promise.resolve({
+      id: 99,
+      name: payload.name,
+      category: payload.category,
+      lessons: payload.lessons || [],
+    });
+  };
+  form.submitWords = function () {
+    return Promise.reject(new Error('stub vocab failure'));
+  };
+  form.fetchTextbooks = function () {
+    return Promise.resolve([
+      { id: 7, name: '书七', edition: '人教版PEP', stage: '', grade: '三年级',
+        volume: '上册', module: '', lessons: ['第1课', '第2课'] },
+      { id: 99, name: '恢复教材', edition: '人教版PEP', stage: '', grade: '三年级',
+        volume: '上册', module: '', lessons: ['第1课'] },
+    ]);
+  };
+  h.pickPhotos([fakePhoto()]);
+  h.clickRecognize();
+  await flushPromises(14);
+  var select = h.dom.document.getElementById('parent-photo-textbook');
+  select.value = 'new';
+  select.fire('change');
+  var nameInput = h.dom.document.getElementById('parent-photo-tb-name');
+  nameInput.value = '恢复教材';
+  form.commitBtn.fire('click');
+  await flushPromises(20);
+  eq(form.bookChoice, 99, 'U5fix1 恢复: bookChoice points at established id');
+  select = h.dom.document.getElementById('parent-photo-textbook');
+  eq(select.value, '99', 'U5fix1 恢复: select shows established book, not 新建');
+  var opts = select.querySelectorAll('option');
+  assert(opts.some(function (o) {
+    return o.value === '99' && o.textContent.indexOf('恢复教材') >= 0;
+  }), 'U5fix1 恢复: select option labels the established book');
+}
+
+/**
  * Issue #80 U5 — a later photo landing must not reset the parent's textbook
  * pick; only recommendations for new rows should follow the kept choice.
  */
@@ -872,6 +1034,11 @@ function testTextbookPanelRedrawPreservesParentBookChoice() {
   await testEarlierPhotoNeverBorrowsLaterHeaderLesson();
   await testPriorRecommendationsFollowPhotoOrderNotCompletionOrder();
   await testFirstRecognitionPreselectThenRecommend();
+  await testMultiLessonSamePhotoPreservesOcrLessonsSingle();
+  await testMultiLessonSamePhotoPreservesOcrLessonsMulti();
+  await testMultiLessonSamePhotoPreservesOcrLessonsPdf();
+  await testLatePreselectSyncsTextbookPanelUi();
+  await testCommitVocabFailureRecoveryShowsEstablishedBook();
   await testLaterPhotoLandingPreservesParentBookChoice();
   testTextbookPanelRedrawPreservesParentBookChoice();
 
