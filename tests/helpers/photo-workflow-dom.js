@@ -11,6 +11,7 @@
  */
 function createPhotoDom() {
   var byId = {};
+  var activeElement = null;
 
   function textOf(node) {
     if (!node) {
@@ -122,6 +123,9 @@ function createPhotoDom() {
         fn.call(el, ev);
       });
     };
+    el.focus = function () {
+      activeElement = el;
+    };
     el.setAttribute = function (key, value) {
       el.attrs[key] = String(value);
       if (key === 'id') {
@@ -182,6 +186,9 @@ function createPhotoDom() {
       },
       getElementById: function (wanted) {
         return Object.prototype.hasOwnProperty.call(byId, wanted) ? byId[wanted] : null;
+      },
+      get activeElement() {
+        return activeElement;
       },
     },
   };

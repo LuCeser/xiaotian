@@ -896,6 +896,66 @@ async function testLatePreselectSyncsTextbookPanelUi() {
     'U5fix1 晚到预选: commit enabled once a book is chosen');
   eq(form.rows[0].lesson, '第2课',
     'U5fix1 晚到预选: photo 1 still gets book 7 末课 recommendation');
+  var chips = detail.querySelectorAll('.photo-lesson-chip');
+  assert(chips.length >= 2,
+    'U5fix2 晚到预选: detail lists at least two lesson groups after rows land');
+  var chipTexts = chips.map(function (c) { return c.textContent; });
+  assert(chipTexts.some(function (t) { return t.indexOf('第2课 · 1') >= 0; }),
+    'U5fix2 晚到预选: detail chip shows photo1 第2课 group, not stale 待确认');
+  assert(chipTexts.some(function (t) { return t.indexOf('第4课 · 1') >= 0; }),
+    'U5fix2 晚到预选: detail chip shows photo2 第4课 group');
+  assert(detail.textContent.indexOf('第4课') >= 0 &&
+    detail.textContent.indexOf('加到课次表末尾') >= 0,
+    'U5fix2 晚到预选: append note names 第4课');
+  var lesson4Chip = chips.filter(function (c) {
+    return c.textContent.indexOf('第4课 · 1') >= 0;
+  })[0];
+  lesson4Chip.fire('click');
+  var picked = form.rows.filter(function (r) { return r.lessonPicked; }).length;
+  eq(picked, 1, 'U5fix2 晚到预选: 第4课 chip selects exactly one row');
+}
+
+/**
+ * Issue #80 U5fix2 — while photo 2 is still recognizing, parent edits the
+ * 新建教材 name; landing photo 2 must not replace that input (same node,
+ * value, focus).
+ */
+async function testLaterPhotoLandingPreservesNewBookInputs() {
+  var calls = 0;
+  var secondLanding = null;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          entries: [{ word: 'p1a', meaning: '壹', lesson: '' }],
+        });
+      }
+      return new Promise(function (resolve) {
+        secondLanding = { resolve: resolve };
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto('one.jpg'), fakePhoto('two.jpg')]);
+  h.clickRecognize();
+  await flushPromises(20);
+  var select = h.dom.document.getElementById('parent-photo-textbook');
+  select.value = 'new';
+  select.fire('change');
+  var nameInput = h.dom.document.getElementById('parent-photo-tb-name');
+  nameInput.value = 'Oxford ';
+  nameInput.focus();
+  var nameNode = nameInput;
+  secondLanding.resolve({
+    entries: [{ word: 'p2a', meaning: '贰', lesson: '' }],
+  });
+  await flushPromises(20);
+  assert(h.dom.document.getElementById('parent-photo-tb-name') === nameNode,
+    'U5fix2 多图: 新建教材 name input stays the same DOM node');
+  eq(nameInput.value, 'Oxford ',
+    'U5fix2 多图: trailing space in name survives later photo landing');
+  assert(h.dom.document.activeElement === nameInput,
+    'U5fix2 多图: focus stays in the name field');
 }
 
 /**
@@ -1038,6 +1098,7 @@ function testTextbookPanelRedrawPreservesParentBookChoice() {
   await testMultiLessonSamePhotoPreservesOcrLessonsMulti();
   await testMultiLessonSamePhotoPreservesOcrLessonsPdf();
   await testLatePreselectSyncsTextbookPanelUi();
+  await testLaterPhotoLandingPreservesNewBookInputs();
   await testCommitVocabFailureRecoveryShowsEstablishedBook();
   await testLaterPhotoLandingPreservesParentBookChoice();
   testTextbookPanelRedrawPreservesParentBookChoice();
