@@ -142,6 +142,31 @@ const { classifyPhotoEntries } = photo;
   assert.strictEqual(retried.pages[0].status, 'done');
 }
 
+// 9b. abortRunningPages (Issue #80 §3.2, U6): the stop/invalidate sweep —
+//     every page still marked running returns to pending (error cleared)
+//     so 继续/重试 stay reachable once the wind-down settles; done and
+//     failed pages are untouched (stop never undoes finished work). Pure:
+//     a NEW plan, the input never mutated.
+{
+  let plan = pdf.createPagePlan(5);
+  plan = pdf.applyPageEvent(plan, 1, 'start');
+  plan = pdf.applyPageEvent(plan, 1, 'done');
+  plan = pdf.applyPageEvent(plan, 2, 'start');
+  plan = pdf.applyPageEvent(plan, 3, 'start');
+  plan = pdf.applyPageEvent(plan, 3, 'fail', '超时');
+  plan = pdf.applyPageEvent(plan, 5, 'start');
+  const swept = pdf.abortRunningPages(plan);
+  assert.deepStrictEqual(swept.pages.map((p) => p.status),
+    ['done', 'pending', 'failed', 'pending', 'pending']);
+  assert.deepStrictEqual(plan.pages.map((p) => p.status),
+    ['done', 'running', 'failed', 'pending', 'running'],
+    'the input plan keeps its running pages (pure transition)');
+  // An out-of-lifecycle sweep on an all-settled plan changes nothing.
+  const settled = pdf.abortRunningPages(swept);
+  assert.deepStrictEqual(settled.pages.map((p) => p.status),
+    ['done', 'pending', 'failed', 'pending', 'pending']);
+}
+
 // 10. planSummary: counts per status plus the two whole-file verdicts —
 //     processing while anything is pending/running, settled once nothing
 //     is, allSucceeded only when every page done (a partial failure is

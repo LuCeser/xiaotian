@@ -1,8 +1,12 @@
 /**
- * Issue #80 path B — per-photo recognition identity (U3).
- * Pure store: each page/photo slot holds its own header meta and OCR
- * entries (including original lessons). Retries REPLACE the slot; they
- * never append a second snapshot for the same photo index.
+ * Issue #80 path B — the import-flow state core.
+ * U3: per-photo recognition identity — each page/photo slot holds its own
+ * header meta and OCR entries (including original lessons). Retries
+ * REPLACE the slot; they never append a second snapshot for the same
+ * photo index.
+ * U6: the batch run state machine (§3.2) — run-level facts (停止 aborted /
+ * 真实执行 executing / 失效 invalidated) beside the shared page plan, the
+ * batch transitions 开始/停止/收尾/继续/重试/失效, and the ONE button rule.
  */
 (function (global) {
   'use strict';
@@ -145,6 +149,236 @@
     return null;
   }
 
+  // ===== Issue #80 path B U6 — the batch run state machine (§3.2) =====
+
+  /**
+   * The run-level facts the §3.2 button table needs, kept BESIDE the page
+   * plan (parent-pdf-core owns the per-page statuses pending/running/done/
+   * failed; the page transitions 成功/失败 ride its applyPageEvent):
+   *   plan        — the page plan this run drives (createPagePlan shape)
+   *   aborted     — the parent STOPPED the batch (停止)
+   *   executing   — an actual runner or its wind-down is in flight (真实执行)
+   *   invalidated — the run was superseded/released; its results are dead
+   *
+   * The core rule: 剩余工作 (pending pages) is NOT execution. `executing`
+   * is the ONLY busy truth — "pending means processing" is exactly the
+   * conflation this machine replaces (rethink §1.1 row 4). U7/U8 wire the
+   * photo/PDF UI to these transitions; until then the form keeps its own
+   * flags. Transitions mutate the passed state (the setPhotoRecognition
+   * precedent) and return it; page moves go through the shared page
+   * machine via lazy globals (the applyLessonToPage convention).
+   */
+  function createImportRunState(plan) {
+    return {
+      plan: plan || { pages: [] },
+      aborted: false,
+      executing: false,
+      invalidated: false,
+    };
+  }
+
+  /**
+   * 开始 — the batch starts executing (expects a fresh all-pending plan).
+   * 失效是终态：a superseded run is never resurrected — a new run gets a
+   * new state.
+   */
+  function beginImportRun(state) {
+    if (!state || state.executing || state.invalidated) {
+      return state; // no overlapping execution — ever
+    }
+    state.aborted = false;
+    state.executing = true;
+    return state;
+  }
+
+  /**
+   * 停止 — the parent stops the batch. The in-flight page keeps running
+   * until the wind-down settles (executing stays true → the 停止中 phase);
+   * settleImportRun is what restores it to pending.
+   */
+  function stopImportRun(state) {
+    if (!state) {
+      return state;
+    }
+    state.aborted = true;
+    return state;
+  }
+
+  /**
+   * 收尾 — the runner chain (or a stopped run's wind-down) has fully
+   * settled: executing goes false and any page still marked running
+   * returns to pending, so 继续/重试 stay reachable even when a late
+   * handler never fired (§3.2: 停止后当前 running 项恢复 pending).
+   */
+  function settleImportRun(state) {
+    if (!state) {
+      return state;
+    }
+    state.executing = false;
+    if (state.plan && global.abortRunningPages) {
+      state.plan = global.abortRunningPages(state.plan);
+    }
+    return state;
+  }
+
+  /**
+   * 继续 — run the REMAINING work only: pages already done/failed are
+   * never reset (继续不重跑 done); the runner takes pendingImportPages().
+   */
+  function resumeImportRun(state) {
+    if (!state || state.executing || state.invalidated) {
+      return state; // wind-down first — no overlapping execution; a dead run never resumes
+    }
+    state.aborted = false;
+    state.executing = true;
+    return state;
+  }
+
+  /**
+   * 重试 — ONE failed page goes back to pending (失败重试只处理目标张);
+   * the other failed pages stay failed. Starting it is an execution.
+   */
+  function retryImportPage(state, pageNo) {
+    if (!state || state.executing || state.invalidated) {
+      return state;
+    }
+    if (global.retryPage) {
+      state.plan = global.retryPage(state.plan, pageNo);
+    }
+    state.aborted = false;
+    state.executing = true;
+    return state;
+  }
+
+  /**
+   * 失效 — the run was superseded/released (a new run took over, the
+   * subject switched): no result of this run may land again. Mirrors the
+   * form-level epoch bump's plan-level effect; a dead run offers nothing.
+   */
+  function invalidateImportRun(state) {
+    if (!state) {
+      return state;
+    }
+    state.aborted = true;
+    state.executing = false;
+    state.invalidated = true;
+    if (state.plan && global.abortRunningPages) {
+      state.plan = global.abortRunningPages(state.plan);
+    }
+    return state;
+  }
+
+  /** The pages 开始/继续 will run — ONLY the pending ones (剩余工作). */
+  function pendingImportPages(state) {
+    if (!state || !state.plan || !state.plan.pages) {
+      return [];
+    }
+    return state.plan.pages.filter(function (page) {
+      return page.status === 'pending';
+    }).map(function (page) { return page.no; });
+  }
+
+  /**
+   * importRunCounts — the status counts the button rule and the summary
+   * line need. Deliberately NOT planSummary: that helper still derives a
+   * `processing` verdict from page counts — the very inference U6 removes
+   * from the run verdicts (U8 drops it when the UI stops calling it).
+   */
+  function importRunCounts(state) {
+    var c = { total: 0, pending: 0, running: 0, done: 0, failed: 0 };
+    ((state && state.plan && state.plan.pages) || []).forEach(function (page) {
+      c.total += 1;
+      if (c[page.status] !== undefined) {
+        c[page.status] += 1;
+      }
+    });
+    return c;
+  }
+
+  /**
+   * importRunDecision — THE button rule: §3.2's table as one function, so
+   * no caller ever re-derives button state from scattered booleans and
+   * page counts again (U7/U8 render from this). opts.noun is 页 (PDF) or
+   * 张 (photos) — labels only, never the rule.
+   *
+   *   phase       §3.2 row                    buttons
+   *   idle        尚未开始                    开始识别
+   *   running     正在运行                    停止；继续/重试禁用；禁止保存
+   *   stopping    已停止、旧执行未收尾        停止中（禁用）；继续暂禁；禁止保存
+   *   stopped     已停止、已收尾、仍有剩余    继续处理；失败张可单独重试；可保存
+   *   failed      已结束、含 failed           逐张重试；可保存成功部分
+   *   done        全部完成                    无运行按钮
+   *   invalidated 失效                        无按钮（迟到结果由执行身份拒绝）
+   *
+   * saveAllowed is the RUN-level gate only (忙碌禁止保存); whether anything
+   * is committable at all stays the draft's own business (导入与进度分离 —
+   * nothing is written before the parent confirms).
+   */
+  function importRunDecision(state, opts) {
+    var noun = opts && opts.noun ? String(opts.noun) : '张';
+    var c = importRunCounts(state);
+    // 真实执行（含收尾）是唯一的忙碌事实——剩余工作绝不参与推断。
+    var busy = !!(state && state.executing);
+    var phase;
+    if (state && state.invalidated) {
+      phase = 'invalidated';
+    } else if (busy) {
+      phase = state.aborted ? 'stopping' : 'running';
+    } else if (c.pending > 0) {
+      // Settled with remaining work: a virgin batch (never begun, no
+      // progress) shows 开始; anything else shows 继续. Page statuses alone
+      // cannot tell — a stop before the first page landed sweeps every page
+      // back to pending, looking virgin again — so the aborted fact decides
+      // (§3.2: 已停止、执行已收尾、仍有 pending → 继续处理).
+      phase = (c.done + c.failed + c.running === 0 && !state.aborted)
+        ? 'idle'
+        : 'stopped';
+    } else {
+      phase = c.failed > 0 ? 'failed' : 'done';
+    }
+    var failedPages = [];
+    ((state && state.plan && state.plan.pages) || []).forEach(function (page) {
+      if (page.status === 'failed') {
+        failedPages.push(page.no);
+      }
+    });
+    // 失效是终态：失败页虽留在计划里（失败原因仍要展示），重试转换对
+    // 失效批次是 no-op——按钮规则与终态一致，不得承诺不会发生的动作。
+    var retryOffered = failedPages.length > 0 && phase !== 'invalidated';
+    return {
+      phase: phase,
+      busy: busy,
+      remaining: c.pending,
+      counts: c,
+      failedPages: failedPages,
+      saveAllowed: !busy,
+      actions: {
+        start: {
+          shown: phase === 'idle',
+          enabled: phase === 'idle',
+          label: '开始识别',
+        },
+        stop: {
+          shown: phase === 'running' || phase === 'stopping',
+          enabled: phase === 'running',
+          label: phase === 'stopping'
+            ? '停止中…'
+            : '停止（保留已完成' + noun + '）',
+        },
+        resume: {
+          shown: phase === 'running' || phase === 'stopping' || phase === 'stopped',
+          enabled: phase === 'stopped',
+          label: '继续处理（剩 ' + c.pending + ' ' + noun + '）',
+        },
+        retry: {
+          shown: retryOffered,
+          enabled: retryOffered && !busy,
+          pages: failedPages,
+        },
+      },
+    };
+  }
+
   global.createImportPhotoState = createImportPhotoState;
   global.clearImportPhotoState = clearImportPhotoState;
   global.setPhotoRecognition = setPhotoRecognition;
@@ -154,4 +388,14 @@
   global.recognitionMetaForPage = recognitionMetaForPage;
   global.originalEntryForRow = originalEntryForRow;
   global.normalizePhotoPageNo = normalizePhotoPageNo;
+  global.createImportRunState = createImportRunState;
+  global.beginImportRun = beginImportRun;
+  global.stopImportRun = stopImportRun;
+  global.settleImportRun = settleImportRun;
+  global.resumeImportRun = resumeImportRun;
+  global.retryImportPage = retryImportPage;
+  global.invalidateImportRun = invalidateImportRun;
+  global.pendingImportPages = pendingImportPages;
+  global.importRunCounts = importRunCounts;
+  global.importRunDecision = importRunDecision;
 })(typeof window !== 'undefined' ? window : this);
