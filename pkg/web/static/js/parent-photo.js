@@ -2887,7 +2887,11 @@
     // Issue #80 U5: preselect the target book before deriving lessons;
     // then refresh EVERY landed page so an earlier header-less photo picks
     // up the book's 末课 once a later photo supplies matchable meta.
+    var panelWasRendered = state.panelRendered;
     this.applyBookPreselectIfUnset();
+    if (panelWasRendered) {
+      this.syncTextbookPanelFromChoice();
+    }
     state.lessonRecs = state.lessonRecs || [];
     while (state.lessonRecs.length < pageNo) {
       state.lessonRecs.push(null);
@@ -2895,6 +2899,18 @@
     var stamped = global.classifyPhotoEntries(parsed.entries, this.existingWords);
     stampEntryIndex(stamped);
     this.rows = global.mergePageRows(this.rows, pageNo, stamped);
+    // Issue #80 U5fix1: stamp THIS page's fresh rows (OCR lesson facts and
+    // empty-row recommendations) before the batch refresh — otherwise
+    // refreshRowLesson clears unrecognized origins when the photo has no
+    // whole-page default (e.g. 第1课 + 第2课 on one page).
+    var priorRecs = lessonRecsPriorToPage(state.lessonRecs, pageNo);
+    var pageRec = this.recommendationForPhotoPage(pageNo, priorRecs);
+    this.rows = this.rows.map(function (row) {
+      if (!row || (row.page || 1) !== pageNo) {
+        return row;
+      }
+      return fillRecommendedLessons([row], pageRec)[0];
+    });
     this.refreshLessonRecommendations();
     // Issue #11: the page's poems and display-only others replace
     // their own page segments (a retry never duplicates either).
@@ -3317,6 +3333,24 @@
       return;
     }
     this.bookChoice = preselectBookChoice(this.books, this.detectedMeta);
+  };
+
+  /**
+   * syncTextbookPanelFromChoice — the attribution panel renders ONCE (Issue
+   * #80 U5); when a LATER page's meta enables an honest preselect, the
+   * in-memory bookChoice moves but the select/detail must follow.
+   */
+  PhotoAddForm.prototype.syncTextbookPanelFromChoice = function () {
+    var select = document.getElementById('parent-photo-textbook');
+    if (!select) {
+      return;
+    }
+    select.value = String(this.bookChoice);
+    if (this.bookDetailHost) {
+      this.renderTextbookDetail(this.bookDetailHost);
+    }
+    this.updateStateLine();
+    this.updateCommitButton();
   };
 
   PhotoAddForm.prototype.renderTextbookPanelReset = function () {
@@ -5315,11 +5349,8 @@
         reloaded.then(function (books) {
           if (books) {
             self.books = books;
-            self.renderTextbookPanel('');
             self.bookChoice = established.id;
-            if (self.bookDetailHost) {
-              self.renderTextbookDetail(self.bookDetailHost);
-            }
+            self.renderTextbookPanel('');
             self.renderPreview();
           }
           self.reportCommitError('教材「' + established.name +
