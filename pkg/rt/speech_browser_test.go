@@ -2490,11 +2490,9 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 			t.Fatal("the correction taps never landed their verdict writes")
 		}
 		m.handleEndSession(m.currentSender())
+		// No gate held; the asserts still wait for the server tasks first
+		// (§5.1 order — the late-submit window below is observation only).
 		res := <-driver
-		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
-			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
-				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
-		}
 
 		// A submit arriving past the sealed close cannot ride the message
 		// path — handleCheckSubmit's alive gate (a strictly earlier refusal)
@@ -2509,7 +2507,17 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 		// 拿掉接纳的变异会让 finishCorrections 走异步 goroutine：给这个未被
 		// 拒绝的提交一个有界窗口把 diff 真正落库，「没有发生」才是业务断言。
 		waitFor(t, 3*time.Second, func() bool { return len(f.words.submissions()) > 0 })
+		if !waitFor(t, speechReclaimBound, f.speechServerTasksSettled) {
+			t.Fatalf("server tasks did not settle: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+				f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
+				f.providerStarted.Load(), f.providerDone.Load(),
+				f.announcementRun.Load(), f.announcementDone.Load())
+		}
 
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
 		if got := len(f.words.submissions()); got != 0 {
 			t.Fatalf("correction diff batches = %v, want none — a sealed registry admits no submit", f.words.submissions())
 		}
@@ -2637,47 +2645,65 @@ func TestPassageSubmitBrowser(t *testing.T) {
 			t.Fatal("the passage verdict never landed")
 		}
 		m.handleEndSession(m.currentSender())
+		// The driver's own exit rides the transport teardown, not the held
+		// gate — receive it now, assert it AFTER the reclaim (§5.1: no Fatal
+		// while a control point is still held).
 		res := <-driver
-		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
-			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
-				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
-		}
 
 		if !speechGateHit(fallbackHold, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){fallbackHold.release}, "the unchecked fallback never reached CompleteCheck before the probe")
 		}
 
+		// S1 acceptance (第三轮第 4 项): the fallback is parked BEFORE its
+		// executor call — outside the bottom tracker's sight — and the
+		// whole-task observation must still refuse to report it done. The
+		// observation is RECORDED here and asserted after the reclaim.
+		fallbackParkedSettled := f.speechServerTasksSettled()
+
 		// Probe the production entry while the registry is sealed and the
-		// fallback latch is still parked — no unchecked row yet.
+		// fallback latch is still parked — no unchecked row yet. The stored
+		// row is recorded, not asserted: the assert comes after the reclaim.
 		m.submitPassage(m.currentSender(), CheckSubmitMsg{
 			Type: TypeCheckSubmit, RequestID: "late-passage-after-close",
 		})
+		parked, parkedErr := f.tools.GetLessonState(context.Background(), lessonID)
 
-		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
-		if err != nil {
-			t.Fatalf("read stored lesson: %v", err)
-		}
-		if stored.Stage != lesson.StageChecking {
-			t.Fatalf("stored stage=%q, want checking — a sealed registry admits no submit", stored.Stage)
-		}
-		if stored.Version != versionAfterVerdict {
-			t.Fatalf("stored version = %d, want %d (verdicts only, no latch)", stored.Version, versionAfterVerdict)
-		}
-
+		// 释放控制点 → 等待原任务（兜底整任务，含其事件尾部）→ 最后断言。
 		fallbackHold.release()
-		if !waitFor(t, 5*time.Second, func() bool {
-			stored, err := f.tools.GetLessonState(context.Background(), lessonID)
-			return err == nil && stored.Stage == lesson.StageSubmitted && stored.Unchecked
-		}) {
-			t.Fatal("the passage unchecked fallback never settled after releasing the gate")
+		if !waitFor(t, speechReclaimBound, f.speechServerTasksSettled) {
+			t.Fatalf("server tasks did not settle after the reclaim: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+				f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
+				f.providerStarted.Load(), f.providerDone.Load(),
+				f.announcementRun.Load(), f.announcementDone.Load())
 		}
 
-		stored, err = f.tools.GetLessonState(context.Background(), lessonID)
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
+		if fallbackParkedSettled {
+			t.Fatal("settled reported every server task done while the fallback was still parked before its executor call")
+		}
+		if parkedErr != nil {
+			t.Fatalf("read stored lesson while parked: %v", parkedErr)
+		}
+		if parked.Stage != lesson.StageChecking {
+			t.Fatalf("stored stage=%q, want checking — a sealed registry admits no submit", parked.Stage)
+		}
+		if parked.Version != versionAfterVerdict {
+			t.Fatalf("stored version = %d, want %d (verdicts only, no latch)", parked.Version, versionAfterVerdict)
+		}
+
+		// The settled wait above already observed the fallback's whole task
+		// exit (its handle is released only after the event tail), so the
+		// stored row is final here — no extra poll.
+		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
 		if err != nil {
 			t.Fatalf("read stored lesson after fallback: %v", err)
 		}
-		if !stored.Unchecked {
-			t.Fatalf("stored unchecked=%v, want true — only the fallback latch may move the row", stored.Unchecked)
+		if stored.Stage != lesson.StageSubmitted || !stored.Unchecked {
+			t.Fatalf("stored stage=%q unchecked=%v, want the fallback's submitted+unchecked",
+				stored.Stage, stored.Unchecked)
 		}
 		if stored.Version != versionAfterVerdict+1 {
 			t.Fatalf("stored version = %d, want %d (one unchecked fallback latch only)",
@@ -2797,11 +2823,9 @@ func TestPoemSubmitBrowser(t *testing.T) {
 			t.Fatal("the poem manual verdicts never landed")
 		}
 		m.handleEndSession(m.currentSender())
+		// No gate is held here — still, the driver result is only ASSERTED
+		// after the server tasks (the poem fallback's own task) settled.
 		res := <-driver
-		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
-			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
-				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
-		}
 
 		m.submitPoem(m.currentSender(), CheckSubmitMsg{
 			Type: TypeCheckSubmit, RequestID: "late-poem-after-close",
@@ -2810,7 +2834,17 @@ func TestPoemSubmitBrowser(t *testing.T) {
 			stored, err := f.tools.GetLessonState(context.Background(), lessonID)
 			return err == nil && stored.Stage == lesson.StageSubmitted
 		})
+		if !waitFor(t, speechReclaimBound, f.speechServerTasksSettled) {
+			t.Fatalf("server tasks did not settle: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+				f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
+				f.providerStarted.Load(), f.providerDone.Load(),
+				f.announcementRun.Load(), f.announcementDone.Load())
+		}
 
+		if res.WSCloseCount != 1 || res.LateReviewResults != 0 || res.LateTeacherSentences != 0 {
+			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
+				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
+		}
 		stored, err := f.tools.GetLessonState(context.Background(), lessonID)
 		if err != nil {
 			t.Fatalf("read stored lesson: %v", err)
