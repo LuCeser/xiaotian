@@ -1050,8 +1050,14 @@
     return true;
   }
 
-  /** Entries for recommendLesson — recognized rows keep their OCR lesson. */
-  function entriesForPhotoPage(rows, pageNo) {
+  /** Entries for recommendLesson — OCR lessons come from the photo store. */
+  function entriesForPhotoPage(rows, pageNo, importState) {
+    if (importState && global.recognitionEntriesForPage) {
+      var stored = global.recognitionEntriesForPage(importState, pageNo);
+      if (stored.length) {
+        return stored;
+      }
+    }
     return (rows || []).filter(function (r) {
       return (r.page || 1) === pageNo;
     }).map(function (r) {
@@ -1736,6 +1742,9 @@
     // The per-photo book headers read so far (mergePhotoMetas' input);
     // detectedMeta is their merged view.
     this.detectedMetaList = [];
+    // Issue #80 U3: per-photo OCR snapshots (meta + entries + lessons).
+    this.importPhotoState = global.createImportPhotoState
+      ? global.createImportPhotoState() : { photos: {} };
     // Issue #8: a supplement run is in flight (the affordance disables
     // and says 生成中 rather than queueing a second overlapping call).
     this.meaningBusy = false;
@@ -2400,8 +2409,13 @@
           self.resetEntries();
           return;
         }
+        if (global.setPhotoRecognition) {
+          global.setPhotoRecognition(self.importPhotoState, 1, parsed);
+        }
         self.detectedMeta = meta;
-        self.detectedMetaList = [meta];
+        self.detectedMetaList = global.photoMetaListFromState
+          ? global.photoMetaListFromState(self.importPhotoState)
+          : (meta ? [meta] : []);
         // Snapshot the REAL libraries for classification; load the textbook
         // list in parallel for the attribution panel. All ride the DRAFT's
         // subject (a Chinese draft classifies against the 语文 word library
@@ -2679,11 +2693,9 @@
           self.renderPdfBar();
           return null;
         }
-        self.landRecognized(data, pageNo, state, function (meta) {
-          // Photos: headers MERGE (§2.2) — later photos fill only fields
-          // the earlier ones left empty; contradicting readings void the
-          // field instead of picking a winner.
-          self.detectedMetaList.push(meta);
+        self.landRecognized(data, pageNo, state, function () {
+          // Photos: headers MERGE (§2.2) from per-photo slots — retries
+          // replace a slot instead of appending another header version.
           var any = self.detectedMetaList.some(function (m) { return m; });
           return any ? mergePhotoMetas(self.detectedMetaList) : null;
         });
@@ -2792,6 +2804,12 @@
    */
   PhotoAddForm.prototype.landRecognized = function (data, pageNo, state, metaMerger) {
     var parsed = parseRecognized(data);
+    if (global.setPhotoRecognition && this.importPhotoState) {
+      global.setPhotoRecognition(this.importPhotoState, pageNo, parsed);
+      if (global.photoMetaListFromState) {
+        this.detectedMetaList = global.photoMetaListFromState(this.importPhotoState);
+      }
+    }
     if (parsed.meta) {
       var merged = metaMerger(parsed.meta);
       if (merged) {
@@ -2806,8 +2824,11 @@
     // the photo-order fallback. Memory-only; a retried page re-derives it.
     state.lessonRecs = state.lessonRecs || [];
     var priorRecs = lessonRecsPriorToPage(state.lessonRecs, pageNo);
+    var pageMeta = global.recognitionMetaForPage
+      ? (global.recognitionMetaForPage(this.importPhotoState, pageNo) || parsed.meta)
+      : parsed.meta;
     var rec = recommendForDraftPage(this.books, this.detectedMeta,
-      { textbook: parsed.meta, entries: parsed.entries }, priorRecs,
+      { textbook: pageMeta, entries: parsed.entries }, priorRecs,
       this.bookChoice);
     state.lessonRecs[pageNo - 1] = rec;
     var stamped = fillRecommendedLessons(
@@ -3104,6 +3125,11 @@
     this.existingPassages = [];
     this.detectedMeta = null;
     this.detectedMetaList = [];
+    if (global.clearImportPhotoState) {
+      global.clearImportPhotoState(this.importPhotoState);
+    } else if (this.importPhotoState) {
+      this.importPhotoState.photos = {};
+    }
     this.bookChoice = 'unset';
     this.batchLessonDraft = '';
     this.lastLessonPick = null;
@@ -3582,9 +3608,12 @@
           continue;
         }
         var prior = lessonRecsPriorToPage(newRecs, p);
+        var pageMeta = global.recognitionMetaForPage
+          ? (global.recognitionMetaForPage(this.importPhotoState, p) || this.detectedMeta)
+          : this.detectedMeta;
         newRecs[p - 1] = recommendForDraftPage(
           this.books, this.detectedMeta,
-          { textbook: this.detectedMeta, entries: entriesForPhotoPage(this.rows, p) },
+          { textbook: pageMeta, entries: entriesForPhotoPage(this.rows, p, this.importPhotoState) },
           prior, this.bookChoice);
       }
       state.lessonRecs = newRecs;
@@ -3603,8 +3632,11 @@
     if (!this.rows.length) {
       return;
     }
+    var singleMeta = global.recognitionMetaForPage
+      ? (global.recognitionMetaForPage(this.importPhotoState, 1) || this.detectedMeta)
+      : this.detectedMeta;
     var rec = recommendForDraftPage(this.books, this.detectedMeta,
-      { textbook: this.detectedMeta, entries: entriesForPhotoPage(this.rows, 1) },
+      { textbook: singleMeta, entries: entriesForPhotoPage(this.rows, 1, this.importPhotoState) },
       [], this.bookChoice);
     this.rows = this.rows.map(function (row) {
       if (row.lessonOrigin === 'parent') {
