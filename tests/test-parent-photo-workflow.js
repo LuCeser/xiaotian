@@ -420,6 +420,117 @@ async function testPdfRetryReplacesRegisteredSnapshot() {
     'retried page rows land in the preview');
 }
 
+/**
+ * Issue #80 U3 review fix2: a run where EVERY page recognized nothing is
+ * RETRYABLE — the all-empty finish must NOT wipe what the run registered.
+ * The kept header stays consistent with metaDone, so a successful retry
+ * preselects the SAME textbook the same result preselects on first try
+ * (the control mount below proves that first-try expectation).
+ */
+async function testPdfAllEmptyRunKeepsMetaForRetryPreselect() {
+  var metaA = { edition: '人教版PEP', grade: '三年级', volume: '上册' };
+  var valid = {
+    entries: [{ word: 'late', meaning: '迟', lesson: '第1课' }],
+    textbook: metaA,
+  };
+  // Control: the SAME valid result on first try preselects book 7.
+  var control = mountWorkflowForm({
+    recognizePhoto: function () { return Promise.resolve(valid); },
+  });
+  control.pickPhotos([fakePdf()]);
+  control.clickRecognize();
+  await flushPromises(24);
+  eq(control.form.bookChoice, 7,
+    'control: the same result on first try preselects the matching book');
+
+  var calls = 0;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      return Promise.resolve(calls === 1 ? { entries: [], textbook: metaA } : valid);
+    },
+  });
+  h.pickPhotos([fakePdf()]);
+  h.clickRecognize();
+  await flushPromises(24);
+  var form = h.form;
+  eq(form.pdfState.plan.pages[0].status, 'failed',
+    'all-empty single-page PDF fails honestly');
+  var empty = global.getPhotoRecognition(form.importPhotoState, 1);
+  assert(!!empty, 'all-empty finish KEEPS the registered empty snapshot for retry');
+  if (empty) {
+    eq(empty.entries.length, 0, 'kept all-empty snapshot carries no entries');
+    eq(empty.meta.edition, '人教版PEP', 'kept all-empty snapshot keeps its header meta');
+  }
+  assert(form.detectedMeta !== null && form.pdfState.metaDone === true,
+    'all-empty finish keeps detectedMeta consistent with metaDone');
+  assert(h.clickRetryPage(1), 'status bar renders the real retry chip');
+  await flushPromises(20);
+  var replaced = global.getPhotoRecognition(form.importPhotoState, 1);
+  assert(!!replaced && !!replaced.entries[0] && replaced.entries[0].word === 'late',
+    'retry REPLACES the kept empty snapshot with fresh content');
+  eq(form.pdfState.plan.pages[0].status, 'done', 'retried page settles done');
+  eq(form.detectedMeta && form.detectedMeta.edition, '人教版PEP',
+    'textbook header survives the all-empty finish and retry');
+  eq(form.bookChoice, 7,
+    'retry-after-all-empty preselects the same book as the first-try control');
+  assert(form.rows.some(function (r) { return r.word === 'late'; }),
+    'retried rows land in the preview');
+}
+
+/**
+ * The photo-batch kin of the all-empty case: EVERY photo empty keeps every
+ * registered (empty) snapshot, so retrying one photo REPLACES its own slot
+ * instead of first-registering into a wiped store.
+ */
+async function testPhotoBatchAllEmptyKeepsSnapshotsForRetry() {
+  var calls = 0;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls <= 2) {
+        return Promise.resolve({
+          entries: [],
+          textbook: calls === 1
+            ? { edition: 'PA', grade: '三年级', volume: '上册' }
+            : { edition: 'PB', grade: '四年级', volume: '下册' },
+        });
+      }
+      return Promise.resolve({
+        entries: [{ word: 's2', meaning: '贰', lesson: '第7课' }],
+        textbook: { edition: 'PB', grade: '四年级', volume: '下册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto('one.jpg'), fakePhoto('two.jpg')]);
+  h.clickRecognize();
+  await flushPromises(30);
+  var form = h.form;
+  eq(form.photoBatch.plan.pages[0].status, 'failed', 'photo 1 all-empty fails honestly');
+  eq(form.photoBatch.plan.pages[1].status, 'failed', 'photo 2 all-empty fails honestly');
+  eq(global.photoMetaListFromState(form.importPhotoState).length, 2,
+    'all-empty photo batch keeps one registered slot per photo');
+  eq(form.detectedMetaList.length, 2, 'all-empty finish keeps detectedMetaList slots');
+  assert(form.detectedMeta !== null && form.photoBatch.metaDone === true,
+    'all-empty finish keeps detectedMeta consistent with metaDone');
+  assert(h.clickRetryPage(2), 'status bar renders the real retry chip for photo 2');
+  await flushPromises(16);
+  var kept1 = global.getPhotoRecognition(form.importPhotoState, 1);
+  assert(!!kept1, "photo 1's empty snapshot SURVIVES the all-empty finish and the retry");
+  if (kept1) {
+    eq(kept1.entries.length, 0, 'photo 1 slot still carries its own (empty) record');
+    eq(kept1.meta.edition, 'PA', 'photo 1 slot still carries its own header meta');
+  }
+  var replaced = global.getPhotoRecognition(form.importPhotoState, 2);
+  assert(!!replaced && !!replaced.entries[0] && replaced.entries[0].word === 's2',
+    'retry REPLACES photo 2 slot — not first-registration into a wiped store');
+  eq(global.photoMetaListFromState(form.importPhotoState).length, 2,
+    'meta list keeps one slot per photo after the retry');
+  eq(form.photoBatch.plan.pages[1].status, 'done', 'retried photo settles done');
+  eq(form.photoBatch.plan.pages[0].status, 'failed',
+    'photo 1 stays failed — its own retry chip remains');
+}
+
 /** The photo-batch kin of the PDF retry-replace case (same real entries). */
 async function testPhotoRetryReplacesRegisteredSnapshot() {
   var calls = 0;
@@ -490,6 +601,8 @@ async function testPhotoRetryReplacesRegisteredSnapshot() {
   await testPdfEntryRegistersPageSnapshots();
   await testPdfRetryReplacesRegisteredSnapshot();
   await testPhotoRetryReplacesRegisteredSnapshot();
+  await testPdfAllEmptyRunKeepsMetaForRetryPreselect();
+  await testPhotoBatchAllEmptyKeepsSnapshotsForRetry();
 
   if (failures) {
     console.error('test-parent-photo-workflow: ' + failures + ' of ' + checks + ' checks failed');
