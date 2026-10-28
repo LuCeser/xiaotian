@@ -73,6 +73,7 @@ function installWorkflowGlobals(dom) {
   require(path.resolve(__dirname, '..', '..', 'pkg', 'web', 'static', 'js', 'parent-meaning-core.js'));
   require(path.resolve(__dirname, '..', '..', 'pkg', 'web', 'static', 'js', 'parent-textbook.js'));
   require(path.resolve(__dirname, '..', '..', 'pkg', 'web', 'static', 'js', 'parent-batch-edit.js'));
+  require(path.resolve(__dirname, '..', '..', 'pkg', 'web', 'static', 'js', 'parent-import-core.js'));
   require(path.resolve(__dirname, '..', '..', 'pkg', 'web', 'static', 'js', 'parent-pdf-core.js'));
   require(path.resolve(__dirname, '..', '..', 'pkg', 'web', 'static', 'js', 'parent-photo.js'));
 
@@ -92,6 +93,7 @@ function installWorkflowGlobals(dom) {
  * @param {object} [options]
  * @param {object} [options.modalKit] — __parentModalKit (openModal spy)
  * @param {Function} [options.recognizePhoto]
+ * @param {boolean} [options.realBatchRun] — run real runPages/finishRun (U3+)
  */
 function mountWorkflowForm(options) {
   options = options || {};
@@ -144,13 +146,15 @@ function mountWorkflowForm(options) {
     return Promise.resolve(new Uint8Array([0xff, 0xd8, 1]));
   };
 
-  form.runPages = function () {
-    return Promise.resolve({ pending: 0, running: 0, done: 1, failed: 0 });
-  };
+  if (!options.realBatchRun) {
+    form.runPages = function () {
+      return Promise.resolve({ pending: 0, running: 0, done: 1, failed: 0 });
+    };
 
-  form.finishRun = function () {
-    this.discardBtn.hidden = false;
-  };
+    form.finishRun = function () {
+      this.discardBtn.hidden = false;
+    };
+  }
 
   return {
     dom: dom,
