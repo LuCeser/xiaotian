@@ -1,7 +1,10 @@
 /**
  * Issue #80 U2 — real UI entry regression for photo import: recognize button
  * (single / multi / PDF), textbook change, new-book input, import batch edit.
- * Complements the pure-function tests in test-parent-photo-textbook.js.
+ * Issue #80 U3 — per-photo recognition identity: snapshot registration, the
+ * retry chip REPLACING an existing snapshot, and word-edit → reclassify
+ * keeping each row linked to its own OCR entry. Complements the
+ * pure-function tests in test-parent-photo-textbook.js.
  *
  * `node tests/test-parent-photo-workflow.js`
  */
@@ -270,6 +273,88 @@ async function testReclassifyKeepsOriginalEntryLink() {
   eq(orig.meaning, '乙', 'reclassify preserves original OCR meaning lookup');
 }
 
+/**
+ * Issue #80 U3 review P2-1: correcting a WORD FACE through the real word
+ * input (→ onRowEdited → reclassify) must not orphan the row from its OCR
+ * entry, and same-page duplicate words must link to their OWN entries —
+ * identity is the photo-local ordinal, never the current word.
+ */
+async function testWordEditKeepsOriginalEntryLink() {
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      return Promise.resolve({
+        entries: [
+          { word: 'bat', meaning: '甲', lesson: '第1课' },
+          { word: 'bat', meaning: '乙', lesson: '第2课' },
+        ],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto()]);
+  h.clickRecognize();
+  await flushPromises(12);
+  var form = h.form;
+  var inputs = form.preview.querySelectorAll('.photo-word-input');
+  eq(inputs.length, 2, 'one real word input per landed row');
+  inputs[0].value = 'cat';
+  inputs[0].fire('input');
+  inputs[1].value = 'hat';
+  inputs[1].fire('input');
+  eq(form.rows[0].word, 'cat', 'word edit 0 landed on the row model');
+  eq(form.rows[1].word, 'hat', 'word edit 1 landed on the row model');
+  eq(form.rows[1].status, 'new', 'reclassify reran after the edits');
+  var orig0 = global.originalEntryForRow(form.importPhotoState, form.rows[0]);
+  assert(!!orig0, 'corrected word still links to its original OCR entry');
+  if (orig0) {
+    eq(orig0.word, 'bat', 'original entry keeps the OCR word face');
+  }
+  var orig1 = global.originalEntryForRow(form.importPhotoState, form.rows[1]);
+  assert(!!orig1, 'duplicate word still links to its original OCR entry');
+  if (orig1) {
+    eq(orig1.lesson, '第2课', 'duplicate word links to its OWN entry, not the first match');
+  }
+}
+
+/** Issue #80 U3 review P2-2: the real PDF entry registers page snapshots. */
+async function testPdfEntryRegistersPageSnapshots() {
+  var calls = 0;
+  var h = mountWorkflowForm({
+    pdfPageCount: 2,
+    recognizePhoto: function () {
+      calls += 1;
+      return Promise.resolve(calls === 1 ? {
+        entries: [{ word: 'p1', meaning: '壹', lesson: '第1课' }],
+        textbook: { edition: 'E1', grade: '三年级', volume: '上册' },
+      } : {
+        entries: [{ word: 'p2', meaning: '贰', lesson: '第5课' }],
+        textbook: { edition: 'E2', grade: '四年级', volume: '下册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePdf()]);
+  h.clickRecognize();
+  await flushPromises(30);
+  var form = h.form;
+  var rec1 = global.getPhotoRecognition(form.importPhotoState, 1);
+  var rec2 = global.getPhotoRecognition(form.importPhotoState, 2);
+  assert(!!rec1, 'PDF page 1 registers its snapshot');
+  assert(!!rec2, 'PDF page 2 registers its snapshot');
+  if (rec1) {
+    eq(rec1.entries[0].word, 'p1', 'PDF page 1 snapshot keeps its OCR entry');
+    eq(rec1.meta.edition, 'E1', 'PDF page 1 header meta isolated from page 2');
+  }
+  if (rec2) {
+    eq(rec2.entries[0].word, 'p2', 'PDF page 2 snapshot keeps its OCR entry');
+    eq(rec2.meta.edition, 'E2', 'PDF page 2 header meta isolated from page 1');
+  }
+  eq(global.photoMetaListFromState(form.importPhotoState).length, 2,
+    'PDF meta list keeps one slot per page');
+  eq(form.detectedMeta.edition, 'E1', 'PDF whole-file header still first-page-wins');
+  assert(form.pdfState.plan.pages.every(function (p) { return p.status === 'done'; }),
+    'PDF run marks both pages done');
+}
+
 (async function main() {
   await testSinglePhotoEntryClearsViaRecognizeButton();
   await testMultiPhotoEntryClearsViaRecognizeButton();
@@ -281,6 +366,8 @@ async function testReclassifyKeepsOriginalEntryLink() {
   await testMultiPhotoBatchRegistersPerPhotoIdentity();
   await testRetryReplacesPhotoIdentity();
   await testReclassifyKeepsOriginalEntryLink();
+  await testWordEditKeepsOriginalEntryLink();
+  await testPdfEntryRegistersPageSnapshots();
 
   if (failures) {
     console.error('test-parent-photo-workflow: ' + failures + ' of ' + checks + ' checks failed');

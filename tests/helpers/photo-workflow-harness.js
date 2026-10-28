@@ -38,7 +38,8 @@ function fakePdf(name) {
   };
 }
 
-function installWorkflowGlobals(dom) {
+function installWorkflowGlobals(dom, options) {
+  options = options || {};
   global.window = global;
   global.document = dom.document;
   global.URL.createObjectURL = function () { return 'blob:test'; };
@@ -80,7 +81,10 @@ function installWorkflowGlobals(dom) {
   global.PdfPageRunner = {
     isAvailable: function () { return true; },
     open: function () {
-      return Promise.resolve({ doc: { id: 'doc1' }, pageCount: 1 });
+      return Promise.resolve({
+        doc: { id: 'doc1' },
+        pageCount: options.pdfPageCount || 1,
+      });
     },
     close: function () {},
     renderPage: function () {
@@ -93,11 +97,12 @@ function installWorkflowGlobals(dom) {
  * @param {object} [options]
  * @param {object} [options.modalKit] — __parentModalKit (openModal spy)
  * @param {Function} [options.recognizePhoto]
+ * @param {number} [options.pdfPageCount] — pages the fake PDF reports
  */
 function mountWorkflowForm(options) {
   options = options || {};
   var dom = createPhotoDom();
-  installWorkflowGlobals(dom);
+  installWorkflowGlobals(dom, options);
 
   var root = dom.document.createElement('div');
   var modalCalls = [];
@@ -155,6 +160,21 @@ function mountWorkflowForm(options) {
     },
     clickRecognize: function () {
       form.recognizeBtn.fire('click');
+    },
+    /** Click the status bar's REAL retry chip for one failed page. */
+    clickRetryPage: function (pageNo) {
+      var chip = null;
+      form.pdfBar.querySelectorAll('.pdf-page-chip').forEach(function (c) {
+        if (c.getAttribute('data-page') === String(pageNo)) {
+          chip = c;
+        }
+      });
+      var btn = chip && chip.querySelector('.pdf-retry-btn');
+      if (!btn) {
+        return false;
+      }
+      btn.fire('click');
+      return true;
     },
   };
 }
