@@ -448,7 +448,7 @@ func (tm *TurnManager) handleCheckVerdict(s Sender, m CheckVerdictMsg) {
 	}
 	lessonID := tm.tutor.lessonID
 	expected := tm.tutor.version
-	write, admitted := tm.admitCheckWriteLocked()
+	write, admitted := tm.admitCheckWriteLocked(lessonID)
 	tm.mu.Unlock()
 	if !admitted {
 		return
@@ -654,7 +654,7 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	frozen.confirmed, frozen.timedOutN, frozen.hinted = tm.tutor.outcomeCounts()
 	frozen.hintWords, frozen.hintTotal = tm.tutor.hintAccounting()
 	scopeGen := tm.activeScope.gen
-	write, writeAdmitted := tm.admitCheckWriteLocked()
+	write, writeAdmitted := tm.admitCheckWriteLocked(lessonID)
 	if !writeAdmitted {
 		tm.mu.Unlock()
 		cancel()
@@ -1056,7 +1056,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	// presentation; an admitted registration survives the turn's
 	// cancellation and ends in finishCorrections BEFORE the wrap line.
 	tm.mu.Lock()
-	write, writeAdmitted := tm.admitCheckWriteLocked()
+	write, writeAdmitted := tm.admitCheckWriteLocked(lessonID)
 	tm.mu.Unlock()
 	if !writeAdmitted {
 		cancel()
@@ -1549,7 +1549,7 @@ func (tm *TurnManager) applyOcrPrefills(s Sender, entries []OcrResultEntry) {
 	// ONE admission covers the whole finite batch: every per-word write and
 	// its legal conflict retry ride the same registration, so a close that
 	// lands mid-batch waits for the accepted save (1.06 discipline).
-	write, admitted := tm.admitCheckWriteLocked()
+	write, admitted := tm.admitCheckWriteLocked(tm.tutor.lessonID)
 	if !admitted {
 		tm.mu.Unlock()
 		return
@@ -1793,7 +1793,7 @@ func (tm *TurnManager) applyVoiceVerdict(s Sender, ctx context.Context, cancel c
 		idx = p.Index - 1
 		lessonID, version = tm.tutor.lessonID, tm.tutor.version
 		word = tm.tutor.words[idx].Word
-		write, admitted = tm.admitCheckWriteLocked()
+		write, admitted = tm.admitCheckWriteLocked(lessonID)
 		return nil
 	}) {
 		return

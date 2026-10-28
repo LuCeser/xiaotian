@@ -321,3 +321,114 @@ func TestCheckResumeReinitSpeaksBridge(t *testing.T) {
 		t.Fatalf("teacher_sentence count = %d, want > %d (resume bridge must run after classroom replace epoch)", s.countOf(TypeTeacherSentence), bridgeBefore)
 	}
 }
+
+// TestSameLessonReinitDuringInflightSaveRefused (issue #69 rethink3 S4): a
+// same-lessonID re-init that arrives while THIS connection's accepted submit
+// for the row is still running must not build a classroom on the pre-save row
+// state — the honest answer is a RECOVERABLE init error, nothing installed,
+// no blind fallback; the save itself keeps running and lands normally (its
+// classroom is still the live scope), and a retry after it settles reads the
+// row's true post-save state (the completed short-circuit).
+func TestSameLessonReinitDuringInflightSaveRefused(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	tm, s := ttInitCheckingRow(t, exec, words)
+	tm.taskTrack = &serverTaskTracker{} // S1: whole-task settle for the waits below
+
+	hold := newHoldFirstCompleteCheck(exec)
+	tm.exec = hold
+
+	reclaimAndFail := func(msg string) {
+		hold.openUp()
+		if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+			t.Fatalf("%s (reclaim: CompleteCheck calls=%d returned=%d never settled)",
+				msg, hold.callCount(), hold.returnedCount())
+		}
+		t.Fatal(msg)
+	}
+
+	// The real submit entry admits the save; the latch write parks inside the
+	// real executor hold (the row's state is moving by construction).
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "busy-reinit-submit"}))
+	select {
+	case <-hold.entered:
+	case <-time.After(3 * time.Second):
+		reclaimAndFail("the submit never reached CompleteCheck")
+	}
+
+	readyBefore := s.countOf(TypeSessionReady)
+	startedBefore := s.countOf(TypeCheckStarted)
+
+	// The same-lessonID re-init (the same production session_init entry the
+	// connection's read loop would dispatch) is refused with a recoverable
+	// error while that admission is live.
+	ttInit(t, tm, s)
+
+	errCount, recoverable := 0, false
+	s.mu.Lock()
+	sentControls := append([][]byte(nil), s.controls...)
+	s.mu.Unlock()
+	for _, raw := range sentControls {
+		var probe struct {
+			Type        string `json:"type"`
+			Code        string `json:"code"`
+			Recoverable bool   `json:"recoverable"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.Type == TypeError &&
+			probe.Code == ErrCodeLessonUnavailable {
+			errCount++
+			recoverable = probe.Recoverable
+		}
+	}
+	if errCount != 1 || !recoverable {
+		reclaimAndFail(fmt.Sprintf("in-flight-save reinit answered %d lesson errors (recoverable=%v), want exactly 1 recoverable", errCount, recoverable))
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		reclaimAndFail(fmt.Sprintf("session_ready after the refused reinit = %d, want %d (no classroom on stale row state)", got, readyBefore))
+	}
+	if got := s.countOf(TypeCheckStarted); got != startedBefore {
+		reclaimAndFail(fmt.Sprintf("check_started after the refused reinit = %d, want %d (no panel re-open)", got, startedBefore))
+	}
+	tm.mu.Lock()
+	scopeGen := tm.activeScope.gen
+	tm.mu.Unlock()
+
+	// The save keeps running and lands on its OWN classroom (still the live
+	// scope): the writeback applies and the natural ending follows.
+	hold.openUp()
+	if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+		reclaimAndFail("the accepted submit never finished after the refusal")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) >= 1 }) {
+		reclaimAndFail("the submit's review_result never arrived — the refusal must not stall the save's own presentation")
+	}
+	tm.mu.Lock()
+	gotVer, gotChecking := tm.tutor.version, tm.tutor.checking
+	stillScope := tm.activeScope != nil && tm.activeScope.gen == scopeGen
+	tm.mu.Unlock()
+	if !stillScope {
+		reclaimAndFail("the refusal replaced the live classroom's scope")
+	}
+	exec.mu.Lock()
+	rowVer, rowStage := exec.lesson.Version, exec.lesson.Stage
+	exec.mu.Unlock()
+	if gotVer != rowVer || gotChecking {
+		t.Fatalf("tutor version/checking = %d/%v, want %d/false (the live submit's writeback stands)", gotVer, gotChecking, rowVer)
+	}
+	if rowStage != lesson.StageSubmitted {
+		t.Fatalf("row stage = %q, want submitted (the accepted save completed)", rowStage)
+	}
+
+	// A retry after the save settles reads the row's true state: the
+	// completed short-circuit, not a classroom built on checking-era state.
+	exec.mu.Lock()
+	exec.lesson.CurrentIndex = len(exec.lesson.Cards)
+	exec.mu.Unlock()
+	ttInit(t, tm, s)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) >= 1 }) {
+		t.Fatal("the post-save retry never reached the completed short-circuit")
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		t.Fatalf("session_ready after the post-save retry = %d, want %d (completed rows short-circuit without a new ready)", got, readyBefore)
+	}
+}

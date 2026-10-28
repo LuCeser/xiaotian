@@ -784,10 +784,26 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 		// under it — only the request that still owns the pending
 		// reservation may install the row's authority.
 		tm.mu.Lock()
-		if tm.classroomInstallAllowed(req.installGen) {
+		saveInFlight := tm.lessonSaveInFlightLocked(lessonID)
+		allowed := tm.classroomInstallAllowed(req.installGen)
+		tm.mu.Unlock()
+		if saveInFlight {
+			// Same-lessonID reentry while THIS connection's accepted save for
+			// the row is still running (issue #69 rethink3 S4): the row state
+			// read above is already stale by construction — the save will move
+			// its version/stage the moment it lands. Installing a classroom on
+			// it (or blind-fallback rating it) would present a panel that
+			// cannot survive its own save, so the honest answer is a
+			// RECOVERABLE init error: nothing installed, the save keeps
+			// running, a retry after it settles reads the true row. The
+			// bounded wait that lets a quick retry proceed in-place is S7's
+			// persistDone coordination — refusing is this step's minimal fix.
+			tm.failLessonInitBusy(s)
+			return
+		}
+		if allowed {
 			tm.category = lesson.NormalizeCategory(l.Category)
 		}
-		tm.mu.Unlock()
 	} else {
 		// Fresh lesson: this process instance is the single creator (init
 		// lock held) — fetch due words now, scoped to the same subject.
@@ -866,6 +882,27 @@ func (tm *TurnManager) failLessonInit(s Sender) {
 		return
 	}
 	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable))
+}
+
+// lessonSaveBusyNotice is the same-lessonID reentry refusal (issue #69
+// rethink3 S4): the row's accepted save is still running on this connection,
+// so any classroom built from the row right now would be built on stale
+// state. The error is RECOVERABLE — the save keeps running and a retry after
+// it settles opens the true row.
+const lessonSaveBusyNotice = "上一次提交还在保存中，请稍等一下再重新进课堂哦"
+
+// failLessonInitBusy is failLessonInit's recoverable sibling: refuse the
+// re-init without installing anything, without touching the in-flight save,
+// and without any unchecked fallback for the row.
+func (tm *TurnManager) failLessonInitBusy(s Sender) {
+	if !tm.applySessionEffect(func() error {
+		return s.SendControl(ErrorMsg{
+			Type: TypeError, Code: ErrCodeLessonUnavailable, Message: lessonSaveBusyNotice, Recoverable: true,
+		})
+	}) {
+		return
+	}
+	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable), infra.F("at", "lesson_save_inflight"))
 }
 
 // normalizeSessionMode normalizes the page-supplied UI mode (13.1 D-08):

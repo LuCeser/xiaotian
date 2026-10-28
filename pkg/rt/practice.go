@@ -400,7 +400,7 @@ func (tm *TurnManager) submitPractice(s Sender, m CheckSubmitMsg) {
 	// cancellation only stops presentation after that save was accepted.
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
-	write, writeAdmitted := tm.admitCheckWriteLocked()
+	write, writeAdmitted := tm.admitCheckWriteLocked(lessonID)
 	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()

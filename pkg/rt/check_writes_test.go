@@ -10,7 +10,7 @@ func TestCheckWriteAdmission(t *testing.T) {
 		tm := NewTurnManager(nil, nil, nil, nil, TurnManagerConfig{}, nil, nil)
 		claim := tm.closeSessionAt(0, false, false, 0, false, "", nil)
 		tm.mu.Lock()
-		write, admitted := tm.admitCheckWriteLocked()
+		write, admitted := tm.admitCheckWriteLocked("vet-admission")
 		tm.mu.Unlock()
 		if !claim.owned || len(claim.checkWrites) != 0 || admitted || write != nil {
 			t.Fatalf("claim=%+v admitted=%v write=%v, want owned close with zero writes", claim, admitted, write)
@@ -20,7 +20,7 @@ func TestCheckWriteAdmission(t *testing.T) {
 	t.Run("admission wins and close can wait for completion", func(t *testing.T) {
 		tm := NewTurnManager(nil, nil, nil, nil, TurnManagerConfig{}, nil, nil)
 		tm.mu.Lock()
-		write, admitted := tm.admitCheckWriteLocked()
+		write, admitted := tm.admitCheckWriteLocked("vet-admission")
 		tm.mu.Unlock()
 		if !admitted {
 			t.Fatal("live session refused check write admission")

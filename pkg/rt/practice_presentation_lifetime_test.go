@@ -53,7 +53,7 @@ func TestPracticeSubmitPresentationLifetime(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
-	write, admitted := tm.admitCheckWriteLocked()
+	write, admitted := tm.admitCheckWriteLocked(tm.tutor.lessonID)
 	tm.mu.Unlock()
 	if !admitted {
 		t.Fatal("practice save was not admitted")

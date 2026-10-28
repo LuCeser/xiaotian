@@ -21,24 +21,40 @@ func checkPersistContext(turnCtx context.Context) (context.Context, context.Canc
 // checkWriteAdmission represents one persistence operation accepted before
 // closing sealed the session. Its done signal is independent from presentation
 // work: callers complete it when database work and its receipt have finished.
+// lessonID names the row the accepted save will write (issue #69 rethink3 S4):
+// a same-lessonID re-init can ask whether the row's state is still moving.
 type checkWriteAdmission struct {
-	done chan struct{}
-	once sync.Once
+	done     chan struct{}
+	lessonID string
+	once     sync.Once
 }
 
 // admitCheckWriteLocked registers one accepted write. Caller holds tm.mu.
 // Formal dictation check_submit must take validity, snapshot, scope in-flight
 // dedup, and this registration in the same tm.mu hold (issue #69 R2).
-func (tm *TurnManager) admitCheckWriteLocked() (*checkWriteAdmission, bool) {
+func (tm *TurnManager) admitCheckWriteLocked(lessonID string) (*checkWriteAdmission, bool) {
 	if tm.closed || tm.checkWritesSealed {
 		return nil, false
 	}
-	w := &checkWriteAdmission{done: make(chan struct{})}
+	w := &checkWriteAdmission{done: make(chan struct{}), lessonID: lessonID}
 	if tm.checkWrites == nil {
 		tm.checkWrites = make(map[*checkWriteAdmission]struct{})
 	}
 	tm.checkWrites[w] = struct{}{}
 	return w, true
+}
+
+// lessonSaveInFlightLocked reports whether an accepted save for lessonID is
+// still running (its admission has not completed). Caller holds tm.mu. A
+// re-init of that row while a save is in flight must not build a classroom
+// on the pre-save row state (issue #69 rethink3 S4 same-lessonID reentry).
+func (tm *TurnManager) lessonSaveInFlightLocked(lessonID string) bool {
+	for w := range tm.checkWrites {
+		if w.lessonID == lessonID {
+			return true
+		}
+	}
+	return false
 }
 
 // completeCheckWrite releases an admission on every return path. It is safe

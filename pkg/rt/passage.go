@@ -679,7 +679,7 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
-	write, writeAdmitted := tm.admitCheckWriteLocked()
+	write, writeAdmitted := tm.admitCheckWriteLocked(lessonID)
 	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
