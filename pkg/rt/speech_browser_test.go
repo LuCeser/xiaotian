@@ -165,6 +165,31 @@ func (s *speechHoldTTS) holdHits() int {
 	return s.hits
 }
 
+// speechExecTracker sits at the BOTTOM of the fixture's executor chain (every
+// gate mounts ABOVE it): it counts CompleteCheck entries and exits — checked
+// submits of every classroom kind AND the unchecked close fallback — so a
+// reclaim can observe the server-side latch tasks actually leaving the
+// executor (review R0-P2: the driver's own result never proves that; the
+// fallback can still be parked on a test gate when the driver returns).
+type speechExecTracker struct {
+	LessonExecutor
+	entered atomic.Int64
+	exited  atomic.Int64
+}
+
+func (t *speechExecTracker) CompleteCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, unchecked bool) (lesson.CompleteCheckResult, error) {
+	t.entered.Add(1)
+	res, err := t.LessonExecutor.CompleteCheck(ctx, lessonID, expectedVersion, requestID, unchecked)
+	t.exited.Add(1)
+	return res, err
+}
+
+// latchInFlight counts CompleteCheck calls that entered but have not returned
+// (a submit or fallback parked on a gate counts as in flight).
+func (t *speechExecTracker) latchInFlight() int64 {
+	return t.entered.Load() - t.exited.Load()
+}
+
 // speechManagerTracker wraps one connection's real TurnManager: it counts
 // connections/closes and records the sentence_ack frames the BROWSER actually
 // sent (parsed from the real inbound control stream — observation only, the
@@ -293,6 +318,10 @@ type speechBrowserFixture struct {
 	writerDone                        atomic.Int64
 	providerStarted, providerDone     atomic.Int64
 	announcementRun, announcementDone atomic.Int64
+
+	// execTrack is the fixture's bottom executor tracker (see its type) — the
+	// completion observation reclaims wait on for parked latch tasks.
+	execTrack *speechExecTracker
 }
 
 type speechObservedTTS struct {
@@ -425,12 +454,14 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 		{Word: "听写浏览器", Meaning: "fixture 第一词"},
 		{Word: "第二词", Meaning: "fixture 第二词"},
 	}
+	execTrack := &speechExecTracker{LessonExecutor: tools}
 	f := &speechBrowserFixture{
 		t:                      t,
 		db:                     db,
 		dbPath:                 dbPath,
 		tools:                  tools,
-		exec:                   tools,
+		exec:                   execTrack,
+		execTrack:              execTrack,
 		expectedSentences:      append([]string(nil), speechExpectedOpening...),
 		expectedPCMPerSentence: 2,
 		asr:                    newFakeASR(),
@@ -905,28 +936,94 @@ func speechGateHit(g *speechOneGate, timeout time.Duration) bool {
 	return speechChHit(g.entered, timeout)
 }
 
+const speechReclaimBound = 90 * time.Second
+
+// speechConnectionTasksSettled mirrors assertOriginalTasksExited's counters
+// without Fatalling — the observation half of §5.1 (single-connection shape:
+// exactly one handler/writer, one settled opening announcement).
+func (f *speechBrowserFixture) speechConnectionTasksSettled() bool {
+	return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
+		f.writerDone.Load() == 1 && f.providerStarted.Load() > 0 &&
+		f.providerStarted.Load() == f.providerDone.Load() &&
+		f.announcementRun.Load() > 0 && f.announcementRun.Load() == f.announcementDone.Load()
+}
+
+// speechConnectionsSettled is the multi-connection form (the practice journey
+// rides two connections): every handler/writer that ran has exited and no
+// provider or announcement run is left pending.
+func (f *speechBrowserFixture) speechConnectionsSettled() bool {
+	return f.handlerActive.Load() == 0 && f.handlerDone.Load() >= 1 &&
+		f.writerDone.Load() >= 1 &&
+		f.providerStarted.Load() == f.providerDone.Load() &&
+		f.announcementRun.Load() == f.announcementDone.Load()
+}
+
+// speechServerTasksSettled reports whether every SERVER-side task of the
+// fixture has finished: the browser connections (multi-connection form), the
+// accepted dictation submit (formalCheckSubmitPending is cleared in the
+// task's defer, after its writeback/review_result/receipt), every admitted
+// write the close claims wait on, and every CompleteCheck latch call —
+// checked submits of all kinds and the unchecked close fallback (the
+// fixture's bottom executor tracker). The driver's own exit is observed
+// separately by the caller.
+func (f *speechBrowserFixture) speechServerTasksSettled() bool {
+	if !f.speechConnectionsSettled() {
+		return false
+	}
+	if f.execTrack != nil && f.execTrack.latchInFlight() != 0 {
+		return false
+	}
+	f.mu.Lock()
+	mgrs := append([]*speechManagerTracker(nil), f.managers...)
+	f.mu.Unlock()
+	for _, m := range mgrs {
+		m.TurnManager.mu.Lock()
+		busy := len(m.checkWrites) > 0 || m.formalCheckSubmitPending
+		m.TurnManager.mu.Unlock()
+		if busy {
+			return false
+		}
+	}
+	return true
+}
+
+func (f *speechBrowserFixture) recvSpeechDriver(driver <-chan speechDriverResult, timeout time.Duration) (speechDriverResult, bool) {
+	f.t.Helper()
+	if driver == nil {
+		return speechDriverResult{}, false
+	}
+	select {
+	case res, ok := <-driver:
+		return res, ok
+	case <-time.After(timeout):
+		return speechDriverResult{}, false
+	}
+}
+
 // reclaimAndFail is the failure half of §5.1: release EVERY held control
-// point, wait (bounded) for the driver task's own exit, and only then fail
-// carrying both observations. t.Cleanup stays the last resort — it must
-// never replace this reclaim-before-assert.
+// point, wait (bounded) for server tasks and the driver goroutine, and only
+// then fail carrying both observations. t.Cleanup stays the last resort — it
+// must never replace this reclaim-before-assert.
 func (f *speechBrowserFixture) reclaimAndFail(driver <-chan speechDriverResult, releases []func(), format string, args ...any) {
 	f.t.Helper()
 	for _, release := range releases {
-		release()
-	}
-	ok, errMsg := false, "no driver result within the reclaim bound"
-	if driver != nil {
-		select {
-		case res, got := <-driver:
-			if got {
-				ok, errMsg = res.OK, res.Err
-			} else {
-				errMsg = "the driver goroutine ended without a result (runDriver's own Fatal fired first)"
-			}
-		case <-time.After(90 * time.Second):
+		if release != nil {
+			release()
 		}
 	}
-	f.t.Fatalf(format+" [reclaimed; driver ok=%v err=%v]", append(args, ok, errMsg)...)
+	tasksOK := waitFor(f.t, speechReclaimBound, f.speechServerTasksSettled)
+	res, driverGot := f.recvSpeechDriver(driver, speechReclaimBound)
+	ok, errMsg := false, "no driver result within the reclaim bound"
+	if driverGot {
+		ok, errMsg = res.OK, res.Err
+		if !ok && errMsg == "" {
+			errMsg = "driver reported failure"
+		}
+	} else if driver != nil {
+		errMsg = "the driver channel closed without a result"
+	}
+	f.t.Fatalf(format+" [reclaimed; server_settled=%v driver_ok=%v driver_err=%v]",
+		append(args, tasksOK, ok, errMsg)...)
 }
 
 // speechSubmitGate wraps the executor's checked CompleteCheck at the two
@@ -1045,12 +1142,24 @@ func (f *speechBrowserFixture) close() {
 // waitFirstManager blocks until a browser connection created its manager.
 func (f *speechBrowserFixture) waitFirstManager(timeout time.Duration) *speechManagerTracker {
 	f.t.Helper()
+	if m := f.tryFirstManager(timeout); m != nil {
+		return m
+	}
+	f.t.Fatal("no /rt connection was created before the deadline")
+	return nil
+}
+
+// tryFirstManager is waitFirstManager's observation half (§5.1): it returns
+// nil on timeout instead of Fataling, so callers that still hold a control
+// point or a running driver can reclaim FIRST and fail carrying both
+// observations. Every post-runDriverAsync call site uses this shape.
+func (f *speechBrowserFixture) tryFirstManager(timeout time.Duration) *speechManagerTracker {
+	f.t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		f.mu.Lock()
-		n := len(f.managers)
 		var m *speechManagerTracker
-		if n > 0 {
+		if len(f.managers) > 0 {
 			m = f.managers[0]
 		}
 		f.mu.Unlock()
@@ -1059,7 +1168,6 @@ func (f *speechBrowserFixture) waitFirstManager(timeout time.Duration) *speechMa
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	f.t.Fatal("no /rt connection was created before the deadline")
 	return nil
 }
 
@@ -1089,19 +1197,17 @@ func (f *speechBrowserFixture) waitManagersClosed(timeout time.Duration) bool {
 	return false
 }
 
-// runDriver spawns the Node browser driver and returns its parsed result.
-// extraArgs append verbatim (e.g. "--hold-ms", "3000" for starve-probe).
-// A failed scenario comes back as speechDriverResult{OK:false, Err:...}
-// with the driver's combined output attached for diagnosis.
-func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration, extraArgs ...string) speechDriverResult {
+// execSpeechDriver runs driver.js and parses SPEECH_RESULT without Fatalling —
+// runDriverAsync reports failures on the result channel for §5.1 reclaim.
+func (f *speechBrowserFixture) execSpeechDriver(scenario string, timeout time.Duration, extraArgs ...string) (speechDriverResult, string, error) {
 	f.t.Helper()
 	root := speechRepoRoot(f.t)
-	driver := filepath.Join(root, "pkg", "rt", "testdata", "speech-browser", "driver.js")
+	driverPath := filepath.Join(root, "pkg", "rt", "testdata", "speech-browser", "driver.js")
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout+15*time.Second)
 	defer cancel()
 	args := append([]string{
-		driver,
+		driverPath,
 		"--url", f.url() + "tutor/",
 		"--scenario", scenario,
 		"--timeout-ms", fmt.Sprint(int64(timeout / time.Millisecond)),
@@ -1117,7 +1223,7 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 		f.mu.Unlock()
 		expected, err := json.Marshal(sentences)
 		if err != nil {
-			f.t.Fatalf("encode expected opening: %v", err)
+			return speechDriverResult{}, "", fmt.Errorf("encode expected opening: %w", err)
 		}
 		args = append(args, "--expected-sentences-json", string(expected))
 		args = append(args, "--expected-pcm-per-sentence", fmt.Sprint(pcm))
@@ -1126,21 +1232,38 @@ func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration,
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	runErr := cmd.Run()
+	stderr := errOut.String()
 
 	var res speechDriverResult
 	line := lastSpeechResultLine(out.String())
 	if line == "" {
-		f.t.Fatalf("driver produced no SPEECH_RESULT line (run err=%v)\nstdout:\n%s\nstderr:\n%s",
-			runErr, out.String(), errOut.String())
+		return res, stderr, fmt.Errorf("driver produced no SPEECH_RESULT line (run err=%v)\nstdout:\n%s\nstderr:\n%s",
+			runErr, out.String(), stderr)
 	}
 	if err := json.Unmarshal([]byte(line), &res); err != nil {
-		f.t.Fatalf("driver result decode: %v\nline: %s", err, line)
+		return res, stderr, fmt.Errorf("driver result decode: %v\nline: %s", err, line)
 	}
 	if runErr != nil && res.OK {
-		f.t.Fatalf("driver exited with error %v but reported ok", runErr)
+		return res, stderr, fmt.Errorf("driver exited with error %v but reported ok", runErr)
 	}
 	if !res.OK {
-		f.t.Fatalf("driver scenario %q failed: %s\nstderr:\n%s", scenario, res.Err, errOut.String())
+		return res, stderr, fmt.Errorf("driver scenario %q failed: %s", scenario, res.Err)
+	}
+	return res, stderr, nil
+}
+
+// runDriver spawns the Node browser driver and returns its parsed result.
+// extraArgs append verbatim (e.g. "--hold-ms", "3000" for starve-probe).
+// A failed scenario comes back as speechDriverResult{OK:false, Err:...}
+// with the driver's combined output attached for diagnosis.
+func (f *speechBrowserFixture) runDriver(scenario string, timeout time.Duration, extraArgs ...string) speechDriverResult {
+	f.t.Helper()
+	res, stderr, err := f.execSpeechDriver(scenario, timeout, extraArgs...)
+	if err != nil {
+		if stderr != "" {
+			f.t.Fatalf("%v\nstderr:\n%s", err, stderr)
+		}
+		f.t.Fatal(err)
 	}
 	return res
 }
@@ -1168,7 +1291,10 @@ func TestCloseTransportFailure(t *testing.T) {
 	if !speechChHit(settled, 10*time.Second) {
 		f.reclaimAndFail(driver, nil, "opening did not settle before the close test")
 	}
-	m := f.waitFirstManager(5 * time.Second)
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, nil, "no /rt connection was created before the deadline")
+	}
 	cancelCount := ttArmCancelCounting(m.TurnManager)
 	res := <-driver
 	if res.WSCloseCount != 1 {
@@ -1193,7 +1319,10 @@ func TestCloseDuringScreenVerdict(t *testing.T) {
 	if !speechGateHit(verdictGate, 10*time.Second) {
 		f.reclaimAndFail(driver, []func(){verdictGate.release}, "screen verdict did not reach the real persistence gate")
 	}
-	m := f.waitFirstManager(5 * time.Second)
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "no /rt connection was created before the deadline")
+	}
 	if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
 		f.reclaimAndFail(driver, []func(){verdictGate.release}, "test close did not obtain session ownership")
 	}
@@ -1235,7 +1364,10 @@ func TestCloseDuringVoiceVerdict(t *testing.T) {
 	if !speechGateHit(verdictGate, 30*time.Second) {
 		f.reclaimAndFail(driver, []func(){verdictGate.release}, "spoken verdict did not reach the real persistence gate — the natural voice turn never landed")
 	}
-	m := f.waitFirstManager(5 * time.Second)
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "no /rt connection was created before the deadline")
+	}
 	if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
 		f.reclaimAndFail(driver, []func(){verdictGate.release}, "test close did not obtain session ownership")
 	}
@@ -1301,7 +1433,10 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 		if !speechGateHit(writesGate, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){writesGate.release}, "OCR prefill batch did not reach the first real persistence gate")
 		}
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){writesGate.release}, "no /rt connection was created before the deadline")
+		}
 
 		// A cross-connection manual verdict lands while the batch's first
 		// write parks (another tab's tap — §七 multi-connection rule): the
@@ -1309,11 +1444,11 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 		lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
 		l, err := f.tools.GetLessonState(context.Background(), lessonID)
 		if err != nil {
-			t.Fatalf("read lesson state: %v", err)
+			f.reclaimAndFail(driver, []func(){writesGate.release}, "read lesson state: %v", err)
 		}
 		if _, err := f.tools.ApplyVerdict(context.Background(), lessonID, l.Version, "cross-tab-manual-1",
 			lesson.CheckVerdict{WordIndex: 0, Correct: true, Manual: true}); err != nil {
-			t.Fatalf("cross-connection manual verdict: %v", err)
+			f.reclaimAndFail(driver, []func(){writesGate.release}, "cross-connection manual verdict: %v", err)
 		}
 		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
 			f.reclaimAndFail(driver, []func(){writesGate.release}, "test close did not obtain session ownership")
@@ -1358,7 +1493,10 @@ func TestCloseDuringOcrPrefills(t *testing.T) {
 		if !speechGateHit(ocrGate, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){ocrGate.release}, "the real OCR vision call never started")
 		}
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){ocrGate.release}, "no /rt connection was created before the deadline")
+		}
 		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
 			f.reclaimAndFail(driver, []func(){ocrGate.release}, "test close did not obtain session ownership")
 		}
@@ -1428,12 +1566,32 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		if !speechGateHit(before, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){before.release}, "the formal submit never reached the real latch write")
 		}
-		m := f.waitFirstManager(5 * time.Second)
-		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){before.release}, "no /rt connection was created before the deadline")
+		}
+		closeOK := m.tryTerminalClose(m.currentSender(), ReasonClientEnd)
+		// T6 observation, non-Fatal on purpose (§5.1: record the observation
+		// while the gate is still held, assert only after the reclaim): the
+		// original connection's read loop must already be free while the
+		// accepted save is parked — reverting the submit onto the read loop
+		// (go → sync) parks it inside CompleteCheck and this turns red.
+		exitedWhileParked := waitFor(t, 15*time.Second, f.speechConnectionTasksSettled)
+		before.release()
+		if !waitFor(t, speechReclaimBound, f.speechServerTasksSettled) {
+			f.reclaimAndFail(driver, nil, "server tasks did not settle after releasing the submit gate")
+		}
+		res, got := f.recvSpeechDriver(driver, speechReclaimBound)
+		if !got {
+			f.reclaimAndFail(driver, nil, "driver never returned after reclaim")
+		}
+		if !closeOK {
 			t.Fatal("test close did not obtain session ownership")
 		}
-		before.release()
-		assertOutcome(t, f, m, <-driver)
+		if !exitedWhileParked {
+			t.Fatal("the original connection did not exit while the accepted submit was parked — the save must not ride the read loop")
+		}
+		assertOutcome(t, f, m, res)
 	})
 
 	t.Run("close after commit before return", func(t *testing.T) {
@@ -1446,12 +1604,29 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 		if !speechGateHit(committed, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){committed.release}, "the formal submit never committed its latch write")
 		}
-		m := f.waitFirstManager(5 * time.Second)
-		if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){committed.release}, "no /rt connection was created before the deadline")
+		}
+		closeOK := m.tryTerminalClose(m.currentSender(), ReasonClientEnd)
+		// Same T6 observation as the first ordering: the read loop must be
+		// free while the committed window is parked.
+		exitedWhileParked := waitFor(t, 15*time.Second, f.speechConnectionTasksSettled)
+		committed.release()
+		if !waitFor(t, speechReclaimBound, f.speechServerTasksSettled) {
+			f.reclaimAndFail(driver, nil, "server tasks did not settle after releasing the submit gate")
+		}
+		res, got := f.recvSpeechDriver(driver, speechReclaimBound)
+		if !got {
+			f.reclaimAndFail(driver, nil, "driver never returned after reclaim")
+		}
+		if !closeOK {
 			t.Fatal("test close did not obtain session ownership")
 		}
-		committed.release()
-		assertOutcome(t, f, m, <-driver)
+		if !exitedWhileParked {
+			t.Fatal("the original connection did not exit while the committed submit was parked — the save must not ride the read loop")
+		}
+		assertOutcome(t, f, m, res)
 	})
 
 	t.Run("connection exits while persist is still parked", func(t *testing.T) {
@@ -1462,21 +1637,37 @@ func TestAcceptedSubmitSurvivesClose(t *testing.T) {
 
 		driver := f.runDriverAsync("check-submit-close", 45*time.Second)
 		persistReached := speechGateHit(before, 30*time.Second)
-		m := f.waitFirstManager(5 * time.Second)
-		if persistReached {
-			if !m.tryTerminalClose(m.currentSender(), ReasonClientEnd) {
-				t.Fatal("test close did not obtain session ownership")
-			}
-			// Release the persist gate only AFTER the original connection tasks
-			// have exited — a synchronous latch write in the read loop cannot
-			// pass this while the gate stays closed.
-			f.assertOriginalTasksExited()
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){before.release}, "no /rt connection was created before the deadline")
 		}
+		closeOK := false
+		if persistReached {
+			closeOK = m.tryTerminalClose(m.currentSender(), ReasonClientEnd)
+		}
+		// Record the read-loop-exit observation BEFORE releasing the persist
+		// gate (non-Fatal), then release and reclaim — a synchronous latch
+		// write in the read loop cannot pass this window while the gate stays
+		// closed; the assert happens only after every task was reclaimed.
+		exitedWhileParked := waitFor(t, 15*time.Second, f.speechConnectionTasksSettled)
 		before.release()
+		if !waitFor(t, speechReclaimBound, f.speechServerTasksSettled) {
+			f.reclaimAndFail(driver, nil, "server tasks did not settle after releasing the persist gate")
+		}
+		res, got := f.recvSpeechDriver(driver, speechReclaimBound)
+		if !got {
+			f.reclaimAndFail(driver, nil, "driver never returned after reclaim")
+		}
 		if !persistReached {
 			t.Fatal("the formal submit never reached the parked latch write")
 		}
-		assertOutcome(t, f, m, <-driver)
+		if !closeOK {
+			t.Fatal("test close did not obtain session ownership")
+		}
+		if !exitedWhileParked {
+			t.Fatal("the original connection did not exit while the persist was parked — the save must not ride the read loop")
+		}
+		assertOutcome(t, f, m, res)
 	})
 }
 
@@ -1522,7 +1713,10 @@ func TestCloseFallbackAfterAcceptedWrites(t *testing.T) {
 	if !speechGateHit(verdictGate, 30*time.Second) {
 		f.reclaimAndFail(driver, []func(){verdictGate.release}, "the screen verdict did not reach the real persistence gate")
 	}
-	m := f.waitFirstManager(5 * time.Second)
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "no /rt connection was created before the deadline")
+	}
 	// The goodbye close claims the fallback while the accepted verdict write
 	// is parked AHEAD of the real SQLite write.
 	m.handleEndSession(m.currentSender())
@@ -1589,7 +1783,10 @@ func TestCloseFallbackMultipleWrites(t *testing.T) {
 	}
 
 	driver := f.runDriverAsync("ocr-prefill-close", 45*time.Second)
-	m := f.waitFirstManager(5 * time.Second)
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, []func(){verdictGate.release}, "no /rt connection was created before the deadline")
+	}
 	if !speechGateHit(verdictGate, 30*time.Second) {
 		m.TurnManager.mu.Lock()
 		pending := len(m.checkWrites)
@@ -1734,7 +1931,10 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		if !speechGateHit(before, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){before.release, readGate.release}, "the formal submit never reached its pre-latch window")
 		}
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){before.release, readGate.release}, "no /rt connection was created before the deadline")
+		}
 		// The goodbye close claims the fallback while the ACCEPTED submit is
 		// parked ahead of its latch write. 读门会合（复盘第 3 节第 2 项）：
 		// 提交闩仍驻留时，只有撤掉 waitCheckWrites 的兜底才会在这个窗口
@@ -1805,7 +2005,10 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		if !speechGateHit(committed, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){committed.release}, "the formal submit never committed its latch write")
 		}
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){committed.release}, "no /rt connection was created before the deadline")
+		}
 		m.handleEndSession(m.currentSender())
 		committed.release()
 		res := <-driver
@@ -1848,7 +2051,10 @@ func TestCloseFallbackVersusSubmit(t *testing.T) {
 		if !speechGateHit(verdictGate, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){verdictGate.release}, "the screen verdict did not reach the persistence gate")
 		}
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){verdictGate.release}, "no /rt connection was created before the deadline")
+		}
 		m.handleEndSession(m.currentSender())
 		verdictGate.release()
 		res := <-driver
@@ -1912,7 +2118,10 @@ func TestCloseSnapshotBrowser(t *testing.T) {
 		if !speechGateHit(resumeGate, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){resumeGate.release, closeGate.release}, "the resume never reached its pre-presentation window")
 		}
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){resumeGate.release, closeGate.release}, "no /rt connection was created before the deadline")
+		}
 		// The goodbye parks inside the close entry (init-write lock held,
 		// tm.mu not yet) while the presentation is still parked behind its
 		// own window — the old two-lock snapshot window, driven through the
@@ -1982,7 +2191,10 @@ func TestCloseSnapshotBrowser(t *testing.T) {
 		if !speechGateHit(resumeGate, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){resumeGate.release}, "the resume never reached its pre-presentation window")
 		}
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){resumeGate.release}, "no /rt connection was created before the deadline")
+		}
 		// The goodbye runs to completion while the presentation is still
 		// parked: the claim saw no checking classroom, so no fallback exists
 		// and the late presentation is refused outright.
@@ -2048,7 +2260,10 @@ func TestDuplicateSubmitBrowser(t *testing.T) {
 	if !speechGateHit(before, 30*time.Second) {
 		f.reclaimAndFail(driver, []func(){before.release}, "the formal submit never reached its pre-latch window")
 	}
-	m := f.waitFirstManager(5 * time.Second)
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, []func(){before.release}, "no /rt connection was created before the deadline")
+	}
 	// While THIS session's submit is parked ahead of its latch write, another
 	// connection flips the checking→submitted latch first (the multi-
 	// connection rule rides the database, §七).
@@ -2103,7 +2318,10 @@ func TestClosedControlBrowser(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		f.seedChecking()
 		driver := f.runDriverAsync("resume-close-window", 45*time.Second)
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, nil, "no /rt connection was created before the deadline")
+		}
 		settled(f)
 		m.handleEndSession(m.currentSender())
 		res := <-driver
@@ -2138,7 +2356,10 @@ func TestClosedControlBrowser(t *testing.T) {
 		f := newSpeechBrowserFixture(t)
 		f.seedChecking()
 		driver := f.runDriverAsync("resume-close-window", 45*time.Second)
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, nil, "no /rt connection was created before the deadline")
+		}
 		settled(f)
 
 		start := make(chan struct{})
@@ -2198,7 +2419,10 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 		if !speechGateHit(reviewGate, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){reviewGate.release}, "the correction diff write never reached its review gate")
 		}
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){reviewGate.release}, "no /rt connection was created before the deadline")
+		}
 		// The goodbye close claims the accepted correction (its admission covers
 		// the diff write, the receipt and the marker reset) while the diff write
 		// is parked AHEAD of the real save.
@@ -2250,7 +2474,10 @@ func TestCorrectionSubmitBrowser(t *testing.T) {
 		// dead connection — the late submit below probes the production entry
 		// in-process instead.
 		driver := f.runDriverAsync("correction-submit-close", 45*time.Second, "--submit-delay-ms", "3000")
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, nil, "no /rt connection was created before the deadline")
+		}
 		if !waitFor(t, 30*time.Second, func() bool {
 			m.TurnManager.mu.Lock()
 			defer m.TurnManager.mu.Unlock()
@@ -2321,7 +2548,10 @@ func TestPassageSubmitBrowser(t *testing.T) {
 		if !speechGateHit(before, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){before.release}, "the passage submit never reached its pre-latch window")
 		}
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){before.release}, "no /rt connection was created before the deadline")
+		}
 		m.handleEndSession(m.currentSender())
 		before.release()
 		res := <-driver
@@ -2329,13 +2559,12 @@ func TestPassageSubmitBrowser(t *testing.T) {
 			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
 				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
 		}
-		if !waitFor(t, 15*time.Second, func() bool {
-			return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
-				f.writerDone.Load() == 1 &&
-				f.providerStarted.Load() == f.providerDone.Load() &&
-				f.announcementRun.Load() == f.announcementDone.Load()
-		}) {
-			t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+		// Server tasks, not just the connection: the accepted submit's own
+		// tail AND the unchecked fallback must both be done before the row is
+		// read (review R0-P2: the driver's return proves neither — the
+		// fallback can still be parked on a gate when it fires).
+		if !waitFor(t, speechReclaimBound, f.speechServerTasksSettled) {
+			t.Fatalf("server tasks did not settle: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
 				f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
 				f.providerStarted.Load(), f.providerDone.Load(),
 				f.announcementRun.Load(), f.announcementDone.Load())
@@ -2381,7 +2610,10 @@ func TestPassageSubmitBrowser(t *testing.T) {
 		t.Cleanup(fallbackHold.release)
 
 		driver := f.runDriverAsync("passage-submit-close", 45*time.Second, "--submit-delay-ms", "15000")
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){fallbackHold.release}, "no /rt connection was created before the deadline")
+		}
 		var lessonID string
 		var versionAfterVerdict int
 		if !waitFor(t, 30*time.Second, func() bool {
@@ -2475,7 +2707,10 @@ func TestPoemSubmitBrowser(t *testing.T) {
 		if !speechGateHit(before, 30*time.Second) {
 			f.reclaimAndFail(driver, []func(){before.release}, "the poem submit never reached its pre-latch window")
 		}
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, []func(){before.release}, "no /rt connection was created before the deadline")
+		}
 		m.handleEndSession(m.currentSender())
 		before.release()
 		res := <-driver
@@ -2483,13 +2718,12 @@ func TestPoemSubmitBrowser(t *testing.T) {
 			t.Fatalf("close=%d late review=%d late sentences=%d, want 1/0/0",
 				res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences)
 		}
-		if !waitFor(t, 15*time.Second, func() bool {
-			return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
-				f.writerDone.Load() == 1 &&
-				f.providerStarted.Load() == f.providerDone.Load() &&
-				f.announcementRun.Load() == f.announcementDone.Load()
-		}) {
-			t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+		// Server tasks, not just the connection: the accepted submit's own
+		// tail AND the unchecked fallback must both be done before the row is
+		// read (review R0-P2: the driver's return proves neither — the
+		// fallback can still be parked on a gate when it fires).
+		if !waitFor(t, speechReclaimBound, f.speechServerTasksSettled) {
+			t.Fatalf("server tasks did not settle: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
 				f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
 				f.providerStarted.Load(), f.providerDone.Load(),
 				f.announcementRun.Load(), f.announcementDone.Load())
@@ -2533,7 +2767,10 @@ func TestPoemSubmitBrowser(t *testing.T) {
 		f.scriptSpokenConfirm()
 
 		driver := f.runDriverAsync("poem-submit-close", 45*time.Second, "--submit-delay-ms", "15000")
-		m := f.waitFirstManager(5 * time.Second)
+		m := f.tryFirstManager(5 * time.Second)
+		if m == nil {
+			f.reclaimAndFail(driver, nil, "no /rt connection was created before the deadline")
+		}
 		var lessonID string
 		var versionAfterVerdicts int
 		if !waitFor(t, 30*time.Second, func() bool {
@@ -2603,7 +2840,10 @@ func TestPlaybackSettleBrowser(t *testing.T) {
 	t.Cleanup(settleGate.release)
 
 	driver := f.runDriverAsync("resume-close-window", 45*time.Second)
-	m := f.waitFirstManager(5 * time.Second)
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, []func(){settleGate.release}, "no /rt connection was created before the deadline")
+	}
 	if !speechGateHit(settleGate, 30*time.Second) {
 		f.reclaimAndFail(driver, []func(){settleGate.release}, "the naturally-acked announcement never reached its settle window")
 	}
@@ -2640,7 +2880,10 @@ func TestStreamResultBrowser(t *testing.T) {
 	f.mu.Unlock()
 
 	driver := f.runDriverAsync("resume-close-window", 45*time.Second)
-	m := f.waitFirstManager(5 * time.Second)
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, []func(){func() { close(g.release) }}, "no /rt connection was created before the deadline")
+	}
 	if !speechChHit(g.entered, 30*time.Second) {
 		f.reclaimAndFail(driver, []func(){func() { close(g.release) }}, "the resume stream never parked between its chunks")
 	}
@@ -2714,14 +2957,12 @@ func TestPracticeSubmitBrowser(t *testing.T) {
 			res.WSCloseCount, res.LateReviewResults, res.LateTeacherSentences, res.LateSentenceTexts)
 	}
 	// Two connections live in this journey (completed short-circuit + the
-	// practice classroom) — all handlers must be gone, none replaced.
-	if !waitFor(t, 15*time.Second, func() bool {
-		return f.handlerActive.Load() == 0 && f.handlerDone.Load() >= 1 &&
-			f.writerDone.Load() >= 1 &&
-			f.providerStarted.Load() == f.providerDone.Load() &&
-			f.announcementRun.Load() == f.announcementDone.Load()
-	}) {
-		t.Fatalf("connection tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
+	// practice classroom) — every handler must be gone, none replaced, and
+	// the accepted practice submit's own tail (plus any fallback latch) must
+	// be done before the rows are read (review R0-P2: the driver's return
+	// alone proves neither).
+	if !waitFor(t, speechReclaimBound, f.speechServerTasksSettled) {
+		t.Fatalf("server tasks did not settle: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
 			f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
 			f.providerStarted.Load(), f.providerDone.Load(),
 			f.announcementRun.Load(), f.announcementDone.Load())
@@ -2762,7 +3003,17 @@ func (f *speechBrowserFixture) runDriverAsync(scenario string, timeout time.Dura
 	done := make(chan speechDriverResult, 1)
 	go func() {
 		defer close(done)
-		done <- f.runDriver(scenario, timeout, extraArgs...)
+		res, stderr, err := f.execSpeechDriver(scenario, timeout, extraArgs...)
+		if err != nil {
+			res.OK = false
+			if res.Err == "" {
+				res.Err = err.Error()
+			}
+			if stderr != "" && !strings.Contains(res.Err, stderr) {
+				res.Err += "\nstderr:\n" + stderr
+			}
+		}
+		done <- res
 	}()
 	return done
 }
@@ -2780,12 +3031,7 @@ func (f *speechBrowserFixture) waitOneManager(timeout time.Duration) {
 
 func (f *speechBrowserFixture) assertOriginalTasksExited() {
 	f.t.Helper()
-	if !waitFor(f.t, 15*time.Second, func() bool {
-		return f.handlerActive.Load() == 0 && f.handlerDone.Load() == 1 &&
-			f.writerDone.Load() == 1 && f.providerStarted.Load() > 0 &&
-			f.providerStarted.Load() == f.providerDone.Load() &&
-			f.announcementRun.Load() > 0 && f.announcementRun.Load() == f.announcementDone.Load()
-	}) {
+	if !waitFor(f.t, 15*time.Second, f.speechConnectionTasksSettled) {
 		f.t.Fatalf("original tasks did not exit: handler=%d/%d writer=%d provider=%d/%d announcement=%d/%d",
 			f.handlerActive.Load(), f.handlerDone.Load(), f.writerDone.Load(),
 			f.providerStarted.Load(), f.providerDone.Load(),
