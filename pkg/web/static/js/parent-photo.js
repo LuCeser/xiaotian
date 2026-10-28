@@ -873,6 +873,38 @@
   }
 
   /**
+   * refreshRowLesson — ONE row's lesson after the target book changed
+   * (Issue #80 U4). The three ways a lesson can exist keep separate
+   * identities: the parent's value (an explicit clear included) and the
+   * photo's own OCR lesson are FACTS the refresh preserves; a row whose
+   * lesson came from a recommendation is re-derived from the CURRENT rec,
+   * so an old recommendation can never freeze into a "recognized" fact
+   * (fillRecommendedLessons is for FRESH rows only — there a non-empty
+   * lesson is an OCR fact; here it may be last round's recommendation).
+   * Pure: returns the row or a copy, the input is never touched.
+   */
+  function refreshRowLesson(row, rec) {
+    if (!row) {
+      return row;
+    }
+    if (row.lessonOrigin === 'parent') {
+      return row;
+    }
+    if (row.lessonOrigin === 'recognized' && metaField(row.lesson)) {
+      return row;
+    }
+    var copy = Object.assign({}, row);
+    if (rec && metaField(rec.lesson)) {
+      copy.lesson = metaField(rec.lesson);
+      copy.lessonOrigin = rec.source || 'recognized';
+    } else {
+      copy.lesson = '';
+      copy.lessonOrigin = 'none';
+    }
+    return copy;
+  }
+
+  /**
    * applyBatchLesson — the 整批指定 path (Issue #80 §3.2): one lesson
    * onto every committable CHECKED row (the 加入 set — the whole
    * submittable batch), origin 'parent' (the 推荐 badge stops applying).
@@ -1014,12 +1046,12 @@
   /**
    * recommendForDraftPage — one freshly recognized page's recommendation
    * with the honest inputs of the moment (Issue #80 §3.1): the page's own
-   * header + entries, the lesson list of the book the CURRENT merged meta
-   * actually matches (the preselect candidate — nothing is chosen yet at
-   * recognize time), and the run's earlier pages' recommendations in
-   * order. Pure; recommendLesson does the deciding, nothing is written.
+   * header + entries, the lesson list of the parent's CURRENT book choice,
+   * and the run's earlier pages' recommendations in order. Pure;
+   * recommendLesson does the deciding, nothing is written. (U4: the merged
+   * batch meta is deliberately NOT an input — a page's facts are its own.)
    */
-  function recommendForDraftPage(books, meta, photo, priorRecs, bookChoice) {
+  function recommendForDraftPage(books, photo, priorRecs, bookChoice) {
     var lessons = lessonsForRecommend(books, bookChoice);
     return recommendLesson(photo, lessons, priorRecs || []);
   }
@@ -1045,8 +1077,7 @@
     form.rows = classifyPhotoEntries(entries, form.existingWords);
     stampEntryIndex(form.rows);
     form.rows = fillRecommendedLessons(form.rows, recommendForDraftPage(
-      form.books, form.detectedMeta,
-      { textbook: form.detectedMeta, entries: entries }, [],
+      form.books, { textbook: form.detectedMeta, entries: entries }, [],
       form.bookChoice));
     return true;
   }
@@ -2858,7 +2889,7 @@
     var pageMeta = global.recognitionMetaForPage
       ? (global.recognitionMetaForPage(this.importPhotoState, pageNo) || parsed.meta)
       : parsed.meta;
-    var rec = recommendForDraftPage(this.books, this.detectedMeta,
+    var rec = recommendForDraftPage(this.books,
       { textbook: pageMeta, entries: parsed.entries }, priorRecs,
       this.bookChoice);
     state.lessonRecs[pageNo - 1] = rec;
@@ -3631,61 +3662,52 @@
   };
 
   /**
+   * recommendationForPhotoPage — ONE page's §3.1 rec from honest inputs:
+   * the page's OWN registered snapshot (meta + entries from the import
+   * store; an unregistered page has neither) plus the earlier pages'
+   * freshly derived recs in photo order. The merged batch meta
+   * (detectedMeta) is deliberately NOT an input — its lesson may come
+   * from a LATER photo, and an earlier photo must never borrow it.
+   */
+  PhotoAddForm.prototype.recommendationForPhotoPage = function (pageNo, priorRecs) {
+    return recommendForDraftPage(this.books, {
+      textbook: global.recognitionMetaForPage
+        ? global.recognitionMetaForPage(this.importPhotoState, pageNo)
+        : null,
+      entries: entriesForPhotoPage(this.rows, pageNo, this.importPhotoState),
+    }, priorRecs || [], this.bookChoice);
+  };
+
+  /**
    * refreshLessonRecommendations — after the parent changes the target
-   * book, re-derive §3.1 recommendations for rows the parent has not
-   * locked (lessonOrigin !== 'parent'; recognized rows keep OCR lesson).
+   * book, re-derive §3.1 recommendations (Issue #80 U4): EVERY page's rec
+   * is recomputed, in PHOTO order, from the page's own snapshot and the
+   * CURRENT book choice — A→B→新建→空教材 all recompute, earlier photos
+   * feed later ones by photo number (never completion order), and rows
+   * keep their own facts (the parent's value, an explicit clear included,
+   * and the photo's own OCR lesson) while recommendation-derived lessons
+   * are replaced.
    */
   PhotoAddForm.prototype.refreshLessonRecommendations = function () {
     var state = this.runState();
-    var self = this;
     if (state && state.lessonRecs && state.lessonRecs.length) {
       var newRecs = [];
-      var pageCount = state.lessonRecs.length;
-      for (var p = 1; p <= pageCount; p++) {
-        var pageEntry = state.plan && state.plan.pages[p - 1];
-        if (pageEntry && pageEntry.status === 'pending') {
-          newRecs[p - 1] = state.lessonRecs[p - 1];
-          continue;
-        }
-        var prior = lessonRecsPriorToPage(newRecs, p);
-        var pageMeta = global.recognitionMetaForPage
-          ? (global.recognitionMetaForPage(this.importPhotoState, p) || this.detectedMeta)
-          : this.detectedMeta;
-        newRecs[p - 1] = recommendForDraftPage(
-          this.books, this.detectedMeta,
-          { textbook: pageMeta, entries: entriesForPhotoPage(this.rows, p, this.importPhotoState) },
-          prior, this.bookChoice);
+      for (var p = 1, n = state.lessonRecs.length; p <= n; p++) {
+        newRecs[p - 1] = this.recommendationForPhotoPage(p,
+          lessonRecsPriorToPage(newRecs, p));
       }
       state.lessonRecs = newRecs;
       this.rows = this.rows.map(function (row) {
-        if (row.lessonOrigin === 'parent') {
-          return row;
-        }
-        if (row.lessonOrigin === 'recognized' && metaField(row.lesson)) {
-          return row;
-        }
-        var rec = newRecs[(row.page || 1) - 1];
-        return fillRecommendedLessons([row], rec)[0];
+        return refreshRowLesson(row, newRecs[((row && row.page) || 1) - 1]);
       });
       return;
     }
     if (!this.rows.length) {
       return;
     }
-    var singleMeta = global.recognitionMetaForPage
-      ? (global.recognitionMetaForPage(this.importPhotoState, 1) || this.detectedMeta)
-      : this.detectedMeta;
-    var rec = recommendForDraftPage(this.books, this.detectedMeta,
-      { textbook: singleMeta, entries: entriesForPhotoPage(this.rows, 1, this.importPhotoState) },
-      [], this.bookChoice);
+    var rec = this.recommendationForPhotoPage(1, []);
     this.rows = this.rows.map(function (row) {
-      if (row.lessonOrigin === 'parent') {
-        return row;
-      }
-      if (row.lessonOrigin === 'recognized' && metaField(row.lesson)) {
-        return row;
-      }
-      return fillRecommendedLessons([row], rec)[0];
+      return refreshRowLesson(row, rec);
     });
   };
 

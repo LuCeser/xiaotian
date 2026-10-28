@@ -238,22 +238,20 @@ const BOOKS = [
   // recommendForDraftPage: §3.1 previous-lesson only from the parent's
   // chosen book — OCR meta match alone never supplies another book's list.
   const BOOKS2 = [{ id: 7, name: '书七', edition: '人教版PEP', stage: '', grade: '三年级', volume: '', module: '', lessons: ['第1课', '第2课'] }];
-  eq(recommendForDraftPage(BOOKS2, { edition: '人教版PEP', grade: '三年级' },
-    { entries: [{ word: 'a', lesson: '' }] }, []),
+  eq(recommendForDraftPage(BOOKS2, { entries: [{ word: 'a', lesson: '' }] }, []),
     { lesson: '', source: 'none' }, 'unset bookChoice never borrows OCR-matched lessons');
-  eq(recommendForDraftPage([], null, { entries: [{ word: 'a', lesson: '' }] }, []),
+  eq(recommendForDraftPage([], { entries: [{ word: 'a', lesson: '' }] }, []),
     { lesson: '', source: 'none' }, 'new-book draft with no signal stays none');
 
   // §3.1: photo-order fallback only looks at EARLIER photo indices.
   const outOfOrder = [undefined, { lesson: '第2课', source: 'recognized' }];
   eq(lessonRecsPriorToPage(outOfOrder, 1), [], 'photo 1 has no prior recs');
-  eq(recommendForDraftPage([], null, { entries: [{ word: 'a', lesson: '' }] },
+  eq(recommendForDraftPage([], { entries: [{ word: 'a', lesson: '' }] },
     lessonRecsPriorToPage(outOfOrder, 1), 'new'),
     { lesson: '', source: 'none' }, 'retry photo 1 never borrows photo 2 lesson');
 
   // §3.1: the parent's chosen textbook feeds previous-lesson, not OCR rematch.
-  eq(recommendForDraftPage(BOOKS2, { edition: '人教版PEP', grade: '三年级' },
-    { entries: [{ word: 'a', lesson: '' }] }, [], 7),
+  eq(recommendForDraftPage(BOOKS2, { entries: [{ word: 'a', lesson: '' }] }, [], 7),
     { lesson: '第2课', source: 'previous-lesson' }, 'chosen book id uses its lesson list');
   eq(lessonsForRecommend(BOOKS2, 7), ['第1课', '第2课'], 'lessonsForRecommend reads the chosen book');
 })();
