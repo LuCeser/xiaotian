@@ -19,11 +19,12 @@ import (
 // 合格红).
 type holdFirstCompleteCheck struct {
 	LessonExecutor
-	entered  chan struct{}
-	release  chan struct{}
-	calls    atomic.Int64
-	returned atomic.Int64
-	once     sync.Once
+	entered     chan struct{}
+	release     chan struct{}
+	calls       atomic.Int64
+	returned    atomic.Int64
+	once        sync.Once
+	releaseOnce sync.Once
 }
 
 func newHoldFirstCompleteCheck(inner LessonExecutor) *holdFirstCompleteCheck {
@@ -50,16 +51,32 @@ func (h *holdFirstCompleteCheck) CompleteCheck(ctx context.Context, lessonID str
 
 func (h *holdFirstCompleteCheck) callCount() int64     { return h.calls.Load() }
 func (h *holdFirstCompleteCheck) returnedCount() int64 { return h.returned.Load() }
-func (h *holdFirstCompleteCheck) openUp()              { close(h.release) }
+func (h *holdFirstCompleteCheck) openUp() {
+	h.releaseOnce.Do(func() { close(h.release) })
+}
 
-// ttSubmitTaskSettled observes the accepted dictation submit task's own exit:
-// the connection-level pending flag is cleared in the task's defer, AFTER its
-// review_result and receipt finished — the completion observation §5.1 asks
-// for (closed/attempt counts alone never are one).
-func ttSubmitTaskSettled(tm *TurnManager) bool {
+// ttFormalSubmitSettled is the per-task completion observation for the formal
+// submit hold gate (review R0-P2). It needs BOTH halves:
+//   - returned >= calls observes EVERY checked CompleteCheck, so a mutation
+//     that lets a second submit task coexist (dedup removed) still waits for
+//     that task's executor call — the single-flight flag alone would not;
+//   - !formalCheckSubmitPending observes the accepted task's OWN tail: its
+//     defer clears the flag only after the writeback, review_result and
+//     receipt, so counting messages after the wait is deterministic. Counts
+//     alone would let the assertions race that tail (CompleteCheck returns
+//     before finishCheckSubmit sends anything).
+func ttFormalSubmitSettled(tm *TurnManager, hold *holdFirstCompleteCheck) bool {
+	if calls := hold.callCount(); calls > 0 && hold.returnedCount() < calls {
+		return false
+	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return !tm.formalCheckSubmitPending
+}
+
+func waitFormalSubmitSettled(t *testing.T, tm *TurnManager, hold *holdFirstCompleteCheck, timeout time.Duration) bool {
+	t.Helper()
+	return waitFor(t, timeout, func() bool { return ttFormalSubmitSettled(tm, hold) })
 }
 
 // TestHoldFirstCompleteCheckProtocol pins the hold gate's own execution
@@ -106,6 +123,7 @@ func TestHoldFirstCompleteCheckProtocol(t *testing.T) {
 	// Releasing a never-hit gate must not fabricate the hit (§5.1).
 	late := newHoldFirstCompleteCheck(exec)
 	late.openUp()
+	late.openUp() // release must be idempotent (§5.1 + Cleanup)
 	select {
 	case <-late.entered:
 		t.Fatal("release closed entered — 解除控制点伪造了命中")
@@ -128,7 +146,10 @@ func TestCheckSubmitInFlightBlocksSameConnectionRetry(t *testing.T) {
 
 	reclaimAndFail := func(msg string) {
 		hold.openUp()
-		waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) })
+		if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+			t.Fatalf("%s (reclaim: CompleteCheck calls=%d returned=%d never settled)",
+				msg, hold.callCount(), hold.returnedCount())
+		}
 		t.Fatal(msg)
 	}
 
@@ -154,8 +175,9 @@ func TestCheckSubmitInFlightBlocksSameConnectionRetry(t *testing.T) {
 	}
 
 	hold.openUp()
-	if !waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) }) {
-		t.Fatalf("the accepted submit task never finished (CompleteCheck calls=%d)", hold.callCount())
+	if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+		t.Fatalf("the accepted submit task never finished (CompleteCheck calls=%d returned=%d)",
+			hold.callCount(), hold.returnedCount())
 	}
 	if got := hold.callCount(); got != 1 {
 		t.Fatalf("CompleteCheck calls after finish = %d, want exactly 1", got)
@@ -168,7 +190,8 @@ func TestCheckSubmitInFlightBlocksSameConnectionRetry(t *testing.T) {
 // TestFormalCheckSubmitFreezesWordListAtAdmission: mutating the live tutor
 // during the latch write must not change the rating batch assembled from the
 // admission snapshot. The frozen-batch assertion waits for the submit task's
-// OWN completion first (pending cleared ⇒ the save and its receipt landed).
+// OWN completion first (ttFormalSubmitSettled: every call returned AND the
+// task's defer-tail — writeback, review_result, receipt — has landed).
 func TestFormalCheckSubmitFreezesWordListAtAdmission(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	tm, s, _, inner := ttDriveToCheck(t, ttCards("苹果"), words)
@@ -186,7 +209,10 @@ func TestFormalCheckSubmitFreezesWordListAtAdmission(t *testing.T) {
 	}
 	if !hit {
 		hold.openUp()
-		waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) })
+		if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+			t.Fatalf("submit reclaim: CompleteCheck calls=%d returned=%d never settled",
+				hold.callCount(), hold.returnedCount())
+		}
 		t.Fatal("submit never reached CompleteCheck")
 	}
 	tm.mu.Lock()
@@ -195,8 +221,9 @@ func TestFormalCheckSubmitFreezesWordListAtAdmission(t *testing.T) {
 	tm.mu.Unlock()
 	hold.openUp()
 
-	if !waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) }) {
-		t.Fatalf("the accepted submit task never finished (CompleteCheck calls=%d)", hold.callCount())
+	if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+		t.Fatalf("the accepted submit task never finished (CompleteCheck calls=%d returned=%d)",
+			hold.callCount(), hold.returnedCount())
 	}
 	subs := words.submissions()
 	if len(subs) != 1 {
