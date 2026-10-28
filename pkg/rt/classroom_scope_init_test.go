@@ -2,6 +2,7 @@ package rt
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -174,10 +175,12 @@ func TestSupersededClassroomSubmitCannotWriteBack(t *testing.T) {
 	}
 	tm.cfg = cfg
 	if fe, ok := hold.LessonExecutor.(*fakeExecutor); ok {
+		// EnsureLessonCards reuses the in-memory row: reset index/stage so
+		// practice greeting does not inherit checking CurrentIndex, but keep
+		// Version=4 so A's admitted CompleteCheck still succeeds (success path).
 		fe.mu.Lock()
 		fe.lesson.CurrentIndex = 0
 		fe.lesson.Stage = ""
-		fe.lesson.Version = 1
 		fe.lesson.Verdicts = nil
 		fe.mu.Unlock()
 	}
@@ -195,7 +198,6 @@ func TestSupersededClassroomSubmitCannotWriteBack(t *testing.T) {
 	}
 
 	tm.mu.Lock()
-	tm.tutor.checking = true // B is in check; A's stale writeback must not clear this.
 	wantVer := tm.tutor.version
 	wantChecking := tm.tutor.checking
 	tm.mu.Unlock()
@@ -217,6 +219,104 @@ func TestSupersededClassroomSubmitCannotWriteBack(t *testing.T) {
 		t.Fatalf("tutor.version = %d, want %d (superseded submit must not write back)", gotVer, wantVer)
 	}
 	if gotChecking != wantChecking {
-		t.Fatalf("tutor.checking = %v, want %v (superseded submit must not clear B's check stage)", gotChecking, wantChecking)
+		t.Fatalf("tutor.checking = %v, want %v (superseded submit must not flip B's stage on success path)", gotChecking, wantChecking)
+	}
+}
+
+// TestClassroomReplaceNotifiesClientEpoch (R1 review P1): after classroom A's
+// opening is underway, replacing with classroom B must ship interrupt_ack
+// BEFORE B's session_ready so production playback adopts the bumped epoch and
+// accepts B's greeting audio_start.
+func TestClassroomReplaceNotifiesClientEpoch(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	practice := &fakePracticeSource{cards: ptPracticeCards("cat", "dog")}
+	ps := newTestPracticeStore(t)
+	cfg := TurnManagerConfig{
+		LessonID: ttLessonID, Words: words,
+		Practice: practice, PracticeStore: ps,
+	}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, cfg,
+		NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+
+	ttInit(t, tm, s)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) >= 1 }) {
+		t.Fatal("classroom A greeting never started before replace")
+	}
+	tm.mu.Lock()
+	epochA := tm.epoch
+	tm.mu.Unlock()
+	ttAckLast(t, tm, s, epochA)
+	sentsBeforeB := s.countOf(TypeTeacherSentence)
+	startsBeforeB := s.countOf(TypeAudioStart)
+
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Practice: true,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) >= 2 }) {
+		t.Fatal("practice session_ready never arrived")
+	}
+
+	acks := s.controlsOf(t, TypeInterruptAck)
+	if len(acks) < 1 {
+		t.Fatalf("interrupt_ack count = %d, want at least 1 (classroom replace must notify playback epoch)", len(acks))
+	}
+	s.mu.Lock()
+	order := append([][]byte(nil), s.controls...)
+	s.mu.Unlock()
+	firstAck, secondReady := -1, -1
+	readyCount := 0
+	for i, raw := range order {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &probe) != nil {
+			continue
+		}
+		if probe.Type == TypeInterruptAck && firstAck < 0 {
+			firstAck = i
+		}
+		if probe.Type == TypeSessionReady {
+			readyCount++
+			if readyCount == 2 {
+				secondReady = i
+			}
+		}
+	}
+	if firstAck < 0 || secondReady < 0 || firstAck > secondReady {
+		t.Fatalf("interrupt_ack index=%d second session_ready index=%d, want ack before B's ready", firstAck, secondReady)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioStart) > startsBeforeB }) {
+		t.Fatalf("audio_start count = %d, want > %d (B opening must register after epoch notify)", s.countOf(TypeAudioStart), startsBeforeB)
+	}
+	if got := s.countOf(TypeTeacherSentence); got <= sentsBeforeB {
+		t.Fatalf("teacher_sentence count = %d, want > %d (B greeting must enqueue after epoch notify)", got, sentsBeforeB)
+	}
+}
+
+// TestCheckResumeReinitSpeaksBridge (R1 review P2): repeating session_init into
+// the same checking row on one connection bumps playback epoch on replace;
+// the resume bridge must still speak under the post-install epoch.
+func TestCheckResumeReinitSpeaksBridge(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	tm, s := ttInitCheckingRow(t, exec, words)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) >= 1 }) {
+		t.Fatal("first check resume bridge never spoke")
+	}
+	tm.mu.Lock()
+	epoch := tm.epoch
+	tm.mu.Unlock()
+	ttAckLast(t, tm, s, epoch)
+	bridgeBefore := s.countOf(TypeTeacherSentence)
+
+	ttInit(t, tm, s)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckStarted) >= 2 }) {
+		t.Fatal("second check_started never arrived on re-init")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > bridgeBefore }) {
+		t.Fatalf("teacher_sentence count = %d, want > %d (resume bridge must run after classroom replace epoch)", s.countOf(TypeTeacherSentence), bridgeBefore)
 	}
 }
