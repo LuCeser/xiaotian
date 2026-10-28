@@ -291,7 +291,7 @@ func scopeParagraphs(p passage.Passage, scope passage.ScopeRow) ([]string, bool)
 // selected paragraphs. A submitted attempt never reopens here — its judgment
 // is settled history; re-practicing the range is a new row (段落历史不被伪
 // 造).
-func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
+func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64, installGen uint64) {
 	if tm.cfg.Passages == nil {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeLessonUnavailable),
@@ -369,8 +369,6 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
 	tm.mu.Lock()
 	tm.category = lesson.NormalizeCategory(p.Category)
 	tm.mu.Unlock()
-
-	installGen := tm.beginClassroomAttempt()
 
 	// Resume probe: this RANGE's latest attempt row — keyed by content +
 	// range, never the scope row id (a removed-and-re-added range keeps
@@ -468,8 +466,8 @@ func (tm *TurnManager) startPassageSession(s Sender, l lesson.Lesson, p passage.
 	}
 	var epoch uint64
 	if !tm.applyClassroomInstallEffect(installGen, func() error {
-		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor) {
-			return errClassroomInstallStale
+		if err := tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor, s); err != nil {
+			return err
 		}
 		if err := s.SendControl(ready); err != nil {
 			return err

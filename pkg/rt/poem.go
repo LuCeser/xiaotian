@@ -195,7 +195,7 @@ func (tm *TurnManager) poemViewForRow(l lesson.Lesson) *PoemTaskView {
 // attempt under its own id (a mid-writing reconnect or an unfinished check)
 // or open a FRESH attempt row. A submitted attempt never reopens here — its
 // judgment is settled history; re-practicing the poem is a new row.
-func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
+func (tm *TurnManager) handlePoemInit(s Sender, poemID int64, installGen uint64) {
 	if tm.cfg.Poems == nil {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeLessonUnavailable),
@@ -209,8 +209,6 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
 	tm.mu.Lock()
 	tm.category = lesson.CategoryChinese
 	tm.mu.Unlock()
-
-	installGen := tm.beginClassroomAttempt()
 
 	ctx := context.Background()
 	p, err := tm.cfg.Poems.FetchPoem(ctx, poemID)
@@ -298,8 +296,8 @@ func (tm *TurnManager) startPoemSession(s Sender, l lesson.Lesson, p poem.Poem, 
 	}
 	var epoch uint64
 	if !tm.applyClassroomInstallEffect(installGen, func() error {
-		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor) {
-			return errClassroomInstallStale
+		if err := tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor, s); err != nil {
+			return err
 		}
 		if err := s.SendControl(ready); err != nil {
 			return err

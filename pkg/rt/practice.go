@@ -212,14 +212,13 @@ func (tm *TurnManager) noDueWordsTextForNow() string {
 // vocabulary (never the due fetch), and start the SAME three-stage FSM with
 // the practice flag set. Runs on the transport read loop — DB calls are the
 // same short-transaction class as the main init.
-func (tm *TurnManager) handlePracticeInit(s Sender) {
+func (tm *TurnManager) handlePracticeInit(s Sender, installGen uint64) {
 	if !tm.stillOpen() {
 		// PR #60 review: a practice init resumed after a subject pick runs on
 		// the answer turn's goroutine — a session closed under that handoff
 		// answers nothing.
 		return
 	}
-	installGen := tm.beginClassroomAttempt()
 	if tm.cfg.Practice == nil || tm.cfg.PracticeStore == nil {
 		// Honest degraded answer (lesson_unavailable class) — never a
 		// silent fallback into a due-word lesson.
@@ -300,8 +299,8 @@ func (tm *TurnManager) handlePracticeInit(s Sender) {
 			Category:  category,
 		}
 		if !tm.applyClassroomInstallEffect(installGen, func() error {
-			if !tm.replaceActiveClassroomLocked(installGen, lessonID, nil) {
-				return errClassroomInstallStale
+			if err := tm.replaceActiveClassroomLocked(installGen, lessonID, nil, s); err != nil {
+				return err
 			}
 			if sendErr := s.SendControl(ready); sendErr != nil {
 				return sendErr
