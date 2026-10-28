@@ -9,10 +9,12 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/pybridge"
 )
@@ -182,6 +184,105 @@ func TestCreateDesignationRoute(t *testing.T) {
 		}
 		if rows := designationRows(t, db); rows != 0 {
 			t.Fatalf("rows = %d, want 0 on a failed bridge call", rows)
+		}
+	})
+
+	t.Run("lesson length counts Unicode runes like textbook routes", func(t *testing.T) {
+		thirtyFourHan := strings.Repeat("课", 34) // 34 runes, 102 UTF-8 bytes — byte cap would reject.
+		hundredASCII := strings.Repeat("x", 100)
+		hundredOneASCII := strings.Repeat("x", 101)
+		hundredEmoji := strings.Repeat("😀", 100) // 100 runes, 400 bytes
+		extendedOne := strings.Repeat("\U00020000", 100) // 100 supplementary-plane runes
+
+		okResult := pybridge.DesignateResult{
+			Status: pybridge.DesignateStatusOK, Total: 1,
+			Cards: []pybridge.DesignateCard{{ID: 1, Word: "w", Meaning: "m"}},
+		}
+
+		passCases := []struct {
+			name   string
+			lesson string
+		}{
+			{"34 hanzi", thirtyFourHan},
+			{"100 ascii runes", hundredASCII},
+			{"100 emoji", hundredEmoji},
+			{"100 supplementary han", extendedOne},
+		}
+		for _, tc := range passCases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				if tc.name == "34 hanzi" {
+					if utf8.RuneCountInString(tc.lesson) != 34 {
+						t.Fatalf("lesson runes = %d, want 34", utf8.RuneCountInString(tc.lesson))
+					}
+					if len(tc.lesson) <= 100 {
+						t.Fatalf("34 hanzi UTF-8 len = %d, want >100 bytes to catch byte-cap regressions", len(tc.lesson))
+					}
+				} else if utf8.RuneCountInString(tc.lesson) != 100 {
+					t.Fatalf("lesson runes = %d, want 100", utf8.RuneCountInString(tc.lesson))
+				}
+
+				exec := &fakeExecutor{designateResult: okResult}
+				h, db := newTextbookTestHandler(t, exec, &fakeCardRepo{})
+				ensureTextbookTables(t, db)
+				lessonsJSON, err := json.Marshal([]string{"第1课", tc.lesson})
+				if err != nil {
+					t.Fatal(err)
+				}
+				seedTextbookRow(t, db, 7, "指定教材", string(lessonsJSON), 1)
+
+				bodyBytes, err := json.Marshal(DesignationCreateRequest{
+					TextbookID: 7, Lesson: tc.lesson,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				rec := postDesignation(t, h, string(bodyBytes))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status %d (%s), want 200 — rune cap should accept this lesson", rec.Code, rec.Body.String())
+				}
+				if len(exec.designateCalls) != 1 || exec.designateCalls[0].Lesson != tc.lesson {
+					t.Fatalf("designate calls = %+v, want one call with lesson %q", exec.designateCalls, tc.lesson)
+				}
+			})
+		}
+
+		rejectCases := []struct {
+			name   string
+			lesson string
+		}{
+			{"101 ascii runes", hundredOneASCII},
+			{"101 emoji", strings.Repeat("😀", 101)},
+			{"101 supplementary han", strings.Repeat("\U00020000", 101)},
+		}
+		for _, tc := range rejectCases {
+			tc := tc
+			t.Run("reject "+tc.name, func(t *testing.T) {
+				if utf8.RuneCountInString(tc.lesson) != 101 {
+					t.Fatalf("lesson runes = %d, want 101", utf8.RuneCountInString(tc.lesson))
+				}
+				exec := &fakeExecutor{designateResult: okResult}
+				h, db := newTextbookTestHandler(t, exec, &fakeCardRepo{})
+				bodyBytes, err := json.Marshal(DesignationCreateRequest{
+					TextbookID: 7, Lesson: tc.lesson,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				rec := postDesignation(t, h, string(bodyBytes))
+				if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), codeInvalidRequest) {
+					t.Fatalf("status %d (%s), want 400 invalid_request", rec.Code, rec.Body.String())
+				}
+				if !strings.Contains(rec.Body.String(), "exceeds 100 characters") {
+					t.Fatalf("body %s, want lesson exceeds cap message", rec.Body.String())
+				}
+				if len(exec.designateCalls) != 0 {
+					t.Fatalf("subprocess calls = %d, want 0 before rune validation", len(exec.designateCalls))
+				}
+				if rows := designationRows(t, db); rows != 0 {
+					t.Fatalf("rows = %d, want 0", rows)
+				}
+			})
 		}
 	})
 }
