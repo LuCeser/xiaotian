@@ -2888,10 +2888,10 @@
     // then refresh EVERY landed page so an earlier header-less photo picks
     // up the book's 末课 once a later photo supplies matchable meta.
     var panelWasRendered = state.panelRendered;
+    var choiceBeforePreselect = this.bookChoice;
     this.applyBookPreselectIfUnset();
-    if (panelWasRendered) {
-      this.syncTextbookPanelFromChoice();
-    }
+    var bookChoiceChangedByPreselect = panelWasRendered &&
+      choiceBeforePreselect !== this.bookChoice;
     state.lessonRecs = state.lessonRecs || [];
     while (state.lessonRecs.length < pageNo) {
       state.lessonRecs.push(null);
@@ -2933,6 +2933,16 @@
     this.reclassify();
     if (this.rows.length || this.poemRows.length || this.passageRows.length) {
       this.renderPreview();
+    }
+    // Issue #80 U5fix2: detail chips / append notes read merged rows — sync
+    // only AFTER landing + refresh + reclassify. Rebuild edit controls only
+    // when a LATER page's meta actually moved bookChoice.
+    if (panelWasRendered) {
+      if (bookChoiceChangedByPreselect) {
+        this.syncTextbookPanelFromChoice();
+      } else {
+        this.refreshTextbookDetailRowDerived();
+      }
     }
     if (this.sourcePageNo === pageNo) {
       this.setSourceCaption('第 ' + pageNo + ' ' + state.noun + ' · 已识别');
@@ -3353,6 +3363,83 @@
     this.updateCommitButton();
   };
 
+  /**
+   * refreshTextbookDetailRowDerived — a later photo landed while bookChoice
+   * stayed put: refresh append notes and lesson-group chips without tearing
+   * down the 新建教材 inputs or the batch-lesson field the parent is typing
+   * in (Issue #80 U5fix2).
+   */
+  PhotoAddForm.prototype.refreshTextbookDetailRowDerived = function () {
+    var host = this.bookDetailHost;
+    if (!host) {
+      return;
+    }
+    this.syncUnitField();
+    if (typeof this.bookChoice === 'number') {
+      var book = this.chosenBook();
+      if (book) {
+        var inList = {};
+        (book.lessons || []).forEach(function (name) {
+          inList[name] = true;
+        });
+        var missing = distinctRowLessons(this.rows).filter(function (name) {
+          return !inList[name];
+        });
+        var appendNote = host.querySelector('.photo-book-append-note');
+        if (missing.length) {
+          var appendText = '课次「' + missing.join('」「') +
+            '」不在教材课次表里，确认后将加到课次表末尾。';
+          if (appendNote) {
+            appendNote.textContent = appendText;
+          } else {
+            appendNote = document.createElement('p');
+            appendNote.className = 'photo-meta-line photo-book-append-note';
+            appendNote.textContent = appendText;
+            var pickBar = host.querySelector('.photo-lesson-pickbar');
+            host.insertBefore(appendNote, pickBar || null);
+          }
+        } else if (appendNote && appendNote.parentNode) {
+          appendNote.parentNode.removeChild(appendNote);
+        }
+      }
+    }
+    this.rebuildLessonPickChips(host);
+    this.updateStateLine();
+  };
+
+  /** Replace lesson-group chips after rows change; keep toolbar + form fields. */
+  PhotoAddForm.prototype.rebuildLessonPickChips = function (host) {
+    var pickBar = host.querySelector('.photo-lesson-pickbar');
+    if (!pickBar) {
+      return;
+    }
+    var keep = [];
+    pickBar.childNodes.forEach(function (node) {
+      if (node.className && node.className.indexOf('photo-lesson-chip') < 0) {
+        keep.push(node);
+      }
+    });
+    clearEl(pickBar);
+    var self = this;
+    keep.forEach(function (node) {
+      pickBar.appendChild(node);
+    });
+    lessonPickGroups(this.rows).forEach(function (group) {
+      var chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'photo-lesson-chip';
+      chip.textContent = (group.lesson || '待确认') + ' · ' + group.count;
+      chip.title = '一键选中课次为「' + (group.lesson || '待确认') + '」的 ' +
+        group.count + ' 行';
+      chip.addEventListener('click', function () {
+        self.rows = pickLessonGroup(self.rows, group.lesson);
+        self.syncLessonPickUi();
+      });
+      pickBar.appendChild(chip);
+    });
+    this.syncLessonPickUi();
+  };
+
   PhotoAddForm.prototype.renderTextbookPanelReset = function () {
     this.textbookPanel.hidden = true;
     clearEl(this.textbookPanel);
@@ -3598,7 +3685,7 @@
       });
       if (missing.length) {
         var appendNote = document.createElement('p');
-        appendNote.className = 'photo-meta-line';
+        appendNote.className = 'photo-meta-line photo-book-append-note';
         appendNote.textContent = '课次「' + missing.join('」「') + '」不在教材课次表里，确认后将加到课次表末尾。';
         host.appendChild(appendNote);
       }
