@@ -58,7 +58,7 @@ func TestEndSessionBeforeRowCreationWritesNothing(t *testing.T) {
 	ttAckLast(t, tm, s, 0) // settle the ask so its goroutine is done interfering
 
 	// The spoken answer's locked half binds 语文 (epoch 0 = the answer turn's).
-	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, 0, true)
+	req, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, 0, true)
 	if !ok {
 		t.Fatal("takeSubjectAsk refused a live clarify")
 	}
@@ -75,7 +75,7 @@ func TestEndSessionBeforeRowCreationWritesNothing(t *testing.T) {
 			endFired = true
 		}
 	}
-	tm.finalizeSubjectAsk(s, m, oldEpoch, lesson.CategoryChinese, "voice")
+	tm.finalizeSubjectAsk(s, req, oldEpoch, lesson.CategoryChinese, "voice")
 
 	if endFired {
 		if ids := exec.ensureIDCalls(); len(ids) != 0 {

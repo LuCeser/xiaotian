@@ -84,20 +84,37 @@ func (tm *TurnManager) subjectHasDue(category string) bool {
 	return err == nil && len(words) > 0
 }
 
+// classroomInitRequest is one session_init attempt's COMPLETE identity
+// (issue #69 rethink3 S2): the wire message, the subject the request runs
+// under, and the classroom generation the attempt reserved — message,
+// subject and generation stay ONE identity from reservation to install. The
+// subject clarify parks the whole request; the binding's locked half
+// consumes ALL of it in one tm.mu hold, and the continuation then carries
+// only this local object. It never re-reads the shared identity fields
+// (category, the pending reservation): a later session_init on the same
+// connection may already have replaced them, and the late continuation must
+// neither borrow the newer reservation nor disturb it.
+type classroomInitRequest struct {
+	category   string
+	msg        SessionInitMsg
+	installGen uint64
+}
+
 // startSubjectAsk parks the auto classroom on the clarify question: the
 // subject_ask control rides out (the page's two pick buttons), the teacher
-// speaks the same question, and the ORIGINAL session_init message is held
-// until the child answers (subject_pick or a spoken 语文/英语). No lesson
-// row exists yet — the row's subject is whatever the child picks, and the
-// answered round then runs under that subject only.
-func (tm *TurnManager) startSubjectAsk(s Sender, m SessionInitMsg) {
+// speaks the same question, and the WHOLE init request — message, subject
+// and reserved generation — is held until the child answers (subject_pick or
+// a spoken 语文/英语). No lesson row exists yet — the row's subject is
+// whatever the child picks, and the answered round then runs under that
+// subject only.
+func (tm *TurnManager) startSubjectAsk(s Sender, req classroomInitRequest) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var askEpoch uint64
 	if !tm.applySessionEffect(func() error {
 		if err := s.SendControl(SubjectAskMsg{Type: TypeSubjectAsk, Question: subjectAskText}); err != nil {
 			return err
 		}
-		tm.pendingAsk = &m
+		tm.pendingAsk = &req
 		tm.state = StateListening
 		askEpoch = tm.epoch // fixed NOW: a pick processed before the goroutine
 		// first runs bumps the epoch, and the ask's entry check must refuse it.
@@ -149,27 +166,33 @@ func (tm *TurnManager) handleSubjectAnswerTurn(s Sender, transcript string, epoc
 // session_ready and a greeting it can never ack. The button channel passes
 // fromTurn=false: a tap is not bound to any turn's epoch.
 func (tm *TurnManager) finishSubjectAsk(s Sender, category, via string, epoch uint64, fromTurn bool) {
-	m, oldEpoch, ok := tm.takeSubjectAsk(category, epoch, fromTurn)
+	req, oldEpoch, ok := tm.takeSubjectAsk(category, epoch, fromTurn)
 	if !ok {
 		return
 	}
-	tm.finalizeSubjectAsk(s, m, oldEpoch, category, via)
+	tm.finalizeSubjectAsk(s, req, oldEpoch, category, via)
 }
 
 // takeSubjectAsk is the binding's locked half, atomic under one tm.mu hold:
 // epoch validation (voice channel), pendingAsk consumption, category
 // binding, and the ask's full playback termination (stopAskPlaybackLocked).
-// Split out from finishSubjectAsk so the deterministic race tests can drive
-// the locked half and interleave a timeout against it, exactly as the
-// scheduler could. Returns the parked init message and the PRE-bump epoch;
-// ok=false when there is nothing to bind.
-func (tm *TurnManager) takeSubjectAsk(category string, epoch uint64, fromTurn bool) (SessionInitMsg, uint64, bool) {
+// The consumption takes the WHOLE parked request — message AND reserved
+// generation — and the pick binds the request's own subject in the same
+// hold (issue #69 rethink3 S2): the continuation's identity is complete at
+// this instant, so a session_init the read loop parks before the unlocked
+// half runs can neither be borrowed nor cleared by it. Split out from
+// finishSubjectAsk so the deterministic race tests can drive the locked half
+// and interleave a timeout against it, exactly as the scheduler could.
+// Returns the parked init request and the PRE-bump epoch; ok=false when
+// there is nothing to bind.
+func (tm *TurnManager) takeSubjectAsk(category string, epoch uint64, fromTurn bool) (classroomInitRequest, uint64, bool) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.pendingAsk == nil || tm.closed || (fromTurn && tm.epoch != epoch) {
-		return SessionInitMsg{}, 0, false
+		return classroomInitRequest{}, 0, false
 	}
-	m := *tm.pendingAsk
+	req := *tm.pendingAsk
+	req.category = category
 	tm.pendingAsk = nil
 	tm.category = category
 	if tm.subjectTakeInterleave != nil {
@@ -179,36 +202,52 @@ func (tm *TurnManager) takeSubjectAsk(category string, epoch uint64, fromTurn bo
 		tm.subjectTakeInterleave()
 	}
 	old := tm.stopAskPlaybackLocked()
-	return m, old, true
+	return req, old, true
 }
 
 // finalizeSubjectAsk is the binding's unlocked half: the client-facing
 // aftermath of the termination (VAD reset + the interrupt_ack epoch notice)
-// and the handoff to the picked classroom. An end_session that closed the
-// session between the halves must not receive session_ready or a greeting.
-// The stillOpen check here is only the fast path (it also spares the picked
-// event); the REAL gates live at the classroom init's outward points — the
-// starters (session_ready, tutor bind), the row creation and the
-// announcement entry checks — because this half runs on the ANSWER TURN's
-// goroutine and an end_session can close the session under any of that IO
-// (PR #60 review: an entry-only check passes and still ships a classroom
-// that outlives its own session_ended).
-func (tm *TurnManager) finalizeSubjectAsk(s Sender, m SessionInitMsg, oldEpoch uint64, category, via string) {
+// and the handoff to the picked classroom, carried by the LOCAL request the
+// locked half already consumed — never shared identity fields. An
+// end_session that closed the session between the halves must not receive
+// session_ready or a greeting. The stillOpen check here is only the fast
+// path (it also spares the picked event); the REAL gates live at the
+// classroom init's outward points — the starters (session_ready, tutor
+// bind), the row creation and the announcement entry checks — because this
+// half runs on the ANSWER TURN's goroutine and an end_session can close the
+// session under any of that IO (PR #60 review: an entry-only check passes
+// and still ships a classroom that outlives its own session_ended).
+func (tm *TurnManager) finalizeSubjectAsk(s Sender, req classroomInitRequest, oldEpoch uint64, category, via string) {
 	tm.vad.Reset()
-	_ = s.SendControl(InterruptAckMsg{
-		Type:     TypeInterruptAck,
-		OldEpoch: oldEpoch,
-		NewEpoch: oldEpoch + 1,
-	})
+	tm.shipAskTerminationAck(s, oldEpoch)
 	if !tm.stillOpen() {
 		return
 	}
 	tm.recorder.Emit(EventSubjectPicked, infra.F("category", category), infra.F("via", via))
+	tm.continueSessionInit(s, req)
+}
+
+// shipAskTerminationAck forwards the binding's epoch bump (oldEpoch →
+// oldEpoch+1) to the client — but ONLY while that transition is still the
+// session's CURRENT epoch, checked and sent under one tm.mu hold (the same
+// discipline replaceActiveClassroomLocked ships its install ack with). A
+// late binding resuming after a later classroom already bumped PAST the pair
+// must stay silent: the client adopts interrupt_ack.new_epoch verbatim and
+// stops its playback (rt-playback's onEpochBump), so a stale (old → old+1)
+// landing after the newer ack would drag the player's epoch BACKWARDS and
+// kill the live classroom's audio — the newer transition's own ack already
+// carries everything the client needs (issue #69 rethink3 S2: the late
+// continuation must not disturb B).
+func (tm *TurnManager) shipAskTerminationAck(s Sender, oldEpoch uint64) {
 	tm.mu.Lock()
-	installGen := tm.pendingAskInstallGen
-	tm.pendingAskInstallGen = 0
+	if tm.epoch == oldEpoch+1 {
+		_ = s.SendControl(InterruptAckMsg{
+			Type:     TypeInterruptAck,
+			OldEpoch: oldEpoch,
+			NewEpoch: oldEpoch + 1,
+		})
+	}
 	tm.mu.Unlock()
-	tm.continueSessionInit(s, m, installGen)
 }
 
 // stillOpen reports whether the session is still live.

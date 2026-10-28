@@ -210,9 +210,12 @@ func (tm *TurnManager) noDueWordsTextForNow() string {
 // D-11): resolve an r0x- id, build today's exclusion set (the daily lesson's
 // words ∪ the day's practiced words), randomly pick ≤10 words from the FULL
 // vocabulary (never the due fetch), and start the SAME three-stage FSM with
-// the practice flag set. Runs on the transport read loop — DB calls are the
-// same short-transaction class as the main init.
-func (tm *TurnManager) handlePracticeInit(s Sender, installGen uint64) {
+// the practice flag set. Runs on the transport read loop — or on the answer
+// turn's goroutine when a subject clarify preceded it, which is why the
+// subject and generation come from the REQUEST object, never the shared
+// fields a later session_init may have replaced (issue #69 rethink3 S2).
+// DB calls are the same short-transaction class as the main init.
+func (tm *TurnManager) handlePracticeInit(s Sender, req classroomInitRequest) {
 	if !tm.stillOpen() {
 		// PR #60 review: a practice init resumed after a subject pick runs on
 		// the answer turn's goroutine — a session closed under that handoff
@@ -231,7 +234,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender, installGen uint64) {
 	}
 
 	now := time.Now()
-	category := tm.sessionCategory()
+	category := req.category
 	lessonID := resolvePracticeLessonID(now)
 
 	// The per-lesson init lock discipline: two simultaneous practice
@@ -298,8 +301,8 @@ func (tm *TurnManager) handlePracticeInit(s Sender, installGen uint64) {
 			Lesson:    LessonView{LessonID: lessonID, Words: []string{}},
 			Category:  category,
 		}
-		if !tm.applyClassroomInstallEffect(installGen, func() error {
-			if installErr := tm.replaceActiveClassroomLocked(installGen, lessonID, nil, s); installErr != nil {
+		if !tm.applyClassroomInstallEffect(req.installGen, func() error {
+			if installErr := tm.replaceActiveClassroomLocked(req.installGen, lessonID, nil, s); installErr != nil {
 				return installErr
 			}
 			if sendErr := s.SendControl(ready); sendErr != nil {
@@ -314,7 +317,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender, installGen uint64) {
 			cancel()
 			return
 		}
-		if tm.activeClassroomGen() != installGen {
+		if tm.activeClassroomGen() != req.installGen {
 			cancel()
 			return
 		}
@@ -341,7 +344,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender, installGen uint64) {
 		return
 	}
 	tm.recorder.Emit(EventPracticeStarted, infra.F("picked", len(picked)))
-	tm.startDictationSession(s, l, true, installGen)
+	tm.startDictationSession(s, l, true, req.installGen)
 }
 
 // practiceSummaryText builds the practice wrap line (13.1-05, D-13's third

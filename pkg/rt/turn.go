@@ -443,12 +443,14 @@ type TurnManager struct {
 	photo           *photoBuffer
 	acked           map[string]bool
 	pendingPlayback map[string]*pendingPlayback
-	// pendingAsk (Issue #55): the parked session_init of an auto word
+	// pendingAsk (Issue #55): the parked init REQUEST of an auto word
 	// classroom whose TWO subjects both hold due words — the clarify is
 	// out, and the child's answer (subject_pick or spoken 语文/英语)
-	// binds category and resumes through continueSessionInit. Non-nil ONLY
-	// while the ask is live; the classroom has no lesson row yet.
-	pendingAsk *SessionInitMsg
+	// binds category and resumes through continueSessionInit. The whole
+	// request parks and is consumed atomically (issue #69 rethink3 S2);
+	// non-nil ONLY while the ask is live, and the classroom has no lesson
+	// row yet.
+	pendingAsk *classroomInitRequest
 	// pendingAdvance is the one accepted dictation write that later turns
 	// and reconnect reconciliation must wait for before reading a target.
 	pendingAdvance *pendingDictationAdvance
@@ -491,10 +493,6 @@ type TurnManager struct {
 	audioObservation audioObservation
 	cfg              TurnManagerConfig
 
-	// pendingAskInstallGen is the classroom generation reserved at the
-	// session_init that parked on subject clarify; continueSessionInit after
-	// a pick must install under THIS gen, not bump again (issue #69 R1).
-	pendingAskInstallGen uint64
 	// timerGen is the monotonic per-word timer generation. EVERY
 	// arm/reset/stop increments it, so a callback already queued before the
 	// reset is dead on arrival even with the same epoch and word index
@@ -680,7 +678,8 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	} else {
 		tm.mode = normalizeSessionMode(m.Mode)
 	}
-	tm.category = sessionCategoryFromWire(m.Category)
+	category := sessionCategoryFromWire(m.Category)
+	tm.category = category
 	tm.mu.Unlock()
 
 	installGen := tm.beginClassroomAttempt()
@@ -693,21 +692,22 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	// keeps the english landing and its ordinary no-due ending. A declared
 	// english/chinese never reaches the ask — the user's specification is
 	// final (AC2).
-	if m.Poem == 0 && m.Passage == 0 && tm.sessionCategory() == CategoryAuto {
+	if m.Poem == 0 && m.Passage == 0 && category == CategoryAuto {
 		resolved, ask := tm.resolveAutoSubject()
 		if ask {
-			tm.mu.Lock()
-			tm.pendingAskInstallGen = installGen
-			tm.mu.Unlock()
-			tm.startSubjectAsk(s, m)
+			// The WHOLE request parks — message, subject and reserved
+			// generation are one identity from here until the pick's atomic
+			// consumption (issue #69 rethink3 S2).
+			tm.startSubjectAsk(s, classroomInitRequest{msg: m, category: category, installGen: installGen})
 			return
 		}
+		category = resolved
 		tm.mu.Lock()
 		tm.category = resolved
 		tm.mu.Unlock()
 	}
 
-	tm.continueSessionInit(s, m, installGen)
+	tm.continueSessionInit(s, classroomInitRequest{msg: m, category: category, installGen: installGen})
 }
 
 // continueSessionInit runs everything session_init does once the classroom's
@@ -715,27 +715,32 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 // due-word classroom itself (row resume vs. fresh fetch). It is ALSO the
 // resume point after a subject clarify answer (Issue #55) — an auto
 // classroom whose two subjects both hold due words asks the child first,
-// then re-enters here under the picked subject with the ORIGINAL init
-// message, so the answered round binds exactly like an explicit declaration.
-func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg, installGen uint64) {
-	if m.Practice {
-		tm.handlePracticeInit(s, installGen)
+// then re-enters here under the picked subject with the ORIGINAL request
+// object, so the answered round binds exactly like an explicit declaration.
+// The request is the continuation's COMPLETE identity (issue #69 rethink3
+// S2): its subject and generation were fixed when it was consumed, and no
+// shared identity field is read back along the way — this half runs on the
+// ANSWER TURN's goroutine, where a later session_init on the same connection
+// may have replaced every shared field.
+func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
+	if req.msg.Practice {
+		tm.handlePracticeInit(s, req)
 		return
 	}
 
 	// Issue #12: a whole-poem 背默 classroom branches BEFORE the due-word
 	// flow — poems never enter FetchDueWords (they are not cards), and the
 	// poem row's own resume/correction branches live in handlePoemInit.
-	if m.Poem > 0 {
-		tm.handlePoemInit(s, m.Poem, installGen)
+	if req.msg.Poem > 0 {
+		tm.handlePoemInit(s, req.msg.Poem, req.installGen)
 		return
 	}
 
 	// Issue #14: a passage-range 背默 classroom branches the same way — the
 	// selected paragraphs never enter FetchDueWords, and the range's own
 	// resume/correction branches live in handlePassageInit.
-	if m.Passage > 0 {
-		tm.handlePassageInit(s, m.Passage, m.PassageScope, installGen)
+	if req.msg.Passage > 0 {
+		tm.handlePassageInit(s, req.msg.Passage, req.msg.PassageScope, req.installGen)
 		return
 	}
 
@@ -745,7 +750,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg, installGe
 		return
 	}
 
-	category := tm.sessionCategory()
+	category := req.category
 	lessonID := lessonIDForCategory(tm.cfg.LessonID, time.Now(), category)
 
 	unlock := lockLessonInit(lessonID)
@@ -761,9 +766,16 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg, installGe
 	if err == nil {
 		// Existing row: the ROW is the subject authority from here on — a
 		// reconnect echoes and reviews under the subject the lesson was
-		// actually created under, not whatever the page re-declared.
+		// actually created under, not whatever the page re-declared. The
+		// shared mirror is admission-gated (issue #69 rethink3 S2): a late
+		// continuation whose reservation a newer session_init already
+		// replaced must not rewrite the live classroom's subject out from
+		// under it — only the request that still owns the pending
+		// reservation may install the row's authority.
 		tm.mu.Lock()
-		tm.category = lesson.NormalizeCategory(l.Category)
+		if tm.classroomInstallAllowed(req.installGen) {
+			tm.category = lesson.NormalizeCategory(l.Category)
+		}
 		tm.mu.Unlock()
 	} else {
 		// Fresh lesson: this process instance is the single creator (init
@@ -774,7 +786,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg, installGe
 			return
 		}
 		if len(cards) == 0 {
-			tm.startNoDueSession(s, lessonID, installGen)
+			tm.startNoDueSession(s, lessonID, req.installGen)
 			return
 		}
 		// #68 / path B: the row write is serialized against every close path
@@ -810,17 +822,17 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg, installGe
 	case l.Stage == lesson.StageChecking:
 		// 13.1-04 (Pitfall 2): the check never finished and the close
 		// fallback never landed — reopen the check panel from the row.
-		tm.startCheckResume(s, l, installGen)
+		tm.startCheckResume(s, l, req.installGen)
 	case l.Stage == lesson.StageSubmitted && l.Unchecked:
 		// 13.1-04 (D-03): the fallback rated this lesson unchecked —
 		// reopen as the post-hoc correction instead of short-circuiting.
-		tm.startCheckCorrection(s, l, installGen)
+		tm.startCheckCorrection(s, l, req.installGen)
 	case l.CurrentIndex >= len(l.Cards):
 		// Legacy + normally completed rows short-circuit exactly as before
 		// (stage first, index second — the new branches never swallow them).
-		tm.startCompletedSession(s, l, installGen)
+		tm.startCompletedSession(s, l, req.installGen)
 	default:
-		tm.startDictationSession(s, l, false, installGen)
+		tm.startDictationSession(s, l, false, req.installGen)
 	}
 }
 

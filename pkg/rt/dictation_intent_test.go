@@ -455,7 +455,7 @@ func TestDictationConfirmationStateGuard(t *testing.T) {
 		// Park the clarify exactly like startSubjectAsk: no tutor, ask live.
 		tm.mu.Lock()
 		initMsg := SessionInitMsg{Type: TypeSessionInit, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1}}
-		tm.pendingAsk = &initMsg
+		tm.pendingAsk = &classroomInitRequest{msg: initMsg}
 		tm.tutor = nil
 		tm.mu.Unlock()
 
