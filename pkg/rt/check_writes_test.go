@@ -8,7 +8,7 @@ import (
 func TestCheckWriteAdmission(t *testing.T) {
 	t.Run("close wins and seals admission", func(t *testing.T) {
 		tm := NewTurnManager(nil, nil, nil, nil, TurnManagerConfig{}, nil, nil)
-		claim := tm.closeSessionAt(0, false, false, "", nil)
+		claim := tm.closeSessionAt(0, false, false, 0, false, "", nil)
 		tm.mu.Lock()
 		write, admitted := tm.admitCheckWriteLocked()
 		tm.mu.Unlock()
@@ -25,7 +25,7 @@ func TestCheckWriteAdmission(t *testing.T) {
 		if !admitted {
 			t.Fatal("live session refused check write admission")
 		}
-		claim := tm.closeSessionAt(0, false, false, "", nil)
+		claim := tm.closeSessionAt(0, false, false, 0, false, "", nil)
 		if len(claim.checkWrites) != 1 || claim.checkWrites[0] != write {
 			t.Fatalf("captured writes = %v, want the admitted write", claim.checkWrites)
 		}

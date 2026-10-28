@@ -752,7 +752,7 @@ func (tm *TurnManager) runAcceptedFormalCheckSubmit(s Sender, ctx context.Contex
 		// The absorbed duplicate saves nothing: the admission ends BEFORE
 		// the terminal close claims (and would capture) it.
 		tm.completeCheckWrite(write)
-		if tm.tryTerminalClose(s, ReasonLessonComplete) {
+		if tm.tryTerminalCloseForScope(s, scopeGen, ReasonLessonComplete) {
 			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 		}
 		cancel()
@@ -966,6 +966,10 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
 	epoch := tm.epoch
+	scopeGen := uint64(0)
+	if tm.activeScope != nil {
+		scopeGen = tm.activeScope.gen
+	}
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
 	l, err := tm.exec.GetLessonState(ctx, lessonID)
@@ -998,7 +1002,7 @@ func (tm *TurnManager) submitCorrections(s Sender, m CheckSubmitMsg) {
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "correction_submit_latch"),
 		)
-		if tm.tryTerminalClose(s, ReasonLessonComplete) {
+		if tm.tryTerminalCloseForScope(s, scopeGen, ReasonLessonComplete) {
 			tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 		}
 		return

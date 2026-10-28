@@ -427,6 +427,12 @@ type TurnManager struct {
 	// eligibility/snapshot decision. The deterministic race tests probe the
 	// claim's one-critical-section contract from here.
 	closeEntryInterleave func()
+	// completedCloseInterleave (test seam, issue #69 rethink3 S3; nil in
+	// production) fires after a completed-lesson replay has shipped
+	// session_ready and BEFORE its scoped terminal close — the window where
+	// a newer classroom on the same connection can install and finish its
+	// natural opening while the stale close request is still pending.
+	completedCloseInterleave func()
 
 	// announceEntryInterleave (test seam, PR #60 review J15; nil in
 	// production) fires after runAnnouncementDisplayAt's entry gate has
@@ -754,7 +760,12 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 	lessonID := lessonIDForCategory(tm.cfg.LessonID, time.Now(), category)
 
 	unlock := lockLessonInit(lessonID)
-	defer unlock()
+	released := false
+	defer func() {
+		if !released {
+			unlock()
+		}
+	}()
 
 	ctx := context.Background()
 	l, err := tm.exec.GetLessonState(ctx, lessonID)
@@ -830,6 +841,12 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 	case l.CurrentIndex >= len(l.Cards):
 		// Legacy + normally completed rows short-circuit exactly as before
 		// (stage first, index second — the new branches never swallow them).
+		// Release the per-lesson init lock before the scoped terminal close:
+		// the classroom is installed and session_ready has shipped; a
+		// concurrent session_init on the same connection must not block
+		// behind a parked close attempt (issue #69 rethink3 S3).
+		unlock()
+		released = true
 		tm.startCompletedSession(s, l, req.installGen)
 	default:
 		tm.startDictationSession(s, l, false, req.installGen)
@@ -945,10 +962,13 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson, installG
 		return
 	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-	// The completion goodbye rides the ONE-TIME terminal close: a goodbye
-	// that raced in after session_ready already closed the session, and no
-	// second session_ended may ship.
-	tm.tryTerminalClose(s, ReasonLessonComplete)
+	if tm.completedCloseInterleave != nil {
+		tm.completedCloseInterleave()
+	}
+	// The completion goodbye rides the ONE-TIME terminal close scoped to
+	// THIS install: a classroom that replaced this one while the close was
+	// still pending must stay live (issue #69 rethink3 S3).
+	tm.tryTerminalCloseForScope(s, installGen, ReasonLessonComplete)
 }
 
 // startDictationSession binds the FSM to the lesson row and immediately
@@ -1399,8 +1419,11 @@ type closeClaim struct {
 // Everything that can block — persistence, logs, the goodbye enqueue, the
 // VAD reset — runs outside, after the claim: a failed notification must
 // never reopen, delay or skip the close.
-func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch, takeFallback bool) closeClaim {
+func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch, gateScope bool, scopeGen uint64, takeFallback bool) closeClaim {
 	if tm.closed || (gateEpoch && tm.epoch != epoch) {
+		return closeClaim{}
+	}
+	if gateScope && (tm.activeScope == nil || tm.activeScope.gen != scopeGen) {
 		return closeClaim{}
 	}
 	c := closeClaim{owned: true}
@@ -1433,7 +1456,7 @@ func (tm *TurnManager) claimCloseLocked(epoch uint64, gateEpoch, takeFallback bo
 // for) runs lock-free. A failed session_ended enqueue is logged and
 // swallowed — the session is already closed at that point, the close is
 // not undoable, and the caller still learns it owns the close.
-func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch, takeFallback bool, reason string, s Sender) closeClaim {
+func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch, gateScope bool, scopeGen uint64, takeFallback bool, reason string, s Sender) closeClaim {
 	tm.initWriteMu.Lock()
 	if tm.closeEntryInterleave != nil {
 		// Narrow test probe (issue #69 备选一 步骤 8): fires with the
@@ -1443,7 +1466,7 @@ func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch, takeFallback bool
 		tm.closeEntryInterleave()
 	}
 	tm.mu.Lock()
-	c := tm.claimCloseLocked(epoch, gateEpoch, takeFallback)
+	c := tm.claimCloseLocked(epoch, gateEpoch, gateScope, scopeGen, takeFallback)
 	tm.mu.Unlock()
 	tm.initWriteMu.Unlock()
 	if !c.owned {
@@ -1471,14 +1494,21 @@ func (tm *TurnManager) closeSessionAt(epoch uint64, gateEpoch, takeFallback bool
 // the transport close (Close) carry it; these callers have either already
 // left the check stage or never showed it.
 func (tm *TurnManager) tryTerminalClose(s Sender, reason string) bool {
-	return tm.closeSessionAt(0, false, false, reason, s).owned
+	return tm.closeSessionAt(0, false, false, 0, false, reason, s).owned
+}
+
+// tryTerminalCloseForScope is the classroom-task terminal close: eligibility
+// requires the live activeScope to still be the requesting scope (issue #69
+// rethink3 S3). Connection goodbye and transport close stay scope-free.
+func (tm *TurnManager) tryTerminalCloseForScope(s Sender, scopeGen uint64, reason string) bool {
+	return tm.closeSessionAt(0, false, true, scopeGen, false, reason, s).owned
 }
 
 // tryTerminalCloseAt is tryTerminalClose gated on the ending's OWN epoch: a
 // stale ending — a summary whose wait outlived an interrupt that bumped the
 // epoch — must not close (or goodbye) the classroom that replaced it.
 func (tm *TurnManager) tryTerminalCloseAt(s Sender, epoch uint64, reason string) bool {
-	return tm.closeSessionAt(epoch, true, false, reason, s).owned
+	return tm.closeSessionAt(epoch, true, false, 0, false, reason, s).owned
 }
 
 // handleEndSession is the explicit goodbye (RT-10/SC7 server half). The
@@ -1496,7 +1526,7 @@ func (tm *TurnManager) tryTerminalCloseAt(s Sender, epoch uint64, reason string)
 // goodbye, or (when it lost the race) is suppressed entirely.
 // session_ended stays the terminal control message.
 func (tm *TurnManager) handleEndSession(s Sender) {
-	if c := tm.closeSessionAt(0, false, true, ReasonClientEnd, s); c.owned {
+	if c := tm.closeSessionAt(0, false, false, 0, true, ReasonClientEnd, s); c.owned {
 		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 		if c.hasFallback {
 			// The fallback AWAITS the captured saves before it can decide —
@@ -1517,7 +1547,7 @@ func (tm *TurnManager) handleEndSession(s Sender) {
 // 取消等待) and sweeps the photo assembler (13.1-03 privacy P2: the child's
 // photo never outlives its session).
 func (tm *TurnManager) internalClose() {
-	tm.closeSessionAt(0, false, false, "", nil)
+	tm.closeSessionAt(0, false, false, 0, false, "", nil)
 }
 
 // internalCloseLocked is internalClose's locked half (caller holds tm.mu),
@@ -1556,7 +1586,7 @@ func (tm *TurnManager) internalCloseLocked() {
 // terminates with it; a heartbeat-answering browser must not keep the
 // original connection alive past this point.
 func (tm *TurnManager) orderlyCloseAt(s Sender, epoch uint64, reason string) {
-	tm.closeSessionAt(epoch, true, false, reason, s)
+	tm.closeSessionAt(epoch, true, false, 0, false, reason, s)
 }
 
 // Close implements SessionManager: the transport read loop exited for any
@@ -1567,7 +1597,7 @@ func (tm *TurnManager) orderlyCloseAt(s Sender, epoch uint64, reason string) {
 // the closed flag also decided — and owns — the fallback; the loser does
 // nothing. No session_ended ships here (the transport is gone).
 func (tm *TurnManager) Close(Sender) {
-	if c := tm.closeSessionAt(0, false, true, "", nil); c.owned {
+	if c := tm.closeSessionAt(0, false, false, 0, true, "", nil); c.owned {
 		tm.recorder.Emit(EventSessionEnd, infra.F("session_id", tm.session))
 		if c.hasFallback {
 			// Same 1.11 rule as handleEndSession: the close returns as soon
