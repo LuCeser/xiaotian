@@ -35,18 +35,29 @@ func (tm *TurnManager) classroomInstallAllowed(gen uint64) bool {
 }
 
 // replaceActiveClassroomLocked installs tutor under gen when allowed. On
-// classroom replacement it cancels in-flight presentation work and bumps
-// the playback epoch (distinct from scope generation). Caller holds tm.mu.
-func (tm *TurnManager) replaceActiveClassroomLocked(gen uint64, lessonID string, tutor *DictationTutor) bool {
+// classroom replacement it cancels in-flight presentation work, bumps the
+// playback epoch, and (when s is non-nil) ships interrupt_ack BEFORE any
+// session_ready in the same install effect so the client adopts the new
+// epoch and drops queued audio from the prior classroom. Caller holds tm.mu.
+func (tm *TurnManager) replaceActiveClassroomLocked(gen uint64, lessonID string, tutor *DictationTutor, s Sender) error {
 	if !tm.classroomInstallAllowed(gen) {
-		return false
+		return errClassroomInstallStale
 	}
 	if tm.activeScope != nil {
-		tm.stopAskPlaybackLocked()
+		old := tm.stopAskPlaybackLocked()
+		if s != nil {
+			if err := s.SendControl(InterruptAckMsg{
+				Type:     TypeInterruptAck,
+				OldEpoch: old,
+				NewEpoch: old + 1,
+			}); err != nil {
+				return err
+			}
+		}
 	}
 	tm.activeScope = &classroomScope{gen: gen, lessonID: lessonID, tutor: tutor}
 	tm.tutor = tutor
-	return true
+	return nil
 }
 
 // activeClassroomGen returns the live classroom generation, or 0 when none.
