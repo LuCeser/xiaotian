@@ -1076,6 +1076,10 @@
     form.existingPassages = loaded[3] || [];
     form.rows = classifyPhotoEntries(entries, form.existingWords);
     stampEntryIndex(form.rows);
+    // Issue #80 U5: honest preselect before the first recommendation pass.
+    if (form.bookChoice === 'unset') {
+      form.bookChoice = preselectBookChoice(form.books, form.detectedMeta);
+    }
     form.rows = fillRecommendedLessons(form.rows, recommendForDraftPage(
       form.books, { textbook: form.detectedMeta, entries: entries }, [],
       form.bookChoice));
@@ -2880,23 +2884,18 @@
       this.renderPdfBar();
       return;
     }
-    // Issue #80 §3.1: the page's own recommendation stamps its rows before
-    // the merge — every row keeps the lesson the photo itself carried, the
-    // empties take the page's default, and the run's earlier pages feed
-    // the photo-order fallback. Memory-only; a retried page re-derives it.
+    // Issue #80 U5: preselect the target book before deriving lessons;
+    // then refresh EVERY landed page so an earlier header-less photo picks
+    // up the book's 末课 once a later photo supplies matchable meta.
+    this.applyBookPreselectIfUnset();
     state.lessonRecs = state.lessonRecs || [];
-    var priorRecs = lessonRecsPriorToPage(state.lessonRecs, pageNo);
-    var pageMeta = global.recognitionMetaForPage
-      ? (global.recognitionMetaForPage(this.importPhotoState, pageNo) || parsed.meta)
-      : parsed.meta;
-    var rec = recommendForDraftPage(this.books,
-      { textbook: pageMeta, entries: parsed.entries }, priorRecs,
-      this.bookChoice);
-    state.lessonRecs[pageNo - 1] = rec;
-    var stamped = fillRecommendedLessons(
-      global.classifyPhotoEntries(parsed.entries, this.existingWords), rec);
+    while (state.lessonRecs.length < pageNo) {
+      state.lessonRecs.push(null);
+    }
+    var stamped = global.classifyPhotoEntries(parsed.entries, this.existingWords);
     stampEntryIndex(stamped);
     this.rows = global.mergePageRows(this.rows, pageNo, stamped);
+    this.refreshLessonRecommendations();
     // Issue #11: the page's poems and display-only others replace
     // their own page segments (a retry never duplicates either).
     // Issue #13: the passages replace their own segment the same way.
@@ -2904,11 +2903,9 @@
     this.passageRows = mergePagePassages(this.passageRows, pageNo, parsed.passages, this.existingPassages);
     this.otherSections = mergePageOthers(this.otherSections, pageNo, parsed.others);
     state.plan = global.applyPageEvent(state.plan, pageNo, 'done');
-    // The textbook panel renders with the FIRST rows that land: its
-    // preselect fixes bookChoice, so the reclassify below (and any
-    // mid-run edit) sees the real textbook mode — the ordering the
-    // photo flow gets for free by rendering the panel right after its
-    // single recognition. A retry never rebuilds it.
+    // The textbook panel renders with the FIRST rows that land (bookChoice
+    // was already preselected above when meta allowed). A retry never
+    // rebuilds it — parent's choice survives redraw.
     if (!state.panelRendered &&
         (this.rows.length || this.poemRows.length || this.passageRows.length)) {
       this.renderTextbookPanel('');
@@ -3311,6 +3308,17 @@
   };
 
   /** Hide the panel (no recognition yet / reset). */
+  /**
+   * applyBookPreselectIfUnset — Issue #80 U5: the honest textbook preselect
+   * runs before recommendations, and only while the parent has not chosen yet.
+   */
+  PhotoAddForm.prototype.applyBookPreselectIfUnset = function () {
+    if (this.bookChoice !== 'unset') {
+      return;
+    }
+    this.bookChoice = preselectBookChoice(this.books, this.detectedMeta);
+  };
+
   PhotoAddForm.prototype.renderTextbookPanelReset = function () {
     this.textbookPanel.hidden = true;
     clearEl(this.textbookPanel);
@@ -3383,10 +3391,12 @@
       this.textbookPanel.appendChild(errNote);
     }
 
-    // Preselect (Issue #80): honest match → that book; books exist but no
-    // match → 请选择; no books yet → 新建; nothing readable → 补充词汇.
+    // Preselect (Issue #80 U5): only while still 请选择 — never overwrite a
+    // choice the parent already made or that landing applied before render.
     var preselect = matchTextbookForMeta(this.books, this.detectedMeta);
-    this.bookChoice = preselectBookChoice(this.books, this.detectedMeta);
+    if (this.bookChoice === 'unset') {
+      this.bookChoice = preselectBookChoice(this.books, this.detectedMeta);
+    }
 
     // 教材 select.
     var bookField = document.createElement('div');
