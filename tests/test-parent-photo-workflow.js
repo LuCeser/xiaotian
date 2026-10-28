@@ -586,6 +586,78 @@ async function testPhotoRetryReplacesRegisteredSnapshot() {
   eq(form.photoBatch.plan.pages[1].status, 'done', 'retried photo settles done');
 }
 
+/**
+ * Issue #80 U4 — the book switch re-derives recommendations for EVERY
+ * choice (A→B→新建→空教材→A) while the three lesson identities keep their
+ * own facts: the photo's OCR lesson and the parent's value (an explicit
+ * clear included) survive; only recommendation-derived rows recompute, so
+ * an old recommendation can never freeze into a "recognized" fact.
+ */
+async function testBookSwitchRecomputesEveryChoice() {
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      return Promise.resolve({
+        entries: [
+          { word: 'r1', meaning: '一', lesson: '' },
+          { word: 'r2', meaning: '二', lesson: '' },
+          { word: 'r3', meaning: '三', lesson: '' },
+          { word: 'r4', meaning: '四', lesson: '' },
+        ],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto()]);
+  h.clickRecognize();
+  await flushPromises(14);
+  var form = h.form;
+  eq(form.rows.length, 4, 'U4 切换: four rows land from the real recognize button');
+  eq(form.bookChoice, 7, 'U4 切换: matching meta preselects book 7');
+  // The parent's own calls ride REAL lesson inputs: one hand-set lesson,
+  // one explicit clear (the empty string is the parent's call too).
+  var inputs = form.preview.querySelectorAll('.photo-lesson-input');
+  eq(inputs.length, 4, 'U4 切换: one real lesson input per landed row');
+  inputs[2].value = '家长课';
+  inputs[2].fire('input');
+  inputs[3].value = '';
+  inputs[3].fire('input');
+  eq(form.rows[2].lesson, '家长课', 'U4 切换: parent edit lands on the row');
+  eq(form.rows[2].lessonOrigin, 'parent', 'U4 切换: parent edit origin');
+  eq(form.rows[3].lesson, '', 'U4 切换: parent explicit clear empties the row');
+  eq(form.rows[3].lessonOrigin, 'parent',
+    'U4 切换: the explicit clear is still the parent\'s call');
+
+  var select = h.dom.document.getElementById('parent-photo-textbook');
+  select.value = '8';
+  select.fire('change');
+  eq(form.rows[0].lesson, '单元B', 'A→B: recommendation rows recompute to book 8 末课');
+  eq(form.rows[0].lessonOrigin, 'previous-lesson', 'A→B: origin follows the new source');
+  eq(form.rows[1].lesson, '单元B', 'A→B: every recommendation row recomputes');
+  eq(form.rows[2].lesson, '家长课', 'A→B: parent value survives the switch');
+  eq(form.rows[2].lessonOrigin, 'parent', 'A→B: parent origin survives the switch');
+  eq(form.rows[3].lesson, '', 'A→B: parent explicit clear survives the switch');
+  eq(form.rows[3].lessonOrigin, 'parent', 'A→B: the clear stays the parent\'s');
+
+  select.value = 'new';
+  select.fire('change');
+  eq(form.rows[0].lesson, '', 'B→新建: no other book 末课 is borrowed');
+  eq(form.rows[0].lessonOrigin, 'none', 'B→新建: honest 待确认 origin');
+  eq(form.rows[2].lesson, '家长课', 'B→新建: parent value survives');
+  eq(form.rows[3].lesson, '', 'B→新建: explicit clear survives');
+
+  select.value = 'none';
+  select.fire('change');
+  eq(form.rows[0].lesson, '', '新建→空教材: still no borrowed 末课');
+  eq(form.rows[0].lessonOrigin, 'none', '新建→空教材: origin none');
+  eq(form.rows[3].lesson, '', '新建→空教材: explicit clear still survives');
+
+  select.value = '7';
+  select.fire('change');
+  eq(form.rows[0].lesson, '第2课', '空教材→A: switching back recomputes book 7 末课');
+  eq(form.rows[0].lessonOrigin, 'previous-lesson', '空教材→A: origin previous-lesson');
+  eq(form.rows[2].lesson, '家长课', '空教材→A: parent value survives the whole chain');
+}
+
 (async function main() {
   await testSinglePhotoEntryClearsViaRecognizeButton();
   await testMultiPhotoEntryClearsViaRecognizeButton();
@@ -603,6 +675,7 @@ async function testPhotoRetryReplacesRegisteredSnapshot() {
   await testPhotoRetryReplacesRegisteredSnapshot();
   await testPdfAllEmptyRunKeepsMetaForRetryPreselect();
   await testPhotoBatchAllEmptyKeepsSnapshotsForRetry();
+  await testBookSwitchRecomputesEveryChoice();
 
   if (failures) {
     console.error('test-parent-photo-workflow: ' + failures + ' of ' + checks + ' checks failed');
