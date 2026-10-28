@@ -51,10 +51,7 @@ func validateDesignationCreateRequest(req *DesignationCreateRequest) string {
 	if strings.TrimSpace(req.Lesson) == "" {
 		return "lesson is required (待确认课次不能指定)"
 	}
-	if len(req.Lesson) > 100 {
-		return "lesson must be at most 100 characters"
-	}
-	return ""
+	return validateTextbookLessonName(req.Lesson)
 }
 
 // createDesignation serves POST /designations. Flow: decode → validate

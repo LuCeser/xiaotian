@@ -405,6 +405,15 @@ type TextbookAssignRequest struct {
 	IncludeInScope bool    `json:"includeInScope"`
 }
 
+// validateTextbookLessonName caps one lesson name the same way each entry
+// in validateTextbookLessons is capped (Unicode runes, not UTF-8 bytes).
+func validateTextbookLessonName(lesson string) string {
+	if n := len([]rune(lesson)); n > maxTextbookLessonRunes {
+		return fmt.Sprintf("lesson exceeds %d characters", maxTextbookLessonRunes)
+	}
+	return ""
+}
+
 // validateTextbookName checks one name-shaped field.
 func validateTextbookName(field, value string) string {
 	if value == "" {
@@ -520,10 +529,7 @@ func validateTextbookAssignRequest(req *TextbookAssignRequest) string {
 	if msg := validateIDBatch("cardIds", req.CardIDs); msg != "" {
 		return msg
 	}
-	if n := len([]rune(req.Lesson)); n > maxTextbookLessonRunes {
-		return fmt.Sprintf("lesson exceeds %d characters", maxTextbookLessonRunes)
-	}
-	return ""
+	return validateTextbookLessonName(req.Lesson)
 }
 
 // Poem route caps (Issue #11): one commit carries at most maxPoems whole
