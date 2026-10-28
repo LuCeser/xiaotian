@@ -202,7 +202,11 @@ func (tm *TurnManager) finalizeSubjectAsk(s Sender, m SessionInitMsg, oldEpoch u
 		return
 	}
 	tm.recorder.Emit(EventSubjectPicked, infra.F("category", category), infra.F("via", via))
-	tm.continueSessionInit(s, m)
+	tm.mu.Lock()
+	installGen := tm.pendingAskInstallGen
+	tm.pendingAskInstallGen = 0
+	tm.mu.Unlock()
+	tm.continueSessionInit(s, m, installGen)
 }
 
 // stillOpen reports whether the session is still live.

@@ -449,6 +449,10 @@ type TurnManager struct {
 	// binds category and resumes through continueSessionInit. Non-nil ONLY
 	// while the ask is live; the classroom has no lesson row yet.
 	pendingAsk *SessionInitMsg
+	// pendingAskInstallGen is the classroom generation reserved at the
+	// session_init that parked on subject clarify; continueSessionInit after
+	// a pick must install under THIS gen, not bump again (issue #69 R1).
+	pendingAskInstallGen uint64
 	// pendingAdvance is the one accepted dictation write that later turns
 	// and reconnect reconciliation must wait for before reading a target.
 	pendingAdvance *pendingDictationAdvance
@@ -676,6 +680,8 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	tm.category = sessionCategoryFromWire(m.Category)
 	tm.mu.Unlock()
 
+	installGen := tm.beginClassroomAttempt()
+
 	// Issue #55: an unspecified subject on a WORD classroom (dictation or
 	// practice — never the 背默 branches, whose subject is the work's own)
 	// is settled by the CHILD, never a model: the one subject holding due
@@ -687,6 +693,9 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 	if m.Poem == 0 && m.Passage == 0 && tm.sessionCategory() == CategoryAuto {
 		resolved, ask := tm.resolveAutoSubject()
 		if ask {
+			tm.mu.Lock()
+			tm.pendingAskInstallGen = installGen
+			tm.mu.Unlock()
 			tm.startSubjectAsk(s, m)
 			return
 		}
@@ -695,7 +704,7 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 		tm.mu.Unlock()
 	}
 
-	tm.continueSessionInit(s, m)
+	tm.continueSessionInit(s, m, installGen)
 }
 
 // continueSessionInit runs everything session_init does once the classroom's
@@ -705,9 +714,9 @@ func (tm *TurnManager) handleSessionInit(s Sender, m SessionInitMsg) {
 // classroom whose two subjects both hold due words asks the child first,
 // then re-enters here under the picked subject with the ORIGINAL init
 // message, so the answered round binds exactly like an explicit declaration.
-func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
+func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg, installGen uint64) {
 	if m.Practice {
-		tm.handlePracticeInit(s)
+		tm.handlePracticeInit(s, installGen)
 		return
 	}
 
@@ -715,7 +724,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 	// flow — poems never enter FetchDueWords (they are not cards), and the
 	// poem row's own resume/correction branches live in handlePoemInit.
 	if m.Poem > 0 {
-		tm.handlePoemInit(s, m.Poem)
+		tm.handlePoemInit(s, m.Poem, installGen)
 		return
 	}
 
@@ -723,11 +732,9 @@ func (tm *TurnManager) continueSessionInit(s Sender, m SessionInitMsg) {
 	// selected paragraphs never enter FetchDueWords, and the range's own
 	// resume/correction branches live in handlePassageInit.
 	if m.Passage > 0 {
-		tm.handlePassageInit(s, m.Passage, m.PassageScope)
+		tm.handlePassageInit(s, m.Passage, m.PassageScope, installGen)
 		return
 	}
-
-	installGen := tm.beginClassroomAttempt()
 
 	if tm.cfg.Words == nil {
 		// T-13-14: fixed human wording; the adapter is wired by 13-10.
@@ -853,17 +860,21 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string, installGen u
 	// sessionCategory/lessonViewFor take tm.mu themselves: read them before
 	// the effect (both are session-constant after session_init).
 	category := tm.sessionCategory()
+	ctx, cancel := context.WithCancel(context.Background())
+	var epoch uint64
 	if !tm.applyClassroomInstallEffect(installGen, func() error {
 		// PR #60 review: the session may have closed under the init IO that
 		// led here — a closed session gets no session_ready and no spoken
 		// explanation (nothing may follow its session_ended); the bind and
 		// the enqueue are one hold, so the close can no longer land between
 		// them either.
-		if !tm.replaceActiveClassroomLocked(installGen, lessonID, nil) {
-			return errClassroomInstallStale
+		if err := tm.replaceActiveClassroomLocked(installGen, lessonID, nil, s); err != nil {
+			return err
 		}
 		tm.state = StateListening
 		tm.sessionReadyAt = time.Now()
+		tm.turnCancel = cancel
+		epoch = tm.epoch
 		return s.SendControl(SessionReadyMsg{
 			Type:      TypeSessionReady,
 			SessionID: tm.session,
@@ -873,20 +884,15 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string, installGen u
 			Category:  category,
 		})
 	}) {
+		cancel()
+		return
+	}
+	if tm.activeClassroomGen() != installGen {
+		cancel()
 		return
 	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	var epoch uint64
-	if !tm.applySessionEffect(func() error {
-		tm.turnCancel = cancel
-		epoch = tm.epoch
-		return nil
-	}) {
-		cancel()
-		return
-	}
 	go tm.runStarterTask(func() {
 		tm.runNaturalEndingAt(s, epoch, ctx, cancel, tm.noDueWordsTextForNow(), purposeNoDue, ReasonNoDueWords)
 	})
@@ -902,8 +908,8 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson, installG
 		// PR #60 review: same gate as the other starters — a closed session
 		// replays neither session_ready nor the completion session_ended;
 		// the bind and the enqueue are one hold.
-		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, nil) {
-			return errClassroomInstallStale
+		if err := tm.replaceActiveClassroomLocked(installGen, l.LessonID, nil, s); err != nil {
+			return err
 		}
 		tm.state = StateListening
 		tm.sessionReadyAt = time.Now()
@@ -916,6 +922,9 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson, installG
 			Category:  category,
 		})
 	}) {
+		return
+	}
+	if tm.activeClassroomGen() != installGen {
 		return
 	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
@@ -938,6 +947,8 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 	var mode string
 	tutor := newDictationTutor(l)
 	tutor.practice = practice
+	ctx, cancel := context.WithCancel(context.Background())
+	var epoch uint64
 	if !tm.applyClassroomInstallEffect(installGen, func() error {
 		// PR #60 review: the subject-picked classroom's init runs on the
 		// answer turn's goroutine, so an end_session may have closed the
@@ -945,14 +956,16 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 		// that binds the tutor, so a closed session binds nothing, sends no
 		// session_ready and never greets; the bind and the enqueue are one
 		// hold, so the close can no longer land between them either.
-		if !tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor) {
-			return errClassroomInstallStale
+		if err := tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor, s); err != nil {
+			return err
 		}
 		tm.state = StateListening
 		tm.sessionReadyAt = time.Now()
 		first = tm.tutor.words[tm.tutor.currentIndex]
 		total = len(tm.tutor.words)
 		mode = tm.mode
+		tm.turnCancel = cancel
+		epoch = tm.epoch
 		return s.SendControl(SessionReadyMsg{
 			Type:      TypeSessionReady,
 			SessionID: tm.session,
@@ -962,23 +975,15 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 			Category:  category,
 		})
 	}) {
+		cancel()
+		return
+	}
+	if tm.activeClassroomGen() != installGen {
+		cancel()
 		return
 	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	var epoch uint64
-	if !tm.applySessionEffect(func() error {
-		// A close that landed after the session_ready send still gets no
-		// greeting: the entry gates (runAnnouncementDisplayAt) kill the
-		// goroutine even if it launches, but refusing here is the fast path.
-		tm.turnCancel = cancel
-		epoch = tm.epoch
-		return nil
-	}) {
-		cancel()
-		return
-	}
 	spoken := greetingText(total, first.Word)
 	display := spoken
 	if mode != ModeTest {
