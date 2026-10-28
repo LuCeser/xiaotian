@@ -14,7 +14,7 @@
 
 | # | 级别/归属 | 生产入口（442d734） | 确定性交错 | 业务断言 | 对应变异 | 运行命令 | 状态 |
 |---|---|---|---|---|---|---|---|
-| 1 | P1 / S2 / T2 | `subject.go:164` takeSubjectAsk 锁内消费消息；`:205-208` finalizeSubjectAsk 二次加锁读共享 `pendingAskInstallGen`；预留 `turn.go:676/690` | A 语音 goroutine 在两半之间暂停；读循环处理 B 的 auto init 覆盖该字段；恢复 A | A 不借 B 的 gen 安装（无迟到 ready）；B 的预留不被清；B 能完成初始化 | generation 获取恢复为续接读共享字段 | `CGO_ENABLED=1 go test -race -count=1 ./pkg/rt -run '<S2 新用例>'` | 待修 |
+| 1 | P1 / S2 / T2 | `subject.go:164` takeSubjectAsk 锁内消费消息；`:205-208` finalizeSubjectAsk 二次加锁读共享 `pendingAskInstallGen`；预留 `turn.go:676/690` | A 语音 goroutine 在两半之间暂停；读循环处理 B 的 auto init 覆盖该字段；恢复 A | A 不借 B 的 gen 安装（无迟到 ready）；B 的预留不被清；B 能完成初始化 | generation 获取恢复为续接读共享字段 | `CGO_ENABLED=1 go test -race -count=1 ./pkg/rt -run 'TestLate.*Binding'` | **S2 已修**（65084b1/ac6727c：classroomInitRequest 一次临界区取走消息+学科+generation；迟到 epoch 通知现值门、行权威镜像准入门、加练分支同源；M1–M4 变异红） |
 | 2 | P1 / S3 / T1(关闭半边) | `turn.go:920` gen 检查与 `:927` tryTerminalClose 分离；`claimCloseLocked`（`:1364`）只查 closed/可选 epoch。同类：`check.go:751/997`（S5/S6） | A 过 920 检查后、927 关闭前暂停；B 安装并完成自然开场；恢复 A | B 保持活动；连接不提前结束；连接主动关闭仍有效；事件单次 | 只撤 claim 内 scope 校验 | `CGO_ENABLED=1 go test -race -count=1 ./pkg/rt -run '<S3 新用例>'` | 待修 |
 | 3 | P1 / S1 / §5.1 | 测试侧：`speech_browser_test.go` TestPassageSubmitBrowser/close seals：driver 断言 `:2637-2640`、读库 Fatal `:2652-2661` 均早于 `fallbackHold.release()`（`:2663`） | 兜底停在 uncheckedBefore（`:1043-1045`）持点不放，触发断言失败 | 失败须先释放→等任务与 driver→回收→再断言；goroutine 内 Fatal 不算红 | 测试协议证明：人为制造断言失败验证先回收 | `go test -tags=rtbrowser -count=1 ./pkg/rt -run 'TestPassageSubmitBrowser/close_seals_before_the_submit'` | **S1 已修**（320419a：三处 close-seals 重排为记录→释放→等待→断言；reclaim 顺序协议 M-C 变异红） |
 | 4 | P1 / S1 / T8,T9 | 测试观察：`speechServerTasksSettled`（`speech_browser_test.go:969`）依赖 `latchInFlight`（`:973`，tracker 在门内层，兜底停门上未计入）、`checkWrites`、`activeScope.formalSubmit`（`:982`）——兜底三者皆不在 | 连接退出（driver 已返回）后兜底仍持点；轮询 settled | settled 须为 false；释放后须观察到兜底整个任务退出（taskDone：结果/事件/清理） | 完成发布提前到 CompleteCheck 返回；观察缩回活动 scope | `go test -tags=rtbrowser -count=1 ./pkg/rt -run 'TestPassageSubmitBrowser'` | **S1 已修**（7ed3174：settled 改读 task_watch 整任务观察，兜底句柄在 claim 预留；M-A/M-B 变异红；passage close-seals 增「兜底停车时 settled 必为 false」断言） |
@@ -36,3 +36,12 @@
 - 观察替换：`ttFormalSubmitSettled` 与浏览器 `speechServerTasksSettled` 不再读 `activeScope.formalSubmit` / `checkWrites`。
 - 协议证明（去掉修复就红，均为测试设施协议、非生产业务证明）：M-A 完成发布提前到 CompleteCheck 返回 → fsfs/receipt/summary 三个尾部 park 红「尚未结束却已报告完成」；M-B 观察缩回活动 scope → 「遗漏 A」＋两兜底入口红；M-C 撤掉回收等待 → 「断言时点早于真实退出」红。
 - 未做（按计划留待后续步骤）：S2 初始化身份完整传递、S3 关闭 claim 的 scope 校验、S4 真实浏览器验收、M4 去重变异复验（S5）、processTurn/read_word 等会话回合任务未纳入观察（不在 S1 命名范围）。
+
+## S2 完成记录（钉在 65084b1/ac6727c）
+
+- 初始化身份成为完整请求对象 `classroomInitRequest{category, msg, installGen}`：选科临界区一次取走消息＋学科＋预留 generation（subject.go takeSubjectAsk），续接（finalize→continueSessionInit→各 starter）只携带局部对象，不再读共享身份字段；`pendingAskInstallGen` 删除。
+- 迟到续接防扰 B：interrupt_ack 仅在 epoch 迁移仍是当前值时发送（rt-playback onEpochBump 盲采 new_epoch，过期对会把客户端 epoch 拉回并停播）；既有课堂行权威学科镜像改为 `classroomInstallAllowed(req.installGen)` 准入门控；加练分支（handlePracticeInit）改由请求对象取学科与 generation。
+- 测试（subject_request_test.go，四条确定性交错，-race）：迟到绑定不借 B 预约且 B 完成（验收原文）；迟到 epoch 通知跳过；加练学科同源；行权威不改活课堂学科。按 id 存行的 ttPerIDExecutor 修正 fake 单行串课。
+- 变异证明（去掉修复就红，业务断言、非超时）：M1 generation 恢复续接读共享字段→四用例红（迟到 ready/二 ack/借安装/学科改写）；M2 学科恢复读共享字段→fetch=auto、行 id 错、加练 auto 红；M3 撤 ack 现值门→二 ack 红；M4 撤行权威门→共享学科=chinese 红。
+- 顺带（d416a21）：S1 starterInterleave seam 的负载竞态（基线 d5915cd 全量 -race 同样报）——runStarterTask 快照加 mu、S1 用例挂载同锁；测试设施修复，非生产行为。
+- 未做（留后续步骤）：S3 关闭 claim 内 scope 校验、S4 真实浏览器验收、迟到续接 IO 早退/错误出口的请求门（failLessonInit、practice 降级 sendError 仍为会话门，归 S5/S6 结果消息身份）、同 lessonID 重入（S7）。
