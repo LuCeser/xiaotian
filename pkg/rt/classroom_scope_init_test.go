@@ -1,0 +1,212 @@
+package rt
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
+)
+
+// holdFirstDueFetch parks the first FetchDueWords until release (R1 T2).
+type holdFirstDueFetch struct {
+	WordSource
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newHoldFirstDueFetch(inner WordSource) *holdFirstDueFetch {
+	return &holdFirstDueFetch{
+		WordSource: inner,
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+}
+
+func (h *holdFirstDueFetch) FetchDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error) {
+	h.once.Do(func() { close(h.entered) })
+	<-h.release
+	return h.WordSource.FetchDueWords(ctx, limit, category)
+}
+
+func (h *holdFirstDueFetch) openUp() { close(h.release) }
+
+// ttInitCheckingRow opens a checking lesson through real session_init.
+func ttInitCheckingRow(t *testing.T, exec *fakeExecutor, words WordSource) (*TurnManager, *captureSender) {
+	t.Helper()
+	cards := exec.lesson.Cards
+	exec.lesson.Stage = lesson.StageChecking
+	exec.lesson.CurrentIndex = len(cards)
+	exec.lesson.Version = 4
+	exec.lesson.Verdicts = make([]lesson.CheckVerdict, len(cards))
+	for i := range cards {
+		exec.lesson.Verdicts[i] = lesson.CheckVerdict{WordIndex: i, Correct: true, Manual: true}
+	}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		ttConfig(words), NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	return tm, s
+}
+
+// TestLateClassroomInitCannotOverrideActive (rethink2 T2): a slower dictation
+// init must not install session_ready or a tutor after a newer practice init
+// has already won the connection's classroom generation.
+func TestLateClassroomInitCannotOverrideActive(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	fetchHold := newHoldFirstDueFetch(words)
+	exec := newFakeExecutorNoRow(ttLessonID)
+
+	practice := &fakePracticeSource{cards: ptPracticeCards("cat", "dog")}
+	ps := newTestPracticeStore(t)
+	cfg := TurnManagerConfig{
+		LessonID: ttLessonID, Words: fetchHold,
+		Practice: practice, PracticeStore: ps,
+	}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, cfg,
+		NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+
+	initA := mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	})
+	initB := mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Practice: true,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.HandleControl(s, initA)
+	}()
+
+	select {
+	case <-fetchHold.entered:
+	case <-time.After(3 * time.Second):
+		fetchHold.openUp()
+		wg.Wait()
+		t.Fatal("the first session_init never reached FetchDueWords")
+	}
+
+	tm.HandleControl(s, initB)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) >= 1 }) {
+		fetchHold.openUp()
+		wg.Wait()
+		t.Fatal("practice session_ready never arrived")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) >= 1 }) {
+		fetchHold.openUp()
+		wg.Wait()
+		t.Fatal("practice greeting never started before the late dictation init is released")
+	}
+	readyAfterB := s.countOf(TypeSessionReady)
+	sentsAfterB := s.countOf(TypeTeacherSentence)
+
+	tm.mu.Lock()
+	practiceLesson := tm.tutor != nil && tm.tutor.lessonID != "" && tm.tutor.practice
+	tm.mu.Unlock()
+	if !practiceLesson {
+		fetchHold.openUp()
+		wg.Wait()
+		t.Fatal("active tutor is not the practice classroom after B won")
+	}
+
+	fetchHold.openUp()
+	wg.Wait()
+
+	if got := s.countOf(TypeSessionReady); got != readyAfterB {
+		t.Fatalf("session_ready count = %d, want %d (late dictation init must not ship ready)", got, readyAfterB)
+	}
+	if got := s.countOf(TypeTeacherSentence); got != sentsAfterB {
+		t.Fatalf("teacher_sentence count = %d, want %d (late dictation init must not greet)", got, sentsAfterB)
+	}
+	tm.mu.Lock()
+	stillPractice := tm.tutor != nil && tm.tutor.practice
+	tm.mu.Unlock()
+	if !stillPractice {
+		t.Fatal("late dictation init replaced the practice classroom tutor")
+	}
+}
+
+// TestSupersededClassroomSubmitCannotWriteBack (rethink2 T1 init/writeback):
+// after classroom B replaces checking classroom A on the same connection, A's
+// in-flight formal submit must not flip B's in-memory checking state.
+func TestSupersededClassroomSubmitCannotWriteBack(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	tm, s := ttInitCheckingRow(t, exec, words)
+
+	hold := newHoldFirstCompleteCheck(exec)
+	tm.exec = hold
+
+	reclaimAndFail := func(msg string) {
+		hold.openUp()
+		waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) })
+		t.Fatal(msg)
+	}
+
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "scope-a-submit"}))
+	select {
+	case <-hold.entered:
+	case <-time.After(3 * time.Second):
+		reclaimAndFail("classroom A submit never reached CompleteCheck")
+	}
+
+	practice := &fakePracticeSource{cards: ptPracticeCards("cat", "dog")}
+	ps := newTestPracticeStore(t)
+	cfg := TurnManagerConfig{
+		LessonID: ttLessonID, Words: words,
+		Practice: practice, PracticeStore: ps,
+	}
+	tm.cfg = cfg
+	if fe, ok := hold.LessonExecutor.(*fakeExecutor); ok {
+		fe.mu.Lock()
+		fe.lesson.CurrentIndex = 0
+		fe.lesson.Stage = ""
+		fe.lesson.Version = 1
+		fe.lesson.Verdicts = nil
+		fe.mu.Unlock()
+	}
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Practice: true,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool {
+		tm.mu.Lock()
+		ok := tm.tutor != nil && tm.tutor.practice
+		tm.mu.Unlock()
+		return ok
+	}) {
+		reclaimAndFail("practice classroom B never installed")
+	}
+
+	tm.mu.Lock()
+	tm.tutor.checking = true // B is in check; A's stale writeback must not clear this.
+	wantVer := tm.tutor.version
+	wantChecking := tm.tutor.checking
+	tm.mu.Unlock()
+
+	hold.openUp()
+	if !waitFor(t, 5*time.Second, func() bool { return ttSubmitTaskSettled(tm) }) {
+		reclaimAndFail(fmt.Sprintf("classroom A submit task never finished (calls=%d)", hold.callCount()))
+	}
+
+	tm.mu.Lock()
+	gotVer, gotChecking := tm.tutor.version, tm.tutor.checking
+	stillB := tm.tutor.practice
+	tm.mu.Unlock()
+	if !stillB {
+		t.Fatal("active tutor is no longer the practice classroom after A's save finished")
+	}
+	if gotVer != wantVer {
+		t.Fatalf("tutor.version = %d, want %d (superseded submit must not write back)", gotVer, wantVer)
+	}
+	if gotChecking != wantChecking {
+		t.Fatalf("tutor.checking = %v, want %v (superseded submit must not clear B's check stage)", gotChecking, wantChecking)
+	}
+}
