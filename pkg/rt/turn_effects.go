@@ -1,6 +1,10 @@
 package rt
 
-import "github.com/xiaotian/home-tutor-agent/pkg/infra"
+import (
+	"github.com/pkg/errors"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+)
 
 // TurnEffectOutcome classifies one effect wrapper's execution (issue #69
 // 备选一步骤 5). The legacy boolean shape folded two fundamentally
@@ -61,6 +65,34 @@ func (tm *TurnManager) applySessionResultLocked(effect func() error) TurnEffectR
 	return TurnEffectResult{Outcome: TurnEffectApplied}
 }
 
+// applyScopeSessionResultLocked runs a session-scoped memory mutation only
+// when scopeGen still owns the active classroom (R1 writeback gate). Caller
+// holds tm.mu.
+func (tm *TurnManager) applyScopeSessionResultLocked(scopeGen uint64, effect func() error) TurnEffectResult {
+	if !tm.scopeWritebackAllowedLocked(scopeGen) {
+		return TurnEffectResult{Outcome: TurnEffectStale}
+	}
+	if err := effect(); err != nil {
+		return TurnEffectResult{Outcome: TurnEffectDeliveryFailed, Err: err}
+	}
+	return TurnEffectResult{Outcome: TurnEffectApplied}
+}
+
+// applyClassroomInstallResultLocked runs an install effect only while gen is
+// still the latest classroom reservation. Caller holds tm.mu.
+func (tm *TurnManager) applyClassroomInstallResultLocked(gen uint64, effect func() error) TurnEffectResult {
+	if !tm.classroomInstallAllowed(gen) {
+		return TurnEffectResult{Outcome: TurnEffectStale}
+	}
+	if err := effect(); err != nil {
+		if errors.Is(err, errClassroomInstallStale) {
+			return TurnEffectResult{Outcome: TurnEffectStale}
+		}
+		return TurnEffectResult{Outcome: TurnEffectDeliveryFailed, Err: err}
+	}
+	return TurnEffectResult{Outcome: TurnEffectApplied}
+}
+
 // applyCheckStageResultLocked is the check-stage sibling: the surfaces that
 // run OUTSIDE any turn (photo OCR carries no epoch of its own). Caller
 // holds tm.mu; no logging here.
@@ -103,6 +135,34 @@ func (tm *TurnManager) applySessionOutcome(effect func() error) TurnEffectResult
 	return res
 }
 
+// applyScopeSessionOutcome is the scope-gated session effect entry (async
+// submit writeback and similar).
+func (tm *TurnManager) applyScopeSessionOutcome(scopeGen uint64, effect func() error) TurnEffectResult {
+	tm.mu.Lock()
+	res := tm.applyScopeSessionResultLocked(scopeGen, effect)
+	tm.mu.Unlock()
+	if res.Outcome == TurnEffectDeliveryFailed {
+		tm.logger.Warn("scope session effect enqueue failed",
+			infra.F("classroom_gen", scopeGen),
+			infra.ErrField(res.Err))
+	}
+	return res
+}
+
+// applyClassroomInstallOutcome gates classroom install sends (session_ready,
+// tutor bind) against a reserved generation.
+func (tm *TurnManager) applyClassroomInstallOutcome(gen uint64, effect func() error) TurnEffectResult {
+	tm.mu.Lock()
+	res := tm.applyClassroomInstallResultLocked(gen, effect)
+	tm.mu.Unlock()
+	if res.Outcome == TurnEffectDeliveryFailed {
+		tm.logger.Warn("classroom install enqueue failed",
+			infra.F("classroom_gen", gen),
+			infra.ErrField(res.Err))
+	}
+	return res
+}
+
 // applyCheckStageOutcome is applyTurnOutcomeAt's check-stage sibling; the
 // failure log likewise fires outside tm.mu.
 func (tm *TurnManager) applyCheckStageOutcome(effect func() error) TurnEffectResult {
@@ -135,6 +195,18 @@ func (tm *TurnManager) applyTurnLocked(epoch uint64, effect func() error) bool {
 // applySessionEffect is the legacy boolean wrapper over applySessionOutcome.
 func (tm *TurnManager) applySessionEffect(effect func() error) bool {
 	return tm.applySessionOutcome(effect).Applied()
+}
+
+// applyScopeSessionEffect is the legacy boolean wrapper over
+// applyScopeSessionOutcome.
+func (tm *TurnManager) applyScopeSessionEffect(scopeGen uint64, effect func() error) bool {
+	return tm.applyScopeSessionOutcome(scopeGen, effect).Applied()
+}
+
+// applyClassroomInstallEffect is the legacy boolean wrapper over
+// applyClassroomInstallOutcome.
+func (tm *TurnManager) applyClassroomInstallEffect(gen uint64, effect func() error) bool {
+	return tm.applyClassroomInstallOutcome(gen, effect).Applied()
 }
 
 // applyCheckStageEffect is the legacy boolean wrapper over
