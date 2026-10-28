@@ -2968,7 +2968,15 @@
     // Issue #11/#13: a poems-only or passages-only run is a real result
     // too — emptiness is judged over EVERY content kind.
     if (!this.rows.length && !this.poemRows.length && !this.passageRows.length) {
-      this.resetEntries();
+      // Issue #80 U3: an all-empty run that still has failed/pending pages
+      // is RETRYABLE — its registered (empty) snapshots and the textbook
+      // header it read must survive, so a retry REPLACES the photo's own
+      // record instead of first-registering into a wiped store, and
+      // detectedMeta stays consistent with metaDone (resetEntries drops
+      // the meta but never the read flag — the wipe lost both ways).
+      if (!summary || !(summary.failed > 0 || summary.pending > 0)) {
+        this.resetEntries();
+      }
       this.renderPreviewHint(summary && summary.failed > 0
         ? '这一轮没有一' + noun + '识别成功，请检查文件后重试'
         : '这次处理没有识别到词表内容');
