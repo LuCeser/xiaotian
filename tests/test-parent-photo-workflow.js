@@ -658,6 +658,112 @@ async function testBookSwitchRecomputesEveryChoice() {
   eq(form.rows[2].lesson, '家长课', '空教材→A: parent value survives the whole chain');
 }
 
+/**
+ * Issue #80 U4 — 前张不借后张: photo 1's header never recognized, so its
+ * refresh must derive from ITS OWN header-less snapshot plus the chosen
+ * book — never from the merged batch meta whose 课次 belongs to photo 2.
+ */
+async function testEarlierPhotoNeverBorrowsLaterHeaderLesson() {
+  var calls = 0;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 1) {
+        // No textbook header on photo 1 — an honest header-less photo.
+        return Promise.resolve({
+          entries: [{ word: 'p1a', meaning: '壹', lesson: '' }],
+        });
+      }
+      return Promise.resolve({
+        entries: [{ word: 'p2a', meaning: '贰', lesson: '' }],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册', lesson: '第4课' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto('one.jpg'), fakePhoto('two.jpg')]);
+  h.clickRecognize();
+  await flushPromises(30);
+  var form = h.form;
+  eq(form.rows.length, 2, 'U4 前张: both photos land their rows');
+  eq(form.rows[0].lesson, '', 'U4 前张: header-less photo 1 has no lesson of its own');
+  eq(form.rows[1].lesson, '第4课', 'U4 前张: photo 2 keeps its own header lesson');
+  eq(form.rows[1].lessonOrigin, 'recognized', 'U4 前张: photo 2 lesson origin recognized');
+  eq(form.detectedMeta && form.detectedMeta.lesson, '第4课',
+    'U4 前张: the merged batch meta DOES carry photo 2 课次 (the borrowing temptation)');
+  eq(String(form.bookChoice), 'unset',
+    'U4 前张: header-less first photo leaves the choice unset');
+  var select = h.dom.document.getElementById('parent-photo-textbook');
+  select.value = '7';
+  select.fire('change');
+  eq(form.rows[0].lesson, '第2课',
+    '前张刷新取所选教材末课（第2课），不借整批 meta 里后张的第4课');
+  eq(form.rows[0].lessonOrigin, 'previous-lesson', '前张刷新来源是 previous-lesson');
+  eq(form.rows[1].lesson, '第4课', '后张自己的识别课次在刷新后保留');
+}
+
+/**
+ * Issue #80 U4 — 后张按前序推荐计算: photo ORDER, not completion order.
+ * Photo 1 fails its first attempt, so photo 2 lands first; the retried
+ * photo 1 lands LAST with its own lesson. The lesson-less photo 3 — and
+ * the post-retry book-switch refresh — must keep following photo 2 (photo
+ * order), never the late-completed photo 1 (completion order).
+ */
+async function testPriorRecommendationsFollowPhotoOrderNotCompletionOrder() {
+  var calls = 0;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          entries: [],
+          textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+        });
+      }
+      if (calls === 2) {
+        return Promise.resolve({
+          entries: [{ word: 'w2', meaning: '贰', lesson: '' }],
+          textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册', lesson: '第4课' },
+        });
+      }
+      if (calls === 3) {
+        return Promise.resolve({
+          entries: [{ word: 'w3', meaning: '叁', lesson: '' }],
+          textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+        });
+      }
+      return Promise.resolve({
+        entries: [{ word: 'w1', meaning: '壹', lesson: '第2课' }],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto('one.jpg'), fakePhoto('two.jpg'), fakePhoto('three.jpg')]);
+  h.clickRecognize();
+  await flushPromises(40);
+  var form = h.form;
+  eq(form.photoBatch.plan.pages[0].status, 'failed', 'U4 前序: photo 1 empty attempt fails');
+  eq(form.rows.length, 2, 'U4 前序: photos 2 and 3 land');
+  eq(form.rows[0].word, 'w2', 'U4 前序: photo 2 rows keep photo order');
+  eq(form.rows[0].lesson, '第4课', 'U4 前序: photo 2 own header lesson stamps its row');
+  eq(form.rows[1].lesson, '第4课',
+    'U4 前序: lesson-less photo 3 follows photo 2 (photo order) at landing');
+  eq(form.rows[1].lessonOrigin, 'photo-order', 'U4 前序: photo 3 landing origin photo-order');
+  assert(h.clickRetryPage(1), 'U4 前序: photo 1 real retry chip rendered');
+  await flushPromises(18);
+  eq(form.rows.length, 3, 'U4 前序: retried photo 1 lands its row');
+  eq(form.rows[0].word, 'w1', 'U4 前序: retried photo 1 inserts at its PHOTO position');
+  eq(form.rows[0].lesson, '第2课', 'U4 前序: retried photo 1 own lesson stamps its row');
+  eq(form.rows[0].lessonOrigin, 'recognized', 'U4 前序: retried own lesson origin recognized');
+  var select = h.dom.document.getElementById('parent-photo-textbook');
+  select.value = '8';
+  select.fire('change');
+  eq(form.rows[0].lesson, '第2课', 'U4 前序: photo 1 own lesson survives the switch');
+  eq(form.rows[1].lesson, '第4课', 'U4 前序: photo 2 own lesson survives the switch');
+  eq(form.rows[2].lesson, '第4课',
+    '刷新后 photo 3 仍按片序取 photo 2 的第4课，不取完成顺序上更近的补拍 photo 1 第2课');
+  eq(form.rows[2].lessonOrigin, 'photo-order', 'U4 前序: photo 3 refreshed origin photo-order');
+}
+
 (async function main() {
   await testSinglePhotoEntryClearsViaRecognizeButton();
   await testMultiPhotoEntryClearsViaRecognizeButton();
@@ -676,6 +782,8 @@ async function testBookSwitchRecomputesEveryChoice() {
   await testPdfAllEmptyRunKeepsMetaForRetryPreselect();
   await testPhotoBatchAllEmptyKeepsSnapshotsForRetry();
   await testBookSwitchRecomputesEveryChoice();
+  await testEarlierPhotoNeverBorrowsLaterHeaderLesson();
+  await testPriorRecommendationsFollowPhotoOrderNotCompletionOrder();
 
   if (failures) {
     console.error('test-parent-photo-workflow: ' + failures + ' of ' + checks + ' checks failed');
