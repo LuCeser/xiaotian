@@ -400,3 +400,158 @@ func TestClassroomSwitchDuringSubmitBrowser(t *testing.T) {
 		t.Fatal("the connection or its server tasks did not settle after B's ending")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Case E — the mid-opening switch (R1's epoch-notice half in a real browser):
+// A's opening is playing with its later sentences already queued when the
+// connection switches to B. The page must get interrupt_ack BEFORE B's
+// session_ready (the queued old audio stops; the player adopts B's epoch and
+// naturally ACKs B's whole opening). The mutation verdict rides the player's
+// registration, never a frame count.
+// ---------------------------------------------------------------------------
+
+func TestClassroomSwitchOpeningEpochBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	// B's dictation fetch batch (english): armed now, consumed only by B's
+	// init — A's own entry resolves through the chinese peek only.
+	f.words.setDue("english", speechEnglishWords)
+
+	opening := string(mustJSON(t, speechExpectedOpening))
+	driver := f.runDriverAsync("classroom-switch-opening", 75*time.Second,
+		"--expected-second-json", opening, "--reject-margin-ms", "8000")
+
+	m := f.tryFirstManager(10 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, nil, "no /rt connection was created before the deadline")
+	}
+	// The page's FIRST natural ack of A's opening is the switch instant:
+	// sentence 1 has played, sentences 2-3 sit queued on the player.
+	if !waitFor(t, 45*time.Second, func() bool { return speechAckEpochCount(m, 0) >= 1 }) {
+		f.reclaimAndFail(driver, nil, "A's opening never produced its first natural ack")
+	}
+	speechInjectSessionInit(t, f, m, "english")
+
+	res, gotDriver := f.recvSpeechDriver(driver, speechReclaimBound)
+	if !gotDriver || !res.OK {
+		f.reclaimAndFail(driver, nil, "the opening-switch journey failed: %s", res.Err)
+	}
+	if res.SecondRoundVerdict != "acked" {
+		t.Fatalf("B's opening verdict = %q with rounds %+v (dropped=%d) — the player's registration must show B's audio accepted and naturally acked",
+			res.SecondRoundVerdict, res.Rounds, res.Playback.DroppedChunks)
+	}
+	if len(res.Rounds) != 2 || !res.Rounds[1].AllAckedNaturally || res.Rounds[1].Epoch != 1 {
+		t.Fatalf("B's round = %+v, want epoch 1 fully acked naturally", res.Rounds)
+	}
+	if res.Playback.DroppedChunks != 0 {
+		t.Fatalf("dropped chunks = %d, want 0 — every delivered chunk must play", res.Playback.DroppedChunks)
+	}
+	if res.ReadyCount != 2 || len(res.InterruptAcks) != 1 || !res.InterruptAckBeforeReady {
+		t.Fatalf("ready=%d acks=%+v before-ready=%v, want 2 readys and the 0→1 install notice ordered between them",
+			res.ReadyCount, res.InterruptAcks, res.InterruptAckBeforeReady)
+	}
+	if len(res.ErrorFrames) != 0 {
+		t.Fatalf("error frames = %+v, want none", res.ErrorFrames)
+	}
+
+	// The queued old audio stopped: at least one delivered sentence of A's
+	// opening never completed (its ack never came) and the player cancelled.
+	a := res.Rounds[0]
+	aAcks := 0
+	for _, s := range a.Sentences {
+		aAcks += s.Acks
+	}
+	if len(a.Sentences) < 2 || aAcks != 1 || res.StopNowCount < 1 {
+		t.Fatalf("A's opening delivered %d sentences with %d acks and stopNow=%d, want ≥2 delivered, exactly 1 acked (the queued remainder stopped by the switch)",
+			len(a.Sentences), aAcks, res.StopNowCount)
+	}
+	if got := speechAckEpochCount(m, 0); got != 1 {
+		t.Fatalf("server-side acks for epoch 0 = %d, want exactly 1 (the stopped queue never acks)", got)
+	}
+	if got := speechAckEpochCount(m, 1); got != len(res.Rounds[1].Sentences) {
+		t.Fatalf("server-side acks for epoch 1 = %d, want %d natural acks of B's opening", got, len(res.Rounds[1].Sentences))
+	}
+	if res.SessionEndedCount != 0 || res.WSCloseCount != 0 {
+		t.Fatalf("session_ended=%d close=%d, want 0/0 — B's live classroom keeps the connection", res.SessionEndedCount, res.WSCloseCount)
+	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatal("the connection or its server tasks did not settle after the page left")
+	}
+	if state := speechTutorStateOf(m); state.lessonID != lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryEnglish) {
+		t.Fatalf("live classroom at the end = %q, want B's english row", state.lessonID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Case G — the late ask continuation (S2's fix held in a real browser): the
+// answered 语文 continuation parks at its own row fetch; B (an independent
+// REAL english row) installs and finishes its opening naturally; A's release
+// must stay completely silent — no second session_ready, no A greeting, no
+// second epoch notice.
+// ---------------------------------------------------------------------------
+
+func TestLateAskContinuationSilentBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.words.setDue("english", speechEnglishWords)
+	f.words.setPeek("english", speechEnglishWords[:1]) // both subjects due → the ask
+	f.mu.Lock()
+	f.wordsOverride = speechNewCategoryFetchHold(f.words, "chinese")
+	f.expectedSentences = append([]string(nil), speechExpectedAskRound...)
+	f.mu.Unlock()
+	// The child's spoken 语文 answer rides the real capture → VAD → ASR.
+	f.asr.mu.Lock()
+	f.asr.script = append(f.asr.script, asrScript{text: "语文"})
+	f.asr.mu.Unlock()
+
+	opening := string(mustJSON(t, speechExpectedOpening))
+	driver := f.runDriverAsync("subject-ask-switch", 75*time.Second,
+		"--expected-second-json", opening, "--late-window-ms", "5000")
+
+	m := f.tryFirstManager(10 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, nil, "no /rt connection was created before the deadline")
+	}
+	hold, _ := f.wordsOverride.(*speechCategoryFetchHold)
+	if hold == nil {
+		f.reclaimAndFail(driver, nil, "the chinese fetch hold was not mounted")
+	}
+	if !speechChHit(hold.entered, 45*time.Second) {
+		hold.openUp()
+		f.reclaimAndFail(driver, nil, "the answered continuation never reached its own row fetch")
+	}
+
+	speechInjectSessionInit(t, f, m, "english")
+	if !waitFor(t, 45*time.Second, func() bool { return f.announcementDone.Load() >= 1 }) {
+		hold.openUp()
+		f.reclaimAndFail(driver, nil, "B's opening never settled through the real page")
+	}
+	hold.openUp()
+	if !waitFor(t, 30*time.Second, func() bool { return m.TurnManager.serverTasksSettled() }) {
+		f.reclaimAndFail(driver, nil, "the late continuation's task never finished after the release")
+	}
+
+	res, gotDriver := f.recvSpeechDriver(driver, speechReclaimBound)
+	if !gotDriver || !res.OK {
+		f.reclaimAndFail(driver, nil, "the ask-switch journey failed: %s", res.Err)
+	}
+	if res.ReadyCount != 1 {
+		t.Fatalf("session_ready count = %d, want exactly 1 (B's) — a late continuation must never install or ship a ready of its own", res.ReadyCount)
+	}
+	if len(res.InterruptAcks) != 1 || res.InterruptAcks[0].OldEpoch != 0 || res.InterruptAcks[0].NewEpoch != 1 {
+		t.Fatalf("interrupt_acks = %+v, want exactly the pick's 0→1 notice (B installed onto an empty scope: no second notice)", res.InterruptAcks)
+	}
+	if len(res.Rounds) != 2 || !res.Rounds[0].AllAckedNaturally || !res.Rounds[1].AllAckedNaturally || res.Rounds[1].Epoch != 1 {
+		t.Fatalf("rounds = %+v, want the ask and B's opening (epoch 1) both acked naturally", res.Rounds)
+	}
+	if lw := res.LateWindow; lw.TeacherSentences != 0 || lw.SessionReady != 0 || lw.InterruptAcks != 0 || lw.Errors != 0 {
+		t.Fatalf("late window after B's opening = %+v, want zero late-continuation output", lw)
+	}
+	if res.Playback.DroppedChunks != 0 || res.WSCloseCount != 0 || len(res.ErrorFrames) != 0 {
+		t.Fatalf("dropped=%d close=%d errors=%+v, want 0/0/none", res.Playback.DroppedChunks, res.WSCloseCount, res.ErrorFrames)
+	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatal("the connection or its server tasks did not settle after the page left")
+	}
+	if state := speechTutorStateOf(m); state.lessonID != lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryEnglish) {
+		t.Fatalf("live classroom at the end = %q, want B's english row — the late continuation must not have installed over it", state.lessonID)
+	}
+}
