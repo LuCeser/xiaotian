@@ -14,6 +14,12 @@
  * a dead batch), and a superseded execution's late wind-down renders no
  * finish: the 分类已切换 hint survives, and the PDF legacy bar's early-stop
  * hint promises only what its buttons offer.
+ * Issue #80 U8 — the PDF run rides the SAME §3.2 machine as the photo batch
+ * (U7fix1's legacy-bar pin retired): 停止 shows 停止中, the late in-flight
+ * result is dropped, and 继续处理 — really offered by the bar now — re-runs
+ * only the pending pages. The single photo joins the same batch
+ * initialization and invalidation rules (its landing keeps the plain flow's
+ * own surface, poems included).
  *
  * `node tests/test-parent-photo-workflow.js`
  */
@@ -1457,18 +1463,123 @@ async function testRetryResponseAfterSubjectSwitchKeepsSwitchHint() {
 }
 
 /**
- * Issue #80 U7fix1 (review P2-2, PDF regression) — the shared stopped hint
- * must not promise what the entry's own buttons do not offer: a PDF stopped
- * before its first page lands says 已停止 with the remaining count, WITHOUT
- * 可点「继续处理」 — the legacy bar (U8 未接入) renders no resume button,
- * and the hint agrees with it.
+ * Issue #80 U8 — the PDF run rides the SAME §3.2 machine as the photo
+ * batch (U7's photo flagship, PDF edition; the U7fix1 legacy-bar pin is
+ * retired): through the REAL bar buttons, 开始 → 停止（停止中）→ 收尾 →
+ * 继续 — the stopped page's late result never reaches the draft (back to
+ * pending, no snapshot), 继续处理 re-runs ONLY the pending pages (a done
+ * page is never re-run), and saving stays barred while an execution — the
+ * stop's wind-down included — is in flight.
+ */
+async function testPdfStopDropsLateResultAndResumeRunsOnlyPending() {
+  var calls = 0;
+  var gate = null;
+  var meta = { edition: '人教版PEP', grade: '三年级', volume: '上册' };
+  var h = mountWorkflowForm({
+    pdfPageCount: 3,
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 2) {
+        return new Promise(function (resolve) { gate = resolve; });
+      }
+      return Promise.resolve(calls === 1
+        ? { entries: [{ word: 'first', meaning: '壹', lesson: '第1课' }], textbook: meta }
+        : { entries: [{ word: 'after-resume', meaning: '续', lesson: '第2课' }], textbook: meta });
+    },
+  });
+  h.pickPhotos([fakePdf()]);
+  h.clickRecognize();
+  await flushPromises(14);
+  var form = h.form;
+  eq(calls, 2, 'U8 PDF停止: page 1 done, page 2 recognize in flight');
+  eq(form.rows.length, 1, 'U8 PDF停止: page 1 rows landed');
+  eq(form.pdfState.plan.pages[0].status, 'done', 'U8 PDF停止: page 1 done on the plan');
+  eq(form.pdfState.plan.pages[1].status, 'running', 'U8 PDF停止: page 2 running');
+  var midRunResume = h.barResume();
+  assert(!!midRunResume && midRunResume.disabled,
+    'U8 PDF停止: resume renders DISABLED while the run is executing');
+  if (midRunResume) {
+    midRunResume.fire('click');
+    await flushPromises(3);
+  }
+  eq(calls, 2, 'U8 PDF停止: clicking the disabled resume starts no overlapping execution');
+  assert(form.commitBtn.disabled, 'U8 PDF停止: save barred while the run executes');
+  var submits = 0;
+  form.submitWords = function () {
+    submits += 1;
+    return Promise.resolve({ results: [] });
+  };
+  form.commitBtn.fire('click');
+  eq(submits, 0, 'U8 PDF停止: the real commit entry refuses while busy');
+
+  var stop = h.barStop();
+  assert(!!stop, 'U8 PDF停止: the real stop button renders while executing');
+  if (stop) {
+    stop.fire('click');
+    stop = h.barStop();
+  }
+  eq(stop && stop.textContent, '停止中…',
+    'U8 PDF停止: the bar shows 停止中 after the stop transition');
+  assert(!stop || stop.disabled, 'U8 PDF停止: 停止中 leaves the stop control disabled');
+  assert(form.commitBtn.disabled, 'U8 PDF停止: save stays barred during the wind-down');
+
+  gate({
+    entries: [{ word: 'late-page', meaning: '迟', lesson: '第9课' }],
+    textbook: meta,
+  });
+  await flushPromises(14);
+  eq(form.rows.length, 1, 'U8 PDF停止: the stopped page late result never reaches the draft');
+  assert(!form.rows.some(function (r) { return r.word === 'late-page'; }),
+    'U8 PDF停止: the late word is absent from the draft rows');
+  assert(!global.getPhotoRecognition(form.importPhotoState, 2),
+    'U8 PDF停止: the dropped result registers no snapshot');
+  eq(form.pdfState.plan.pages[1].status, 'pending',
+    'U8 PDF停止: the stopped page returns to pending');
+  eq(form.pdfState.plan.pages[2].status, 'pending',
+    'U8 PDF停止: the unstarted page stays pending');
+  eq(calls, 2, 'U8 PDF停止: the loop schedules no further page after the stop');
+  eq(form.pdfState.aborted, true, 'U8 PDF停止: the run records the stop fact');
+  eq(form.pdfState.executing, false,
+    'U8 PDF停止: the wind-down settled (executing false)');
+
+  var resume = h.barResume();
+  assert(!!resume && !resume.disabled,
+    'U8 PDF继续: resume enabled once the wind-down settled');
+  if (resume) {
+    assert(resume.textContent.indexOf('剩 2 页') >= 0,
+      'U8 PDF继续: the resume label names the remaining pages');
+    resume.fire('click');
+  }
+  await flushPromises(24);
+  eq(calls, 4, 'U8 PDF继续: resume re-recognized ONLY the 2 pending pages (done never re-run)');
+  eq(form.rows.length, 3, 'U8 PDF继续: the pending pages land after resume');
+  assert(form.pdfState.plan.pages.every(function (p) { return p.status === 'done'; }),
+    'U8 PDF继续: every page settles done');
+  assert(!h.barStop() && !h.barResume(),
+    'U8 PDF继续: no run buttons once the file is fully done');
+  eq(submits, 0, 'U8 PDF继续: the busy-barred commit never submitted');
+}
+
+/**
+ * Issue #80 U8 (retires the U7fix1 legacy-bar pin) — a PDF stopped before
+ * its first page lands REALLY offers 继续处理 now (the bar renders it), so
+ * the finish hint may promise it again: 已停止 + remaining count + 可点
+ * 「继续处理」, and clicking the real button completes the file.
  */
 async function testPdfEarlyStopHintMatchesStatusBarButtons() {
   var gate = null;
+  var first = true;
   var h = mountWorkflowForm({
     pdfPageCount: 2,
     recognizePhoto: function () {
-      return new Promise(function (resolve) { gate = resolve; });
+      if (first) {
+        first = false;
+        return new Promise(function (resolve) { gate = resolve; });
+      }
+      return Promise.resolve({
+        entries: [{ word: 'after-resume', meaning: '续', lesson: '第1课' }],
+        textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+      });
     },
   });
   h.pickPhotos([fakePdf()]);
@@ -1476,7 +1587,7 @@ async function testPdfEarlyStopHintMatchesStatusBarButtons() {
   await flushPromises(14);
   var form = h.form;
   var stop = h.barStop();
-  assert(!!stop, 'U7fix1 PDF早停: the legacy stop button renders mid-run');
+  assert(!!stop, 'U8 PDF早停: the stop button renders mid-run');
   if (stop) {
     stop.fire('click');
   }
@@ -1485,16 +1596,114 @@ async function testPdfEarlyStopHintMatchesStatusBarButtons() {
     textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
   });
   await flushPromises(14);
+  eq(form.rows.length, 0, 'U8 PDF早停: the dropped result leaves the draft empty');
+  assert(form.pdfState.plan.pages.every(function (p) { return p.status === 'pending'; }),
+    'U8 PDF早停: the settle sweep returns every page to pending');
   var hint = form.preview.querySelector('.preview-empty');
   assert(!!hint && hint.textContent.indexOf('已停止') >= 0 &&
     hint.textContent.indexOf('未处理') >= 0,
-    'U7fix1 PDF早停: the finish hint states the stop with the remaining pages');
-  assert(!hint || hint.textContent.indexOf('继续处理') < 0,
-    'U7fix1 PDF早停: the hint does NOT promise 继续处理 the bar never shows');
-  assert(!h.barResume(),
-    'U7fix1 PDF早停: the legacy bar renders no 继续处理 button (U8 未接入)');
-  assert(!!h.barStop(),
-    'U7fix1 PDF早停: the legacy bar keeps its stop control — hint and bar agree');
+    'U8 PDF早停: the finish hint states the stop with the remaining pages');
+  assert(!!hint && hint.textContent.indexOf('可点「继续处理」') >= 0,
+    'U8 PDF早停: the hint promises 继续处理 the bar really shows now');
+  var resume = h.barResume();
+  assert(!!resume && !resume.disabled,
+    'U8 PDF早停: the bar really renders the enabled 继续处理 the hint names');
+  assert(!h.barStop(),
+    'U8 PDF早停: the settled stop RETIRES the stop control (the legacy bar kept it stuck — hint and bar agree on 继续处理 only)');
+  if (resume) {
+    resume.fire('click');
+  }
+  await flushPromises(24);
+  assert(form.pdfState.plan.pages.every(function (p) { return p.status === 'done'; }),
+    'U8 PDF早停: resume completes the whole file');
+  eq(form.rows.length, 2, 'U8 PDF早停: both pages land after resume');
+}
+
+/**
+ * Issue #80 U8 — the single photo joins the SAME batch initialization
+ * rules (§3.1 单张也作为第 1 张处理): the REAL 开始识别 button initializes a
+ * one-photo run on the U6 machine, while the landing keeps the plain
+ * flow's OWN surface — no chips bar, no stop/resume buttons — and poems
+ * land through the plain flow exactly as before.
+ */
+async function testSinglePhotoRunJoinsBatchRulesKeepsPlainSurface() {
+  var gate = null;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      return new Promise(function (resolve) { gate = resolve; });
+    },
+  });
+  h.pickPhotos([fakePhoto('only.jpg')]);
+  h.clickRecognize();
+  await flushPromises(6);
+  var form = h.form;
+  assert(!!form.photoBatch, 'U8 单张: 开始识别 initializes the batch run state');
+  eq(form.photoBatch && form.photoBatch.kind, 'photo-single',
+    'U8 单张: the run is marked as the single-photo batch');
+  eq(form.photoBatch && form.photoBatch.executing, true,
+    'U8 单张: the run is executing while the recognition is in flight');
+  eq(form.photoBatch && form.photoBatch.plan.pages[0].status, 'running',
+    'U8 单张: the single photo rides the plan as page 1');
+  eq(form.pdfBar.hidden, true, 'U8 单张: the plain flow renders NO chips bar');
+  assert(!h.barStop() && !h.barResume(),
+    'U8 单张: no stop/resume buttons on the plain surface');
+  assert(form.commitBtn.disabled, 'U8 单张: saving barred while the run executes');
+
+  gate({
+    poems: [{ title: '静夜思', author: '李白', lines: ['床前明月光', '疑是地上霜'] }],
+    entries: [],
+    passages: [],
+  });
+  await flushPromises(16);
+  if (form.photoBatch) {
+    eq(form.photoBatch.plan.pages[0].status, 'done',
+      'U8 单张: the page settles done through the plan');
+    eq(form.photoBatch.executing, false,
+      'U8 单张: the wind-down settles the run (executing false)');
+  }
+  eq(form.poemRows.length, 1,
+    'U8 单张: poems land through the plain flow as before');
+  eq(form.pdfBar.hidden, true, 'U8 单张: still no bar after landing');
+}
+
+/**
+ * Issue #80 U8 — the single run obeys the SAME invalidation rule: a REAL
+ * subject-radio switch mid-flight marks the run 失效 (terminal), and the
+ * late result never lands — the 分类已切换 hint survives, no rows, and no
+ * bar ever renders for the plain surface.
+ */
+async function testSinglePhotoRunInvalidatedBySubjectSwitch() {
+  var gate = null;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      return new Promise(function (resolve) { gate = resolve; });
+    },
+  });
+  h.pickPhotos([fakePhoto('only.jpg')]);
+  h.clickRecognize();
+  await flushPromises(6);
+  var form = h.form;
+  assert(h.switchCategory('chinese'),
+    'U8 单张失效: the real category radio fires the subject switch');
+  eq(form.photoBatch && form.photoBatch.invalidated, true,
+    'U8 单张失效: the switch invalidated the single run (same rule as the batch)');
+  eq(form.photoBatch && form.photoBatch.executing, false,
+    'U8 单张失效: an invalidated run executes nothing');
+  gate({
+    entries: [{ word: 'late-single', meaning: '迟', lesson: '第9课' }],
+    textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+  });
+  await flushPromises(14);
+  eq(form.rows.length, 0, 'U8 单张失效: the late result lands no rows');
+  var hint = form.preview.querySelector('.preview-empty');
+  assert(!!hint && hint.textContent.indexOf('分类已切换') >= 0,
+    'U8 单张失效: the 分类已切换 hint survives the late result');
+  assert(!h.barStop() && !h.barResume(),
+    'U8 单张失效: the plain surface never renders run buttons');
+  if (form.photoBatch) {
+    eq(form.photoBatch.plan.pages[0].status, 'pending',
+      'U8 单张失效: the swept page rests pending on the dead run');
+  }
 }
 
 (async function main() {
@@ -1532,7 +1741,10 @@ async function testPdfEarlyStopHintMatchesStatusBarButtons() {
   await testSubjectSwitchAfterSettledStopHidesRetryChip();
   await testResumeResponseAfterSubjectSwitchKeepsSwitchHint();
   await testRetryResponseAfterSubjectSwitchKeepsSwitchHint();
+  await testPdfStopDropsLateResultAndResumeRunsOnlyPending();
   await testPdfEarlyStopHintMatchesStatusBarButtons();
+  await testSinglePhotoRunJoinsBatchRulesKeepsPlainSurface();
+  await testSinglePhotoRunInvalidatedBySubjectSwitch();
 
   if (failures) {
     console.error('test-parent-photo-workflow: ' + failures + ' of ' + checks + ' checks failed');
