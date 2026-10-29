@@ -98,6 +98,10 @@ func (f *fakePyBridge) RunDesignate(context.Context, pybridge.DesignateOpts) (py
 	panic("PyFSRS must never call RunDesignate")
 }
 
+func (f *fakePyBridge) RunCreateDesignation(context.Context, pybridge.CreateDesignationOpts) (pybridge.DesignateResult, error) {
+	panic("PyFSRS must never call RunCreateDesignation")
+}
+
 // TestPyFSRSNilExecRejected pins the D-47 nil-guard: constructing without a
 // pybridge executor is an error, never a runtime panic later.
 func TestPyFSRSNilExecRejected(t *testing.T) {

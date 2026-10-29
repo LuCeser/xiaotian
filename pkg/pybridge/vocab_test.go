@@ -666,6 +666,7 @@ func TestDesignateArgs(t *testing.T) {
 		name      string
 		extraArgs []string
 		opts      DesignateOpts
+		create    *CreateDesignationOpts
 	}{
 		{
 			name: "minimal",
@@ -685,6 +686,20 @@ func TestDesignateArgs(t *testing.T) {
 			},
 		},
 		{
+			name: "atomic create flags",
+			create: &CreateDesignationOpts{
+				DesignateOpts: DesignateOpts{TextbookID: 3, Lesson: "第4单元"},
+				RequestKey:    "client-req-1",
+				Category:      "chinese",
+			},
+			extraArgs: []string{
+				"--textbook-id", "3",
+				"--lesson", "第4单元",
+				"--request-key", "client-req-1",
+				"--category", "chinese",
+			},
+		},
+		{
 			name: "fractional lock hours truncate to whole",
 			opts: DesignateOpts{TextbookID: 9, Lesson: "Unit 3", FetchLockHours: 12.5},
 			extraArgs: []string{
@@ -697,7 +712,12 @@ func TestDesignateArgs(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			argv := designateArgs(cfg, tc.opts)
+			var argv []string
+			if tc.create != nil {
+				argv = createDesignationArgs(cfg, *tc.create)
+			} else {
+				argv = designateArgs(cfg, tc.opts)
+			}
 
 			if want := "vocab_manager.py"; argv[0] != want {
 				t.Errorf("argv[0] = %q, want %q", argv[0], want)
@@ -717,7 +737,7 @@ func TestDesignateArgs(t *testing.T) {
 
 			// FetchLockHours zero-value must NOT emit the flag (omit-when-
 			// zero contract; the script's 24h default applies).
-			if tc.opts.FetchLockHours == 0 {
+			if tc.create == nil && tc.opts.FetchLockHours == 0 {
 				if argvFind(argv, "--fetch-lock-hours") >= 0 {
 					t.Errorf("argv %v unexpectedly contains --fetch-lock-hours "+
 						"(zero-valued DesignateOpts.FetchLockHours must omit the flag)", argv)

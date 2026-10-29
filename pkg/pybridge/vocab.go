@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -495,11 +496,23 @@ func (b *Bridge) RunUnlock(ctx context.Context, opts UnlockOpts) (UnlockResult, 
 // (integerLockHours; <= 0 omits the flag so the script's 24h default
 // applies). Pure transform, no I/O, trivially unit-testable.
 func designateArgs(cfg infra.PythonConfig, opts DesignateOpts) []string {
+	return createDesignationArgs(cfg, CreateDesignationOpts{DesignateOpts: opts})
+}
+
+// createDesignationArgs builds argv for designate, optionally including
+// --request-key and --category for atomic snapshot create (Issue #80 U10).
+func createDesignationArgs(cfg infra.PythonConfig, opts CreateDesignationOpts) []string {
 	args := []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "designate",
 		"--textbook-id", strconv.FormatInt(opts.TextbookID, 10),
 		"--lesson", opts.Lesson}
 	if n, ok := integerLockHours(opts.FetchLockHours); ok {
 		args = append(args, "--fetch-lock-hours", strconv.Itoa(n))
+	}
+	if strings.TrimSpace(opts.RequestKey) != "" {
+		args = append(args, "--request-key", strings.TrimSpace(opts.RequestKey))
+	}
+	if opts.Category != "" {
+		args = append(args, "--category", opts.Category)
 	}
 	return args
 }
@@ -546,6 +559,48 @@ func (b *Bridge) RunDesignate(ctx context.Context, opts DesignateOpts) (Designat
 	var result DesignateResult
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return DesignateResult{}, errors.Wrap(ErrPythonJSONParse, "run designate")
+	}
+	return result, nil
+}
+
+// RunCreateDesignation runs designate with --request-key so locks and the
+// pending designations snapshot land in one SQLite transaction (Issue #80
+// U10). See CreateDesignationOpts for the path guard and validation rules.
+func (b *Bridge) RunCreateDesignation(ctx context.Context, opts CreateDesignationOpts) (DesignateResult, error) {
+	if opts.TextbookID <= 0 {
+		return DesignateResult{}, fmt.Errorf("create designation: textbook id must be > 0, got %d", opts.TextbookID)
+	}
+	if opts.Lesson == "" {
+		return DesignateResult{}, errors.New("create designation: lesson is required (待确认 cannot be designated)")
+	}
+	key := strings.TrimSpace(opts.RequestKey)
+	if key == "" {
+		return DesignateResult{}, errors.New("create designation: request key is required")
+	}
+	if len(key) > MaxDesignationRequestKeyLen {
+		return DesignateResult{}, fmt.Errorf("create designation: request key longer than %d characters", MaxDesignationRequestKeyLen)
+	}
+	opts.RequestKey = key
+	if goPath := strings.TrimSpace(opts.GoDatabasePath); goPath != "" {
+		if filepath.Clean(goPath) != filepath.Clean(b.cfg.VocabDBPath) {
+			return DesignateResult{}, ErrDesignationDatabaseSplit
+		}
+	}
+
+	start := time.Now()
+	args := createDesignationArgs(b.cfg, opts)
+	stdout, stderr, exitCode, err := b.run(ctx, b.cfg.DueTimeout,
+		b.cfg.Interpreter, args...)
+	defer b.logResult("designate", start, stdout, stderr, exitCode, err)
+
+	raw, clsErr := classifyMgmtRun("designate", stdout, stderr, exitCode, err)
+	if clsErr != nil {
+		return DesignateResult{}, clsErr
+	}
+
+	var result DesignateResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return DesignateResult{}, errors.Wrap(ErrPythonJSONParse, "run create designation")
 	}
 	return result, nil
 }

@@ -94,6 +94,10 @@ func (f *fakeExecutor) RunDesignate(_ context.Context, _ pybridge.DesignateOpts)
 	return pybridge.DesignateResult{}, nil
 }
 
+func (f *fakeExecutor) RunCreateDesignation(_ context.Context, _ pybridge.CreateDesignationOpts) (pybridge.DesignateResult, error) {
+	return pybridge.DesignateResult{}, nil
+}
+
 // --- NewFSRSService validation ---
 
 func TestNewFSRSServiceValidation(t *testing.T) {

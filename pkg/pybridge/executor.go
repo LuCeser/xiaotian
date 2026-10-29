@@ -121,6 +121,12 @@ type Executor interface {
 	// the outcome rides in DesignateResult.Status (ok / occupied / too_many),
 	// so callers must branch on it rather than on the error alone.
 	RunDesignate(ctx context.Context, opts DesignateOpts) (DesignateResult, error)
+
+	// RunCreateDesignation invokes designate with --request-key so selection,
+	// locks and the pending designations snapshot commit in one SQLite
+	// transaction (Issue #80 U10). GoDatabasePath must match the bridge's
+	// VocabDBPath when non-empty; a mismatch returns ErrDesignationDatabaseSplit.
+	RunCreateDesignation(ctx context.Context, opts CreateDesignationOpts) (DesignateResult, error)
 }
 
 // DueOpts carries the operational flags for the vocab_manager.py due
@@ -548,6 +554,26 @@ type DesignateOpts struct {
 	FetchLockHours float64
 }
 
+// CreateDesignationOpts carries the atomic designation-create flags: the
+// designate selection target plus the client request key and subject for the
+// pending snapshot row Python inserts in the same transaction.
+type CreateDesignationOpts struct {
+	DesignateOpts
+
+	// RequestKey is forwarded as --request-key; must be non-empty and bounded
+	// by MaxDesignationRequestKeyLen.
+	RequestKey string
+
+	// Category is forwarded as --category for the snapshot row (normalized
+	// to english/chinese in Python).
+	Category string
+
+	// GoDatabasePath is the Go lesson store's SQLite path. When non-empty it
+	// MUST equal PythonConfig.VocabDBPath or RunCreateDesignation fails with
+	// ErrDesignationDatabaseSplit before spawning Python.
+	GoDatabasePath string
+}
+
 // DesignateCard mirrors one selected card in the designate payload: the
 // card identity plus the word/meaning/example ground truth the classroom
 // row needs. Field tags align exactly with the JSON keys cmd_designate
@@ -569,7 +595,12 @@ const (
 	DesignateStatusOK       = "ok"
 	DesignateStatusOccupied = "occupied"
 	DesignateStatusTooMany  = "too_many"
+	DesignateStatusKeyConflict = "key_conflict"
 )
+
+// MaxDesignationRequestKeyLen bounds client request keys for atomic create.
+// Must match vocab_manager.py MAX_DESIGNATION_REQUEST_KEY_LEN.
+const MaxDesignationRequestKeyLen = 128
 
 // DesignateResult is the typed payload the designate path returns. Status
 // carries the outcome (see the DesignateStatus constants); Cards is the
@@ -581,6 +612,12 @@ type DesignateResult struct {
 	Cards      []DesignateCard `json:"cards"`
 	TextbookID int64           `json:"textbook_id"`
 	Total      int             `json:"total"`
+
+	// Populated on atomic create (--request-key): the pending/consumed row
+	// Python wrote or replayed in the same transaction as the locks.
+	DesignationID     int64  `json:"designation_id,omitempty"`
+	DesignationStatus string `json:"designation_status,omitempty"`
+	Category          string `json:"category,omitempty"`
 }
 
 // Sentinel errors returned by the pybridge layer. Callers MUST detect
@@ -610,6 +647,10 @@ var (
 	// payload", so an empty success stdout is treated as a bridge-level
 	// error rather than a silent zero-card / zero-path result.
 	ErrPythonEmpty = errors.New("python stdout empty")
+
+	// ErrDesignationDatabaseSplit is returned when RunCreateDesignation
+	// sees GoDatabasePath != VocabDBPath — atomic create requires one file.
+	ErrDesignationDatabaseSplit = errors.New("go and python database paths differ")
 )
 
 // ExitError is the typed error returned alongside ErrPythonExit (and

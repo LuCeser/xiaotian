@@ -71,6 +71,10 @@ func (f *fakeExecutor) RunDesignate(context.Context, pybridge.DesignateOpts) (py
 	return pybridge.DesignateResult{}, nil
 }
 
+func (f *fakeExecutor) RunCreateDesignation(context.Context, pybridge.CreateDesignationOpts) (pybridge.DesignateResult, error) {
+	return pybridge.DesignateResult{}, nil
+}
+
 func (f *fakeExecutor) RunSetParticipation(context.Context, pybridge.SetParticipationOpts) (pybridge.SetParticipationResult, error) {
 	return pybridge.SetParticipationResult{}, nil
 }

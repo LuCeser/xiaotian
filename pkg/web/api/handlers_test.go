@@ -127,6 +127,11 @@ func (f *fakeExecutor) RunDesignate(_ context.Context, opts pybridge.DesignateOp
 	return f.designateResult, f.designateErr
 }
 
+func (f *fakeExecutor) RunCreateDesignation(_ context.Context, opts pybridge.CreateDesignationOpts) (pybridge.DesignateResult, error) {
+	f.designateCalls = append(f.designateCalls, opts.DesignateOpts)
+	return f.designateResult, f.designateErr
+}
+
 // fakeCardRepo is a manual fake for database.CardRepository that captures
 // the received filter and returns a canned slice. CountByUnit captures the
 // requested category and returns the canned unitCounts (Plan 09-04).
