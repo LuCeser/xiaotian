@@ -634,21 +634,26 @@ def cmd_designate(db, args):
     MAX_DESIGNATE_LIMIT eligible cards is a typed rejection carrying the
     real total — nothing is locked. Designate never writes learned_lessons,
     include_in_scope, participates or review_logs."""
-    textbook = db.execute(
-        "SELECT id, name, lessons FROM textbooks WHERE id = ?",
-        (args.textbook_id,),
-    ).fetchone()
-    if textbook is None:
-        print(f"Error: textbook id not found: {args.textbook_id}")
-        sys.exit(1)
     lesson = args.lesson.strip() if args.lesson else ""
-    try:
-        lessons = json.loads(textbook["lessons"])
-    except (TypeError, ValueError):
-        lessons = []
-    if not lesson or lesson not in lessons:
-        print(f"Error: lesson {lesson!r} is not in textbook {textbook['name']!r}'s lesson list")
-        sys.exit(1)
+
+    request_key = (getattr(args, "request_key", None) or "").strip()
+    atomic_create = bool(request_key)
+
+    if not atomic_create:
+        textbook = db.execute(
+            "SELECT id, name, lessons FROM textbooks WHERE id = ?",
+            (args.textbook_id,),
+        ).fetchone()
+        if textbook is None:
+            print(f"Error: textbook id not found: {args.textbook_id}")
+            sys.exit(1)
+        try:
+            lessons = json.loads(textbook["lessons"])
+        except (TypeError, ValueError):
+            lessons = []
+        if not lesson or lesson not in lessons:
+            print(f"Error: lesson {lesson!r} is not in textbook {textbook['name']!r}'s lesson list")
+            sys.exit(1)
 
     now = datetime.now(timezone.utc)
     # Lock timestamps and the occupancy comparison share this format, so the
@@ -657,8 +662,6 @@ def cmd_designate(db, args):
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     lock_hours = args.fetch_lock_hours if args.fetch_lock_hours is not None else FETCH_LOCK_HOURS
 
-    request_key = (getattr(args, "request_key", None) or "").strip()
-    atomic_create = bool(request_key)
     if atomic_create:
         if len(request_key) > MAX_DESIGNATION_REQUEST_KEY_LEN:
             print(f"Error: request key longer than {MAX_DESIGNATION_REQUEST_KEY_LEN} characters")
@@ -699,6 +702,23 @@ def cmd_designate(db, args):
                 category=existing["category"],
             ), ensure_ascii=False, indent=2))
             return
+
+        textbook = db.execute(
+            "SELECT id, name, lessons FROM textbooks WHERE id = ?",
+            (args.textbook_id,),
+        ).fetchone()
+        if textbook is None:
+            db.rollback()
+            print(f"Error: textbook id not found: {args.textbook_id}")
+            sys.exit(1)
+        try:
+            lessons = json.loads(textbook["lessons"])
+        except (TypeError, ValueError):
+            lessons = []
+        if not lesson or lesson not in lessons:
+            db.rollback()
+            print(f"Error: lesson {lesson!r} is not in textbook {textbook['name']!r}'s lesson list")
+            sys.exit(1)
 
     rows = db.execute(
         """SELECT c.id, c.word, c.meaning, c.example, c.unit, c.fetch_locked_until
