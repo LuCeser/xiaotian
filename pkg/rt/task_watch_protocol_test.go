@@ -1,7 +1,9 @@
 package rt
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -425,23 +427,57 @@ func ttBrowserReclaimCore(releases []func(), settled func() bool, recvDriver fun
 	return settledSeen, driverGot
 }
 
-// TestBrowserReclaimOrderProtocol (review P2-6): the browser fixture's
+// ttExitRecordingSender records the submit task's OWN final wire action:
+// session_ended ships from inside the task goroutine strictly before its
+// registered handle releases — so the log entry it writes causally precedes
+// ANY observation of settled (review P2-6 fix2: the exit timing must be
+// recorded by the task's real exit itself, never by the probe the core
+// under test happens to call — withdrawing the core's wait must not
+// withdraw the recording).
+type ttExitRecordingSender struct {
+	*captureSender
+	order *ttReclaimOrderLog
+	once  sync.Once
+}
+
+func (w *ttExitRecordingSender) SendControl(v any) error {
+	b, err := json.Marshal(v)
+	if err == nil && bytes.Contains(b, []byte(`"type":"`+TypeSessionEnded+`"`)) {
+		w.once.Do(func() { w.order.add("task_exit") })
+	}
+	return w.captureSender.SendControl(v)
+}
+
+// TestBrowserReclaimOrderProtocol (review P2-6 fix2): the browser fixture's
 // failure-reclaim core — the exact function reclaimAndFail runs before its
-// report — must observe, IN ORDER: every release, the whole-task
-// observation turning true (the parked task's true exit, seen through the
-// settled probe the core itself polls), the driver's result, and only then
-// may the caller report. The order log is written by wrappers OUTSIDE the
-// core, so withdrawing the core's wait reports without ever observing the
-// exit — the log shows the report with no settled-true in front of it.
+// report — must observe, IN ORDER: every release, the task's REAL exit (its
+// own final wire action recorded by the sender wrapper, independent of the
+// core's probe), the driver's result, and only then the caller's report.
+// The task's tail is slowed deterministically: after the released FSRS gate
+// it parks at the presentation seam until a timer opens it, so a core that
+// skips its settled wait reports ~immediately while the task provably has
+// not exited yet — the log then shows the report BEFORE task_exit (red),
+// instead of a merely-unset evidence field. The self-check reclaims itself
+// (ack the summary, settle) BEFORE asserting (S1).
 func TestBrowserReclaimOrderProtocol(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	tm, s, _, _ := ttDriveToCheck(t, ttCards("苹果"), words)
 	ttCheckAll(t, tm, s, 1)
 	tm.taskTrack = &serverTaskTracker{}
 
-	park := newTtPark()
+	order := &ttReclaimOrderLog{}
+	exitSender := &ttExitRecordingSender{captureSender: s, order: order}
+
+	park := newTtPark() // the FSRS gate the reclaim releases
+	tail := newTtPark() // the slow tail: opens on a timer after the release
 	tm.cfg.Words = &ttGateWords{WordSource: words, park: park}
-	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "s1-reclaim-order"}))
+	tm.checkSubmitPresentationInterleave = func() { tail.hit(); tail.wait() }
+
+	tm.mu.Lock()
+	epoch := tm.epoch
+	tm.mu.Unlock()
+	sentsBefore := s.countOf(TypeTeacherSentence)
+	tm.HandleControl(exitSender, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "s1-reclaim-order"}))
 	if !ttHitWithin(park, 5*time.Second) {
 		park.openUp()
 		ttPoll(5*time.Second, tm.serverTasksSettled)
@@ -452,17 +488,25 @@ func TestBrowserReclaimOrderProtocol(t *testing.T) {
 		ttPoll(5*time.Second, tm.serverTasksSettled)
 		t.Fatal("settled reported the submit done while it was parked at the FSRS gate")
 	}
+	// The slow tail: 300ms after the reclaim's release, the task may finish.
+	// A core that reports without waiting does so ~immediately after the
+	// release — long before this fires — so the ordering red is deterministic.
+	tailTimer := time.AfterFunc(300*time.Millisecond, tail.openUp)
 
-	order := &ttReclaimOrderLog{}
-	settledTrueSeen := false
-	settled := func() bool {
-		ok := tm.serverTasksSettled()
-		if ok && !settledTrueSeen {
-			settledTrueSeen = true
-			order.add("settled_true")
+	acked := make(chan struct{})
+	go func() {
+		defer close(acked)
+		// The summary must be acked for the task to truly finish (both the
+		// green and the mutated run reclaim through this).
+		if !ttPoll(15*time.Second, func() bool {
+			sentences := s.countOf(TypeTeacherSentence)
+			return sentences > sentsBefore && s.countOf(TypeAudioEnd) >= sentences
+		}) {
+			return
 		}
-		return ok
-	}
+		ttAckLast(t, tm, s, epoch)
+	}()
+
 	coreDone := make(chan struct{})
 	go func() {
 		defer close(coreDone)
@@ -471,7 +515,7 @@ func TestBrowserReclaimOrderProtocol(t *testing.T) {
 		// reclaimAndFail's Fatal follows the core.
 		ttBrowserReclaimCore(
 			[]func(){func() { order.add("release"); park.openUp() }},
-			settled,
+			tm.serverTasksSettled,
 			func() bool { order.add("recv"); return true },
 			5*time.Second,
 		)
@@ -480,22 +524,29 @@ func TestBrowserReclaimOrderProtocol(t *testing.T) {
 	case <-coreDone:
 	case <-time.After(10 * time.Second):
 		park.openUp()
+		tail.openUp()
 		ttPoll(5*time.Second, tm.serverTasksSettled)
 		t.Fatal("the reclaim core never returned")
 	}
 	order.add("report") // the caller's report point (reclaimAndFail's Fatal)
 
+	// Self-reclaim FIRST, then assert (review P2-6: the old order Fatalf'd
+	// before its own supplementary reclaim wait).
+	tailTimer.Stop()
+	tail.openUp()
+	if !ttPoll(5*time.Second, tm.serverTasksSettled) {
+		t.Fatal("server tasks never settled after the reclaim — the ack of the summary never landed")
+	}
+
 	if got := order.index("release"); got != 0 {
 		t.Fatalf("reclaim order log = %v — the release must come first, was %d", order.entries, got)
 	}
-	if got := order.index("settled_true"); got < 0 || got > order.index("report") {
-		t.Fatalf("reclaim order log = %v — the task's true exit (settled turning true) must be observed before the report; removing the core's wait reports blind", order.entries)
+	if got, report := order.index("task_exit"), order.index("report"); got < 0 || got > report {
+		t.Fatalf("reclaim order log = %v — the task's true exit must be observed before the report (task_exit at %d, report at %d); a core that skips its settled wait reports before the task's own final frame",
+			order.entries, got, report)
 	}
-	if got, recv := order.index("recv"), order.index("report"); got < 0 || got > recv {
+	if got, report := order.index("recv"), order.index("report"); got < 0 || got > report {
 		t.Fatalf("reclaim order log = %v — the driver's result must be taken before the report", order.entries)
-	}
-	if !ttPoll(5*time.Second, tm.serverTasksSettled) {
-		t.Fatal("server tasks never settled after the reclaim")
 	}
 	if got := len(words.submissions()); got != 1 {
 		t.Fatalf("FSRS submissions = %d, want the released save to land exactly once", got)
