@@ -131,12 +131,20 @@ var (
     cards TEXT NOT NULL DEFAULT '[]',  -- JSON array of DesignationCard
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    consumed_at TEXT NOT NULL DEFAULT ''
+    consumed_at TEXT NOT NULL DEFAULT '',
+    request_key TEXT NOT NULL DEFAULT ''
 )`
 
 	// idxDesignationsPending serves the classroom's pending-designation
 	// probe (the consumption step, Issue #80 step 14).
 	idxDesignationsPending = `CREATE INDEX IF NOT EXISTS idx_designations_pending ON designations(status, id)`
+
+	// idxDesignationsRequestKey enforces one designation per client request
+	// key (Issue #80 U10): same-key retries read back the same row; different
+	// targets must use different keys.
+	idxDesignationsRequestKey = `CREATE UNIQUE INDEX IF NOT EXISTS idx_designations_request_key ON designations(request_key) WHERE request_key != ''`
+
+	alterDesignationsAddRequestKey = `ALTER TABLE designations ADD COLUMN request_key TEXT NOT NULL DEFAULT ''`
 )
 
 // Word is one vocabulary card carried with the lesson row: the surface word,
@@ -201,6 +209,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		idxReceiptsLesson,
 		designationsDDL, // Issue #80 指定默写: created designations, pending → consumed exactly once
 		idxDesignationsPending,
+		idxDesignationsRequestKey,
 	}
 
 	for _, stmt := range statements {
@@ -236,7 +245,46 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	hasReqKey, err := designationsHasColumn(ctx, db, "request_key")
+	if err != nil {
+		return fmt.Errorf("lesson/migrate: %w", err)
+	}
+	if !hasReqKey {
+		if _, err := db.ExecContext(ctx, alterDesignationsAddRequestKey); err != nil {
+			return fmt.Errorf("lesson/migrate: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, idxDesignationsRequestKey); err != nil {
+			return fmt.Errorf("lesson/migrate: %w", err)
+		}
+	}
+
 	return nil
+}
+
+func designationsHasColumn(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info(designations)")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid       int
+			colName   string
+			ctype     string
+			notNull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &colName, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if colName == name {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // lessonsHasColumn reports whether the lessons table already carries the
@@ -1070,6 +1118,7 @@ type Designation struct {
 	Status     string
 	CreatedAt  string
 	ConsumedAt string
+	RequestKey string
 	Cards      []DesignationCard
 	ID         int64
 	TextbookID int64
@@ -1135,6 +1184,53 @@ func (s *Store) CreateDesignation(ctx context.Context, in DesignationInput) (Des
 		Cards:      in.Cards,
 		Status:     DesignationStatusPending,
 	}, nil
+}
+
+// GetDesignationByRequestKey loads one designations row by its client
+// request key (Issue #80 U10 idempotent create). ErrDesignationNotFound
+// when no row exists.
+func (s *Store) GetDesignationByRequestKey(ctx context.Context, requestKey string) (Designation, error) {
+	requestKey = strings.TrimSpace(requestKey)
+	if requestKey == "" {
+		return Designation{}, errors.Wrap(ErrInvalidLesson, "get designation: request key is required")
+	}
+	var (
+		d         Designation
+		cardsJSON string
+	)
+	err := s.db.QueryRowContext(ctx,
+		"SELECT id, textbook_id, lesson, category, cards, status, created_at, consumed_at, request_key "+
+			"FROM designations WHERE request_key = ?",
+		requestKey,
+	).Scan(&d.ID, &d.TextbookID, &d.Lesson, &d.Category, &cardsJSON, &d.Status,
+		&d.CreatedAt, &d.ConsumedAt, &d.RequestKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Designation{}, errors.Wrap(ErrDesignationNotFound,
+			fmt.Sprintf("get designation by request key %q", requestKey))
+	}
+	if err != nil {
+		return Designation{}, errors.Wrap(err, "get designation by request key")
+	}
+	cards, err := decodeDesignationCardsJSON(cardsJSON)
+	if err != nil {
+		return Designation{}, errors.Wrap(err, "get designation by request key: decode cards")
+	}
+	d.Cards = cards
+	return d, nil
+}
+
+func decodeDesignationCardsJSON(raw string) ([]DesignationCard, error) {
+	if strings.TrimSpace(raw) == "" {
+		return []DesignationCard{}, nil
+	}
+	var cards []DesignationCard
+	if err := json.Unmarshal([]byte(raw), &cards); err != nil {
+		return nil, err
+	}
+	if cards == nil {
+		cards = []DesignationCard{}
+	}
+	return cards, nil
 }
 
 // ConsumeDesignation flips a pending designation to consumed EXACTLY ONCE
