@@ -27,6 +27,9 @@
  *   3. 大小／页数／无法读取的明确反馈 — an over-cap file is refused
  *      before anything is processed, an over-page-count PDF is refused at
  *      open, a damaged PDF surfaces 无法读取 (AC-3).
+ *   4. 停止并继续 (Issue #80 U8) — 停止 mid-run shows 停止中, the held
+ *      page's late reply is dropped (back to pending, nothing landed),
+ *      继续处理 re-runs ONLY the pending pages and the file completes.
  */
 // @ts-check
 const { test, expect } = require('@playwright/test');
@@ -229,6 +232,67 @@ test('limits: over-cap size refused at pick, over-cap page count refused at open
     await expect(page.locator('#parent-photo-form-error')).toContainText('无法读取这个 PDF', { timeout: 30_000 });
     await expect(page.locator('.pdf-page-chip')).toHaveCount(0);
     await expect(page.locator('tr.photo-row')).toHaveCount(0);
+  } finally {
+    await deleteWords(request, WORDS);
+  }
+});
+
+test('stop mid-run then 继续处理: stopped page restarts clean, done pages never re-run (Issue #80 U8)', async ({ page, request }) => {
+  await deleteWords(request, WORDS);
+  try {
+    // The controlled concurrency point: the SECOND recognize reply (page 2
+    // in flight) is held in the browser while 停止 lands — one real page
+    // request out, its late response released only afterwards.
+    let recognizeCalls = 0;
+    let releasePage2;
+    const page2Gate = new Promise((resolve) => { releasePage2 = resolve; });
+    await page.route('**/api/v1/words/photo/recognize*', async (route) => {
+      recognizeCalls += 1;
+      if (recognizeCalls !== 2) {
+        return route.continue();
+      }
+      const response = await route.fetch();
+      await page2Gate;
+      await route.fulfill({ response });
+    });
+
+    await page.goto('/parent.html');
+    await page.getByRole('tab', { name: '词库' }).click();
+    await page.locator('#addSection').waitFor();
+    await page.getByRole('tab', { name: '照片导入' }).click();
+    const panel = page.locator('#add-panel-photo');
+    await panel.waitFor();
+    await panel.locator('input[name="parent-category-photo"][value="english"]').check();
+    await page.locator('#parent-photo-file').setInputFiles(PDF_TEXTBOOK);
+    await page.getByRole('button', { name: '开始识别' }).click();
+
+    // Page 1 done; page 2's request is held — the run is executing.
+    await expect(page.locator('.pdf-page-chip[data-status="done"]')).toHaveCount(1, { timeout: 60_000 });
+    const stop = page.locator('.pdf-stop-btn');
+    await expect(stop).toBeEnabled();
+    await stop.click();
+    await expect(stop).toBeDisabled();
+    await expect(stop).toHaveText('停止中…');
+
+    // The held reply arrives for a STOPPED run: dropped — page 2 returns
+    // to pending, pages 3/4 never start, and page 2's words never land.
+    releasePage2();
+    await expect(page.locator('.pdf-page-chip[data-status="done"]')).toHaveCount(1, { timeout: 30_000 });
+    await expect(page.locator('.pdf-page-chip[data-status="pending"]')).toHaveCount(3);
+    await expect(page.locator('.pdf-summary-line')).toContainText('待处理 3');
+    expect(await wordValues(page)).toEqual(['pen', 'bag']);
+
+    // 继续处理 runs ONLY the pending pages (page 1's recognize is never
+    // repeated) and the file completes in page order.
+    const resume = page.locator('.pdf-resume-btn');
+    await expect(resume).toBeEnabled();
+    await expect(resume).toContainText('剩 3 页');
+    await resume.click();
+    await expect(page.locator('.pdf-page-chip[data-status="done"]')).toHaveCount(4, { timeout: 60_000 });
+    expect(await wordValues(page)).toEqual([
+      'pen', 'bag', 'cat', 'dog', 'bird', 'pen', 'fish',
+    ]);
+    expect(recognizeCalls).toBe(5); // page1 + held page2 + resumed 2/3/4
   } finally {
     await deleteWords(request, WORDS);
   }
