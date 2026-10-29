@@ -120,18 +120,21 @@ type speechDriverResult struct {
 	// S4 classroom-switch scenario fields: per-turn round observations (the
 	// player's registration per sentence), epoch notices, error frames, the
 	// late-window counters, and the switch-specific verdicts.
-	Rounds                  []speechRoundObs        `json:"rounds"`
-	SecondRoundVerdict      string                  `json:"secondRoundVerdict"`
-	ReadyCount              int                     `json:"readyCount"`
-	ReadyIndexes            []int                   `json:"readyIndexes"`
-	CheckStartedCount       int                     `json:"checkStartedCount"`
-	ReviewResultCount       int                     `json:"reviewResultCount"`
-	SessionEndedCount       int                     `json:"sessionEndedCount"`
-	StopNowCount            int                     `json:"stopNowCount"`
-	InterruptAcks           []speechInterruptAckObs `json:"interruptAcks"`
-	InterruptAckBeforeReady bool                    `json:"interruptAckBeforeSecondReady"`
-	ErrorFrames             []speechErrorFrameObs   `json:"errorFrames"`
-	LateWindow              speechLateWindowObs     `json:"lateWindow"`
+	Rounds             []speechRoundObs `json:"rounds"`
+	SecondRoundVerdict string           `json:"secondRoundVerdict"`
+	ReadyCount         int              `json:"readyCount"`
+	ReadyIndexes       []int            `json:"readyIndexes"`
+	CheckStartedCount  int              `json:"checkStartedCount"`
+	ReviewResultCount  int              `json:"reviewResultCount"`
+	SessionEndedCount  int              `json:"sessionEndedCount"`
+	// EndedReasons (stale-completed-close): ending reasons for diagnostics when
+	// session_ended count assertions fail.
+	EndedReasons              []string                `json:"endedReasons"`
+	StopNowCount              int                     `json:"stopNowCount"`
+	InterruptAcks             []speechInterruptAckObs `json:"interruptAcks"`
+	InterruptAckBeforeReady   bool                    `json:"interruptAckBeforeSecondReady"`
+	ErrorFrames               []speechErrorFrameObs   `json:"errorFrames"`
+	LateWindow                speechLateWindowObs     `json:"lateWindow"`
 }
 
 // speechRoundSentenceObs is one sentence's registration inside an observed
@@ -391,10 +394,14 @@ type speechBrowserFixture struct {
 	// panel presentation (1.13a's browser claim-order probe). closeEntryHold
 	// likewise rides closeSessionAt's init-write-lock window. settleHold
 	// parks an announcement between its valid final ack and the protected
-	// settle (1.14a's probe).
-	resumeHold     func()
-	closeEntryHold func()
-	settleHold     func()
+	// settle (1.14a's probe). completedCloseHold parks a completed replay's
+	// scoped close request after its session_ready (S3's browser case: the
+	// continuation runs on the VOICE TURN's goroutine, so the read loop —
+	// and the page's acks — stay alive while it parks).
+	resumeHold         func()
+	closeEntryHold     func()
+	settleHold         func()
+	completedCloseHold func()
 
 	handlerActive, handlerDone        atomic.Int64
 	writerDone                        atomic.Int64
@@ -620,6 +627,7 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 	poemPractice, passagePractice := f.poemPracticeStore, f.passagePracticeStore
 	practice, practiceStore := f.practice, f.practiceStore
 	resumeHold, closeEntryHold, settleHold := f.resumeHold, f.closeEntryHold, f.settleHold
+	completedCloseHold := f.completedCloseHold
 	f.mu.Unlock()
 	if words == nil {
 		words = f.words
@@ -638,6 +646,7 @@ func (f *speechBrowserFixture) newManager() SessionManager {
 	tm.checkResumeInterleave = resumeHold
 	tm.closeEntryInterleave = closeEntryHold
 	tm.settleInterleave = settleHold
+	tm.completedCloseInterleave = completedCloseHold
 	// S1: every manager observes its whole server tasks (submits, starters,
 	// close fallbacks) — settled waits ride this, not the verified fields.
 	tm.taskTrack = &serverTaskTracker{}
@@ -1326,7 +1335,8 @@ func (f *speechBrowserFixture) execSpeechDriver(scenario string, timeout time.Du
 		scenario == "poem-submit-close" ||
 		scenario == "check-submit-natural" || scenario == "classroom-switch-opening" ||
 		scenario == "classroom-switch-submit" || scenario == "subject-ask-switch" ||
-		scenario == "reinit-same-row" || scenario == "reinit-during-submit" {
+		scenario == "reinit-same-row" || scenario == "reinit-during-submit" ||
+		scenario == "stale-completed-close" {
 		f.mu.Lock()
 		sentences := append([]string(nil), f.expectedSentences...)
 		pcm := f.expectedPCMPerSentence

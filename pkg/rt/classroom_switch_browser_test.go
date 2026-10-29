@@ -733,3 +733,138 @@ func TestSameLessonReinitDuringSubmitBrowser(t *testing.T) {
 		t.Fatalf("live classroom %q → %q — the refused reentry must not replace the scope", scopeBefore.lessonID, tutor.lessonID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Case X — S3's close isolation in a REAL browser (review P2-8): the auto
+// entry asks (both subjects hold due words), the child answers 语文 by voice,
+// and the answered continuation — running on the VOICE TURN's goroutine, so
+// the read loop and the page's acks stay alive — reads the COMPLETED chinese
+// row and short-circuits: session_ready, then its scoped close request parks
+// at the completedClose seam. B, an independent REAL english checking row
+// injected through the production session_init entry, installs on the same
+// connection and finishes its resume bridge with natural ACKs. A's released
+// close must be refused by the scope claim — no lesson_complete goodbye, no
+// early transport end — and B keeps handling messages: its own real submit
+// then succeeds end to end. No fake-row rewrite builds B, no ACK is sent on
+// the page's behalf; A's true exit is observed by the whole-task observation
+// (P1-4), never a clock.
+// ---------------------------------------------------------------------------
+
+func TestStaleCompletedCloseBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.armPoemPassageSaveChain()
+	f.seedCompletedLesson()                        // A: today's REAL chinese row, submitted
+	speechSeedEnglishCheckingWithManualVerdicts(f) // B: an independent REAL english row
+	f.mu.Lock()
+	f.words.setDue("english", speechEnglishWords)
+	f.words.setPeek("chinese", []lesson.Word{{Word: "听写浏览器"}})
+	f.words.setPeek("english", speechEnglishWords[:1]) // both subjects due → the ask
+	f.words.reviewResult = ReviewWriteResult{
+		Requested: []string{"apple", "banana"},
+		Updated:   []string{"apple", "banana"},
+	}
+	f.expectedSentences = append([]string(nil), speechExpectedAskRound...)
+	// A's scoped close parks AFTER the completed replay's session_ready, on
+	// the voice turn's goroutine (one shot: B's own ending closes freely).
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	f.completedCloseHold = func() {
+		hit := false
+		once.Do(func() { hit = true; close(entered) })
+		if hit {
+			<-release
+		}
+	}
+	// The child's spoken 语文 answer rides the real capture → VAD → ASR.
+	f.asr.mu.Lock()
+	f.asr.script = append(f.asr.script, asrScript{text: "语文"})
+	f.asr.mu.Unlock()
+	f.mu.Unlock()
+
+	bridge := string(mustJSON(t, speechExpectedCheckResume))
+	summary := string(mustJSON(t, speechExpectedSummaryAllCorrect))
+	driver := f.runDriverAsync("stale-completed-close", 75*time.Second,
+		"--expected-second-json", bridge, "--expected-third-json", summary,
+		"--late-window-ms", "15000")
+
+	select {
+	case <-entered:
+	case <-time.After(60 * time.Second):
+		f.reclaimAndFail(driver, nil, "the completed replay's scoped close never parked at its seam")
+	}
+
+	// B replaces A on the same connection and finishes its natural opening
+	// (the page's acks flow — A parks on the voice turn, not the read loop).
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		close(release)
+		f.reclaimAndFail(driver, nil, "no /rt connection was created before the deadline")
+	}
+	speechInjectSessionInit(t, f, m, "english")
+	if !waitFor(t, 45*time.Second, func() bool { return f.announcementDone.Load() >= 1 }) {
+		close(release)
+		f.reclaimAndFail(driver, nil, "B's resume bridge never settled through the real page")
+	}
+
+	// Release A's stale close; the voice-turn registration (P1-4) makes the
+	// whole-task observation cover its TRUE exit — the gate hands exactly
+	// that completion to the page side before any late window or submit.
+	close(release)
+	if !waitFor(t, 30*time.Second, func() bool { return m.TurnManager.serverTasksSettled() }) {
+		f.reclaimAndFail(driver, nil, "A's voice-turn continuation never finished after the release")
+	}
+	f.armSwitchGate()
+
+	res, gotDriver := f.recvSpeechDriver(driver, speechReclaimBound)
+	if !gotDriver || !res.OK {
+		f.reclaimAndFail(driver, nil, "the stale-completed-close journey failed: %s (late window %+v)", res.Err, res.LateWindow)
+	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatalf("the connection or its server tasks did not settle after B's ending (ready=%d ended=%d close=%d)",
+			res.ReadyCount, res.SessionEndedCount, res.WSCloseCount)
+	}
+	if got := res.SessionEndedCount; got != 1 {
+		t.Fatalf("session_ended count = %d, want exactly 1 (B's own natural ending; reasons %v)", got, res.EndedReasons)
+	}
+	if res.WSCloseCount != 1 {
+		t.Fatalf("ws close count = %d, want exactly 1 (B's own ending closed the transport)", res.WSCloseCount)
+	}
+	if res.ReadyCount != 2 || res.CheckStartedCount != 1 {
+		t.Fatalf("ready=%d check_started=%d, want 2/1 — the completed replay's ready plus B's panel, and A shipped no panel", res.ReadyCount, res.CheckStartedCount)
+	}
+	if len(res.InterruptAcks) != 2 ||
+		res.InterruptAcks[0].OldEpoch != 0 || res.InterruptAcks[0].NewEpoch != 1 ||
+		res.InterruptAcks[1].OldEpoch != 1 || res.InterruptAcks[1].NewEpoch != 2 {
+		t.Fatalf("interrupt_acks = %+v, want the ask's 0→1 notice then B's 1→2 install notice (A installed onto an empty scope)", res.InterruptAcks)
+	}
+	if len(res.ReadyIndexes) < 2 || res.InterruptAcks[1].Index >= res.ReadyIndexes[1] {
+		t.Fatalf("install ack index %d vs ready indexes %v — B's notice must precede B's session_ready", res.InterruptAcks[1].Index, res.ReadyIndexes)
+	}
+	if lw := res.LateWindow; lw.TeacherSentences != 0 || lw.SessionEnded != 0 || lw.Errors != 0 {
+		t.Fatalf("late window after B's bridge = %+v, want zero A-side output — the stale close must not end the live classroom", lw)
+	}
+	if len(res.ErrorFrames) != 0 {
+		t.Fatalf("error frames = %+v, want none", res.ErrorFrames)
+	}
+	if len(res.Rounds) != 3 || !res.Rounds[0].AllAckedNaturally || !res.Rounds[1].AllAckedNaturally || !res.Rounds[2].AllAckedNaturally {
+		t.Fatalf("rounds = %+v, want the ask, B's bridge and B's summary all acked naturally", res.Rounds)
+	}
+	if res.Rounds[1].Epoch != 2 {
+		t.Fatalf("B's bridge epoch = %d, want 2 (after the ask's bump and B's install bump)", res.Rounds[1].Epoch)
+	}
+
+	// B's own submit landed on B's row through the still-live connection.
+	lessonIDB := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryEnglish)
+	lb, err := f.tools.GetLessonState(context.Background(), lessonIDB)
+	if err != nil {
+		t.Fatalf("read B's row: %v", err)
+	}
+	if lb.Stage != lesson.StageSubmitted || len(lb.Verdicts) != 2 {
+		t.Fatalf("B's row = stage %q verdicts %d, want submitted/2 through B's own submit on the kept-alive connection", lb.Stage, len(lb.Verdicts))
+	}
+	rb, err := f.receipts.ListByLesson(context.Background(), lessonIDB)
+	if err != nil || len(rb) != 1 || rb[0].Status != lesson.ReceiptStatusSaved {
+		t.Fatalf("B's receipts = %+v err=%v, want exactly one saved receipt", rb, err)
+	}
+}

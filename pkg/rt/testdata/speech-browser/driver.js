@@ -1017,6 +1017,62 @@ async function scenarioReinitDuringSubmit(args) {
   return scenarioCheckSubmitNatural({ ...args, expectBusyError: true });
 }
 
+// scenario "stale-completed-close"（S3 真实浏览器验收，review P2-8）：auto
+// 入口双科有到期词 → subject_ask 自然播报后孩子语音答「语文」（真实采集
+// →VAD→ASR→绑定）——该续接在语音回合协程上读到已完成行并短路重放
+// （session_ready），其 scoped 关闭请求驻留在 Go 侧；同连接注入 B（独立
+// 真实 english 检查行）：B 安装并自然完成恢复桥（页面真实 ACK——A 驻留
+// 在语音协程而非读循环，上行通路保持可用）。Go 侧放行 A 的陈旧关闭并
+// 由整任务观察确认其退出后（开关门 armed）页面才统计迟到窗并在 B 的面
+// 板上点提交：A 的陈旧关闭不得结束 B、不得提前断开连接；B 自己的提交
+// 走完整成功路径。全程不代发 ACK、不改 fake 行造 B。
+async function scenarioStaleCompletedClose(args) {
+  const { page, url, timeoutMs } = args;
+  await page.goto(url);
+  await page.locator('#rt-start').click();
+  // The ask round plays and acks naturally, then the child answers 语文 by
+  // voice — the answered continuation (A) runs on the voice turn's own
+  // goroutine from here on.
+  const ask = await waitNthRoundAcked(page, args.expectedSentences, 1, timeoutMs, 'subject ask played naturally');
+  await playPcm16(page, tonePcm16Base64(), 16000, 0.6);
+  await waitWs(page, (view) => frameCount(view, 'in', 'session_ready') >= 1,
+    { timeoutMs, label: 'the completed replay\'s session_ready' });
+  // B's resume bridge — the FIRST round of these texts (A's completed replay
+  // speaks nothing) — plays and acks NATURALLY while A's close request is
+  // still parked.
+  const bridge = await waitNthRoundAcked(page, args.expectedSecond, 1, timeoutMs, 'B resume bridge played naturally');
+  const baseline = roundLastIndex(bridge);
+  // The stale close is released and the voice turn's TRUE exit confirmed by
+  // the server's whole-task observation before the late window opens (the
+  // gate): whatever A's close did is on the wire by these counts.
+  await waitSwitchGateArmed(url, args.lateWindowMs);
+  const late = lateFrameCounts(await wsView(page), baseline);
+  // B keeps handling messages: its own submit through the REAL panel.
+  await page.locator('.rt-check-submit').click();
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'review_result'),
+    { timeoutMs, label: 'B\'s own submit review_result' });
+  const summary = await waitNthRoundAcked(page, args.expectedThird, 1, timeoutMs, 'B summary played naturally');
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'session_ended')
+      && view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+  { timeoutMs, label: 'B natural ending and close' });
+  const view = await wsView(page);
+  const ended = view.filter((e) => e.dir === 'in' && e.type === 'session_ended' && e.msg);
+  return {
+    ok: true,
+    rounds: [ask, bridge, summary],
+    lateWindow: late,
+    readyCount: frameCount(view, 'in', 'session_ready'),
+    readyIndexes: view.filter((e) => e.dir === 'in' && e.type === 'session_ready').map((e) => e.i),
+    checkStartedCount: frameCount(view, 'in', 'check_started'),
+    reviewResultCount: frameCount(view, 'in', 'review_result'),
+    sessionEndedCount: ended.length,
+    endedReasons: ended.map((e) => e.msg.reason || ''),
+    interruptAcks: interruptAckFacts(view),
+    errorFrames: errorFrameFacts(view),
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+  };
+}
+
 const SCENARIOS = {
   fixture: scenarioFixture,
   'held-fixture': scenarioHeldFixture,
@@ -1037,6 +1093,7 @@ const SCENARIOS = {
   'subject-ask-switch': scenarioSubjectAskSwitch,
   'reinit-same-row': scenarioReinitSameRow,
   'reinit-during-submit': scenarioReinitDuringSubmit,
+  'stale-completed-close': scenarioStaleCompletedClose,
 };
 
 async function main() {
