@@ -116,6 +116,75 @@ type speechDriverResult struct {
 	// practice-submit-close scenario field: the texts of any teacher
 	// sentence that landed after the close.
 	LateSentenceTexts []string `json:"lateSentenceTexts"`
+
+	// S4 classroom-switch scenario fields: per-turn round observations (the
+	// player's registration per sentence), epoch notices, error frames, the
+	// late-window counters, and the switch-specific verdicts.
+	Rounds                  []speechRoundObs        `json:"rounds"`
+	SecondRoundVerdict      string                  `json:"secondRoundVerdict"`
+	ReadyCount              int                     `json:"readyCount"`
+	ReadyIndexes            []int                   `json:"readyIndexes"`
+	CheckStartedCount       int                     `json:"checkStartedCount"`
+	ReviewResultCount       int                     `json:"reviewResultCount"`
+	SessionEndedCount       int                     `json:"sessionEndedCount"`
+	StopNowCount            int                     `json:"stopNowCount"`
+	InterruptAcks           []speechInterruptAckObs `json:"interruptAcks"`
+	InterruptAckBeforeReady bool                    `json:"interruptAckBeforeSecondReady"`
+	ErrorFrames             []speechErrorFrameObs   `json:"errorFrames"`
+	LateWindow              speechLateWindowObs     `json:"lateWindow"`
+}
+
+// speechRoundSentenceObs is one sentence's registration inside an observed
+// round: the wire facts (start/end/ack counts, chunks in the start/end
+// window) plus the player's own native-onended precedence for its ack.
+type speechRoundSentenceObs struct {
+	SentenceID      string `json:"sentenceId"`
+	Starts          int    `json:"starts"`
+	Ends            int    `json:"ends"`
+	Acks            int    `json:"acks"`
+	PCMInWindow     int    `json:"pcmInWindow"`
+	Ordered         bool   `json:"ordered"`
+	PlayedBeforeAck bool   `json:"playedBeforeAck"`
+}
+
+// speechRoundObs is one announcement round (one turn id) as the page played
+// it. AllAckedNaturally is the player-side registration verdict: every
+// sentence acked exactly once with its native onended first.
+type speechRoundObs struct {
+	Epoch             uint64                   `json:"epoch"`
+	TurnID            uint64                   `json:"turnId"`
+	Texts             []string                 `json:"texts"`
+	Sentences         []speechRoundSentenceObs `json:"sentences"`
+	OK                bool                     `json:"ok"`
+	Problems          []string                 `json:"problems"`
+	AllAckedNaturally bool                     `json:"allAckedNaturally"`
+}
+
+// speechInterruptAckObs is one inbound interrupt_ack with its wire index.
+type speechInterruptAckObs struct {
+	Index    int    `json:"index"`
+	OldEpoch uint64 `json:"oldEpoch"`
+	NewEpoch uint64 `json:"newEpoch"`
+}
+
+// speechErrorFrameObs is one inbound error frame with its wire index.
+type speechErrorFrameObs struct {
+	Index       int    `json:"index"`
+	Code        string `json:"code"`
+	Recoverable bool   `json:"recoverable"`
+	Message     string `json:"message"`
+}
+
+// speechLateWindowObs tallies the frames that landed after a settled round's
+// final ack inside a switch scenario's late window — the superseded side's
+// silence is asserted here.
+type speechLateWindowObs struct {
+	TeacherSentences int `json:"teacherSentences"`
+	ReviewResults    int `json:"reviewResults"`
+	SessionEnded     int `json:"sessionEnded"`
+	SessionReady     int `json:"sessionReady"`
+	InterruptAcks    int `json:"interruptAcks"`
+	Errors           int `json:"errors"`
 }
 
 var speechExpectedOpening = []string{
@@ -1219,7 +1288,10 @@ func (f *speechBrowserFixture) execSpeechDriver(scenario string, timeout time.Du
 		scenario == "screen-verdict-close" || scenario == "voice-verdict-close" ||
 		scenario == "ocr-prefill-close" || scenario == "check-submit-close" ||
 		scenario == "correction-submit-close" || scenario == "passage-submit-close" ||
-		scenario == "poem-submit-close" {
+		scenario == "poem-submit-close" ||
+		scenario == "check-submit-natural" || scenario == "classroom-switch-opening" ||
+		scenario == "classroom-switch-submit" || scenario == "subject-ask-switch" ||
+		scenario == "reinit-same-row" || scenario == "reinit-during-submit" {
 		f.mu.Lock()
 		sentences := append([]string(nil), f.expectedSentences...)
 		pcm := f.expectedPCMPerSentence
