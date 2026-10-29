@@ -1869,17 +1869,12 @@
       // rows/panel state; the snapshot, book list and supplement bar are
       // the other subject's too. currentFile STAYS — the photo itself is
       // subject-agnostic, 重新识别 under the new subject is the retry.
-      // An in-flight PDF run is STOPPED first (releasePdf alone does not
-      // signal the page loop — without the abort flag the loop would keep
-      // rendering pages of the closed document under the new subject).
-      if (this.pdfState) {
-        this.pdfState.aborted = true;
-      }
-      // Issue #80: the multi-photo run is invalidated — the rows it landed
-      // reset below; a re-recognize rebuilds the run. U7: the 失效
-      // transition owns this (stop fact + plan sweep + the terminal
-      // no-buttons verdict); the pdfState kin keeps its plain flag until
-      // U8 wires it to the same machine.
+      // Issue #80: every in-flight run — multi-photo batch, single photo
+      // (U8) or PDF — is invalidated: the rows it landed reset below; a
+      // re-recognize rebuilds the run. U7/U8: the 失效 transition owns
+      // this for every kind (stop fact + plan sweep + the terminal
+      // no-buttons verdict); the PDF run rides releasePdf below, whose
+      // own invalidate gives it the same terminal rule.
       if (this.photoBatch) {
         global.invalidateImportRun(this.photoBatch);
       }
@@ -2350,6 +2345,11 @@
    */
   PhotoAddForm.prototype.releasePdf = function () {
     if (this.pdfState) {
+      // U8: a released run is 失效 — the SAME terminal transition
+      // releasePhotoBatch gives the photo batch (stop fact + plan sweep +
+      // the no-buttons verdict); the epoch bump below rejects its late
+      // HTTP either way.
+      global.invalidateImportRun(this.pdfState);
       this.recognizeEpoch += 1;
       if (this.pdfState.doc && global.PdfPageRunner) {
         global.PdfPageRunner.close(this.pdfState.doc);
@@ -2431,6 +2431,18 @@
     this.releasePhotoBatch();
     this.releasePdf();
     this.beginRecognizeRun();
+    // U8: the single photo initializes the SAME batch run the other two
+    // entries ride (§3.1 单张也作为第 1 张处理) — createImportRunState +
+    // beginImportRun, the 失效 rules of releasePhotoBatch/onCategorySelected,
+    // and the busy truth the machine carries. The landing below keeps the
+    // plain flow's OWN surface (poems included): no chips bar, no stop or
+    // resume buttons — one recognition in flight has nothing to continue.
+    var run = global.createImportRunState(global.createPagePlan(1));
+    run.kind = 'photo-single';
+    run.noun = '张';
+    this.photoBatch = run;
+    global.beginImportRun(run);
+    run.plan = global.applyPageEvent(run.plan, 1, 'start');
     var runEpoch = this.recognizeEpoch;
     this.setBusy(true);
 
@@ -2460,6 +2472,10 @@
         // passages (entries empty) — that is a legal recognition, not a
         // 没有识别到词表 dead end.
         if (!entries.length && !parsed.poems.length && !parsed.passages.length) {
+          // The same honest page FAILURE the batch landing records — the
+          // plan stays consistent with the plain hint (out-of-lifecycle
+          // events change nothing on a dead run).
+          run.plan = global.applyPageEvent(run.plan, 1, 'fail', '没有识别到词表');
           self.setBusy(false);
           self.renderPreviewHint('这张照片里没有识别到词表，请换一张更清晰的照片');
           self.resetEntries();
@@ -2499,6 +2515,7 @@
             self.setBusy(false);
             return;
           }
+          run.plan = global.applyPageEvent(run.plan, 1, 'done');
           self.poemRows = classifyPoemDrafts(parsed.poems, self.existingPoems);
           self.passageRows = classifyPassageDrafts(parsed.passages, self.existingPassages);
           self.otherSections = parsed.others.map(function (o) {
@@ -2516,13 +2533,20 @@
       .catch(function (err) {
         var message = (err && err.message) ? err.message : '未知错误';
         // Failure shows the reason and the file stays picked — 重新识别
-        // is just clicking 开始识别 again (retry allowed).
+        // is just clicking 开始识别 again (retry allowed). The plan takes
+        // the same honest fail event the batch landing records (a no-op on
+        // a dead run).
+        run.plan = global.applyPageEvent(run.plan, 1, 'fail', message);
         self.showFormError('识别失败：' + message + '。可以重试或换一张照片。');
         if (kit.showToast) {
           kit.showToast('识别失败：' + message, 'error');
         }
       })
       .then(function () {
+        // 收尾 FIRST — the batch convention: executing goes false before
+        // saving re-opens (§3.2), and a handler that never fired leaves
+        // no page stuck on running.
+        self.settleRun(run);
         self.setBusy(false);
       });
   };
@@ -2545,7 +2569,11 @@
    * sequentially. Failures NEVER throw past this method's catch: a page
    * that fails lands on its plan entry and the run continues (AC-4); only
    * open/plan failures (unreadable file, over-cap pages) surface as form
-   * errors with nothing processed.
+   * errors with nothing processed. U8: the PDF run rides the SAME §3.2
+   * machine as the photo batch — createImportRunState + beginImportRun
+   * (the photo batch's init), the 停止/收尾/继续/重试/失效 transitions, and
+   * importRunDecision for every bar/hint verdict; the page-count
+   * processing inference is gone.
    */
   PhotoAddForm.prototype.handlePdfRecognize = function () {
     var self = this;
@@ -2562,6 +2590,7 @@
     this.beginRecognizeRun();
     var runEpoch = this.recognizeEpoch;
     this.setBusy(true);
+    var run = null;
 
     global.PdfPageRunner.open(this.currentFile)
       .then(function (opened) {
@@ -2570,16 +2599,15 @@
           global.PdfPageRunner.close(opened.doc);
           throw new Error(plan.message);
         }
-        self.pdfState = {
-          kind: 'pdf',
-          noun: '页',
-          doc: opened.doc,
-          plan: plan,
-          aborted: false,
-          metaDone: false,
-          panelRendered: false,
-          lessonRecs: [],
-        };
+        run = global.createImportRunState(plan);
+        run.kind = 'pdf';
+        run.noun = '页';
+        run.doc = opened.doc;
+        run.metaDone = false;
+        run.panelRendered = false;
+        run.lessonRecs = [];
+        self.pdfState = run;
+        global.beginImportRun(run);
         self.renderPdfBar();
         self.syncWorkspace();
         // ONE library snapshot classifies every page as it lands (the run
@@ -2615,6 +2643,10 @@
         });
       })
       .then(function (summary) {
+        // 收尾 FIRST (the photo batch's U7 convention): executing goes
+        // false and any still-running page is swept back to pending, so
+        // 继续处理/保存 open the moment the chain ends.
+        self.settleRun(run);
         self.setBusy(false);
         if (!recognizeRunStillValid(self, runEpoch, category)) {
           return;
@@ -2622,6 +2654,7 @@
         self.finishRun(summary);
       })
       .catch(function (err) {
+        self.settleRun(run);
         self.setBusy(false);
         if (!recognizeRunStillValid(self, runEpoch, category)) {
           return;
@@ -2706,14 +2739,14 @@
       // 收尾 FIRST: executing goes false and any still-running photo is
       // swept back to pending, so 继续/保存 open the moment the chain ends
       // — even when a stopped photo's late handler never fired.
-      self.settlePhotoRun(run);
+      self.settleRun(run);
       self.setBusy(false);
       if (!recognizeRunStillValid(self, runEpoch, category)) {
         return;
       }
       self.finishRun(summary);
     }).catch(function (err) {
-      self.settlePhotoRun(run);
+      self.settleRun(run);
       self.setBusy(false);
       if (!recognizeRunStillValid(self, runEpoch, category)) {
         return;
@@ -2821,14 +2854,15 @@
   };
 
   /**
-   * settlePhotoRun (U7) — 收尾 for a PHOTO batch run: the U6 settle
-   * transition (executing goes false; a photo whose handler never fired is
-   * swept back to pending — the 停止后 running 恢复 pending guarantee) plus
-   * the bar re-render that surfaces 继续处理 and re-opens saving. PDF runs
-   * keep their own finish path until U8.
+   * settleRun (U7 收尾, U8 every batch kind) — the U6 settle transition for
+   * ANY run (multi-photo batch, single photo, PDF): executing goes false
+   * and a page whose handler never fired is swept back to pending (the
+   * 停止后 running 恢复 pending guarantee), plus the bar re-render that
+   * surfaces 继续处理 and re-opens saving. The single photo's bar stay
+   * hidden is renderPdfBar's business — settling it stays identical.
    */
-  PhotoAddForm.prototype.settlePhotoRun = function (state) {
-    if (!state || state.kind !== 'photo') {
+  PhotoAddForm.prototype.settleRun = function (state) {
+    if (!state) {
       return;
     }
     global.settleImportRun(state);
@@ -2837,8 +2871,9 @@
 
   /**
    * runState — the run currently owning the page bar / retry machinery:
-   * the PDF run or the multi-photo run (Issue #80). Whichever exists
-   * first wins; the pick/recognize releases keep them mutually exclusive.
+   * the PDF run or the photo batch (multi-photo or the U8 single-photo
+   * run, which rides the machine but owns no bar). Whichever exists first
+   * wins; the pick/recognize releases keep them mutually exclusive.
    */
   PhotoAddForm.prototype.runState = function () {
     return this.pdfState || this.photoBatch || null;
@@ -2872,7 +2907,10 @@
       });
     });
     return chain.then(function () {
-      return global.planSummary(state.plan);
+      // U8: counts ONLY — the form no longer consults planSummary's
+      // pending-means-processing verdict (the §1.1 row-4 inference); the
+      // §3.2 verdicts all come from importRunDecision instead.
+      return global.importRunCounts(state);
     });
   };
 
@@ -3055,14 +3093,14 @@
       // U7: a STOPPED run with nothing landed yet keeps its plan (继续处理
       // stays reachable) and says so — never the 没有识别到词表 verdict.
       if (summary && summary.pending > 0) {
-        // U7fix1 (review P2-2): the stopped hint derives from the batch's
-        // ACTUAL available actions, never from the pending count alone —
+        // U7fix1/U8: the stopped hint derives from the batch's ACTUAL
+        // available actions, never from the pending count alone —
         // superseded runs never get this far (every finish caller checks
-        // the execution identity first). A photo batch past its wind-down
-        // really offers 继续处理 (§3.2 已停止行); the PDF legacy bar (until
-        // U8) renders NO resume button at all, so its hint only states the
-        // remaining fact and never promises what the bar cannot honor.
-        var runDecision = state.kind === 'photo' && global.importRunDecision
+        // the execution identity first). Every batch kind now rides the
+        // §3.2 machine, so a run past its wind-down — photo OR PDF —
+        // really offers 继续处理 (the bar renders it); the hint may
+        // promise what the bar honors again.
+        var runDecision = global.importRunDecision
           ? global.importRunDecision(state, { noun: noun })
           : null;
         if (runDecision && runDecision.actions.resume.enabled) {
@@ -3104,11 +3142,10 @@
   /**
    * handlePdfRetryPage — one failed page again (PDF page or photo):
    * pending → run → finish. Completed pages' rows are untouched (the
-   * merge replaces only the retried page's segment). U7: photos retry
-   * through the U6 transition — the button rule gates (a failed photo, no
-   * execution in flight), retryImportPage does the failed→pending reset
-   * and marks the retry itself an execution; the PDF run keeps the plain
-   * flag flip until U8.
+   * merge replaces only the retried page's segment). U7/U8: EVERY batch
+   * kind retries through the U6 transition — the button rule gates (a
+   * failed page, no execution in flight), retryImportPage does the
+   * failed→pending reset and marks the retry itself an execution.
    */
   PhotoAddForm.prototype.handlePdfRetryPage = function (pageNo) {
     var self = this;
@@ -3118,20 +3155,15 @@
     }
     var category = this.draftCategory;
     var runEpoch = this.recognizeEpoch;
-    if (state.kind === 'photo') {
-      var retryVerdict = global.importRunDecision(state, { noun: state.noun });
-      if (!retryVerdict.actions.retry.enabled) {
-        return;
-      }
-      global.retryImportPage(state, pageNo);
-    } else {
-      state.aborted = false;
-      state.plan = global.retryPage(state.plan, pageNo);
+    var retryVerdict = global.importRunDecision(state, { noun: state.noun });
+    if (!retryVerdict.actions.retry.enabled) {
+      return;
     }
+    global.retryImportPage(state, pageNo);
     this.showFormError('');
     this.setBusy(true);
     this.runPages(pageNo).then(function (summary) {
-      self.settlePhotoRun(state);
+      self.settleRun(state);
       self.setBusy(false);
       // U7fix1 (review P2-2): a superseded execution owns no surface — its
       // late wind-down must not render a finish over whatever replaced it
@@ -3147,10 +3179,11 @@
    * handlePdfResume — the 继续处理 button's handler: after 停止, run the
    * still-pending pages only. Completed pages' rows are never re-merged
    * (their edits survive), and pending pages render fresh — the same
-   * machinery the single-page retry rides. U7: photos 继续 through the U6
-   * transition — the button rule gates reachability (settled, no
-   * execution in flight), resumeImportRun clears the stop fact and marks
-   * the execution; done/failed photos are never reset (继续不重跑 done).
+   * machinery the single-page retry rides. U7/U8: EVERY batch kind 继续
+   * through the U6 transition — the button rule gates reachability
+   * (settled, no execution in flight), resumeImportRun clears the stop
+   * fact and marks the execution; done/failed pages are never reset
+   * (继续不重跑 done).
    */
   PhotoAddForm.prototype.handlePdfResume = function () {
     var self = this;
@@ -3160,19 +3193,15 @@
     }
     var category = this.draftCategory;
     var runEpoch = this.recognizeEpoch;
-    if (state.kind === 'photo') {
-      var resumeVerdict = global.importRunDecision(state, { noun: state.noun });
-      if (!resumeVerdict.actions.resume.enabled) {
-        return;
-      }
-      global.resumeImportRun(state);
-    } else {
-      state.aborted = false;
+    var resumeVerdict = global.importRunDecision(state, { noun: state.noun });
+    if (!resumeVerdict.actions.resume.enabled) {
+      return;
     }
+    global.resumeImportRun(state);
     this.showFormError('');
     this.setBusy(true);
     this.runPages().then(function (summary) {
-      self.settlePhotoRun(state);
+      self.settleRun(state);
       self.setBusy(false);
       // U7fix1 (review P2-2): same guard as the retry — a 继续 whose run
       // was superseded while its request was out finishes NOTHING.
@@ -3187,16 +3216,17 @@
    * renderPdfBar — the per-page status surface (PDF pages and Issue #80
    * photos): one chip per page (页码/张号 + 状态， title carries the failure
    * reason), a 重试 button on failed chips, the whole-run summary line,
-   * and the run buttons (AC-3 处理过程显示状态). U7: a PHOTO batch renders
-   * its run buttons from importRunDecision — §3.2's one button rule (busy
-   * is real execution, never page counts, so 停止中 shows and 继续 is
-   * REACHABLE after a stop). The PDF run keeps the page-count rendering
-   * until U8 wires it to the same machine. textContent-only (Pitfall 10).
+   * and the run buttons (AC-3 处理过程显示状态). U7/U8: EVERY batch kind
+   * renders from importRunDecision — §3.2's one button rule for photo and
+   * PDF alike (busy is real execution, never page counts, so 停止中 shows
+   * and 继续 is REACHABLE after a stop; the legacy page-count branch is
+   * gone). The U8 single-photo run owns NO bar — the plain flow keeps its
+   * own surface. textContent-only (Pitfall 10).
    */
   PhotoAddForm.prototype.renderPdfBar = function () {
     var self = this;
     var state = this.runState();
-    if (!state) {
+    if (!state || state.kind === 'photo-single') {
       this.pdfBar.hidden = true;
       clearEl(this.pdfBar);
       return;
@@ -3205,12 +3235,11 @@
     this.pdfBar.hidden = false;
     clearEl(this.pdfBar);
 
-    // Photos: the run decision carries the counts; PDF: planSummary (the
-    // legacy branch below still reads its processing verdict).
-    var run = state.kind === 'photo' && global.importRunDecision
-      ? global.importRunDecision(state, { noun: noun })
-      : null;
-    var summary = run ? run.counts : global.planSummary(state.plan);
+    // ONE decision for every bar-owning batch kind: photo and PDF both
+    // take the counts AND the button verdicts from the machine — no entry
+    // re-derives busy from page counts.
+    var run = global.importRunDecision(state, { noun: noun });
+    var summary = run.counts;
     var line = document.createElement('p');
     line.className = 'pdf-summary-line';
     line.textContent = '共 ' + summary.total + ' ' + noun + '：成功 ' + summary.done +
@@ -3231,23 +3260,22 @@
       }
       chip.textContent = '第 ' + page.no + ' ' + noun;
       if (page.status === 'failed') {
-        // U7fix1 (review P2-1): a PHOTO batch gates the per-photo retry
-        // chip through the SAME button rule as the run buttons — disabled
-        // while another photo executes (running) or a stop's wind-down is
-        // in flight (stopping), and offered NOT AT ALL once the batch is
-        // dead (invalidated — e.g. a subject switch after settling). The
+        // U7fix1 (review P2-1): the per-page retry chip is gated through
+        // the SAME button rule as the run buttons — disabled while another
+        // page executes (running) or a stop's wind-down is in flight
+        // (stopping), and offered NOT AT ALL once the batch is dead
+        // (invalidated — e.g. a subject switch after settling). The
         // handler already refused those clicks; the chip must not promise
-        // them either. The PDF run keeps the plain chip until U8 wires it
-        // to the same machine.
-        var retryShown = !run ||
-          (run.actions.retry.shown && run.actions.retry.pages.indexOf(page.no) !== -1);
+        // them either.
+        var retryShown = run.actions.retry.shown &&
+          run.actions.retry.pages.indexOf(page.no) !== -1;
         if (retryShown) {
           var retry = document.createElement('button');
           retry.type = 'button';
           retry.className = 'btn btn-secondary pdf-retry-btn';
           retry.textContent = '重试';
           retry.setAttribute('aria-label', '重试第 ' + page.no + ' ' + noun);
-          retry.disabled = !!run && !run.actions.retry.enabled;
+          retry.disabled = !run.actions.retry.enabled;
           retry.addEventListener('click', function () {
             self.handlePdfRetryPage(page.no);
           });
@@ -3258,57 +3286,31 @@
     });
     this.pdfBar.appendChild(chips);
 
-    if (run) {
-      if (run.actions.stop.shown) {
-        var stop = document.createElement('button');
-        stop.type = 'button';
-        stop.className = 'btn btn-secondary pdf-stop-btn';
-        stop.textContent = run.actions.stop.label;
-        stop.disabled = !run.actions.stop.enabled;
-        stop.addEventListener('click', function () {
-          // 停止 — the transition, nothing else: it only raises the stop
-          // fact; the in-flight photo keeps running until the wind-down
-          // settles, and its late result is dropped by that same fact.
-          global.stopImportRun(state);
-          self.renderPdfBar(); // 停止中… shows immediately
-        });
-        this.pdfBar.appendChild(stop);
-      }
-      if (run.actions.resume.shown) {
-        var resume = document.createElement('button');
-        resume.type = 'button';
-        resume.className = 'btn btn-secondary pdf-resume-btn';
-        resume.textContent = run.actions.resume.label;
-        resume.disabled = !run.actions.resume.enabled;
-        resume.addEventListener('click', function () {
-          self.handlePdfResume();
-        });
-        this.pdfBar.appendChild(resume);
-      }
-      return;
-    }
-    if (summary.processing) {
-      var stopLegacy = document.createElement('button');
-      stopLegacy.type = 'button';
-      stopLegacy.className = 'btn btn-secondary pdf-stop-btn';
-      stopLegacy.textContent = '停止（保留已完成' + noun + '）';
-      stopLegacy.addEventListener('click', function () {
-        state.aborted = true;
+    if (run.actions.stop.shown) {
+      var stop = document.createElement('button');
+      stop.type = 'button';
+      stop.className = 'btn btn-secondary pdf-stop-btn';
+      stop.textContent = run.actions.stop.label;
+      stop.disabled = !run.actions.stop.enabled;
+      stop.addEventListener('click', function () {
+        // 停止 — the transition, nothing else: it only raises the stop
+        // fact; the in-flight page keeps running until the wind-down
+        // settles, and its late result is dropped by that same fact.
+        global.stopImportRun(state);
+        self.renderPdfBar(); // 停止中… shows immediately
       });
-      this.pdfBar.appendChild(stopLegacy);
-    } else if (summary.pending > 0) {
-      // The 停止 counterpart: resume ONLY the still-pending pages — the
-      // completed pages' rows (and the parent's edits to them) are never
-      // re-run (AC-4's preservation, extended from failed pages to
-      // stopped ones).
-      var resumeLegacy = document.createElement('button');
-      resumeLegacy.type = 'button';
-      resumeLegacy.className = 'btn btn-secondary pdf-resume-btn';
-      resumeLegacy.textContent = '继续处理（剩 ' + summary.pending + ' ' + noun + '）';
-      resumeLegacy.addEventListener('click', function () {
+      this.pdfBar.appendChild(stop);
+    }
+    if (run.actions.resume.shown) {
+      var resume = document.createElement('button');
+      resume.type = 'button';
+      resume.className = 'btn btn-secondary pdf-resume-btn';
+      resume.textContent = run.actions.resume.label;
+      resume.disabled = !run.actions.resume.enabled;
+      resume.addEventListener('click', function () {
         self.handlePdfResume();
       });
-      this.pdfBar.appendChild(resumeLegacy);
+      this.pdfBar.appendChild(resume);
     }
   };
 
