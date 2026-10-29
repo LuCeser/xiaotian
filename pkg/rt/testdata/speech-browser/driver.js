@@ -734,6 +734,30 @@ async function waitSwitchGateArmed(url, boundMs) {
   }
 }
 
+// waitEarlyCloseEvidence watches POSITIVELY for the released stale close
+// having ended the LIVE classroom or its transport (review P2-8): an honored
+// stale close ALWAYS ships session_ended and closes the socket — wire facts,
+// never a button-click timeout. The bound only limits the watch; plain
+// absence lets the journey proceed to B's own submit (the red is the POSITIVE
+// detection below, not "waited and nothing came").
+async function waitEarlyCloseEvidence(page, baselineIndex, boundMs) {
+  const deadline = Date.now() + boundMs;
+  for (;;) {
+    const view = await wsView(page);
+    const after = view.filter((e) => e.i > baselineIndex);
+    const ended = after.filter((e) => e.dir === 'in' && e.type === 'session_ended');
+    const closed = after.filter((e) => e.dir === 'evt' && e.kind === 'close');
+    if (ended.length || closed.length) {
+      return {
+        sessionEnded: ended.map((e) => (e.msg && e.msg.reason) || ''),
+        wsClosed: closed.length,
+      };
+    }
+    if (Date.now() > deadline) return null;
+    await page.waitForTimeout(150);
+  }
+}
+
 // interruptAckFacts lists every inbound interrupt_ack with its wire index.
 function interruptAckFacts(view) {
   return view.filter((e) => e.dir === 'in' && e.type === 'interrupt_ack' && e.msg)
@@ -1050,11 +1074,45 @@ async function scenarioStaleCompletedClose(args) {
   // still parked.
   const bridge = await waitNthRoundAcked(page, args.expectedSecond, 1, timeoutMs, 'B resume bridge played naturally');
   const baseline = roundLastIndex(bridge);
+  // The wire facts shared by every exit below (success, business failure
+  // and — via main's catch — the exception path: observations are never
+  // discarded, review P2-8).
+  const wireFacts = async () => {
+    const view = await wsView(page);
+    const ended = view.filter((e) => e.dir === 'in' && e.type === 'session_ended' && e.msg);
+    return {
+      rounds: [],
+      readyCount: frameCount(view, 'in', 'session_ready'),
+      readyIndexes: view.filter((e) => e.dir === 'in' && e.type === 'session_ready').map((e) => e.i),
+      checkStartedCount: frameCount(view, 'in', 'check_started'),
+      reviewResultCount: frameCount(view, 'in', 'review_result'),
+      sessionEndedCount: ended.length,
+      endedReasons: ended.map((e) => e.msg.reason || ''),
+      interruptAcks: interruptAckFacts(view),
+      errorFrames: errorFrameFacts(view),
+      wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    };
+  };
   // The stale close is released and the voice turn's TRUE exit confirmed by
   // the server's whole-task observation before the late window opens (the
   // gate): whatever A's close did is on the wire by these counts.
   await waitSwitchGateArmed(url, args.lateWindowMs);
+  // Business assertion first (review P2-8): an honored stale close ends B
+  // RIGHT HERE — session_ended / early transport close after the bridge are
+  // the violation's own wire facts; only their ABSENCE within the watch
+  // lets the journey proceed to B's own submit (the red is the positive
+  // detection, never a submit-button timeout).
+  const early = await waitEarlyCloseEvidence(page, baseline, args.earlyCloseWatchMs);
   const late = lateFrameCounts(await wsView(page), baseline);
+  if (early) {
+    return Object.assign(await wireFacts(), {
+      ok: false,
+      error: 'the released stale close ended the live classroom before B\'s own submit: '
+        + 'session_ended=' + JSON.stringify(early.sessionEnded) + ' ws_close=' + early.wsClosed,
+      earlyClose: early,
+      lateWindow: late,
+    });
+  }
   // B keeps handling messages: its own submit through the REAL panel.
   await page.locator('.rt-check-submit').click();
   await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'review_result'),
@@ -1063,22 +1121,11 @@ async function scenarioStaleCompletedClose(args) {
   await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'session_ended')
       && view.some((e) => e.dir === 'evt' && e.kind === 'close'),
   { timeoutMs, label: 'B natural ending and close' });
-  const view = await wsView(page);
-  const ended = view.filter((e) => e.dir === 'in' && e.type === 'session_ended' && e.msg);
-  return {
+  return Object.assign(await wireFacts(), {
     ok: true,
     rounds: [ask, bridge, summary],
     lateWindow: late,
-    readyCount: frameCount(view, 'in', 'session_ready'),
-    readyIndexes: view.filter((e) => e.dir === 'in' && e.type === 'session_ready').map((e) => e.i),
-    checkStartedCount: frameCount(view, 'in', 'check_started'),
-    reviewResultCount: frameCount(view, 'in', 'review_result'),
-    sessionEndedCount: ended.length,
-    endedReasons: ended.map((e) => e.msg.reason || ''),
-    interruptAcks: interruptAckFacts(view),
-    errorFrames: errorFrameFacts(view),
-    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
-  };
+  });
 }
 
 const SCENARIOS = {
@@ -1122,6 +1169,7 @@ async function main() {
   const holdMs = Number(opt('--hold-ms') || 3000);
   const submitDelayMs = Number(opt('--submit-delay-ms') || 0);
   const lateWindowMs = Number(opt('--late-window-ms') || 3000);
+  const earlyCloseWatchMs = Number(opt('--early-close-watch-ms') || 3000);
   const rejectMarginMs = Number(opt('--reject-margin-ms') || 8000);
   const expectBusyError = Number(opt('--expect-busy-error') || 0) === 1;
   const expectedPcmPerSentence = Number(opt('--expected-pcm-per-sentence'));
@@ -1145,15 +1193,28 @@ async function main() {
 
   const browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
   let result;
+  let observedPage = null;
   try {
     const context = await browser.newContext();
     const page = await context.newPage();
+    observedPage = page;
     await installRtObserver(page);
     await installFakeMic(page);
-    result = await run({ page, url, timeoutMs, holdMs, submitDelayMs, expectedSentences, expectedSecond, expectedThird, expectedPcmPerSentence, lateWindowMs, rejectMarginMs, expectBusyError });
+    result = await run({ page, url, timeoutMs, holdMs, submitDelayMs, expectedSentences, expectedSecond, expectedThird, expectedPcmPerSentence, lateWindowMs, earlyCloseWatchMs, rejectMarginMs, expectBusyError });
     await context.close();
   } catch (err) {
     result = { ok: false, error: String((err && err.message) || err) };
+    // Review P2-8: an exception must not discard the journey's observations
+    // — attach the page's wire/player facts best-effort so the failure
+    // carries business evidence instead of a bare locator message.
+    if (observedPage) {
+      try {
+        result.observed = {
+          wsTail: (await wsView(observedPage)).slice(-40),
+          playback: await playbackState(observedPage),
+        };
+      } catch (_) { /* the page/context may already be gone */ }
+    }
   } finally {
     await browser.close().catch(() => {});
   }
