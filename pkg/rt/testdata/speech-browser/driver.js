@@ -722,6 +722,135 @@ function roundLastIndex(facts) {
     : 0;
 }
 
+// scenario "check-submit-natural"（S4）：真实提交的当前课堂成功路径——恢复
+// 播报自然完成后点「检查完了，提交」，提交的锁存、FSRS 保存、回执与结果/
+// 总结呈现全部自然发生（总结轮自然 ACK，随后 session_ended 与页面关闭）。
+// --expect-busy-error 1 时（reinit-during-submit 同体）在提交后先等那条可
+// 恢复的同 lessonID 重入错误（Go 侧在锁存驻留时注入重入），再等结果。
+async function scenarioCheckSubmitNatural(args) {
+  const { page, url, timeoutMs } = args;
+  await page.goto(url);
+  await page.locator('#rt-start').click();
+  const bridge = await waitNthRoundAcked(page, args.expectedSentences, 1, timeoutMs, 'resume bridge played naturally');
+  await page.locator('.rt-check-submit').click();
+  if (args.expectBusyError) {
+    await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'error' && e.msg
+      && e.msg.code === 'lesson_unavailable' && e.msg.recoverable === true),
+    { timeoutMs, label: 'the recoverable same-lessonID reentry error' });
+  }
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'review_result'),
+    { timeoutMs, label: 'the accepted submit\'s review_result' });
+  const summary = await waitNthRoundAcked(page, args.expectedSecond, 1, timeoutMs, 'summary played naturally');
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'session_ended')
+      && view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+  { timeoutMs, label: 'natural lesson_complete ending and close' });
+  const view = await wsView(page);
+  return {
+    ok: true,
+    rounds: [bridge, summary],
+    readyCount: frameCount(view, 'in', 'session_ready'),
+    readyIndexes: view.filter((e) => e.dir === 'in' && e.type === 'session_ready').map((e) => e.i),
+    checkStartedCount: frameCount(view, 'in', 'check_started'),
+    reviewResultCount: frameCount(view, 'in', 'review_result'),
+    sessionEndedCount: frameCount(view, 'in', 'session_ended'),
+    interruptAcks: interruptAckFacts(view),
+    errorFrames: errorFrameFacts(view),
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+  };
+}
+
+// scenario "classroom-switch-opening"（S4）：A 的开场播报进行中（第 1 句已自
+// 然 ACK、后续句已排队）同连接换课到 B——页面必须先收到 interrupt_ack（停
+// 掉已排队旧音频并采纳新 epoch），再收 B 的 session_ready 与开场音频并自然
+// ACK。第二条轮次要么自然完成，要么在全部帧落地后仍被播放器拒收（拒绝的
+// 登记结果如实上报，Go 侧据此断言，绝不用消息数量代替）。
+async function scenarioClassroomSwitchOpening(args) {
+  const { page, url, timeoutMs } = args;
+  await page.goto(url);
+  await page.locator('#rt-start').click();
+  // Round 1 (A's opening) starts playing; the Go side switches classrooms as
+  // soon as it observes the page's first ack, mid-round on purpose.
+  await waitWs(page, (view) => frameCount(view, 'out', 'sentence_ack') >= 1,
+    { timeoutMs, label: 'the first opening sentence acked naturally' });
+  const second = await waitSwitchRoundSecond(page, args.expectedSecond, args.expectedPcmPerSentence,
+    args.rejectMarginMs, timeoutMs);
+  const view = await wsView(page);
+  const playback = await playbackState(page);
+  const rounds = teacherRounds(view);
+  const round1 = rounds.length ? inspectRound(rounds[0], view, playback, args.expectedSentences, null) : null;
+  const readyIndexes = view.filter((e) => e.dir === 'in' && e.type === 'session_ready').map((e) => e.i);
+  const firstAck = interruptAckFacts(view)[0];
+  return {
+    ok: true,
+    secondRoundVerdict: second.verdict,
+    rounds: [round1, second.facts],
+    readyCount: readyIndexes.length,
+    readyIndexes,
+    interruptAcks: interruptAckFacts(view),
+    interruptAckBeforeSecondReady: !!(firstAck && readyIndexes.length >= 2
+      && readyIndexes[0] < firstAck.index && firstAck.index < readyIndexes[1]),
+    errorFrames: errorFrameFacts(view),
+    stopNowCount: playback.trace.filter((t) => t === 'stopNow').length,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    sessionEndedCount: frameCount(view, 'in', 'session_ended'),
+    droppedChunks: playback.droppedChunks,
+    mic: await micInfo(page),
+  };
+}
+
+// scenario "classroom-switch-submit"（S4）：A 的正式提交在锁存前驻留（Go 侧
+// 门），同连接注入 B（独立真实行）的 session_init——B 的恢复播报自然完成后
+// Go 侧释放 A：A 的保存照常落库（归属 A），呈现被换课 epoch 拒绝（迟到窗内
+// 零输出）。随后页面在 B 的面板上再点一次提交：B 的提交走自己的成功路径
+// （结果/总结/结束全自然）。
+async function scenarioClassroomSwitchSubmit(args) {
+  const { page, url, timeoutMs } = args;
+  await page.goto(url);
+  await page.locator('#rt-start').click();
+  const bridgeA = await waitNthRoundAcked(page, args.expectedSentences, 1, timeoutMs, 'A resume bridge played naturally');
+  await page.locator('.rt-check-submit').click();
+  // The switched classroom's own resume bridge — the SECOND round carrying
+  // these texts (A's bridge and B's bridge speak the same copy).
+  const bridgeB = await waitNthRoundAcked(page, args.expectedSecond, 2, timeoutMs, 'B resume bridge played naturally');
+  const baseline = roundLastIndex(bridgeB);
+  const late0 = lateFrameCounts(await wsView(page), baseline);
+  await page.waitForTimeout(args.lateWindowMs);
+  const late = lateFrameCounts(await wsView(page), baseline);
+  if (late.teacherSentences > late0.teacherSentences
+      || late.reviewResults > late0.reviewResults || late.sessionEnded > late0.sessionEnded) {
+    // A late A-side result landed inside the window — report it; the Go side
+    // owns the assertion (and its own release timing).
+    return {
+      ok: false,
+      error: 'late frames landed inside the switch window: ' + JSON.stringify(late),
+      rounds: [bridgeA, bridgeB],
+      lateWindow: late,
+    };
+  }
+  // B's own submit through the real panel.
+  await page.locator('.rt-check-submit').click();
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'review_result'),
+    { timeoutMs, label: 'B\'s own submit review_result' });
+  const summary = await waitNthRoundAcked(page, args.expectedThird, 1, timeoutMs, 'B summary played naturally');
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'session_ended')
+      && view.some((e) => e.dir === 'evt' && e.kind === 'close'),
+  { timeoutMs, label: 'B natural ending and close' });
+  const view = await wsView(page);
+  return {
+    ok: true,
+    rounds: [bridgeA, bridgeB, summary],
+    lateWindow: late,
+    readyCount: frameCount(view, 'in', 'session_ready'),
+    readyIndexes: view.filter((e) => e.dir === 'in' && e.type === 'session_ready').map((e) => e.i),
+    checkStartedCount: frameCount(view, 'in', 'check_started'),
+    reviewResultCount: frameCount(view, 'in', 'review_result'),
+    sessionEndedCount: frameCount(view, 'in', 'session_ended'),
+    interruptAcks: interruptAckFacts(view),
+    errorFrames: errorFrameFacts(view),
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+  };
+}
+
 async function waitSentenceAckedBy(page, pred, timeoutMs, label) {
   await waitWs(page, (view) => {
     const s = view.find((e) => e.dir === 'in' && e.type === 'teacher_sentence' && e.msg && pred(e.msg.text));
