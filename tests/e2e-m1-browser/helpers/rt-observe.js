@@ -161,6 +161,10 @@ async function playbackState(page) {
         ? playback._sources.map((source) => String(source.__rtKey || '')) : [],
       ledgerKeys: playback && playback._ledger instanceof Map
         ? Array.from(playback._ledger.keys(), String) : [],
+      // Acceptance history (issue #69 review P2-7): keys whose audio_start
+      // passed the epoch gate, kept across stopNow — read-only view.
+      acceptedKeys: playback && playback._acceptedKeys instanceof Map
+        ? Array.from(playback._acceptedKeys.keys(), String) : [],
     };
   });
 }

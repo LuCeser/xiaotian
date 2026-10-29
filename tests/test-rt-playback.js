@@ -603,6 +603,38 @@ FakeTimers.prototype.pendingMs = function () {
       'capped watchdog path also never fakes a sentence_ack');
   }
 
+  // -----------------------------------------------------------------------
+  // 10. Acceptance history (issue #69 rethink3 review P2-7): every
+  // (epoch, sentence_id) whose audio_start PASSED the epoch gate is
+  // recorded once; the record survives stopNow and the drain watchdog
+  // (both clear the runtime ledger — accepted-but-stopped audio must
+  // never read as refused-at-the-gate), survives releaseSharedResources,
+  // and is dropped only by resetSession (a new /rt connection restarts
+  // the epoch space at 0, so old keys would alias new frames).
+  // -----------------------------------------------------------------------
+  {
+    const pb = makePlayback();
+    pb.onTurnStart(1, 1);
+    pb.onAudioStart(1, 's1'); // gate passed → accepted
+    assert.ok(pb._acceptedKeys.has('1:s1'), 'accepted key recorded in the history');
+    assert.ok(pb._ledger.has('1:s1'), 'ledger book opened for the accepted sentence');
+    pb.onAudioStart(0, 'stale-s0'); // stale epoch → refused at the gate
+    assert.ok(!pb._acceptedKeys.has('0:stale-s0'),
+      'a start the epoch gate refused never enters the history');
+    pb.stopNow(); // the switch's interrupt_ack path clears the ledger…
+    assert.strictEqual(pb._ledger.size, 0, 'stopNow clears the runtime ledger');
+    assert.ok(pb._acceptedKeys.has('1:s1'),
+      'acceptance history survives stopNow — accepted-but-stopped is not a rejection');
+    pb.onEpochBump(2); // another stopNow inside (epoch adoption)
+    assert.ok(pb._acceptedKeys.has('1:s1'), 'history survives the epoch bump too');
+    pb.releaseSharedResources(); // natural-ending teardown: ledger only
+    assert.ok(pb._acceptedKeys.has('1:s1'),
+      'releaseSharedResources keeps the acceptance history');
+    pb.resetSession(); // NEW connection: epoch space restarts at 0
+    assert.strictEqual(pb._acceptedKeys.size, 0,
+      'resetSession drops the history with the old epoch space');
+  }
+
   console.log('test-rt-playback.js: all assertions passed');
 })().catch((err) => {
   console.error(err);

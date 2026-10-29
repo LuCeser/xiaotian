@@ -656,12 +656,16 @@ async function waitNthRoundAcked(page, texts, nth, timeoutMs, label) {
 // completes NATURALLY (every ack followed its onended — the fix present) or,
 // once every expected frame has landed on the wire and a rejection margin has
 // passed, is judged by the PLAYER'S OWN REGISTRATION — never by the absence
-// of acks (review P2-7). A round was refused when the player's ledger never
-// opened a book for ANY of its (epoch, sentence) keys — every audio_start was
-// turned away at the epoch gate, so nothing of the round was ever accepted or
-// scheduled. A round whose books ARE open but that has not finished (accepted
-// and queued, playback merely pending or paused) is NOT a rejection: the wait
-// reports it honestly as an observation failure instead of a verdict.
+// of acks (review P2-7). A round was refused when NONE of its (epoch,
+// sentence) keys appears in the player's ACCEPTANCE HISTORY — every
+// audio_start was turned away at the epoch gate, so nothing of the round was
+// ever accepted. The live ledger alone cannot decide this (review P2-7 fix2):
+// stopNow() — the switch's own interrupt_ack path and the drain watchdog —
+// clears the ledger of ALREADY ACCEPTED audio, which would misread
+// accepted-but-stopped as refused. A round whose keys ARE in the history but
+// that never finished (accepted, then stopped or still queued) is NOT a
+// rejection: the wait reports it honestly as an observation failure instead
+// of a verdict.
 async function waitSwitchRoundSecond(page, texts, pcmPerSentence, rejectMarginMs, timeoutMs) {
   let framesCompleteAt = 0;
   const deadline = Date.now() + timeoutMs;
@@ -677,16 +681,20 @@ async function waitSwitchRoundSecond(page, texts, pcmPerSentence, rejectMarginMs
       if (framesComplete && !framesCompleteAt) framesCompleteAt = Date.now();
       if (framesComplete && framesCompleteAt && Date.now() - framesCompleteAt >= rejectMarginMs) {
         const roundKeys = facts.sentences.map((f) => facts.epoch + ':' + f.sentenceId);
-        const booked = roundKeys.filter((k) => playback.ledgerKeys.indexOf(k) >= 0).length;
-        if (booked === 0) {
+        const accepted = roundKeys.filter((k) => playback.acceptedKeys.indexOf(k) >= 0).length;
+        if (accepted === 0) {
           // The player processed every announcement of the round and refused
-          // each at its epoch gate — the registration of the rejection.
-          facts.rejection = { bookedKeys: 0, droppedChunks: playback.droppedChunks };
+          // each at its epoch gate — no acceptance ever happened.
+          facts.rejection = {
+            acceptedKeys: 0, ledgerKeys: playback.ledgerKeys.length,
+            droppedChunks: playback.droppedChunks,
+          };
           return { verdict: 'rejected', facts };
         }
         throw new Error('the switched round was ACCEPTED by the player ('
-          + booked + '/' + roundKeys.length + ' ledger books open) but never completed — '
-          + 'accepted-but-unfinished is not a rejection: '
+          + accepted + '/' + roundKeys.length + ' acceptance-history keys) but never completed — '
+          + 'accepted-but-stopped-or-unfinished is not a rejection '
+          + '(ledger books now ' + playback.ledgerKeys.length + '; stopNow clears them): '
           + JSON.stringify({ acks: facts.sentences.map((f) => f.acks) }));
       }
     }
