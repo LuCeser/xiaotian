@@ -323,7 +323,7 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64, ins
 		tm.sendError(s, ErrCodeLessonUnavailable, passageMissingNotice, false)
 		return
 	case err != nil:
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	case !p.InScope:
 		// 进入范围才有资格被安排 (Issue #4): the honest coded refusal —
@@ -375,7 +375,7 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64, ins
 	// resuming its in-flight attempt).
 	latest, err := tm.exec.LatestPassageLessonID(ctx, p.ID, scope.Whole, scope.Paragraphs)
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	if latest != "" {
@@ -403,7 +403,7 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64, ins
 	l, err := tm.exec.EnsurePassageLesson(ctx, lessonID, p.ID, scope.ID,
 		scope.Whole, scope.Paragraphs, texts, p.Category)
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	if l.PassageID != p.ID || l.PassageWhole != scope.Whole ||
@@ -411,7 +411,7 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64, ins
 		// Defensive identity check: a lesson row must never announce one
 		// range while checking another range's paragraphs.
 		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "passage_identity"))
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	tm.recorder.Emit(EventPassageStarted,

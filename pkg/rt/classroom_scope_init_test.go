@@ -3,6 +3,7 @@ package rt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -406,6 +407,115 @@ func TestCategoryAdmissionHeldWithInstallCheck(t *testing.T) {
 	if gotCategory != lesson.CategoryEnglish {
 		t.Fatalf("live classroom subject = %q, want %q (the newest request's row authority; the parked continuation must not overwrite it)",
 			gotCategory, lesson.CategoryEnglish)
+	}
+}
+
+// ttFailingChineseFetch parks the FIRST chinese FetchDueWords and then fails
+// it — the control point for a late continuation's own row fetch failing
+// AFTER a newer classroom already installed (review P1-3).
+type ttFailingChineseFetch struct {
+	WordSource
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	open    sync.Once
+}
+
+func (w *ttFailingChineseFetch) FetchDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error) {
+	if category != lesson.CategoryChinese {
+		return w.WordSource.FetchDueWords(ctx, limit, category)
+	}
+	var first bool
+	w.once.Do(func() { first = true; close(w.entered) })
+	if !first {
+		return w.WordSource.FetchDueWords(ctx, limit, category)
+	}
+	<-w.release
+	return nil, errors.New("fetch failed after the replacement installed")
+}
+
+func (w *ttFailingChineseFetch) openUp() { w.open.Do(func() { close(w.release) }) }
+
+// TestLateInitFailureStaysSilentAfterReplacement (review P1-3): the answered
+// continuation's row fetch parks, a newer session_init installs a live
+// classroom, and only then does the fetch FAIL — the failure belongs to the
+// superseded request and must not reach the wire: no lesson_unavailable (the
+// page would set started=false under B's live classroom), no event, nothing.
+func TestLateInitFailureStaysSilentAfterReplacement(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	words.setPeek(lesson.CategoryChinese, ttCards("苹果"))
+	words.setPeek(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	words.setDue(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	failing := &ttFailingChineseFetch{
+		WordSource: words,
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		TurnManagerConfig{LessonID: ttLessonID, Words: failing},
+		NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Category: CategoryAuto,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSubjectAsk) >= 1 }) {
+		t.Fatal("the auto entry never asked the subject clarify")
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.HandleControl(s, mustJSON(t, SubjectPickMsg{Type: TypeSubjectPick, Category: lesson.CategoryChinese}))
+	}()
+	select {
+	case <-failing.entered:
+	case <-time.After(3 * time.Second):
+		failing.openUp()
+		wg.Wait()
+		t.Fatal("the answered continuation never reached its own row fetch")
+	}
+
+	// B replaces A on the same connection and finishes installing its live
+	// classroom while A's fetch is still parked.
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Category: lesson.CategoryEnglish,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) >= 1 }) {
+		failing.openUp()
+		wg.Wait()
+		t.Fatal("the replacement classroom never shipped session_ready")
+	}
+	readyBefore := s.countOf(TypeSessionReady)
+
+	// Resume A into a FAILING fetch: the egress must stay silent.
+	failing.openUp()
+	wg.Wait()
+
+	s.mu.Lock()
+	sentControls := append([][]byte(nil), s.controls...)
+	s.mu.Unlock()
+	for _, raw := range sentControls {
+		var probe struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.Type == TypeError {
+			t.Fatalf("an error frame (%s) reached the live connection after a superseded init failed — the late failure must stay silent", probe.Code)
+		}
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		t.Fatalf("session_ready after the late failure = %d, want %d (the failure must not disturb B)", got, readyBefore)
+	}
+	tm.mu.Lock()
+	gotCategory, hasTutor := tm.category, tm.tutor != nil
+	tm.mu.Unlock()
+	if gotCategory != lesson.CategoryEnglish || !hasTutor {
+		t.Fatalf("live classroom = %q tutor=%v, want the english classroom intact", gotCategory, hasTutor)
 	}
 }
 

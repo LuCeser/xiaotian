@@ -779,7 +779,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 	ctx := context.Background()
 	l, err := tm.exec.GetLessonState(ctx, lessonID)
 	if err != nil && !errors.Is(err, lesson.ErrLessonNotFound) {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, req.installGen)
 		return
 	}
 
@@ -819,7 +819,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 			// running, a retry after it settles reads the true row. The
 			// bounded wait that lets a quick retry proceed in-place is S7's
 			// persistDone coordination — refusing is this step's minimal fix.
-			tm.failLessonInitBusy(s)
+			tm.failLessonInitBusy(s, req.installGen)
 			return
 		}
 	} else {
@@ -827,7 +827,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 		// lock held) — fetch due words now, scoped to the same subject.
 		cards, ferr := tm.cfg.Words.FetchDueWords(ctx, dueWordsLimit, category)
 		if ferr != nil {
-			tm.failLessonInit(s)
+			tm.failLessonInit(s, req.installGen)
 			return
 		}
 		if len(cards) == 0 {
@@ -852,7 +852,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 			// RunDue succeeded but the lesson row did not materialize; the
 			// 13-10 fetch lock (1h) may linger — recorded honestly below.
 			// R0 does NOT pretend this is recoverable in-process.
-			tm.failLessonInit(s)
+			tm.failLessonInit(s, req.installGen)
 			return
 		}
 	}
@@ -863,7 +863,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 		// existed): INSERT OR IGNORE is not a replacement mechanism (13-07
 		// frozen boundary). Visible failure — never a re-RunDue, never a
 		// fake backfill.
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, req.installGen)
 	case l.Stage == lesson.StageChecking:
 		// 13.1-04 (Pitfall 2): the check never finished and the close
 		// fallback never landed — reopen the check panel from the row.
@@ -890,13 +890,27 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 // failLessonInit is the single classroom-init failure egress: a coded,
 // fixed-wording ErrorMsg plus the server-side error event (T-13-14). PR #60
 // review: a session that closed under the init IO gets no failure message
-// either — nothing follows its session_ended.
-func (tm *TurnManager) failLessonInit(s Sender) {
-	if !tm.applySessionEffect(func() error {
-		return s.SendControl(ErrorMsg{
+// either — nothing follows its session_ended. Review P1-3: the failure
+// belongs to ONE init request — a LATE continuation whose reservation a
+// newer session_init already replaced must stay completely silent, or its
+// lesson_unavailable would flip the live classroom's page (started=false)
+// for a request that page never made. The reservation check, the closed
+// check and the send are one tm.mu hold.
+func (tm *TurnManager) failLessonInit(s Sender, installGen uint64) {
+	tm.mu.Lock()
+	allowed := tm.classroomInstallAllowed(installGen)
+	var err error
+	if allowed {
+		err = s.SendControl(ErrorMsg{
 			Type: TypeError, Code: ErrCodeLessonUnavailable, Message: lessonUnavailableNotice, Recoverable: false,
 		})
-	}) {
+	}
+	tm.mu.Unlock()
+	if !allowed {
+		return
+	}
+	if err != nil {
+		tm.logger.Warn("lesson init failure enqueue failed", infra.ErrField(err))
 		return
 	}
 	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable))
@@ -911,13 +925,24 @@ const lessonSaveBusyNotice = "上一次提交还在保存中，请稍等一下�
 
 // failLessonInitBusy is failLessonInit's recoverable sibling: refuse the
 // re-init without installing anything, without touching the in-flight save,
-// and without any unchecked fallback for the row.
-func (tm *TurnManager) failLessonInitBusy(s Sender) {
-	if !tm.applySessionEffect(func() error {
-		return s.SendControl(ErrorMsg{
+// and without any unchecked fallback for the row. Same request-identity gate
+// as failLessonInit (review P1-3): the CURRENT request hears the refusal; a
+// superseded late continuation stays silent.
+func (tm *TurnManager) failLessonInitBusy(s Sender, installGen uint64) {
+	tm.mu.Lock()
+	allowed := tm.classroomInstallAllowed(installGen)
+	var err error
+	if allowed {
+		err = s.SendControl(ErrorMsg{
 			Type: TypeError, Code: ErrCodeLessonUnavailable, Message: lessonSaveBusyNotice, Recoverable: true,
 		})
-	}) {
+	}
+	tm.mu.Unlock()
+	if !allowed {
+		return
+	}
+	if err != nil {
+		tm.logger.Warn("lesson busy refusal enqueue failed", infra.ErrField(err))
 		return
 	}
 	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable), infra.F("at", "lesson_save_inflight"))

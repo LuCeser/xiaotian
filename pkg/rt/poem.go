@@ -221,7 +221,7 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64, installGen uint64)
 		tm.sendError(s, ErrCodeLessonUnavailable, poemMissingNotice, false)
 		return
 	case err != nil:
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	case !p.InScope:
 		// 进入范围才有资格被安排 (Issue #4): the honest coded refusal —
@@ -237,7 +237,7 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64, installGen uint64)
 	// Resume probe: this poem's latest attempt row.
 	latest, err := tm.exec.LatestPoemLessonID(ctx, poemID)
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	if latest != "" {
@@ -263,14 +263,14 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64, installGen uint64)
 
 	l, err := tm.exec.EnsurePoemLesson(ctx, lessonID, poemID, p.Lines)
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	if l.PoemID != poemID {
 		// Defensive identity check: a lesson row must never announce one work
 		// while checking another work's lines.
 		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "poem_identity"))
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	tm.recorder.Emit(EventPoemStarted, infra.F("lines", len(p.Lines)))

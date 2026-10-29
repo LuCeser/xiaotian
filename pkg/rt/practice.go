@@ -253,7 +253,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender, req classroomInitRequest) {
 	dailyID := lessonIDForCategory(tm.cfg.LessonID, now, category)
 	if l, err := tm.exec.GetLessonState(ctx, dailyID); err != nil {
 		if !errors.Is(err, lesson.ErrLessonNotFound) {
-			tm.failLessonInit(s)
+			tm.failLessonInit(s, req.installGen)
 			return
 		}
 	} else {
@@ -265,7 +265,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender, req classroomInitRequest) {
 	// ...then today's already-practiced words (避开当日已默, D-11).
 	practiced, err := tm.cfg.PracticeStore.ListPracticeWordsOn(ctx, beijingDay(now))
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, req.installGen)
 		return
 	}
 	for _, w := range practiced {
@@ -284,7 +284,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender, req classroomInitRequest) {
 		Category:          category,
 	})
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, req.installGen)
 		return
 	}
 	picked := pickPracticeWords(cards, exclude, practiceWordsLimit, rand.New(rand.NewSource(now.UnixNano()))) //nolint:gosec // G404: lesson word shuffle, not used for secrets
@@ -340,7 +340,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender, req classroomInitRequest) {
 	l, err := tm.exec.EnsureLessonCards(ctx, lessonID, picked, category)
 	tm.initWriteMu.Unlock()
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, req.installGen)
 		return
 	}
 	tm.recorder.Emit(EventPracticeStarted, infra.F("picked", len(picked)))
