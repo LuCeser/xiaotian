@@ -222,14 +222,28 @@ func (tm *TurnManager) handlePracticeInit(s Sender, req classroomInitRequest) {
 		// answers nothing.
 		return
 	}
+	if tm.practiceInitEntryInterleave != nil {
+		// Test seam (review P1-3 fix2; nil in production): parks the
+		// practice continuation AFTER the subject ask's atomic consumption —
+		// the window where a newer session_init on the same connection may
+		// already have installed its classroom. The deterministic race tests
+		// probe from here that this egress stays silent for the superseded
+		// request.
+		tm.practiceInitEntryInterleave()
+	}
 	if tm.cfg.Practice == nil || tm.cfg.PracticeStore == nil {
 		// Honest degraded answer (lesson_unavailable class) — never a
-		// silent fallback into a due-word lesson.
-		tm.recorder.Emit(EventError,
-			infra.F("code", ErrCodeLessonUnavailable),
-			infra.F("practice", "no_source"),
-		)
-		tm.sendError(s, ErrCodeLessonUnavailable, practiceUnavailableNotice, false)
+		// silent fallback into a due-word lesson. Same request-identity gate
+		// as every init egress (review P1-3 fix2): a LATE practice
+		// continuation resumed after a newer session_init installed must not
+		// flip the live classroom's page (started=false); only the request
+		// that still owns the reservation hears the degraded answer.
+		if tm.sendLessonInitError(s, req.installGen, practiceUnavailableNotice, false) {
+			tm.recorder.Emit(EventError,
+				infra.F("code", ErrCodeLessonUnavailable),
+				infra.F("practice", "no_source"),
+			)
+		}
 		return
 	}
 

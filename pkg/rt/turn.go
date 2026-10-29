@@ -442,6 +442,14 @@ type TurnManager struct {
 	// live classroom's subject. The deterministic race tests probe from here
 	// — a TryLock on tm.mu may never succeed at this point.
 	categoryAdmitInterleave func()
+	// practiceInitEntryInterleave (test seam, issue #69 rethink3 review P1-3
+	// fix2; nil in production) fires at handlePracticeInit's entry on the
+	// ANSWER TURN's goroutine, after the subject ask's atomic consumption and
+	// before the practice service checks — the window where a newer
+	// session_init may already have installed its classroom. The
+	// deterministic race tests park a superseded practice continuation here
+	// and probe that its degraded egress stays silent.
+	practiceInitEntryInterleave func()
 
 	// announceEntryInterleave (test seam, PR #60 review J15; nil in
 	// production) fires after runAnnouncementDisplayAt's entry gate has
@@ -924,33 +932,43 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 	}
 }
 
-// failLessonInit is the single classroom-init failure egress: a coded,
-// fixed-wording ErrorMsg plus the server-side error event (T-13-14). PR #60
-// review: a session that closed under the init IO gets no failure message
-// either — nothing follows its session_ended. Review P1-3: the failure
-// belongs to ONE init request — a LATE continuation whose reservation a
-// newer session_init already replaced must stay completely silent, or its
-// lesson_unavailable would flip the live classroom's page (started=false)
-// for a request that page never made. The reservation check, the closed
-// check and the send are one tm.mu hold.
-func (tm *TurnManager) failLessonInit(s Sender, installGen uint64) {
+// sendLessonInitError is the gated egress every classroom-init failure and
+// refusal shares (review P1-3 fix2): the request-identity check, the closed
+// check and the send are ONE tm.mu hold, so the frame reaches the wire only
+// while installGen is still the connection's latest reservation. A LATE
+// continuation whose reservation a newer session_init already replaced
+// stays completely silent — its lesson_unavailable would flip the live
+// classroom's page (started=false) for a request that page never made.
+// Returns whether the frame was sent (and may be evented).
+func (tm *TurnManager) sendLessonInitError(s Sender, installGen uint64, notice string, recoverable bool) bool {
 	tm.mu.Lock()
 	allowed := tm.classroomInstallAllowed(installGen)
 	var err error
 	if allowed {
 		err = s.SendControl(ErrorMsg{
-			Type: TypeError, Code: ErrCodeLessonUnavailable, Message: lessonUnavailableNotice, Recoverable: false,
+			Type: TypeError, Code: ErrCodeLessonUnavailable, Message: notice, Recoverable: recoverable,
 		})
 	}
 	tm.mu.Unlock()
 	if !allowed {
-		return
+		return false
 	}
 	if err != nil {
-		tm.logger.Warn("lesson init failure enqueue failed", infra.ErrField(err))
-		return
+		tm.logger.Warn("lesson init error enqueue failed", infra.ErrField(err))
+		return false
 	}
-	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable))
+	return true
+}
+
+// failLessonInit is the single classroom-init failure egress: a coded,
+// fixed-wording ErrorMsg plus the server-side error event (T-13-14). PR #60
+// review: a session that closed under the init IO gets no failure message
+// either — nothing follows its session_ended. Review P1-3: the failure
+// belongs to ONE init request (see sendLessonInitError).
+func (tm *TurnManager) failLessonInit(s Sender, installGen uint64) {
+	if tm.sendLessonInitError(s, installGen, lessonUnavailableNotice, false) {
+		tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable))
+	}
 }
 
 // lessonSaveBusyNotice is the same-lessonID reentry refusal (issue #69
@@ -966,23 +984,9 @@ const lessonSaveBusyNotice = "上一次提交还在保存中，请稍等一下�
 // as failLessonInit (review P1-3): the CURRENT request hears the refusal; a
 // superseded late continuation stays silent.
 func (tm *TurnManager) failLessonInitBusy(s Sender, installGen uint64) {
-	tm.mu.Lock()
-	allowed := tm.classroomInstallAllowed(installGen)
-	var err error
-	if allowed {
-		err = s.SendControl(ErrorMsg{
-			Type: TypeError, Code: ErrCodeLessonUnavailable, Message: lessonSaveBusyNotice, Recoverable: true,
-		})
+	if tm.sendLessonInitError(s, installGen, lessonSaveBusyNotice, true) {
+		tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable), infra.F("at", "lesson_save_inflight"))
 	}
-	tm.mu.Unlock()
-	if !allowed {
-		return
-	}
-	if err != nil {
-		tm.logger.Warn("lesson busy refusal enqueue failed", infra.ErrField(err))
-		return
-	}
-	tm.recorder.Emit(EventError, infra.F("code", ErrCodeLessonUnavailable), infra.F("at", "lesson_save_inflight"))
 }
 
 // normalizeSessionMode normalizes the page-supplied UI mode (13.1 D-08):

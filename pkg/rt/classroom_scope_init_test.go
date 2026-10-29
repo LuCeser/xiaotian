@@ -520,6 +520,108 @@ func TestLateInitFailureStaysSilentAfterReplacement(t *testing.T) {
 	}
 }
 
+// TestLatePracticeNoSourceInitStaysSilentAfterReplacement (review P1-3 fix2):
+// fix1's generation gate covered failLessonInit, but the practice service's
+// MISSING-source egress still sent lesson_unavailable unconditionally. The
+// auto PRACTICE request consumes the subject ask and parks at
+// practiceInitEntryInterleave; B (an english dictation classroom) installs
+// on the same connection; the resumed continuation walks the no-source exit
+// — its degraded answer must stay SILENT: the frame would flip B's page
+// (started=false, index.html lesson_unavailable branch) for a request that
+// page never made (S2/S4: 迟到初始化无输出、不干扰 B).
+func TestLatePracticeNoSourceInitStaysSilentAfterReplacement(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	words.setPeek(lesson.CategoryChinese, ttCards("苹果"))
+	words.setPeek(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	words.setDue(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	// Words configured, Practice/PracticeStore deliberately NIL: the
+	// practice continuation's ONLY outcome is the missing-service egress.
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		TurnManagerConfig{LessonID: ttLessonID, Words: words},
+		NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	tm.mu.Lock()
+	tm.practiceInitEntryInterleave = func() {
+		first := false
+		once.Do(func() { first = true; close(entered) })
+		if first {
+			<-release
+		}
+	}
+	tm.mu.Unlock()
+
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Category: CategoryAuto, Practice: true,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSubjectAsk) >= 1 }) {
+		t.Fatal("the auto practice entry never asked the subject clarify")
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.HandleControl(s, mustJSON(t, SubjectPickMsg{Type: TypeSubjectPick, Category: lesson.CategoryChinese}))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		close(release)
+		wg.Wait()
+		t.Fatal("the answered practice continuation never reached its entry seam")
+	}
+
+	// B replaces A on the same connection and installs its live dictation
+	// classroom while the practice continuation is still parked.
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Category: lesson.CategoryEnglish,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) >= 1 }) {
+		close(release)
+		wg.Wait()
+		t.Fatal("the replacement classroom never shipped session_ready")
+	}
+	readyBefore := s.countOf(TypeSessionReady)
+	tm.mu.Lock()
+	wantScope, wantEpoch := tm.activeScope.lessonID, tm.epoch
+	tm.mu.Unlock()
+
+	// Resume the practice continuation into the missing-service egress: a
+	// superseded request must answer NOTHING.
+	close(release)
+	wg.Wait()
+
+	s.mu.Lock()
+	sentControls := append([][]byte(nil), s.controls...)
+	s.mu.Unlock()
+	for _, raw := range sentControls {
+		var probe struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.Type == TypeError {
+			t.Fatalf("an error frame (%s) reached the live connection after the superseded practice init hit its missing-service egress — the late continuation must stay silent", probe.Code)
+		}
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		t.Fatalf("session_ready after the late practice egress = %d, want %d (the egress must not disturb B)", got, readyBefore)
+	}
+	tm.mu.Lock()
+	gotScope, gotEpoch, gotCategory := tm.activeScope.lessonID, tm.epoch, tm.category
+	tm.mu.Unlock()
+	if gotScope != wantScope || gotEpoch != wantEpoch || gotCategory != lesson.CategoryEnglish {
+		t.Fatalf("live classroom = %q epoch %d category %q, want B intact (%q/%d/%q)",
+			gotScope, gotEpoch, gotCategory, wantScope, wantEpoch, lesson.CategoryEnglish)
+	}
+}
+
 // ttFrozenRowRead freezes ONE GetLessonState: the row is read (and held in
 // the wrapper) BEFORE the park, so anything the store does during the park —
 // a landing save — is invisible to the released read. Together with a parked
