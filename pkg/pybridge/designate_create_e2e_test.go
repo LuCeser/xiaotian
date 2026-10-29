@@ -8,6 +8,8 @@ package pybridge
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -357,4 +359,48 @@ func TestE2E_CreateDesignationConcurrentSameKey(t *testing.T) {
 		t.Fatalf("want exactly one designation row")
 	}
 	dgExpectIDs(t, dgCardIDs(results[0]), ids)
+}
+
+// TestE2E_CreateDesignationServiceStyleDBResolution mirrors cmd/service/main:
+// database.path set, python.vocabDBPath empty until ResolveSharedDBPath backfill.
+func TestE2E_CreateDesignationServiceStyleDBResolution(t *testing.T) {
+	_, _, seedCfg := e2eBridge(t, nil)
+	goPath := seedCfg.VocabDBPath
+	home := t.TempDir()
+	resolved, err := database.ResolveSharedDBPath(goPath, "", home)
+	if err != nil {
+		t.Fatalf("ResolveSharedDBPath: %v", err)
+	}
+	if resolved != goPath {
+		t.Fatalf("resolved %q != go path %q", resolved, goPath)
+	}
+
+	cfg := seedCfg
+	cfg.VocabDBPath = resolved
+	lg := newFakeLogger()
+	b, err := NewBridge(cfg, lg)
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	dcMigrateDesignations(t, resolved)
+	ctx := context.Background()
+
+	bookID := dgSetupBook(t, b, "dc-svc", "第4单元")
+	ids := dgAddWords(t, b, "dcsvc", 2)
+	dgAssignLesson(t, b, bookID, "第4单元", ids)
+
+	res, err := b.RunCreateDesignation(ctx, dcCreateOpts(bookID, "第4单元", "req-svc-db", resolved))
+	if err != nil {
+		t.Fatalf("RunCreateDesignation: %v", err)
+	}
+	if res.Status != DesignateStatusOK {
+		t.Fatalf("status = %q, want ok", res.Status)
+	}
+	if dcDesignationCount(t, resolved) != 1 {
+		t.Fatalf("designation row missing on resolved path")
+	}
+	// Python subprocess must have used the same file (not temp DB_PATH default).
+	if _, err := os.Stat(filepath.Join(filepath.Dir(resolved), filepath.Base(resolved))); err != nil {
+		t.Fatalf("stat resolved db: %v", err)
+	}
 }
