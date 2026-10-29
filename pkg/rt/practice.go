@@ -344,7 +344,7 @@ func (tm *TurnManager) handlePracticeInit(s Sender, req classroomInitRequest) {
 		return
 	}
 	tm.recorder.Emit(EventPracticeStarted, infra.F("picked", len(picked)))
-	tm.startDictationSession(s, l, true, req.installGen)
+	tm.startDictationSession(s, l, true, req.installGen, lessonRowSaveGuard{})
 }
 
 // practiceSummaryText builds the practice wrap line (13.1-05, D-13's third

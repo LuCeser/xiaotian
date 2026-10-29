@@ -198,8 +198,8 @@ func derivedVerdicts(words []lesson.Word, outcomes map[string]lesson.WordOutcome
 // fallback write, or a row from before the fallback existed). The check
 // panel reopens from the STORED state and the student resumes exactly where
 // they left off.
-func (tm *TurnManager) startCheckResume(s Sender, l lesson.Lesson, installGen uint64) {
-	tm.startCheckPanelSession(s, l, CheckStartedReasonResume, false, installGen)
+func (tm *TurnManager) startCheckResume(s Sender, l lesson.Lesson, installGen uint64, rowGuard lessonRowSaveGuard) {
+	tm.startCheckPanelSession(s, l, CheckStartedReasonResume, false, installGen, rowGuard)
 }
 
 // startCheckCorrection reopens a SUBMITTED row carrying the D-03 unchecked
@@ -207,8 +207,8 @@ func (tm *TurnManager) startCheckResume(s Sender, l lesson.Lesson, installGen ui
 // this session is the post-hoc correction — the derived downgraded verdicts
 // show as pending hints and check_submit runs the diff-only correction
 // path.
-func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson, installGen uint64) {
-	tm.startCheckPanelSession(s, l, CheckStartedReasonCorrection, true, installGen)
+func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson, installGen uint64, rowGuard lessonRowSaveGuard) {
+	tm.startCheckPanelSession(s, l, CheckStartedReasonCorrection, true, installGen, rowGuard)
 }
 
 // startCheckPanelSession is the shared body of the two reconnect-into-check
@@ -220,7 +220,7 @@ func (tm *TurnManager) startCheckCorrection(s Sender, l lesson.Lesson, installGe
 // the authoritative verdict echo, then speak the reason's bridge through the
 // ACK gate. No due-fetch, no word timers, no rating write — those belong to
 // the paths that FINISH the check (handleCheckVerdict / handleCheckSubmit).
-func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason string, correction bool, installGen uint64) {
+func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason string, correction bool, installGen uint64, rowGuard lessonRowSaveGuard) {
 	preInstallEpoch := tm.currentEpoch()
 	if tm.checkResumeInterleave != nil {
 		tm.checkResumeInterleave()
@@ -252,9 +252,20 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var announceEpoch uint64
+	rowMoved := false
 	if !tm.applyClassroomInstallEffect(installGen, func() error {
 		if tm.epoch != preInstallEpoch {
 			return errClassroomInstallStale
+		}
+		// Review P1-2 fix2: the same-lessonID save check must cover to THIS
+		// install decision. checkResumeInterleave parks the resume exactly
+		// here — after the row read's in-flight check passed, before the
+		// install — and an accepted save of the still-live classroom can
+		// land in that window; re-checking only generation/epoch would seat
+		// the panel on the pre-save version/verdicts.
+		if tm.lessonRowSaveMovedLocked(rowGuard) {
+			rowMoved = true
+			return errLessonRowMoved
 		}
 		if err := tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor, s); err != nil {
 			return err
@@ -274,6 +285,9 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 		return s.SendControl(CheckVerdictsMsg{Type: TypeCheckVerdicts, Verdicts: wireVerdicts(panelVerdicts)})
 	}) {
 		cancel()
+		if rowMoved {
+			tm.failLessonInitBusy(s, installGen)
+		}
 		return
 	}
 	if tm.activeClassroomGen() != installGen {

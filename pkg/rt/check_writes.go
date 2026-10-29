@@ -87,6 +87,31 @@ func (tm *TurnManager) lessonSaveDoneCountLocked(lessonID string) uint64 {
 	return tm.lessonSaveDone[lessonID]
 }
 
+// lessonRowSaveGuard is the same-lessonID reentry baseline carried from the
+// row-read half of continueSessionInit to the INSTALL decision (review P1-2
+// fix2): doneBefore snapshots the row's completion counter BEFORE the row
+// read; any admission still running, or any completion that moved the
+// counter past the snapshot, means the row state the request holds predates
+// a save and must never be installed as a classroom — no matter how late
+// the check runs. The zero value (empty lessonID) guards nothing: fresh
+// rows have no save history to race with.
+type lessonRowSaveGuard struct {
+	lessonID   string
+	doneBefore uint64
+}
+
+// lessonRowSaveMovedLocked reports whether an accepted save for the guarded
+// row started or landed after the baseline was captured. Caller holds
+// tm.mu; the check must run in the SAME tm.mu hold that installs, so the
+// admission registry (also mutated under tm.mu) cannot move underneath it.
+func (tm *TurnManager) lessonRowSaveMovedLocked(g lessonRowSaveGuard) bool {
+	if g.lessonID == "" {
+		return false
+	}
+	return tm.lessonSaveInFlightLocked(g.lessonID) ||
+		tm.lessonSaveDoneCountLocked(g.lessonID) != g.doneBefore
+}
+
 // waitCheckWrites waits without holding either TurnManager lock. Returns
 // false when checkPersistTimeout elapses before every admission completes.
 func waitCheckWrites(writes []*checkWriteAdmission) bool {

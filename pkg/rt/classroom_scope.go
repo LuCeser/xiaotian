@@ -6,6 +6,13 @@ import "github.com/pkg/errors"
 // install effect; the install entry maps it to TurnEffectStale.
 var errClassroomInstallStale = errors.New("rt: stale classroom install")
 
+// errLessonRowMoved signals, inside an install effect, that the lesson row
+// the request read has been moved by an accepted save since the request's
+// baseline (review P1-2 fix2) — the row snapshot is stale and must not be
+// installed. The install entry maps it to TurnEffectStale (nothing changed,
+// nothing enqueued); the starter answers the recoverable busy refusal.
+var errLessonRowMoved = errors.New("rt: lesson row moved by an accepted save")
+
 // formalCheckSubmitOp identifies one accepted formal dictation check_submit on
 // its owning classroom scope (issue #69 rethink2 R2). Pointer identity is the
 // operation id; only that operation's completion may clear the scope slot.

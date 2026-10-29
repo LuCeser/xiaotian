@@ -85,7 +85,7 @@ func (tm *TurnManager) applyClassroomInstallResultLocked(gen uint64, effect func
 		return TurnEffectResult{Outcome: TurnEffectStale}
 	}
 	if err := effect(); err != nil {
-		if errors.Is(err, errClassroomInstallStale) {
+		if errors.Is(err, errClassroomInstallStale) || errors.Is(err, errLessonRowMoved) {
 			return TurnEffectResult{Outcome: TurnEffectStale}
 		}
 		return TurnEffectResult{Outcome: TurnEffectDeliveryFailed, Err: err}

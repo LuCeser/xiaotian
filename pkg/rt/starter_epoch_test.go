@@ -31,7 +31,7 @@ func TestStarterKeepsEpoch(t *testing.T) {
 				gen := tm.beginClassroomAttempt()
 				tm.startDictationSession(s, lesson.Lesson{
 					LessonID: ttLessonID, Version: 1, Cards: ttCards("苹果"),
-				}, false, gen)
+				}, false, gen, lessonRowSaveGuard{})
 			},
 		},
 		{

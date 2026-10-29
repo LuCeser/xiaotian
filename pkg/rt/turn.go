@@ -789,6 +789,13 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 	// flight refuses immediately; the completion counter captured now is the
 	// baseline the post-read re-check compares against, so a save that lands
 	// inside the read→check window cannot slip past as "no activity".
+	// rowGuard carries that baseline on into the INSTALL decision (review
+	// P1-2 fix2): the second-half check below only covers the read→check
+	// window — between its unlock and the starter's install effect an
+	// accepted save for the row can still land, and an install that
+	// re-checks only generation/epoch would seat a classroom on the pre-save
+	// row. Only an EXISTING row can carry save history; the fresh path
+	// leaves the zero guard (nothing to race with).
 	tm.mu.Lock()
 	saveInFlightBefore := tm.lessonSaveInFlightLocked(lessonID)
 	doneBefore := tm.lessonSaveDoneCountLocked(lessonID)
@@ -797,6 +804,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 		tm.failLessonInitBusy(s, req.installGen)
 		return
 	}
+	rowGuard := lessonRowSaveGuard{}
 
 	l, err := tm.exec.GetLessonState(ctx, lessonID)
 	if err != nil && !errors.Is(err, lesson.ErrLessonNotFound) {
@@ -805,6 +813,7 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 	}
 
 	if err == nil {
+		rowGuard = lessonRowSaveGuard{lessonID: lessonID, doneBefore: doneBefore}
 		// Existing row: the ROW is the subject authority from here on — a
 		// reconnect echoes and reviews under the subject the lesson was
 		// actually created under, not whatever the page re-declared. The
@@ -895,11 +904,11 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 	case l.Stage == lesson.StageChecking:
 		// 13.1-04 (Pitfall 2): the check never finished and the close
 		// fallback never landed — reopen the check panel from the row.
-		tm.startCheckResume(s, l, req.installGen)
+		tm.startCheckResume(s, l, req.installGen, rowGuard)
 	case l.Stage == lesson.StageSubmitted && l.Unchecked:
 		// 13.1-04 (D-03): the fallback rated this lesson unchecked —
 		// reopen as the post-hoc correction instead of short-circuiting.
-		tm.startCheckCorrection(s, l, req.installGen)
+		tm.startCheckCorrection(s, l, req.installGen, rowGuard)
 	case l.CurrentIndex >= len(l.Cards):
 		// Legacy + normally completed rows short-circuit exactly as before
 		// (stage first, index second — the new branches never swallow them).
@@ -909,9 +918,9 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 		// behind a parked close attempt (issue #69 rethink3 S3).
 		unlock()
 		released = true
-		tm.startCompletedSession(s, l, req.installGen)
+		tm.startCompletedSession(s, l, req.installGen, rowGuard)
 	default:
-		tm.startDictationSession(s, l, false, req.installGen)
+		tm.startDictationSession(s, l, false, req.installGen, rowGuard)
 	}
 }
 
@@ -1043,10 +1052,18 @@ func (tm *TurnManager) startNoDueSession(s Sender, lessonID string, installGen u
 // startCompletedSession restores the completion state for an
 // already-finished lesson: session_ready then session_ended(lesson_complete)
 // — no summary replay, no second SubmitReview.
-func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson, installGen uint64) {
+func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson, installGen uint64, rowGuard lessonRowSaveGuard) {
 	// Locked helpers read before the effect (session-constant values).
 	view, category := tm.lessonViewFor(l), tm.sessionCategory()
+	rowMoved := false
 	if !tm.applyClassroomInstallEffect(installGen, func() error {
+		// Review P1-2 fix2: the save-activity check must cover to THIS
+		// decision — a save that landed between the row read's check and
+		// this install would otherwise seat the replay on a pre-save row.
+		if tm.lessonRowSaveMovedLocked(rowGuard) {
+			rowMoved = true
+			return errLessonRowMoved
+		}
 		// PR #60 review: same gate as the other starters — a closed session
 		// replays neither session_ready nor the completion session_ended;
 		// the bind and the enqueue are one hold.
@@ -1064,6 +1081,9 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson, installG
 			Category:  category,
 		})
 	}) {
+		if rowMoved {
+			tm.failLessonInitBusy(s, installGen)
+		}
 		return
 	}
 	if tm.activeClassroomGen() != installGen {
@@ -1084,7 +1104,7 @@ func (tm *TurnManager) startCompletedSession(s Sender, l lesson.Lesson, installG
 // structure where first-audible latency contains only the FSRS fetch and
 // the TTS first packet, no LLM call. practice (13.1-05) flips only the
 // submit-path flag; pacing, the check stage and the D-05 gate are identical.
-func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice bool, installGen uint64) {
+func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice bool, installGen uint64, rowGuard lessonRowSaveGuard) {
 	// Locked helpers read before the effect (session-constant values).
 	view, category := tm.lessonViewFor(l), tm.sessionCategory()
 	var first lesson.Word
@@ -1094,7 +1114,15 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 	tutor.practice = practice
 	ctx, cancel := context.WithCancel(context.Background())
 	var epoch uint64
+	rowMoved := false
 	if !tm.applyClassroomInstallEffect(installGen, func() error {
+		// Review P1-2 fix2: same coverage-to-install rule as the panel and
+		// completed starters — a row the request read before a save landed
+		// must not become a dictation classroom here either.
+		if tm.lessonRowSaveMovedLocked(rowGuard) {
+			rowMoved = true
+			return errLessonRowMoved
+		}
 		// PR #60 review: the subject-picked classroom's init runs on the
 		// answer turn's goroutine, so an end_session may have closed the
 		// session under the fetch/row IO — the closed check shares the hold
@@ -1121,6 +1149,9 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 		})
 	}) {
 		cancel()
+		if rowMoved {
+			tm.failLessonInitBusy(s, installGen)
+		}
 		return
 	}
 	if tm.activeClassroomGen() != installGen {

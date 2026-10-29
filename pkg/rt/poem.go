@@ -247,7 +247,7 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64, installGen uint64)
 			// mid-writing attempt re-announces the task (the poem's own
 			// first-content-wins row continues).
 			if l.Stage == lesson.StageChecking {
-				tm.startCheckResume(s, l, installGen)
+				tm.startCheckResume(s, l, installGen, lessonRowSaveGuard{})
 				return
 			}
 			tm.startPoemSession(s, l, p, installGen)

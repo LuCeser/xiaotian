@@ -386,7 +386,7 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64, ins
 			// mid-writing attempt re-announces the task (the range's own
 			// first-content-wins row continues).
 			if l.Stage == lesson.StageChecking {
-				tm.startCheckResume(s, l, installGen)
+				tm.startCheckResume(s, l, installGen, lessonRowSaveGuard{})
 				return
 			}
 			tm.startPassageSession(s, l, p, *scope, installGen)
