@@ -177,6 +177,20 @@
      * {epoch, sentenceId, endSeen, acked, remaining, sources}.
      */
     this._ledger = new Map();
+    /**
+     * Acceptance history (issue #69 rethink3 review P2-7): every
+     * (epoch, sentence_id) whose audio_start PASSED the epoch gate,
+     * recorded once and NEVER cleared by stopNow / the drain watchdog /
+     * releaseSharedResources — the runtime ledger is cancellation state
+     * (stopNow clears it on purpose: interrupted audio never acks), the
+     * history is EVIDENCE of what was accepted. Judging a rejection from
+     * the live ledger alone misreads accepted-but-stopped audio as
+     * refused-at-the-gate. Only resetSession drops it: a new /rt
+     * connection restarts the epoch space at 0 and old keys would alias
+     * the new connection's frames.
+     * @type {Map<string, {epoch:number, sentenceId:string}>}
+     */
+    this._acceptedKeys = new Map();
     this._currentKey = null;
     this.playing = false;
     /** Chunks dropped by the epoch gate or the queue cap (T-13-06c). */
@@ -268,6 +282,9 @@
   RTCPlayback.prototype.resetSession = function () {
     if (this._sources.length) this.stopNow();
     this._ledger.clear();
+    // New /rt connection = new epoch space from 0: the acceptance history
+    // of the PREVIOUS connection must not alias this one's keys (P2-7).
+    this._acceptedKeys.clear();
     this._epoch = null;
     this._turnFirstAudioDone = false;
     this._sentenceId = null;
@@ -288,6 +305,12 @@
     }
     if (epoch !== this._epoch) return;
     var key = ledgerKey(epoch, sentenceId);
+    // Acceptance happened: the gate let this frame book. Recorded in the
+    // history BEFORE the ledger bookkeeping so a later stopNow (which clears
+    // the ledger) can never erase the fact that audio was accepted (P2-7).
+    if (!this._acceptedKeys.has(key)) {
+      this._acceptedKeys.set(key, { epoch: epoch, sentenceId: sentenceId });
+    }
     this._sentenceId = sentenceId;
     this._sentenceEndSeen = false;
     this._acceptingAudio = true;

@@ -190,24 +190,12 @@ func (tm *TurnManager) poemViewForRow(l lesson.Lesson) *PoemTaskView {
 	return &PoemTaskView{ID: l.PoemID, LineCount: lines, Method: "背默"}
 }
 
-// bindPoemRef attaches the poem identity to the live tutor (caller has
-// already constructed it from the row). Caller holds NO lock — this runs
-// between construction and message traffic.
-func (tm *TurnManager) bindPoemRef(l lesson.Lesson, view *PoemTaskView) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.tutor == nil {
-		return
-	}
-	tm.tutor.poem = &poemRef{ID: l.PoemID, Title: view.Title, Author: view.Author}
-}
-
 // handlePoemInit is the session_init{poem} branch (Issue #12): resolve the
 // work, enforce the scope gate, then EITHER resume this poem's in-flight
 // attempt under its own id (a mid-writing reconnect or an unfinished check)
 // or open a FRESH attempt row. A submitted attempt never reopens here — its
 // judgment is settled history; re-practicing the poem is a new row.
-func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
+func (tm *TurnManager) handlePoemInit(s Sender, poemID int64, installGen uint64) {
 	if tm.cfg.Poems == nil {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeLessonUnavailable),
@@ -233,7 +221,7 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
 		tm.sendError(s, ErrCodeLessonUnavailable, poemMissingNotice, false)
 		return
 	case err != nil:
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	case !p.InScope:
 		// 进入范围才有资格被安排 (Issue #4): the honest coded refusal —
@@ -249,7 +237,7 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
 	// Resume probe: this poem's latest attempt row.
 	latest, err := tm.exec.LatestPoemLessonID(ctx, poemID)
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	if latest != "" {
@@ -259,10 +247,10 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
 			// mid-writing attempt re-announces the task (the poem's own
 			// first-content-wins row continues).
 			if l.Stage == lesson.StageChecking {
-				tm.startCheckResume(s, l)
+				tm.startCheckResume(s, l, installGen, lessonRowSaveGuard{})
 				return
 			}
-			tm.startPoemSession(s, l, p)
+			tm.startPoemSession(s, l, p, installGen)
 			return
 		}
 	}
@@ -275,34 +263,29 @@ func (tm *TurnManager) handlePoemInit(s Sender, poemID int64) {
 
 	l, err := tm.exec.EnsurePoemLesson(ctx, lessonID, poemID, p.Lines)
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	if l.PoemID != poemID {
 		// Defensive identity check: a lesson row must never announce one work
 		// while checking another work's lines.
 		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "poem_identity"))
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	tm.recorder.Emit(EventPoemStarted, infra.F("lines", len(p.Lines)))
-	tm.startPoemSession(s, l, p)
+	tm.startPoemSession(s, l, p, installGen)
 }
 
 // startPoemSession binds the FSM to the poem row and announces the task.
 // The greeting carries NO line text, arms no timer, and its display equals
 // its spoken text (title/author are public identity, not the answer).
-func (tm *TurnManager) startPoemSession(s Sender, l lesson.Lesson, p poem.Poem) {
-	tm.mu.Lock()
-	tm.tutor = newDictationTutor(l)
-	tm.tutor.poem = &poemRef{ID: l.PoemID, Title: p.Title, Author: p.Author}
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	total := len(tm.tutor.words)
-	category := tm.tutor.category
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SessionReadyMsg{
+func (tm *TurnManager) startPoemSession(s Sender, l lesson.Lesson, p poem.Poem, installGen uint64) {
+	tutor := newDictationTutor(l)
+	tutor.poem = &poemRef{ID: l.PoemID, Title: p.Title, Author: p.Author}
+	total, category := len(tutor.words), tutor.category
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := SessionReadyMsg{
 		Type:      TypeSessionReady,
 		SessionID: tm.session,
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
@@ -310,18 +293,36 @@ func (tm *TurnManager) startPoemSession(s Sender, l lesson.Lesson, p poem.Poem) 
 		Lesson:    tm.lessonViewFor(l),
 		Category:  category,
 		Poem:      poemTaskView(p),
-	})
+	}
+	var epoch uint64
+	if !tm.applyClassroomInstallEffect(installGen, func() error {
+		if err := tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor, s); err != nil {
+			return err
+		}
+		if err := s.SendControl(ready); err != nil {
+			return err
+		}
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		tm.turnCancel = cancel
+		epoch = tm.epoch
+		return nil
+	}) {
+		cancel()
+		return
+	}
+	if tm.activeClassroomGen() != installGen {
+		cancel()
+		return
+	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
 	text := poemGreetingText(p.Title, p.Author, total)
 	// onAck is deliberately nil: the poem classroom arms NO per-word timer
 	// (不用单词短计时器把整首任务机械推进) — nothing counts down while the
 	// child writes.
-	go tm.runAnnouncementDisplay(s, ctx, cancel, text, text, purposePoemGreeting, nil)
+	tm.goServerTask(func() {
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purposePoemGreeting, nil)
+	})
 }
 
 // buildPoemClassifyMessages assembles the poem writing-stage classification
@@ -393,12 +394,16 @@ func (tm *TurnManager) classifyPoemTurn(ctx context.Context, transcript string) 
 func (tm *TurnManager) dispatchPoemTurn(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, p intentPayload) {
 	switch p.Intent {
 	case intentConfirm:
-		tm.mu.Lock()
-		paused := tm.tutor != nil && tm.tutor.paused
-		checking := tm.tutor != nil && tm.tutor.checking
-		tm.mu.Unlock()
+		paused, checking := false, false
+		if !tm.applyTurnAt(epoch, func() error {
+			paused = tm.tutor != nil && tm.tutor.paused
+			checking = tm.tutor != nil && tm.tutor.checking
+			return nil
+		}) {
+			return
+		}
 		if paused {
-			tm.runAnnouncement(s, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
+			tm.runAnnouncementAt(s, epoch, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
 			return
 		}
 		if checking {
@@ -407,32 +412,34 @@ func (tm *TurnManager) dispatchPoemTurn(s Sender, ctx context.Context, cancel co
 		}
 		tm.enterCheck(s, ctx, cancel, epoch)
 	case intentRepeat, intentSlow:
-		tm.runAnnouncement(s, ctx, cancel, poemNoReadNotice, purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, poemNoReadNotice, purposeChat, nil)
 	case intentHint:
-		tm.poemHint(s, ctx, cancel, p)
+		tm.poemHint(s, ctx, cancel, epoch, p)
 	case intentMeaning, intentExample:
-		tm.runAnnouncement(s, ctx, cancel, poemMeaningNotice, purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, poemMeaningNotice, purposeChat, nil)
 	case intentPause:
-		tm.mu.Lock()
-		if tm.tutor != nil {
+		if !tm.applyTurnAt(epoch, func() error {
 			tm.tutor.paused = true
+			tm.stopWordTimerLocked()
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
-		tm.stopWordTimer()
-		tm.runAnnouncement(s, ctx, cancel, pauseAckText(), purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, pauseAckText(), purposeChat, nil)
 	case intentResume:
-		tm.mu.Lock()
 		title := ""
-		if tm.tutor != nil {
+		if !tm.applyTurnAt(epoch, func() error {
 			tm.tutor.paused = false
 			if tm.tutor.poem != nil {
 				title = tm.tutor.poem.Title
 			}
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
-		tm.runAnnouncement(s, ctx, cancel, poemResumeAckText(title), purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, poemResumeAckText(title), purposeChat, nil)
 	case intentChat:
-		tm.runAnnouncementDisplay(s, ctx, cancel, p.Reply, tm.replyDisplay(p.Reply), purposeChat, nil)
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, p.Reply, tm.replyDisplay(p.Reply), purposeChat, nil)
 	}
 	_ = turnID
 }
@@ -441,27 +448,28 @@ func (tm *TurnManager) dispatchPoemTurn(s Sender, ctx context.Context, cancel co
 // gets its OPENING characters and length — never the verse; an unnamed or
 // out-of-range ask gets the which-line question. The hint count lands on
 // that line's outcome (the same U-9 accounting the word classroom keeps).
-func (tm *TurnManager) poemHint(s Sender, ctx context.Context, cancel context.CancelFunc, p intentPayload) {
-	tm.mu.Lock()
+func (tm *TurnManager) poemHint(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, p intentPayload) {
 	total := 0
 	var cue string
-	if tm.tutor != nil {
+	hintCount := 0
+	if !tm.applyTurnAt(epoch, func() error {
 		total = len(tm.tutor.words)
+		if p.Index >= 1 && p.Index <= total {
+			line := tm.tutor.words[p.Index-1].Word
+			cue = poemHintCueText(p.Index, total, line)
+			hintCount = tm.tutor.recordHint(p.Index - 1)
+		}
+		return nil
+	}) {
+		return
 	}
-	if p.Index >= 1 && p.Index <= total {
-		line := tm.tutor.words[p.Index-1].Word
-		cue = poemHintCueText(p.Index, total, line)
-		n := tm.tutor.recordHint(p.Index - 1)
-		tm.recorder.Emit(EventHintGiven,
-			infra.F("word_index", p.Index-1),
-			infra.F("hint_count", n),
-		)
-	}
-	tm.mu.Unlock()
 	if cue == "" {
 		cue = poemHintAskLineNotice
+	} else {
+		tm.recorder.Emit(EventHintGiven,
+			infra.F("word_index", p.Index-1), infra.F("hint_count", hintCount))
 	}
-	tm.runAnnouncement(s, ctx, cancel, cue, purposeChat, nil)
+	tm.runAnnouncementAt(s, epoch, ctx, cancel, cue, purposeChat, nil)
 }
 
 // submitPoem is the poem check_submit: the SAME per-line manual gate (D-05)
@@ -477,6 +485,7 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 	lessonID := tm.tutor.lessonID
 	expected := tm.tutor.version
 	total := len(tm.tutor.words)
+	ref := *tm.tutor.poem
 	manual := make(map[int]bool, total)
 	for _, v := range tm.tutor.checkVerdicts {
 		if v.Manual {
@@ -491,11 +500,28 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	write, writeAdmitted := tm.admitCheckWriteLocked(lessonID)
+	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
+	if !writeAdmitted {
+		cancel()
+		return
+	}
+	requestID := m.RequestID
+	tm.goServerTask(func() {
+		tm.runAcceptedPoemSubmit(s, ctx, cancel, epoch, write, ref, lessonID, expected, requestID, total)
+	})
+}
 
-	res, err := tm.exec.CompleteCheck(ctx, lessonID, expected, m.RequestID, false)
+func (tm *TurnManager) runAcceptedPoemSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, ref poemRef, lessonID string, expected int, requestID string, total int) {
+	persistCtx, persistDone := checkPersistContext(ctx)
+	defer persistDone()
+
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, requestID, false)
 	if err != nil {
+		tm.completeCheckWrite(write)
+		cancel()
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
 			tm.mu.Lock()
@@ -518,16 +544,18 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "poem_submit_latch"),
 		)
+		tm.completeCheckWrite(write)
+		cancel()
 		return
 	}
 
-	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checking = false
-	ref := *tm.tutor.poem
-	tm.mu.Unlock()
+	tm.applyTurnAt(epoch, func() error {
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checking = false
+		return nil
+	})
 
-	go tm.finishPoemSubmit(s, ctx, cancel, ref, lessonID, total, res, m.RequestID)
+	tm.finishPoemSubmit(s, persistCtx, ctx, cancel, epoch, ref, lessonID, total, res, requestID, write)
 }
 
 // finishPoemSubmit runs on its own goroutine (the ACK-gated ending blocks;
@@ -536,7 +564,7 @@ func (tm *TurnManager) submitPoem(s Sender, m CheckSubmitMsg) {
 // poem_practice_logs row bracketed by the two-phase kind=poem receipt, ship
 // the honest review_result, then speak the wrap line through the ACK gate
 // and end with session_ended(lesson_complete).
-func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, ref poemRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string) {
+func (tm *TurnManager) finishPoemSubmit(s Sender, persistCtx context.Context, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref poemRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
 
 	correct := 0
@@ -565,7 +593,7 @@ func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel co
 		// Receipt phase one: pending BEFORE the write (已提交 ≠ 已保存).
 		receiptID := int64(0)
 		if tm.cfg.Receipts != nil {
-			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+			rec, rerr := tm.cfg.Receipts.Begin(persistCtx, lesson.ReceiptInput{
 				LessonID:  lessonID,
 				RequestID: requestID,
 				Kind:      lesson.ReceiptKindPoem,
@@ -587,13 +615,13 @@ func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel co
 			Mastered:     mastered,
 			ReviewedDay:  beijingDay(time.Now()),
 		}
-		if err := tm.cfg.PoemPractice.RecordPractice(ctx, rec); err != nil {
+		if err := tm.cfg.PoemPractice.RecordPractice(persistCtx, rec); err != nil {
 			// Honest failure: the record was NOT saved — never a narrated
 			// success (S-05). The judgment (verdicts, stage=submitted) is
 			// already persisted on the lesson row and stays visible.
 			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
 			if tm.cfg.Receipts != nil && receiptID > 0 {
-				if cerr := tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false); cerr != nil {
+				if cerr := tm.cfg.Receipts.Complete(persistCtx, receiptID, nil, requestedSet, false); cerr != nil {
 					tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 				}
 			}
@@ -606,7 +634,7 @@ func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel co
 				infra.F("mastered", mastered),
 			)
 			if tm.cfg.Receipts != nil && receiptID > 0 {
-				if cerr := tm.cfg.Receipts.Complete(ctx, receiptID, requestedSet, nil, true); cerr != nil {
+				if cerr := tm.cfg.Receipts.Complete(persistCtx, receiptID, requestedSet, nil, true); cerr != nil {
 					tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 				}
 			}
@@ -619,24 +647,40 @@ func (tm *TurnManager) finishPoemSubmit(s Sender, ctx context.Context, cancel co
 			infra.F("at", "poem_practice"),
 		)
 	}
+	// The accepted poem save ends with its practice record and receipt. The
+	// review result and summary remain presentation work and are not part of
+	// close-time persistence coordination.
+	tm.completeCheckWrite(write)
 
 	updated := 0
 	missing := 1
 	if recorded {
 		updated, missing = 1, 0
 	}
-	tm.mu.Lock()
-	tm.tutor.reviewSeen = true
-	tm.mu.Unlock()
-
-	_ = s.SendControl(ReviewResultMsg{
+	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
 		Requested: 1,
 		Updated:   updated,
 		Missing:   missing,
 		Unchecked: false,
-	})
+	}
 
 	summary := poemSummaryText(title, total, correct, saveFailed)
-	tm.runNaturalEnding(s, ctx, cancel, summary, purposePoemSummary, ReasonLessonComplete)
+	if tm.checkSubmitPresentationInterleave != nil {
+		tm.checkSubmitPresentationInterleave()
+	}
+	if !tm.applyTurnAt(epoch, func() error {
+		if err := s.SendControl(result); err != nil {
+			return err
+		}
+		tm.tutor.reviewSeen = true
+		tm.tutor.reviewResult = result
+		return nil
+	}) {
+		return
+	}
+	if tm.checkSubmitSummaryInterleave != nil {
+		tm.checkSubmitSummaryInterleave()
+	}
+	tm.runNaturalEndingAt(s, epoch, ctx, cancel, summary, purposePoemSummary, ReasonLessonComplete)
 }

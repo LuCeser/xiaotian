@@ -2,6 +2,7 @@ package rt
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -356,7 +357,8 @@ func TestWriterDelivers(t *testing.T) {
 		got[mt] = data
 	}
 
-	// Order between control and audio is unspecified (select); classify.
+	// Control and audio share one FIFO: the pong (enqueued first) may arrive
+	// before the audio, never after; classify to stay tolerant of both.
 	text, ok := got[websocket.TextMessage]
 	if !ok {
 		t.Fatalf("no TextMessage reply delivered (got %v)", got)
@@ -379,15 +381,16 @@ func TestWriterDelivers(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Writer backpressure (T-13-02): audio drops, control errors, neither blocks
+// Writer backpressure (T-13-02): one FIFO — audio drops, control errors,
+// neither blocks and control never displaces queued PCM
 // ---------------------------------------------------------------------------
 
 func TestWriterBackpressure(t *testing.T) {
 	sc, _ := newConnPair(t)
 	w := newConnWriter(sc, 2, nil) // queue size 2; pump deliberately NOT started
 
-	// Audio: fill 2, overflow 2 — every call returns nil, 2 counted drops,
-	// and the loop never blocks.
+	// Audio: fill the FIFO's 2 slots, overflow 2 — every call returns nil, 2
+	// counted drops, and the loop never blocks.
 	pcm := make([]byte, 8)
 	for i := 0; i < 4; i++ {
 		if err := w.SendAudio(pcm); err != nil {
@@ -398,12 +401,8 @@ func TestWriterBackpressure(t *testing.T) {
 		t.Errorf("droppedAudio = %d, want 2", got)
 	}
 
-	// Control: fill 2, third call errors — control never vanishes silently.
-	for i := 0; i < 2; i++ {
-		if err := w.SendControl(PongMsg{Type: TypePong}); err != nil {
-			t.Fatalf("SendControl #%d: %v", i, err)
-		}
-	}
+	// Control into the SAME saturated FIFO errors immediately — control
+	// never vanishes silently and never jumps the queued PCM (FIFO order).
 	if err := w.SendControl(PongMsg{Type: TypePong}); !errors.Is(err, ErrControlQueueFull) {
 		t.Errorf("saturated SendControl err = %v, want ErrControlQueueFull", err)
 	}
@@ -416,6 +415,144 @@ func TestWriterBackpressure(t *testing.T) {
 	// Clean shutdown through the real pump path.
 	w.start()
 	w.shutdown()
+}
+
+func TestWriterTermination(t *testing.T) {
+	sc, _ := newConnPair(t)
+	w := newConnWriter(sc, 2, nil)
+	w.start()
+	w.start() // idempotent: only one loop may own and close Done.
+
+	want := errors.New("write path failed")
+	w.Terminate(want)
+	w.Terminate(errors.New("later reason must not replace the first"))
+	select {
+	case <-w.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("writer Done was not closed after termination")
+	}
+	if !errors.Is(w.TerminationReason(), want) {
+		t.Fatalf("termination reason = %v, want first reason %v", w.TerminationReason(), want)
+	}
+	if err := w.SendControl(PongMsg{Type: TypePong}); !errors.Is(err, ErrWriterTerminated) {
+		t.Fatalf("SendControl after termination = %v, want ErrWriterTerminated", err)
+	}
+	if err := w.SendAudio([]byte{1, 2}); !errors.Is(err, ErrWriterTerminated) {
+		t.Fatalf("SendAudio after termination = %v, want ErrWriterTerminated", err)
+	}
+	// Repeated termination leaves the same already-closed completion signal.
+	w.Terminate(nil)
+	select {
+	case <-w.Done():
+	default:
+		t.Fatal("Done reopened after repeated termination")
+	}
+
+	t.Run("a write failure after the normal termination still propagates", func(t *testing.T) {
+		sc, client := newConnPair(t)
+		w := newConnWriter(sc, 2, nil)
+		// The pump stays unstarted: this pins failSend — the send loop's ONE
+		// write-failure egress — free of select-order flakiness; the loop's
+		// two failure branches call this same method (compile-checked).
+		w.Terminate(nil) // the normal termination consumes terminateOnce FIRST
+
+		want := errors.New("tcp: connection reset by peer")
+		w.failSend("control", want)
+
+		if got := w.TerminationReason(); !errors.Is(got, want) {
+			t.Fatalf("termination reason = %v, want the post-termination failure upgrading the nil", got)
+		}
+		_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := client.ReadMessage(); err == nil {
+			t.Fatal("underlying connection still readable after failure propagation — the read loop would never wake")
+		}
+	})
+}
+
+type terminatingManager struct {
+	reason error
+	sender chan Sender
+	closed chan struct{}
+}
+
+func (m *terminatingManager) HandleControl(s Sender, _ []byte) {
+	m.sender <- s
+	s.Terminate(m.reason)
+}
+func (*terminatingManager) IngestAudio(Sender, []byte) {}
+func (m *terminatingManager) Close(Sender)             { close(m.closed) }
+
+func TestWriterFailureLifecycle(t *testing.T) {
+	t.Run("real websocket write failure publishes the reason", func(t *testing.T) {
+		sc, client := newConnPair(t)
+		w := newConnWriter(sc, 2, nil)
+		w.start()
+		if tcp, ok := client.UnderlyingConn().(*net.TCPConn); ok {
+			_ = tcp.SetLinger(0)
+		}
+		_ = client.Close()
+		if err := w.SendControl(PongMsg{Type: TypePong}); err != nil {
+			t.Fatalf("enqueue before write failure: %v", err)
+		}
+		select {
+		case <-w.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("writer did not exit after the real WebSocket write failed")
+		}
+		if w.TerminationReason() == nil {
+			t.Fatal("write failure did not publish its reason")
+		}
+		if err := w.SendAudio([]byte{1}); !errors.Is(err, ErrWriterTerminated) {
+			t.Fatalf("send after write failure = %v, want ErrWriterTerminated", err)
+		}
+	})
+
+	t.Run("failed termination releases the whole connection", func(t *testing.T) {
+		want := errors.New("terminal delivery failed")
+		manager := &terminatingManager{reason: want, sender: make(chan Sender, 1), closed: make(chan struct{})}
+		h, err := NewHandler(ServerConfig{
+			AllowedOrigins: []string{"http://origin.test"}, HeartbeatInterval: 10 * time.Millisecond,
+		}, func() SessionManager { return manager }, nil)
+		if err != nil {
+			t.Fatalf("NewHandler: %v", err)
+		}
+		handlerDone := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h.HandleWebSocket(w, r)
+			close(handlerDone)
+		}))
+		defer srv.Close()
+		client, _, err := dialRT(t, srv.URL, "http://origin.test")
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer client.Close()
+		if err := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"ping"}`)); err != nil {
+			t.Fatalf("write trigger: %v", err)
+		}
+		sender := <-manager.sender
+		select {
+		case <-manager.closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("read loop did not reach manager.Close")
+		}
+		select {
+		case <-sender.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("send loop did not exit")
+		}
+		select {
+		case <-handlerDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("handler or heartbeat did not exit")
+		}
+		if !errors.Is(sender.TerminationReason(), want) {
+			t.Fatalf("termination reason = %v, want %v", sender.TerminationReason(), want)
+		}
+		if err := sender.SendControl(PongMsg{Type: TypePong}); !errors.Is(err, ErrWriterTerminated) {
+			t.Fatalf("late send = %v, want ErrWriterTerminated", err)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

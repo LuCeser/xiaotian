@@ -135,7 +135,7 @@ func (tm *TurnManager) handlePhotoChunk(s Sender, m PhotoChunkMsg) {
 			infra.F("code", ErrCodeInvalidMessage),
 			infra.F("photo", "outside_check_stage"),
 		)
-		tm.sendError(s, ErrCodeInvalidMessage, photoStageClosedNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, photoStageClosedNotice, true)
 		return
 	}
 	if pipeline == nil {
@@ -144,7 +144,7 @@ func (tm *TurnManager) handlePhotoChunk(s Sender, m PhotoChunkMsg) {
 		// keeps working manual-only (nothing is buffered — there is no path
 		// it could ever take).
 		tm.mu.Unlock()
-		tm.sendError(s, ErrCodePhotoUnavailable, photoUnavailableNotice, true)
+		tm.sendOpenError(s, ErrCodePhotoUnavailable, photoUnavailableNotice, true)
 		return
 	}
 	if m.Seq < 1 {
@@ -153,7 +153,7 @@ func (tm *TurnManager) handlePhotoChunk(s Sender, m PhotoChunkMsg) {
 			infra.F("code", ErrCodeInvalidMessage),
 			infra.F("photo", "bad_seq"),
 		)
-		tm.sendError(s, ErrCodeInvalidMessage, photoChunkInvalidNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, photoChunkInvalidNotice, true)
 		return
 	}
 	if tm.photo == nil {
@@ -171,7 +171,7 @@ func (tm *TurnManager) handlePhotoChunk(s Sender, m PhotoChunkMsg) {
 			infra.F("code", ErrCodeInvalidMessage),
 			infra.F("photo", "bad_chunk"),
 		)
-		tm.sendError(s, ErrCodeInvalidMessage, photoChunkInvalidNotice, true)
+		tm.sendOpenError(s, ErrCodeInvalidMessage, photoChunkInvalidNotice, true)
 		return
 	}
 	final := m.Final
@@ -183,7 +183,9 @@ func (tm *TurnManager) handlePhotoChunk(s Sender, m PhotoChunkMsg) {
 	tm.mu.Unlock()
 
 	if final {
-		go tm.runCheckPhoto(s, jpeg)
+		tm.goServerTask(func() {
+			tm.runCheckPhoto(s, jpeg)
+		})
 	}
 }
 

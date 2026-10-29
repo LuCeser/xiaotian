@@ -37,12 +37,13 @@ func (e *ensureHookExec) EnsureLessonCards(ctx context.Context, lessonID string,
 // TestEndSessionBeforeRowCreationWritesNothing — the 建行前 window (J15:
 // 结束后不得重新建课、不得写入): the picked classroom's init has passed its
 // liveness read, and an end_session completing INSIDE the row-creation call
-// must still kill the write. The probe fires the end only when tm.mu is
-// free at that moment (the subjectTakeInterleave pattern): an
-// implementation that checks closed and writes in ONE lock hold is
-// unreachable — the end cannot land inside, the classroom opens normally,
-// and the else-branch settles it; a split implementation gets raced
-// deterministically and turns this red.
+// must still kill the write. The probe fires the end only when the row
+// write's own lock is free at that moment (the subjectTakeInterleave
+// pattern; the unified close holds initWriteMu across the stillOpen check
+// and the write, issue #69 path B): an implementation that checks closed
+// and writes in ONE lock hold is unreachable — the end cannot land inside,
+// the classroom opens normally, and the else-branch settles it; a split
+// implementation gets raced deterministically and turns this red.
 func TestEndSessionBeforeRowCreationWritesNothing(t *testing.T) {
 	words := newFakeWords()
 	words.setPeek(lesson.CategoryEnglish, ttCards("en1", "en2", "en3"))
@@ -57,20 +58,24 @@ func TestEndSessionBeforeRowCreationWritesNothing(t *testing.T) {
 	ttAckLast(t, tm, s, 0) // settle the ask so its goroutine is done interfering
 
 	// The spoken answer's locked half binds 语文 (epoch 0 = the answer turn's).
-	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, 0, true)
+	req, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, 0, true)
 	if !ok {
 		t.Fatal("takeSubjectAsk refused a live clarify")
 	}
 
 	endFired := false
 	exec.onEnsure = func() {
-		if tm.mu.TryLock() {
-			tm.mu.Unlock()
+		// The write rides initWriteMu (tm.mu stays free): probing tm.mu
+		// here always fires and then deadlocks the unified close on the
+		// initWriteMu the caller itself holds. Probing the write's lock
+		// keeps the contract: one hold → unreachable, split → red.
+		if tm.initWriteMu.TryLock() {
+			tm.initWriteMu.Unlock()
 			tm.handleEndSession(s)
 			endFired = true
 		}
 	}
-	tm.finalizeSubjectAsk(s, m, oldEpoch, lesson.CategoryChinese, "voice")
+	tm.finalizeSubjectAsk(s, req, oldEpoch, lesson.CategoryChinese, "voice")
 
 	if endFired {
 		if ids := exec.ensureIDCalls(); len(ids) != 0 {

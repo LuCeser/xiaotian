@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,11 +36,11 @@ const (
 	// 1C1G VPS.
 	DefaultHeartbeatInterval = 30 * time.Second
 
-	// defaultSendQueue is the per-connection send queue capacity for each
-	// direction (control and audio). Bounded queues keep per-connection
-	// memory inside the 150MB budget (T-13-02): audio overflows are
-	// dropped (real-time streams tolerate loss), control overflows error
-	// (control must not silently vanish).
+	// defaultSendQueue is the per-connection outbound frame queue capacity
+	// (control and PCM share ONE ordered queue). A bounded queue keeps
+	// per-connection memory inside the 150MB budget (T-13-02): audio
+	// overflows are dropped (real-time streams tolerate loss), control
+	// overflows error (control must not silently vanish).
 	defaultSendQueue = 256
 
 	// perMessageWriteTimeout bounds one outbound write; a stalled client
@@ -65,6 +66,9 @@ var (
 	// connection's control queue is saturated (the caller decides how to
 	// surface the failure — control messages are never dropped silently).
 	ErrControlQueueFull = errors.New("rt: control send queue full")
+
+	// ErrWriterTerminated rejects every enqueue after transport termination.
+	ErrWriterTerminated = errors.New("rt: writer terminated")
 )
 
 // ServerConfig configures the /rt WebSocket endpoint. Zero values mean "use
@@ -132,6 +136,14 @@ type Sender interface {
 	// loss; blocking or buffering unboundedly does not) and nil is
 	// returned. The buffer is copied; callers may reuse their slice.
 	SendAudio(b []byte) error
+	// Terminate stops accepting frames and asks the send loop to exit. The
+	// first call owns the reason; later calls are no-ops.
+	Terminate(reason error)
+	// Done closes once after the send loop has exited.
+	Done() <-chan struct{}
+	// TerminationReason reports the first termination reason. Nil means the
+	// transport was ended normally.
+	TerminationReason() error
 }
 
 // SessionManager owns one connection's session state (implemented by the
@@ -288,10 +300,14 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// ctx binds the heartbeat goroutine to this handler's lifetime.
 	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+	var heartbeatDone chan struct{}
 
 	if h.cfg.HeartbeatInterval > 0 {
-		go h.heartbeat(ctx, conn, h.cfg.HeartbeatInterval)
+		heartbeatDone = make(chan struct{})
+		go func() {
+			defer close(heartbeatDone)
+			h.heartbeat(ctx, conn, h.cfg.HeartbeatInterval)
+		}()
 	}
 
 	manager := h.factory()
@@ -320,6 +336,10 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	manager.Close(writer)
 	writer.shutdown()
 	_ = conn.Close()
+	cancel()
+	if heartbeatDone != nil {
+		<-heartbeatDone
+	}
 }
 
 // heartbeat pings the client every interval until ctx is cancelled or a
@@ -363,21 +383,36 @@ func stripOriginPort(origin string) string {
 	return u.String()
 }
 
+// outboundFrame is one queued wire message: a control message (TextMessage)
+// or one PCM chunk (BinaryMessage). 单元 1 前移的最小顺序保证（路径 A 复盘）：
+// 同一播报的控制帧与 PCM 按入队顺序写出——两条独立通道的 select 会让零延迟
+// 供应商的第一块 PCM 抢在 audio_start 之前（页面丢块）。容量与配额语义留给
+// 单元 2 的统一帧队列，这里只做最小的 FIFO 有序发送。
+type outboundFrame struct {
+	data []byte
+	mt   int
+}
+
 // connWriter is the per-connection single-writer send pump. Control and
-// audio flow through separate bounded channels; one goroutine owns every
-// WriteMessage call (the only gorilla-permitted writer), so the session
-// manager can call SendControl/SendAudio from any goroutine without locks.
+// audio flow through ONE bounded FIFO queue — the wire order is the enqueue
+// order, so an utterance's audio_start can never trail its first PCM chunk
+// (the double-select reordering defect the zero-delay fixture exposed); one
+// goroutine owns every WriteMessage call (the only gorilla-permitted
+// writer), so the session manager can call SendControl/SendAudio from any
+// goroutine without locks.
 type connWriter struct {
-	conn    *websocket.Conn
-	control chan []byte
-	audio   chan []byte
-	logger  infra.Logger
-
-	cancel context.CancelFunc
-	done   chan struct{}
-	ctx    context.Context
-
-	droppedAudio atomic.Int64
+	ctx           context.Context
+	logger        infra.Logger
+	reason        error
+	frames        chan outboundFrame
+	cancel        context.CancelFunc
+	done          chan struct{}
+	conn          *websocket.Conn
+	droppedAudio  atomic.Int64
+	startOnce     sync.Once
+	terminateOnce sync.Once
+	terminationMu sync.Mutex
+	terminated    bool
 }
 
 // newConnWriter builds the writer. The pump is NOT started here — call
@@ -392,51 +427,80 @@ func newConnWriter(conn *websocket.Conn, queueSize int, logger infra.Logger) *co
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &connWriter{
-		conn:    conn,
-		control: make(chan []byte, queueSize),
-		audio:   make(chan []byte, queueSize),
-		logger:  logger,
-		ctx:     ctx,
-		cancel:  cancel,
-		done:    make(chan struct{}),
+		conn:   conn,
+		frames: make(chan outboundFrame, queueSize),
+		logger: logger,
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 }
 
 // start launches the pump goroutine. Call exactly once.
 func (w *connWriter) start() {
-	go func() {
-		defer close(w.done)
-		w.run()
-	}()
+	w.startOnce.Do(func() {
+		go func() {
+			defer close(w.done)
+			w.run()
+		}()
+	})
 }
 
 // shutdown stops the pump after a bounded drain and waits for it to exit.
 func (w *connWriter) shutdown() {
-	w.cancel()
+	w.Terminate(nil)
 	<-w.done
+}
+
+func (w *connWriter) Terminate(reason error) {
+	w.terminateOnce.Do(func() {
+		w.terminationMu.Lock()
+		w.terminated, w.reason = true, reason
+		w.terminationMu.Unlock()
+		if reason != nil && w.conn != nil {
+			_ = w.conn.Close()
+		}
+		w.cancel()
+	})
+}
+
+func (w *connWriter) Done() <-chan struct{} { return w.done }
+
+func (w *connWriter) TerminationReason() error {
+	w.terminationMu.Lock()
+	defer w.terminationMu.Unlock()
+	return w.reason
 }
 
 // run is the pump body: serialize every outbound message through one
 // WriteMessage caller, exit on the first write error or on cancellation
-// (after draining).
+// (after draining). The pre-frame hook is a no-op outside the rtbrowser
+// test build (speech_fault_default.go).
 func (w *connWriter) run() {
 	for {
+		speechFaultPumpGateWait(w.ctx)
 		select {
-		case c := <-w.control:
-			if err := w.write(websocket.TextMessage, c); err != nil {
-				w.logWriteFailure("control", err)
-				return
-			}
-		case a := <-w.audio:
-			if err := w.write(websocket.BinaryMessage, a); err != nil {
-				w.logWriteFailure("audio", err)
+		case f := <-w.frames:
+			if err := w.write(f.mt, f.data); err != nil {
+				w.failSend(frameKind(f.mt), err)
 				return
 			}
 		case <-w.ctx.Done():
+			if w.TerminationReason() != nil {
+				return
+			}
 			w.drainAndClose()
 			return
 		}
 	}
+}
+
+// frameKind names a frame for failure logging by its WebSocket message type.
+func frameKind(mt int) string {
+	if mt == websocket.BinaryMessage {
+		return "audio"
+	}
+	return "control"
 }
 
 func (w *connWriter) write(mt int, data []byte) error {
@@ -450,16 +514,13 @@ func (w *connWriter) drainAndClose() {
 	deadline := time.Now().Add(drainGrace)
 	for time.Now().Before(deadline) {
 		select {
-		case c := <-w.control:
-			if err := w.write(websocket.TextMessage, c); err != nil {
-				return
-			}
-		case a := <-w.audio:
-			if err := w.write(websocket.BinaryMessage, a); err != nil {
+		case f := <-w.frames:
+			if err := w.write(f.mt, f.data); err != nil {
+				w.publishWriteFailure(errors.Wrap(err, "rt: drain "+frameKind(f.mt)+" frame"))
 				return
 			}
 		default:
-			// Queues empty — no reason to burn the rest of the grace.
+			// Queue empty — no reason to burn the rest of the grace.
 			_ = w.conn.WriteControl(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 				time.Now().Add(time.Second))
@@ -472,6 +533,35 @@ func (w *connWriter) drainAndClose() {
 		time.Now().Add(time.Second))
 }
 
+// failSend is the send pump's ONE write-failure egress (both frame kinds,
+// pump loop and drain alike): first-wins termination, then the
+// UNCONDITIONAL propagation. 单元 1 review P1: Terminate alone is not
+// enough — when the writer was ALREADY terminated normally (Terminate(nil)
+// consumed terminateOnce), Terminate(err) is a no-op; the failure must still
+// upgrade the nil reason and close the underlying conn so the read loop
+// wakes. That is publishWriteFailure's job here.
+func (w *connWriter) failSend(kind string, err error) {
+	w.Terminate(errors.Wrap(err, "rt: write "+kind+" frame"))
+	w.publishWriteFailure(errors.Wrap(err, "rt: write "+kind+" frame"))
+	w.logWriteFailure(kind, err)
+}
+
+// publishWriteFailure propagates one send-side write failure unconditionally
+// — even when Terminate already ran (first-wins keeps terminateOnce, but a
+// normal Terminate(nil) must never swallow a subsequent write failure: the
+// nil reason upgrades to the error and the underlying connection closes so
+// the read loop wakes 单元 1 review P1).
+func (w *connWriter) publishWriteFailure(err error) {
+	w.terminationMu.Lock()
+	if w.reason == nil {
+		w.reason = err
+	}
+	w.terminationMu.Unlock()
+	if w.conn != nil {
+		_ = w.conn.Close()
+	}
+}
+
 func (w *connWriter) logWriteFailure(kind string, err error) {
 	w.logger.Warn("rt write failed; stopping send pump",
 		infra.F("component", "pkg/rt.conn"),
@@ -481,16 +571,26 @@ func (w *connWriter) logWriteFailure(kind string, err error) {
 }
 
 // SendControl implements Sender. The message is marshaled immediately so
-// serialization errors surface at the call site; a saturated control queue
-// returns ErrControlQueueFull instead of blocking (control is too important
-// to drop and too small to deserve unbounded buffering).
+// serialization errors surface at the call site; a saturated queue returns
+// ErrControlQueueFull instead of blocking (control is too important to drop
+// and too small to deserve unbounded buffering — and it never displaces
+// already-queued PCM: the queue is FIFO).
 func (w *connWriter) SendControl(v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return errors.Wrap(err, "rt: marshal control message")
 	}
+	// Test-build fault point at the real enqueue site (no-op in production).
+	if ferr := speechFaultInterceptSend("control", data); ferr != nil {
+		return ferr
+	}
+	w.terminationMu.Lock()
+	defer w.terminationMu.Unlock()
+	if w.terminated {
+		return ErrWriterTerminated
+	}
 	select {
-	case w.control <- data:
+	case w.frames <- outboundFrame{mt: websocket.TextMessage, data: data}:
 		return nil
 	default:
 		return ErrControlQueueFull
@@ -498,15 +598,23 @@ func (w *connWriter) SendControl(v any) error {
 }
 
 // SendAudio implements Sender. The chunk is copied (audio buffers are
-// pooled and reused upstream); a saturated audio queue drops the chunk,
-// counts it, and returns nil — the real-time stream prefers a gap to a
-// stall, and the 150MB budget prefers a bounded queue to an unbounded one
-// (T-13-02).
+// pooled and reused upstream); a saturated queue drops the chunk, counts
+// it, and returns nil — the real-time stream prefers a gap to a stall, and
+// the 150MB budget prefers a bounded queue to an unbounded one (T-13-02).
 func (w *connWriter) SendAudio(b []byte) error {
+	// Test-build fault point at the real enqueue site (no-op in production).
+	if ferr := speechFaultInterceptSend("audio", b); ferr != nil {
+		return ferr
+	}
 	cp := make([]byte, len(b))
 	copy(cp, b)
+	w.terminationMu.Lock()
+	defer w.terminationMu.Unlock()
+	if w.terminated {
+		return ErrWriterTerminated
+	}
 	select {
-	case w.audio <- cp:
+	case w.frames <- outboundFrame{mt: websocket.BinaryMessage, data: cp}:
 		return nil
 	default:
 		n := w.droppedAudio.Add(1)

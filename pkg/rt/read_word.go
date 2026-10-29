@@ -30,13 +30,22 @@ func (tm *TurnManager) handleReadWord(s Sender, m ReadWordMsg) {
 	if tm.mode != ModeTest && !t.checking {
 		display = repeatMaskedText(m.WordIndex + 1)
 	}
-	tm.stopWordTimerLocked()
 	epoch, turnID := tm.epoch, tm.nextTurnIDLocked()
 	ctx, cancel := context.WithCancel(context.Background())
-	tm.turnCancel = cancel
-	tm.state = StateProcessing
+	if !tm.applyTurnLocked(epoch, func() error {
+		if err := s.SendControl(TurnStartMsg{Type: TypeTurnStart, TurnID: turnID, Epoch: epoch}); err != nil {
+			return err
+		}
+		tm.stopWordTimerLocked()
+		tm.turnCancel = cancel
+		tm.state = StateProcessing
+		return nil
+	}) {
+		tm.mu.Unlock()
+		cancel()
+		return
+	}
 	tm.mu.Unlock()
-	_ = s.SendControl(TurnStartMsg{Type: TypeTurnStart, TurnID: turnID, Epoch: epoch})
 	go func() {
 		defer cancel()
 		ref := tm.speakTurn(s, turnID, epoch, spoken, display, purposeChat, ctx, cancel)
@@ -44,13 +53,13 @@ func (tm *TurnManager) handleReadWord(s Sender, m ReadWordMsg) {
 		if timedOut {
 			// The epoch gate keeps a stale re-read's timeout from closing a
 			// classroom the FSM has since moved on to.
-			tm.orderlyCloseAt(epoch)
+			tm.orderlyCloseAt(s, epoch, ReasonPlaybackTimeout)
 		} else if completed {
-			// The timer re-arms only if the settle actually landed — a
-			// stale re-read must not arm over a newer announcement.
-			if tm.settleListeningAt(s, epoch) {
-				tm.armWordTimer()
-			}
+			// The settle and the timer re-arm are ONE protected ack
+			// post-processing on the re-read's own epoch — a stale re-read
+			// must neither settle nor arm over a newer announcement, and the
+			// arm must not re-read the epoch the FSM has moved on to.
+			tm.settleAnnouncementAt(s, epoch, tm.armWordTimerLocked)
 		}
 	}()
 }

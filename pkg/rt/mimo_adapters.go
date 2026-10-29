@@ -176,6 +176,12 @@ func (t *LessonTools) AdvanceWord(ctx context.Context, lessonID string, expected
 	return t.exec.AdvanceWord(ctx, lessonID, expectedVersion, requestID)
 }
 
+// AdvanceDictation persists behavior and advances one fixed dictation
+// target in the executor's single transaction (advance_dictation tool).
+func (t *LessonTools) AdvanceDictation(ctx context.Context, in lesson.AdvanceDictationInput) (lesson.AdvanceDictationResult, error) {
+	return t.exec.AdvanceDictation(ctx, in)
+}
+
 // EnterCheck opens the lesson's check stage (13.1-01, enter_check tool).
 func (t *LessonTools) EnterCheck(ctx context.Context, lessonID string, expectedVersion int, requestID string, outcomes map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) {
 	return t.exec.EnterCheck(ctx, lessonID, expectedVersion, requestID, outcomes)
@@ -211,6 +217,7 @@ var (
 	_ func(*lesson.Store, context.Context, string, []lesson.Word, string) (lesson.Lesson, error)                                   = (*lesson.Store).EnsureLessonCards
 	_ func(*lesson.Executor, context.Context, string) (lesson.Lesson, error)                                                       = (*lesson.Executor).GetLessonState
 	_ func(*lesson.Executor, context.Context, string, int, string) (lesson.AdvanceResult, error)                                   = (*lesson.Executor).AdvanceWord
+	_ func(*lesson.Executor, context.Context, lesson.AdvanceDictationInput) (lesson.AdvanceDictationResult, error)                 = (*lesson.Executor).AdvanceDictation
 	_ func(*lesson.Executor, context.Context, string, int, string, map[string]lesson.WordOutcome) (lesson.EnterCheckResult, error) = (*lesson.Executor).EnterCheck
 	_ func(*lesson.Executor, context.Context, string, int, string, lesson.CheckVerdict) (lesson.ApplyVerdictResult, error)         = (*lesson.Executor).ApplyVerdict
 	_ func(*lesson.Executor, context.Context, string, int, string, bool) (lesson.CompleteCheckResult, error)                       = (*lesson.Executor).CompleteCheck

@@ -674,7 +674,7 @@ func TestAskGoroutineRefusesBumpedEpoch(t *testing.T) {
 	// fixed at the (pre-bump) value 0.
 	initMsg := SessionInitMsg{Type: TypeSessionInit, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1}, Category: CategoryAuto}
 	tm.mu.Lock()
-	tm.pendingAsk = &initMsg
+	tm.pendingAsk = &classroomInitRequest{msg: initMsg, category: CategoryAuto}
 	tm.state = StateListening
 	askEpoch := tm.epoch
 	tm.mu.Unlock()
@@ -710,7 +710,7 @@ func ttArmAsk(tm *TurnManager) uint64 {
 	initMsg := SessionInitMsg{Type: TypeSessionInit, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1}, Category: CategoryAuto}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	tm.pendingAsk = &initMsg
+	tm.pendingAsk = &classroomInitRequest{msg: initMsg, category: CategoryAuto}
 	tm.state = StateListening
 	return tm.epoch
 }
@@ -839,7 +839,7 @@ func TestSettledStaleAnnouncerCannotLiftNewClassroomGate(t *testing.T) {
 	}
 
 	// The timeout twin: a stale orderlyClose must not close it either.
-	tm.orderlyCloseAt(askEpoch)
+	tm.orderlyCloseAt(s, askEpoch, ReasonPlaybackTimeout)
 	tm.mu.Lock()
 	closed = tm.closed
 	tm.mu.Unlock()
@@ -900,10 +900,10 @@ func TestMidBindingAskTimeoutCannotClosePickedClassroom(t *testing.T) {
 	tm.subjectTakeInterleave = func() {
 		if tm.mu.TryLock() {
 			tm.mu.Unlock()
-			tm.orderlyCloseAt(askEpoch)
+			tm.orderlyCloseAt(s, askEpoch, ReasonPlaybackTimeout)
 		}
 	}
-	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, askEpoch, true)
+	req, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, askEpoch, true)
 	tm.subjectTakeInterleave = nil
 	if !ok {
 		t.Fatal("takeSubjectAsk refused a live clarify")
@@ -911,7 +911,7 @@ func TestMidBindingAskTimeoutCannotClosePickedClassroom(t *testing.T) {
 
 	// And even a timeout landing only AFTER the take must find the old epoch
 	// stale — the bump belongs to the take's own lock hold.
-	tm.orderlyCloseAt(oldEpoch)
+	tm.orderlyCloseAt(s, oldEpoch, ReasonPlaybackTimeout)
 	tm.mu.Lock()
 	closed := tm.closed
 	epoch := tm.epoch
@@ -927,7 +927,7 @@ func TestMidBindingAskTimeoutCannotClosePickedClassroom(t *testing.T) {
 	}
 
 	// The unlocked half then opens the classroom, alive and well.
-	tm.finalizeSubjectAsk(s, m, oldEpoch, lesson.CategoryChinese, "voice")
+	tm.finalizeSubjectAsk(s, req, oldEpoch, lesson.CategoryChinese, "voice")
 	if ready := s.controlsOf(t, TypeSessionReady); len(ready) != 1 {
 		t.Fatalf("session_ready count = %d, want 1", len(ready))
 	}
@@ -954,14 +954,14 @@ func TestFinalizeSkipsClosedSession(t *testing.T) {
 	ttAwaitAskSent(t, s, 0)
 	sentences := s.countOf(TypeTeacherSentence)
 
-	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryEnglish, 0, false)
+	req, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryEnglish, 0, false)
 	if !ok {
 		t.Fatal("takeSubjectAsk refused a live clarify")
 	}
 	// An end_session wins the race between the halves.
 	tm.internalClose()
 
-	tm.finalizeSubjectAsk(s, m, oldEpoch, lesson.CategoryEnglish, "button")
+	tm.finalizeSubjectAsk(s, req, oldEpoch, lesson.CategoryEnglish, "button")
 	if ready := s.controlsOf(t, TypeSessionReady); len(ready) != 0 {
 		t.Errorf("session_ready after close = %d, want 0 (a closed session must not open a classroom)", len(ready))
 	}
@@ -1023,7 +1023,7 @@ func TestEndSessionDuringPickedInitIOSendsNoClassroom(t *testing.T) {
 	ttAckLast(t, tm, s, 0) // settle the ask so its goroutine is done interfering
 
 	// The spoken answer's locked half binds 语文 (epoch 0 = the answer turn's).
-	m, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, 0, true)
+	req, oldEpoch, ok := tm.takeSubjectAsk(lesson.CategoryChinese, 0, true)
 	if !ok {
 		t.Fatal("takeSubjectAsk refused a live clarify")
 	}
@@ -1032,7 +1032,7 @@ func TestEndSessionDuringPickedInitIOSendsNoClassroom(t *testing.T) {
 	// AFTER finalizeSubjectAsk's stillOpen gate has already passed.
 	words.onFetch = func() { tm.handleEndSession(s) }
 
-	tm.finalizeSubjectAsk(s, m, oldEpoch, lesson.CategoryChinese, "voice")
+	tm.finalizeSubjectAsk(s, req, oldEpoch, lesson.CategoryChinese, "voice")
 
 	if ready := s.controlsOf(t, TypeSessionReady); len(ready) != 0 {
 		t.Errorf("session_ready after mid-init end_session = %d, want 0", len(ready))

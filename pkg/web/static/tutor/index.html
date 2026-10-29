@@ -1084,10 +1084,16 @@
         // iOS 3-condition unlock inside this handler, then awaits
         // getUserMedia; the stream and AudioContext are held for the whole
         // session — no per-utterance hold-to-talk, no re-authorization.
-        capture.start().then(function (active) {
+        // The context is born inside start() BEFORE the getUserMedia await:
+        // attach it to the playback right away — waiting for the permission
+        // let a zero-latency teacher announcement beat the attach and drop
+        // every chunk (empty-play ack). The synchronous-fail path leaves
+        // audioCtx null and the session degrades exactly as before.
+        var startPromise = capture.start();
+        playback.setAudioContext(capture.audioCtx);
+        startPromise.then(function (active) {
           if (!active || !started || courseEnded) return;
           timing.push(RT_EVENTS.AUTH_COMPLETE);
-          playback.setAudioContext(capture.audioCtx);
         })['catch'](function (errType) {
           showError(errType, '');
         });

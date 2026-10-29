@@ -1,0 +1,1022 @@
+package rt
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
+)
+
+// holdFirstDueFetch parks the first FetchDueWords until release (R1 T2).
+type holdFirstDueFetch struct {
+	WordSource
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	// openOnce makes openUp idempotent (§5.1): every failure path in the T2
+	// test reclaims through it, and a repeated release must pair safely with
+	// an explicit openUp instead of panicking on close-of-closed-channel.
+	openOnce sync.Once
+}
+
+func newHoldFirstDueFetch(inner WordSource) *holdFirstDueFetch {
+	return &holdFirstDueFetch{
+		WordSource: inner,
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+}
+
+func (h *holdFirstDueFetch) FetchDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error) {
+	h.once.Do(func() { close(h.entered) })
+	<-h.release
+	return h.WordSource.FetchDueWords(ctx, limit, category)
+}
+
+func (h *holdFirstDueFetch) openUp() {
+	h.openOnce.Do(func() { close(h.release) })
+}
+
+// ttInitCheckingRow opens a checking lesson through real session_init.
+func ttInitCheckingRow(t *testing.T, exec *fakeExecutor, words WordSource) (*TurnManager, *captureSender) {
+	t.Helper()
+	cards := exec.lesson.Cards
+	exec.lesson.Stage = lesson.StageChecking
+	exec.lesson.CurrentIndex = len(cards)
+	exec.lesson.Version = 4
+	exec.lesson.Verdicts = make([]lesson.CheckVerdict, len(cards))
+	for i := range cards {
+		exec.lesson.Verdicts[i] = lesson.CheckVerdict{WordIndex: i, Correct: true, Manual: true}
+	}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		ttConfig(words), NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	return tm, s
+}
+
+// TestLateClassroomInitCannotOverrideActive (rethink2 T2): a slower dictation
+// init must not install session_ready or a tutor after a newer practice init
+// has already won the connection's classroom generation.
+func TestLateClassroomInitCannotOverrideActive(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	fetchHold := newHoldFirstDueFetch(words)
+	exec := newFakeExecutorNoRow(ttLessonID)
+
+	practice := &fakePracticeSource{cards: ptPracticeCards("cat", "dog")}
+	ps := newTestPracticeStore(t)
+	cfg := TurnManagerConfig{
+		LessonID: ttLessonID, Words: fetchHold,
+		Practice: practice, PracticeStore: ps,
+	}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, cfg,
+		NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+
+	initA := mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	})
+	initB := mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Practice: true,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.HandleControl(s, initA)
+	}()
+
+	select {
+	case <-fetchHold.entered:
+	case <-time.After(3 * time.Second):
+		fetchHold.openUp()
+		wg.Wait()
+		t.Fatal("the first session_init never reached FetchDueWords")
+	}
+
+	tm.HandleControl(s, initB)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) >= 1 }) {
+		fetchHold.openUp()
+		wg.Wait()
+		t.Fatal("practice session_ready never arrived")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) >= 1 }) {
+		fetchHold.openUp()
+		wg.Wait()
+		t.Fatal("practice greeting never started before the late dictation init is released")
+	}
+	readyAfterB := s.countOf(TypeSessionReady)
+	sentsAfterB := s.countOf(TypeTeacherSentence)
+
+	tm.mu.Lock()
+	practiceLesson := tm.tutor != nil && tm.tutor.lessonID != "" && tm.tutor.practice
+	tm.mu.Unlock()
+	if !practiceLesson {
+		fetchHold.openUp()
+		wg.Wait()
+		t.Fatal("active tutor is not the practice classroom after B won")
+	}
+
+	fetchHold.openUp()
+	wg.Wait()
+
+	if got := s.countOf(TypeSessionReady); got != readyAfterB {
+		t.Fatalf("session_ready count = %d, want %d (late dictation init must not ship ready)", got, readyAfterB)
+	}
+	if got := s.countOf(TypeTeacherSentence); got != sentsAfterB {
+		t.Fatalf("teacher_sentence count = %d, want %d (late dictation init must not greet)", got, sentsAfterB)
+	}
+	tm.mu.Lock()
+	stillPractice := tm.tutor != nil && tm.tutor.practice
+	tm.mu.Unlock()
+	if !stillPractice {
+		t.Fatal("late dictation init replaced the practice classroom tutor")
+	}
+}
+
+// TestSupersededClassroomSubmitCannotWriteBack (rethink2 T1 init/writeback):
+// after classroom B replaces checking classroom A on the same connection, A's
+// in-flight formal submit must not flip B's in-memory checking state.
+func TestSupersededClassroomSubmitCannotWriteBack(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	tm, s := ttInitCheckingRow(t, exec, words)
+	tm.taskTrack = &serverTaskTracker{} // S1: whole-task settle for the waits below
+
+	hold := newHoldFirstCompleteCheck(exec)
+	tm.exec = hold
+
+	reclaimAndFail := func(msg string) {
+		hold.openUp()
+		if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+			t.Fatalf("%s (reclaim: CompleteCheck calls=%d returned=%d never settled)",
+				msg, hold.callCount(), hold.returnedCount())
+		}
+		t.Fatal(msg)
+	}
+
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "scope-a-submit"}))
+	select {
+	case <-hold.entered:
+	case <-time.After(3 * time.Second):
+		reclaimAndFail("classroom A submit never reached CompleteCheck")
+	}
+
+	practice := &fakePracticeSource{cards: ptPracticeCards("cat", "dog")}
+	ps := newTestPracticeStore(t)
+	cfg := TurnManagerConfig{
+		LessonID: ttLessonID, Words: words,
+		Practice: practice, PracticeStore: ps,
+	}
+	tm.cfg = cfg
+	if fe, ok := hold.LessonExecutor.(*fakeExecutor); ok {
+		// EnsureLessonCards reuses the in-memory row: reset index/stage so
+		// practice greeting does not inherit checking CurrentIndex, but keep
+		// Version=4 so A's admitted CompleteCheck still succeeds (success path).
+		fe.mu.Lock()
+		fe.lesson.CurrentIndex = 0
+		fe.lesson.Stage = ""
+		fe.lesson.Verdicts = nil
+		fe.mu.Unlock()
+	}
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Practice: true,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool {
+		tm.mu.Lock()
+		ok := tm.tutor != nil && tm.tutor.practice
+		tm.mu.Unlock()
+		return ok
+	}) {
+		reclaimAndFail("practice classroom B never installed")
+	}
+
+	tm.mu.Lock()
+	wantVer := tm.tutor.version
+	wantChecking := tm.tutor.checking
+	tm.mu.Unlock()
+
+	hold.openUp()
+	if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+		reclaimAndFail(fmt.Sprintf("classroom A submit task never finished (calls=%d returned=%d)",
+			hold.callCount(), hold.returnedCount()))
+	}
+
+	tm.mu.Lock()
+	gotVer, gotChecking := tm.tutor.version, tm.tutor.checking
+	stillB := tm.tutor.practice
+	tm.mu.Unlock()
+	if !stillB {
+		t.Fatal("active tutor is no longer the practice classroom after A's save finished")
+	}
+	if gotVer != wantVer {
+		t.Fatalf("tutor.version = %d, want %d (superseded submit must not write back)", gotVer, wantVer)
+	}
+	if gotChecking != wantChecking {
+		t.Fatalf("tutor.checking = %v, want %v (superseded submit must not flip B's stage on success path)", gotChecking, wantChecking)
+	}
+}
+
+// TestClassroomReplaceNotifiesClientEpoch (R1 review P1): after classroom A's
+// opening is underway, replacing with classroom B must ship interrupt_ack
+// BEFORE B's session_ready so production playback adopts the bumped epoch and
+// accepts B's greeting audio_start.
+func TestClassroomReplaceNotifiesClientEpoch(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	practice := &fakePracticeSource{cards: ptPracticeCards("cat", "dog")}
+	ps := newTestPracticeStore(t)
+	cfg := TurnManagerConfig{
+		LessonID: ttLessonID, Words: words,
+		Practice: practice, PracticeStore: ps,
+	}
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec, cfg,
+		NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+
+	ttInit(t, tm, s)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) >= 1 }) {
+		t.Fatal("classroom A greeting never started before replace")
+	}
+	tm.mu.Lock()
+	epochA := tm.epoch
+	tm.mu.Unlock()
+	ttAckLast(t, tm, s, epochA)
+	sentsBeforeB := s.countOf(TypeTeacherSentence)
+	startsBeforeB := s.countOf(TypeAudioStart)
+
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Practice: true,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) >= 2 }) {
+		t.Fatal("practice session_ready never arrived")
+	}
+
+	acks := s.controlsOf(t, TypeInterruptAck)
+	if len(acks) < 1 {
+		t.Fatalf("interrupt_ack count = %d, want at least 1 (classroom replace must notify playback epoch)", len(acks))
+	}
+	s.mu.Lock()
+	order := append([][]byte(nil), s.controls...)
+	s.mu.Unlock()
+	firstAck, secondReady := -1, -1
+	readyCount := 0
+	for i, raw := range order {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &probe) != nil {
+			continue
+		}
+		if probe.Type == TypeInterruptAck && firstAck < 0 {
+			firstAck = i
+		}
+		if probe.Type == TypeSessionReady {
+			readyCount++
+			if readyCount == 2 {
+				secondReady = i
+			}
+		}
+	}
+	if firstAck < 0 || secondReady < 0 || firstAck > secondReady {
+		t.Fatalf("interrupt_ack index=%d second session_ready index=%d, want ack before B's ready", firstAck, secondReady)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeAudioStart) > startsBeforeB }) {
+		t.Fatalf("audio_start count = %d, want > %d (B opening must register after epoch notify)", s.countOf(TypeAudioStart), startsBeforeB)
+	}
+	if got := s.countOf(TypeTeacherSentence); got <= sentsBeforeB {
+		t.Fatalf("teacher_sentence count = %d, want > %d (B greeting must enqueue after epoch notify)", got, sentsBeforeB)
+	}
+}
+
+// TestCheckResumeReinitSpeaksBridge (R1 review P2): repeating session_init into
+// the same checking row on one connection bumps playback epoch on replace;
+// the resume bridge must still speak under the post-install epoch.
+func TestCheckResumeReinitSpeaksBridge(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	tm, s := ttInitCheckingRow(t, exec, words)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) >= 1 }) {
+		t.Fatal("first check resume bridge never spoke")
+	}
+	tm.mu.Lock()
+	epoch := tm.epoch
+	tm.mu.Unlock()
+	ttAckLast(t, tm, s, epoch)
+	bridgeBefore := s.countOf(TypeTeacherSentence)
+
+	ttInit(t, tm, s)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckStarted) >= 2 }) {
+		t.Fatal("second check_started never arrived on re-init")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > bridgeBefore }) {
+		t.Fatalf("teacher_sentence count = %d, want > %d (resume bridge must run after classroom replace epoch)", s.countOf(TypeTeacherSentence), bridgeBefore)
+	}
+}
+
+// TestCategoryAdmissionHeldWithInstallCheck (review P1-1): the existing-row
+// subject write must sit in the SAME tm.mu hold as the admission check. A
+// late ask continuation parked between the two (the categoryAdmitInterleave
+// seam) must hold the lock across the whole window — the probe's TryLock may
+// never succeed there — so a newer session_init can neither install in the
+// gap nor have its installed subject overwritten when the continuation
+// resumes; the live classroom's subject stays the newest request's.
+func TestCategoryAdmissionHeldWithInstallCheck(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	// Both subjects hold due words → the auto entry parks on the clarify.
+	words.setPeek(lesson.CategoryChinese, ttCards("苹果"))
+	words.setPeek(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		ttConfig(words), NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Category: CategoryAuto,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSubjectAsk) >= 1 }) {
+		t.Fatal("the auto entry never asked the subject clarify")
+	}
+
+	leaked := false
+	seamEntered := make(chan struct{})
+	seamRelease := make(chan struct{})
+	var probeOnce sync.Once
+	tm.categoryAdmitInterleave = func() {
+		probeOnce.Do(func() {
+			// The probe: at this instant — between the admission check and
+			// the subject write — the lock must be HELD. A successful TryLock
+			// means the implementation dropped the hold between the two
+			// steps (the exact window a newer session_init installs in).
+			if tm.mu.TryLock() {
+				tm.mu.Unlock()
+				leaked = true
+			}
+			close(seamEntered)
+			<-seamRelease
+		})
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// The child answers 语文: the continuation reads the existing row and
+		// parks between the admission check and the subject write.
+		tm.HandleControl(s, mustJSON(t, SubjectPickMsg{Type: TypeSubjectPick, Category: lesson.CategoryChinese}))
+	}()
+	select {
+	case <-seamEntered:
+	case <-time.After(3 * time.Second):
+		close(seamRelease)
+		wg.Wait()
+		t.Fatal("the answered continuation never reached the category admission seam")
+	}
+
+	// B replaces A on the same connection while A is parked at the seam.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+			Type: TypeSessionInit, Category: lesson.CategoryEnglish,
+			Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+		}))
+	}()
+	close(seamRelease)
+	wg.Wait()
+
+	if leaked {
+		t.Fatal("tm.mu was free between the admission check and the subject write — a newer session_init can install in the gap and be overwritten on resume")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) >= 1 }) {
+		t.Fatal("the replacement classroom never shipped session_ready")
+	}
+	tm.mu.Lock()
+	gotCategory := tm.category
+	tm.mu.Unlock()
+	if gotCategory != lesson.CategoryEnglish {
+		t.Fatalf("live classroom subject = %q, want %q (the newest request's row authority; the parked continuation must not overwrite it)",
+			gotCategory, lesson.CategoryEnglish)
+	}
+}
+
+// ttFailingChineseFetch parks the FIRST chinese FetchDueWords and then fails
+// it — the control point for a late continuation's own row fetch failing
+// AFTER a newer classroom already installed (review P1-3).
+type ttFailingChineseFetch struct {
+	WordSource
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	open    sync.Once
+}
+
+func (w *ttFailingChineseFetch) FetchDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error) {
+	if category != lesson.CategoryChinese {
+		return w.WordSource.FetchDueWords(ctx, limit, category)
+	}
+	var first bool
+	w.once.Do(func() { first = true; close(w.entered) })
+	if !first {
+		return w.WordSource.FetchDueWords(ctx, limit, category)
+	}
+	<-w.release
+	return nil, errors.New("fetch failed after the replacement installed")
+}
+
+func (w *ttFailingChineseFetch) openUp() { w.open.Do(func() { close(w.release) }) }
+
+// TestLateInitFailureStaysSilentAfterReplacement (review P1-3): the answered
+// continuation's row fetch parks, a newer session_init installs a live
+// classroom, and only then does the fetch FAIL — the failure belongs to the
+// superseded request and must not reach the wire: no lesson_unavailable (the
+// page would set started=false under B's live classroom), no event, nothing.
+func TestLateInitFailureStaysSilentAfterReplacement(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	words.setPeek(lesson.CategoryChinese, ttCards("苹果"))
+	words.setPeek(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	words.setDue(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	failing := &ttFailingChineseFetch{
+		WordSource: words,
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		TurnManagerConfig{LessonID: ttLessonID, Words: failing},
+		NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Category: CategoryAuto,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSubjectAsk) >= 1 }) {
+		t.Fatal("the auto entry never asked the subject clarify")
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.HandleControl(s, mustJSON(t, SubjectPickMsg{Type: TypeSubjectPick, Category: lesson.CategoryChinese}))
+	}()
+	select {
+	case <-failing.entered:
+	case <-time.After(3 * time.Second):
+		failing.openUp()
+		wg.Wait()
+		t.Fatal("the answered continuation never reached its own row fetch")
+	}
+
+	// B replaces A on the same connection and finishes installing its live
+	// classroom while A's fetch is still parked.
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Category: lesson.CategoryEnglish,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) >= 1 }) {
+		failing.openUp()
+		wg.Wait()
+		t.Fatal("the replacement classroom never shipped session_ready")
+	}
+	readyBefore := s.countOf(TypeSessionReady)
+
+	// Resume A into a FAILING fetch: the egress must stay silent.
+	failing.openUp()
+	wg.Wait()
+
+	s.mu.Lock()
+	sentControls := append([][]byte(nil), s.controls...)
+	s.mu.Unlock()
+	for _, raw := range sentControls {
+		var probe struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.Type == TypeError {
+			t.Fatalf("an error frame (%s) reached the live connection after a superseded init failed — the late failure must stay silent", probe.Code)
+		}
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		t.Fatalf("session_ready after the late failure = %d, want %d (the failure must not disturb B)", got, readyBefore)
+	}
+	tm.mu.Lock()
+	gotCategory, hasTutor := tm.category, tm.tutor != nil
+	tm.mu.Unlock()
+	if gotCategory != lesson.CategoryEnglish || !hasTutor {
+		t.Fatalf("live classroom = %q tutor=%v, want the english classroom intact", gotCategory, hasTutor)
+	}
+}
+
+// TestLatePracticeNoSourceInitStaysSilentAfterReplacement (review P1-3 fix2):
+// fix1's generation gate covered failLessonInit, but the practice service's
+// MISSING-source egress still sent lesson_unavailable unconditionally. The
+// auto PRACTICE request consumes the subject ask and parks at
+// practiceInitEntryInterleave; B (an english dictation classroom) installs
+// on the same connection; the resumed continuation walks the no-source exit
+// — its degraded answer must stay SILENT: the frame would flip B's page
+// (started=false, index.html lesson_unavailable branch) for a request that
+// page never made (S2/S4: 迟到初始化无输出、不干扰 B).
+func TestLatePracticeNoSourceInitStaysSilentAfterReplacement(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	words.setPeek(lesson.CategoryChinese, ttCards("苹果"))
+	words.setPeek(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	words.setDue(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	exec := newFakeExecutorNoRow(ttLessonID)
+	// Words configured, Practice/PracticeStore deliberately NIL: the
+	// practice continuation's ONLY outcome is the missing-service egress.
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		TurnManagerConfig{LessonID: ttLessonID, Words: words},
+		NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	tm.mu.Lock()
+	tm.practiceInitEntryInterleave = func() {
+		first := false
+		once.Do(func() { first = true; close(entered) })
+		if first {
+			<-release
+		}
+	}
+	tm.mu.Unlock()
+
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Category: CategoryAuto, Practice: true,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSubjectAsk) >= 1 }) {
+		t.Fatal("the auto practice entry never asked the subject clarify")
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.HandleControl(s, mustJSON(t, SubjectPickMsg{Type: TypeSubjectPick, Category: lesson.CategoryChinese}))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		close(release)
+		wg.Wait()
+		t.Fatal("the answered practice continuation never reached its entry seam")
+	}
+
+	// B replaces A on the same connection and installs its live dictation
+	// classroom while the practice continuation is still parked.
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Category: lesson.CategoryEnglish,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) >= 1 }) {
+		close(release)
+		wg.Wait()
+		t.Fatal("the replacement classroom never shipped session_ready")
+	}
+	readyBefore := s.countOf(TypeSessionReady)
+	tm.mu.Lock()
+	wantScope, wantEpoch := tm.activeScope.lessonID, tm.epoch
+	tm.mu.Unlock()
+
+	// Resume the practice continuation into the missing-service egress: a
+	// superseded request must answer NOTHING.
+	close(release)
+	wg.Wait()
+
+	s.mu.Lock()
+	sentControls := append([][]byte(nil), s.controls...)
+	s.mu.Unlock()
+	for _, raw := range sentControls {
+		var probe struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.Type == TypeError {
+			t.Fatalf("an error frame (%s) reached the live connection after the superseded practice init hit its missing-service egress — the late continuation must stay silent", probe.Code)
+		}
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		t.Fatalf("session_ready after the late practice egress = %d, want %d (the egress must not disturb B)", got, readyBefore)
+	}
+	tm.mu.Lock()
+	gotScope, gotEpoch, gotCategory := tm.activeScope.lessonID, tm.epoch, tm.category
+	tm.mu.Unlock()
+	if gotScope != wantScope || gotEpoch != wantEpoch || gotCategory != lesson.CategoryEnglish {
+		t.Fatalf("live classroom = %q epoch %d category %q, want B intact (%q/%d/%q)",
+			gotScope, gotEpoch, gotCategory, wantScope, wantEpoch, lesson.CategoryEnglish)
+	}
+}
+
+// ttFrozenRowRead freezes ONE GetLessonState: the row is read (and held in
+// the wrapper) BEFORE the park, so anything the store does during the park —
+// a landing save — is invisible to the released read. Together with a parked
+// CompleteCheck this is review P1-2's exact interleave — "the old row was
+// read, then the save completed and deleted its registration" — under full
+// test control (the save is never blocked once released; nothing depends on
+// it staying parked).
+type ttFrozenRowRead struct {
+	LessonExecutor
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	open    sync.Once
+}
+
+func (w *ttFrozenRowRead) GetLessonState(ctx context.Context, lessonID string) (lesson.Lesson, error) {
+	l, err := w.LessonExecutor.GetLessonState(ctx, lessonID)
+	var first bool
+	w.once.Do(func() { first = true; close(w.entered) })
+	if first {
+		<-w.release
+	}
+	return l, err
+}
+
+func (w *ttFrozenRowRead) openUp() { w.open.Do(func() { close(w.release) }) }
+
+// TestSameLessonReinitAfterSaveLandedUnderReadRefused (review P1-2): the
+// re-init's row read completes on the PRE-save row and parks inside the read;
+// the row's accepted save then lands — synchronously, through the REAL screen
+// verdict entry, whose admission registers and releases around ApplyVerdict
+// with the session staying open — and only then does the re-init's in-flight
+// check run. The registry reads empty (the save is done, its registration
+// deleted), yet the row the re-init holds is stale, so the re-init must still
+// answer the recoverable refusal and install nothing. The save is never kept
+// parked: the interleave is fully controlled by the frozen read alone.
+func TestSameLessonReinitAfterSaveLandedUnderReadRefused(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	// A submitted+unchecked row reopens as the CORRECTION panel — its screen
+	// verdict is the one real save whose admission fully releases while the
+	// session stays live (no ending rides it).
+	exec.mu.Lock()
+	exec.lesson.Stage = lesson.StageSubmitted
+	exec.lesson.Unchecked = true
+	exec.lesson.CurrentIndex = len(exec.lesson.Cards)
+	exec.lesson.Version = 4
+	exec.mu.Unlock()
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		ttConfig(words), NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckStarted) >= 1 }) {
+		t.Fatal("the correction panel never opened")
+	}
+
+	// The re-init reads the row and parks INSIDE the read, holding the
+	// PRE-save row snapshot (the wrapper captured it before parking).
+	frozen := &ttFrozenRowRead{
+		LessonExecutor: exec,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	tm.exec = frozen
+	go ttInit(t, tm, s)
+	select {
+	case <-frozen.entered:
+	case <-time.After(3 * time.Second):
+		frozen.openUp()
+		t.Fatal("the re-init never read the row")
+	}
+
+	readyBefore := s.countOf(TypeSessionReady)
+	startedBefore := s.countOf(TypeCheckStarted)
+
+	// The save lands NOW, while the re-init sits between its row read and its
+	// in-flight check: one real screen verdict — admitted, written, and its
+	// registration released — all before HandleControl returns.
+	tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+		Type: TypeCheckVerdict, RequestID: "p12-verdict-1", WordIndex: 0, Correct: true,
+	}))
+	tm.mu.Lock()
+	stillRegistered := tm.lessonSaveInFlightLocked(ttLessonID)
+	doneCount := tm.lessonSaveDoneCountLocked(ttLessonID)
+	tm.mu.Unlock()
+	if stillRegistered || doneCount != 1 {
+		frozen.openUp()
+		t.Fatalf("interleave premise failed: registered=%v completed=%d, want the save landed and its registration deleted", stillRegistered, doneCount)
+	}
+
+	// The released read hands the re-init the PRE-save row: the completion
+	// counter is the only witness that this row snapshot predates a landing
+	// save, so the re-init must refuse instead of installing the stale row.
+	frozen.openUp()
+
+	errCount, recoverable := 0, false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		sentControls := append([][]byte(nil), s.controls...)
+		s.mu.Unlock()
+		errCount, recoverable = 0, false
+		for _, raw := range sentControls {
+			var probe struct {
+				Type        string `json:"type"`
+				Code        string `json:"code"`
+				Recoverable bool   `json:"recoverable"`
+			}
+			if json.Unmarshal(raw, &probe) == nil && probe.Type == TypeError &&
+				probe.Code == ErrCodeLessonUnavailable {
+				errCount++
+				recoverable = probe.Recoverable
+			}
+		}
+		if errCount > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if errCount != 1 || !recoverable {
+		t.Fatalf("reentry after the save landed under the read answered %d lesson errors (recoverable=%v), want exactly 1 recoverable — the stale row must be refused", errCount, recoverable)
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		t.Fatalf("session_ready after the refused reinit = %d, want %d (no classroom on the pre-save row)", got, readyBefore)
+	}
+	if got := s.countOf(TypeCheckStarted); got != startedBefore {
+		t.Fatalf("check_started after the refused reinit = %d, want %d (the stale unchecked row must not reopen a panel)", got, startedBefore)
+	}
+	tm.mu.Lock()
+	scopeLesson := tm.activeScope.lessonID
+	tm.mu.Unlock()
+	if scopeLesson != ttLessonID {
+		t.Fatalf("live scope lesson = %q, want %q (the refusal replaced nothing)", scopeLesson, ttLessonID)
+	}
+}
+
+// TestSameLessonReinitAfterSaveLandedBeforeInstallRefused (review P1-2 fix2):
+// the same-lessonID save check must cover TO THE INSTALL DECISION. The re-init
+// passes the row read's in-flight check and parks at checkResumeInterleave —
+// the exact window between that check's unlock and the panel's install
+// effect. While it parks, the STILL-LIVE classroom's real VOICE verdict entry
+// admits a save, lands it and fully releases its registration (only the
+// completion counter witnesses the landing). The released re-init must then
+// refuse with the recoverable busy error and install nothing: an install that
+// re-checks only generation/epoch would seat the panel on the pre-verdict
+// version/verdicts. The interleave alone controls the window — no clocks.
+func TestSameLessonReinitAfterSaveLandedBeforeInstallRefused(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	tm, s := ttInitCheckingRow(t, exec, words)
+
+	// The one-shot park at the panel's own seam: A's FIRST resume panel ran
+	// before this arm, so only the re-init parks here.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	tm.mu.Lock()
+	tm.checkResumeInterleave = func() {
+		first := false
+		once.Do(func() { first = true; close(entered) })
+		if first {
+			<-release
+		}
+	}
+	tm.mu.Unlock()
+
+	reinitDone := make(chan struct{})
+	go func() {
+		defer close(reinitDone)
+		ttInit(t, tm, s)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		close(release)
+		<-reinitDone
+		t.Fatal("the re-init never parked at the panel seam")
+	}
+
+	readyBefore := s.countOf(TypeSessionReady)
+	startedBefore := s.countOf(TypeCheckStarted)
+	tm.mu.Lock()
+	epoch, scopeGen, doneBefore := tm.epoch, tm.activeScope.gen, tm.lessonSaveDoneCountLocked(ttLessonID)
+	tm.mu.Unlock()
+
+	// The old classroom's real voice verdict (the entry checkDispatch calls):
+	// admitted, written, registration fully released — the announcement is
+	// acked so the function returns and the save counts as LANDED.
+	verdictDone := make(chan struct{})
+	go func() {
+		defer close(verdictDone)
+		tm.applyVoiceVerdict(s, context.Background(), func() {}, epoch,
+			intentPayload{Intent: intentCheckRight, Index: 1})
+	}()
+	// The verdict's OWN spoken line — matched by its fixed text, never "the
+	// next sentence": A's resume bridge may still be speaking its own
+	// sentences on its goroutine, and acking one of those instead would let
+	// the verdict's line time out and CLOSE the session (orderly playback
+	// timeout), silencing the busy refusal under test.
+	ackVerdictLine := func() string {
+		for _, m := range s.controlsOf(t, TypeTeacherSentence) {
+			if text, _ := m["text"].(string); strings.Contains(text, "第 1 个词对了") {
+				if sid, _ := m["sentence_id"].(string); sid != "" {
+					return sid
+				}
+			}
+		}
+		return ""
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckVerdicts) >= 1 && ackVerdictLine() != "" }) {
+		close(release)
+		<-reinitDone
+		t.Fatal("the voice verdict never wrote its echo and spoke its ack line")
+	}
+	tm.HandleControl(s, mustJSON(t, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: ackVerdictLine(), Epoch: epoch}))
+	select {
+	case <-verdictDone:
+	case <-time.After(5 * time.Second):
+		close(release)
+		<-reinitDone
+		t.Fatal("the voice verdict task never finished")
+	}
+	tm.mu.Lock()
+	stillRegistered := tm.lessonSaveInFlightLocked(ttLessonID)
+	doneCount := tm.lessonSaveDoneCountLocked(ttLessonID)
+	tm.mu.Unlock()
+	if stillRegistered || doneCount != doneBefore+1 {
+		close(release)
+		<-reinitDone
+		t.Fatalf("interleave premise failed: registered=%v completed=%d, want the voice save landed and released (base %d)",
+			stillRegistered, doneCount, doneBefore)
+	}
+
+	// Release the re-init into the install decision: the row snapshot it
+	// holds predates the landed save and must be refused, not installed.
+	close(release)
+	<-reinitDone
+
+	errCount, recoverable := 0, false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		sentControls := append([][]byte(nil), s.controls...)
+		s.mu.Unlock()
+		errCount, recoverable = 0, false
+		for _, raw := range sentControls {
+			var probe struct {
+				Type        string `json:"type"`
+				Code        string `json:"code"`
+				Recoverable bool   `json:"recoverable"`
+			}
+			if json.Unmarshal(raw, &probe) == nil && probe.Type == TypeError &&
+				probe.Code == ErrCodeLessonUnavailable {
+				errCount++
+				recoverable = probe.Recoverable
+			}
+		}
+		if errCount > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if errCount != 1 || !recoverable {
+		t.Fatalf("reentry after the save landed before the install answered %d lesson errors (recoverable=%v), want exactly 1 recoverable — the pre-save row must be refused at the install decision",
+			errCount, recoverable)
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		t.Fatalf("session_ready after the refused reinit = %d, want %d (no classroom on the pre-save row)", got, readyBefore)
+	}
+	if got := s.countOf(TypeCheckStarted); got != startedBefore {
+		t.Fatalf("check_started after the refused reinit = %d, want %d (no panel on the pre-save row)", got, startedBefore)
+	}
+	tm.mu.Lock()
+	gotScope := tm.activeScope.lessonID
+	gotGen := tm.activeScope.gen
+	gotVer := tm.tutor.version
+	tm.mu.Unlock()
+	if gotScope != ttLessonID || gotGen != scopeGen {
+		t.Fatalf("live scope = %q gen %d, want %q gen %d (the refusal replaced nothing)", gotScope, gotGen, ttLessonID, scopeGen)
+	}
+	exec.mu.Lock()
+	rowVer := exec.lesson.Version
+	exec.mu.Unlock()
+	if gotVer != rowVer {
+		t.Fatalf("live tutor version = %d, want %d (the voice verdict's own writeback stands)", gotVer, rowVer)
+	}
+}
+
+// TestSameLessonReinitDuringInflightSaveRefused (issue #69 rethink3 S4): a
+// same-lessonID re-init that arrives while THIS connection's accepted submit
+// for the row is still running must not build a classroom on the pre-save row
+// state — the honest answer is a RECOVERABLE init error, nothing installed,
+// no blind fallback; the save itself keeps running and lands normally (its
+// classroom is still the live scope), and a retry after it settles reads the
+// row's true post-save state (the completed short-circuit).
+func TestSameLessonReinitDuringInflightSaveRefused(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	tm, s := ttInitCheckingRow(t, exec, words)
+	tm.taskTrack = &serverTaskTracker{} // S1: whole-task settle for the waits below
+
+	hold := newHoldFirstCompleteCheck(exec)
+	tm.exec = hold
+
+	reclaimAndFail := func(msg string) {
+		hold.openUp()
+		if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+			t.Fatalf("%s (reclaim: CompleteCheck calls=%d returned=%d never settled)",
+				msg, hold.callCount(), hold.returnedCount())
+		}
+		t.Fatal(msg)
+	}
+
+	// The real submit entry admits the save; the latch write parks inside the
+	// real executor hold (the row's state is moving by construction).
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "busy-reinit-submit"}))
+	select {
+	case <-hold.entered:
+	case <-time.After(3 * time.Second):
+		reclaimAndFail("the submit never reached CompleteCheck")
+	}
+
+	readyBefore := s.countOf(TypeSessionReady)
+	startedBefore := s.countOf(TypeCheckStarted)
+
+	// The same-lessonID re-init (the same production session_init entry the
+	// connection's read loop would dispatch) is refused with a recoverable
+	// error while that admission is live.
+	ttInit(t, tm, s)
+
+	errCount, recoverable := 0, false
+	s.mu.Lock()
+	sentControls := append([][]byte(nil), s.controls...)
+	s.mu.Unlock()
+	for _, raw := range sentControls {
+		var probe struct {
+			Type        string `json:"type"`
+			Code        string `json:"code"`
+			Recoverable bool   `json:"recoverable"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.Type == TypeError &&
+			probe.Code == ErrCodeLessonUnavailable {
+			errCount++
+			recoverable = probe.Recoverable
+		}
+	}
+	if errCount != 1 || !recoverable {
+		reclaimAndFail(fmt.Sprintf("in-flight-save reinit answered %d lesson errors (recoverable=%v), want exactly 1 recoverable", errCount, recoverable))
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		reclaimAndFail(fmt.Sprintf("session_ready after the refused reinit = %d, want %d (no classroom on stale row state)", got, readyBefore))
+	}
+	if got := s.countOf(TypeCheckStarted); got != startedBefore {
+		reclaimAndFail(fmt.Sprintf("check_started after the refused reinit = %d, want %d (no panel re-open)", got, startedBefore))
+	}
+	tm.mu.Lock()
+	scopeGen := tm.activeScope.gen
+	tm.mu.Unlock()
+
+	// The save keeps running and lands on its OWN classroom (still the live
+	// scope): the writeback applies and the natural ending follows.
+	hold.openUp()
+	if !waitFormalSubmitSettled(t, tm, hold, 5*time.Second) {
+		reclaimAndFail("the accepted submit never finished after the refusal")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) >= 1 }) {
+		reclaimAndFail("the submit's review_result never arrived — the refusal must not stall the save's own presentation")
+	}
+	tm.mu.Lock()
+	gotVer, gotChecking := tm.tutor.version, tm.tutor.checking
+	stillScope := tm.activeScope != nil && tm.activeScope.gen == scopeGen
+	tm.mu.Unlock()
+	if !stillScope {
+		reclaimAndFail("the refusal replaced the live classroom's scope")
+	}
+	exec.mu.Lock()
+	rowVer, rowStage := exec.lesson.Version, exec.lesson.Stage
+	exec.mu.Unlock()
+	if gotVer != rowVer || gotChecking {
+		t.Fatalf("tutor version/checking = %d/%v, want %d/false (the live submit's writeback stands)", gotVer, gotChecking, rowVer)
+	}
+	if rowStage != lesson.StageSubmitted {
+		t.Fatalf("row stage = %q, want submitted (the accepted save completed)", rowStage)
+	}
+
+	// A retry after the save settles reads the row's true state: the
+	// completed short-circuit, not a classroom built on checking-era state.
+	exec.mu.Lock()
+	exec.lesson.CurrentIndex = len(exec.lesson.Cards)
+	exec.mu.Unlock()
+	ttInit(t, tm, s)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) >= 1 }) {
+		t.Fatal("the post-save retry never reached the completed short-circuit")
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		t.Fatalf("session_ready after the post-save retry = %d, want %d (completed rows short-circuit without a new ready)", got, readyBefore)
+	}
+}

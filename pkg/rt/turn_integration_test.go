@@ -10,7 +10,9 @@ package rt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -144,6 +146,15 @@ func itDrainUntilTimeout(t *testing.T, conn *websocket.Conn, window time.Duratio
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				return seen // window elapsed with nothing in flight
+			}
+			// 1.05+ contract: the terminal session_ended closes the
+			// transport right after shipping — a normal close (or the EOF
+			// it lands as) inside the quiet window ENDS the drain instead
+			// of failing it; the server cannot ship further frames on a
+			// closed connection. Anything else is still fatal.
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) ||
+				errors.Is(err, io.ErrUnexpectedEOF) {
+				return seen
 			}
 			t.Fatalf("itDrainUntilTimeout: connection failed inside the quiet window: %v", err)
 		}

@@ -264,22 +264,6 @@ func (tm *TurnManager) passageViewForRow(l lesson.Lesson) *PassageTaskView {
 	return view
 }
 
-// bindPassageRef attaches the passage identity to the live tutor (caller has
-// already constructed it from the row or the init request). Caller holds NO
-// lock — this runs between construction and message traffic.
-func (tm *TurnManager) bindPassageRef(view *PassageTaskView) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	if tm.tutor == nil || view == nil {
-		return
-	}
-	tm.tutor.passage = &passageRef{
-		ID: view.ID, ScopeID: view.ScopeID,
-		Title: view.Title, Author: view.Author,
-		Whole: view.Whole, Paragraphs: append([]int(nil), view.Paragraphs...),
-	}
-}
-
 // scopeParagraphs resolves the range's own paragraph TEXTS in original
 // order: whole → every stored paragraph; a set → the named paragraphs at
 // their original indexes. The scope row's indexes are already canonical
@@ -307,7 +291,7 @@ func scopeParagraphs(p passage.Passage, scope passage.ScopeRow) ([]string, bool)
 // selected paragraphs. A submitted attempt never reopens here — its judgment
 // is settled history; re-practicing the range is a new row (段落历史不被伪
 // 造).
-func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
+func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64, installGen uint64) {
 	if tm.cfg.Passages == nil {
 		tm.recorder.Emit(EventError,
 			infra.F("code", ErrCodeLessonUnavailable),
@@ -339,7 +323,7 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
 		tm.sendError(s, ErrCodeLessonUnavailable, passageMissingNotice, false)
 		return
 	case err != nil:
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	case !p.InScope:
 		// 进入范围才有资格被安排 (Issue #4): the honest coded refusal —
@@ -391,7 +375,7 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
 	// resuming its in-flight attempt).
 	latest, err := tm.exec.LatestPassageLessonID(ctx, p.ID, scope.Whole, scope.Paragraphs)
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	if latest != "" {
@@ -402,10 +386,10 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
 			// mid-writing attempt re-announces the task (the range's own
 			// first-content-wins row continues).
 			if l.Stage == lesson.StageChecking {
-				tm.startCheckResume(s, l)
+				tm.startCheckResume(s, l, installGen, lessonRowSaveGuard{})
 				return
 			}
-			tm.startPassageSession(s, l, p, *scope)
+			tm.startPassageSession(s, l, p, *scope, installGen)
 			return
 		}
 	}
@@ -419,7 +403,7 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
 	l, err := tm.exec.EnsurePassageLesson(ctx, lessonID, p.ID, scope.ID,
 		scope.Whole, scope.Paragraphs, texts, p.Category)
 	if err != nil {
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	if l.PassageID != p.ID || l.PassageWhole != scope.Whole ||
@@ -427,14 +411,14 @@ func (tm *TurnManager) handlePassageInit(s Sender, passageID, scopeID int64) {
 		// Defensive identity check: a lesson row must never announce one
 		// range while checking another range's paragraphs.
 		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "passage_identity"))
-		tm.failLessonInit(s)
+		tm.failLessonInit(s, installGen)
 		return
 	}
 	tm.recorder.Emit(EventPassageStarted,
 		infra.F("paragraphs", len(texts)),
 		infra.F("whole", scope.Whole),
 	)
-	tm.startPassageSession(s, l, p, *scope)
+	tm.startPassageSession(s, l, p, *scope, installGen)
 }
 
 // passageIndexesEqual compares two paragraph index sets as sets (order and
@@ -461,22 +445,17 @@ func passageIndexesEqual(a, b []int) bool {
 // task. The greeting carries NO paragraph text, arms no timer, and its
 // display equals its spoken text (title/author/range are public identity,
 // not the answer).
-func (tm *TurnManager) startPassageSession(s Sender, l lesson.Lesson, p passage.Passage, scope passage.ScopeRow) {
+func (tm *TurnManager) startPassageSession(s Sender, l lesson.Lesson, p passage.Passage, scope passage.ScopeRow, installGen uint64) {
 	view := passageTaskView(p, scope)
-	tm.mu.Lock()
-	tm.tutor = newDictationTutor(l)
-	tm.tutor.passage = &passageRef{
+	tutor := newDictationTutor(l)
+	tutor.passage = &passageRef{
 		ID: l.PassageID, ScopeID: l.PassageScopeID,
 		Title: p.Title, Author: p.Author,
 		Whole: l.PassageWhole, Paragraphs: append([]int(nil), view.Paragraphs...),
 	}
-	tm.state = StateListening
-	tm.sessionReadyAt = time.Now()
-	total := len(tm.tutor.words)
-	category := tm.tutor.category
-	tm.mu.Unlock()
-
-	_ = s.SendControl(SessionReadyMsg{
+	total, category := len(tutor.words), tutor.category
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := SessionReadyMsg{
 		Type:      TypeSessionReady,
 		SessionID: tm.session,
 		Audio:     AudioSpec{SampleRate: requiredSampleRate, Format: requiredFormat, Channels: requiredChannels},
@@ -484,18 +463,36 @@ func (tm *TurnManager) startPassageSession(s Sender, l lesson.Lesson, p passage.
 		Lesson:    tm.lessonViewFor(l),
 		Category:  category,
 		Passage:   view,
-	})
+	}
+	var epoch uint64
+	if !tm.applyClassroomInstallEffect(installGen, func() error {
+		if err := tm.replaceActiveClassroomLocked(installGen, l.LessonID, tutor, s); err != nil {
+			return err
+		}
+		if err := s.SendControl(ready); err != nil {
+			return err
+		}
+		tm.state = StateListening
+		tm.sessionReadyAt = time.Now()
+		tm.turnCancel = cancel
+		epoch = tm.epoch
+		return nil
+	}) {
+		cancel()
+		return
+	}
+	if tm.activeClassroomGen() != installGen {
+		cancel()
+		return
+	}
 	tm.recorder.Emit(EventConnected, infra.F("session_id", tm.session))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	tm.mu.Lock()
-	tm.turnCancel = cancel
-	tm.mu.Unlock()
 	text := passageGreetingText(p.Title, p.Author, view.Whole, view.Paragraphs, total)
 	// onAck is deliberately nil: the passage classroom arms NO per-word
 	// timer (背默推进不靠机械计时) — nothing counts down while the child
 	// writes.
-	go tm.runAnnouncementDisplay(s, ctx, cancel, text, text, purposePassageGreeting, nil)
+	tm.goServerTask(func() {
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, text, text, purposePassageGreeting, nil)
+	})
 }
 
 // buildPassageClassifyMessages assembles the passage writing-stage
@@ -570,12 +567,16 @@ func (tm *TurnManager) classifyPassageTurn(ctx context.Context, transcript strin
 func (tm *TurnManager) dispatchPassageTurn(s Sender, ctx context.Context, cancel context.CancelFunc, turnID, epoch uint64, p intentPayload) {
 	switch p.Intent {
 	case intentConfirm:
-		tm.mu.Lock()
-		paused := tm.tutor != nil && tm.tutor.paused
-		checking := tm.tutor != nil && tm.tutor.checking
-		tm.mu.Unlock()
+		paused, checking := false, false
+		if !tm.applyTurnAt(epoch, func() error {
+			paused = tm.tutor != nil && tm.tutor.paused
+			checking = tm.tutor != nil && tm.tutor.checking
+			return nil
+		}) {
+			return
+		}
 		if paused {
-			tm.runAnnouncement(s, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
+			tm.runAnnouncementAt(s, epoch, ctx, cancel, confirmPausedRejectText(), purposeChat, nil)
 			return
 		}
 		if checking {
@@ -584,35 +585,37 @@ func (tm *TurnManager) dispatchPassageTurn(s Sender, ctx context.Context, cancel
 		}
 		tm.enterCheck(s, ctx, cancel, epoch)
 	case intentRepeat, intentSlow:
-		tm.runAnnouncement(s, ctx, cancel, passageNoReadNotice, purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, passageNoReadNotice, purposeChat, nil)
 	case intentHint:
-		tm.passageHint(s, ctx, cancel, p)
+		tm.passageHint(s, ctx, cancel, epoch, p)
 	case intentMeaning, intentExample:
-		tm.runAnnouncement(s, ctx, cancel, passageMeaningNotice, purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, passageMeaningNotice, purposeChat, nil)
 	case intentPause:
-		tm.mu.Lock()
-		if tm.tutor != nil {
+		if !tm.applyTurnAt(epoch, func() error {
 			tm.tutor.paused = true
+			tm.stopWordTimerLocked()
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
-		tm.stopWordTimer()
-		tm.runAnnouncement(s, ctx, cancel, pauseAckText(), purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, pauseAckText(), purposeChat, nil)
 	case intentResume:
-		tm.mu.Lock()
 		title, whole := "", false
 		var paragraphs []int
-		if tm.tutor != nil {
+		if !tm.applyTurnAt(epoch, func() error {
 			tm.tutor.paused = false
 			if tm.tutor.passage != nil {
 				title = tm.tutor.passage.Title
 				whole = tm.tutor.passage.Whole
-				paragraphs = tm.tutor.passage.Paragraphs
+				paragraphs = append([]int(nil), tm.tutor.passage.Paragraphs...)
 			}
+			return nil
+		}) {
+			return
 		}
-		tm.mu.Unlock()
-		tm.runAnnouncement(s, ctx, cancel, passageResumeAckText(title, whole, paragraphs), purposeChat, nil)
+		tm.runAnnouncementAt(s, epoch, ctx, cancel, passageResumeAckText(title, whole, paragraphs), purposeChat, nil)
 	case intentChat:
-		tm.runAnnouncementDisplay(s, ctx, cancel, p.Reply, tm.replyDisplay(p.Reply), purposeChat, nil)
+		tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, p.Reply, tm.replyDisplay(p.Reply), purposeChat, nil)
 	}
 	_ = turnID
 }
@@ -622,27 +625,30 @@ func (tm *TurnManager) dispatchPassageTurn(s Sender, ctx context.Context, cancel
 // out-of-range or OUT-OF-RANGE-OF-THIS-TASK number gets the which-paragraph
 // question. The hint count lands on that paragraph's outcome (the same U-9
 // accounting the word classroom keeps).
-func (tm *TurnManager) passageHint(s Sender, ctx context.Context, cancel context.CancelFunc, p intentPayload) {
-	tm.mu.Lock()
+func (tm *TurnManager) passageHint(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, p intentPayload) {
 	var cue string
-	if tm.tutor != nil && tm.tutor.passage != nil {
-		for pos, no := range tm.tutor.passage.Paragraphs {
-			if no == p.Index && pos < len(tm.tutor.words) {
-				cue = passageHintCueText(no, tm.tutor.words[pos].Word)
-				n := tm.tutor.recordHint(pos)
-				tm.recorder.Emit(EventHintGiven,
-					infra.F("word_index", pos),
-					infra.F("hint_count", n),
-				)
-				break
+	hintPos, hintCount := -1, 0
+	if !tm.applyTurnAt(epoch, func() error {
+		if tm.tutor.passage != nil {
+			for pos, no := range tm.tutor.passage.Paragraphs {
+				if no == p.Index && pos < len(tm.tutor.words) {
+					cue = passageHintCueText(no, tm.tutor.words[pos].Word)
+					hintPos, hintCount = pos, tm.tutor.recordHint(pos)
+					break
+				}
 			}
 		}
+		return nil
+	}) {
+		return
 	}
-	tm.mu.Unlock()
 	if cue == "" {
 		cue = passageHintAskLineNotice
+	} else {
+		tm.recorder.Emit(EventHintGiven,
+			infra.F("word_index", hintPos), infra.F("hint_count", hintCount))
 	}
-	tm.runAnnouncement(s, ctx, cancel, cue, purposeChat, nil)
+	tm.runAnnouncementAt(s, epoch, ctx, cancel, cue, purposeChat, nil)
 }
 
 // submitPassage is the passage check_submit: the SAME per-paragraph manual
@@ -658,6 +664,7 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 	lessonID := tm.tutor.lessonID
 	expected := tm.tutor.version
 	total := len(tm.tutor.words)
+	ref := *tm.tutor.passage
 	manual := make(map[int]bool, total)
 	for _, v := range tm.tutor.checkVerdicts {
 		if v.Manual {
@@ -672,11 +679,28 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
+	write, writeAdmitted := tm.admitCheckWriteLocked(lessonID)
+	epoch := tm.epoch
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
+	if !writeAdmitted {
+		cancel()
+		return
+	}
+	requestID := m.RequestID
+	tm.goServerTask(func() {
+		tm.runAcceptedPassageSubmit(s, ctx, cancel, epoch, write, ref, lessonID, expected, requestID, total)
+	})
+}
 
-	res, err := tm.exec.CompleteCheck(ctx, lessonID, expected, m.RequestID, false)
+func (tm *TurnManager) runAcceptedPassageSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, write *checkWriteAdmission, ref passageRef, lessonID string, expected int, requestID string, total int) {
+	persistCtx, persistDone := checkPersistContext(ctx)
+	defer persistDone()
+
+	res, err := tm.exec.CompleteCheck(persistCtx, lessonID, expected, requestID, false)
 	if err != nil {
+		tm.completeCheckWrite(write)
+		cancel()
 		var conflict *lesson.ConflictError
 		if errors.As(err, &conflict) {
 			tm.mu.Lock()
@@ -699,16 +723,18 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 			infra.F("code", ErrCodeDuplicateSubmit),
 			infra.F("duplicate", "passage_submit_latch"),
 		)
+		tm.completeCheckWrite(write)
+		cancel()
 		return
 	}
 
-	tm.mu.Lock()
-	tm.tutor.version = res.NewVersion
-	tm.tutor.checking = false
-	ref := *tm.tutor.passage
-	tm.mu.Unlock()
+	tm.applyTurnAt(epoch, func() error {
+		tm.tutor.version = res.NewVersion
+		tm.tutor.checking = false
+		return nil
+	})
 
-	go tm.finishPassageSubmit(s, ctx, cancel, ref, lessonID, total, res, m.RequestID)
+	tm.finishPassageSubmit(s, persistCtx, ctx, cancel, epoch, ref, lessonID, total, res, requestID, write)
 }
 
 // finishPassageSubmit runs on its own goroutine (the ACK-gated ending
@@ -718,7 +744,7 @@ func (tm *TurnManager) submitPassage(s Sender, m CheckSubmitMsg) {
 // two-phase kind=passage receipt, ship the honest review_result, then speak
 // the wrap line through the ACK gate and end with session_ended
 // (lesson_complete).
-func (tm *TurnManager) finishPassageSubmit(s Sender, ctx context.Context, cancel context.CancelFunc, ref passageRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string) {
+func (tm *TurnManager) finishPassageSubmit(s Sender, persistCtx context.Context, ctx context.Context, cancel context.CancelFunc, epoch uint64, ref passageRef, lessonID string, total int, res lesson.CompleteCheckResult, requestID string, write *checkWriteAdmission) {
 	defer cancel()
 
 	correct := 0
@@ -741,7 +767,7 @@ func (tm *TurnManager) finishPassageSubmit(s Sender, ctx context.Context, cancel
 		// Receipt phase one: pending BEFORE the write (已提交 ≠ 已保存).
 		receiptID := int64(0)
 		if tm.cfg.Receipts != nil {
-			rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+			rec, rerr := tm.cfg.Receipts.Begin(persistCtx, lesson.ReceiptInput{
 				LessonID:  lessonID,
 				RequestID: requestID,
 				Kind:      lesson.ReceiptKindPassage,
@@ -774,13 +800,13 @@ func (tm *TurnManager) finishPassageSubmit(s Sender, ctx context.Context, cancel
 			Mastered:          mastered,
 			ReviewedDay:       beijingDay(time.Now()),
 		}
-		if err := tm.cfg.PassagePractice.RecordPractice(ctx, rec); err != nil {
+		if err := tm.cfg.PassagePractice.RecordPractice(persistCtx, rec); err != nil {
 			// Honest failure: the record was NOT saved — never a narrated
 			// success (S-05). The judgment (verdicts, stage=submitted) is
 			// already persisted on the lesson row and stays visible.
 			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
 			if tm.cfg.Receipts != nil && receiptID > 0 {
-				if cerr := tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false); cerr != nil {
+				if cerr := tm.cfg.Receipts.Complete(persistCtx, receiptID, nil, requestedSet, false); cerr != nil {
 					tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 				}
 			}
@@ -794,7 +820,7 @@ func (tm *TurnManager) finishPassageSubmit(s Sender, ctx context.Context, cancel
 				infra.F("whole", ref.Whole),
 			)
 			if tm.cfg.Receipts != nil && receiptID > 0 {
-				if cerr := tm.cfg.Receipts.Complete(ctx, receiptID, requestedSet, nil, true); cerr != nil {
+				if cerr := tm.cfg.Receipts.Complete(persistCtx, receiptID, requestedSet, nil, true); cerr != nil {
 					tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 				}
 			}
@@ -807,24 +833,39 @@ func (tm *TurnManager) finishPassageSubmit(s Sender, ctx context.Context, cancel
 			infra.F("at", "passage_practice"),
 		)
 	}
+	// The accepted passage save ends with its practice record and receipt.
+	// Feedback and summary playback remain cancellable presentation work.
+	tm.completeCheckWrite(write)
 
 	updated := 0
 	missing := 1
 	if recorded {
 		updated, missing = 1, 0
 	}
-	tm.mu.Lock()
-	tm.tutor.reviewSeen = true
-	tm.mu.Unlock()
-
-	_ = s.SendControl(ReviewResultMsg{
+	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
 		Requested: 1,
 		Updated:   updated,
 		Missing:   missing,
 		Unchecked: false,
-	})
+	}
 
 	summary := passageSummaryText(ref.Title, ref.Whole, ref.Paragraphs, total, correct, saveFailed)
-	tm.runNaturalEnding(s, ctx, cancel, summary, purposePassageSummary, ReasonLessonComplete)
+	if tm.checkSubmitPresentationInterleave != nil {
+		tm.checkSubmitPresentationInterleave()
+	}
+	if !tm.applyTurnAt(epoch, func() error {
+		if err := s.SendControl(result); err != nil {
+			return err
+		}
+		tm.tutor.reviewSeen = true
+		tm.tutor.reviewResult = result
+		return nil
+	}) {
+		return
+	}
+	if tm.checkSubmitSummaryInterleave != nil {
+		tm.checkSubmitSummaryInterleave()
+	}
+	tm.runNaturalEndingAt(s, epoch, ctx, cancel, summary, purposePassageSummary, ReasonLessonComplete)
 }

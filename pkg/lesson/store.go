@@ -128,8 +128,10 @@ type Word struct {
 
 // WordOutcome is one word's recorded dictation-stage behavior (13.1-01):
 // the U-9 outcome vocabulary ("confirmed"/"timeout"/"hint") plus the word's
-// hint-request count. The check stage snapshots these into the lessons row
-// at EnterCheck so the unified rating (checkRating(result, hints)) survives
+// hint-request count. Each word's outcome lands on the lessons row with its
+// OWN advance (AdvanceDictation, issue #56 path B — same transaction as the
+// cursor move); EnterCheck's whole-classroom snapshot remains for the legacy
+// two-step flow. The unified rating (checkRating(result, hints)) survives
 // reconnects — per-word behavior used to live only in memory.
 type WordOutcome struct {
 	Outcome string `json:"outcome"`
