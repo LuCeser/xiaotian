@@ -28,6 +28,9 @@ MAX_CARD_LIMIT = 100
 # many words (AC-11 单次最多 100 个). Must stay equal to Go
 # pybridge.MaxDesignateLimit.
 MAX_DESIGNATE_LIMIT = 100
+# Client request key for atomic designation create (Issue #80 U10). Must stay
+# in sync with Go pybridge.MaxDesignationRequestKeyLen.
+MAX_DESIGNATION_REQUEST_KEY_LEN = 128
 # Ten 366-day years. Must match Go pybridge.MaxFetchLockHours.
 MAX_FETCH_LOCK_HOURS = 24 * 366 * 10
 
@@ -569,6 +572,53 @@ def cmd_new(db, args):
     print(json.dumps(new_cards, ensure_ascii=False, indent=2))
 
 
+def _normalize_designation_category(category):
+    if category and str(category).strip().lower() == "chinese":
+        return "chinese"
+    return "english"
+
+
+def _designations_atomic_ready(db):
+    row = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='designations'",
+    ).fetchone()
+    if row is None:
+        return False
+    cols = {r[1] for r in db.execute("PRAGMA table_info(designations)")}
+    return "request_key" in cols
+
+
+def _designation_cards_for_response(cards):
+    out = []
+    for c in cards:
+        out.append({
+            "id": c["id"],
+            "word": c.get("word", ""),
+            "meaning": c.get("meaning", ""),
+            "example": c.get("example", ""),
+            "unit": c.get("unit", ""),
+        })
+    return out
+
+
+def _designation_ok_payload(textbook_id, lesson, cards, designation_id=None,
+                            designation_status=None, category=None):
+    payload = {
+        "status": "ok",
+        "textbook_id": textbook_id,
+        "lesson": lesson,
+        "total": len(cards),
+        "cards": _designation_cards_for_response(cards),
+    }
+    if designation_id is not None:
+        payload["designation_id"] = designation_id
+    if designation_status is not None:
+        payload["designation_status"] = designation_status
+    if category is not None:
+        payload["category"] = category
+    return payload
+
+
 def cmd_designate(db, args):
     """Issue #80 指定默写 selection: every participates=1 card assigned to
     one (textbook, lesson), regardless of learned_lessons progress, FSRS
@@ -607,7 +657,49 @@ def cmd_designate(db, args):
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     lock_hours = args.fetch_lock_hours if args.fetch_lock_hours is not None else FETCH_LOCK_HOURS
 
+    request_key = (getattr(args, "request_key", None) or "").strip()
+    atomic_create = bool(request_key)
+    if atomic_create:
+        if len(request_key) > MAX_DESIGNATION_REQUEST_KEY_LEN:
+            print(f"Error: request key longer than {MAX_DESIGNATION_REQUEST_KEY_LEN} characters")
+            sys.exit(1)
+        if not _designations_atomic_ready(db):
+            print("Error: designations table is not ready for atomic create (run Go lesson migration on this database file)")
+            sys.exit(1)
+
+    category = _normalize_designation_category(getattr(args, "category", None))
+
     db.execute("BEGIN IMMEDIATE")
+
+    if atomic_create:
+        existing = db.execute(
+            """SELECT id, textbook_id, lesson, category, cards, status
+               FROM designations WHERE request_key = ?""",
+            (request_key,),
+        ).fetchone()
+        if existing is not None:
+            if existing["textbook_id"] != args.textbook_id or existing["lesson"] != lesson:
+                db.rollback()
+                print(json.dumps({
+                    "status": "key_conflict",
+                    "textbook_id": args.textbook_id,
+                    "lesson": lesson,
+                    "total": 0,
+                }, ensure_ascii=False, indent=2))
+                return
+            try:
+                stored_cards = json.loads(existing["cards"] or "[]")
+            except (TypeError, ValueError):
+                stored_cards = []
+            db.commit()
+            print(json.dumps(_designation_ok_payload(
+                existing["textbook_id"], existing["lesson"], stored_cards,
+                designation_id=existing["id"],
+                designation_status=existing["status"],
+                category=existing["category"],
+            ), ensure_ascii=False, indent=2))
+            return
+
     rows = db.execute(
         """SELECT c.id, c.word, c.meaning, c.example, c.unit, c.fetch_locked_until
            FROM cards c
@@ -645,9 +737,34 @@ def cmd_designate(db, args):
             f"UPDATE cards SET fetch_locked_until = ? WHERE id IN ({placeholders})",
             [locked_until] + ids,
         )
+    designation_id = None
+    if atomic_create and cards:
+        cards_json = json.dumps([
+            {"id": c["id"], "word": c["word"], "meaning": c["meaning"],
+             "example": c["example"]}
+            for c in cards
+        ], ensure_ascii=False)
+        if os.environ.get("HTA_TEST_FAIL_DESIGNATION_INSERT") == "1":
+            db.execute("INSERT INTO designations__test_fail VALUES (1)")
+        cur = db.execute(
+            """INSERT INTO designations
+               (textbook_id, lesson, category, cards, status, created_at, consumed_at, request_key)
+               VALUES (?, ?, ?, ?, 'pending', datetime('now'), '', ?)""",
+            (args.textbook_id, lesson, category, cards_json, request_key),
+        )
+        designation_id = cur.lastrowid
     db.commit()
+    if atomic_create:
+        print(json.dumps(_designation_ok_payload(
+            args.textbook_id, lesson, cards,
+            designation_id=designation_id,
+            designation_status="pending" if designation_id is not None else None,
+            category=category if designation_id is not None else None,
+        ), ensure_ascii=False, indent=2))
+        return
     print(json.dumps({"status": "ok", "textbook_id": args.textbook_id,
-                      "lesson": lesson, "total": len(cards), "cards": cards},
+                      "lesson": lesson, "total": len(cards),
+                      "cards": _designation_cards_for_response(cards)},
                      ensure_ascii=False, indent=2))
 
 
@@ -1428,6 +1545,10 @@ def main():
                              help="Lesson name from the textbook's list (待确认/课表外 cannot be designated)")
     p_designate.add_argument("--fetch-lock-hours", type=bounded_positive_int(MAX_FETCH_LOCK_HOURS), default=None,
                              help=f"Hours to lock the selected cards (default: {FETCH_LOCK_HOURS})")
+    p_designate.add_argument("--request-key", default=None,
+                             help="Client request key for atomic designation snapshot (Issue #80 U10)")
+    p_designate.add_argument("--category", default="",
+                             help="Subject for the designation snapshot when --request-key is set")
 
     # review
     p_review = subparsers.add_parser("review", help="Record review results")
