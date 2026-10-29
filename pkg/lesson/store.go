@@ -209,7 +209,6 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		idxReceiptsLesson,
 		designationsDDL, // Issue #80 指定默写: created designations, pending → consumed exactly once
 		idxDesignationsPending,
-		idxDesignationsRequestKey,
 	}
 
 	for _, stmt := range statements {
@@ -253,9 +252,9 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		if _, err := db.ExecContext(ctx, alterDesignationsAddRequestKey); err != nil {
 			return fmt.Errorf("lesson/migrate: %w", err)
 		}
-		if _, err := db.ExecContext(ctx, idxDesignationsRequestKey); err != nil {
-			return fmt.Errorf("lesson/migrate: %w", err)
-		}
+	}
+	if _, err := db.ExecContext(ctx, idxDesignationsRequestKey); err != nil {
+		return fmt.Errorf("lesson/migrate: %w", err)
 	}
 
 	return nil
