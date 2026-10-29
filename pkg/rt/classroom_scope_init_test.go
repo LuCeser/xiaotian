@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -652,6 +653,158 @@ func TestSameLessonReinitAfterSaveLandedUnderReadRefused(t *testing.T) {
 	tm.mu.Unlock()
 	if scopeLesson != ttLessonID {
 		t.Fatalf("live scope lesson = %q, want %q (the refusal replaced nothing)", scopeLesson, ttLessonID)
+	}
+}
+
+// TestSameLessonReinitAfterSaveLandedBeforeInstallRefused (review P1-2 fix2):
+// the same-lessonID save check must cover TO THE INSTALL DECISION. The re-init
+// passes the row read's in-flight check and parks at checkResumeInterleave —
+// the exact window between that check's unlock and the panel's install
+// effect. While it parks, the STILL-LIVE classroom's real VOICE verdict entry
+// admits a save, lands it and fully releases its registration (only the
+// completion counter witnesses the landing). The released re-init must then
+// refuse with the recoverable busy error and install nothing: an install that
+// re-checks only generation/epoch would seat the panel on the pre-verdict
+// version/verdicts. The interleave alone controls the window — no clocks.
+func TestSameLessonReinitAfterSaveLandedBeforeInstallRefused(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	tm, s := ttInitCheckingRow(t, exec, words)
+
+	// The one-shot park at the panel's own seam: A's FIRST resume panel ran
+	// before this arm, so only the re-init parks here.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	tm.mu.Lock()
+	tm.checkResumeInterleave = func() {
+		first := false
+		once.Do(func() { first = true; close(entered) })
+		if first {
+			<-release
+		}
+	}
+	tm.mu.Unlock()
+
+	reinitDone := make(chan struct{})
+	go func() {
+		defer close(reinitDone)
+		ttInit(t, tm, s)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		close(release)
+		<-reinitDone
+		t.Fatal("the re-init never parked at the panel seam")
+	}
+
+	readyBefore := s.countOf(TypeSessionReady)
+	startedBefore := s.countOf(TypeCheckStarted)
+	tm.mu.Lock()
+	epoch, scopeGen, doneBefore := tm.epoch, tm.activeScope.gen, tm.lessonSaveDoneCountLocked(ttLessonID)
+	tm.mu.Unlock()
+
+	// The old classroom's real voice verdict (the entry checkDispatch calls):
+	// admitted, written, registration fully released — the announcement is
+	// acked so the function returns and the save counts as LANDED.
+	verdictDone := make(chan struct{})
+	go func() {
+		defer close(verdictDone)
+		tm.applyVoiceVerdict(s, context.Background(), func() {}, epoch,
+			intentPayload{Intent: intentCheckRight, Index: 1})
+	}()
+	// The verdict's OWN spoken line — matched by its fixed text, never "the
+	// next sentence": A's resume bridge may still be speaking its own
+	// sentences on its goroutine, and acking one of those instead would let
+	// the verdict's line time out and CLOSE the session (orderly playback
+	// timeout), silencing the busy refusal under test.
+	ackVerdictLine := func() string {
+		for _, m := range s.controlsOf(t, TypeTeacherSentence) {
+			if text, _ := m["text"].(string); strings.Contains(text, "第 1 个词对了") {
+				if sid, _ := m["sentence_id"].(string); sid != "" {
+					return sid
+				}
+			}
+		}
+		return ""
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckVerdicts) >= 1 && ackVerdictLine() != "" }) {
+		close(release)
+		<-reinitDone
+		t.Fatal("the voice verdict never wrote its echo and spoke its ack line")
+	}
+	tm.HandleControl(s, mustJSON(t, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: ackVerdictLine(), Epoch: epoch}))
+	select {
+	case <-verdictDone:
+	case <-time.After(5 * time.Second):
+		close(release)
+		<-reinitDone
+		t.Fatal("the voice verdict task never finished")
+	}
+	tm.mu.Lock()
+	stillRegistered := tm.lessonSaveInFlightLocked(ttLessonID)
+	doneCount := tm.lessonSaveDoneCountLocked(ttLessonID)
+	tm.mu.Unlock()
+	if stillRegistered || doneCount != doneBefore+1 {
+		close(release)
+		<-reinitDone
+		t.Fatalf("interleave premise failed: registered=%v completed=%d, want the voice save landed and released (base %d)",
+			stillRegistered, doneCount, doneBefore)
+	}
+
+	// Release the re-init into the install decision: the row snapshot it
+	// holds predates the landed save and must be refused, not installed.
+	close(release)
+	<-reinitDone
+
+	errCount, recoverable := 0, false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		sentControls := append([][]byte(nil), s.controls...)
+		s.mu.Unlock()
+		errCount, recoverable = 0, false
+		for _, raw := range sentControls {
+			var probe struct {
+				Type        string `json:"type"`
+				Code        string `json:"code"`
+				Recoverable bool   `json:"recoverable"`
+			}
+			if json.Unmarshal(raw, &probe) == nil && probe.Type == TypeError &&
+				probe.Code == ErrCodeLessonUnavailable {
+				errCount++
+				recoverable = probe.Recoverable
+			}
+		}
+		if errCount > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if errCount != 1 || !recoverable {
+		t.Fatalf("reentry after the save landed before the install answered %d lesson errors (recoverable=%v), want exactly 1 recoverable — the pre-save row must be refused at the install decision",
+			errCount, recoverable)
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		t.Fatalf("session_ready after the refused reinit = %d, want %d (no classroom on the pre-save row)", got, readyBefore)
+	}
+	if got := s.countOf(TypeCheckStarted); got != startedBefore {
+		t.Fatalf("check_started after the refused reinit = %d, want %d (no panel on the pre-save row)", got, startedBefore)
+	}
+	tm.mu.Lock()
+	gotScope := tm.activeScope.lessonID
+	gotGen := tm.activeScope.gen
+	gotVer := tm.tutor.version
+	tm.mu.Unlock()
+	if gotScope != ttLessonID || gotGen != scopeGen {
+		t.Fatalf("live scope = %q gen %d, want %q gen %d (the refusal replaced nothing)", gotScope, gotGen, ttLessonID, scopeGen)
+	}
+	exec.mu.Lock()
+	rowVer := exec.lesson.Version
+	exec.mu.Unlock()
+	if gotVer != rowVer {
+		t.Fatalf("live tutor version = %d, want %d (the voice verdict's own writeback stands)", gotVer, rowVer)
 	}
 }
 
