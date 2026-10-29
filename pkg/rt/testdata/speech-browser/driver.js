@@ -538,7 +538,6 @@ async function waitSentenceAcked(page, text, timeoutMs, label) {
   return waitSentenceAckedBy(page, (t) => t === text, timeoutMs, label);
 }
 
-
 // ---------------------------------------------------------------------------
 // S4（issue #69 rethink3）：课堂切换竞态的只读观察辅助。换课在同一连接上
 // 发生（同一条 WebSocket 内的第二个 session_init），页面/播放器全程真实；
@@ -722,6 +721,64 @@ function roundLastIndex(facts) {
     : 0;
 }
 
+async function waitSentenceAckedBy(page, pred, timeoutMs, label) {
+  await waitWs(page, (view) => {
+    const s = view.find((e) => e.dir === 'in' && e.type === 'teacher_sentence' && e.msg && pred(e.msg.text));
+    if (!s) return false;
+    return view.some((e) => e.dir === 'out' && e.type === 'sentence_ack' && e.msg && e.msg.sentence_id === s.msg.sentence_id);
+  }, { timeoutMs, label });
+}
+
+// scenario "practice-submit-close"（1.10b 复验）：已提交词课堂短路结束
+// （session_ended(lesson_complete)）→ banner 的「再练一组」以同一 start 流
+// 程开新连接进加练课堂；加练开场与逐词播报全部自然 ACK，两次语音「写了
+// 完了」推进（合成音调→生产采集→VAD→ASR→confirm），检查面板两行人工判
+// 定后提交；关闭由 Go 侧在提交闩驻留时触发。
+async function scenarioPracticeSubmitClose(args) {
+  const { page, url, timeoutMs } = args;
+  await page.goto(url);
+  await page.locator('#rt-start').click();
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'session_ended' && e.msg && e.msg.reason === 'lesson_complete'),
+    { timeoutMs, label: 'completed lesson short-circuit' });
+  await page.locator('.rt-practice-btn').click();
+  await waitSentenceAcked(page, '你好呀！', timeoutMs, 'practice greeting sentence 1');
+  await waitSentenceAcked(page, '今天我们有 2 个词要写。', timeoutMs, 'practice greeting sentence 2');
+  // Student masking (D-10): the greeting/word subtitles carry the word's
+  // POSITION only, never its text — and the picker's order is random.
+  await waitSentenceAcked(page, '听好哦：第 1 个词。', timeoutMs, 'practice greeting sentence 3');
+  await playPcm16(page, tonePcm16Base64());
+  await waitSentenceAcked(page, '第 2 个词。', timeoutMs, 'second practice word announced');
+  await playPcm16(page, tonePcm16Base64());
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'check_started'),
+    { timeoutMs, label: 'spoken confirm opened the practice check' });
+  // The check bridge must finish its natural playback too — the baseline is
+  // taken only after it, so late-frame counting cannot absorb it.
+  await waitSentenceAcked(page, '全都写完啦，真棒！', timeoutMs, 'practice check bridge sentence 1');
+  await waitSentenceAckedBy(page, (t) => t.indexOf('现在我们一起检查：屏幕上有 2 个词') === 0, timeoutMs, 'practice check bridge sentence 2');
+  const buttons = page.locator('.rt-check-row .rt-check-btn');
+  await buttons.nth(0).click();
+  await buttons.nth(2).click();
+  await page.locator('.rt-check-submit').click();
+  // TWO closes: the completed short-circuit connection (the page dropped it
+  // when 再练一组 reconnected) and the practice connection's goodbye —
+  // wait for BOTH so the late window starts at the last one.
+  await waitWs(page, (view) => view.filter((e) => e.dir === 'evt' && e.kind === 'close').length >= 2,
+    { timeoutMs, label: 'both connections closed (short-circuit + practice goodbye)' });
+  const view = await wsView(page);
+  // TWO connections live in this journey: the completed short-circuit's own
+  // close fires FIRST, the practice connection's close last — late frames
+  // are counted only past the LAST close event.
+  const closeAt = view.map((e) => e.dir === 'evt' && e.kind === 'close').lastIndexOf(true);
+  const after = closeAt >= 0 ? view.slice(closeAt + 1) : [];
+  return {
+    ok: true,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    lateTeacherSentences: after.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length,
+    lateReviewResults: after.filter((e) => e.dir === 'in' && e.type === 'review_result').length,
+    lateSentenceTexts: after.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').map((e) => e.msg && e.msg.text),
+  };
+}
+
 // scenario "check-submit-natural"（S4）：真实提交的当前课堂成功路径——恢复
 // 播报自然完成后点「检查完了，提交」，提交的锁存、FSRS 保存、回执与结果/
 // 总结呈现全部自然发生（总结轮自然 ACK，随后 session_ended 与页面关闭）。
@@ -851,120 +908,69 @@ async function scenarioClassroomSwitchSubmit(args) {
   };
 }
 
-async function waitSentenceAckedBy(page, pred, timeoutMs, label) {
-  await waitWs(page, (view) => {
-    const s = view.find((e) => e.dir === 'in' && e.type === 'teacher_sentence' && e.msg && pred(e.msg.text));
-    if (!s) return false;
-    return view.some((e) => e.dir === 'out' && e.type === 'sentence_ack' && e.msg && e.msg.sentence_id === s.msg.sentence_id);
-  }, { timeoutMs, label });
-}
-
-// scenario "practice-submit-close"（1.10b 复验）：已提交词课堂短路结束
-// （session_ended(lesson_complete)）→ banner 的「再练一组」以同一 start 流
-// 程开新连接进加练课堂；加练开场与逐词播报全部自然 ACK，两次语音「写了
-// 完了」推进（合成音调→生产采集→VAD→ASR→confirm），检查面板两行人工判
-// 定后提交；关闭由 Go 侧在提交闩驻留时触发。
-async function scenarioPracticeSubmitClose(args) {
+// scenario "subject-ask-switch"（S4）：双科都有到期词 → subject_ask 问题自然
+// 播报后，孩子语音答「语文」（真实采集→VAD→ASR→关键词绑定）——A 的续接在
+// 取词处驻留（Go 侧按类目门），Go 侧同连接注入 B（english 独立行）：B 安装
+// 并自然完成开场。迟到续接释放后必须零输出（无第二个 session_ready、无 A
+// 的开场播报、无第二条 epoch 通知）。
+async function scenarioSubjectAskSwitch(args) {
   const { page, url, timeoutMs } = args;
   await page.goto(url);
   await page.locator('#rt-start').click();
-  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'session_ended' && e.msg && e.msg.reason === 'lesson_complete'),
-    { timeoutMs, label: 'completed lesson short-circuit' });
-  await page.locator('.rt-practice-btn').click();
-  await waitSentenceAcked(page, '你好呀！', timeoutMs, 'practice greeting sentence 1');
-  await waitSentenceAcked(page, '今天我们有 2 个词要写。', timeoutMs, 'practice greeting sentence 2');
-  // Student masking (D-10): the greeting/word subtitles carry the word's
-  // POSITION only, never its text — and the picker's order is random.
-  await waitSentenceAcked(page, '听好哦：第 1 个词。', timeoutMs, 'practice greeting sentence 3');
-  await playPcm16(page, tonePcm16Base64());
-  await waitSentenceAcked(page, '第 2 个词。', timeoutMs, 'second practice word announced');
-  await playPcm16(page, tonePcm16Base64());
-  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'check_started'),
-    { timeoutMs, label: 'spoken confirm opened the practice check' });
-  // The check bridge must finish its natural playback too — the baseline is
-  // taken only after it, so late-frame counting cannot absorb it.
-  await waitSentenceAcked(page, '全都写完啦，真棒！', timeoutMs, 'practice check bridge sentence 1');
-  await waitSentenceAckedBy(page, (t) => t.indexOf('现在我们一起检查：屏幕上有 2 个词') === 0, timeoutMs, 'practice check bridge sentence 2');
-  const buttons = page.locator('.rt-check-row .rt-check-btn');
-  await buttons.nth(0).click();
-  await buttons.nth(2).click();
-  await page.locator('.rt-check-submit').click();
-  // TWO closes: the completed short-circuit connection (the page dropped it
-  // when 再练一组 reconnected) and the practice connection's goodbye —
-  // wait for BOTH so the late window starts at the last one.
-  await waitWs(page, (view) => view.filter((e) => e.dir === 'evt' && e.kind === 'close').length >= 2,
-    { timeoutMs, label: 'both connections closed (short-circuit + practice goodbye)' });
+  const ask = await waitNthRoundAcked(page, args.expectedSentences, 1, timeoutMs, 'subject ask played naturally');
+  await playPcm16(page, tonePcm16Base64(), 16000, 0.6);
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'session_ready'),
+    { timeoutMs, label: 'the replacement classroom\'s session_ready' });
+  const greeting = await waitNthRoundAcked(page, args.expectedSecond, 1, timeoutMs, 'B greeting played naturally');
+  const baseline = roundLastIndex(greeting);
+  await page.waitForTimeout(args.lateWindowMs);
   const view = await wsView(page);
-  // TWO connections live in this journey: the completed short-circuit's own
-  // close fires FIRST, the practice connection's close last — late frames
-  // are counted only past the LAST close event.
-  const closeAt = view.map((e) => e.dir === 'evt' && e.kind === 'close').lastIndexOf(true);
-  const after = closeAt >= 0 ? view.slice(closeAt + 1) : [];
   return {
     ok: true,
+    rounds: [ask, greeting],
+    lateWindow: lateFrameCounts(view, baseline),
+    readyCount: frameCount(view, 'in', 'session_ready'),
+    readyIndexes: view.filter((e) => e.dir === 'in' && e.type === 'session_ready').map((e) => e.i),
+    interruptAcks: interruptAckFacts(view),
+    errorFrames: errorFrameFacts(view),
     wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
-    lateTeacherSentences: after.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length,
-    lateReviewResults: after.filter((e) => e.dir === 'in' && e.type === 'review_result').length,
-    lateSentenceTexts: after.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').map((e) => e.msg && e.msg.text),
+    droppedChunks: (await playbackState(page)).droppedChunks,
   };
 }
 
-async function waitSentenceAckedBy(page, pred, timeoutMs, label) {
-  await waitWs(page, (view) => {
-    const s = view.find((e) => e.dir === 'in' && e.type === 'teacher_sentence' && e.msg && pred(e.msg.text));
-    if (!s) return false;
-    return view.some((e) => e.dir === 'out' && e.type === 'sentence_ack' && e.msg && e.msg.sentence_id === s.msg.sentence_id);
-  }, { timeoutMs, label });
-}
-
-// scenario "practice-submit-close"（1.10b 复验）：已提交词课堂短路结束
-// （session_ended(lesson_complete)）→ banner 的「再练一组」以同一 start 流
-// 程开新连接进加练课堂；加练开场与逐词播报全部自然 ACK，两次语音「写了
-// 完了」推进（合成音调→生产采集→VAD→ASR→confirm），检查面板两行人工判
-// 定后提交；关闭由 Go 侧在提交闩驻留时触发。
-async function scenarioPracticeSubmitClose(args) {
+// scenario "reinit-same-row"（S4）：同一 lessonID 的重入（无在途保存）——恢复
+// 播报自然完成后，同连接再次 session_init 同一行：interrupt_ack（旧→新
+// epoch）先于第二个 session_ready，检查恢复的桥接播报骑安装后的新 epoch
+// 自然 ACK，连接保持（无结束、无关闭）。
+async function scenarioReinitSameRow(args) {
   const { page, url, timeoutMs } = args;
   await page.goto(url);
   await page.locator('#rt-start').click();
-  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'session_ended' && e.msg && e.msg.reason === 'lesson_complete'),
-    { timeoutMs, label: 'completed lesson short-circuit' });
-  await page.locator('.rt-practice-btn').click();
-  await waitSentenceAcked(page, '你好呀！', timeoutMs, 'practice greeting sentence 1');
-  await waitSentenceAcked(page, '今天我们有 2 个词要写。', timeoutMs, 'practice greeting sentence 2');
-  // Student masking (D-10): the greeting/word subtitles carry the word's
-  // POSITION only, never its text — and the picker's order is random.
-  await waitSentenceAcked(page, '听好哦：第 1 个词。', timeoutMs, 'practice greeting sentence 3');
-  await playPcm16(page, tonePcm16Base64());
-  await waitSentenceAcked(page, '第 2 个词。', timeoutMs, 'second practice word announced');
-  await playPcm16(page, tonePcm16Base64());
-  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'check_started'),
-    { timeoutMs, label: 'spoken confirm opened the practice check' });
-  // The check bridge must finish its natural playback too — the baseline is
-  // taken only after it, so late-frame counting cannot absorb it.
-  await waitSentenceAcked(page, '全都写完啦，真棒！', timeoutMs, 'practice check bridge sentence 1');
-  await waitSentenceAckedBy(page, (t) => t.indexOf('现在我们一起检查：屏幕上有 2 个词') === 0, timeoutMs, 'practice check bridge sentence 2');
-  const buttons = page.locator('.rt-check-row .rt-check-btn');
-  await buttons.nth(0).click();
-  await buttons.nth(2).click();
-  await page.locator('.rt-check-submit').click();
-  // TWO closes: the completed short-circuit connection (the page dropped it
-  // when 再练一组 reconnected) and the practice connection's goodbye —
-  // wait for BOTH so the late window starts at the last one.
-  await waitWs(page, (view) => view.filter((e) => e.dir === 'evt' && e.kind === 'close').length >= 2,
-    { timeoutMs, label: 'both connections closed (short-circuit + practice goodbye)' });
+  const first = await waitNthRoundAcked(page, args.expectedSentences, 1, timeoutMs, 'first resume bridge played naturally');
+  await waitWs(page, (view) => frameCount(view, 'in', 'session_ready') >= 2,
+    { timeoutMs, label: 'the re-init\'s session_ready' });
+  const second = await waitNthRoundAcked(page, args.expectedSecond, 2, timeoutMs, 're-init bridge played naturally');
+  const baseline = roundLastIndex(second);
+  await page.waitForTimeout(args.lateWindowMs);
   const view = await wsView(page);
-  // TWO connections live in this journey: the completed short-circuit's own
-  // close fires FIRST, the practice connection's close last — late frames
-  // are counted only past the LAST close event.
-  const closeAt = view.map((e) => e.dir === 'evt' && e.kind === 'close').lastIndexOf(true);
-  const after = closeAt >= 0 ? view.slice(closeAt + 1) : [];
   return {
     ok: true,
+    rounds: [first, second],
+    lateWindow: lateFrameCounts(view, baseline),
+    readyCount: frameCount(view, 'in', 'session_ready'),
+    readyIndexes: view.filter((e) => e.dir === 'in' && e.type === 'session_ready').map((e) => e.i),
+    checkStartedCount: frameCount(view, 'in', 'check_started'),
+    interruptAcks: interruptAckFacts(view),
+    errorFrames: errorFrameFacts(view),
     wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
-    lateTeacherSentences: after.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length,
-    lateReviewResults: after.filter((e) => e.dir === 'in' && e.type === 'review_result').length,
-    lateSentenceTexts: after.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').map((e) => e.msg && e.msg.text),
   };
+}
+
+// scenario "reinit-during-submit"（S4）：A 的提交锁存驻留（Go 门）时同连接重
+// 入同一 lessonID——按推荐语义必须答一条可恢复的初始化错误（不装旧状态课
+// 堂）；随后 A 的保存自然完成（结果/总结自然 ACK、session_ended、关闭）。
+async function scenarioReinitDuringSubmit(args) {
+  return scenarioCheckSubmitNatural({ ...args, expectBusyError: true });
 }
 
 const SCENARIOS = {
@@ -981,6 +987,12 @@ const SCENARIOS = {
   'poem-submit-close': scenarioPoemSubmitClose,
   'practice-submit-close': scenarioPracticeSubmitClose,
   'starve-probe': scenarioStarveProbe,
+  'check-submit-natural': scenarioCheckSubmitNatural,
+  'classroom-switch-opening': scenarioClassroomSwitchOpening,
+  'classroom-switch-submit': scenarioClassroomSwitchSubmit,
+  'subject-ask-switch': scenarioSubjectAskSwitch,
+  'reinit-same-row': scenarioReinitSameRow,
+  'reinit-during-submit': scenarioReinitDuringSubmit,
 };
 
 async function main() {
@@ -1000,14 +1012,22 @@ async function main() {
   const timeoutMs = Number(opt('--timeout-ms') || 45000);
   const holdMs = Number(opt('--hold-ms') || 3000);
   const submitDelayMs = Number(opt('--submit-delay-ms') || 0);
+  const lateWindowMs = Number(opt('--late-window-ms') || 3000);
+  const rejectMarginMs = Number(opt('--reject-margin-ms') || 8000);
+  const expectBusyError = Number(opt('--expect-busy-error') || 0) === 1;
   const expectedPcmPerSentence = Number(opt('--expected-pcm-per-sentence'));
-  let expectedSentences;
-  try {
-    expectedSentences = JSON.parse(opt('--expected-sentences-json') || 'null');
-  } catch (err) {
-    emit({ ok: false, error: 'invalid --expected-sentences-json: ' + String(err.message || err) });
-    process.exit(2);
-  }
+  const parseList = (name) => {
+    try {
+      return JSON.parse(opt(name) || 'null');
+    } catch (err) {
+      emit({ ok: false, error: 'invalid ' + name + ': ' + String(err.message || err) });
+      process.exit(2);
+    }
+    return null;
+  };
+  const expectedSentences = parseList('--expected-sentences-json');
+  const expectedSecond = parseList('--expected-second-json');
+  const expectedThird = parseList('--expected-third-json');
   const run = SCENARIOS[scenarioName];
   if (!url || !run) {
     emit({ ok: false, error: 'usage: driver.js --url URL [--scenario NAME] [--timeout-ms N] | --check' });
@@ -1021,7 +1041,7 @@ async function main() {
     const page = await context.newPage();
     await installRtObserver(page);
     await installFakeMic(page);
-    result = await run({ page, url, timeoutMs, holdMs, submitDelayMs, expectedSentences, expectedPcmPerSentence });
+    result = await run({ page, url, timeoutMs, holdMs, submitDelayMs, expectedSentences, expectedSecond, expectedThird, expectedPcmPerSentence, lateWindowMs, rejectMarginMs, expectBusyError });
     await context.close();
   } catch (err) {
     result = { ok: false, error: String((err && err.message) || err) };
