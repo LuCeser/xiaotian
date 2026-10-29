@@ -270,3 +270,133 @@ func TestClassroomSubmitNaturalBrowser(t *testing.T) {
 			tutor.version, tutor.checking, tutor.reviewSee, l.Version)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Case S — A's accepted submit parked across a same-connection switch to an
+// independent REAL row (R1's T1 writeback half in a real browser): B finishes
+// its own opening naturally before A resumes; A's save lands on A's row with
+// A's receipt and zero late presentation; B's version/checking stay B's; B's
+// own submit then succeeds through the real panel.
+// ---------------------------------------------------------------------------
+
+func TestClassroomSwitchDuringSubmitBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.armPoemPassageSaveChain()
+	f.seedCheckingWithManualVerdicts()             // A: today's REAL chinese row, checking
+	speechSeedEnglishCheckingWithManualVerdicts(f) // B: an independent REAL row
+	f.mu.Lock()
+	f.words.reviewResult = ReviewWriteResult{
+		Requested: []string{"听写浏览器", "第二词"},
+		Updated:   []string{"听写浏览器", "第二词"},
+	}
+	f.mu.Unlock()
+	before, _ := f.gateCheckSubmit(true, false)
+	t.Cleanup(before.release)
+
+	bridge := string(mustJSON(t, speechExpectedCheckResume))
+	summary := string(mustJSON(t, speechExpectedSummaryAllCorrect))
+	driver := f.runDriverAsync("classroom-switch-submit", 60*time.Second,
+		"--expected-second-json", bridge, "--expected-third-json", summary,
+		"--late-window-ms", "5000")
+
+	if !speechGateHit(before, 30*time.Second) {
+		f.reclaimAndFail(driver, []func(){before.release}, "A's formal submit never reached the real latch write")
+	}
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, []func(){before.release}, "no /rt connection was created before the deadline")
+	}
+
+	// The switch: B's session_init through the production entry on the REAL
+	// connection while A's accepted save is parked.
+	speechInjectSessionInit(t, f, m, "english")
+	if !waitFor(t, 30*time.Second, func() bool { return f.announcementDone.Load() >= 2 }) {
+		f.reclaimAndFail(driver, []func(){before.release}, "B's resume bridge never settled through the real page")
+	}
+
+	// B's live classroom state, captured BEFORE A resumes.
+	want := speechTutorStateOf(m)
+	if want.lessonID == "" || want.checking != true {
+		f.reclaimAndFail(driver, []func(){before.release}, "B's checking classroom was not the live one at the switch (state %+v)", want)
+	}
+
+	// Resume A: the accepted save completes on its own row; its presentation
+	// must be refused by the switched epoch AND its writeback by the scope.
+	before.release()
+	if !waitFor(t, 30*time.Second, func() bool { return m.TurnManager.serverTasksSettled() }) {
+		f.reclaimAndFail(driver, nil, "A's superseded submit task never finished after the release")
+	}
+	got := speechTutorStateOf(m)
+	if got != want {
+		f.reclaimAndFail(driver, nil,
+			"B's tutor after A's superseded save = %+v, want %+v — the writeback scope gate must keep B's version/checking B's own", got, want)
+	}
+
+	// A's row keeps the save, its words, and exactly one saved receipt.
+	lessonIDA := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	l, err := f.tools.GetLessonState(context.Background(), lessonIDA)
+	if err != nil {
+		f.reclaimAndFail(driver, nil, "read A's row: %v", err)
+	}
+	if l.Stage != lesson.StageSubmitted || l.Unchecked || len(l.Verdicts) != 2 {
+		f.reclaimAndFail(driver, nil, "A's row = stage %q unchecked %v verdicts %d, want submitted/false/2 — the accepted save must complete",
+			l.Stage, l.Unchecked, len(l.Verdicts))
+	}
+	if subs := f.words.submittedCategories(); len(subs) != 1 || subs[0] != "chinese" {
+		f.reclaimAndFail(driver, nil, "FSRS save categories after A's release = %v, want exactly [chinese] (A's save, nothing of B's yet)", subs)
+	}
+	receipts, err := f.receipts.ListByLesson(context.Background(), lessonIDA)
+	if err != nil || len(receipts) != 1 || receipts[0].Status != lesson.ReceiptStatusSaved {
+		f.reclaimAndFail(driver, nil, "A's receipts = %+v err=%v, want exactly one saved receipt owned by A's row", receipts, err)
+	}
+
+	res, gotDriver := f.recvSpeechDriver(driver, speechReclaimBound)
+	if !gotDriver || !res.OK {
+		f.reclaimAndFail(driver, nil, "B's own submit journey failed: %s (late window %+v)", res.Err, res.LateWindow)
+	}
+	if lw := res.LateWindow; lw.TeacherSentences != 0 || lw.ReviewResults != 0 || lw.SessionEnded != 0 || lw.Errors != 0 {
+		t.Fatalf("late window after B's bridge = %+v, want zero A-side output — the switched epoch must refuse the superseded presentation", lw)
+	}
+	if len(res.Rounds) != 3 || !res.Rounds[0].AllAckedNaturally || !res.Rounds[1].AllAckedNaturally || !res.Rounds[2].AllAckedNaturally {
+		t.Fatalf("rounds = %+v, want A bridge, B bridge and B summary all acked naturally", res.Rounds)
+	}
+	if res.ReadyCount != 2 || res.CheckStartedCount != 2 || res.ReviewResultCount != 1 || res.SessionEndedCount != 1 || res.WSCloseCount != 1 {
+		t.Fatalf("ready=%d check_started=%d review=%d ended=%d close=%d, want 2/2/1/1/1 — B's own result and single ending",
+			res.ReadyCount, res.CheckStartedCount, res.ReviewResultCount, res.SessionEndedCount, res.WSCloseCount)
+	}
+	if len(res.InterruptAcks) != 1 || res.InterruptAcks[0].OldEpoch != 0 || res.InterruptAcks[0].NewEpoch != 1 {
+		t.Fatalf("interrupt_acks = %+v, want exactly the 0→1 install notice before B's session_ready", res.InterruptAcks)
+	}
+	if len(res.ReadyIndexes) < 2 || res.InterruptAcks[0].Index >= res.ReadyIndexes[1] || res.InterruptAcks[0].Index <= res.ReadyIndexes[0] {
+		t.Fatalf("install ack index %d vs ready indexes %v — the epoch notice must precede B's session_ready",
+			res.InterruptAcks[0].Index, res.ReadyIndexes)
+	}
+	if len(res.ErrorFrames) != 0 {
+		t.Fatalf("error frames = %+v, want none on the switched journey", res.ErrorFrames)
+	}
+
+	// B's own submit landed on B's row; its writeback mirrors B's row exactly.
+	lessonIDB := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryEnglish)
+	lb, err := f.tools.GetLessonState(context.Background(), lessonIDB)
+	if err != nil {
+		t.Fatalf("read B's row: %v", err)
+	}
+	if lb.Stage != lesson.StageSubmitted || len(lb.Verdicts) != 2 {
+		t.Fatalf("B's row = stage %q verdicts %d, want submitted/2 through B's own submit", lb.Stage, len(lb.Verdicts))
+	}
+	if cats := f.words.submittedCategories(); len(cats) != 2 || cats[0] != "chinese" || cats[1] != "english" {
+		t.Fatalf("FSRS save categories = %v, want [chinese english] — one save per classroom", cats)
+	}
+	rb, err := f.receipts.ListByLesson(context.Background(), lessonIDB)
+	if err != nil || len(rb) != 1 || rb[0].Status != lesson.ReceiptStatusSaved {
+		t.Fatalf("B's receipts = %+v err=%v, want exactly one saved receipt owned by B's row", rb, err)
+	}
+	tutorB := speechTutorStateOf(m)
+	if tutorB.version != lb.Version || tutorB.checking || !tutorB.reviewSee {
+		t.Fatalf("B's writeback tutor version/checking/reviewSeen = %d/%v/%v, want %d/false/true mirroring B's row — the replayed version=-6900/checking=true must die here too",
+			tutorB.version, tutorB.checking, tutorB.reviewSee, lb.Version)
+	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatal("the connection or its server tasks did not settle after B's ending")
+	}
+}
