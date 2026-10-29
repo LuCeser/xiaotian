@@ -1288,6 +1288,155 @@ async function testSubjectSwitchAfterSettledStopHidesRetryChip() {
     'U7fix1 失效: the dead batch renders no run buttons at all');
 }
 
+/**
+ * Issue #80 U7fix1 (review P2-2) — a 继续 whose run was superseded while
+ * its request was out finishes NOTHING: after 开始 → 停止 → 收尾 → 继续,
+ * switching the subject through the REAL radio before the resume response
+ * lands — the late wind-down must not overwrite 分类已切换 with an
+ * 已停止/继续处理 hint the (dead) bar cannot honor.
+ */
+async function testResumeResponseAfterSubjectSwitchKeepsSwitchHint() {
+  var gate = null;
+  var calls = 0;
+  var meta = { edition: '人教版PEP', grade: '三年级', volume: '上册' };
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 2 || calls === 3) {
+        return new Promise(function (resolve) { gate = resolve; });
+      }
+      return Promise.resolve({
+        entries: [{ word: 'first', meaning: '壹', lesson: '第1课' }],
+        textbook: meta,
+      });
+    },
+  });
+  h.pickPhotos([fakePhoto('1.jpg'), fakePhoto('2.jpg')]);
+  h.clickRecognize();
+  await flushPromises(14);
+  var form = h.form;
+  var stop = h.barStop();
+  assert(!!stop, 'U7fix1 迟到: the stop button renders while photo 2 executes');
+  if (stop) {
+    stop.fire('click');
+  }
+  gate({
+    entries: [{ word: 'dropped', meaning: '弃', lesson: '第9课' }],
+    textbook: meta,
+  });
+  await flushPromises(14);
+  var resume = h.barResume();
+  assert(!!resume && !resume.disabled,
+    'U7fix1 迟到: 继续 enabled once the stop settled');
+  if (resume) {
+    resume.fire('click');
+  }
+  await flushPromises(8);
+  eq(calls, 3, 'U7fix1 迟到: 继续 re-recognizes the pending photo (gated)');
+  assert(h.switchCategory('chinese'),
+    'U7fix1 迟到: the subject switches while the resume request is out');
+  gate({
+    entries: [{ word: 'late-resume', meaning: '迟', lesson: '第9课' }],
+    textbook: meta,
+  });
+  await flushPromises(14);
+  var hint = form.preview.querySelector('.preview-empty');
+  assert(!!hint && hint.textContent.indexOf('分类已切换') >= 0,
+    'U7fix1 迟到: the late resume wind-down keeps the 分类已切换 hint');
+  assert(!hint || hint.textContent.indexOf('已停止') < 0,
+    'U7fix1 迟到: no 已停止 hint is rendered for the superseded run');
+  eq(form.rows.length, 0, 'U7fix1 迟到: the late resume result lands no rows');
+  assert(!h.barResume(),
+    'U7fix1 迟到: the dead batch renders no 继续处理 button');
+}
+
+/**
+ * Issue #80 U7fix1 (review P2-2, retry kin) — the same guard on the retry
+ * path: a retry whose request is out when the subject switches must not
+ * render a finish over 分类已切换 either.
+ */
+async function testRetryResponseAfterSubjectSwitchKeepsSwitchHint() {
+  var gate = null;
+  var calls = 0;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls <= 2) {
+        return Promise.reject(new Error('forced fail'));
+      }
+      return new Promise(function (resolve) { gate = resolve; });
+    },
+  });
+  h.pickPhotos([fakePhoto('1.jpg'), fakePhoto('2.jpg')]);
+  h.clickRecognize();
+  await flushPromises(20);
+  var form = h.form;
+  eq(form.photoBatch.plan.pages[0].status, 'failed', 'U7fix1 迟到重试: photo 1 failed');
+  eq(form.photoBatch.plan.pages[1].status, 'failed', 'U7fix1 迟到重试: photo 2 failed');
+  var chip = h.barRetry(1);
+  assert(!!chip && !chip.disabled,
+    'U7fix1 迟到重试: the settled failed batch offers an enabled retry chip');
+  if (chip) {
+    chip.fire('click');
+  }
+  await flushPromises(8);
+  eq(calls, 3, 'U7fix1 迟到重试: the retry recognize is in flight (gated)');
+  assert(h.switchCategory('chinese'),
+    'U7fix1 迟到重试: the subject switches while the retry request is out');
+  gate({
+    entries: [{ word: 'late-retry', meaning: '迟', lesson: '第9课' }],
+    textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+  });
+  await flushPromises(14);
+  var hint = form.preview.querySelector('.preview-empty');
+  assert(!!hint && hint.textContent.indexOf('分类已切换') >= 0,
+    'U7fix1 迟到重试: the late retry wind-down keeps the 分类已切换 hint');
+  eq(form.rows.length, 0, 'U7fix1 迟到重试: the late retry result lands no rows');
+  assert(!h.barRetry(1),
+    'U7fix1 迟到重试: the dead batch renders no retry chip afterwards');
+}
+
+/**
+ * Issue #80 U7fix1 (review P2-2, PDF regression) — the shared stopped hint
+ * must not promise what the entry's own buttons do not offer: a PDF stopped
+ * before its first page lands says 已停止 with the remaining count, WITHOUT
+ * 可点「继续处理」 — the legacy bar (U8 未接入) renders no resume button,
+ * and the hint agrees with it.
+ */
+async function testPdfEarlyStopHintMatchesStatusBarButtons() {
+  var gate = null;
+  var h = mountWorkflowForm({
+    pdfPageCount: 2,
+    recognizePhoto: function () {
+      return new Promise(function (resolve) { gate = resolve; });
+    },
+  });
+  h.pickPhotos([fakePdf()]);
+  h.clickRecognize();
+  await flushPromises(14);
+  var form = h.form;
+  var stop = h.barStop();
+  assert(!!stop, 'U7fix1 PDF早停: the legacy stop button renders mid-run');
+  if (stop) {
+    stop.fire('click');
+  }
+  gate({
+    entries: [{ word: 'dropped', meaning: '弃', lesson: '第1课' }],
+    textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+  });
+  await flushPromises(14);
+  var hint = form.preview.querySelector('.preview-empty');
+  assert(!!hint && hint.textContent.indexOf('已停止') >= 0 &&
+    hint.textContent.indexOf('未处理') >= 0,
+    'U7fix1 PDF早停: the finish hint states the stop with the remaining pages');
+  assert(!hint || hint.textContent.indexOf('继续处理') < 0,
+    'U7fix1 PDF早停: the hint does NOT promise 继续处理 the bar never shows');
+  assert(!h.barResume(),
+    'U7fix1 PDF早停: the legacy bar renders no 继续处理 button (U8 未接入)');
+  assert(!!h.barStop(),
+    'U7fix1 PDF早停: the legacy bar keeps its stop control — hint and bar agree');
+}
+
 (async function main() {
   await testSinglePhotoEntryClearsViaRecognizeButton();
   await testMultiPhotoEntryClearsViaRecognizeButton();
@@ -1320,6 +1469,9 @@ async function testSubjectSwitchAfterSettledStopHidesRetryChip() {
   await testPhotoStopBeforeFirstLandingThenResumeCompletes();
   await testRetryChipGatedWhileAnotherPhotoRunsAndDuringWindDown();
   await testSubjectSwitchAfterSettledStopHidesRetryChip();
+  await testResumeResponseAfterSubjectSwitchKeepsSwitchHint();
+  await testRetryResponseAfterSubjectSwitchKeepsSwitchHint();
+  await testPdfEarlyStopHintMatchesStatusBarButtons();
 
   if (failures) {
     console.error('test-parent-photo-workflow: ' + failures + ' of ' + checks + ' checks failed');
