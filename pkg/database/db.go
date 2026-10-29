@@ -50,14 +50,15 @@ func Open(dbPath string) (*sql.DB, error) {
 		}
 	}
 
-	// DSN with pragmas. The _pragma= query parameter is the modernc.org/sqlite
-	// convention for applying PRAGMA statements at connection open time.
-	// RESEARCH Pitfall 3: DSN format differs between mattn/go-sqlite3 and
-	// modernc.org/sqlite — this uses the modernc convention.
-	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)",
-		dbPath,
-	)
+	absPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("database: abs db path: %w", err)
+	}
+	absPath = filepath.Clean(absPath)
+
+	// DSN with pragmas. Path is URI-encoded (see sqliteFileDSN) so Go opens
+	// the same file Python reaches via sqlite3.connect(literal path).
+	dsn := sqliteFileDSN(absPath)
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
