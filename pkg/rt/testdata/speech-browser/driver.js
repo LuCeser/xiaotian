@@ -538,6 +538,126 @@ async function waitSentenceAcked(page, text, timeoutMs, label) {
   return waitSentenceAckedBy(page, (t) => t === text, timeoutMs, label);
 }
 
+
+// ---------------------------------------------------------------------------
+// S4（issue #69 rethink3）：课堂切换竞态的只读观察辅助。换课在同一连接上
+// 发生（同一条 WebSocket 内的第二个 session_init），页面/播放器全程真实；
+// 这些辅助只把「轮次」组织成可断言的登记结果。
+// ---------------------------------------------------------------------------
+
+// teacherRounds 把一条连接上的 teacher_sentence 帧按 turn_id 分组成轮次
+// （每次播报一个 turn id；换课 bump epoch，后续播报骑新 turn id）。
+function teacherRounds(view) {
+  const opens = view.filter((e) => e.dir === 'evt' && e.kind === 'open');
+  if (!opens.length) return [];
+  const connection = view.filter((e) => e.i > opens[0].i);
+  const teachers = connection.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence' && e.msg);
+  const rounds = [];
+  let current = null;
+  for (const e of teachers) {
+    if (!current || current.turnId !== e.msg.turn_id) {
+      current = { turnId: e.msg.turn_id, epoch: e.msg.epoch, teacherEvents: [], texts: [] };
+      rounds.push(current);
+    }
+    current.teacherEvents.push(e);
+    current.texts.push(e.msg.text);
+  }
+  return rounds;
+}
+
+// roundSentenceFacts gathers one round sentence's wire facts: its single
+// audio_start/audio_end inside the round, the binary chunks that landed in
+// the start/end window, and the page's out sentence_ack with its native
+// onended precedence (playedBeforeAck — the player's own registration, never
+// a frame count alone).
+function roundSentenceFacts(view, playback, round, teacher) {
+  const m = teacher.msg;
+  const matches = (e, dir, type) => e.dir === dir && e.type === type && e.msg
+    && e.msg.epoch === round.epoch && e.msg.turn_id === round.turnId
+    && e.msg.sentence_id === m.sentence_id;
+  const starts = view.filter((e) => matches(e, 'in', 'audio_start'));
+  const ends = view.filter((e) => matches(e, 'in', 'audio_end'));
+  const acks = view.filter((e) => e.dir === 'out' && e.type === 'sentence_ack' && e.msg
+    && e.msg.epoch === round.epoch && e.msg.sentence_id === m.sentence_id);
+  const start = starts[0];
+  const end = ends[0];
+  const ack = acks[0];
+  const pcmInWindow = start && end
+    ? view.filter((e) => e.dir === 'in' && e.kind === 'binary' && e.i > start.i && e.i < end.i).length
+    : 0;
+  return {
+    sentenceId: m.sentence_id,
+    starts: starts.length, ends: ends.length, acks: acks.length,
+    pcmInWindow,
+    startIndex: start ? start.i : -1,
+    endIndex: end ? end.i : -1,
+    ordered: !!(start && end && ack && teacher.i < start.i && start.i < end.i && end.i < ack.i),
+    playedBeforeAck: acks.length === 1 && playedBeforeAck(playback.trace, round.epoch, m.sentence_id),
+    firstIndex: teacher.i, lastIndex: ack ? ack.i : (end || start || teacher).i,
+  };
+}
+
+// inspectRound checks one observed round against its expected texts and (when
+// expectedPcmPerSentence is a number) the fixture's PCM shape: every sentence
+// 1 start / 1 end / exactly the expected chunk count in its window / exactly
+// one ack that followed its native onended, in that order; and no binary
+// chunk outside every window inside the round's span. Returns the
+// per-sentence facts either way — a REJECTED round (the player dropped a
+// switched classroom's audio) reports its facts honestly instead of throwing,
+// so the Go side asserts on the registration.
+function inspectRound(round, view, playback, expectedTexts, expectedPcmPerSentence) {
+  const facts = { epoch: round.epoch, turnId: round.turnId, texts: round.texts.slice(), sentences: [] };
+  const problems = [];
+  if (JSON.stringify(round.texts) !== JSON.stringify(expectedTexts)) {
+    problems.push('texts=' + JSON.stringify(round.texts) + ' want ' + JSON.stringify(expectedTexts));
+  }
+  for (const teacher of round.teacherEvents) {
+    const f = roundSentenceFacts(view, playback, round, teacher);
+    facts.sentences.push(f);
+    if (f.starts !== 1 || f.ends !== 1) problems.push(f.sentenceId + ' start/end=' + f.starts + '/' + f.ends);
+    if (f.acks !== 1) problems.push(f.sentenceId + ' acks=' + f.acks);
+    if (typeof expectedPcmPerSentence === 'number' && f.pcmInWindow !== expectedPcmPerSentence) {
+      problems.push(f.sentenceId + ' pcm=' + f.pcmInWindow + ' want ' + expectedPcmPerSentence);
+    }
+    if (!f.ordered) problems.push(f.sentenceId + ' frame order broken');
+    if (f.acks === 1 && !f.playedBeforeAck) problems.push(f.sentenceId + ' ack without native onended');
+  }
+  const spanStart = round.teacherEvents.length ? round.teacherEvents[0].i : 0;
+  const spanEnd = facts.sentences.length
+    ? Math.max(...facts.sentences.map((f) => f.lastIndex))
+    : spanStart;
+  const strays = view.filter((e) => e.dir === 'in' && e.kind === 'binary'
+    && e.i > spanStart && e.i < spanEnd
+    && !facts.sentences.some((f) => f.startIndex >= 0 && f.endIndex >= 0 && f.startIndex < e.i && e.i < f.endIndex));
+  if (strays.length) problems.push(strays.length + ' stray chunk(s) outside every window');
+  facts.ok = problems.length === 0;
+  facts.problems = problems;
+  facts.allAckedNaturally = facts.sentences.length > 0
+    && facts.sentences.every((f) => f.acks === 1 && f.playedBeforeAck && f.ordered);
+  return facts;
+}
+
+// waitNthRoundAcked waits until the nth round carrying exactly texts has all
+// its sentences acked (the wire fact), then returns its full facts with the
+// real playback trace (playedBeforeAck checked by the caller's assertions).
+async function waitNthRoundAcked(page, texts, nth, timeoutMs, label) {
+  await waitWs(page, (view) => {
+    const rounds = teacherRounds(view).filter((r) => JSON.stringify(r.texts) === JSON.stringify(texts));
+    if (rounds.length < nth) return false;
+    const facts = inspectRound(rounds[nth - 1], view, { trace: [] }, texts, null);
+    return facts.sentences.length === texts.length && facts.sentences.every((f) => f.acks >= 1);
+  }, { timeoutMs, label });
+  const view = await wsView(page);
+  return inspectRound(
+    teacherRounds(view).filter((r) => JSON.stringify(r.texts) === JSON.stringify(texts))[nth - 1],
+    view, await playbackState(page), texts, null);
+}
+
+// waitSwitchRoundSecond is the classroom-switch wait: the second round either
+// completes NATURALLY (every ack followed its onended — the fix present) or,
+// once every expected frame has landed on the wire and a rejection margin has
+// passed with the player still not accepting it, reports the rejection. The
+// margin only bounds the observation; the verdict rides the registration.
 async function waitSentenceAckedBy(page, pred, timeoutMs, label) {
   await waitWs(page, (view) => {
     const s = view.find((e) => e.dir === 'in' && e.type === 'teacher_sentence' && e.msg && pred(e.msg.text));
