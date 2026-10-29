@@ -147,6 +147,23 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		return 1
 	}
 
+	// Resolve the single shared vocab SQLite path before constructing the
+	// Python bridge so --db and database.Open hit the same file (Issue #80
+	// U10 fix2: empty python.vocabDBPath backfill, abs/rel equivalence,
+	// URI-safe Go open vs Python literal path).
+	dbPath, dbPathErr := database.ResolveSharedDBPath(cfg.Database.Path, cfg.Python.VocabDBPath, homeDir())
+	if dbPathErr != nil {
+		logger.Error("shared database path resolution failed",
+			infra.F("component", "infra.main"),
+			infra.F("database.path", cfg.Database.Path),
+			infra.F("python.vocabDBPath", cfg.Python.VocabDBPath),
+			infra.ErrField(dbPathErr),
+		)
+		return 1
+	}
+	cfg.Database.Path = dbPath
+	cfg.Python.VocabDBPath = dbPath
+
 	// Phase 3 (D-03/D-04/D-05): construct the Go <-> Python subprocess bridge.
 	// NewBridge is a pure constructor -- it spawns no subprocess and performs
 	// no file IO, so it is safe to call at boot even when the configured
@@ -224,33 +241,7 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		return 1
 	}
 
-	// Phase 4 (D-09): open the shared SQLite database.
-	// The path comes from Config.Database.Path. When empty, prefer the
-	// Python-owned vocab DB (python.vocabDBPath): the cards table Go reads
-	// via CardRepository lives THERE (D-12 read path, ADR write-separation —
-	// Python writes, Go reads the same file via multi-process WAL).
-	// Phase 9 fix: the old unconditional $HOME/.home-tutor-agent/vocab.db
-	// default pointed the read path at a different file than the Python
-	// bridge writes, so GET /api/v1/words always saw "no such table: cards".
-	// The legacy default remains only as a last resort when BOTH paths are
-	// empty. sql.DB lifetime = service lifetime. Closed during shutdown.
-	dbPath := cfg.Database.Path
-	if dbPath == "" {
-		dbPath = cfg.Python.VocabDBPath
-	}
-	if dbPath == "" {
-		dbPath = filepath.Join(homeDir(), ".home-tutor-agent", "vocab.db")
-	}
-	if cfg.Database.Path != "" && cfg.Python.VocabDBPath != "" {
-		if filepath.Clean(cfg.Database.Path) != filepath.Clean(cfg.Python.VocabDBPath) {
-			logger.Error("database.path and python.vocabDBPath must refer to the same SQLite file",
-				infra.F("component", "infra.main"),
-				infra.F("database.path", cfg.Database.Path),
-				infra.F("python.vocabDBPath", cfg.Python.VocabDBPath),
-			)
-			return 1
-		}
-	}
+	// Phase 4 (D-09): open the shared SQLite database (path resolved above).
 	db, err := database.Open(dbPath)
 	if err != nil {
 		logger.Error("database open failed",

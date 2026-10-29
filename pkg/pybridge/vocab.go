@@ -30,13 +30,13 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/database"
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
@@ -585,7 +585,11 @@ func (b *Bridge) RunCreateDesignation(ctx context.Context, opts CreateDesignatio
 	if goPath == "" {
 		return DesignateResult{}, ErrDesignationDatabasePathRequired
 	}
-	if filepath.Clean(goPath) != filepath.Clean(b.cfg.VocabDBPath) {
+	same, sameErr := database.SameSQLiteFile(goPath, b.cfg.VocabDBPath)
+	if sameErr != nil {
+		return DesignateResult{}, fmt.Errorf("create designation: compare database paths: %w", sameErr)
+	}
+	if !same {
 		return DesignateResult{}, ErrDesignationDatabaseSplit
 	}
 
