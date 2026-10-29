@@ -42,6 +42,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 	_ "modernc.org/sqlite" // same pure-Go driver pkg/database uses (read fsrs_card bytes)
 )
 
@@ -515,6 +516,164 @@ func TestE2E_RunEditRoundTrip(t *testing.T) {
 	if row["unit"] != "U1" {
 		t.Errorf("unit changed by word-only edit: %q", row["unit"])
 	}
+}
+
+// TestE2E_RunEditWordAndMeaningPreservesFSRS mirrors the parent batch-edit
+// 确认修改 payload exactly: ONE RunEdit carrying BOTH word and meaning —
+// what parent-browse.js editWord PUTs per row ({word, meaning} together).
+// After a real review moves fsrs_card off its fresh-card bytes, the combined
+// edit must rewrite BOTH text columns while the fsrs_card BYTES stay
+// identical. The comparison is unconditional: the browser suite cannot
+// assert this at all — GET /words (handlers.go wordJSON) has no fsrs_card
+// field — so this test is the only guard on the wire-shaped payload.
+func TestE2E_RunEditWordAndMeaningPreservesFSRS(t *testing.T) {
+	b, _, cfg := e2eBridge(t, nil)
+	env := mgmtListEnv(t, cfg.DataDir)
+
+	if _, err := b.RunAdd(context.Background(), AddOpts{
+		Category: "english", Unit: "U1",
+		Entries: []AddEntry{{Word: "apple", Meaning: "苹果", Example: "I eat an apple."}},
+	}); err != nil {
+		t.Fatalf("RunAdd: %v", err)
+	}
+	// One real review so fsrs_card carries non-trivial learning state — the
+	// exact bytes a destructive edit would destroy.
+	if _, err := b.RunReview(context.Background(), ReviewOpts{
+		Results:  map[string]string{"apple": "good"},
+		Category: "english",
+	}); err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+	before := fsrsCardBytes(t, cfg.VocabDBPath, "1")
+	if before == "" {
+		t.Fatal("fsrs_card empty after add+review — fixture broken")
+	}
+
+	word, meaning := "banana", "香蕉"
+	if _, err := b.RunEdit(context.Background(), EditOpts{ID: 1, Word: &word, Meaning: &meaning}); err != nil {
+		t.Fatalf("RunEdit word+meaning: %v", err)
+	}
+
+	rows := listCards(t, env, cfg.VocabDBPath)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0]["word"] != "banana" || rows[0]["meaning"] != "香蕉" {
+		t.Errorf("combined edit columns = word:%v meaning:%q, want banana/香蕉", rows[0]["word"], rows[0]["meaning"])
+	}
+	if rows[0]["example"] != "I eat an apple." || rows[0]["unit"] != "U1" {
+		t.Errorf("untouched columns changed: example=%q unit=%v", rows[0]["example"], rows[0]["unit"])
+	}
+	if after := fsrsCardBytes(t, cfg.VocabDBPath, "1"); after != before {
+		t.Fatalf("fsrs_card changed by word+meaning edit (VOC-01 violation):\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+// cardIdentity is the by-id snapshot of one card's identity columns — id,
+// word, meaning, fsrs_card — the four things ADR-0003 requires an edit
+// conflict to leave untouched.
+type cardIdentity struct {
+	ID      int
+	Word    string
+	Meaning string
+	FSRS    string
+}
+
+// readCardIdentity reads one card's identity columns straight from SQLite,
+// so the conflict assertion can compare id/word/meaning/fsrs_card together
+// (the script's `list` output has no fsrs_card column).
+func readCardIdentity(t *testing.T, dbPath string, id int) cardIdentity {
+	t.Helper()
+	db := e2eOpenDB(t, dbPath)
+	var c cardIdentity
+	if err := db.QueryRow("SELECT id, word, meaning, fsrs_card FROM cards WHERE id = ?", id).
+		Scan(&c.ID, &c.Word, &c.Meaning, &c.FSRS); err != nil {
+		t.Fatalf("read card id=%d: %v", id, err)
+	}
+	return c
+}
+
+// assertCardIdentityUnchanged fails if the card at before.ID no longer
+// matches before on ANY of id / word / meaning / fsrs_card.
+func assertCardIdentityUnchanged(t *testing.T, dbPath string, before cardIdentity) {
+	t.Helper()
+	if after := readCardIdentity(t, dbPath, before.ID); after != before {
+		t.Fatalf("card %d changed across conflict:\nbefore: %+v\nafter:  %+v", before.ID, before, after)
+	}
+}
+
+// editConflictFixture seeds the two-card identity-conflict fixture — "colour"
+// and "color" share a category so renaming either onto the other trips
+// UNIQUE(word, category) — and gives BOTH cards real review history so their
+// fsrs_card columns carry non-trivial learning state.
+func editConflictFixture(t *testing.T) (*Bridge, infra.PythonConfig) {
+	t.Helper()
+	b, _, cfg := e2eBridge(t, nil)
+	if _, err := b.RunAdd(context.Background(), AddOpts{
+		Category: "english", Unit: "id-conflict",
+		Entries: []AddEntry{
+			{Word: "colour", Meaning: "英式"},
+			{Word: "color", Meaning: "美式"},
+		},
+	}); err != nil {
+		t.Fatalf("RunAdd: %v", err)
+	}
+	if _, err := b.RunReview(context.Background(), ReviewOpts{
+		Results:  map[string]string{"colour": "good", "color": "good"},
+		Category: "english",
+	}); err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+	return b, cfg
+}
+
+// TestE2E_EditWordConflictKeepsIdentity pins ADR-0003: renaming onto an
+// occupied (word, category) fails without clobbering either card. The
+// conflict request carries BOTH Word and Meaning — the exact wire shape the
+// parent batch-edit 确认修改 sends ({word, meaning} together) — so a backend
+// that overwrites EITHER card's meaning (source or target) before surfacing
+// the UNIQUE error is caught, not just a word/fsrs clobber.
+//
+// Two independent sub-cases pre-commit a meaning edit on the SOURCE (id 1) or
+// the TARGET (id 2) first, then fire the Word+Meaning conflict. Each snapshot
+// captures id/word/meaning/fsrs_card of BOTH cards so a conflict that clobbers
+// either card is caught.
+func TestE2E_EditWordConflictKeepsIdentity(t *testing.T) {
+	t.Run("source meaning pre-written", func(t *testing.T) {
+		b, cfg := editConflictFixture(t)
+
+		preMeaning := "英式改"
+		if _, err := b.RunEdit(context.Background(), EditOpts{ID: 1, Meaning: &preMeaning}); err != nil {
+			t.Fatalf("pre-edit source meaning: %v", err)
+		}
+		before1 := readCardIdentity(t, cfg.VocabDBPath, 1)
+		before2 := readCardIdentity(t, cfg.VocabDBPath, 2)
+
+		word, newMeaning := "color", "英式再改"
+		if _, err := b.RunEdit(context.Background(), EditOpts{ID: 1, Word: &word, Meaning: &newMeaning}); err == nil {
+			t.Fatal("RunEdit: expected identity conflict, got success")
+		}
+		assertCardIdentityUnchanged(t, cfg.VocabDBPath, before1)
+		assertCardIdentityUnchanged(t, cfg.VocabDBPath, before2)
+	})
+
+	t.Run("target meaning pre-written", func(t *testing.T) {
+		b, cfg := editConflictFixture(t)
+
+		preMeaning := "美式改"
+		if _, err := b.RunEdit(context.Background(), EditOpts{ID: 2, Meaning: &preMeaning}); err != nil {
+			t.Fatalf("pre-edit target meaning: %v", err)
+		}
+		before1 := readCardIdentity(t, cfg.VocabDBPath, 1)
+		before2 := readCardIdentity(t, cfg.VocabDBPath, 2)
+
+		word, newMeaning := "color", "英式再改"
+		if _, err := b.RunEdit(context.Background(), EditOpts{ID: 1, Word: &word, Meaning: &newMeaning}); err == nil {
+			t.Fatal("RunEdit: expected identity conflict, got success")
+		}
+		assertCardIdentityUnchanged(t, cfg.VocabDBPath, before1)
+		assertCardIdentityUnchanged(t, cfg.VocabDBPath, before2)
+	})
 }
 
 func TestE2E_ParticipationExcludesDueAndPreservesFSRS(t *testing.T) {

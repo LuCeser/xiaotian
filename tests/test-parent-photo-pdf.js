@@ -18,9 +18,12 @@ const photo = require('../pkg/web/static/js/parent-photo.js');
 
 // The two IIFEs each land on their own module.exports here, but share ONE
 // window in the real page — applyLessonToPage looks isCommittable up
-// lazily on its global (parent-photo.js loads after parent-pdf-core.js).
-// Bridge them the way the browser does, then require's shape is honest.
+// lazily on its global (parent-photo.js loads after parent-pdf-core.js),
+// and validatePhotoSelection does the same for validatePdfFile (Issue
+// #80's photo-selection gate leans on the PDF verdict). Bridge them the
+// way the browser does, then require's shape is honest.
 pdf.isCommittable = photo.isCommittable;
+photo.validatePdfFile = pdf.validatePdfFile;
 const { classifyPhotoEntries } = photo;
 
 // ----------------------------------------------------------------------
@@ -113,8 +116,15 @@ const { classifyPhotoEntries } = photo;
 
   plan = pdf.applyPageEvent(plan, 2, 'start');
   plan = pdf.applyPageEvent(plan, 2, 'fail', '识别服务超时');
+
   assert.strictEqual(plan.pages[1].status, 'failed');
   assert.strictEqual(plan.pages[1].error, '识别服务超时');
+
+  plan = pdf.createPagePlan(1);
+  plan = pdf.applyPageEvent(plan, 1, 'start');
+  assert.strictEqual(plan.pages[0].status, 'running');
+  plan = pdf.applyPageEvent(plan, 1, 'abort');
+  assert.strictEqual(plan.pages[0].status, 'pending');
 }
 
 // 9. retryPage: a failed page resets to pending (error cleared) so the
@@ -130,6 +140,31 @@ const { classifyPhotoEntries } = photo;
   assert.strictEqual(plan.pages[1].error, '');
   const retried = pdf.retryPage(plan, 1); // a done page stays done
   assert.strictEqual(retried.pages[0].status, 'done');
+}
+
+// 9b. abortRunningPages (Issue #80 §3.2, U6): the stop/invalidate sweep —
+//     every page still marked running returns to pending (error cleared)
+//     so 继续/重试 stay reachable once the wind-down settles; done and
+//     failed pages are untouched (stop never undoes finished work). Pure:
+//     a NEW plan, the input never mutated.
+{
+  let plan = pdf.createPagePlan(5);
+  plan = pdf.applyPageEvent(plan, 1, 'start');
+  plan = pdf.applyPageEvent(plan, 1, 'done');
+  plan = pdf.applyPageEvent(plan, 2, 'start');
+  plan = pdf.applyPageEvent(plan, 3, 'start');
+  plan = pdf.applyPageEvent(plan, 3, 'fail', '超时');
+  plan = pdf.applyPageEvent(plan, 5, 'start');
+  const swept = pdf.abortRunningPages(plan);
+  assert.deepStrictEqual(swept.pages.map((p) => p.status),
+    ['done', 'pending', 'failed', 'pending', 'pending']);
+  assert.deepStrictEqual(plan.pages.map((p) => p.status),
+    ['done', 'running', 'failed', 'pending', 'running'],
+    'the input plan keeps its running pages (pure transition)');
+  // An out-of-lifecycle sweep on an all-settled plan changes nothing.
+  const settled = pdf.abortRunningPages(swept);
+  assert.deepStrictEqual(settled.pages.map((p) => p.status),
+    ['done', 'pending', 'failed', 'pending', 'pending']);
 }
 
 // 10. planSummary: counts per status plus the two whole-file verdicts —
@@ -277,6 +312,111 @@ const { classifyPhotoEntries } = photo;
   assert.deepStrictEqual(chunks.map((c) => c.length), [100, 100, 50]);
   assert.deepStrictEqual([].concat(...chunks), items);
   assert.deepStrictEqual(pdf.chunkBatch([1, 2], 0), [[1], [2]]); // size < 1 ⇒ 1
+}
+
+// ----------------------------------------------------------------------
+// E. Issue #80 §2.3 — the multi-photo pick. validatePhotoSelection gates
+//    the WHOLE selection (one PDF alone, or 1..20 photos alone; anything
+//    mixed or alien is refused whole); mergePhotoMetas folds several
+//    photos' book headers (later photos fill only empty fields; two
+//    different readings void the field); the photo INDEX is the page
+//    number, so the merge machinery keeps photo order and a retried
+//    photo replaces its own segment.
+// ----------------------------------------------------------------------
+
+const shot = (name, type) => ({ name, type, size: 512 * 1024 });
+const PNG = (name) => shot(name || 'p.png', 'image/png');
+const JPEG = (name) => shot(name || 'j.jpg', 'image/jpeg');
+const PDF = (name, size) => ({
+  name: name || 'scan.pdf', type: 'application/pdf', size: size || 1024,
+});
+
+// 17. validatePhotoSelection — the whole-selection verdicts.
+{
+  // One PDF alone: the ordinary scanned-PDF pick.
+  assert.strictEqual(photo.validatePhotoSelection([]).code, 'empty');
+  assert.strictEqual(photo.validatePhotoSelection(null).code, 'empty');
+  const one = photo.validatePhotoSelection([PDF()]);
+  assert.strictEqual(one.ok, true);
+  assert.strictEqual(one.kind, 'pdf');
+  assert.strictEqual(one.files.length, 1);
+
+  // An over-cap PDF is refused BEFORE anything runs (AC-3's shape).
+  const big = photo.validatePhotoSelection([PDF('big.pdf', pdf.MAX_PDF_BYTES + 1)]);
+  assert.strictEqual(big.ok, false);
+  assert.strictEqual(big.code, 'pdf-too-large');
+
+  // PDF + photo (and two PDFs): mixed — refused whole, 分批上传.
+  assert.strictEqual(photo.validatePhotoSelection([PDF(), PNG()]).code, 'mixed');
+  assert.strictEqual(photo.validatePhotoSelection([PDF(), PDF()]).code, 'mixed');
+
+  // An alien file among photos: unsupported, nothing processed.
+  assert.strictEqual(
+    photo.validatePhotoSelection([PNG(), { name: 'x.heic', type: 'image/heic', size: 5 }]).code,
+    'unsupported');
+
+  // 20 photos is fine, 21 is refused whole (the cap bounds the run).
+  const twenty = Array.from({ length: 20 }, (_, i) => PNG('p' + i + '.png'));
+  assert.strictEqual(photo.validatePhotoSelection(twenty).ok, true);
+  assert.strictEqual(photo.validatePhotoSelection(twenty).kind, 'photos');
+  assert.strictEqual(photo.validatePhotoSelection(twenty.concat([JPEG()])).code,
+    'photo-too-many');
+  assert.strictEqual(
+    photo.validatePhotoSelection(twenty.concat([JPEG()])).limit, 20);
+  assert.strictEqual(photo.MAX_PHOTO_FILES, 20);
+
+  // One photo is the ordinary pick (kind photos, files[0] only).
+  const single = photo.validatePhotoSelection([JPEG('one.jpg')]);
+  assert.strictEqual(single.ok, true);
+  assert.strictEqual(single.kind, 'photos');
+  assert.strictEqual(single.files.length, 1);
+}
+
+// 18. mergePhotoMetas — later photos fill ONLY empty fields; two different
+//     non-empty readings void the field (待确认, never a picked winner).
+{
+  const merged = photo.mergePhotoMetas([
+    { edition: '人教版PEP', grade: null, lesson: '第1课' },
+    { edition: '', grade: '三年级', lesson: '第2课' },
+  ]);
+  assert.strictEqual(merged.edition, '人教版PEP', 'the only reading wins');
+  assert.strictEqual(merged.grade, '三年级', 'a later photo fills an empty field');
+  assert.strictEqual(merged.lesson, '', 'two different lessons void the field');
+
+  const agree = photo.mergePhotoMetas([
+    { edition: '人教版PEP', volume: '上册' },
+    { edition: '人教版PEP', volume: '上册' },
+  ]);
+  assert.strictEqual(agree.edition, '人教版PEP');
+  assert.strictEqual(agree.volume, '上册', 'agreeing readings stand');
+
+  const none = photo.mergePhotoMetas([null, null]);
+  assert.ok(none && Object.keys(none).every((k) => none[k] === ''),
+    'no headers read → every field empty');
+
+  // Whitespace trims before comparing (metaField's one rule).
+  const spaced = photo.mergePhotoMetas([{ edition: ' 人教版 ' }, { edition: '人教版' }]);
+  assert.strictEqual(spaced.edition, '人教版');
+}
+
+// 19. The photo INDEX is the page number: photos land in PICK order no
+//     matter the completion order, and re-recognizing one photo replaces
+//     exactly its own segment (the retry never duplicates).
+{
+  let rows = pdf.mergePageRows([], 2, [{ word: 'bird', lesson: '第2课' }]);
+  rows = pdf.mergePageRows(rows, 1, [{ word: 'cow', lesson: '第1课' }]);
+  rows = pdf.mergePageRows(rows, 2, [{ word: 'frog', lesson: '第2课' }]); // photo 2 retried
+  assert.deepStrictEqual(rows.map((r) => [r.page, r.word]), [
+    [1, 'cow'],
+    [2, 'frog'],
+  ], 'photo order holds; the retry replaced only photo 2');
+
+  // A same-word repeat on a LATER photo stays the classifier's duplicate
+  // verdict (cross-photo dedup rides the merged-array reclassify).
+  const reclassified = classifyPhotoEntries(
+    rows.map((r) => ({ word: r.word, meaning: '', lesson: r.lesson })).concat(
+      [{ word: 'cow', meaning: '', lesson: '第2课' }]), []);
+  assert.strictEqual(reclassified[reclassified.length - 1].status, 'invalid');
 }
 
 console.log('test-parent-photo-pdf: all assertions passed');

@@ -38,6 +38,7 @@ type fakeExecutor struct {
 	deleteErr            error
 	participationErr     error
 	unassignErr          error
+	designateErr         error
 	renameResult         pybridge.RenameUnitResult
 	editCalls            []pybridge.EditOpts
 	renameCalls          []pybridge.RenameUnitOpts
@@ -49,10 +50,12 @@ type fakeExecutor struct {
 	addCalls             []pybridge.AddOpts
 	textbookUpdateCalls  []pybridge.TextbookUpdateOpts
 	assignCalls          []pybridge.AssignWordsOpts
+	designateCalls       []pybridge.DesignateOpts
 	textbookCreateResult pybridge.TextbookMutationResult
 	textbookUpdateResult pybridge.TextbookMutationResult
 	participationResult  pybridge.SetParticipationResult
 	unassignResult       pybridge.UnassignWordsResult
+	designateResult      pybridge.DesignateResult
 	assignResult         pybridge.AssignWordsResult
 	addResult            pybridge.AddResult
 	deleteResult         pybridge.DeleteWordsResult
@@ -117,6 +120,11 @@ func (f *fakeExecutor) RunAssignWords(_ context.Context, opts pybridge.AssignWor
 func (f *fakeExecutor) RunUnassignWords(_ context.Context, opts pybridge.UnassignWordsOpts) (pybridge.UnassignWordsResult, error) {
 	f.unassignCalls = append(f.unassignCalls, opts)
 	return f.unassignResult, f.unassignErr
+}
+
+func (f *fakeExecutor) RunDesignate(_ context.Context, opts pybridge.DesignateOpts) (pybridge.DesignateResult, error) {
+	f.designateCalls = append(f.designateCalls, opts)
+	return f.designateResult, f.designateErr
 }
 
 // fakeCardRepo is a manual fake for database.CardRepository that captures

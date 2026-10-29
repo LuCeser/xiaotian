@@ -54,8 +54,29 @@ require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-phot
 const {
   classifyPhotoEntries,
   matchTextbookForMeta,
+  preselectBookChoice,
+  isPhotoTextbookMode,
   distinctLessons,
   distinctRowLessons,
+  lessonsNamedOnPhoto,
+  recommendLesson,
+  recommendForDraftPage,
+  recognizeRunStillValid,
+  applyRecognizeLibraryLoad,
+  createFormFieldValue,
+  entriesForPhotoPage,
+  lessonRecsPriorToPage,
+  lessonsForRecommend,
+  fillRecommendedLessons,
+  applyBatchLesson,
+  applyPickedLesson,
+  clearLessonPicks,
+  pickAllLessons,
+  pickLessonGroup,
+  pickLessonRange,
+  lessonPickGroups,
+  lessonOriginLabel,
+  appendMissingLessons,
   isCommittable,
   planAssignments,
   commitUnit,
@@ -161,6 +182,205 @@ const BOOKS = [
 })();
 
 // ----------------------------------------------------------------------
+// preselectBookChoice / isPhotoTextbookMode (Issue #80 §2.2)
+// ----------------------------------------------------------------------
+
+(function () {
+  eq(preselectBookChoice(BOOKS, {
+    edition: '人教版PEP', stage: '', grade: '三年级', volume: '上册', module: 'Unit 1-3',
+  }), 2, 'meta match → existing id');
+  eq(preselectBookChoice(BOOKS, {
+    edition: '译林版', stage: '', grade: '三年级', volume: '上册', module: '',
+  }), 'unset', 'books exist but no match → unset');
+  eq(preselectBookChoice([], { edition: '人教版PEP', grade: '三年级' }), 'new', 'no books → new');
+  eq(preselectBookChoice([], null), 'new', 'no books and no meta → still 新建 (§2.2)');
+  assert(!isPhotoTextbookMode('unset'), 'unset is not textbook mode');
+  assert(isPhotoTextbookMode('new'), 'new is textbook mode');
+})();
+
+// ----------------------------------------------------------------------
+// recommendLesson / appendMissingLessons (Issue #80 §3.1 / §2.1)
+// ----------------------------------------------------------------------
+
+(function () {
+  const single = recommendLesson({
+    textbook: { lesson: '第2课' },
+    entries: [{ word: 'a', lesson: '第2课' }],
+  }, ['第1课'], []);
+  eq(single, { lesson: '第2课', source: 'recognized' }, 'one lesson on photo → recognized');
+
+  const multi = recommendLesson({
+    entries: [{ word: 'a', lesson: '第1课' }, { word: 'b', lesson: '第2课' }],
+  }, [], []);
+  eq(multi.source, 'none', 'two lessons on photo → no whole-photo default');
+  eq(multi.lesson, '', 'two lessons → empty default');
+
+  const carry = recommendLesson({ entries: [{ word: 'a', lesson: '' }] },
+    [], [{ lesson: '第3课', source: 'recognized' }]);
+  eq(carry, { lesson: '第3课', source: 'photo-order' }, 'empty photo inherits prior photo');
+
+  const last = recommendLesson({ entries: [] }, ['第1课', '第5课'], []);
+  eq(last, { lesson: '第5课', source: 'previous-lesson' }, 'empty batch uses last existing lesson');
+
+  const none = recommendLesson({ entries: [] }, [], []);
+  eq(none, { lesson: '', source: 'none' }, 'no signal → none');
+
+  eq(lessonsNamedOnPhoto({
+    textbook: { module: 'Unit 3', lesson: '第2课' },
+    entries: [{ word: 'x', lesson: '' }],
+  }), ['第2课'], 'module is not a lesson name');
+
+  eq(appendMissingLessons(['第1课'], ['第2课', '第1课', '第3课']),
+    ['第1课', '第2课', '第3课'], 'append missing only, keep order');
+  eq(appendMissingLessons(['第1课'], ['第3单元', 'Unit 3']),
+    ['第1课', '第3单元', 'Unit 3'], '第3单元 and Unit 3 stay distinct');
+
+  // recommendForDraftPage: §3.1 previous-lesson only from the parent's
+  // chosen book — OCR meta match alone never supplies another book's list.
+  const BOOKS2 = [{ id: 7, name: '书七', edition: '人教版PEP', stage: '', grade: '三年级', volume: '', module: '', lessons: ['第1课', '第2课'] }];
+  eq(recommendForDraftPage(BOOKS2, { entries: [{ word: 'a', lesson: '' }] }, []),
+    { lesson: '', source: 'none' }, 'unset bookChoice never borrows OCR-matched lessons');
+  eq(recommendForDraftPage([], { entries: [{ word: 'a', lesson: '' }] }, []),
+    { lesson: '', source: 'none' }, 'new-book draft with no signal stays none');
+
+  // §3.1: photo-order fallback only looks at EARLIER photo indices.
+  const outOfOrder = [undefined, { lesson: '第2课', source: 'recognized' }];
+  eq(lessonRecsPriorToPage(outOfOrder, 1), [], 'photo 1 has no prior recs');
+  eq(recommendForDraftPage([], { entries: [{ word: 'a', lesson: '' }] },
+    lessonRecsPriorToPage(outOfOrder, 1), 'new'),
+    { lesson: '', source: 'none' }, 'retry photo 1 never borrows photo 2 lesson');
+
+  // §3.1: the parent's chosen textbook feeds previous-lesson, not OCR rematch.
+  eq(recommendForDraftPage(BOOKS2, { entries: [{ word: 'a', lesson: '' }] }, [], 7),
+    { lesson: '第2课', source: 'previous-lesson' }, 'chosen book id uses its lesson list');
+  eq(lessonsForRecommend(BOOKS2, 7), ['第1课', '第2课'], 'lessonsForRecommend reads the chosen book');
+})();
+
+// ----------------------------------------------------------------------
+// fillRecommendedLessons / applyBatchLesson / applyPickedLesson
+// (Issue #80 §3.2 — memory-only row stamping; a row object never leaves
+// with a lesson it did not earn, and no request machinery runs here)
+// ----------------------------------------------------------------------
+
+(function () {
+  // A row with its own recognized lesson keeps it and is marked 识别;
+  // an empty row takes the page recommendation; no recommendation → the
+  // lesson stays the honest empty string (待确认).
+  const stamped = fillRecommendedLessons([
+    { word: 'a', lesson: '第2课', status: 'new' },
+    { word: 'b', lesson: '', status: 'new' },
+    { word: 'c', lesson: '  ', status: 'new' },
+  ], { lesson: '第9课', source: 'recognized' });
+  eq(stamped.map(function (r) { return [r.word, r.lesson, r.lessonOrigin]; }), [
+    ['a', '第2课', 'recognized'],
+    ['b', '第9课', 'recognized'],
+    ['c', '第9课', 'recognized'],
+  ], 'own lesson wins; a blank-only lesson is empty and takes the recommendation');
+  eq(fillRecommendedLessons([{ word: 'a', lesson: '' }], { lesson: '', source: 'none' })[0].lesson,
+    '', 'no recommendation keeps the empty lesson an empty string');
+  // Purity: the input rows are never mutated.
+  const input = [{ word: 'a', lesson: '', status: 'new' }];
+  fillRecommendedLessons(input, { lesson: '第1课', source: 'photo-order' });
+  eq(input[0].lesson, '', 'fillRecommendedLessons does not mutate its input');
+
+  const rows = [
+    { word: 'a', lesson: '第1课', status: 'new', checked: true },
+    { word: 'b', lesson: '', status: 'new', checked: false },
+    { word: 'c', lesson: '', status: 'exists', checked: true },
+    { word: 'd', lesson: '', status: 'invalid', reason: 'empty-word', checked: false },
+    { word: 'e', lesson: '', status: 'conflict', checked: true, resolution: 'adopt' },
+    { word: 'f', lesson: '', status: 'conflict', checked: true, resolution: '' },
+  ];
+
+  // 整批: every committable CHECKED row (加入 set) takes the lesson.
+  const batch = applyBatchLesson(rows, '第5课');
+  eq(batch.map(function (r) { return r.lesson; }),
+    ['第5课', '', '第5课', '', '第5课', ''],
+    'batch apply covers checked committable rows only');
+  eq(rows[0].lesson, '第1课', 'batch apply does not mutate its input rows');
+  eq(batch.filter(function (r) { return r.lesson === '第5课'; })
+    .every(function (r) { return r.lessonOrigin === 'parent'; }),
+    true, 'batch apply stamps origin parent (the 推荐 badge stops)');
+
+  // 多选: the pick is separate from 加入 — a picked-but-unchecked row
+  // still takes the lesson (memory-only; committing stays 加入's call).
+  const picked = applyBatchLesson([], '第5课');
+  eq(picked, [], 'batch apply over no rows is empty');
+  const pickedRows = rows.map(function (r, i) {
+    return i === 1 || i === 4 ? Object.assign({}, r, { lessonPicked: true }) : r;
+  });
+  const applied = applyPickedLesson(pickedRows, '第7课');
+  eq(applied.map(function (r) { return r.lesson; }),
+    ['第1课', '第7课', '', '', '第7课', ''],
+    'picked apply covers picked committable rows, checked or not');
+  // The unpicked row that already carries a lesson keeps it untouched
+  // (identity preserved — not a copy).
+  eq(applied[3].lesson, '', 'an invalid row never takes a picked lesson');
+  eq(applied[5].lesson, '', 'an unresolved conflict never takes a picked lesson');
+})();
+
+// ----------------------------------------------------------------------
+// The 多选指定 pick helpers (Issue #80 §3.2 + 2026-10-27 feedback):
+// auto-clear after a successful apply, 全选/全部取消, per-lesson one-click
+// groups, Shift 连选 — all memory-only, all pure.
+// ----------------------------------------------------------------------
+
+(function () {
+  const ROWS2 = [
+    { word: 'a', lesson: '第1课', status: 'new', checked: true },
+    { word: 'b', lesson: '第1课', status: 'new', checked: true },
+    { word: 'c', lesson: '', status: 'new', checked: true },
+    { word: 'd', lesson: '', status: 'invalid', reason: 'empty-word', checked: false },
+    { word: 'e', lesson: '第2课', status: 'exists', checked: true },
+  ];
+  const picksOf = function (rows) {
+    return rows.map(function (r) { return !!r.lessonPicked; });
+  };
+
+  // 指定成功后自动清空选择: clearLessonPicks drops every pick.
+  const picked = pickLessonGroup(pickAllLessons(ROWS2, true), '第1课');
+  eq(picksOf(picked), [true, true, false, false, false],
+    'a lesson chip selects exactly that lesson\'s committable rows');
+  eq(picksOf(clearLessonPicks(picked)), [false, false, false, false, false],
+    'clearLessonPicks empties the selection');
+  eq(picksOf(ROWS2), [false, false, false, false, false],
+    'the pick helpers never mutate their input');
+
+  // 全选/全部取消 ride the committable verdict (invalid never picks).
+  eq(picksOf(pickAllLessons(ROWS2, true)), [true, true, true, false, true],
+    '全选 covers committable rows only');
+  eq(picksOf(pickAllLessons(pickAllLessons(ROWS2, true), false)),
+    [false, false, false, false, false], '全部取消 clears them again');
+
+  // The 待确认 chip: an empty lesson is a group of its own.
+  eq(picksOf(pickLessonGroup(ROWS2, '')), [false, false, true, false, false],
+    'the 待确认 chip selects the empty-lesson rows');
+  eq(picksOf(pickLessonGroup(ROWS2, ' 第1课 ')), [true, true, false, false, false],
+    'a chip name is trimmed before matching');
+
+  // Shift 连选: the inclusive range joins the pick, both directions.
+  eq(picksOf(pickLessonRange(ROWS2, 1, 3)), [false, true, true, false, false],
+    'shift range picks [1..3] committable rows');
+  eq(picksOf(pickLessonRange(ROWS2, 3, 0)), [true, true, true, false, false],
+    'a reversed range picks the same inclusive span');
+
+  // The chips model: first-appearance order, counts, 待确认 included.
+  eq(lessonPickGroups(ROWS2), [
+    { lesson: '第1课', count: 2 },
+    { lesson: '', count: 1 },
+    { lesson: '第2课', count: 1 },
+  ], 'lessonPickGroups lists distinct current lessons in row order');
+
+  // The 已分单元 marker: 识别/推荐/已指定 label the source; 待确认 none.
+  eq(lessonOriginLabel('recognized'), '识别', 'recognized → 识别');
+  eq(lessonOriginLabel('photo-order'), '推荐', 'photo-order → 推荐');
+  eq(lessonOriginLabel('previous-lesson'), '推荐', 'previous-lesson → 推荐');
+  eq(lessonOriginLabel('parent'), '已指定', 'parent → 已指定');
+  eq(lessonOriginLabel(''), '', 'no origin → no badge');
+  eq(lessonOriginLabel('none'), '', 'a none origin → no badge');
+})();
+
+// ----------------------------------------------------------------------
 // isCommittable — the conflict-resolution gate (Issue #6 AC-3)
 // ----------------------------------------------------------------------
 
@@ -205,7 +425,7 @@ const SNAP = [
 const BOOK = 9;
 
 (function () {
-  const groups = planAssignments(ROWS, SNAP, BOOK, false);
+  const groups = planAssignments(ROWS, SNAP, BOOK);
   // Groups keyed by lesson in first-appearance order; unchecked/conflict/
   // invalid rows never assigned; exists rows DO get their lesson.
   eq(groups.map(function (g) { return g.lesson; }), ['第5课', '', '第7课'],
@@ -215,18 +435,17 @@ const BOOK = 9;
   eq(groups[1].cardIds, [13], 'an empty lesson forms the 待确认 group');
   eq(groups[2].cardIds, [15], 'an exists row is assignable, unresolved conflict/invalid/unchecked are not');
 
-  // includePending lifts ONLY the 待确认 group into scope.
-  const withInclude = planAssignments(ROWS, SNAP, BOOK, true);
-  const pending = withInclude.filter(function (g) { return g.lesson === ''; })[0];
-  eq(pending.includeInScope, true, 'includePending sets includeInScope on the 待确认 group');
-  const lessonGroups = withInclude.filter(function (g) { return g.lesson !== ''; });
-  assert(lessonGroups.every(function (g) { return g.includeInScope === false; }),
-    'rows with a real lesson never ride the include override');
+  // Issue #80 AC-06: an import NEVER grants 默写范围 — the 待确认 group
+  // stores with includeInScope:false and waits for the textbook's
+  // progress (加入范围 lives in 词库浏览, never in the import).
+  const ac06Groups = planAssignments(ROWS, SNAP, BOOK);
+  assert(ac06Groups.every(function (g) { return g.includeInScope === false; }),
+    'no import group ever carries includeInScope:true');
 
   // A word missing from the snapshot (id unknown) is skipped, not guessed.
   const partial = planAssignments([
     { index: 0, word: 'ghost', meaning: '', lesson: '第1课', status: 'new', checked: true },
-  ], SNAP, BOOK, false);
+  ], SNAP, BOOK);
   eq(partial, [], 'a word without a resolved id forms no group');
 
   // A resolved card whose attribution projection failed is equally
@@ -236,12 +455,12 @@ const BOOK = 9;
     { index: 0, word: 'lake', meaning: '湖', lesson: '第7课', status: 'exists', checked: true },
   ], [
     { id: 15, word: 'lake', textbooks: null },
-  ], BOOK, false);
+  ], BOOK);
   eq(unknownAttribution, [],
     'a word with unknown attribution forms no assignment group');
 
   // Nothing committable → no calls at all.
-  eq(planAssignments([], SNAP, BOOK, true), [], 'no rows → no assignment calls');
+  eq(planAssignments([], SNAP, BOOK), [], 'no rows → no assignment calls');
 })();
 
 // ----------------------------------------------------------------------
@@ -256,7 +475,7 @@ const BOOK = 9;
       ? Object.assign({}, r, { resolution: 'adopt', checked: true })
       : r;
   });
-  const groups = planAssignments(rows, SNAP, BOOK, false);
+  const groups = planAssignments(rows, SNAP, BOOK);
   const lesson7 = groups.filter(function (g) { return g.lesson === '第7课'; })[0];
   eq(lesson7.cardIds, [15, 16], 'a resolved conflict row merges its source with exists rows');
   eq(lesson7.words, ['lake', 'star'], 'the group words carry the resolved conflict');
@@ -275,12 +494,12 @@ const BOOK = 9;
       ? { id: w.id, word: w.word, textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: true }] }
       : w;
   });
-  const groups = planAssignments(ROWS, snapIncluded, BOOK, false);
+  const groups = planAssignments(ROWS, snapIncluded, BOOK);
   const lesson7 = groups.filter(function (g) { return g.lesson === '第7课'; })[0];
   eq(lesson7.includeInScope, true, 'an existing explicit include survives re-import');
 
   // The same include on a DIFFERENT book is not this import's business.
-  const otherBook = planAssignments(ROWS, snapIncluded, 8, false);
+  const otherBook = planAssignments(ROWS, snapIncluded, 8);
   const other7 = otherBook.filter(function (g) { return g.lesson === '第7课'; })[0];
   eq(other7.includeInScope, false, 'another book\'s include does not leak into this import');
 
@@ -295,7 +514,7 @@ const BOOK = 9;
       ? { id: w.id, word: w.word, textbooks: [{ id: 9, name: '书A', lesson: '第7课', includeInScope: true }] }
       : w;
   });
-  const viaConflict = planAssignments(resolvedRows, starIncluded, BOOK, false);
+  const viaConflict = planAssignments(resolvedRows, starIncluded, BOOK);
   const conflictGroup = viaConflict.filter(function (g) {
     return g.lesson === '第7课' && g.words.indexOf('star') >= 0;
   })[0];
@@ -1074,7 +1293,6 @@ async function testCommitDataFlow() {
   knownForm.rows = [knownRow];
   knownForm.banner = makeScopeNode('div');
   knownForm.draftCategory = 'english';
-  knownForm.includePending = false;
   knownForm.fetchWords = function () {
     return Promise.resolve([
       { id: 11, word: 'apple', meaning: '苹果', participates: true,
@@ -1101,7 +1319,6 @@ async function testCommitDataFlow() {
   degradedForm.rows = [degradedRow];
   degradedForm.banner = makeScopeNode('div');
   degradedForm.draftCategory = 'english';
-  degradedForm.includePending = false;
   degradedForm.fetchWords = function () {
     wordReads++;
     if (wordReads === 1) {
@@ -1157,7 +1374,6 @@ async function testAdoptDegradedFlow() {
   form.rows = [row];
   form.banner = makeScopeNode('div');
   form.draftCategory = 'english';
-  form.includePending = false;
   form.fetchWords = function () {
     // The degraded wire shape from textbooks_test.go: the card is known,
     // its attribution is not — every read of this flow.
@@ -1189,15 +1405,14 @@ async function testAdoptDegradedFlow() {
   assert(banner.indexOf('释义已按照片更新') >= 0 && banner.indexOf('未能指定课次') >= 0,
     'the adopt banner keeps what did persist (edit) + the missing step (assign)');
 
-  // @80e3977 P3 的保护：待确认词 + includePending（归属已知时 payload 会带
-  // includeInScope:true）在 textbooks:null 下同样一个 payload 都不发。
+  // @80e3977 P3 的保护（Issue #80 后语义：导入永不发 includeInScope:true，
+  // 但待确认词同样要在 textbooks:null 下一个 payload 都不发）。
   const pendingRow = { index: 0, word: 'lake', meaning: '湖', lesson: '', status: 'exists', checked: true };
   const pendingPayloads = [];
   const pendingForm = Object.create(PhotoAddForm.prototype);
   pendingForm.rows = [pendingRow];
   pendingForm.banner = makeScopeNode('div');
   pendingForm.draftCategory = 'english';
-  pendingForm.includePending = true;
   pendingForm.fetchWords = function () {
     return Promise.resolve([
       { id: 15, word: 'lake', meaning: '湖', participates: true, textbooks: null },
@@ -1217,9 +1432,205 @@ async function testAdoptDegradedFlow() {
     'the suppressed include flow still reports the word as unassigned');
 }
 
+// Issue #80 §2.4：已有教材的确认走 appendLessons —— 请求只带本书还没有
+// 的课次名；不带整份名单、不带 learnedLessons（进度只在教材页改）。
+// 无新增且无回填时不发任何写请求。
+async function testAppendLessonsPayload() {
+  const book = {
+    id: 9, name: '书A', edition: '译林版', stage: '', grade: '六年级', volume: '', module: '',
+    lessons: ['第1课'], learnedLessons: 1,
+  };
+  const calls = [];
+  const form = Object.create(PhotoAddForm.prototype);
+  form.books = [book];
+  form.bookChoice = 9;
+  form.detectedMeta = { edition: '译林版', stage: '', grade: '六年级', volume: '下册', module: '' };
+  form.updateTextbook = function (id, patch) {
+    calls.push({ id: id, patch: patch });
+    return Promise.resolve(Object.assign({}, book, { volume: '下册', lessons: ['第1课', '第2课'] }));
+  };
+
+  const settled = await form.resolveTargetBook([
+    { word: 'a', lesson: '第1课', status: 'new', checked: true },
+    { word: 'b', lesson: '第2课', status: 'new', checked: true },
+    { word: 'c', lesson: '第1课', status: 'new', checked: false },
+  ], null, [], []);
+  eq(calls.length, 1, 'one update carries the append');
+  eq(calls[0].patch.appendLessons, ['第2课'], 'the payload carries ONLY the missing lesson names');
+  assert(!('lessons' in calls[0].patch), 'the payload never re-sends the whole list');
+  assert(!('learnedLessons' in calls[0].patch), 'the payload never touches progress');
+  eq(calls[0].patch.volume, '下册', 'an empty header field still backfills in the same call');
+  eq(settled.lessons, ['第1课', '第2课'], 'the in-memory book follows the server reply');
+
+  // Nothing missing, nothing to backfill → the confirm writes nothing.
+  const quietCalls = [];
+  const quiet = Object.create(PhotoAddForm.prototype);
+  quiet.books = [Object.assign({}, book, { volume: '下册' })];
+  quiet.bookChoice = 9;
+  quiet.detectedMeta = { edition: '译林版', stage: '', grade: '六年级', volume: '下册', module: '' };
+  quiet.updateTextbook = function (id, patch) {
+    quietCalls.push({ id: id, patch: patch });
+    return Promise.resolve({});
+  };
+  await quiet.resolveTargetBook([
+    { word: 'a', lesson: '第1课', status: 'new', checked: true },
+  ], null, [], []);
+  eq(quietCalls, [], 'a fully-known book gets no update call at all');
+}
+
+// ----------------------------------------------------------------------
+// Issue #80 Codex fix2 — stale fetch, draft isolation, form clears, import edit
 // ----------------------------------------------------------------------
 
-testCommitDataFlow().then(testAdoptDegradedFlow).then(function () {
+(function () {
+  eq(createFormFieldValue({ edition: '' }, 'edition', '译林版'), '',
+    'parent-cleared edition stays empty on re-render');
+  eq(createFormFieldValue({}, 'edition', '译林版'), '译林版',
+    'never-edited field still prefills from OCR');
+
+  const form = Object.create(PhotoAddForm.prototype);
+  form.recognizeEpoch = 3;
+  form.draftCategory = 'english';
+  assert(!recognizeRunStillValid(form, 3, 'chinese'),
+    'category switch invalidates the in-flight library fetch');
+  form.recognizeEpoch = 4;
+  assert(!recognizeRunStillValid(form, 3, 'english'),
+    'epoch bump invalidates the in-flight library fetch');
+
+  const mergeForm = Object.create(PhotoAddForm.prototype);
+  mergeForm.recognizeEpoch = 1;
+  mergeForm.draftCategory = 'english';
+  mergeForm.detectedMeta = null;
+  mergeForm.bookChoice = 'unset';
+  mergeForm.rows = [];
+  assert(applyRecognizeLibraryLoad(mergeForm, 1, 'english',
+    [[{ id: 9, word: 'apple' }], [], [], []],
+    [{ word: 'apple', meaning: '苹果', lesson: '' }]),
+    'applyRecognizeLibraryLoad merges while the run is still valid');
+  eq(mergeForm.rows[0].word, 'apple', 'library merge lands rows on the draft');
+  mergeForm.recognizeEpoch = 2;
+  mergeForm.rows = [];
+  assert(!applyRecognizeLibraryLoad(mergeForm, 1, 'english',
+    [[{ id: 9, word: 'apple' }], [], [], []],
+    [{ word: 'apple', meaning: '苹果', lesson: '' }]),
+    'applyRecognizeLibraryLoad drops a stale fetch after epoch bump');
+  eq(mergeForm.rows.length, 0, 'stale fetch leaves the draft empty');
+
+  const fresh = Object.create(PhotoAddForm.prototype);
+  fresh.recognizeEpoch = 0;
+  fresh.rows = [{ word: 'stale' }];
+  fresh.bookChoice = 'new';
+  fresh.newBookDraft = { name: '草稿' };
+  function makeClearable() {
+    const kids = [];
+    return {
+      childNodes: kids,
+      appendChild: function (n) { kids.push(n); },
+      removeChild: function () {},
+      hidden: false,
+    };
+  }
+  fresh.preview = makeClearable();
+  fresh.textbookPanel = makeClearable();
+  fresh.workspace = { hidden: false };
+  fresh.discardBtn = { hidden: false };
+  fresh.renderPreviewHint = function () {};
+  fresh.renderTextbookPanelReset = function () {};
+  fresh.syncWorkspace = function () {};
+  fresh.renderPreview = function () {};
+  fresh.beginRecognizeRun();
+  assert(fresh.rows.length === 0, 'beginRecognizeRun clears draft rows');
+  assert(fresh.bookChoice === 'unset', 'beginRecognizeRun resets bookChoice');
+  assert(fresh.newBookDraft === null, 'beginRecognizeRun clears newBookDraft');
+  assert(fresh.recognizeEpoch === 1, 'beginRecognizeRun bumps recognizeEpoch');
+
+  const recBooks = [{ id: 7, name: '书七', edition: '人教版PEP', stage: '', grade: '三年级',
+    volume: '', module: '', lessons: ['第1课', '第2课'] }];
+  const recForm = Object.create(PhotoAddForm.prototype);
+  recForm.books = recBooks;
+  recForm.detectedMeta = { edition: '人教版PEP', grade: '三年级' };
+  recForm.bookChoice = 7;
+  recForm.rows = [
+    { word: 'a', lesson: '', lessonOrigin: 'none', page: 1, status: 'new' },
+  ];
+  recForm.refreshLessonRecommendations();
+  eq(recForm.rows[0].lesson, '第2课', 'hand-picked book re-fills previous-lesson recommendation');
+  eq(recForm.rows[0].lessonOrigin, 'previous-lesson', 'origin reflects the book-list fallback');
+})();
+
+require(path.resolve(__dirname, '..', 'pkg', 'web', 'static', 'js', 'parent-batch-edit.js'));
+
+(function () {
+  const picked = [
+    { id: 1, word: 'alpha', meaning: '甲', category: 'english' },
+    { id: 3, word: 'gamma', meaning: '丙', category: 'english' },
+  ];
+  const library = [
+    { id: 1, word: 'alpha', category: 'english' },
+    { id: 2, word: 'beta', category: 'english' },
+    { id: 1000001, word: 'gamma', category: 'english' },
+  ];
+  const preview = global.previewBatchEdits(
+    picked,
+    global.parseBatchForEdit('alpha\t甲 revised\nbeta\tstolen').rows,
+    library);
+  const blocked = preview.edits.filter(function (e) {
+    return e.kind === 'edit' && e.blocked;
+  });
+  assert(blocked.length === 1, 'import batch preview blocks the identity conflict');
+  assert(preview.edits.some(function (e) {
+    return e.kind === 'edit' && !e.blocked && e.wordTo === 'alpha';
+  }), 'import batch preview still allows the non-conflicting edit');
+})();
+
+// ----------------------------------------------------------------------
+// Issue #80 Codex fix1 — recognize/commit concurrency + receipt snapshot
+// ----------------------------------------------------------------------
+
+(function () {
+  const form = Object.create(PhotoAddForm.prototype);
+  form.bookChoice = 'new';
+  form.textbookDepsReady = function () { return true; };
+  form.rows = [{ word: 'a', status: 'new', checked: true }];
+  form.poemRows = [];
+  form.passageRows = [];
+  form.commitBtn = { disabled: true, querySelector: function () { return { textContent: '' }; } };
+  form.commitHint = { hidden: true };
+  form.textbookPanel = { hidden: true };
+  form.recognizeBusy = true;
+  form.commitInFlight = false;
+  form.updateCommitButton();
+  assert(form.commitBtn.disabled, 'updateCommitButton keeps commit off while recognizeBusy');
+
+  global.document = { createElement: makeScopeNode };
+  form.rows = [{ index: 0, word: 'mutated-after-commit', meaning: 'm', lesson: '第5课',
+    status: 'exists', checked: true }];
+  form.banner = makeScopeNode('div');
+  form.renderTextbookCommitResult({
+    book: SCOPE_BOOK,
+    receiptRows: [{ index: 0, word: 'apple', meaning: '苹果', lesson: '第5课',
+      status: 'exists', checked: true }],
+    submittedRows: [],
+    addOutcome: { added: 0, skipped: 0 },
+    fresh: [{ id: 11, word: 'apple', meaning: '苹果', textbooks: [] }],
+    editResults: [],
+    groups: [],
+    groupResults: scopeGroupResults('第5课', false, ['apple']),
+    unassigned: [],
+    postSave: [{ word: 'apple', participates: true,
+      textbooks: [{ id: 9, name: '书A', lesson: '第5课', includeInScope: false }] }],
+    booksAfter: SCOPE_BOOKS_AFTER,
+  });
+  const snapBanner = scopeTextOf(form.banner);
+  assert(snapBanner.indexOf('mutated-after-commit') < 0,
+    'renderTextbookCommitResult uses receiptRows, not live this.rows');
+  assert(snapBanner.indexOf('apple') >= 0,
+    'the snapshot word appears on the receipt');
+})();
+
+// ----------------------------------------------------------------------
+
+testCommitDataFlow().then(testAdoptDegradedFlow).then(testAppendLessonsPayload).then(function () {
   if (failures) {
     console.error('parent-photo-textbook: ' + failures + ' of ' + checks + ' checks failed');
     process.exit(1);

@@ -392,6 +392,7 @@ type TextbookUpdateRequest struct {
 	Module         *string  `json:"module"`
 	LearnedLessons *int     `json:"learnedLessons"`
 	Lessons        []string `json:"lessons"`
+	AppendLessons  []string `json:"appendLessons"`
 	SetPrimary     bool     `json:"setPrimary"`
 }
 
@@ -402,6 +403,15 @@ type TextbookAssignRequest struct {
 	Lesson         string  `json:"lesson"`
 	CardIDs        []int64 `json:"cardIds"`
 	IncludeInScope bool    `json:"includeInScope"`
+}
+
+// validateTextbookLessonName caps one lesson name the same way each entry
+// in validateTextbookLessons is capped (Unicode runes, not UTF-8 bytes).
+func validateTextbookLessonName(lesson string) string {
+	if n := len([]rune(lesson)); n > maxTextbookLessonRunes {
+		return fmt.Sprintf("lesson exceeds %d characters", maxTextbookLessonRunes)
+	}
+	return ""
 }
 
 // validateTextbookName checks one name-shaped field.
@@ -486,8 +496,16 @@ func validateTextbookUpdateRequest(req *TextbookUpdateRequest) string {
 			return fmt.Sprintf("%s exceeds %d characters", field.name, maxTextbookFieldRunes)
 		}
 	}
+	if req.Lessons != nil && req.AppendLessons != nil {
+		return "lessons and appendLessons are mutually exclusive"
+	}
 	if req.Lessons != nil {
 		if msg := validateTextbookLessons(req.Lessons); msg != "" {
+			return msg
+		}
+	}
+	if req.AppendLessons != nil {
+		if msg := validateTextbookLessons(req.AppendLessons); msg != "" {
 			return msg
 		}
 	}
@@ -496,7 +514,7 @@ func validateTextbookUpdateRequest(req *TextbookUpdateRequest) string {
 	}
 	changed := req.Name != nil || req.Edition != nil || req.Stage != nil ||
 		req.Grade != nil || req.Volume != nil || req.Module != nil ||
-		req.Lessons != nil || req.LearnedLessons != nil || req.SetPrimary
+		req.Lessons != nil || req.AppendLessons != nil || req.LearnedLessons != nil || req.SetPrimary
 	if !changed {
 		return "at least one change is required"
 	}
@@ -511,10 +529,7 @@ func validateTextbookAssignRequest(req *TextbookAssignRequest) string {
 	if msg := validateIDBatch("cardIds", req.CardIDs); msg != "" {
 		return msg
 	}
-	if n := len([]rune(req.Lesson)); n > maxTextbookLessonRunes {
-		return fmt.Sprintf("lesson exceeds %d characters", maxTextbookLessonRunes)
-	}
-	return ""
+	return validateTextbookLessonName(req.Lesson)
 }
 
 // Poem route caps (Issue #11): one commit carries at most maxPoems whole

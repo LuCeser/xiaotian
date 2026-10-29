@@ -117,6 +117,9 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks
 	mux.HandleFunc("POST /textbooks/{id}/unassign", h.unassignTextbookWords)
 	mux.HandleFunc("POST /units/rename", h.renameUnit)
 	mux.HandleFunc("DELETE /words", h.deleteWords)
+	// Issue #80 指定默写: creation only (select + lock + pending snapshot
+	// row); the classroom consumption of a designation is the rt layer's.
+	mux.HandleFunc("POST /designations", h.createDesignation)
 	mux.HandleFunc("GET /settings/fsrs", h.getFSRS)
 	mux.HandleFunc("PUT /settings/fsrs", h.putFSRS)
 	// 13.3-02: the read-only parent achievement routes (ROADMAP success

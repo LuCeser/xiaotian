@@ -141,6 +141,31 @@
   }
 
   /**
+   * wordNeedsScopeRecover — a textbook-owned word whose lesson is still
+   * 待确认 and has not been manually included yet (Issue #80 AC-08). The
+   * row action calls assign with includeInScope without opening the bulk
+   * modal.
+   */
+  function wordNeedsScopeRecover(word) {
+    if (!word || word.participates === false) {
+      return null;
+    }
+    if (word.scope_reason !== 'pending') {
+      return null;
+    }
+    var hit = null;
+    (word.textbooks || []).forEach(function (entry) {
+      if (!entry || entry.lesson || entry.includeInScope) {
+        return;
+      }
+      if (!hit || entry.id === hit.id) {
+        hit = entry;
+      }
+    });
+    return hit;
+  }
+
+  /**
    * groupBrowseWords — one group per lesson (words that have textbook
    * ownership) or per unit tag (supplementary words). A lesson group is
    * keyed by its BOOK and lesson name together: two books' 「第1课」 are
@@ -634,6 +659,7 @@
     // modal from the toolbar and the 批量指定 modal from the bulk bar.
     this.onManageTextbooks = options.onManageTextbooks || null;
     this.onAssignTextbook = options.onAssignTextbook || null;
+    this.assignWords = options.assignWords || null;
     // Issue #11: the unified content view's 古诗 page — the whole-poem
     // list, the explicit attribution write and the textbook list the
     // assign modal reads. Absent fetchPoems ⇒ the 类型 filter never
@@ -811,6 +837,20 @@
       bulk.appendChild(this.bulkAssignBtn);
     }
 
+    // Issue #80 AC-09: 批量编辑 — paste the corrected word list over the
+    // checked rows; the preview (parent-batch-edit.js) blocks identity
+    // conflicts BEFORE any write, and the confirm rides one PUT per word.
+    this.bulkEditBtn = document.createElement('button');
+    this.bulkEditBtn.type = 'button';
+    this.bulkEditBtn.className = 'btn btn-secondary';
+    this.bulkEditBtn.id = 'bulk-edit-btn';
+    this.bulkEditBtn.textContent = '批量编辑';
+    this.bulkEditBtn.disabled = true;
+    this.bulkEditBtn.addEventListener('click', function () {
+      self.openBatchEditModal();
+    });
+    bulk.appendChild(this.bulkEditBtn);
+
     // The browse list region announces polite updates (UI-SPEC
     // Accessibility Contract).
     this.listHost = document.createElement('div');
@@ -865,6 +905,16 @@
     if (this.bulkAssignBtn) {
       this.bulkAssignBtn.disabled = !actionable;
     }
+    if (this.bulkEditBtn) {
+      // Issue #80 AC-09: the batch word/meaning edit rides the 词语 list
+      // only (poems/passages are edited as whole works).
+      this.bulkEditBtn.disabled = !actionable || this.type !== 'words';
+    }
+  };
+
+  BrowseView.prototype.clearSelection = function () {
+    this.selectedIds = {};
+    this.updateSelectionControls();
   };
 
   BrowseView.prototype.applyBulkParticipation = function (enabled) {
@@ -1336,6 +1386,30 @@
 
     var actions = document.createElement('span');
     actions.className = 'row-actions';
+
+    var recover = wordNeedsScopeRecover(word);
+    if (recover && typeof self.assignWords === 'function') {
+      var recoverBtn = document.createElement('button');
+      recoverBtn.type = 'button';
+      recoverBtn.className = 'row-action row-action-scope';
+      recoverBtn.textContent = '加入默写范围';
+      recoverBtn.title = '课次待确认：不受进度限制，直接加入默写范围';
+      recoverBtn.addEventListener('click', function () {
+        recoverBtn.disabled = true;
+        self.assignWords(recover.id, {
+          cardIds: [word.id],
+          lesson: '',
+          includeInScope: true,
+        }).then(function () {
+          toast('已加入默写范围', 'success');
+          return self.refresh();
+        }).catch(function (err) {
+          toast('加入默写范围失败：' + errorMessage(err) + '。', 'error');
+          return self.refresh();
+        });
+      });
+      actions.appendChild(recoverBtn);
+    }
 
     var editBtn = document.createElement('button');
     editBtn.type = 'button';
@@ -2274,6 +2348,182 @@
     });
   };
 
+  /**
+   * openBatchEditModal (Issue #80 AC-09) — 批量编辑: paste the corrected
+   * word list (the 批量添加 line contract) over the checked rows. The
+   * PREVIEW is memory-only (previewBatchEdits); 取消 drops it untouched.
+   * 确认修改 rides ONE PUT /words/{id} per non-blocked edit — a word's
+   * failure fails only itself and is named in the result line, never a
+   * silent partial success.
+   */
+  BrowseView.prototype.openBatchEditModal = function () {
+    var self = this;
+    if (this.type !== 'words') {
+      return;
+    }
+    var ids = this.selectedIds;
+    var selected = (this.words || []).filter(function (w) {
+      return ids[String(w.id)];
+    });
+    if (!selected.length || selected.length > 500) {
+      return;
+    }
+
+    openModal({
+      wide: true,
+      title: '批量编辑（已选 ' + selected.length + ' 个词）',
+      build: function (body, actions, close) {
+        var hint = document.createElement('p');
+        hint.className = 'form-hint';
+        hint.textContent = '按勾选顺序每行一个词，word<TAB>释义（无 Tab 按第一个空格分）；' +
+          '行数必须与已选数量一致。改词面落到别的词的面上会被阻断，不会覆盖。';
+        body.appendChild(hint);
+
+        var paste = document.createElement('textarea');
+        paste.className = 'form-textarea';
+        paste.id = 'batch-edit-input';
+        paste.rows = Math.min(10, Math.max(4, selected.length));
+        paste.setAttribute('aria-label', '批量编辑粘贴');
+        var prefillLine = global.batchEditPrefillLine || function (word, meaning) {
+          return word + (meaning ? '\t' + meaning : '');
+        };
+        var prefilled = selected.map(function (w) {
+          return prefillLine(w.word, w.meaning);
+        }).join('\n');
+        paste.value = prefilled;
+        body.appendChild(paste);
+
+        var previewBox = document.createElement('div');
+        previewBox.className = 'batch-edit-preview';
+        previewBox.id = 'batch-edit-preview';
+        body.appendChild(previewBox);
+
+        var applyBtn = buildLoadingButton('确认修改', 'btn btn-primary');
+        applyBtn.type = 'button';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = '取消';
+        cancelBtn.addEventListener('click', close);
+        actions.appendChild(cancelBtn);
+        actions.appendChild(applyBtn);
+
+        // The preview re-derives from the CURRENT text on every input —
+        // pure functions only, nothing written until 确认修改.
+        var parseEdit = global.parseBatchForEdit || global.parseBatch;
+        var render = function () {
+          var parsed = parseEdit(paste.value);
+          var preview = global.previewBatchEdits(selected, parsed.rows, self.words);
+          clearContainer(previewBox);
+          previewBox.dataset.ok = preview.ok ? 'true' : 'false';
+          if (!preview.ok && preview.code === 'count-mismatch') {
+            var mismatch = document.createElement('p');
+            mismatch.className = 'batch-edit-problem';
+            mismatch.textContent = '行数不一致：粘贴 ' + preview.pasted + ' 行，已选 ' +
+              preview.selected + ' 个词。请补齐或删减到一致（# 开头的行和空行不计）。';
+            previewBox.appendChild(mismatch);
+            applyBtn.disabled = true;
+            return;
+          }
+          var edits = preview.edits.filter(function (e) { return e.kind === 'edit'; });
+          var blocked = global.blockedEdits(preview);
+          (parsed.errors || []).forEach(function (err) {
+            var line = document.createElement('p');
+            line.className = 'batch-edit-problem';
+            line.textContent = '第 ' + err.line + ' 行无法使用：' +
+              batchEditErrorText(err.reason) + '。';
+            previewBox.appendChild(line);
+          });
+          var summary = document.createElement('p');
+          summary.className = 'batch-edit-summary';
+          summary.textContent = edits.length + ' 处修改、' + preview.unchanged +
+            ' 处不变' + (blocked.length ? '、' + blocked.length + ' 处阻断' : '') + '。';
+          previewBox.appendChild(summary);
+          var list = document.createElement('ul');
+          list.className = 'batch-edit-list';
+          edits.forEach(function (e) {
+            var li = document.createElement('li');
+            var face = e.wordTo === e.wordFrom ? e.wordFrom
+              : (e.wordFrom + ' → ' + e.wordTo);
+            li.textContent = face + '（释义：' +
+              (e.meaningTo === e.meaningFrom ? '不变' : ('「' + (e.meaningFrom || '（空）') +
+                '」→「' + e.meaningTo + '」')) + '）' +
+              (e.blocked === 'identity-conflict'
+                ? ' — 已阻断：词面与另一个词（#' + e.conflictId + '）相同'
+                : (e.blocked === 'meaning-too-long' ? ' — 已阻断：释义超过 1000 字' : ''));
+            if (e.blocked) {
+              li.className = 'batch-edit-blocked';
+            }
+            list.appendChild(li);
+          });
+          previewBox.appendChild(list);
+          applyBtn.disabled = !edits.some(function (e) { return !e.blocked; });
+        };
+        paste.addEventListener('input', render);
+        render();
+
+        applyBtn.addEventListener('click', function () {
+          if (applyBtn.disabled) {
+            return;
+          }
+          var parsed = parseEdit(paste.value);
+          var preview = global.previewBatchEdits(selected, parsed.rows, self.words);
+          var pending = preview.edits.filter(function (e) {
+            return e.kind === 'edit' && !e.blocked;
+          });
+          if (!pending.length) {
+            return;
+          }
+          setLoading(applyBtn, true);
+          var failures = [];
+          // ONE PUT per word, sequential: each editWord is its own call —
+          // a failure fails only itself and the loop keeps going.
+          pending.reduce(function (chain, e) {
+            return chain.then(function () {
+              // example/unit stay untouched: absent flags keep the stored
+              // values server-side (cmd_edit's COALESCE contract).
+              return self.editWord(e.id, { word: e.wordTo, meaning: e.meaningTo })
+                .catch(function (err) {
+                  failures.push({ word: e.wordFrom, error: errorMessage(err) });
+                });
+            });
+          }, Promise.resolve()).then(function () {
+            close();
+            self.selectedIds = {};
+            if (failures.length) {
+              toast('已保存 ' + (pending.length - failures.length) + ' 个，失败 ' +
+                failures.length + ' 个：' + failures.map(function (f) {
+                  return f.word + '（' + f.error + '）';
+                }).join('、') + '。请重试失败的部分。', 'error');
+            } else {
+              toast('已保存 ' + pending.length + ' 处修改', 'success');
+            }
+            self.refresh();
+            self.onMutated();
+          });
+        });
+      },
+    });
+  };
+
+  /** One parse-error reason's human line (the batch parser's codes). */
+  function batchEditErrorText(reason) {
+    var code = String(reason || '').split(':')[0];
+    if (code === 'empty-word') {
+      return '词面为空';
+    }
+    if (code === 'word-comma') {
+      return '词面里不能有英文逗号';
+    }
+    if (code === 'word-too-long') {
+      return '词面超过 200 字';
+    }
+    if (code === 'duplicate') {
+      return '与第 ' + String(reason).split(':')[1] + ' 行重复';
+    }
+    return '无法解析';
+  }
+
   // ------------------------------------------------------------------
   // Rename + destructive-delete flows (Plan 09-07 Task 2). Every
   // mutation is gated by its modal — the dialog is the ONLY confirmation
@@ -2515,6 +2765,7 @@
   global.groupBrowseWords = groupBrowseWords;
   global.orderBrowseGroups = orderBrowseGroups;
   global.dictationStatusText = dictationStatusText;
+  global.wordNeedsScopeRecover = wordNeedsScopeRecover;
   global.lessonOwnership = lessonOwnership;
   global.supplementaryDeletePlan = supplementaryDeletePlan;
   global.unitRenameTouchesLesson = unitRenameTouchesLesson;

@@ -661,6 +661,11 @@
     return v == null ? '' : String(v).trim();
   }
 
+  /** True when the parent chose a concrete textbook target (not 补充 / 请选择). */
+  function isPhotoTextbookMode(choice) {
+    return choice !== 'none' && choice !== 'unset';
+  }
+
   /**
    * distinctLessons — the distinct non-empty trimmed lesson NAMES, keeping
    * first-appearance order (teaching order is explicit; never sorted).
@@ -688,6 +693,465 @@
     return distinctLessons((rows || []).map(function (row) {
       return row && row.lesson ? row.lesson : '';
     }));
+  }
+
+  /**
+   * lessonsNamedOnPhoto — every non-empty lesson string on one recognition
+   * payload (page header + row lessons), deduped in first-seen order.
+   */
+  function lessonsNamedOnPhoto(photo) {
+    var names = [];
+    if (photo && photo.textbook) {
+      var pageLesson = metaField(photo.textbook.lesson);
+      if (pageLesson) {
+        names.push(pageLesson);
+      }
+    }
+    (photo && photo.entries || []).forEach(function (e) {
+      if (e && e.lesson != null) {
+        names.push(metaField(e.lesson));
+      }
+    });
+    return distinctLessons(names);
+  }
+
+  /**
+   * recommendLesson — per-photo default lesson (Issue #80 §3.1). Does not
+   * invent names absent from the recognition; module fields are ignored.
+   * priorRecommendedLessons: earlier photos' {lesson, source} in order.
+   */
+  function recommendLesson(photo, existingLessons, priorRecommendedLessons) {
+    var onPhoto = lessonsNamedOnPhoto(photo);
+    if (onPhoto.length === 1) {
+      return { lesson: onPhoto[0], source: 'recognized' };
+    }
+    if (onPhoto.length > 1) {
+      return { lesson: '', source: 'none' };
+    }
+    var prior = priorRecommendedLessons || [];
+    for (var i = prior.length - 1; i >= 0; i--) {
+      if (prior[i] && metaField(prior[i].lesson)) {
+        return { lesson: metaField(prior[i].lesson), source: 'photo-order' };
+      }
+    }
+    var list = existingLessons || [];
+    if (list.length) {
+      return { lesson: list[list.length - 1], source: 'previous-lesson' };
+    }
+    return { lesson: '', source: 'none' };
+  }
+
+  /**
+   * Issue #80 §2.3: one selection carries at most MAX_PHOTO_FILES photos
+   * (each one walks the ordinary per-image compress + recognize path, so
+   * the cap bounds the run, not the memory — one photo is resident at a
+   * time, the PDF-page precedent).
+   */
+  var MAX_PHOTO_FILES = 20;
+
+  /** A picker file's photo-ness (the two MIME types the flow accepts). */
+  function isPhotoFile(file) {
+    return !!file && (file.type === 'image/png' || file.type === 'image/jpeg');
+  }
+
+  /**
+   * validatePhotoSelection — the WHOLE-selection gate (Issue #80 §2.3):
+   * one PDF alone, or 1..MAX_PHOTO_FILES photos alone; anything mixed
+   * (PDF + photo, two PDFs) or alien is refused WHOLE — nothing is
+   * processed, matching the PDF pre-load gate's honest-refusal shape.
+   * Pure: takes the picker's file shapes, never the FileList itself.
+   *   { ok: true, kind: 'pdf' | 'photos', files: [...] }
+   *   { ok: false, code: 'unsupported'|'mixed'|'photo-too-many'|
+   *                   'pdf-too-large', message }
+   */
+  function validatePhotoSelection(files) {
+    var list = Array.prototype.slice.call(files || []).filter(Boolean);
+    if (!list.length) {
+      return { ok: false, code: 'empty', message: '' };
+    }
+    var photos = [];
+    var pdf = null;
+    for (var i = 0; i < list.length; i++) {
+      var f = list[i];
+      var pdfVerdict = global.validatePdfFile
+        ? global.validatePdfFile(f)
+        : { ok: false, code: 'not-pdf' };
+      if (pdfVerdict.ok || pdfVerdict.code === 'pdf-too-large') {
+        pdf = { file: f, verdict: pdfVerdict };
+      } else if (isPhotoFile(f)) {
+        photos.push(f);
+      } else {
+        return {
+          ok: false,
+          code: 'unsupported',
+          message: '只支持 PNG / JPEG 照片或 PDF 扫描件，请换一个文件',
+        };
+      }
+    }
+    if (pdf && list.length > 1) {
+      return {
+        ok: false,
+        code: 'mixed',
+        message: '一次只能选择一个 PDF，或最多 ' + MAX_PHOTO_FILES +
+          ' 张照片，不能混选；请分开分批上传',
+      };
+    }
+    if (pdf) {
+      if (!pdf.verdict.ok) {
+        return { ok: false, code: pdf.verdict.code, message: pdf.verdict.message };
+      }
+      return { ok: true, kind: 'pdf', files: [pdf.file] };
+    }
+    if (photos.length > MAX_PHOTO_FILES) {
+      return {
+        ok: false,
+        code: 'photo-too-many',
+        limit: MAX_PHOTO_FILES,
+        message: '一次最多选择 ' + MAX_PHOTO_FILES + ' 张照片（选中 ' +
+          photos.length + ' 张），请分批上传',
+      };
+    }
+    return { ok: true, kind: 'photos', files: photos };
+  }
+
+  /**
+   * mergePhotoMetas — the multi-photo book header (Issue #80 §2.2): a
+   * field later photos read fills ONLY what earlier photos left empty;
+   * two DIFFERENT non-empty readings void the field (待确认 — the backfill
+   * must never pick a winner between contradicting photos). lesson rides
+   * along for the panel's display; the book backfill reads only the five
+   * META_FIELDS. Pure.
+   */
+  function mergePhotoMetas(metas) {
+    var merged = {};
+    META_KEYS.concat(['lesson']).forEach(function (key) {
+      var seen = '';
+      var conflict = false;
+      (metas || []).forEach(function (meta) {
+        var value = meta ? metaField(meta[key]) : '';
+        if (!value) {
+          return;
+        }
+        if (!seen) {
+          seen = value;
+        } else if (seen !== value) {
+          conflict = true;
+        }
+      });
+      merged[key] = conflict ? '' : seen;
+    });
+    return merged;
+  }
+
+  /**
+   * fillRecommendedLessons — stamp ONE freshly recognized photo's rows
+   * with the recommendation (Issue #80 §3.2): a row that landed with its
+   * own lesson keeps it (origin 'recognized'); an empty row takes the
+   * photo's recommended lesson and source; no recommendation anywhere →
+   * the row stays an honest 空（待确认, origin 'none'）. Memory-only: it
+   * returns NEW row copies and never touches the inputs. Pure.
+   */
+  function fillRecommendedLessons(rows, rec) {
+    return (rows || []).map(function (row) {
+      if (!row) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      var own = metaField(copy.lesson);
+      if (own) {
+        copy.lesson = own;
+        copy.lessonOrigin = 'recognized';
+      } else if (rec && metaField(rec.lesson)) {
+        copy.lesson = metaField(rec.lesson);
+        copy.lessonOrigin = rec.source || 'recognized';
+      } else {
+        copy.lesson = '';
+        copy.lessonOrigin = 'none';
+      }
+      return copy;
+    });
+  }
+
+  /**
+   * refreshRowLesson — ONE row's lesson after the target book changed
+   * (Issue #80 U4). The three ways a lesson can exist keep separate
+   * identities: the parent's value (an explicit clear included) and the
+   * photo's own OCR lesson are FACTS the refresh preserves; a row whose
+   * lesson came from a recommendation is re-derived from the CURRENT rec,
+   * so an old recommendation can never freeze into a "recognized" fact
+   * (fillRecommendedLessons is for FRESH rows only — there a non-empty
+   * lesson is an OCR fact; here it may be last round's recommendation).
+   * Pure: returns the row or a copy, the input is never touched.
+   */
+  function refreshRowLesson(row, rec) {
+    if (!row) {
+      return row;
+    }
+    if (row.lessonOrigin === 'parent') {
+      return row;
+    }
+    if (row.lessonOrigin === 'recognized' && metaField(row.lesson)) {
+      return row;
+    }
+    var copy = Object.assign({}, row);
+    if (rec && metaField(rec.lesson)) {
+      copy.lesson = metaField(rec.lesson);
+      copy.lessonOrigin = rec.source || 'recognized';
+    } else {
+      copy.lesson = '';
+      copy.lessonOrigin = 'none';
+    }
+    return copy;
+  }
+
+  /**
+   * applyBatchLesson — the 整批指定 path (Issue #80 §3.2): one lesson
+   * onto every committable CHECKED row (the 加入 set — the whole
+   * submittable batch), origin 'parent' (the 推荐 badge stops applying).
+   * Returns a NEW array; untouched rows keep their identity. Pure.
+   */
+  function applyBatchLesson(rows, lesson) {
+    return mapParentLesson(rows, lesson, function (row) {
+      return isCommittable(row, true) && row.checked !== false;
+    });
+  }
+
+  /**
+   * applyPickedLesson — the 多选指定 path (Issue #80 §3.2): the row's
+   * 选中 (lessonPicked) is deliberately SEPARATE from 加入 — a picked but
+   * unchecked row still takes the lesson (it is memory-only; whether it
+   * commits stays the 加入 checkbox's call). Pure.
+   */
+  function applyPickedLesson(rows, lesson) {
+    return mapParentLesson(rows, lesson, function (row) {
+      return !!row.lessonPicked && isCommittable(row, true);
+    });
+  }
+
+  /** The shared parent-assignment map: predicate rows get lesson+'parent'. */
+  function mapParentLesson(rows, lesson, predicate) {
+    var value = lesson == null ? '' : String(lesson);
+    return (rows || []).map(function (row) {
+      if (!row || !predicate(row)) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      copy.lesson = value;
+      copy.lessonOrigin = 'parent';
+      return copy;
+    });
+  }
+
+  /**
+   * The 多选指定 pick helpers (Issue #80 §3.2 + 2026-10-27 feedback):
+   * picks are MEMORY-ONLY selection over committable rows, deliberately
+   * separate from 加入. All pure — new arrays, inputs untouched.
+   */
+  /** 指定成功后自动清空选择: every pick drops, rows keep their identity. */
+  function clearLessonPicks(rows) {
+    return (rows || []).map(function (row) {
+      if (!row || !row.lessonPicked) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      copy.lessonPicked = false;
+      return copy;
+    });
+  }
+
+  /** 全选/全部取消 over the committable rows only. */
+  function pickAllLessons(rows, picked) {
+    return (rows || []).map(function (row) {
+      if (!row || !isCommittable(row, true) || !!row.lessonPicked === !!picked) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      copy.lessonPicked = !!picked;
+      return copy;
+    });
+  }
+
+  /**
+   * 按识别单元分组一键选中: picked = exactly the committable rows whose
+   * CURRENT lesson equals the name ('' = the 待确认 group) — a chip's
+   * one-click selection replaces whatever was picked before.
+   */
+  function pickLessonGroup(rows, lesson) {
+    var name = lesson == null ? '' : String(lesson).trim();
+    return (rows || []).map(function (row) {
+      var want = !!row && isCommittable(row, true) && metaField(row.lesson) === name;
+      if (!row || !!row.lessonPicked === want) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      copy.lessonPicked = want;
+      return copy;
+    });
+  }
+
+  /** Shift 连选: every committable row in [min,max] joins the pick. */
+  function pickLessonRange(rows, fromIndex, toIndex) {
+    var lo = Math.min(fromIndex, toIndex);
+    var hi = Math.max(fromIndex, toIndex);
+    return (rows || []).map(function (row, i) {
+      if (!row || i < lo || i > hi || !isCommittable(row, true) || row.lessonPicked) {
+        return row;
+      }
+      var copy = Object.assign({}, row);
+      copy.lessonPicked = true;
+      return copy;
+    });
+  }
+
+  /**
+   * lessonPickGroups — the chips model: the committable rows' distinct
+   * CURRENT lessons ('' shown as 待确认), first-appearance order, with
+   * counts. Pure.
+   */
+  function lessonPickGroups(rows) {
+    var order = [];
+    var byLesson = {};
+    (rows || []).forEach(function (row) {
+      if (!row || !isCommittable(row, true)) {
+        return;
+      }
+      var name = metaField(row.lesson);
+      if (!Object.prototype.hasOwnProperty.call(byLesson, name)) {
+        byLesson[name] = { lesson: name, count: 0 };
+        order.push(name);
+      }
+      byLesson[name].count += 1;
+    });
+    return order.map(function (name) { return byLesson[name]; });
+  }
+
+  /**
+   * lessonOriginLabel — the 已分单元 marker beside each row's lesson
+   * input: WHERE the current lesson came from. '' / 'none' render nothing
+   * (an honest 待确认 row carries no badge). Pure.
+   */
+  function lessonOriginLabel(origin) {
+    if (origin === 'recognized') {
+      return '识别';
+    }
+    if (origin === 'photo-order' || origin === 'previous-lesson') {
+      return '推荐';
+    }
+    if (origin === 'parent') {
+      return '已指定';
+    }
+    return '';
+  }
+
+  /**
+   * recommendForDraftPage — one freshly recognized page's recommendation
+   * with the honest inputs of the moment (Issue #80 §3.1): the page's own
+   * header + entries, the lesson list of the parent's CURRENT book choice,
+   * and the run's earlier pages' recommendations in order. Pure;
+   * recommendLesson does the deciding, nothing is written. (U4: the merged
+   * batch meta is deliberately NOT an input — a page's facts are its own.)
+   */
+  function recommendForDraftPage(books, photo, priorRecs, bookChoice) {
+    var lessons = lessonsForRecommend(books, bookChoice);
+    return recommendLesson(photo, lessons, priorRecs || []);
+  }
+
+  /** True while a recognize run's epoch and draft subject still match. */
+  function recognizeRunStillValid(form, runEpoch, category) {
+    return runEpoch === form.recognizeEpoch && form.draftCategory === category;
+  }
+
+  /**
+   * applyRecognizeLibraryLoad — merge a library/textbook fetch into the
+   * draft ONLY while the run epoch and subject still match (Issue #80 P1).
+   * Returns false when the snapshot is stale and must be dropped.
+   */
+  function applyRecognizeLibraryLoad(form, runEpoch, category, loaded, entries) {
+    if (!recognizeRunStillValid(form, runEpoch, category)) {
+      return false;
+    }
+    form.existingWords = loaded[0] || [];
+    form.books = loaded[1] || [];
+    form.existingPoems = loaded[2] || [];
+    form.existingPassages = loaded[3] || [];
+    form.rows = classifyPhotoEntries(entries, form.existingWords);
+    stampEntryIndex(form.rows);
+    // Issue #80 U5: honest preselect before the first recommendation pass.
+    if (form.bookChoice === 'unset') {
+      form.bookChoice = preselectBookChoice(form.books, form.detectedMeta);
+    }
+    form.rows = fillRecommendedLessons(form.rows, recommendForDraftPage(
+      form.books, { textbook: form.detectedMeta, entries: entries }, [],
+      form.bookChoice));
+    return true;
+  }
+
+  /** Entries for recommendLesson — OCR lessons come from the photo store. */
+  function entriesForPhotoPage(rows, pageNo, importState) {
+    if (importState && global.recognitionEntriesForPage) {
+      var stored = global.recognitionEntriesForPage(importState, pageNo);
+      if (stored.length) {
+        return stored;
+      }
+    }
+    return (rows || []).filter(function (r) {
+      return (r.page || 1) === pageNo;
+    }).map(function (r) {
+      return {
+        word: r.word,
+        meaning: r.meaning,
+        lesson: r.lessonOrigin === 'recognized' ? (r.lesson || '') : '',
+      };
+    });
+  }
+
+  /**
+   * stampEntryIndex (Issue #80 U3) — fix each freshly classified row's
+   * photo-local OCR ordinal: classifyPhotoEntries' index IS the entry's
+   * position within its photo, but mergePageRows re-indexes rows to their
+   * GLOBAL array position right after. The ordinal is the row's stable link
+   * to its original OCR entry (originalEntryForRow): it must be taken while
+   * it still means "position within the photo".
+   */
+  function stampEntryIndex(rows) {
+    (rows || []).forEach(function (row) {
+      if (row) {
+        row.entryIndex = row.index;
+      }
+    });
+    return rows;
+  }
+
+  /** A running page whose result was dropped goes back to pending. */
+  function abandonRunningPage(state, pageNo) {
+    if (!state || !state.plan || !global.applyPageEvent) {
+      return;
+    }
+    state.plan = global.applyPageEvent(state.plan, pageNo, 'abort');
+  }
+
+  /**
+   * appendMissingLessons — keep existing order, append unseen names from
+   * incoming in order (Issue #80: import never inserts into the middle).
+   */
+  function appendMissingLessons(existing, incoming) {
+    var seen = {};
+    var out = [];
+    (existing || []).forEach(function (name) {
+      var v = metaField(name);
+      if (v && !seen[v]) {
+        seen[v] = true;
+        out.push(v);
+      }
+    });
+    (incoming || []).forEach(function (name) {
+      var v = metaField(name);
+      if (v && !seen[v]) {
+        seen[v] = true;
+        out.push(v);
+      }
+    });
+    return out;
   }
 
   /** The two parent confirmations a 释义差异 row can carry (Issue #6). */
@@ -740,7 +1204,7 @@
    * (不指定教材) still use the field.
    */
   function commitUnit(form) {
-    if (form && form.bookChoice && form.bookChoice !== 'none') {
+    if (form && isPhotoTextbookMode(form.bookChoice)) {
       return '';
     }
     var input = form && form.unitInput;
@@ -832,6 +1296,64 @@
     return bestScore > 0 ? best : null;
   }
 
+  /** Issue #80: memory-only preselect for the textbook dropdown. */
+  function preselectBookChoice(books, meta) {
+    var hit = matchTextbookForMeta(books, meta);
+    if (hit) {
+      return hit.id;
+    }
+    if (books && books.length) {
+      return 'unset';
+    }
+    // §2.2: no books in this subject yet → 新建 (lesson-only wordlists
+    // without a page header still land in textbook mode, not 补充词汇).
+    return 'new';
+  }
+
+  /**
+   * lessonRecsPriorToPage — earlier photos' recommendations in photo
+   * order (Issue #80 §3.1). Sparse slots from out-of-order completion
+   * are skipped; only indices before pageNo count.
+   */
+  function lessonRecsPriorToPage(lessonRecs, pageNo) {
+    var prior = [];
+    var cap = Math.max(0, (pageNo || 0) - 1);
+    for (var i = 0; i < cap; i++) {
+      if (lessonRecs && lessonRecs[i]) {
+        prior.push(lessonRecs[i]);
+      }
+    }
+    return prior;
+  }
+
+  /** Lessons list for recommendLesson's previous-lesson fallback. */
+  function lessonsForRecommend(books, bookChoice) {
+    if (bookChoice === 'new' || bookChoice === 'none' || bookChoice === 'unset') {
+      return [];
+    }
+    if (typeof bookChoice === 'number') {
+      var chosen = null;
+      (books || []).forEach(function (b) {
+        if (b && b.id === bookChoice) {
+          chosen = b;
+        }
+      });
+      return (chosen && chosen.lessons) || [];
+    }
+    return [];
+  }
+
+  /**
+   * createFormFieldValue — 新建教材 field: distinguish「从未编辑」from
+   *「家长明确清空」（batch 指定课次会重绘表单，不得用 OCR 填回）。
+   */
+  function createFormFieldValue(savedDraft, key, detectedValue) {
+    if (savedDraft && Object.prototype.hasOwnProperty.call(savedDraft, key)) {
+      return savedDraft[key];
+    }
+    return detectedValue || '';
+  }
+
   /**
    * planAssignments — group the committable rows into textbook-assign
    * calls (POST /textbooks/{id}/assign takes ONE lesson + one
@@ -839,10 +1361,10 @@
    * conflicts the parent RESOLVED (Issue #6), each with a card id
    * resolved from the post-commit library snapshot (unresolved conflicts
    * and invalid rows never reach a textbook). Groups keep
-   * first-appearance order. includePending=true (the page-level 「待确认
-   * 课次的词直接加入默写范围」checkbox) lifts ONLY the lesson-less group
-   * into scope — rows with a real lesson always ride the textbook's
-   * progress.
+   * first-appearance order. Issue #80 AC-06: an import never grants
+   * 默写范围 — includeInScope rides only the sticky rule below, so the
+   * lesson-less group stores as 待确认 and out-of-progress words wait
+   * for the textbook page's progress (加入范围 lives in 词库浏览).
    *
    * Sticky include (Issue #6 AC-4): snapshotRows is the GET /words shape
    * ({id, word, textbooks:[{id, lesson, includeInScope}]}); when the word
@@ -851,7 +1373,7 @@
    * parent's explicit include (the assign upsert is last-write-wins, so
    * the preservation has to ride the payload). Pure.
    */
-  function planAssignments(rows, snapshotRows, bookId, includePending) {
+  function planAssignments(rows, snapshotRows, bookId) {
     var byWord = {};
     (snapshotRows || []).forEach(function (w) {
       if (w && w.word) {
@@ -878,7 +1400,11 @@
           sticky = true;
         }
       });
-      var include = sticky || (includePending && !lesson);
+      // Issue #80 §2.4: an import NEVER grants scope — new words ride the
+      // textbook's progress (includeInScope: false); only a sticky
+      // include the word ALREADY carries on this book is re-sent, so a
+      // re-import cannot silently clear a parent's explicit include.
+      var include = sticky;
       var key = lesson + '\u0000' + (include ? '1' : '0');
       if (!Object.prototype.hasOwnProperty.call(byKey, key)) {
         byKey[key] = { lesson: lesson, includeInScope: include, cardIds: [], words: [] };
@@ -1006,10 +1532,11 @@
       this.form.appendChild(unit.field);
     }
 
-    // Photo/PDF picker row: one file at a time (Issue #3 settles the
-    // single-file limit; Issue #7 adds the scanned PDF — pages split in
-    // the browser, ADR-0004). The .pdf extension rides accept because
-    // iPad Safari sometimes hands a PDF an empty MIME type.
+    // Photo/PDF picker row: photos may come SEVERAL AT A TIME (Issue #80
+    // §2.3 — up to 20, one recognition per photo, the PDF-page merge
+    // machinery); a PDF stays one file whose pages split in the browser
+    // (Issue #7, ADR-0004). The .pdf extension rides accept because iPad
+    // Safari sometimes hands a PDF an empty MIME type.
     var pickField = document.createElement('div');
     pickField.className = 'form-field';
     var pickLabel = document.createElement('label');
@@ -1017,12 +1544,13 @@
     pickLabel.textContent = '词表照片／扫描 PDF';
     var pickHint = document.createElement('p');
     pickHint.className = 'form-hint';
-    pickHint.textContent = '拍摄或选择一张英语单词表或语文词语表照片（PNG / JPEG），或整本扫描 PDF（最多 100 页），无需裁图。';
+    pickHint.textContent = '拍摄或选择英语单词表或语文词语表照片（PNG / JPEG，一次最多 20 张），或整本扫描 PDF（最多 100 页，单份），无需裁图。';
     var pickRow = document.createElement('div');
     pickRow.className = 'photo-pick-row';
     this.fileInput = document.createElement('input');
     this.fileInput.type = 'file';
     this.fileInput.accept = 'image/png,image/jpeg,application/pdf,.pdf';
+    this.fileInput.multiple = true;
     this.fileInput.className = 'photo-file-input';
     this.fileInput.id = 'parent-photo-file';
     this.pickBtn = document.createElement('button');
@@ -1251,12 +1779,25 @@
     this.draftCategory = '';
     this.detectedMeta = null; // the READ-off-the-photo textbook header
     this.books = []; // the draft's subject's textbooks (panel list)
-    this.bookChoice = 'none'; // 'none' | 'new' | a textbook id (number)
-    this.includePending = false; // 待确认课次的词直接加入默写范围
+    this.bookChoice = 'unset'; // 'unset' | 'none' | 'new' | textbook id
     // Issue #7: while a PDF is in play — { doc, plan, aborted, metaDone,
     // panelRendered }. doc stays open for page retries until discard /
     // commit reset / a new file; rows themselves live in this.rows.
     this.pdfState = null;
+    // Issue #80 §2.3: the multi-photo run — { files, plan, aborted,
+    // metaDone, panelRendered } (the pdfState kin; the photo index is the
+    // page number, so mergePageRows and the retry bar ride unchanged).
+    // pickedPhotos carries the PICK (1 photo too — the plain flow just
+    // reads files[0] through it); photoBatch only exists while a
+    // multi-photo run is in play.
+    this.pickedPhotos = [];
+    this.photoBatch = null;
+    // The per-photo book headers read so far (mergePhotoMetas' input);
+    // detectedMeta is their merged view.
+    this.detectedMetaList = [];
+    // Issue #80 U3: per-photo OCR snapshots (meta + entries + lessons).
+    this.importPhotoState = global.createImportPhotoState
+      ? global.createImportPhotoState() : { photos: {} };
     // Issue #8: a supplement run is in flight (the affordance disables
     // and says 生成中 rather than queueing a second overlapping call).
     this.meaningBusy = false;
@@ -1267,6 +1808,18 @@
     this.sourceKind = '';
     this.pdfPageURL = null;
     this.sourcePageNo = 0;
+    // 页 vs 张 — the run-driven source view's noun (PDF pages / Issue #80
+    // photos); showPhotoSourceFile/showPdfPageBlob set it per run.
+    this.sourceNoun = '页';
+    // Issue #80 §3.2: the 多选指定 transient state — the toolbar input's
+    // draft (survives the detail-host re-renders) and the Shift 连选
+    // anchor (the last plain-clicked pick row).
+    this.batchLessonDraft = '';
+    this.lastLessonPick = null;
+    this.newBookDraft = null;
+    this.recognizeBusy = false;
+    this.commitInFlight = false;
+    this.recognizeEpoch = 0;
 
     var self = this;
     this.pickBtn.addEventListener('click', function () {
@@ -1316,12 +1869,16 @@
       // rows/panel state; the snapshot, book list and supplement bar are
       // the other subject's too. currentFile STAYS — the photo itself is
       // subject-agnostic, 重新识别 under the new subject is the retry.
-      // An in-flight PDF run is STOPPED first (releasePdf alone does not
-      // signal the page loop — without the abort flag the loop would keep
-      // rendering pages of the closed document under the new subject).
-      if (this.pdfState) {
-        this.pdfState.aborted = true;
+      // Issue #80: every in-flight run — multi-photo batch, single photo
+      // (U8) or PDF — is invalidated: the rows it landed reset below; a
+      // re-recognize rebuilds the run. U7/U8: the 失效 transition owns
+      // this for every kind (stop fact + plan sweep + the terminal
+      // no-buttons verdict); the PDF run rides releasePdf below, whose
+      // own invalidate gives it the same terminal rule.
+      if (this.photoBatch) {
+        global.invalidateImportRun(this.photoBatch);
       }
+      this.recognizeEpoch += 1;
       this.draftCategory = category;
       this.existingWords = [];
       this.existingPoems = [];
@@ -1396,6 +1953,7 @@
     }
     this.pdfPageURL = URL.createObjectURL(blob);
     this.sourceKind = 'pdf';
+    this.sourceNoun = '页';
     this.sourcePageNo = pageNo;
     this.sourceImg.alt = '第 ' + pageNo + ' 页大图预览';
     this.sourceImg.src = this.pdfPageURL;
@@ -1478,11 +2036,7 @@
         return;
       }
       if (!lesson) {
-        if (this.includePending) {
-          out.joined += 1;
-        } else {
-          out.heldPending += 1;
-        }
+        out.heldPending += 1;
         return;
       }
       var idx = lessons.indexOf(lesson);
@@ -1566,9 +2120,8 @@
     if (sched.heldPending && sched.mode !== 'none') {
       var pend = document.createElement('p');
       pend.className = 'photo-state-hint photo-state-hint-neutral';
-      pend.textContent = sched.includePending
-        ? '待确认课次的 ' + sched.heldPending + ' 词已勾选直接加入默写范围。'
-        : '待确认课次的 ' + sched.heldPending + ' 词暂不自动安排，可指定课次或勾选直接加入范围。';
+      pend.textContent = '待确认课次的 ' + sched.heldPending +
+        ' 词保存后暂不自动安排，可先指定课次；加入范围请到「词库」操作。';
       this.stateLine.appendChild(pend);
     }
   };
@@ -1681,23 +2234,53 @@
       : '';
   };
 
+  /**
+   * handleFilePicked — the WHOLE selection goes through
+   * validatePhotoSelection (Issue #80 §2.3): one PDF, or 1..20 photos; a
+   * mixed or over-cap selection is refused whole (nothing processed). One
+   * photo keeps the plain single-photo flow; several start the batch run
+   * at 开始识别 (handlePhotoBatchRecognize). A new valid pick always
+   * releases the previous photo run — its retries never outlive it.
+   */
   PhotoAddForm.prototype.handleFilePicked = function () {
-    var file = this.fileInput.files && this.fileInput.files[0];
+    var files = this.fileInput.files
+      ? Array.prototype.slice.call(this.fileInput.files) : [];
     this.showFormError('');
-    this.currentFile = file || null;
-    if (!file) {
+    if (!files.length) {
+      this.currentFile = null;
+      this.pickedPhotos = [];
       this.clearPickUI();
       this.releasePdf();
+      this.releasePhotoBatch();
       return;
     }
-    var verdict = (global.validatePdfFile || function () {
-      return { ok: false, code: 'not-pdf' };
-    })(file);
-    if (verdict.ok) {
+    var verdict = validatePhotoSelection(files);
+    if (!verdict.ok) {
+      if (verdict.code === 'empty') {
+        this.currentFile = null;
+        this.pickedPhotos = [];
+        this.clearPickUI();
+        this.releasePdf();
+        this.releasePhotoBatch();
+        return;
+      }
+      // pdf-too-large / mixed / photo-too-many / unsupported: refuse
+      // BEFORE anything is processed (the PDF gate's honest-refusal shape).
+      this.currentFile = null;
+      this.pickedPhotos = [];
+      this.clearPickUI();
+      this.showFormError(verdict.message);
+      return;
+    }
+    if (verdict.kind === 'pdf') {
+      var file = verdict.files[0];
+      this.pickedPhotos = [];
+      this.currentFile = file;
       // Issue #7: a scanned PDF. No thumbnail (a PDF is not an <img>); the
       // page plan replaces it once 开始识别 runs. A new file always
       // releases the previous run's doc — page retries never outlive it.
       this.releasePdf();
+      this.releasePhotoBatch();
       this.fileMeta.textContent = file.name + '（' +
         Math.max(1, Math.round(file.size / (1024 * 1024))) + ' MB）';
       this.thumb.hidden = true;
@@ -1722,24 +2305,22 @@
       this.syncWorkspace();
       return;
     }
-    if (verdict.code !== 'not-pdf') {
-      // pdf-too-large: refuse BEFORE loading, nothing is processed (AC-3).
-      this.currentFile = null;
-      this.clearPickUI();
-      this.showFormError(verdict.message);
-      return;
-    }
-    if (file.type !== 'image/png' && file.type !== 'image/jpeg') {
-      this.currentFile = null;
-      this.clearPickUI();
-      this.showFormError('只支持 PNG / JPEG 照片或 PDF 扫描件，请换一个文件');
-      return;
-    }
-    this.fileMeta.textContent = file.name + '（' + Math.max(1, Math.round(file.size / 1024)) + ' KB）';
+    // Photos (one or many — one photo rides the plain flow, many the
+    // batch run; either way the pick is the same shape from here on).
+    var photos = verdict.files;
+    var first = photos[0];
+    this.currentFile = first;
+    this.pickedPhotos = photos;
+    this.releasePhotoBatch();
+    var totalKb = photos.reduce(function (sum, f) { return sum + (f.size || 0); }, 0) / 1024;
+    this.fileMeta.textContent = photos.length === 1
+      ? first.name + '（' + Math.max(1, Math.round(first.size / 1024)) + ' KB）'
+      : photos.length + ' 张照片（共 ' + Math.max(1, Math.round(totalKb / 1024)) + ' MB，从「' +
+        first.name + '」开始）';
     if (this.thumb.src) {
       URL.revokeObjectURL(this.thumb.src);
     }
-    this.thumb.src = URL.createObjectURL(file);
+    this.thumb.src = URL.createObjectURL(first);
     this.thumb.hidden = false;
     this.recognizeBtn.disabled = false;
     // Issue #81: the SAME object URL feeds the large 本次材料 view — the
@@ -1750,7 +2331,9 @@
     this.sourceImg.alt = '词表照片大图预览';
     this.sourceImg.src = this.thumb.src;
     this.sourceView.hidden = false;
-    this.setSourceCaption(file.name);
+    this.setSourceCaption(photos.length === 1
+      ? first.name
+      : '共 ' + photos.length + ' 张照片，从「' + first.name + '」开始');
     this.syncWorkspace();
   };
 
@@ -1761,8 +2344,16 @@
    * the photo flow does — 开始识别 replaces it).
    */
   PhotoAddForm.prototype.releasePdf = function () {
-    if (this.pdfState && this.pdfState.doc && global.PdfPageRunner) {
-      global.PdfPageRunner.close(this.pdfState.doc);
+    if (this.pdfState) {
+      // U8: a released run is 失效 — the SAME terminal transition
+      // releasePhotoBatch gives the photo batch (stop fact + plan sweep +
+      // the no-buttons verdict); the epoch bump below rejects its late
+      // HTTP either way.
+      global.invalidateImportRun(this.pdfState);
+      this.recognizeEpoch += 1;
+      if (this.pdfState.doc && global.PdfPageRunner) {
+        global.PdfPageRunner.close(this.pdfState.doc);
+      }
     }
     this.pdfState = null;
     // Issue #81: the page render dies with the document — the left column
@@ -1821,13 +2412,38 @@
       return;
     }
     this.draftCategory = category;
+    if (this.commitInFlight) {
+      return;
+    }
     if (this.isPickedPdf()) {
       this.handlePdfRecognize();
+      return;
+    }
+    // Issue #80 §2.3: several picked photos run one-by-one (the PDF page
+    // loop's shape); a single photo keeps the plain flow below verbatim.
+    if (this.pickedPhotos.length > 1) {
+      this.handlePhotoBatchRecognize();
       return;
     }
     var self = this;
     var kit = global.__parentFormKit || {};
     this.showFormError('');
+    this.releasePhotoBatch();
+    this.releasePdf();
+    this.beginRecognizeRun();
+    // U8: the single photo initializes the SAME batch run the other two
+    // entries ride (§3.1 单张也作为第 1 张处理) — createImportRunState +
+    // beginImportRun, the 失效 rules of releasePhotoBatch/onCategorySelected,
+    // and the busy truth the machine carries. The landing below keeps the
+    // plain flow's OWN surface (poems included): no chips bar, no stop or
+    // resume buttons — one recognition in flight has nothing to continue.
+    var run = global.createImportRunState(global.createPagePlan(1));
+    run.kind = 'photo-single';
+    run.noun = '张';
+    this.photoBatch = run;
+    global.beginImportRun(run);
+    run.plan = global.applyPageEvent(run.plan, 1, 'start');
+    var runEpoch = this.recognizeEpoch;
     this.setBusy(true);
 
     var uploadBytes = null;
@@ -1845,7 +2461,7 @@
         // preview rows against a classification snapshot that no longer
         // matches the draft's subject. Drop it; the switch hint already
         // told the parent to 重新识别.
-        if (self.draftCategory !== category) {
+        if (runEpoch !== self.recognizeEpoch || self.draftCategory !== category) {
           self.setBusy(false);
           return;
         }
@@ -1856,14 +2472,22 @@
         // passages (entries empty) — that is a legal recognition, not a
         // 没有识别到词表 dead end.
         if (!entries.length && !parsed.poems.length && !parsed.passages.length) {
+          // The same honest page FAILURE the batch landing records — the
+          // plan stays consistent with the plain hint (out-of-lifecycle
+          // events change nothing on a dead run).
+          run.plan = global.applyPageEvent(run.plan, 1, 'fail', '没有识别到词表');
           self.setBusy(false);
           self.renderPreviewHint('这张照片里没有识别到词表，请换一张更清晰的照片');
           self.resetEntries();
           return;
         }
+        if (global.setPhotoRecognition) {
+          global.setPhotoRecognition(self.importPhotoState, 1, parsed);
+        }
         self.detectedMeta = meta;
-        self.bookChoice = 'none';
-        self.includePending = false;
+        self.detectedMetaList = global.photoMetaListFromState
+          ? global.photoMetaListFromState(self.importPhotoState)
+          : (meta ? [meta] : []);
         // Snapshot the REAL libraries for classification; load the textbook
         // list in parallel for the attribution panel. All ride the DRAFT's
         // subject (a Chinese draft classifies against the 语文 word library
@@ -1887,11 +2511,11 @@
           poemsLoad,
           passagesLoad,
         ]).then(function (loaded) {
-          self.existingWords = loaded[0] || [];
-          self.books = loaded[1] || [];
-          self.existingPoems = loaded[2] || [];
-          self.existingPassages = loaded[3] || [];
-          self.rows = classifyPhotoEntries(entries, self.existingWords);
+          if (!applyRecognizeLibraryLoad(self, runEpoch, category, loaded, entries)) {
+            self.setBusy(false);
+            return;
+          }
+          run.plan = global.applyPageEvent(run.plan, 1, 'done');
           self.poemRows = classifyPoemDrafts(parsed.poems, self.existingPoems);
           self.passageRows = classifyPassageDrafts(parsed.passages, self.existingPassages);
           self.otherSections = parsed.others.map(function (o) {
@@ -1909,13 +2533,20 @@
       .catch(function (err) {
         var message = (err && err.message) ? err.message : '未知错误';
         // Failure shows the reason and the file stays picked — 重新识别
-        // is just clicking 开始识别 again (retry allowed).
+        // is just clicking 开始识别 again (retry allowed). The plan takes
+        // the same honest fail event the batch landing records (a no-op on
+        // a dead run).
+        run.plan = global.applyPageEvent(run.plan, 1, 'fail', message);
         self.showFormError('识别失败：' + message + '。可以重试或换一张照片。');
         if (kit.showToast) {
           kit.showToast('识别失败：' + message, 'error');
         }
       })
       .then(function () {
+        // 收尾 FIRST — the batch convention: executing goes false before
+        // saving re-opens (§3.2), and a handler that never fired leaves
+        // no page stuck on running.
+        self.settleRun(run);
         self.setBusy(false);
       });
   };
@@ -1938,7 +2569,11 @@
    * sequentially. Failures NEVER throw past this method's catch: a page
    * that fails lands on its plan entry and the run continues (AC-4); only
    * open/plan failures (unreadable file, over-cap pages) surface as form
-   * errors with nothing processed.
+   * errors with nothing processed. U8: the PDF run rides the SAME §3.2
+   * machine as the photo batch — createImportRunState + beginImportRun
+   * (the photo batch's init), the 停止/收尾/继续/重试/失效 transitions, and
+   * importRunDecision for every bar/hint verdict; the page-count
+   * processing inference is gone.
    */
   PhotoAddForm.prototype.handlePdfRecognize = function () {
     var self = this;
@@ -1947,8 +2582,15 @@
     // every page's recognize call and the one library snapshot ride it.
     var category = this.draftCategory;
     this.showFormError('');
-    this.setBusy(true);
+    if (this.commitInFlight) {
+      return;
+    }
     this.releasePdf();
+    this.releasePhotoBatch();
+    this.beginRecognizeRun();
+    var runEpoch = this.recognizeEpoch;
+    this.setBusy(true);
+    var run = null;
 
     global.PdfPageRunner.open(this.currentFile)
       .then(function (opened) {
@@ -1957,13 +2599,15 @@
           global.PdfPageRunner.close(opened.doc);
           throw new Error(plan.message);
         }
-        self.pdfState = {
-          doc: opened.doc,
-          plan: plan,
-          aborted: false,
-          metaDone: false,
-          panelRendered: false,
-        };
+        run = global.createImportRunState(plan);
+        run.kind = 'pdf';
+        run.noun = '页';
+        run.doc = opened.doc;
+        run.metaDone = false;
+        run.panelRendered = false;
+        run.lessonRecs = [];
+        self.pdfState = run;
+        global.beginImportRun(run);
         self.renderPdfBar();
         self.syncWorkspace();
         // ONE library snapshot classifies every page as it lands (the run
@@ -1988,19 +2632,33 @@
           poemsLoad,
           passagesLoad,
         ]).then(function (loaded) {
+          if (!recognizeRunStillValid(self, runEpoch, category)) {
+            return null;
+          }
           self.existingWords = loaded[0] || [];
           self.books = loaded[1] || [];
           self.existingPoems = loaded[2] || [];
           self.existingPassages = loaded[3] || [];
-          return self.runPdfPages();
+          return self.runPages();
         });
       })
       .then(function (summary) {
+        // 收尾 FIRST (the photo batch's U7 convention): executing goes
+        // false and any still-running page is swept back to pending, so
+        // 继续处理/保存 open the moment the chain ends.
+        self.settleRun(run);
         self.setBusy(false);
-        self.finishPdfRun(summary);
+        if (!recognizeRunStillValid(self, runEpoch, category)) {
+          return;
+        }
+        self.finishRun(summary);
       })
       .catch(function (err) {
+        self.settleRun(run);
         self.setBusy(false);
+        if (!recognizeRunStillValid(self, runEpoch, category)) {
+          return;
+        }
         var message = (err && err.message) ? err.message : '未知错误';
         self.showFormError('PDF 处理失败：' + message + '。可以重试或换一个文件。');
         if (kit.showToast) {
@@ -2010,13 +2668,230 @@
   };
 
   /**
-   * runPdfPages — run every PENDING page of the plan sequentially
-   * (onlyPageNo: the single-page retry path). The chain never rejects:
-   * per-page failures are recorded on the plan; the loop keeps going.
+   * handlePhotoBatchRecognize (Issue #80 §2.3) — the multi-photo run:
+   * one plan entry per picked photo, run one-by-one through the SAME
+   * compress + recognize + merge machinery a PDF page rides (the photo
+   * index is the page number; mergePageRows keeps photo order and makes a
+   * retried photo REPLACE its own segment). Only ONE photo is resident at
+   * a time (the large view's object URL is revoked on every swap — the
+   * PDF page-render precedent). One library snapshot classifies every
+   * photo as it lands, exactly like the PDF run.
    */
-  PhotoAddForm.prototype.runPdfPages = function (onlyPageNo) {
+  PhotoAddForm.prototype.handlePhotoBatchRecognize = function () {
     var self = this;
-    var state = this.pdfState;
+    var kit = global.__parentFormKit || {};
+    var category = this.draftCategory;
+    var files = this.pickedPhotos;
+    this.showFormError('');
+    if (this.commitInFlight) {
+      return;
+    }
+    // A stale PDF run must not own the bar (runState prefers it) — the
+    // same reset handlePdfRecognize gives itself.
+    this.releasePdf();
+    this.releasePhotoBatch();
+    this.beginRecognizeRun();
+    var runEpoch = this.recognizeEpoch;
+    this.setBusy(true);
+    this.detectedMetaList = [];
+
+    // U7 (§3.2): the batch IS a U6 run state — createImportRunState's shape
+    // (plan / aborted / executing / invalidated) plus the photo run's own
+    // facts. 停止/继续/重试/失效 below ride the machine's transitions, and
+    // the bar renders from importRunDecision — never from page-count
+    // verdicts (pending photos are NOT processing; execution is).
+    var run = global.createImportRunState(global.createPagePlan(files.length));
+    run.kind = 'photo';
+    run.noun = '张';
+    run.files = files;
+    run.metaDone = false;
+    run.panelRendered = false;
+    run.lessonRecs = [];
+    this.photoBatch = run;
+    global.beginImportRun(run);
+    this.renderPdfBar();
+    this.syncWorkspace();
+
+    var booksLoad = this.fetchTextbooks
+      ? this.fetchTextbooks(category).catch(function () { return null; })
+      : Promise.resolve(null);
+    var poemsLoad = this.fetchPoems
+      ? this.fetchPoems(category).catch(function () { return null; })
+      : Promise.resolve(null);
+    var passagesLoad = this.fetchPassages
+      ? this.fetchPassages(category).catch(function () { return null; })
+      : Promise.resolve(null);
+    Promise.all([
+      this.fetchWords(category).catch(function () { return []; }),
+      booksLoad,
+      poemsLoad,
+      passagesLoad,
+    ]).then(function (loaded) {
+      if (!recognizeRunStillValid(self, runEpoch, category)) {
+        return null;
+      }
+      self.existingWords = loaded[0] || [];
+      self.books = loaded[1] || [];
+      self.existingPoems = loaded[2] || [];
+      self.existingPassages = loaded[3] || [];
+      return self.runPages();
+    }).then(function (summary) {
+      // 收尾 FIRST: executing goes false and any still-running photo is
+      // swept back to pending, so 继续/保存 open the moment the chain ends
+      // — even when a stopped photo's late handler never fired.
+      self.settleRun(run);
+      self.setBusy(false);
+      if (!recognizeRunStillValid(self, runEpoch, category)) {
+        return;
+      }
+      self.finishRun(summary);
+    }).catch(function (err) {
+      self.settleRun(run);
+      self.setBusy(false);
+      if (!recognizeRunStillValid(self, runEpoch, category)) {
+        return;
+      }
+      var message = (err && err.message) ? err.message : '未知错误';
+      self.showFormError('照片处理失败：' + message + '。可以重试或换一批照片。');
+      if (kit.showToast) {
+        kit.showToast('照片处理失败：' + message, 'error');
+      }
+    });
+  };
+
+  /**
+   * runOnePhotoPage — compress → recognize → merge ONE photo of the
+   * batch. The photo's classified rows replace its segment in this.rows
+   * (the photo index is the page number), so a retried photo never
+   * duplicates and other photos' edits survive.
+   */
+  PhotoAddForm.prototype.runOnePhotoPage = function (pageNo) {
+    var self = this;
+    var state = this.photoBatch;
+    if (!state || state.aborted) {
+      return Promise.resolve(null);
+    }
+    var runEpoch = this.recognizeEpoch;
+    var file = state.files[pageNo - 1];
+    state.plan = global.applyPageEvent(state.plan, pageNo, 'start');
+    this.renderPdfBar();
+    return this.prepareUpload(file)
+      .then(function (bytes) {
+        if (!bytes) {
+          throw new Error('这张照片压缩后仍然太大');
+        }
+        // The photo being recognized shows large in the 本次材料 column;
+        // the swap revokes the previous photo's URL — one image resident.
+        self.showPhotoSourceFile(file, pageNo);
+        return self.recognizePhoto(bytes, self.draftCategory);
+      })
+      .then(function (data) {
+        if (runEpoch !== self.recognizeEpoch || !self.photoBatch || state.aborted) {
+          abandonRunningPage(state, pageNo);
+          self.renderPdfBar();
+          return null;
+        }
+        self.landRecognized(data, pageNo, state, function () {
+          // Photos: headers MERGE (§2.2) from per-photo slots — retries
+          // replace a slot instead of appending another header version.
+          var any = self.detectedMetaList.some(function (m) { return m; });
+          return any ? mergePhotoMetas(self.detectedMetaList) : null;
+        });
+      })
+      .catch(function (err) {
+        if (runEpoch !== self.recognizeEpoch || !self.photoBatch || state.aborted) {
+          abandonRunningPage(state, pageNo);
+          self.renderPdfBar();
+          return;
+        }
+        state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
+          (err && err.message) || '识别失败');
+        if (self.sourcePageNo === pageNo) {
+          self.setSourceCaption('第 ' + pageNo + ' ' + state.noun + ' · 识别失败');
+        }
+        self.renderPdfBar();
+      });
+  };
+
+  /**
+   * showPhotoSourceFile — the run-driven 本次材料 view for a photo of the
+   * batch: the SAME lifecycle as showPdfPageBlob (one object URL at a
+   * time, revoked on every swap; clearPdfSource owns the last revoke),
+   * noun 张.
+   */
+  PhotoAddForm.prototype.showPhotoSourceFile = function (file, pageNo) {
+    if (this.pdfPageURL) {
+      URL.revokeObjectURL(this.pdfPageURL);
+    }
+    this.pdfPageURL = URL.createObjectURL(file);
+    this.sourceKind = 'pdf'; // the run-driven view's shared lifecycle
+    this.sourceNoun = '张';
+    this.sourcePageNo = pageNo;
+    this.sourceImg.alt = '第 ' + pageNo + ' 张照片大图预览';
+    this.sourceImg.src = this.pdfPageURL;
+    this.sourceView.hidden = false;
+    this.setSourceCaption('第 ' + pageNo + ' ' + this.sourceNoun + ' · 识别中…');
+    this.syncWorkspace();
+  };
+
+  /**
+   * releasePhotoBatch — drop the multi-photo run: abort the loop, drop
+   * the plan/bar (the rows stay — a fresh pick keeps the old preview on
+   * screen exactly like the photo/PDF flows; 开始识别 replaces it).
+   * U7: 失效 is the U6 transition — a released run is TERMINAL (no resume,
+   * no retry) and its in-flight photo is swept back to pending before the
+   * state goes away; the epoch bump below still rejects its late HTTP.
+   */
+  PhotoAddForm.prototype.releasePhotoBatch = function () {
+    if (this.photoBatch) {
+      global.invalidateImportRun(this.photoBatch);
+      this.photoBatch = null;
+      this.recognizeEpoch += 1;
+    }
+    this.clearPdfSource();
+    this.renderPdfBar();
+    this.syncWorkspace();
+  };
+
+  /**
+   * settleRun (U7 收尾, U8 every batch kind) — the U6 settle transition for
+   * ANY run (multi-photo batch, single photo, PDF): executing goes false
+   * and a page whose handler never fired is swept back to pending (the
+   * 停止后 running 恢复 pending guarantee), plus the bar re-render that
+   * surfaces 继续处理 and re-opens saving. The single photo's bar stay
+   * hidden is renderPdfBar's business — settling it stays identical.
+   */
+  PhotoAddForm.prototype.settleRun = function (state) {
+    if (!state) {
+      return;
+    }
+    global.settleImportRun(state);
+    this.renderPdfBar();
+  };
+
+  /**
+   * runState — the run currently owning the page bar / retry machinery:
+   * the PDF run or the photo batch (multi-photo or the U8 single-photo
+   * run, which rides the machine but owns no bar). Whichever exists first
+   * wins; the pick/recognize releases keep them mutually exclusive.
+   */
+  PhotoAddForm.prototype.runState = function () {
+    return this.pdfState || this.photoBatch || null;
+  };
+
+  /**
+   * runPages — run every PENDING page of the plan sequentially
+   * (onlyPageNo: the single-page retry path), dispatching each page to
+   * the run's own runner (PDF render / photo compress). The chain never
+   * rejects: per-page failures are recorded on the plan; the loop keeps
+   * going.
+   */
+  PhotoAddForm.prototype.runPages = function (onlyPageNo) {
+    var self = this;
+    var state = this.runState();
+    if (!state) {
+      return Promise.resolve(null);
+    }
     var chain = Promise.resolve();
     state.plan.pages.forEach(function (page) {
       if (onlyPageNo && page.no !== onlyPageNo) {
@@ -2026,12 +2901,121 @@
         if (state.aborted || page.status !== 'pending') {
           return null;
         }
-        return self.runOnePdfPage(page.no);
+        return state.kind === 'photo'
+          ? self.runOnePhotoPage(page.no)
+          : self.runOnePdfPage(page.no);
       });
     });
     return chain.then(function () {
-      return global.planSummary(state.plan);
+      // U8: counts ONLY — the form no longer consults planSummary's
+      // pending-means-processing verdict (the §1.1 row-4 inference); the
+      // §3.2 verdicts all come from importRunDecision instead.
+      return global.importRunCounts(state);
     });
+  };
+
+  /**
+   * landRecognized — the shared post-recognize landing of ONE page (PDF
+   * page or photo — Issue #80 rides the same machinery): parse, merge the
+   * page's segment into every content kind, settle cross-page duplicates,
+   * render the panel ONCE with the first rows. metaMerger (PDF: first
+   * page wins; photos: mergePhotoMetas) folds the header into
+   * detectedMeta, and metaLineSync keeps the panel's 识别到 line honest
+   * when a later photo changes it.
+   */
+  PhotoAddForm.prototype.landRecognized = function (data, pageNo, state, metaMerger) {
+    var parsed = parseRecognized(data);
+    if (global.setPhotoRecognition && this.importPhotoState) {
+      global.setPhotoRecognition(this.importPhotoState, pageNo, parsed);
+      if (global.photoMetaListFromState) {
+        this.detectedMetaList = global.photoMetaListFromState(this.importPhotoState);
+      }
+    }
+    if (parsed.meta) {
+      var merged = metaMerger(parsed.meta);
+      if (merged) {
+        this.detectedMeta = merged;
+        this.syncMetaLine();
+      }
+      state.metaDone = true;
+    }
+    // A page that recognized NOTHING is an honest page FAILURE — the same
+    // rule the single-photo path applies (没有识别到词表), instead of a
+    // silent "done" page with no content. Its (empty) identity is still
+    // registered above, so re-running this page REPLACES its slot in the
+    // store (Issue #80 U3: retry replaces the photo's own record).
+    if (!parsed.entries.length && !parsed.poems.length && !parsed.passages.length) {
+      state.plan = global.applyPageEvent(state.plan, pageNo, 'fail', '没有识别到词表');
+      if (this.sourcePageNo === pageNo) {
+        this.setSourceCaption('第 ' + pageNo + ' ' + state.noun + ' · 识别失败');
+      }
+      this.renderPdfBar();
+      return;
+    }
+    // Issue #80 U5: preselect the target book before deriving lessons;
+    // then refresh EVERY landed page so an earlier header-less photo picks
+    // up the book's 末课 once a later photo supplies matchable meta.
+    var panelWasRendered = state.panelRendered;
+    var choiceBeforePreselect = this.bookChoice;
+    this.applyBookPreselectIfUnset();
+    var bookChoiceChangedByPreselect = panelWasRendered &&
+      choiceBeforePreselect !== this.bookChoice;
+    state.lessonRecs = state.lessonRecs || [];
+    while (state.lessonRecs.length < pageNo) {
+      state.lessonRecs.push(null);
+    }
+    var stamped = global.classifyPhotoEntries(parsed.entries, this.existingWords);
+    stampEntryIndex(stamped);
+    this.rows = global.mergePageRows(this.rows, pageNo, stamped);
+    // Issue #80 U5fix1: stamp THIS page's fresh rows (OCR lesson facts and
+    // empty-row recommendations) before the batch refresh — otherwise
+    // refreshRowLesson clears unrecognized origins when the photo has no
+    // whole-page default (e.g. 第1课 + 第2课 on one page).
+    var priorRecs = lessonRecsPriorToPage(state.lessonRecs, pageNo);
+    var pageRec = this.recommendationForPhotoPage(pageNo, priorRecs);
+    this.rows = this.rows.map(function (row) {
+      if (!row || (row.page || 1) !== pageNo) {
+        return row;
+      }
+      return fillRecommendedLessons([row], pageRec)[0];
+    });
+    this.refreshLessonRecommendations();
+    // Issue #11: the page's poems and display-only others replace
+    // their own page segments (a retry never duplicates either).
+    // Issue #13: the passages replace their own segment the same way.
+    this.poemRows = mergePagePoems(this.poemRows, pageNo, parsed.poems, this.existingPoems);
+    this.passageRows = mergePagePassages(this.passageRows, pageNo, parsed.passages, this.existingPassages);
+    this.otherSections = mergePageOthers(this.otherSections, pageNo, parsed.others);
+    state.plan = global.applyPageEvent(state.plan, pageNo, 'done');
+    // The textbook panel renders with the FIRST rows that land (bookChoice
+    // was already preselected above when meta allowed). A retry never
+    // rebuilds it — parent's choice survives redraw.
+    if (!state.panelRendered &&
+        (this.rows.length || this.poemRows.length || this.passageRows.length)) {
+      this.renderTextbookPanel('');
+      state.panelRendered = true;
+    }
+    // Settle cross-page duplicates NOW — the 与第 N 行重复 verdicts
+    // come from classifyPhotoEntries over the whole merged array, and
+    // the preview should show them the moment the page lands.
+    this.reclassify();
+    if (this.rows.length || this.poemRows.length || this.passageRows.length) {
+      this.renderPreview();
+    }
+    // Issue #80 U5fix2: detail chips / append notes read merged rows — sync
+    // only AFTER landing + refresh + reclassify. Rebuild edit controls only
+    // when a LATER page's meta actually moved bookChoice.
+    if (panelWasRendered) {
+      if (bookChoiceChangedByPreselect) {
+        this.syncTextbookPanelFromChoice();
+      } else {
+        this.refreshTextbookDetailRowDerived();
+      }
+    }
+    if (this.sourcePageNo === pageNo) {
+      this.setSourceCaption('第 ' + pageNo + ' ' + state.noun + ' · 已识别');
+    }
+    this.renderPdfBar();
   };
 
   /**
@@ -2045,6 +3029,10 @@
   PhotoAddForm.prototype.runOnePdfPage = function (pageNo) {
     var self = this;
     var state = this.pdfState;
+    if (!state || state.aborted) {
+      return Promise.resolve(null);
+    }
+    var runEpoch = this.recognizeEpoch;
     state.plan = global.applyPageEvent(state.plan, pageNo, 'start');
     this.renderPdfBar();
     return global.PdfPageRunner.renderPage(state.doc, pageNo)
@@ -2059,104 +3047,131 @@
         return self.recognizePhoto(blob, self.draftCategory);
       })
       .then(function (data) {
-        var parsed = parseRecognized(data);
-        if (!state.metaDone && parsed.meta) {
-          self.detectedMeta = parsed.meta;
-          state.metaDone = true;
+        if (runEpoch !== self.recognizeEpoch || !self.pdfState || state.aborted) {
+          abandonRunningPage(state, pageNo);
+          self.renderPdfBar();
+          return null;
         }
-        var classified = global.classifyPhotoEntries(parsed.entries, self.existingWords);
-        self.rows = global.mergePageRows(self.rows, pageNo, classified);
-        // Issue #11: the page's poems and display-only others replace
-        // their own page segments (a retry never duplicates either).
-        // Issue #13: the passages replace their own segment the same way.
-        self.poemRows = mergePagePoems(self.poemRows, pageNo, parsed.poems, self.existingPoems);
-        self.passageRows = mergePagePassages(self.passageRows, pageNo, parsed.passages, self.existingPassages);
-        self.otherSections = mergePageOthers(self.otherSections, pageNo, parsed.others);
-        state.plan = global.applyPageEvent(state.plan, pageNo, 'done');
-        // The textbook panel renders with the FIRST rows that land: its
-        // preselect fixes bookChoice, so the reclassify below (and any
-        // mid-run edit) sees the real textbook mode — the ordering the
-        // photo flow gets for free by rendering the panel right after its
-        // single recognition. A retry never rebuilds it.
-        if (!state.panelRendered &&
-            (self.rows.length || self.poemRows.length || self.passageRows.length)) {
-          self.renderTextbookPanel('');
-          state.panelRendered = true;
-        }
-        // Settle cross-page duplicates NOW — the 与第 N 行重复 verdicts
-        // come from classifyPhotoEntries over the whole merged array, and
-        // the preview should show them the moment the page lands.
-        self.reclassify();
-        if (self.rows.length || self.poemRows.length || self.passageRows.length) {
-          self.renderPreview();
-        }
-        if (self.sourcePageNo === pageNo) {
-          self.setSourceCaption('第 ' + pageNo + ' 页 · 已识别');
-        }
-        self.renderPdfBar();
+        self.landRecognized(data, pageNo, state, function (meta) {
+          // PDF: one document, one header — the first page that read one
+          // settles it (the pre-#80 semantics, unchanged).
+          return state.metaDone ? null : meta;
+        });
       })
       .catch(function (err) {
+        if (runEpoch !== self.recognizeEpoch || !self.pdfState || state.aborted) {
+          abandonRunningPage(state, pageNo);
+          self.renderPdfBar();
+          return;
+        }
         state.plan = global.applyPageEvent(state.plan, pageNo, 'fail',
           (err && err.message) || '识别失败');
         if (self.sourcePageNo === pageNo) {
-          self.setSourceCaption('第 ' + pageNo + ' 页 · 识别失败');
+          self.setSourceCaption('第 ' + pageNo + ' ' + state.noun + ' · 识别失败');
         }
         self.renderPdfBar();
       });
   };
 
   /**
-   * finishPdfRun — the after-run surface. A run with failed pages says so
-   * (never a whole-file success); an all-failed run leaves the honest
-   * empty preview; otherwise the textbook panel renders ONCE (a retry
-   * must not rebuild it out from under the parent's choices).
+   * finishRun — the after-run surface (PDF pages and Issue #80 photos
+   * alike; the noun keeps the wording honest). A run with failed pages
+   * says so (never a whole-file success); an all-failed run leaves the
+   * honest empty preview; otherwise the textbook panel renders ONCE (a
+   * retry must not rebuild it out from under the parent's choices).
    */
-  PhotoAddForm.prototype.finishPdfRun = function (summary) {
+  PhotoAddForm.prototype.finishRun = function (summary) {
     var kit = global.__parentFormKit || {};
-    if (!this.pdfState) {
+    var state = this.runState();
+    if (!state) {
       return;
     }
+    var noun = state.noun;
     // Issue #11/#13: a poems-only or passages-only run is a real result
     // too — emptiness is judged over EVERY content kind.
     if (!this.rows.length && !this.poemRows.length && !this.passageRows.length) {
-      this.resetEntries();
+      // U7: a STOPPED run with nothing landed yet keeps its plan (继续处理
+      // stays reachable) and says so — never the 没有识别到词表 verdict.
+      if (summary && summary.pending > 0) {
+        // U7fix1/U8: the stopped hint derives from the batch's ACTUAL
+        // available actions, never from the pending count alone —
+        // superseded runs never get this far (every finish caller checks
+        // the execution identity first). Every batch kind now rides the
+        // §3.2 machine, so a run past its wind-down — photo OR PDF —
+        // really offers 继续处理 (the bar renders it); the hint may
+        // promise what the bar honors again.
+        var runDecision = global.importRunDecision
+          ? global.importRunDecision(state, { noun: noun })
+          : null;
+        if (runDecision && runDecision.actions.resume.enabled) {
+          this.renderPreviewHint('已停止：还有 ' + summary.pending + ' ' + noun +
+            '未处理，可点「继续处理」或重新开始');
+        } else {
+          this.renderPreviewHint('已停止：还有 ' + summary.pending + ' ' + noun + '未处理');
+        }
+        return;
+      }
+      // Issue #80 U3: an all-empty run that still has failed/pending pages
+      // is RETRYABLE — its registered (empty) snapshots and the textbook
+      // header it read must survive, so a retry REPLACES the photo's own
+      // record instead of first-registering into a wiped store, and
+      // detectedMeta stays consistent with metaDone (resetEntries drops
+      // the meta but never the read flag — the wipe lost both ways).
+      if (!summary || !(summary.failed > 0 || summary.pending > 0)) {
+        this.resetEntries();
+      }
       this.renderPreviewHint(summary && summary.failed > 0
-        ? '这一轮没有一页识别成功，请检查文件后重试'
+        ? '这一轮没有一' + noun + '识别成功，请检查文件后重试'
         : '这次处理没有识别到词表内容');
       return;
     }
-    if (!this.pdfState.panelRendered) {
+    if (!state.panelRendered) {
       this.renderTextbookPanel('');
-      this.pdfState.panelRendered = true;
+      state.panelRendered = true;
     }
     this.renderPreview();
     this.discardBtn.hidden = false;
     if (summary && summary.failed > 0) {
-      this.showFormError('有 ' + summary.failed + ' 页识别失败（在上方状态条可重试失败页）；已完成页的结果不受影响。');
+      this.showFormError('有 ' + summary.failed + ' ' + noun + '识别失败（在上方状态条可重试失败' + noun + '）；已完成' + noun + '的结果不受影响。');
       if (kit.showToast) {
-        kit.showToast('有 ' + summary.failed + ' 页识别失败，可单独重试', 'error');
+        kit.showToast('有 ' + summary.failed + ' ' + noun + '识别失败，可单独重试', 'error');
       }
     }
   };
 
   /**
-   * handlePdfRetryPage — one failed page again: pending → run → finish.
-   * Completed pages' rows are untouched (the merge replaces only the
-   * retried page's segment).
+   * handlePdfRetryPage — one failed page again (PDF page or photo):
+   * pending → run → finish. Completed pages' rows are untouched (the
+   * merge replaces only the retried page's segment). U7/U8: EVERY batch
+   * kind retries through the U6 transition — the button rule gates (a
+   * failed page, no execution in flight), retryImportPage does the
+   * failed→pending reset and marks the retry itself an execution.
    */
   PhotoAddForm.prototype.handlePdfRetryPage = function (pageNo) {
     var self = this;
-    var state = this.pdfState;
+    var state = this.runState();
     if (!state || this.recognizeBtn.disabled) {
       return;
     }
-    state.aborted = false;
-    state.plan = global.retryPage(state.plan, pageNo);
+    var category = this.draftCategory;
+    var runEpoch = this.recognizeEpoch;
+    var retryVerdict = global.importRunDecision(state, { noun: state.noun });
+    if (!retryVerdict.actions.retry.enabled) {
+      return;
+    }
+    global.retryImportPage(state, pageNo);
     this.showFormError('');
     this.setBusy(true);
-    this.runPdfPages(pageNo).then(function (summary) {
+    this.runPages(pageNo).then(function (summary) {
+      self.settleRun(state);
       self.setBusy(false);
-      self.finishPdfRun(summary);
+      // U7fix1 (review P2-2): a superseded execution owns no surface — its
+      // late wind-down must not render a finish over whatever replaced it
+      // (e.g. the 分类已切换 hint after a mid-flight subject switch).
+      if (!recognizeRunStillValid(self, runEpoch, category)) {
+        return;
+      }
+      self.finishRun(summary);
     });
   };
 
@@ -2164,44 +3179,70 @@
    * handlePdfResume — the 继续处理 button's handler: after 停止, run the
    * still-pending pages only. Completed pages' rows are never re-merged
    * (their edits survive), and pending pages render fresh — the same
-   * machinery the single-page retry rides.
+   * machinery the single-page retry rides. U7/U8: EVERY batch kind 继续
+   * through the U6 transition — the button rule gates reachability
+   * (settled, no execution in flight), resumeImportRun clears the stop
+   * fact and marks the execution; done/failed pages are never reset
+   * (继续不重跑 done).
    */
   PhotoAddForm.prototype.handlePdfResume = function () {
     var self = this;
-    var state = this.pdfState;
+    var state = this.runState();
     if (!state || this.recognizeBtn.disabled) {
       return;
     }
-    state.aborted = false;
+    var category = this.draftCategory;
+    var runEpoch = this.recognizeEpoch;
+    var resumeVerdict = global.importRunDecision(state, { noun: state.noun });
+    if (!resumeVerdict.actions.resume.enabled) {
+      return;
+    }
+    global.resumeImportRun(state);
     this.showFormError('');
     this.setBusy(true);
-    this.runPdfPages().then(function (summary) {
+    this.runPages().then(function (summary) {
+      self.settleRun(state);
       self.setBusy(false);
-      self.finishPdfRun(summary);
+      // U7fix1 (review P2-2): same guard as the retry — a 继续 whose run
+      // was superseded while its request was out finishes NOTHING.
+      if (!recognizeRunStillValid(self, runEpoch, category)) {
+        return;
+      }
+      self.finishRun(summary);
     });
   };
 
   /**
-   * renderPdfBar — the per-page status surface: one chip per page (页码 +
-   * 状态， title carries the failure reason), a 重试该页 button on failed
-   * chips, the whole-file summary line, and a 停止 button while running
-   * (AC-3 处理过程显示状态). textContent-only (Pitfall 10).
+   * renderPdfBar — the per-page status surface (PDF pages and Issue #80
+   * photos): one chip per page (页码/张号 + 状态， title carries the failure
+   * reason), a 重试 button on failed chips, the whole-run summary line,
+   * and the run buttons (AC-3 处理过程显示状态). U7/U8: EVERY batch kind
+   * renders from importRunDecision — §3.2's one button rule for photo and
+   * PDF alike (busy is real execution, never page counts, so 停止中 shows
+   * and 继续 is REACHABLE after a stop; the legacy page-count branch is
+   * gone). The U8 single-photo run owns NO bar — the plain flow keeps its
+   * own surface. textContent-only (Pitfall 10).
    */
   PhotoAddForm.prototype.renderPdfBar = function () {
     var self = this;
-    var state = this.pdfState;
-    if (!state) {
+    var state = this.runState();
+    if (!state || state.kind === 'photo-single') {
       this.pdfBar.hidden = true;
       clearEl(this.pdfBar);
       return;
     }
+    var noun = state.noun;
     this.pdfBar.hidden = false;
     clearEl(this.pdfBar);
 
-    var summary = global.planSummary(state.plan);
+    // ONE decision for every bar-owning batch kind: photo and PDF both
+    // take the counts AND the button verdicts from the machine — no entry
+    // re-derives busy from page counts.
+    var run = global.importRunDecision(state, { noun: noun });
+    var summary = run.counts;
     var line = document.createElement('p');
     line.className = 'pdf-summary-line';
-    line.textContent = '共 ' + summary.total + ' 页：成功 ' + summary.done +
+    line.textContent = '共 ' + summary.total + ' ' + noun + '：成功 ' + summary.done +
       '，失败 ' + summary.failed +
       (summary.pending ? '，待处理 ' + summary.pending : '') +
       (summary.running ? '，识别中 ' + summary.running : '');
@@ -2215,42 +3256,57 @@
       chip.setAttribute('data-page', String(page.no));
       chip.setAttribute('data-status', page.status);
       if (page.error) {
-        chip.title = '第 ' + page.no + ' 页：' + page.error;
+        chip.title = '第 ' + page.no + ' ' + noun + '：' + page.error;
       }
-      chip.textContent = '第 ' + page.no + ' 页';
+      chip.textContent = '第 ' + page.no + ' ' + noun;
       if (page.status === 'failed') {
-        var retry = document.createElement('button');
-        retry.type = 'button';
-        retry.className = 'btn btn-secondary pdf-retry-btn';
-        retry.textContent = '重试';
-        retry.setAttribute('aria-label', '重试第 ' + page.no + ' 页');
-        retry.addEventListener('click', function () {
-          self.handlePdfRetryPage(page.no);
-        });
-        chip.appendChild(retry);
+        // U7fix1 (review P2-1): the per-page retry chip is gated through
+        // the SAME button rule as the run buttons — disabled while another
+        // page executes (running) or a stop's wind-down is in flight
+        // (stopping), and offered NOT AT ALL once the batch is dead
+        // (invalidated — e.g. a subject switch after settling). The
+        // handler already refused those clicks; the chip must not promise
+        // them either.
+        var retryShown = run.actions.retry.shown &&
+          run.actions.retry.pages.indexOf(page.no) !== -1;
+        if (retryShown) {
+          var retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'btn btn-secondary pdf-retry-btn';
+          retry.textContent = '重试';
+          retry.setAttribute('aria-label', '重试第 ' + page.no + ' ' + noun);
+          retry.disabled = !run.actions.retry.enabled;
+          retry.addEventListener('click', function () {
+            self.handlePdfRetryPage(page.no);
+          });
+          chip.appendChild(retry);
+        }
       }
       chips.appendChild(chip);
     });
     this.pdfBar.appendChild(chips);
 
-    if (summary.processing) {
+    if (run.actions.stop.shown) {
       var stop = document.createElement('button');
       stop.type = 'button';
       stop.className = 'btn btn-secondary pdf-stop-btn';
-      stop.textContent = '停止（保留已完成页）';
+      stop.textContent = run.actions.stop.label;
+      stop.disabled = !run.actions.stop.enabled;
       stop.addEventListener('click', function () {
-        state.aborted = true;
+        // 停止 — the transition, nothing else: it only raises the stop
+        // fact; the in-flight page keeps running until the wind-down
+        // settles, and its late result is dropped by that same fact.
+        global.stopImportRun(state);
+        self.renderPdfBar(); // 停止中… shows immediately
       });
       this.pdfBar.appendChild(stop);
-    } else if (summary.pending > 0) {
-      // The 停止 counterpart: resume ONLY the still-pending pages — the
-      // completed pages' rows (and the parent's edits to them) are never
-      // re-run (AC-4's preservation, extended from failed pages to
-      // stopped ones).
+    }
+    if (run.actions.resume.shown) {
       var resume = document.createElement('button');
       resume.type = 'button';
       resume.className = 'btn btn-secondary pdf-resume-btn';
-      resume.textContent = '继续处理（剩 ' + summary.pending + ' 页）';
+      resume.textContent = run.actions.resume.label;
+      resume.disabled = !run.actions.resume.enabled;
       resume.addEventListener('click', function () {
         self.handlePdfResume();
       });
@@ -2260,16 +3316,40 @@
 
   PhotoAddForm.prototype.setBusy = function (busy) {
     var kit = global.__parentFormKit || {};
+    this.recognizeBusy = !!busy;
     if (kit.setLoading) {
       kit.setLoading(this.recognizeBtn, busy);
     } else {
       this.recognizeBtn.disabled = busy;
     }
-    this.pickBtn.disabled = busy;
+    this.pickBtn.disabled = busy || this.commitInFlight;
     if (busy) {
       this.commitBtn.disabled = true;
     } else {
       this.updateCommitButton();
+    }
+  };
+
+  /**
+   * beginRecognizeRun — drop the previous draft and bump the epoch so
+   * late HTTP results from a released run cannot mutate the new draft.
+   */
+  PhotoAddForm.prototype.beginRecognizeRun = function () {
+    this.recognizeEpoch += 1;
+    this.resetEntries();
+    this.textbookPanel.hidden = true;
+    clearEl(this.preview);
+    this.renderPreviewHint('识别中…');
+    this.discardBtn.hidden = true;
+    if (this.pdfState) {
+      this.pdfState.panelRendered = false;
+      this.pdfState.lessonRecs = [];
+      this.pdfState.metaDone = false;
+    }
+    if (this.photoBatch) {
+      this.photoBatch.panelRendered = false;
+      this.photoBatch.lessonRecs = [];
+      this.photoBatch.metaDone = false;
     }
   };
 
@@ -2281,12 +3361,61 @@
     this.passageRows = [];
     this.existingPassages = [];
     this.detectedMeta = null;
-    this.bookChoice = 'none';
-    this.includePending = false;
+    this.detectedMetaList = [];
+    if (global.clearImportPhotoState) {
+      global.clearImportPhotoState(this.importPhotoState);
+    } else if (this.importPhotoState) {
+      this.importPhotoState.photos = {};
+    }
+    this.bookChoice = 'unset';
+    this.batchLessonDraft = '';
+    this.lastLessonPick = null;
+    this.lessonPickBar = null;
+    this.newBookDraft = null;
     this.syncUnitField();
     this.renderTextbookPanelReset();
     this.renderPreview();
     this.discardBtn.hidden = true;
+  };
+
+  /**
+   * syncLessonPickUi — the 多选指定 live sync (Issue #80 §3.2): the
+   * preview's pick checkboxes follow the row models (a Shift 连选 or chip
+   * click changed several at once), and the pick bar's counts/disabled
+   * states follow. No table rebuild — the picks must not steal any caret.
+   */
+  PhotoAddForm.prototype.syncLessonPickUi = function () {
+    var picks = this.preview.querySelectorAll('.photo-lesson-pick');
+    for (var i = 0; i < picks.length && i < this.rows.length; i++) {
+      var committable = isCommittable(this.rows[i], true);
+      picks[i].disabled = !committable;
+      picks[i].checked = committable && !!this.rows[i].lessonPicked;
+    }
+    var bar = this.lessonPickBar;
+    if (!bar) {
+      return;
+    }
+    var pickedCount = 0;
+    var committableCount = 0;
+    this.rows.forEach(function (row) {
+      if (!row || !isCommittable(row, true)) {
+        return;
+      }
+      committableCount += 1;
+      if (row.lessonPicked) {
+        pickedCount += 1;
+      }
+    });
+    if (bar.pickedBtn) {
+      bar.pickedBtn.textContent = '指定选中行（' + pickedCount + '）';
+      bar.pickedBtn.disabled = pickedCount === 0;
+    }
+    if (bar.allBtn) {
+      bar.allBtn.disabled = pickedCount === committableCount;
+    }
+    if (bar.noneBtn) {
+      bar.noneBtn.disabled = pickedCount === 0;
+    }
   };
 
   PhotoAddForm.prototype.renderPreviewHint = function (text) {
@@ -2309,7 +3438,7 @@
 
   /** The chosen book object (null for 'none'/'new'/not found). */
   PhotoAddForm.prototype.chosenBook = function () {
-    if (this.bookChoice === 'none' || this.bookChoice === 'new') {
+    if (!isPhotoTextbookMode(this.bookChoice) || this.bookChoice === 'new') {
       return null;
     }
     var id = this.bookChoice;
@@ -2348,9 +3477,141 @@
   };
 
   /** Hide the panel (no recognition yet / reset). */
+  /**
+   * applyBookPreselectIfUnset — Issue #80 U5: the honest textbook preselect
+   * runs before recommendations, and only while the parent has not chosen yet.
+   */
+  PhotoAddForm.prototype.applyBookPreselectIfUnset = function () {
+    if (this.bookChoice !== 'unset') {
+      return;
+    }
+    this.bookChoice = preselectBookChoice(this.books, this.detectedMeta);
+  };
+
+  /**
+   * syncTextbookPanelFromChoice — the attribution panel renders ONCE (Issue
+   * #80 U5); when a LATER page's meta enables an honest preselect, the
+   * in-memory bookChoice moves but the select/detail must follow.
+   */
+  PhotoAddForm.prototype.syncTextbookPanelFromChoice = function () {
+    var select = document.getElementById('parent-photo-textbook');
+    if (!select) {
+      return;
+    }
+    select.value = String(this.bookChoice);
+    if (this.bookDetailHost) {
+      this.renderTextbookDetail(this.bookDetailHost);
+    }
+    this.updateStateLine();
+    this.updateCommitButton();
+  };
+
+  /**
+   * refreshTextbookDetailRowDerived — a later photo landed while bookChoice
+   * stayed put: refresh append notes and lesson-group chips without tearing
+   * down the 新建教材 inputs or the batch-lesson field the parent is typing
+   * in (Issue #80 U5fix2).
+   */
+  PhotoAddForm.prototype.refreshTextbookDetailRowDerived = function () {
+    var host = this.bookDetailHost;
+    if (!host) {
+      return;
+    }
+    this.syncUnitField();
+    if (typeof this.bookChoice === 'number') {
+      var book = this.chosenBook();
+      if (book) {
+        var inList = {};
+        (book.lessons || []).forEach(function (name) {
+          inList[name] = true;
+        });
+        var missing = distinctRowLessons(this.rows).filter(function (name) {
+          return !inList[name];
+        });
+        var appendNote = host.querySelector('.photo-book-append-note');
+        if (missing.length) {
+          var appendText = '课次「' + missing.join('」「') +
+            '」不在教材课次表里，确认后将加到课次表末尾。';
+          if (appendNote) {
+            appendNote.textContent = appendText;
+          } else {
+            appendNote = document.createElement('p');
+            appendNote.className = 'photo-meta-line photo-book-append-note';
+            appendNote.textContent = appendText;
+            var pickBar = host.querySelector('.photo-lesson-pickbar');
+            host.insertBefore(appendNote, pickBar || null);
+          }
+        } else if (appendNote && appendNote.parentNode) {
+          appendNote.parentNode.removeChild(appendNote);
+        }
+      }
+    }
+    this.rebuildLessonPickChips(host);
+    this.updateStateLine();
+  };
+
+  /** Replace lesson-group chips after rows change; keep toolbar + form fields. */
+  PhotoAddForm.prototype.rebuildLessonPickChips = function (host) {
+    var pickBar = host.querySelector('.photo-lesson-pickbar');
+    if (!pickBar) {
+      return;
+    }
+    var keep = [];
+    pickBar.childNodes.forEach(function (node) {
+      if (node.className && node.className.indexOf('photo-lesson-chip') < 0) {
+        keep.push(node);
+      }
+    });
+    clearEl(pickBar);
+    var self = this;
+    keep.forEach(function (node) {
+      pickBar.appendChild(node);
+    });
+    lessonPickGroups(this.rows).forEach(function (group) {
+      var chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'photo-lesson-chip';
+      chip.textContent = (group.lesson || '待确认') + ' · ' + group.count;
+      chip.title = '一键选中课次为「' + (group.lesson || '待确认') + '」的 ' +
+        group.count + ' 行';
+      chip.addEventListener('click', function () {
+        self.rows = pickLessonGroup(self.rows, group.lesson);
+        self.syncLessonPickUi();
+      });
+      pickBar.appendChild(chip);
+    });
+    this.syncLessonPickUi();
+  };
+
   PhotoAddForm.prototype.renderTextbookPanelReset = function () {
     this.textbookPanel.hidden = true;
     clearEl(this.textbookPanel);
+  };
+
+  /**
+   * metaLineText — the 识别到／未识别到 line's text (one encoder, two
+   * callers: the panel build and syncMetaLine's in-place refresh).
+   */
+  function metaLineText(meta) {
+    var parts = META_FIELDS.concat([{ key: 'lesson', label: '课次' }]).map(function (f) {
+      var value = meta ? metaField(meta[f.key]) : '';
+      return f.label + ' ' + (value || '待确认');
+    });
+    return (meta ? '识别到：' : '照片上未识别到教材信息（') +
+      parts.join(' · ') + (meta ? '' : '）');
+  }
+
+  /**
+   * syncMetaLine — refresh the panel's 识别到 line in place after a later
+   * photo of a multi-photo run merged more of the header (Issue #80 §2.2:
+   * the panel itself renders ONCE, but its header line stays honest).
+   */
+  PhotoAddForm.prototype.syncMetaLine = function () {
+    var line = this.textbookPanel
+      ? this.textbookPanel.querySelector('.photo-meta-first') : null;
+    if (line) {
+      line.textContent = metaLineText(this.detectedMeta);
+    }
   };
 
   /**
@@ -2380,14 +3641,11 @@
     this.textbookPanel.appendChild(title);
 
     // The read-off-the-photo header, 待确认 for every unread field (AC2).
+    // photo-meta-first lets syncMetaLine refresh it in place when a later
+    // photo of a multi-photo run merges more of the header (Issue #80).
     var metaLine = document.createElement('p');
-    metaLine.className = 'photo-meta-line';
-    var metaParts = META_FIELDS.concat([{ key: 'lesson', label: '课次' }]).map(function (f) {
-      var value = self.detectedMeta ? metaField(self.detectedMeta[f.key]) : '';
-      return f.label + ' ' + (value || '待确认');
-    });
-    metaLine.textContent = (this.detectedMeta ? '识别到：' : '照片上未识别到教材信息（') +
-      metaParts.join(' · ') + (this.detectedMeta ? '' : '）');
+    metaLine.className = 'photo-meta-line photo-meta-first';
+    metaLine.textContent = metaLineText(this.detectedMeta);
     this.textbookPanel.appendChild(metaLine);
 
     if (loadError) {
@@ -2397,15 +3655,11 @@
       this.textbookPanel.appendChild(errNote);
     }
 
-    // Preselect: honest match → that book; recognized header, no match →
-    // 新建教材; nothing readable → 不指定 (the plain #3 flow).
+    // Preselect (Issue #80 U5): only while still 请选择 — never overwrite a
+    // choice the parent already made or that landing applied before render.
     var preselect = matchTextbookForMeta(this.books, this.detectedMeta);
-    if (preselect) {
-      this.bookChoice = preselect.id;
-    } else if (this.detectedMeta) {
-      this.bookChoice = 'new';
-    } else {
-      this.bookChoice = 'none';
+    if (this.bookChoice === 'unset') {
+      this.bookChoice = preselectBookChoice(this.books, this.detectedMeta);
     }
 
     // 教材 select.
@@ -2419,11 +3673,13 @@
     bookSelect.id = 'parent-photo-textbook';
     bookSelect.setAttribute('aria-label', '教材归属');
     [
+      { value: 'unset', text: '请选择教材' },
       { value: 'none', text: '不指定教材（作为补充词汇）' },
       { value: 'new', text: '新建教材…' },
     ].concat(this.books.map(function (b) {
       var summary = global.textbookMetaSummary ? global.textbookMetaSummary(b) : '';
-      return { value: String(b.id), text: b.name + (summary ? '（' + summary + '）' : '') };
+      var rec = preselect && preselect.id === b.id ? '（推荐）' : '';
+      return { value: String(b.id), text: b.name + rec + (summary ? '（' + summary + '）' : '') };
     })).forEach(function (opt) {
       var o = document.createElement('option');
       o.value = opt.value;
@@ -2442,7 +3698,9 @@
 
     bookSelect.addEventListener('change', function () {
       self.bookChoice = bookSelect.value === 'new' ? 'new'
-        : (bookSelect.value === 'none' ? 'none' : parseInt(bookSelect.value, 10));
+        : (bookSelect.value === 'none' ? 'none'
+          : (bookSelect.value === 'unset' ? 'unset' : parseInt(bookSelect.value, 10)));
+      self.refreshLessonRecommendations();
       self.renderTextbookDetail(detailHost);
       self.renderPreview(); // lesson column visibility follows the choice
     });
@@ -2467,7 +3725,7 @@
     if (!this.unitField) {
       return;
     }
-    var textbook = this.bookChoice && this.bookChoice !== 'none';
+    var textbook = isPhotoTextbookMode(this.bookChoice);
     this.unitField.hidden = !!textbook;
   };
 
@@ -2475,6 +3733,13 @@
     var self = this;
     this.syncUnitField();
     clearEl(host);
+    if (this.bookChoice === 'unset') {
+      var unsetNote = document.createElement('p');
+      unsetNote.className = 'photo-meta-line photo-meta-warn';
+      unsetNote.textContent = '请选择已有教材或新建教材后再确认添加。';
+      host.appendChild(unsetNote);
+      return;
+    }
     if (this.bookChoice === 'none') {
       var noneNote = document.createElement('p');
       noneNote.className = 'photo-meta-line';
@@ -2500,7 +3765,9 @@
       nameInput.id = 'parent-photo-tb-name';
       // parent-textbook.js's summary join IS the prefill (one encoder for
       // 版本·学段·年级·上下册·模块; a missing script degrades to no prefill).
-      nameInput.value = global.textbookMetaSummary ? global.textbookMetaSummary(this.detectedMeta) : '';
+      var savedDraft = this.newBookDraft || {};
+      nameInput.value = createFormFieldValue(savedDraft, 'name',
+        global.textbookMetaSummary ? global.textbookMetaSummary(this.detectedMeta) : '');
       nameInput.setAttribute('aria-label', '教材名称');
       nameField.appendChild(nameLabel);
       nameField.appendChild(nameInput);
@@ -2517,11 +3784,22 @@
         input.className = 'form-input';
         input.id = 'parent-photo-tb-' + meta.key;
         input.placeholder = meta.ph;
-        input.value = self.detectedMeta ? metaField(self.detectedMeta[meta.key]) : '';
+        input.value = createFormFieldValue(savedDraft, meta.key,
+          self.detectedMeta ? metaField(self.detectedMeta[meta.key]) : '');
         input.setAttribute('aria-label', meta.label);
         field.appendChild(label);
         field.appendChild(input);
+        input.addEventListener('input', function () {
+          if (self.bookChoice === 'new') {
+            self.newBookDraft = self.readCreateForm();
+          }
+        });
         host.appendChild(field);
+      });
+      nameInput.addEventListener('input', function () {
+        if (self.bookChoice === 'new') {
+          self.newBookDraft = self.readCreateForm();
+        }
       });
 
       var lessonsNote = document.createElement('p');
@@ -2550,16 +3828,20 @@
       });
       if (missing.length) {
         var appendNote = document.createElement('p');
-        appendNote.className = 'photo-meta-line';
+        appendNote.className = 'photo-meta-line photo-book-append-note';
         appendNote.textContent = '课次「' + missing.join('」「') + '」不在教材课次表里，确认后将加到课次表末尾。';
         host.appendChild(appendNote);
       }
     }
 
-    // Batch lesson toolbar (AC3): one lesson onto every CHECKED row. Free
-    // text with datalist suggestions — correcting a misread lesson to a
-    // name the list does not carry yet is the normal case, so the input
-    // never traps the parent inside the current options.
+    // Batch lesson toolbar (AC3 + Issue #80 §3.2 + 2026-10-27 feedback):
+    // one lesson input, two apply paths — 整批 (应用到勾选行, every
+    // committable CHECKED row) and 多选 (指定选中行, the picked rows —
+    // picks are separate from 加入). 指定成功后自动清空选择 and the input.
+    // Free text with datalist suggestions — correcting a misread lesson to
+    // a name the list does not carry yet is the normal case, so the input
+    // never traps the parent inside the current options. The typed draft
+    // survives the toolbar re-renders (batchLessonDraft).
     var toolbar = document.createElement('div');
     toolbar.className = 'photo-lesson-toolbar';
     var toolLabel = document.createElement('span');
@@ -2572,48 +3854,135 @@
     lessonInput.setAttribute('list', 'parent-photo-lesson-options');
     lessonInput.setAttribute('aria-label', '批量指定课次');
     lessonInput.placeholder = '如 第5课（留空＝待确认）';
+    lessonInput.value = this.batchLessonDraft || '';
+    lessonInput.addEventListener('input', function () {
+      self.batchLessonDraft = lessonInput.value;
+    });
+    var applyAfter = function () {
+      // 指定成功后自动清空选择（反馈 2026-10-27）— and the input too: the
+      // value just landed on rows, keeping it invites a mis-apply.
+      if (self.bookChoice === 'new') {
+        self.newBookDraft = self.readCreateForm();
+      }
+      self.rows = clearLessonPicks(self.rows);
+      self.batchLessonDraft = '';
+      // Re-render rows so the per-row inputs reflect the batch value, and
+      // the detail host so the append-note matches the corrected lessons.
+      self.renderPreview();
+      self.renderTextbookDetail(host);
+    };
     var applyBtn = document.createElement('button');
     applyBtn.type = 'button';
     applyBtn.className = 'btn btn-secondary';
     applyBtn.textContent = '应用到勾选行';
     applyBtn.addEventListener('click', function () {
-      var lesson = lessonInput.value.trim();
-      self.rows.forEach(function (row) {
-        if (isCommittable(row, true) && row.checked !== false) {
-          row.lesson = lesson;
-        }
-      });
-      // Re-render rows so the per-row inputs reflect the batch value, and
-      // the detail host so the append-note matches the corrected lessons.
-      self.renderPreview();
-      self.renderTextbookDetail(host);
+      self.rows = applyBatchLesson(self.rows, lessonInput.value.trim());
+      applyAfter();
+    });
+    var pickedBtn = document.createElement('button');
+    pickedBtn.type = 'button';
+    pickedBtn.className = 'btn btn-secondary photo-lesson-picked-btn';
+    pickedBtn.textContent = '指定选中行';
+    pickedBtn.addEventListener('click', function () {
+      self.rows = applyPickedLesson(self.rows, lessonInput.value.trim());
+      applyAfter();
     });
     toolbar.appendChild(toolLabel);
     toolbar.appendChild(lessonInput);
     toolbar.appendChild(applyBtn);
+    toolbar.appendChild(pickedBtn);
     host.appendChild(toolbar);
 
-    // AC5: the explicit include-in-scope handling for lesson-less rows.
-    var includeLabel = document.createElement('label');
-    includeLabel.className = 'photo-include-toggle';
-    var include = document.createElement('input');
-    include.type = 'checkbox';
-    include.id = 'parent-photo-include';
-    include.checked = this.includePending;
-    include.addEventListener('change', function () {
-      self.includePending = include.checked;
-      // Issue #81: the checkbox changes WHAT WILL BE SCHEDULED — the state
-      // line and the save-note follow immediately (no table rebuild).
-      self.updateStateLine();
-      self.updateCommitHint();
+    // The pick helpers (反馈 2026-10-27): 全选/全部取消 over committable
+    // rows, and one chip per CURRENT lesson group (待确认 included) that
+    // one-click selects exactly that group — the re-assign-a-misread-unit
+    // flow: chip → type the right unit → 指定选中行.
+    var pickBar = document.createElement('div');
+    pickBar.className = 'photo-lesson-pickbar';
+    var allBtn = document.createElement('button');
+    allBtn.type = 'button';
+    allBtn.className = 'btn btn-secondary';
+    allBtn.textContent = '全选';
+    allBtn.addEventListener('click', function () {
+      self.rows = pickAllLessons(self.rows, true);
+      self.syncLessonPickUi();
     });
-    var includeText = document.createElement('span');
-    includeText.textContent = '待确认课次的词直接加入默写范围（不受进度限制）';
-    includeLabel.appendChild(include);
-    includeLabel.appendChild(includeText);
-    host.appendChild(includeLabel);
-
+    var noneBtn = document.createElement('button');
+    noneBtn.type = 'button';
+    noneBtn.className = 'btn btn-secondary';
+    noneBtn.textContent = '全部取消';
+    noneBtn.addEventListener('click', function () {
+      self.rows = pickAllLessons(self.rows, false);
+      self.syncLessonPickUi();
+    });
+    pickBar.appendChild(allBtn);
+    pickBar.appendChild(noneBtn);
+    lessonPickGroups(this.rows).forEach(function (group) {
+      var chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'photo-lesson-chip';
+      chip.textContent = (group.lesson || '待确认') + ' · ' + group.count;
+      chip.title = '一键选中课次为「' + (group.lesson || '待确认') + '」的 ' + group.count + ' 行';
+      chip.addEventListener('click', function () {
+        self.rows = pickLessonGroup(self.rows, group.lesson);
+        self.syncLessonPickUi();
+      });
+      pickBar.appendChild(chip);
+    });
+    host.appendChild(pickBar);
+    this.lessonPickBar = { pickedBtn: pickedBtn, allBtn: allBtn, noneBtn: noneBtn };
+    this.syncLessonPickUi();
     this.updateStateLine();
+  };
+
+  /**
+   * recommendationForPhotoPage — ONE page's §3.1 rec from honest inputs:
+   * the page's OWN registered snapshot (meta + entries from the import
+   * store; an unregistered page has neither) plus the earlier pages'
+   * freshly derived recs in photo order. The merged batch meta
+   * (detectedMeta) is deliberately NOT an input — its lesson may come
+   * from a LATER photo, and an earlier photo must never borrow it.
+   */
+  PhotoAddForm.prototype.recommendationForPhotoPage = function (pageNo, priorRecs) {
+    return recommendForDraftPage(this.books, {
+      textbook: global.recognitionMetaForPage
+        ? global.recognitionMetaForPage(this.importPhotoState, pageNo)
+        : null,
+      entries: entriesForPhotoPage(this.rows, pageNo, this.importPhotoState),
+    }, priorRecs || [], this.bookChoice);
+  };
+
+  /**
+   * refreshLessonRecommendations — after the parent changes the target
+   * book, re-derive §3.1 recommendations (Issue #80 U4): EVERY page's rec
+   * is recomputed, in PHOTO order, from the page's own snapshot and the
+   * CURRENT book choice — A→B→新建→空教材 all recompute, earlier photos
+   * feed later ones by photo number (never completion order), and rows
+   * keep their own facts (the parent's value, an explicit clear included,
+   * and the photo's own OCR lesson) while recommendation-derived lessons
+   * are replaced.
+   */
+  PhotoAddForm.prototype.refreshLessonRecommendations = function () {
+    var state = this.runState();
+    if (state && state.lessonRecs && state.lessonRecs.length) {
+      var newRecs = [];
+      for (var p = 1, n = state.lessonRecs.length; p <= n; p++) {
+        newRecs[p - 1] = this.recommendationForPhotoPage(p,
+          lessonRecsPriorToPage(newRecs, p));
+      }
+      state.lessonRecs = newRecs;
+      this.rows = this.rows.map(function (row) {
+        return refreshRowLesson(row, newRecs[((row && row.page) || 1) - 1]);
+      });
+      return;
+    }
+    if (!this.rows.length) {
+      return;
+    }
+    var rec = this.recommendationForPhotoPage(1, []);
+    this.rows = this.rows.map(function (row) {
+      return refreshRowLesson(row, rec);
+    });
   };
 
   /** Read the 新建教材 mini-form's values back (name + five meta fields). */
@@ -2632,7 +4001,7 @@
 
   /** Re-run classification over the CURRENT (edited) row values. */
   PhotoAddForm.prototype.reclassify = function () {
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
     var entries = this.rows.map(function (r) {
       return { word: r.word, meaning: r.meaning, lesson: r.lesson };
     });
@@ -2651,9 +4020,19 @@
       }
       next[i].checked = this.rows[i].checked !== false && isCommittable(next[i], textbookMode);
       next[i].lesson = this.rows[i].lesson || '';
+      // Issue #80 §3.2: the recommendation origin (识别/推荐 badges) and
+      // the multi-select 选中 state ride every re-classification — an edit
+      // must never silently drop the parent's picks or relabel a row's
+      // lesson source.
+      next[i].lessonOrigin = this.rows[i].lessonOrigin || '';
+      next[i].lessonPicked = !!this.rows[i].lessonPicked;
       // Issue #7: the page tag rides every re-classification — the
       // preview's page grouping and mergePageRows' segment replace read it.
       next[i].page = this.rows[i].page || 0;
+      // Issue #80 U3: the photo-local OCR ordinal rides too — correcting a
+      // word face must never orphan the row from its original OCR entry
+      // (originalEntryForRow links by ordinal, not by the edited word).
+      next[i].entryIndex = this.rows[i].entryIndex;
       // Issue #8: provenance and the unanswered-attempt flag ride too —
       // editing a word never silently drops the 系统补充 marker or the
       // 生成失败 note (ADR-0005: edits do not change the source).
@@ -2698,7 +4077,7 @@
       this.renderOthersPreview();
       return;
     }
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
 
     var table = document.createElement('table');
     table.className = 'preview-table photo-preview-table';
@@ -2736,9 +4115,10 @@
 
     var tbody = document.createElement('tbody');
     // Issue #7: PDF rows group under per-page header rows (页码 + that
-    // page's status + a 本页批量课次 mini-toolbar). Photo rows (no page
-    // tag) render flat, exactly as before.
-    var hasPages = this.pdfState && this.rows.some(function (r) { return r.page; });
+    // page's status + a 本页批量课次 mini-toolbar). Issue #80: a
+    // multi-photo run groups the same way (张号). Plain single-photo rows
+    // (no page tag) render flat, exactly as before.
+    var hasPages = this.runState() && this.rows.some(function (r) { return r.page; });
     if (hasPages) {
       global.rowsByPage(this.rows).forEach(function (group) {
         if (group.no) {
@@ -2755,6 +4135,24 @@
     }
     table.appendChild(tbody);
     this.preview.appendChild(table);
+
+    var checkedRows = this.rows.filter(function (r) {
+      return r.checked !== false && r.status !== 'invalid';
+    });
+    if (checkedRows.length && global.previewBatchEdits) {
+      var editBar = document.createElement('div');
+      editBar.className = 'photo-batch-edit-bar';
+      var editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'btn btn-secondary';
+      editBtn.id = 'photo-batch-edit-btn';
+      editBtn.textContent = '批量编辑勾选行（' + checkedRows.length + '）';
+      editBtn.addEventListener('click', function () {
+        self.openImportBatchEditModal();
+      });
+      editBar.appendChild(editBtn);
+      this.preview.appendChild(editBar);
+    }
 
     if (textbookMode) {
       // The shared lesson datalist: book lessons + the rows' current
@@ -2776,6 +4174,8 @@
     this.renderPoemPreview();
     this.renderPassagePreview();
     this.renderOthersPreview();
+    // Issue #80 §3.2: fresh row DOM → re-sync the pick checkboxes/bar.
+    this.syncLessonPickUi();
   };
 
   /**
@@ -2794,7 +4194,7 @@
     if (!this.poemRows.length) {
       return;
     }
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
 
     var head = document.createElement('h4');
     head.className = 'photo-section-title';
@@ -3004,7 +4404,7 @@
     if (!this.passageRows.length) {
       return;
     }
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
 
     var head = document.createElement('h4');
     head.className = 'photo-section-title';
@@ -3381,15 +4781,18 @@
   };
 
   /**
-   * One page's header row (Issue #7): 页码 + the page's row count + the
-   * 本页批量课次 mini-toolbar (US-13/AC-6 — setting one lesson onto a
-   * whole page without touching other pages; the global toolbar stays
-   * available for cross-page selections). The lesson input shares the
-   * page-level datalist rendered right after the table. colCount is the
-   * table's live header count (the thead is the one owner of the shape).
+   * One page's header row (Issue #7): 页码/张号 + the page's row count +
+   * the 本页/本张批量课次 mini-toolbar (US-13/AC-6 — setting one lesson
+   * onto a whole page without touching other pages; the global toolbar
+   * stays available for cross-page selections). The lesson input shares
+   * the page-level datalist rendered right after the table. colCount is
+   * the table's live header count (the thead is the one owner of the
+   * shape).
    */
   PhotoAddForm.prototype.buildPageHeadRow = function (group, colCount) {
     var self = this;
+    var state = this.runState();
+    var noun = state ? state.noun : '页';
     var tr = document.createElement('tr');
     tr.className = 'pdf-page-head';
     var td = document.createElement('td');
@@ -3397,19 +4800,19 @@
 
     var label = document.createElement('span');
     label.className = 'pdf-page-label';
-    label.textContent = '第 ' + group.no + ' 页（' + group.rows.length + ' 条）';
+    label.textContent = '第 ' + group.no + ' ' + noun + '（' + group.rows.length + ' 条）';
     td.appendChild(label);
 
     var lessonInput = document.createElement('input');
     lessonInput.type = 'text';
     lessonInput.className = 'form-input pdf-page-lesson';
     lessonInput.setAttribute('list', 'parent-photo-lesson-options');
-    lessonInput.setAttribute('aria-label', '第 ' + group.no + ' 页课次');
-    lessonInput.placeholder = '本页课次（如 第5课）';
+    lessonInput.setAttribute('aria-label', '第 ' + group.no + ' ' + noun + '课次');
+    lessonInput.placeholder = '本' + noun + '课次（如 第5课）';
     var apply = document.createElement('button');
     apply.type = 'button';
     apply.className = 'btn btn-secondary pdf-page-lesson-apply';
-    apply.textContent = '应用到本页';
+    apply.textContent = '应用到本' + noun;
     apply.addEventListener('click', function () {
       self.rows = global.applyLessonToPage(self.rows, group.no, lessonInput.value.trim());
       self.renderPreview();
@@ -3527,6 +4930,31 @@
       // confirmed lesson the book's list lacks.
       var lessonCell = document.createElement('td');
       lessonCell.className = 'photo-lesson-cell';
+
+      // 多选指定: the row's 选中 is SEPARATE from 加入 — it decides which
+      // rows the toolbar's 指定选中行 touches, never what commits. Shift
+      // 连选: shift-click extends the pick from the last clicked row.
+      var pickHit = document.createElement('label');
+      pickHit.className = 'inline-check-hit photo-lesson-pick-hit';
+      var pick = document.createElement('input');
+      pick.type = 'checkbox';
+      pick.className = 'photo-lesson-pick';
+      pick.id = 'parent-photo-lesson-pick-' + i;
+      pick.checked = !!row.lessonPicked;
+      pick.disabled = !committable;
+      pick.setAttribute('aria-label', '选中指定课次 第 ' + (i + 1) + ' 行');
+      pick.addEventListener('click', function (event) {
+        if (event.shiftKey && self.lastLessonPick != null && self.lastLessonPick !== i) {
+          self.rows = pickLessonRange(self.rows, self.lastLessonPick, i);
+        } else {
+          self.rows[i].lessonPicked = pick.checked;
+          self.lastLessonPick = i;
+        }
+        self.syncLessonPickUi();
+      });
+      pickHit.appendChild(pick);
+      lessonCell.appendChild(pickHit);
+
       var lessonInput = document.createElement('input');
       lessonInput.type = 'text';
       lessonInput.className = 'form-input photo-cell-input photo-lesson-input';
@@ -3537,6 +4965,14 @@
       lessonInput.disabled = !committable;
       lessonInput.addEventListener('input', function () {
         self.rows[i].lesson = lessonInput.value;
+        // Issue #80 §3.2: a hand-edited lesson is the parent's call — the
+        // 识别/推荐 badge gives way to 已指定 without a table rebuild.
+        self.rows[i].lessonOrigin = 'parent';
+        var badge = lessonCell.querySelector('.photo-lesson-origin');
+        if (badge) {
+          badge.textContent = lessonOriginLabel('parent');
+          badge.hidden = !badge.textContent;
+        }
         // Issue #81: the lesson feeds the state line's 本批课次 + progress
         // verdict — the line is pure text, so it syncs live without ever
         // rebuilding the table (the caret stays in this input).
@@ -3544,6 +4980,18 @@
         self.updateCommitHint();
       });
       lessonCell.appendChild(lessonInput);
+
+      // Issue #80 §3.2 + 2026-10-27 feedback: the 已分单元 marker — where
+      // the current lesson came from (识别/推荐/已指定); a 待确认 row
+      // carries no badge.
+      var originLabel = lessonOriginLabel(row.lessonOrigin);
+      if (originLabel) {
+        var originBadge = document.createElement('span');
+        originBadge.className = 'photo-lesson-origin photo-lesson-origin-' + row.lessonOrigin;
+        originBadge.textContent = originLabel;
+        originBadge.title = '课次来源：' + originLabel;
+        lessonCell.appendChild(originBadge);
+      }
       tr.appendChild(lessonCell);
     }
 
@@ -3653,7 +5101,7 @@
    */
   PhotoAddForm.prototype.onRowEdited = function () {
     this.reclassify();
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
     var rowEls = this.preview.querySelectorAll('.photo-row');
     for (var i = 0; i < rowEls.length && i < this.rows.length; i++) {
       var row = this.rows[i];
@@ -3673,6 +5121,13 @@
       if (lessonEl) {
         lessonEl.disabled = !committable;
       }
+      // Issue #80 §3.2: the pick checkbox rides the same verdict (and the
+      // reclassify-carried lessonPicked state).
+      var pickEl = tr.querySelector('.photo-lesson-pick');
+      if (pickEl) {
+        pickEl.disabled = !committable;
+        pickEl.checked = committable && !!row.lessonPicked;
+      }
 
       var statusCell = tr.querySelector('.photo-status');
       if (statusCell) {
@@ -3691,7 +5146,8 @@
 
   PhotoAddForm.prototype.updateCommitButton = function () {
     var label = this.commitBtn.querySelector('.btn-label');
-    var n = this.bookChoice !== 'none' ? this.committedRows().length : this.submittableRows().length;
+    var n = isPhotoTextbookMode(this.bookChoice)
+      ? this.committedRows().length : this.submittableRows().length;
     // Issue #11/#13: checked poem and passage drafts ride the SAME
     // commit; the label names every kind honestly. Word-only drafts keep
     // the established label verbatim (确认添加（N 个） — specs pin it).
@@ -3712,7 +5168,9 @@
         ? '确认添加（' + parts.join(' · ') + '）'
         : '确认添加（0 个）';
     }
-    this.commitBtn.disabled = n === 0 && m === 0 && k === 0;
+    this.commitBtn.disabled = this.recognizeBusy || this.commitInFlight ||
+      (n === 0 && m === 0 && k === 0) ||
+      (this.bookChoice === 'unset' && this.textbookDepsReady());
     // Issue #81: the footer save-note counts exactly what this label is
     // about to commit — refresh them together.
     this.updateCommitHint();
@@ -3857,7 +5315,7 @@
    *  lesson-assigned (exists) and parent-RESOLVED conflicts (Issue #6);
    *  unresolved conflicts, invalid and unchecked rows never do. */
   PhotoAddForm.prototype.committedRows = function () {
-    var textbookMode = this.bookChoice !== 'none';
+    var textbookMode = isPhotoTextbookMode(this.bookChoice);
     return this.rows.filter(function (r) {
       return isCommittable(r, textbookMode) && r.checked !== false;
     });
@@ -3874,7 +5332,7 @@
    * step's outcome lands in the receipt honestly.
    */
   PhotoAddForm.prototype.handleCommit = function () {
-    if (this.commitBtn.disabled) {
+    if (this.commitBtn.disabled || this.recognizeBusy || this.commitInFlight) {
       return;
     }
     var self = this;
@@ -3882,7 +5340,11 @@
     this.showFormError('');
     this.reclassify();
 
-    if (this.bookChoice !== 'none' && this.textbookDepsReady()) {
+    if (this.bookChoice === 'unset' && this.textbookDepsReady()) {
+      this.showFormError('请先选择教材或新建教材后再确认');
+      return;
+    }
+    if (isPhotoTextbookMode(this.bookChoice) && this.textbookDepsReady()) {
       this.handleTextbookCommit();
       return;
     }
@@ -3979,8 +5441,10 @@
   /** Shared post-success reset (both commit paths land here). */
   PhotoAddForm.prototype.resetAfterCommit = function () {
     this.currentFile = null;
+    this.pickedPhotos = [];
     this.fileInput.value = '';
     this.releasePdf();
+    this.releasePhotoBatch();
     this.clearPickUI();
     this.resetEntries();
   };
@@ -4040,6 +5504,9 @@
     }
 
     this.setCommitBusy(true);
+    var receiptRowsSnapshot = this.rows.map(function (r) {
+      return Object.assign({}, r);
+    });
     // established tracks the step-1 result so a LATER step's failure can
     // still name what already persisted (per-step honesty: a partial
     // commit never renders as a plain failure with unreported writes).
@@ -4077,6 +5544,7 @@
         });
       })
       .then(function (receipt) {
+        receipt.receiptRows = receiptRowsSnapshot;
         self.renderTextbookCommitResult(receipt);
         self.onCommitted(receipt.addOutcome || {});
         // The textbook list changed (created/appended lessons/backfilled
@@ -4111,11 +5579,8 @@
         reloaded.then(function (books) {
           if (books) {
             self.books = books;
-            self.renderTextbookPanel('');
             self.bookChoice = established.id;
-            if (self.bookDetailHost) {
-              self.renderTextbookDetail(self.bookDetailHost);
-            }
+            self.renderTextbookPanel('');
             self.renderPreview();
           }
           self.reportCommitError('教材「' + established.name +
@@ -4213,15 +5678,20 @@
       return Promise.resolve(book);
     }
     if (missing.length) {
-      patch.lessons = distinctLessons((book.lessons || []).concat(missing));
+      // Issue #80 §2.4: append-only — the request carries ONLY the names
+      // the book's list lacks (appendLessons); the server merges them
+      // inside BEGIN IMMEDIATE, never reordering or replacing the list.
+      // The whole-list lessons shape and learnedLessons stay OUT of an
+      // import update (progress is the textbook page's call alone).
+      patch.appendLessons = missing;
     }
     return this.updateTextbook(book.id, patch).then(function (updated) {
       // Keep the in-memory book current for the receipt's progress hint.
       if (updated && updated.lessons) {
         book.lessons = updated.lessons;
         book.learnedLessons = updated.learnedLessons;
-      } else if (patch.lessons) {
-        book.lessons = patch.lessons;
+      } else if (patch.appendLessons) {
+        book.lessons = appendMissingLessons(book.lessons || [], patch.appendLessons);
       }
       META_KEYS.forEach(function (key) {
         if (patch[key]) {
@@ -4279,7 +5749,7 @@
             }
           });
           return self.runAdoptEdits(adoptRows, idByWord).then(function (editResults) {
-            var groups = planAssignments(committed, fresh || [], book.id, self.includePending);
+            var groups = planAssignments(committed, fresh || [], book.id);
             var unassigned = committed.filter(function (r) {
               return !Object.prototype.hasOwnProperty.call(idByWord, r.word) ||
                 !attributionKnownByWord[r.word];
@@ -4401,6 +5871,160 @@
    * 重试生成 once any previous attempt went unanswered; the note names
    * the unanswered count honestly (AC-5).
    */
+  /**
+   * openImportBatchEditModal (Issue #80 AC-09) — the browse batch-edit
+   * preview over the import draft's checked rows; 确认 applies to memory
+   * only (the ordinary 确认添加 persists).
+   */
+  PhotoAddForm.prototype.openImportBatchEditModal = function () {
+    var self = this;
+    var kit = global.__parentModalKit || {};
+    if (!kit.openModal || !global.previewBatchEdits) {
+      return;
+    }
+    var category = this.draftCategory || '';
+    var picked = [];
+    var library = (this.existingWords || []).slice();
+    this.rows.forEach(function (r, rowIndex) {
+      if (r.checked === false || r.status === 'invalid') {
+        return;
+      }
+      var existing = null;
+      (self.existingWords || []).forEach(function (w) {
+        if (w && w.word === r.word && (w.category || '') === category) {
+          existing = w;
+        }
+      });
+      var id = existing ? existing.id : (1000000 + rowIndex);
+      var entry = {
+        id: id,
+        word: r.word,
+        meaning: r.meaning || '',
+        category: category,
+        rowIndex: rowIndex,
+      };
+      picked.push(entry);
+      if (!existing) {
+        library.push({ id: id, word: r.word, meaning: r.meaning || '', category: category });
+      }
+    });
+    if (!picked.length || picked.length > 500) {
+      return;
+    }
+    var prefillLine = global.batchEditPrefillLine || function (word, meaning) {
+      return word + (meaning ? '\t' + meaning : '');
+    };
+
+    kit.openModal({
+      wide: true,
+      title: '批量编辑导入草稿（已勾选 ' + picked.length + ' 行）',
+      build: function (body, actions, close) {
+        var hint = document.createElement('p');
+        hint.className = 'form-hint';
+        hint.textContent = '按勾选顺序每行一个词；确认只改草稿，不写词库。';
+        body.appendChild(hint);
+        var paste = document.createElement('textarea');
+        paste.className = 'form-textarea';
+        paste.id = 'photo-batch-edit-input';
+        paste.rows = Math.min(10, Math.max(4, picked.length));
+        paste.value = picked.map(function (w) {
+          return prefillLine(w.word, w.meaning);
+        }).join('\n');
+        body.appendChild(paste);
+        var previewBox = document.createElement('div');
+        previewBox.className = 'batch-edit-preview';
+        body.appendChild(previewBox);
+        var applyBtn = kit.buildLoadingButton
+          ? kit.buildLoadingButton('应用到草稿', 'btn btn-primary')
+          : null;
+        if (!applyBtn) {
+          applyBtn = document.createElement('button');
+          applyBtn.type = 'button';
+          applyBtn.className = 'btn btn-primary';
+          applyBtn.textContent = '应用到草稿';
+        }
+        applyBtn.type = 'button';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn btn-secondary';
+        cancelBtn.textContent = '取消';
+        cancelBtn.addEventListener('click', close);
+        actions.appendChild(cancelBtn);
+        actions.appendChild(applyBtn);
+        var parseEdit = global.parseBatchForEdit || global.parseBatch;
+        var render = function () {
+          var parsed = parseEdit(paste.value);
+          var preview = global.previewBatchEdits(picked, parsed.rows, library);
+          clearEl(previewBox);
+          previewBox.dataset.ok = preview.ok ? 'true' : 'false';
+          if (!preview.ok && preview.code === 'count-mismatch') {
+            applyBtn.disabled = true;
+            var mismatch = document.createElement('p');
+            mismatch.className = 'batch-edit-problem';
+            mismatch.textContent = '行数不一致：粘贴 ' + preview.pasted + ' 行，已勾选 ' +
+              preview.selected + ' 行。';
+            previewBox.appendChild(mismatch);
+            return;
+          }
+          var edits = preview.edits.filter(function (e) { return e.kind === 'edit'; });
+          var blocked = global.blockedEdits ? global.blockedEdits(preview) : edits.filter(
+            function (e) { return e.blocked; });
+          var summary = document.createElement('p');
+          summary.className = 'batch-edit-summary';
+          summary.textContent = edits.length + ' 处修改、' + preview.unchanged +
+            ' 处不变' + (blocked.length ? '、' + blocked.length + ' 处阻断' : '') + '。';
+          previewBox.appendChild(summary);
+          var list = document.createElement('ul');
+          list.className = 'batch-edit-list';
+          edits.forEach(function (e) {
+            var li = document.createElement('li');
+            var face = e.wordTo === e.wordFrom ? e.wordFrom
+              : (e.wordFrom + ' → ' + e.wordTo);
+            li.textContent = face + '（释义：' +
+              (e.meaningTo === e.meaningFrom ? '不变' : ('「' + (e.meaningFrom || '（空）') +
+                '」→「' + e.meaningTo + '」')) + '）' +
+              (e.blocked === 'identity-conflict'
+                ? ' — 已阻断：词面与另一个词（#' + e.conflictId + '）相同'
+                : (e.blocked === 'meaning-too-long' ? ' — 已阻断：释义超过 1000 字' : ''));
+            if (e.blocked) {
+              li.className = 'batch-edit-blocked';
+            }
+            list.appendChild(li);
+          });
+          previewBox.appendChild(list);
+          var applicable = edits.some(function (e) { return !e.blocked; });
+          applyBtn.disabled = !applicable;
+        };
+        paste.addEventListener('input', render);
+        render();
+        applyBtn.addEventListener('click', function () {
+          if (applyBtn.disabled) {
+            return;
+          }
+          var parsed = parseEdit(paste.value);
+          var preview = global.previewBatchEdits(picked, parsed.rows, library);
+          var pending = preview.edits.filter(function (e) {
+            return e.kind === 'edit' && !e.blocked;
+          });
+          if (!pending.length) {
+            return;
+          }
+          preview.edits.forEach(function (e, i) {
+            if (e.kind !== 'edit' || e.blocked) {
+              return;
+            }
+            var idx = picked[i].rowIndex;
+            self.rows[idx].word = e.wordTo;
+            self.rows[idx].meaning = e.meaningTo;
+          });
+          self.reclassify();
+          close();
+          self.renderPreview();
+        });
+      },
+    });
+  };
+
   PhotoAddForm.prototype.renderMeaningBar = function () {
     var self = this;
     this.meaningBar.hidden = true;
@@ -4599,13 +6223,18 @@
 
   PhotoAddForm.prototype.setCommitBusy = function (busy) {
     var kit = global.__parentFormKit || {};
+    this.commitInFlight = !!busy;
     if (kit.setLoading) {
       kit.setLoading(this.commitBtn, busy);
     } else {
       this.commitBtn.disabled = busy;
     }
-    this.recognizeBtn.disabled = busy || !this.currentFile;
+    this.recognizeBtn.disabled = busy || this.recognizeBusy || !this.currentFile;
+    this.pickBtn.disabled = busy || this.recognizeBusy;
     this.discardBtn.disabled = busy;
+    if (!busy) {
+      this.updateCommitButton();
+    }
   };
 
   /**
@@ -4704,6 +6333,7 @@
         }
       });
     });
+    var assignMissNote = '未能指定课次——可在词库中补指定';
     var snapMeaning = {};
     (input.fresh || []).forEach(function (w) {
       if (w && w.word) {
@@ -5297,7 +6927,7 @@
     var kit = global.__parentFormKit || {};
     var book = receipt.book;
     var built = buildTextbookReceipt({
-      rows: this.rows,
+      rows: receipt.receiptRows || this.rows,
       addRows: receipt.submittedRows,
       addOutcome: receipt.addOutcome,
       fresh: receipt.fresh,
@@ -5425,6 +7055,7 @@
   PhotoAddForm.prototype.handleDiscard = function () {
     var kit = global.__parentFormKit || {};
     this.releasePdf();
+    this.releasePhotoBatch();
     this.resetEntries();
     this.showFormError('');
     if (kit.clearContainer) {
@@ -5472,8 +7103,33 @@
   global.PhotoAddForm = PhotoAddForm;
   global.classifyPhotoEntries = classifyPhotoEntries;
   global.matchTextbookForMeta = matchTextbookForMeta;
+  global.preselectBookChoice = preselectBookChoice;
+  global.isPhotoTextbookMode = isPhotoTextbookMode;
   global.distinctLessons = distinctLessons;
   global.distinctRowLessons = distinctRowLessons;
+  global.lessonsNamedOnPhoto = lessonsNamedOnPhoto;
+  global.recommendLesson = recommendLesson;
+  global.recommendForDraftPage = recommendForDraftPage;
+  global.recognizeRunStillValid = recognizeRunStillValid;
+  global.applyRecognizeLibraryLoad = applyRecognizeLibraryLoad;
+  global.createFormFieldValue = createFormFieldValue;
+  global.entriesForPhotoPage = entriesForPhotoPage;
+  global.lessonRecsPriorToPage = lessonRecsPriorToPage;
+  global.lessonsForRecommend = lessonsForRecommend;
+  global.fillRecommendedLessons = fillRecommendedLessons;
+  global.applyBatchLesson = applyBatchLesson;
+  global.applyPickedLesson = applyPickedLesson;
+  global.clearLessonPicks = clearLessonPicks;
+  global.pickAllLessons = pickAllLessons;
+  global.pickLessonGroup = pickLessonGroup;
+  global.pickLessonRange = pickLessonRange;
+  global.lessonPickGroups = lessonPickGroups;
+  global.lessonOriginLabel = lessonOriginLabel;
+  global.appendMissingLessons = appendMissingLessons;
+  global.MAX_PHOTO_FILES = MAX_PHOTO_FILES;
+  global.validatePhotoSelection = validatePhotoSelection;
+  global.mergePhotoMetas = mergePhotoMetas;
+  global.isPhotoFile = isPhotoFile;
   global.isCommittable = isCommittable;
   global.isResolved = isResolved;
   global.planAssignments = planAssignments;

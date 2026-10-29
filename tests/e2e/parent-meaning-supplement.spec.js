@@ -65,7 +65,13 @@ test('meaning supplement: fills only the blanks, marks them, and the real write 
     await recognize(page, FIXTURE_WAIYAN);
 
     // The read header prefills the 新建教材 form (its own meta family).
-    await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
+    // Issue #80 §2.2: with other english books already on the shared DB
+    // and no meta match, the panel stops at 请选择 — the parent picks
+    // 新建 either way.
+    const bookSelect = page.locator('#parent-photo-textbook');
+    if ((await bookSelect.inputValue()) === 'unset') {
+      await bookSelect.selectOption('new');
+    }
     await expect(page.locator('#parent-photo-tb-name')).toHaveValue(BOOK_WAIYAN);
 
     // The affordance names exactly the two blank rows (AC-4 trigger).

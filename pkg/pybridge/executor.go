@@ -112,6 +112,15 @@ type Executor interface {
 	// subcommand (Issue #4): remove cards' assignments to one textbook —
 	// the words return to supplementary vocabulary (eligible by default).
 	RunUnassignWords(ctx context.Context, opts UnassignWordsOpts) (UnassignWordsResult, error)
+
+	// RunDesignate invokes the vocab_manager.py `designate` subcommand
+	// (Issue #80 指定默写): select every participates=1 card assigned to one
+	// textbook lesson — regardless of learned progress, FSRS due dates or
+	// cards.unit — and claim them with fetch locks inside one BEGIN
+	// IMMEDIATE transaction. A nil error NEVER implies selection succeeded:
+	// the outcome rides in DesignateResult.Status (ok / occupied / too_many),
+	// so callers must branch on it rather than on the error alone.
+	RunDesignate(ctx context.Context, opts DesignateOpts) (DesignateResult, error)
 }
 
 // DueOpts carries the operational flags for the vocab_manager.py due
@@ -465,7 +474,10 @@ type TextbookUpdateOpts struct {
 	LearnedLessons *int
 	// Lessons, when non-nil, replaces the explicit lesson list.
 	Lessons []string
-	ID      int64
+	// AppendLessons, when non-nil, appends unseen names inside BEGIN
+	// IMMEDIATE (mutually exclusive with Lessons).
+	AppendLessons []string
+	ID            int64
 	// SetPrimary makes this textbook the category's primary, demoting the
 	// others in the same script transaction.
 	SetPrimary bool
@@ -516,6 +528,59 @@ type UnassignWordsResult struct {
 	Requested  int     `json:"requested"`
 	Removed    int     `json:"removed"`
 	TextbookID int64   `json:"textbook_id"`
+}
+
+// DesignateOpts carries the vocab_manager.py designate flags (Issue #80):
+// one textbook, one lesson from that textbook's list, and the optional
+// fetch-lock window (the same --fetch-lock-hours contract as DueOpts —
+// zero omits the flag so the script's 24h default applies).
+type DesignateOpts struct {
+	// Lesson names one lesson from the textbook's explicit list. Forwarded
+	// as --lesson. The empty string is invalid here (待确认 cannot be
+	// designated) and is rejected before any subprocess spawn.
+	Lesson string
+
+	// TextbookID scopes the selection. Forwarded as --textbook-id.
+	TextbookID int64
+
+	// FetchLockHours sets the occupancy window on the selected cards.
+	// Forwarded as --fetch-lock-hours; <= 0 omits the flag.
+	FetchLockHours float64
+}
+
+// DesignateCard mirrors one selected card in the designate payload: the
+// card identity plus the word/meaning/example ground truth the classroom
+// row needs. Field tags align exactly with the JSON keys cmd_designate
+// emits (the due-card shape minus the FSRS fields — designation ignores
+// the schedule by design).
+type DesignateCard struct {
+	Word    string `json:"word"`
+	Meaning string `json:"meaning"`
+	Example string `json:"example"`
+	Unit    string `json:"unit"`
+	ID      int64  `json:"id"`
+}
+
+// Designate status values — the typed outcome cmd_designate reports for
+// every exit-0 call. "ok" selected and locked the cards; "occupied" found
+// an unexpired fetch lock in the target and changed nothing; "too_many"
+// exceeded the single-session cap and locked nothing.
+const (
+	DesignateStatusOK       = "ok"
+	DesignateStatusOccupied = "occupied"
+	DesignateStatusTooMany  = "too_many"
+)
+
+// DesignateResult is the typed payload the designate path returns. Status
+// carries the outcome (see the DesignateStatus constants); Cards is the
+// selected snapshot in card-id order, non-empty only on the ok branch;
+// Total is the eligible-card count the script saw for the branch it took.
+type DesignateResult struct {
+	Status     string          `json:"status"`
+	Lesson     string          `json:"lesson"`
+	Cards      []DesignateCard `json:"cards"`
+	TextbookID int64           `json:"textbook_id"`
+	Total      int             `json:"total"`
 }
 
 // Sentinel errors returned by the pybridge layer. Callers MUST detect

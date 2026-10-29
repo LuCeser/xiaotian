@@ -19,10 +19,11 @@
  * can never hijack onto theirs (a lookalike with no meta matches nothing).
  *
  * Acceptance link, one test per UAT gap:
- *   1. T21 课次缺失的明确处理 — blank batch lesson (= 待确认) + the
- *      include-in-scope override: the receipt says 已指定默写范围（课次待
- *      确认）, the batch is NOT progress-gated, and the 不指定教材 branch
- *      carries its own 补充词汇不要求虚构课次 honesty note.
+ *   1. T21 课次缺失的明确处理 — blank batch lesson (= 待确认): Issue #80
+ *      AC-06 removed the import-side include override, so the receipt
+ *      says 已指定课次待确认 + 暂不自动安排, the classroom keeps the words
+ *      out, and the 不指定教材 branch carries its own 补充词汇不要求虚构
+ *      课次 honesty note.
  *   2. T18 新建教材在提交时建立 — 新建教材… shows the one-time confirm hint,
  *      prefills the name from the recognized meta, refuses an empty name, and
  *      the book does NOT exist in the real DB until 确认添加 succeeds (there
@@ -137,51 +138,53 @@ async function assignThroughUI(page, words, textbookLabel, lessonLabel, include)
   await expect(dialog).toBeHidden({ timeout: 15_000 });
 }
 
-test('T21: blank lesson + include-in-scope commits as 课次待确认 scope and is not progress-gated', async ({ page, request }) => {
+test('T21: blank lesson commits as 课次待确认, out of the classroom until progress moves (AC-06: no import-side 加入范围)', async ({ page, request }) => {
   await deleteWords(request, WORDS);
   try {
     await recognize(page, FIXTURE_PEP);
 
     // The task's related 补充词汇 note lives on the 不指定教材 branch (not on
     // the textbook path): verify it there, then move to 新建教材 for the
-    // actual commit. Source: parent-photo.js:1368.
+    // actual commit.
     await page.locator('#parent-photo-textbook').selectOption('none');
     await expect(page.locator('.photo-book-detail'))
       .toContainText('补充词汇不要求虚构课次');
 
-    // Back to a fresh textbook so the include checkbox exists at all
-    // (renderTextbookDetail returns early for 不指定教材).
+    // Back to a fresh textbook for the actual commit.
     await page.locator('#parent-photo-textbook').selectOption('new');
 
     // Blank batch lesson = 待确认 (the row default inherits the header's
     // 第2课, so it must be cleared explicitly).
     await batchSetLesson(page, '');
-    // The photo panel's own label differs from the browse modal's; assert by
-    // id (source: parent-photo.js:1494). Checking it only flips a flag — no
-    // re-render (parent-photo.js:1490-1492).
-    await page.locator('#parent-photo-include').check();
 
-    // The name goes LAST: 应用到勾选行 re-renders the whole 教材详情 panel
-    // (parent-photo.js:1476), rebuilding #parent-photo-tb-name back to the
-    // recognized prefill. Filling it before the batch apply is silently
-    // discarded, and the commit then tries to re-create another suite's PEP
-    // book ("textbook name already exists") instead of this suite's own.
+    // Issue #80 AC-06: the import offers NO 加入范围 affordance anymore —
+    // 待确认 words must wait for progress (加入范围 lives in 词库浏览).
+    await expect(page.locator('#parent-photo-include')).toHaveCount(0);
+    await expect(page.locator('.photo-state-line'))
+      .toContainText('待确认课次的 3 词保存后暂不自动安排');
+
+    // The name goes LAST: 应用到勾选行 re-renders the whole 教材详情 panel,
+    // rebuilding #parent-photo-tb-name back to the recognized prefill.
+    // Filling it before the batch apply is silently discarded, and the
+    // commit then tries to re-create another suite's PEP book.
     await prepareNewBook(page, BOOK1);
     await expect(page.locator('#parent-photo-tb-name')).toHaveValue(BOOK1);
 
     await page.getByRole('button', { name: '确认添加（3 个）' }).click();
     await awaitReceipt(page, BOOK1, { 新增: 3 });
 
-    // The group receipt names the explicit include-in-scope scope, not a
-    // lesson (source: parent-photo.js:2920-2921).
+    // The group receipt names the 待确认 lesson group — never a 默写范围
+    // grant (an import cannot join words into the scope).
     await expect(page.locator('.result-banner'))
-      .toContainText('已指定默写范围（课次待确认）：tiger、panda、grape');
+      .toContainText('已指定课次待确认：tiger、panda、grape');
+    await expect(page.locator('.result-banner'))
+      .toContainText('暂不自动安排 3 词（课次待确认）');
 
-    // No progress exists on the new book (no lessons, learnedLessons 0), yet
-    // include_in_scope admits the batch into the real classroom.
+    // No progress on the new book and no include flag: the real classroom
+    // keeps every one of them out until the textbook page moves progress.
     const picked = await practiceSelection();
     for (const w of ['tiger', 'panda', 'grape']) {
-      expect(picked).toContain(w);
+      expect(picked).not.toContain(w);
     }
   } finally {
     await deleteWords(request, WORDS);
@@ -320,25 +323,26 @@ test('T15: 待确认 + 直接加入范围 through the browse modal admits the wo
 // Task-text vs source discrepancies found while reading the code (assertions
 // above use the SOURCE wording, not the audit's paraphrase):
 //
-//   - T21 include checkbox: the photo panel's label is
-//     「待确认课次的词直接加入默写范围（不受进度限制）」 (parent-photo.js:1494),
-//     NOT 「不受课次进度限制，直接加入默写范围」. The latter IS the browse
-//     modal's label (parent-textbook.js:612) and is exercised in T15.
+//   - T21 (Issue #80 AC-06): the photo panel's include checkbox is GONE —
+//     an import never joins words into 默写范围; the 待确认 group stores
+//     includeInScope:false and the classroom keeps it out until progress
+//     moves. The browse modal's 不受课次进度限制 override (parent-
+//     textbook.js) still exists and is exercised in T15.
 //   - T21 补充词汇 note: 「这些词将作为补充词汇加入，默认加入默写范围（补充
-//     词汇不要求虚构课次）。」 (parent-photo.js:1368) renders ONLY on the
+//     词汇不要求虚构课次）。」 (parent-photo.js) renders ONLY on the
 //     不指定教材 branch, never on the textbook path the task's flow describes.
 //     Covered by switching to 不指定教材 in T21 (no assertion skipped).
 //   - T21 group note: the actual line is
-//     「已指定默写范围（课次待确认）：<words>」 — the audit's
-//     「已指定默写范围（课次待确认）」 is a substring, matched exactly above.
+//     「已指定课次待确认：<words>」 — an import without an explicit
+//     include can never write 默写范围 wording.
 //   - T18 hint: actual is
 //     「确认必要信息建立教材（只需这一次）；识别到的信息已预填，可修改。」
-//     (parent-photo.js:1376); the error is
-//     「请先填写教材名称（缺失的教材信息只需这一次确认）」(parent-photo.js:2063).
-//   - T24-b keep note: 「保留词库释义，仅合并来源」 (parent-photo.js:2727) —
+//     (parent-photo.js); the error is
+//     「请先填写教材名称（缺失的教材信息只需这一次确认）」(parent-photo.js).
+//   - T24-b keep note: 「保留词库释义，仅合并来源」 (parent-photo.js) —
 //     matches the audit exactly.
 //   - T15 chip title: 「课次待确认：暂不自动加入默写范围，确认课次或手动加入
-//     后生效」 (parent-browse.js:852) — matches the audit exactly.
+//     后生效」 (parent-browse.js) — matches the audit exactly.
 //
 // No assertion was skipped: every control the task describes exists and is
 // reachable through the real UI.

@@ -26,6 +26,11 @@
  *      (honestly preselected by meta match, AC-1) adds 第2课 words that
  *      stay OUT of real classroom selection until the progress moves
  *      (AC-4); the receipt says so.
+ *   4. 一次多选两张照片 (Issue #80) — ONE picker selection, two photos of
+ *      the same book: each photo's rows carry their own page lesson, the
+ *      确认 appends the missing lesson once at the END of the list
+ *      (appendLessons, never the whole list, never learnedLessons), and
+ *      NOTHING is written before 确认 (AC-01).
  *
  * Classroom probes: raw /rt practice session_init (mode=test full-reveal;
  * ≥1.1s apart — r0x lesson ids are second-granular, same-second probes
@@ -53,6 +58,7 @@ const FIXTURE_LEXIN2 = path.join(FIXTURES, 'photo-textbook-lexin2.png');
 const BOOK_PEP = '人教版PEP·三年级·上册·Unit 3';
 const BOOK_JIJIANG = '冀教版·五年级·上册·Unit 1';
 const BOOK_LEXIN = '译林版·六年级·下册·Unit 5';
+const BOOK_LEXIN_DUAL = '译林版·六年级·下册·Unit 5·双图隔离';
 
 /** Real word→assignments snapshot for the english category (the shared
  *  wordRows helper returns whole rows; this suite only reads textbooks). */
@@ -91,8 +97,14 @@ test('photo textbook: misread lesson is batch-corrected; the CONFIRMED result go
     await expect(meta).toContainText('模块 Unit 3');
     await expect(meta).toContainText('课次 第2课'); // the stub's MISREAD
 
-    // AC-1: no existing book matches → 新建教材 prefilled from the meta.
-    await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
+    // AC-1: no existing book matches the PEP header — Issue #80 §2.2 has
+    // the panel STOP at 请选择 once any book exists (suite order leaves
+    // 外研版/北师大版 behind), or preselect 新建 on a clean DB. The parent
+    // lands on 新建教材 either way, prefilled from the meta.
+    const select = page.locator('#parent-photo-textbook');
+    if ((await select.inputValue()) === 'unset') {
+      await select.selectOption('new');
+    }
     await expect(page.locator('#parent-photo-tb-name')).toHaveValue(BOOK_PEP);
 
     // AC-3: batch-correct the whole page to the lesson actually printed.
@@ -143,6 +155,12 @@ test('photo textbook: two books built from photos keep independent progress', as
     await awaitReceipt(page, BOOK_PEP, { 新增: 3 });
 
     await recognize(page, FIXTURE_JIJIANG);
+    // Books exist (PEP) but none matches 冀教版 — Issue #80 §2.2 stops at
+    // 请选择 instead of guessing 新建; the parent explicitly creates the
+    // new book, which restores the lesson column.
+    const select = page.locator('#parent-photo-textbook');
+    await expect(select).toHaveValue('unset');
+    await select.selectOption('new');
     // 冀教版's header was read correctly — 第1课 stands, no correction.
     await expect(page.locator('input[aria-label="课次 第 1 行"]')).toHaveValue('第1课');
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
@@ -187,7 +205,13 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
   try {
     // Photo 1 → the 译林版 book with 第1课, then mark 第1课 learned.
     await recognize(page, FIXTURE_LEXIN);
-    await expect(page.locator('#parent-photo-textbook')).toHaveValue('new');
+    // In suite order other books exist and none matches 译林版 — the
+    // panel stops at 请选择 (Issue #80 §2.2); standalone it preselects
+    // 新建 on the clean DB. Either way the parent lands on 新建教材.
+    const freshSelect = page.locator('#parent-photo-textbook');
+    if ((await freshSelect.inputValue()) === 'unset') {
+      await freshSelect.selectOption('new');
+    }
     await page.getByRole('button', { name: '确认添加（2 个）' }).click();
     await awaitReceipt(page, BOOK_LEXIN, { 新增: 2 });
     const books1 = await textbooks(request);
@@ -229,6 +253,91 @@ test('photo textbook: confirmed-but-unlearned lessons stay out of the classroom 
     picked = await practiceSelection();
     expect(picked).toContain('bird');
     expect(picked).toContain('frog');
+  } finally {
+    await deleteWords(request, WORDS);
+  }
+});
+
+test('photo textbook: ONE pick of two photos — lessons append once in order, progress untouched, nothing written before 确认 (Issue #80 §2.3/§2.4)', async ({ page, request }) => {
+  await deleteWords(request, WORDS);
+  // Independent setup: the 译林版 book already exists with 第1课 learned,
+  // so this test always exercises appendLessons — never suite-order luck.
+  const create = await request.post('/api/v1/textbooks', {
+    data: {
+      name: BOOK_LEXIN_DUAL,
+      category: CAT,
+      edition: '译林版',
+      grade: '六年级',
+      volume: '下册',
+      module: 'Unit 5',
+      lessons: ['第1课'],
+    },
+  });
+  expect(create.ok()).toBeTruthy();
+  const created = await create.json();
+  const putProgress = await request.put(`/api/v1/textbooks/${created.id}`, {
+    data: { learnedLessons: 1 },
+  });
+  expect(putProgress.ok()).toBeTruthy();
+  const textbookWrites = [];
+  page.on('request', (req) => {
+    if (req.method() === 'PUT' && /\/api\/v1\/textbooks\/\d+$/.test(req.url())) {
+      textbookWrites.push(req.postData() || '');
+    }
+  });
+  try {
+    // One picker selection, TWO fixture photos (Issue #80 §2.3): each
+    // photo walks its own recognize; the draft merges in photo order and
+    // each photo's rows carry that photo's page lesson.
+    await recognize(page, [FIXTURE_LEXIN, FIXTURE_LEXIN2]);
+    const dualBook = (await textbooks(request)).find((b) => b.name === BOOK_LEXIN_DUAL);
+    expect(dualBook).toBeTruthy();
+    const select = page.locator('#parent-photo-textbook');
+    await select.selectOption(String(dualBook.id));
+    const bookId = String(dualBook.id);
+    await expect(bookId).not.toBe('unset');
+    await expect(page.locator('input[aria-label="课次 第 1 行"]')).toHaveValue('第1课');
+    await expect(page.locator('input[aria-label="课次 第 3 行"]')).toHaveValue('第2课');
+    const commitBtn = page.getByRole('button', { name: '确认添加（4 个）' });
+    await expect(commitBtn).toBeEnabled();
+
+    // AC-01 未按确认不写库：词库没有这四个词，教材名单与进度原样。
+    const wordsBefore = await wordAssignments(request);
+    expect(wordsBefore.get('cow')).toBeFalsy();
+    expect(wordsBefore.get('bird')).toBeFalsy();
+    const booksBefore = await textbooks(request);
+    const lexinBefore = booksBefore.find((b) => b.name === BOOK_LEXIN_DUAL);
+    expect(lexinBefore).toBeTruthy();
+    expect(lexinBefore.lessons).toEqual(['第1课']);
+    const learnedBefore = lexinBefore.learnedLessons;
+
+    await commitBtn.click();
+    await awaitReceipt(page, BOOK_LEXIN_DUAL, { 新增: 4 });
+
+    // The append-only invariants (§2.1): both lessons present exactly
+    // once, in photo order at the END of the list, progress unchanged.
+    const booksAfter = await textbooks(request);
+    const lexinAfter = booksAfter.find((b) => b.name === BOOK_LEXIN_DUAL);
+    expect(lexinAfter).toBeTruthy();
+    expect(lexinAfter.lessons).toEqual(['第1课', '第2课']);
+    expect(lexinAfter.lessons.indexOf('第1课'))
+      .toBe(lexinAfter.lessons.lastIndexOf('第1课'));
+    expect(lexinAfter.learnedLessons).toBe(learnedBefore);
+
+    // No import write ever carries the whole list or the progress (§2.4);
+    // an existing book's missing names ride appendLessons alone.
+    for (const body of textbookWrites) {
+      expect(body.includes('learnedLessons')).toBe(false);
+      expect(body.includes('"lessons"')).toBe(false);
+    }
+    const appends = textbookWrites.filter((b) => b.includes('appendLessons'));
+    expect(appends.length).toBe(1);
+    expect(JSON.parse(appends[0]).appendLessons).toEqual(['第2课']);
+
+    // The stored attribution follows each photo's own lesson.
+    const assigns = await wordAssignments(request);
+    expect(((assigns.get('cow') || []).find((t) => t.name === BOOK_LEXIN_DUAL) || {}).lesson).toBe('第1课');
+    expect(((assigns.get('frog') || []).find((t) => t.name === BOOK_LEXIN_DUAL) || {}).lesson).toBe('第2课');
   } finally {
     await deleteWords(request, WORDS);
   }

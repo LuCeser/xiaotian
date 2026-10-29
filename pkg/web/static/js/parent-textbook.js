@@ -116,6 +116,7 @@
     updateTextbook: function () { return Promise.reject(new Error('未配置')); },
     assignWords: function () { return Promise.reject(new Error('未配置')); },
     onMutated: function () {},
+    onAssignSuccess: function () {},
   };
 
   /** modalKit resolves the shared modal builders at interaction time. */
@@ -608,6 +609,11 @@
         var include = document.createElement('input');
         include.type = 'checkbox';
         include.id = 'assign-include';
+        include.checked = (words || []).some(function (w) {
+          return (w.textbooks || []).some(function (entry) {
+            return entry && entry.includeInScope;
+          });
+        });
         var includeText = document.createElement('span');
         includeText.textContent = '不受课次进度限制，直接加入默写范围';
         includeLabel.appendChild(include);
@@ -638,6 +644,9 @@
           }).then(function () {
             toast('已指定 ' + ids.length + ' 个词', 'success');
             deps.onMutated();
+            if (typeof deps.onAssignSuccess === 'function') {
+              deps.onAssignSuccess();
+            }
             close();
           }).catch(function (err) {
             error.textContent = '指定失败：' + ((err && err.message) || '未知错误');
@@ -719,6 +728,7 @@
       deps.updateTextbook = wiring.updateTextbook || deps.updateTextbook;
       deps.assignWords = wiring.assignWords || deps.assignWords;
       deps.onMutated = wiring.onMutated || deps.onMutated;
+      deps.onAssignSuccess = wiring.onAssignSuccess || deps.onAssignSuccess;
     },
     openManager: openManager,
     openAssign: openAssign,

@@ -363,6 +363,7 @@
         window.TextbookUI.openAssign(ids, words);
       }
     },
+    assignWords: textbookDeps.assignWords,
     // Issue #11: the unified content view's 古诗 page — the poem list
     // (subject/search scoped) and its explicit attribution write. Absent
     // ⇒ the browse view's 类型 filter degrades to the 词语 page only.
@@ -462,6 +463,9 @@
       assignWords: textbookDeps.assignWords,
       onMutated: function () {
         browse.refresh();
+      },
+      onAssignSuccess: function () {
+        browse.clearSelection();
       },
     });
   }
