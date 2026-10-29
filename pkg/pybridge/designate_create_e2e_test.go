@@ -46,6 +46,23 @@ func dcCreateOpts(bookID int64, lesson, key string, dbPath string) CreateDesigna
 	}
 }
 
+func dcUnlockCards(t *testing.T, b *Bridge, ctx context.Context, ids []int64) {
+	t.Helper()
+	if _, err := b.RunUnlock(ctx, UnlockOpts{IDs: ids}); err != nil {
+		t.Fatalf("RunUnlock: %v", err)
+	}
+}
+
+func dcAssertAllUnlocked(t *testing.T, dbPath string, ids []int64) {
+	t.Helper()
+	locks := dgLocks(t, dbPath)
+	for _, id := range ids {
+		if locks[id] != "" {
+			t.Fatalf("card %d still locked %q, want empty", id, locks[id])
+		}
+	}
+}
+
 // TestE2E_CreateDesignationAtomicOk — ok path writes one pending row and locks.
 func TestE2E_CreateDesignationAtomicOk(t *testing.T) {
 	b, _, cfg := e2eBridge(t, nil)
@@ -90,7 +107,7 @@ func TestE2E_CreateDesignationIdempotentRetry(t *testing.T) {
 	if err != nil || first.DesignationID <= 0 {
 		t.Fatalf("first create = %+v, %v", first, err)
 	}
-	locksAfterFirst := dgLocks(t, cfg.VocabDBPath)
+	dcUnlockCards(t, b, ctx, ids)
 
 	second, err := b.RunCreateDesignation(ctx, dcCreateOpts(bookID, "第4单元", key, cfg.VocabDBPath))
 	if err != nil {
@@ -102,12 +119,7 @@ func TestE2E_CreateDesignationIdempotentRetry(t *testing.T) {
 	if dcDesignationCount(t, cfg.VocabDBPath) != 1 {
 		t.Fatalf("retry created a second designation row")
 	}
-	locksAfterSecond := dgLocks(t, cfg.VocabDBPath)
-	for id, until := range locksAfterFirst {
-		if locksAfterSecond[id] != until {
-			t.Fatalf("retry changed lock on card %d: was %q now %q", id, until, locksAfterSecond[id])
-		}
-	}
+	dcAssertAllUnlocked(t, cfg.VocabDBPath, ids)
 }
 
 // TestE2E_CreateDesignationRetryAfterConsumed reads consumed status without re-locking.
@@ -125,7 +137,6 @@ func TestE2E_CreateDesignationRetryAfterConsumed(t *testing.T) {
 	if err != nil || created.DesignationID <= 0 {
 		t.Fatalf("create: %+v, %v", created, err)
 	}
-	locksAfterCreate := dgLocks(t, cfg.VocabDBPath)
 
 	db, err := database.Open(cfg.VocabDBPath)
 	if err != nil {
@@ -139,6 +150,7 @@ func TestE2E_CreateDesignationRetryAfterConsumed(t *testing.T) {
 	if ok, err := store.ConsumeDesignation(ctx, created.DesignationID); err != nil || !ok {
 		t.Fatalf("ConsumeDesignation: ok=%v err=%v", ok, err)
 	}
+	dcUnlockCards(t, b, ctx, ids)
 
 	retry, err := b.RunCreateDesignation(ctx, dcCreateOpts(bookID, "第4单元", key, cfg.VocabDBPath))
 	if err != nil {
@@ -147,8 +159,37 @@ func TestE2E_CreateDesignationRetryAfterConsumed(t *testing.T) {
 	if retry.DesignationID != created.DesignationID || retry.DesignationStatus != "consumed" {
 		t.Fatalf("retry = %+v, want same id consumed", retry)
 	}
-	if dgLocks(t, cfg.VocabDBPath)[ids[0]] != locksAfterCreate[ids[0]] {
-		t.Fatalf("consumed retry refreshed locks")
+	dcAssertAllUnlocked(t, cfg.VocabDBPath, ids)
+}
+
+// TestE2E_CreateDesignationRetryAfterLessonRemoved — idempotent replay must
+// not require the lesson to remain on the current textbook list.
+func TestE2E_CreateDesignationRetryAfterLessonRemoved(t *testing.T) {
+	b, _, cfg := e2eBridge(t, nil)
+	dcMigrateDesignations(t, cfg.VocabDBPath)
+	ctx := context.Background()
+
+	bookID := dgSetupBook(t, b, "dc-lessrm", "第4单元")
+	ids := dgAddWords(t, b, "dclrm", 2)
+	dgAssignLesson(t, b, bookID, "第4单元", ids)
+	key := "req-lesson-removed"
+
+	first, err := b.RunCreateDesignation(ctx, dcCreateOpts(bookID, "第4单元", key, cfg.VocabDBPath))
+	if err != nil || first.DesignationID <= 0 {
+		t.Fatalf("first create: %+v, %v", first, err)
+	}
+	if _, err := b.RunTextbookUpdate(ctx, TextbookUpdateOpts{
+		ID: bookID, Lessons: []string{"第1课"},
+	}); err != nil {
+		t.Fatalf("remove target lesson from list: %v", err)
+	}
+
+	retry, err := b.RunCreateDesignation(ctx, dcCreateOpts(bookID, "第4单元", key, cfg.VocabDBPath))
+	if err != nil {
+		t.Fatalf("retry after lesson removed from list: %v", err)
+	}
+	if retry.DesignationID != first.DesignationID || retry.DesignationStatus != "pending" {
+		t.Fatalf("retry = %+v, want same pending designation", retry)
 	}
 }
 
@@ -258,6 +299,24 @@ func TestE2E_CreateDesignationDatabaseSplit(t *testing.T) {
 	_, err := b.RunCreateDesignation(ctx, opts)
 	if !errors.Is(err, ErrDesignationDatabaseSplit) {
 		t.Fatalf("error = %v, want ErrDesignationDatabaseSplit", err)
+	}
+}
+
+// TestE2E_CreateDesignationRequiresGoDBPath — empty GoDatabasePath must not
+// bypass the single-file guard.
+func TestE2E_CreateDesignationRequiresGoDBPath(t *testing.T) {
+	b, _, cfg := e2eBridge(t, nil)
+	dcMigrateDesignations(t, cfg.VocabDBPath)
+	ctx := context.Background()
+
+	bookID := dgSetupBook(t, b, "dc-nopath", "第4单元")
+	ids := dgAddWords(t, b, "dcnp", 1)
+	dgAssignLesson(t, b, bookID, "第4单元", ids)
+
+	opts := dcCreateOpts(bookID, "第4单元", "req-nopath", "")
+	_, err := b.RunCreateDesignation(ctx, opts)
+	if !errors.Is(err, ErrDesignationDatabasePathRequired) {
+		t.Fatalf("error = %v, want ErrDesignationDatabasePathRequired", err)
 	}
 }
 
