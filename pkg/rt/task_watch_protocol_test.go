@@ -383,8 +383,8 @@ func TestVoiceTurnInitContinuationObserved(t *testing.T) {
 // report — so deleting the helper's wait turns the recorded ORDER red, never
 // a necessarily-false evidence field (review P2-6).
 type ttReclaimOrderLog struct {
-	mu      sync.Mutex
 	entries []string
+	mu      sync.Mutex
 }
 
 func (l *ttReclaimOrderLog) add(kind string) {
