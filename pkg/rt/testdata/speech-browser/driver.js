@@ -658,6 +658,128 @@ async function waitNthRoundAcked(page, texts, nth, timeoutMs, label) {
 // once every expected frame has landed on the wire and a rejection margin has
 // passed with the player still not accepting it, reports the rejection. The
 // margin only bounds the observation; the verdict rides the registration.
+async function waitSwitchRoundSecond(page, texts, pcmPerSentence, rejectMarginMs, timeoutMs) {
+  let framesCompleteAt = 0;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const view = await wsView(page);
+    const rounds = teacherRounds(view);
+    if (rounds.length >= 2 && JSON.stringify(rounds[1].texts) === JSON.stringify(texts)) {
+      const playback = await playbackState(page);
+      const facts = inspectRound(rounds[1], view, playback, texts, pcmPerSentence);
+      if (facts.allAckedNaturally) return { verdict: 'acked', facts };
+      const framesComplete = facts.sentences.length === texts.length
+        && facts.sentences.every((f) => f.starts === 1 && f.ends === 1 && f.pcmInWindow === pcmPerSentence);
+      if (framesComplete && !framesCompleteAt) framesCompleteAt = Date.now();
+      if (framesComplete && framesCompleteAt && Date.now() - framesCompleteAt >= rejectMarginMs) {
+        return { verdict: 'rejected', facts };
+      }
+    }
+    if (Date.now() > deadline) {
+      throw new Error('the switched classroom\'s round neither completed nor fully landed within '
+        + timeoutMs + 'ms');
+    }
+    await page.waitForTimeout(150);
+  }
+}
+
+// countIn / frameCounters — tiny tally helpers for the reports.
+function frameCount(view, dir, type) {
+  return view.filter((e) => e.dir === dir && e.type === type).length;
+}
+
+// interruptAckFacts lists every inbound interrupt_ack with its wire index.
+function interruptAckFacts(view) {
+  return view.filter((e) => e.dir === 'in' && e.type === 'interrupt_ack' && e.msg)
+    .map((e) => ({ index: e.i, oldEpoch: e.msg.old_epoch, newEpoch: e.msg.new_epoch }));
+}
+
+// errorFrameFacts lists every inbound error frame with its wire index.
+function errorFrameFacts(view) {
+  return view.filter((e) => e.dir === 'in' && e.type === 'error' && e.msg)
+    .map((e) => ({ index: e.i, code: e.msg.code || '', recoverable: !!e.msg.recoverable, message: e.msg.message || '' }));
+}
+
+// lateFrameCounts tallies the frames that landed after one index (the late
+// window's baseline): what followed a settled round must be nothing.
+function lateFrameCounts(view, afterIndex) {
+  const after = view.filter((e) => e.i > afterIndex);
+  return {
+    teacherSentences: after.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length,
+    reviewResults: after.filter((e) => e.dir === 'in' && e.type === 'review_result').length,
+    sessionEnded: after.filter((e) => e.dir === 'in' && e.type === 'session_ended').length,
+    sessionReady: after.filter((e) => e.dir === 'in' && e.type === 'session_ready').length,
+    interruptAcks: after.filter((e) => e.dir === 'in' && e.type === 'interrupt_ack').length,
+    errors: after.filter((e) => e.dir === 'in' && e.type === 'error').length,
+  };
+}
+
+// roundLastIndex is one round's last observed frame index (its final ack, or
+// the last control of its last sentence when the ack never came).
+function roundLastIndex(facts) {
+  return facts.sentences.length
+    ? Math.max(...facts.sentences.map((f) => f.lastIndex))
+    : 0;
+}
+
+async function waitSentenceAckedBy(page, pred, timeoutMs, label) {
+  await waitWs(page, (view) => {
+    const s = view.find((e) => e.dir === 'in' && e.type === 'teacher_sentence' && e.msg && pred(e.msg.text));
+    if (!s) return false;
+    return view.some((e) => e.dir === 'out' && e.type === 'sentence_ack' && e.msg && e.msg.sentence_id === s.msg.sentence_id);
+  }, { timeoutMs, label });
+}
+
+// scenario "practice-submit-close"（1.10b 复验）：已提交词课堂短路结束
+// （session_ended(lesson_complete)）→ banner 的「再练一组」以同一 start 流
+// 程开新连接进加练课堂；加练开场与逐词播报全部自然 ACK，两次语音「写了
+// 完了」推进（合成音调→生产采集→VAD→ASR→confirm），检查面板两行人工判
+// 定后提交；关闭由 Go 侧在提交闩驻留时触发。
+async function scenarioPracticeSubmitClose(args) {
+  const { page, url, timeoutMs } = args;
+  await page.goto(url);
+  await page.locator('#rt-start').click();
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'session_ended' && e.msg && e.msg.reason === 'lesson_complete'),
+    { timeoutMs, label: 'completed lesson short-circuit' });
+  await page.locator('.rt-practice-btn').click();
+  await waitSentenceAcked(page, '你好呀！', timeoutMs, 'practice greeting sentence 1');
+  await waitSentenceAcked(page, '今天我们有 2 个词要写。', timeoutMs, 'practice greeting sentence 2');
+  // Student masking (D-10): the greeting/word subtitles carry the word's
+  // POSITION only, never its text — and the picker's order is random.
+  await waitSentenceAcked(page, '听好哦：第 1 个词。', timeoutMs, 'practice greeting sentence 3');
+  await playPcm16(page, tonePcm16Base64());
+  await waitSentenceAcked(page, '第 2 个词。', timeoutMs, 'second practice word announced');
+  await playPcm16(page, tonePcm16Base64());
+  await waitWs(page, (view) => view.some((e) => e.dir === 'in' && e.type === 'check_started'),
+    { timeoutMs, label: 'spoken confirm opened the practice check' });
+  // The check bridge must finish its natural playback too — the baseline is
+  // taken only after it, so late-frame counting cannot absorb it.
+  await waitSentenceAcked(page, '全都写完啦，真棒！', timeoutMs, 'practice check bridge sentence 1');
+  await waitSentenceAckedBy(page, (t) => t.indexOf('现在我们一起检查：屏幕上有 2 个词') === 0, timeoutMs, 'practice check bridge sentence 2');
+  const buttons = page.locator('.rt-check-row .rt-check-btn');
+  await buttons.nth(0).click();
+  await buttons.nth(2).click();
+  await page.locator('.rt-check-submit').click();
+  // TWO closes: the completed short-circuit connection (the page dropped it
+  // when 再练一组 reconnected) and the practice connection's goodbye —
+  // wait for BOTH so the late window starts at the last one.
+  await waitWs(page, (view) => view.filter((e) => e.dir === 'evt' && e.kind === 'close').length >= 2,
+    { timeoutMs, label: 'both connections closed (short-circuit + practice goodbye)' });
+  const view = await wsView(page);
+  // TWO connections live in this journey: the completed short-circuit's own
+  // close fires FIRST, the practice connection's close last — late frames
+  // are counted only past the LAST close event.
+  const closeAt = view.map((e) => e.dir === 'evt' && e.kind === 'close').lastIndexOf(true);
+  const after = closeAt >= 0 ? view.slice(closeAt + 1) : [];
+  return {
+    ok: true,
+    wsCloseCount: view.filter((e) => e.dir === 'evt' && e.kind === 'close').length,
+    lateTeacherSentences: after.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').length,
+    lateReviewResults: after.filter((e) => e.dir === 'in' && e.type === 'review_result').length,
+    lateSentenceTexts: after.filter((e) => e.dir === 'in' && e.type === 'teacher_sentence').map((e) => e.msg && e.msg.text),
+  };
+}
+
 async function waitSentenceAckedBy(page, pred, timeoutMs, label) {
   await waitWs(page, (view) => {
     const s = view.find((e) => e.dir === 'in' && e.type === 'teacher_sentence' && e.msg && pred(e.msg.text));
