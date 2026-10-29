@@ -555,3 +555,156 @@ func TestLateAskContinuationSilentBrowser(t *testing.T) {
 		t.Fatalf("live classroom at the end = %q, want B's english row — the late continuation must not have installed over it", state.lessonID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Case R — the same-row re-init without an in-flight save (the confirmed
+// check-resume fix in a real browser): repeating session_init into the same
+// checking row bumps the epoch at install, ships interrupt_ack BEFORE the
+// second session_ready, and the resume bridge re-speaks under the
+// POST-INSTALL epoch — the page adopts it and naturally ACKs.
+// ---------------------------------------------------------------------------
+
+func TestCheckResumeReinitEpochBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.seedChecking()
+
+	bridge := string(mustJSON(t, speechExpectedCheckResume))
+	driver := f.runDriverAsync("reinit-same-row", 75*time.Second,
+		"--expected-second-json", bridge, "--late-window-ms", "4000")
+
+	m := f.tryFirstManager(10 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, nil, "no /rt connection was created before the deadline")
+	}
+	if !waitFor(t, 45*time.Second, func() bool { return f.announcementDone.Load() >= 1 }) {
+		f.reclaimAndFail(driver, nil, "the first resume bridge never settled")
+	}
+	speechInjectSessionInit(t, f, m, "chinese")
+
+	res, gotDriver := f.recvSpeechDriver(driver, speechReclaimBound)
+	if !gotDriver || !res.OK {
+		f.reclaimAndFail(driver, nil, "the same-row re-init journey failed: %s", res.Err)
+	}
+	if res.ReadyCount != 2 || res.CheckStartedCount != 2 {
+		t.Fatalf("ready=%d check_started=%d, want 2/2 — the re-init reopens the panel", res.ReadyCount, res.CheckStartedCount)
+	}
+	if len(res.Rounds) != 2 || !res.Rounds[0].AllAckedNaturally || !res.Rounds[1].AllAckedNaturally {
+		t.Fatalf("rounds = %+v, want both bridges acked naturally", res.Rounds)
+	}
+	if res.Rounds[1].Epoch != res.Rounds[0].Epoch+1 {
+		t.Fatalf("bridge epochs = %d → %d, want the re-spoken bridge under the POST-install epoch",
+			res.Rounds[0].Epoch, res.Rounds[1].Epoch)
+	}
+	if len(res.InterruptAcks) != 1 || res.InterruptAcks[0].OldEpoch != res.Rounds[0].Epoch || res.InterruptAcks[0].NewEpoch != res.Rounds[1].Epoch {
+		t.Fatalf("interrupt_acks = %+v, want exactly the install's %d→%d notice",
+			res.InterruptAcks, res.Rounds[0].Epoch, res.Rounds[1].Epoch)
+	}
+	if len(res.ReadyIndexes) < 2 || res.InterruptAcks[0].Index >= res.ReadyIndexes[1] || res.InterruptAcks[0].Index <= res.ReadyIndexes[0] {
+		t.Fatalf("install ack index %d vs ready indexes %v — the epoch notice must precede the second session_ready",
+			res.InterruptAcks[0].Index, res.ReadyIndexes)
+	}
+	if lw := res.LateWindow; lw.TeacherSentences != 0 || lw.SessionReady != 0 || lw.Errors != 0 {
+		t.Fatalf("late window = %+v, want zero output after the re-init's bridge", lw)
+	}
+	if res.SessionEndedCount != 0 || res.WSCloseCount != 0 || len(res.ErrorFrames) != 0 {
+		t.Fatalf("ended=%d close=%d errors=%+v, want 0/0/none — the reopened classroom stays live", res.SessionEndedCount, res.WSCloseCount, res.ErrorFrames)
+	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatal("the connection or its server tasks did not settle after the page left")
+	}
+	// The re-init itself wrote nothing: the row only left checking through
+	// the page's departure (the ordinary unchecked close fallback — the
+	// SWITCH never fell back; the late window above proves the session stayed
+	// open and live until the browser left).
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	l, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil || l.Stage != lesson.StageSubmitted || !l.Unchecked {
+		t.Fatalf("row after the page left = stage %q unchecked %v err=%v, want submitted/true through the departure fallback", l.Stage, l.Unchecked, err)
+	}
+	if subs := f.words.submissions(); len(subs) != 0 {
+		t.Fatalf("FSRS saves = %d, want 0 — the no-outcome fallback rates nothing", len(subs))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Case L — the same-lessonID reentry while the row's accepted submit is in
+// flight (the S4 minimal fix in a real browser): the re-init is refused with
+// ONE recoverable error, nothing installs; A's save then completes naturally
+// (result, naturally-acked summary, single session_ended and close).
+// ---------------------------------------------------------------------------
+
+func TestSameLessonReinitDuringSubmitBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.armPoemPassageSaveChain()
+	f.seedCheckingWithManualVerdicts()
+	f.mu.Lock()
+	f.words.reviewResult = ReviewWriteResult{
+		Requested: []string{"听写浏览器", "第二词"},
+		Updated:   []string{"听写浏览器", "第二词"},
+	}
+	f.mu.Unlock()
+	before, _ := f.gateCheckSubmit(true, false)
+	t.Cleanup(before.release)
+
+	summary := string(mustJSON(t, speechExpectedSummaryAllCorrect))
+	driver := f.runDriverAsync("reinit-during-submit", 60*time.Second,
+		"--expected-second-json", summary)
+
+	if !speechGateHit(before, 30*time.Second) {
+		f.reclaimAndFail(driver, []func(){before.release}, "A's formal submit never reached the real latch write")
+	}
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		f.reclaimAndFail(driver, []func(){before.release}, "no /rt connection was created before the deadline")
+	}
+	scopeBefore := speechTutorStateOf(m)
+
+	// The same-row reentry while the admission is live: the production entry
+	// answers (refusal) synchronously — no classroom on the stale row state.
+	speechInjectSessionInit(t, f, m, "chinese")
+
+	// Resume A: its save completes on its OWN still-live classroom.
+	before.release()
+	res, gotDriver := f.recvSpeechDriver(driver, speechReclaimBound)
+	if !gotDriver || !res.OK {
+		f.reclaimAndFail(driver, nil, "the reentry journey failed: %s", res.Err)
+	}
+	speechWantRecoverableBusyError(t, res)
+	if res.ReadyCount != 1 || res.CheckStartedCount != 1 {
+		t.Fatalf("ready=%d check_started=%d, want 1/1 — the refused reentry installs nothing", res.ReadyCount, res.CheckStartedCount)
+	}
+	if len(res.Rounds) != 2 || !res.Rounds[0].AllAckedNaturally || !res.Rounds[1].AllAckedNaturally {
+		t.Fatalf("rounds = %+v, want A's bridge and naturally-acked summary", res.Rounds)
+	}
+	if res.ReviewResultCount != 1 || res.SessionEndedCount != 1 || res.WSCloseCount != 1 || len(res.InterruptAcks) != 0 {
+		t.Fatalf("review=%d ended=%d close=%d acks=%v, want 1/1/1/0 — A's natural ending after a single save",
+			res.ReviewResultCount, res.SessionEndedCount, res.WSCloseCount, res.InterruptAcks)
+	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatal("the connection or its server tasks did not settle after the natural ending")
+	}
+
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	l, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if l.Stage != lesson.StageSubmitted || l.Unchecked {
+		t.Fatalf("row = stage %q unchecked %v, want submitted/false — the refusal must not stall or degrade the save", l.Stage, l.Unchecked)
+	}
+	if subs := f.words.submissions(); len(subs) != 1 {
+		t.Fatalf("FSRS saves = %d, want exactly one — the reentry must not duplicate or drop the save", len(subs))
+	}
+	receipts, err := f.receipts.ListByLesson(context.Background(), lessonID)
+	if err != nil || len(receipts) != 1 || receipts[0].Status != lesson.ReceiptStatusSaved {
+		t.Fatalf("receipts = %+v err=%v, want exactly one saved receipt", receipts, err)
+	}
+	tutor := speechTutorStateOf(m)
+	if tutor.version != l.Version || tutor.checking || !tutor.reviewSee {
+		t.Fatalf("writeback tutor = %d/%v/%v, want %d/false/true — the refusal keeps A's own successful writeback",
+			tutor.version, tutor.checking, tutor.reviewSee, l.Version)
+	}
+	if scopeBefore.lessonID != tutor.lessonID {
+		t.Fatalf("live classroom %q → %q — the refused reentry must not replace the scope", scopeBefore.lessonID, tutor.lessonID)
+	}
+}
