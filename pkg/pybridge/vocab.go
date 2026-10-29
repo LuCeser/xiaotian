@@ -581,10 +581,12 @@ func (b *Bridge) RunCreateDesignation(ctx context.Context, opts CreateDesignatio
 		return DesignateResult{}, fmt.Errorf("create designation: request key longer than %d characters", MaxDesignationRequestKeyLen)
 	}
 	opts.RequestKey = key
-	if goPath := strings.TrimSpace(opts.GoDatabasePath); goPath != "" {
-		if filepath.Clean(goPath) != filepath.Clean(b.cfg.VocabDBPath) {
-			return DesignateResult{}, ErrDesignationDatabaseSplit
-		}
+	goPath := strings.TrimSpace(opts.GoDatabasePath)
+	if goPath == "" {
+		return DesignateResult{}, ErrDesignationDatabasePathRequired
+	}
+	if filepath.Clean(goPath) != filepath.Clean(b.cfg.VocabDBPath) {
+		return DesignateResult{}, ErrDesignationDatabaseSplit
 	}
 
 	start := time.Now()

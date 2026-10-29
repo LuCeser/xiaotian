@@ -241,6 +241,16 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 	if dbPath == "" {
 		dbPath = filepath.Join(homeDir(), ".home-tutor-agent", "vocab.db")
 	}
+	if cfg.Database.Path != "" && cfg.Python.VocabDBPath != "" {
+		if filepath.Clean(cfg.Database.Path) != filepath.Clean(cfg.Python.VocabDBPath) {
+			logger.Error("database.path and python.vocabDBPath must refer to the same SQLite file",
+				infra.F("component", "infra.main"),
+				infra.F("database.path", cfg.Database.Path),
+				infra.F("python.vocabDBPath", cfg.Python.VocabDBPath),
+			)
+			return 1
+		}
+	}
 	db, err := database.Open(dbPath)
 	if err != nil {
 		logger.Error("database open failed",

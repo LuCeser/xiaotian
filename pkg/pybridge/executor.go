@@ -568,9 +568,9 @@ type CreateDesignationOpts struct {
 	// to english/chinese in Python).
 	Category string
 
-	// GoDatabasePath is the Go lesson store's SQLite path. When non-empty it
-	// MUST equal PythonConfig.VocabDBPath or RunCreateDesignation fails with
-	// ErrDesignationDatabaseSplit before spawning Python.
+	// GoDatabasePath is the Go lesson store's SQLite path. It is required and
+	// MUST equal PythonConfig.VocabDBPath or RunCreateDesignation fails before
+	// spawning Python (ErrDesignationDatabasePathRequired / ErrDesignationDatabaseSplit).
 	GoDatabasePath string
 }
 
@@ -651,6 +651,11 @@ var (
 	// ErrDesignationDatabaseSplit is returned when RunCreateDesignation
 	// sees GoDatabasePath != VocabDBPath — atomic create requires one file.
 	ErrDesignationDatabaseSplit = errors.New("go and python database paths differ")
+
+	// ErrDesignationDatabasePathRequired is returned when RunCreateDesignation
+	// is called without GoDatabasePath — the caller must affirm the same file
+	// the Go lesson store uses (Issue #80 U10).
+	ErrDesignationDatabasePathRequired = errors.New("go database path is required for atomic designation create")
 )
 
 // ExitError is the typed error returned alongside ErrPythonExit (and
