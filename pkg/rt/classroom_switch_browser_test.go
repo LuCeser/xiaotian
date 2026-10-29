@@ -295,9 +295,11 @@ func TestClassroomSwitchDuringSubmitBrowser(t *testing.T) {
 
 	bridge := string(mustJSON(t, speechExpectedCheckResume))
 	summary := string(mustJSON(t, speechExpectedSummaryAllCorrect))
+	// late-window-ms bounds the driver's wait for the SERVER's switch gate
+	// (armed only after A's released task truly exits), not a fixed window.
 	driver := f.runDriverAsync("classroom-switch-submit", 60*time.Second,
 		"--expected-second-json", bridge, "--expected-third-json", summary,
-		"--late-window-ms", "5000")
+		"--late-window-ms", "15000")
 
 	if !speechGateHit(before, 30*time.Second) {
 		f.reclaimAndFail(driver, []func(){before.release}, "A's formal submit never reached the real latch write")
@@ -326,6 +328,9 @@ func TestClassroomSwitchDuringSubmitBrowser(t *testing.T) {
 	if !waitFor(t, 30*time.Second, func() bool { return m.TurnManager.serverTasksSettled() }) {
 		f.reclaimAndFail(driver, nil, "A's superseded submit task never finished after the release")
 	}
+	// The late window (and B's own submit beyond it) starts only after the
+	// server confirmed A's true exit — the gate hands the completion over.
+	f.armSwitchGate()
 	got := speechTutorStateOf(m)
 	if got != want {
 		f.reclaimAndFail(driver, nil,
@@ -503,8 +508,11 @@ func TestLateAskContinuationSilentBrowser(t *testing.T) {
 	f.asr.mu.Unlock()
 
 	opening := string(mustJSON(t, speechExpectedOpening))
+	// late-window-ms now bounds the driver's wait for the SERVER's switch
+	// gate (which arms only after the released continuation's task truly
+	// exits), not a fixed observation window (review P1-4).
 	driver := f.runDriverAsync("subject-ask-switch", 75*time.Second,
-		"--expected-second-json", opening, "--late-window-ms", "5000")
+		"--expected-second-json", opening, "--late-window-ms", "15000")
 
 	m := f.tryFirstManager(10 * time.Second)
 	if m == nil {
@@ -528,6 +536,11 @@ func TestLateAskContinuationSilentBrowser(t *testing.T) {
 	if !waitFor(t, 30*time.Second, func() bool { return m.TurnManager.serverTasksSettled() }) {
 		f.reclaimAndFail(driver, nil, "the late continuation's task never finished after the release")
 	}
+	// Only now may the driver count its late window: the voice-turn
+	// registration (P1-4) makes settled cover the continuation's true exit,
+	// and the gate hands that completion to the page side — no fixed window
+	// stands in for the relation.
+	f.armSwitchGate()
 
 	res, gotDriver := f.recvSpeechDriver(driver, speechReclaimBound)
 	if !gotDriver || !res.OK {

@@ -388,6 +388,14 @@ type speechBrowserFixture struct {
 	providerStarted, providerDone     atomic.Int64
 	announcementRun, announcementDone atomic.Int64
 
+	// switchGate is the completion hand-off for the switch scenarios' late
+	// window (review P1-4): the driver may only start counting late frames
+	// after the SERVER side has observed every superseded-side task truly
+	// exit (serverTasksSettled now covers the voice-turn continuation), so a
+	// fixed time window no longer stands in for that completion relation.
+	// The driver polls it from its own process via /__switch_gate.
+	switchGate atomic.Bool
+
 	// execTrack is the fixture's bottom executor tracker (see its type) — the
 	// completion observation reclaims wait on for parked latch tasks.
 	execTrack *speechExecTracker
@@ -570,6 +578,13 @@ func newSpeechBrowserFixture(t *testing.T) *speechBrowserFixture {
 		defer f.handlerActive.Add(-1)
 		defer f.handlerDone.Add(1)
 		handler.HandleWebSocket(w, r)
+	})
+	// The switch gate endpoint is READ-ONLY test-server state (review P1-4):
+	// the driver polls it from its own process to learn that the Go side has
+	// confirmed the superseded side's true exit before counting late frames.
+	mux.HandleFunc("/__switch_gate", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"armed":%v}`, f.switchGate.Load())))
 	})
 	tutorDir := filepath.Join(root, "pkg", "web", "static", "tutor")
 	if _, err := os.Stat(tutorDir); err != nil {
@@ -1071,6 +1086,12 @@ func (f *speechBrowserFixture) recvSpeechDriver(driver <-chan speechDriverResult
 		return speechDriverResult{}, false
 	}
 }
+
+// armSwitchGate releases the driver's late-window observation (review P1-4):
+// call only AFTER the released side's tasks have settled — the driver's late
+// frame count is then causally after that true exit instead of racing a
+// fixed observation window against the scheduler.
+func (f *speechBrowserFixture) armSwitchGate() { f.switchGate.Store(true) }
 
 // reclaimAndFail is the failure half of §5.1: release EVERY held control
 // point, wait (bounded) for server tasks and the driver goroutine, and only

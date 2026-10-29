@@ -687,6 +687,29 @@ function frameCount(view, dir, type) {
   return view.filter((e) => e.dir === dir && e.type === type).length;
 }
 
+// waitSwitchGateArmed polls the TEST SERVER's switch gate from the DRIVER
+// process (never the page, never the socket): the gate arms only after the
+// Go side observed every superseded-side server task truly exit, so the late
+// window counted afterwards is causally after that exit — a fixed time
+// window no longer stands in for the completion relation (review P1-4). The
+// bound only limits the observation; on expiry the journey fails honestly.
+async function waitSwitchGateArmed(url, boundMs) {
+  const gateUrl = new URL('/__switch_gate', url).href;
+  const deadline = Date.now() + boundMs;
+  for (;;) {
+    try {
+      const r = await fetch(gateUrl);
+      const j = await r.json();
+      if (j && j.armed) return;
+    } catch (_) { /* the fixture server answers momentarily */ }
+    if (Date.now() > deadline) {
+      throw new Error('the switch gate never armed within ' + boundMs
+        + 'ms — the superseded side did not truly exit first');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 // interruptAckFacts lists every inbound interrupt_ack with its wire index.
 function interruptAckFacts(view) {
   return view.filter((e) => e.dir === 'in' && e.type === 'interrupt_ack' && e.msg)
@@ -871,7 +894,9 @@ async function scenarioClassroomSwitchSubmit(args) {
   const bridgeB = await waitNthRoundAcked(page, args.expectedSecond, 2, timeoutMs, 'B resume bridge played naturally');
   const baseline = roundLastIndex(bridgeB);
   const late0 = lateFrameCounts(await wsView(page), baseline);
-  await page.waitForTimeout(args.lateWindowMs);
+  // The late window starts only once the SERVER confirms A's released task
+  // truly exited (the gate) — then, and only then, is the window counted.
+  await waitSwitchGateArmed(url, args.lateWindowMs);
   const late = lateFrameCounts(await wsView(page), baseline);
   if (late.teacherSentences > late0.teacherSentences
       || late.reviewResults > late0.reviewResults || late.sessionEnded > late0.sessionEnded) {
@@ -923,7 +948,10 @@ async function scenarioSubjectAskSwitch(args) {
     { timeoutMs, label: 'the replacement classroom\'s session_ready' });
   const greeting = await waitNthRoundAcked(page, args.expectedSecond, 1, timeoutMs, 'B greeting played naturally');
   const baseline = roundLastIndex(greeting);
-  await page.waitForTimeout(args.lateWindowMs);
+  // The late window starts only once the SERVER confirms the released late
+  // continuation truly exited (the gate) — a fixed window no longer decides
+  // whether the continuation was done (review P1-4).
+  await waitSwitchGateArmed(url, args.lateWindowMs);
   const view = await wsView(page);
   return {
     ok: true,
