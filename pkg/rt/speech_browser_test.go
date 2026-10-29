@@ -149,7 +149,10 @@ type speechRoundSentenceObs struct {
 
 // speechRoundObs is one announcement round (one turn id) as the page played
 // it. AllAckedNaturally is the player-side registration verdict: every
-// sentence acked exactly once with its native onended first.
+// sentence acked exactly once with its native onended first. Rejection, when
+// present, is the player's OWN refusal registration (review P2-7): zero
+// ledger books opened for the round's (epoch, sentence) keys — never an
+// inference from missing acks.
 type speechRoundObs struct {
 	Epoch             uint64                   `json:"epoch"`
 	TurnID            uint64                   `json:"turnId"`
@@ -158,6 +161,16 @@ type speechRoundObs struct {
 	OK                bool                     `json:"ok"`
 	Problems          []string                 `json:"problems"`
 	AllAckedNaturally bool                     `json:"allAckedNaturally"`
+	Rejection         *speechRoundRejectionObs `json:"rejection"`
+}
+
+// speechRoundRejectionObs is the player-side refusal registration of a
+// rejected switched round: bookedKeys==0 (every audio_start turned away at
+// the epoch gate; nothing of the round was accepted or scheduled) plus the
+// drop-ledger count at the verdict.
+type speechRoundRejectionObs struct {
+	BookedKeys    int `json:"bookedKeys"`
+	DroppedChunks int `json:"droppedChunks"`
 }
 
 // speechInterruptAckObs is one inbound interrupt_ack with its wire index.

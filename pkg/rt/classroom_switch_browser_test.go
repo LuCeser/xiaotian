@@ -449,8 +449,12 @@ func TestClassroomSwitchOpeningEpochBrowser(t *testing.T) {
 			res.ReadyCount, res.SessionEndedCount, res.WSCloseCount)
 	}
 	if res.SecondRoundVerdict != "acked" {
-		t.Fatalf("B's opening verdict = %q with rounds %+v (dropped=%d) — the player's registration must show B's audio accepted and naturally acked",
-			res.SecondRoundVerdict, res.Rounds, res.Playback.DroppedChunks)
+		var rej *speechRoundRejectionObs
+		if len(res.Rounds) > 1 {
+			rej = res.Rounds[1].Rejection
+		}
+		t.Fatalf("B's opening verdict = %q (player rejection registration %+v) with rounds %+v (dropped=%d) — the player's registration must show B's audio accepted and naturally acked",
+			res.SecondRoundVerdict, rej, res.Rounds, res.Playback.DroppedChunks)
 	}
 	if len(res.Rounds) != 2 || !res.Rounds[1].AllAckedNaturally || res.Rounds[1].Epoch != 1 {
 		t.Fatalf("B's round = %+v, want epoch 1 fully acked naturally", res.Rounds)
