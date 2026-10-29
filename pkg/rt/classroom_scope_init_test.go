@@ -519,6 +519,142 @@ func TestLateInitFailureStaysSilentAfterReplacement(t *testing.T) {
 	}
 }
 
+// ttFrozenRowRead freezes ONE GetLessonState: the row is read (and held in
+// the wrapper) BEFORE the park, so anything the store does during the park —
+// a landing save — is invisible to the released read. Together with a parked
+// CompleteCheck this is review P1-2's exact interleave — "the old row was
+// read, then the save completed and deleted its registration" — under full
+// test control (the save is never blocked once released; nothing depends on
+// it staying parked).
+type ttFrozenRowRead struct {
+	LessonExecutor
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	open    sync.Once
+}
+
+func (w *ttFrozenRowRead) GetLessonState(ctx context.Context, lessonID string) (lesson.Lesson, error) {
+	l, err := w.LessonExecutor.GetLessonState(ctx, lessonID)
+	var first bool
+	w.once.Do(func() { first = true; close(w.entered) })
+	if first {
+		<-w.release
+	}
+	return l, err
+}
+
+func (w *ttFrozenRowRead) openUp() { w.open.Do(func() { close(w.release) }) }
+
+// TestSameLessonReinitAfterSaveLandedUnderReadRefused (review P1-2): the
+// re-init's row read completes on the PRE-save row and parks inside the read;
+// the row's accepted save then lands — synchronously, through the REAL screen
+// verdict entry, whose admission registers and releases around ApplyVerdict
+// with the session staying open — and only then does the re-init's in-flight
+// check run. The registry reads empty (the save is done, its registration
+// deleted), yet the row the re-init holds is stale, so the re-init must still
+// answer the recoverable refusal and install nothing. The save is never kept
+// parked: the interleave is fully controlled by the frozen read alone.
+func TestSameLessonReinitAfterSaveLandedUnderReadRefused(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	// A submitted+unchecked row reopens as the CORRECTION panel — its screen
+	// verdict is the one real save whose admission fully releases while the
+	// session stays live (no ending rides it).
+	exec.mu.Lock()
+	exec.lesson.Stage = lesson.StageSubmitted
+	exec.lesson.Unchecked = true
+	exec.lesson.CurrentIndex = len(exec.lesson.Cards)
+	exec.lesson.Version = 4
+	exec.mu.Unlock()
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		ttConfig(words), NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeCheckStarted) >= 1 }) {
+		t.Fatal("the correction panel never opened")
+	}
+
+	// The re-init reads the row and parks INSIDE the read, holding the
+	// PRE-save row snapshot (the wrapper captured it before parking).
+	frozen := &ttFrozenRowRead{
+		LessonExecutor: exec,
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	tm.exec = frozen
+	go ttInit(t, tm, s)
+	select {
+	case <-frozen.entered:
+	case <-time.After(3 * time.Second):
+		frozen.openUp()
+		t.Fatal("the re-init never read the row")
+	}
+
+	readyBefore := s.countOf(TypeSessionReady)
+	startedBefore := s.countOf(TypeCheckStarted)
+
+	// The save lands NOW, while the re-init sits between its row read and its
+	// in-flight check: one real screen verdict — admitted, written, and its
+	// registration released — all before HandleControl returns.
+	tm.HandleControl(s, mustJSON(t, CheckVerdictMsg{
+		Type: TypeCheckVerdict, RequestID: "p12-verdict-1", WordIndex: 0, Correct: true,
+	}))
+	tm.mu.Lock()
+	stillRegistered := tm.lessonSaveInFlightLocked(ttLessonID)
+	doneCount := tm.lessonSaveDoneCountLocked(ttLessonID)
+	tm.mu.Unlock()
+	if stillRegistered || doneCount != 1 {
+		frozen.openUp()
+		t.Fatalf("interleave premise failed: registered=%v completed=%d, want the save landed and its registration deleted", stillRegistered, doneCount)
+	}
+
+	// The released read hands the re-init the PRE-save row: the completion
+	// counter is the only witness that this row snapshot predates a landing
+	// save, so the re-init must refuse instead of installing the stale row.
+	frozen.openUp()
+
+	errCount, recoverable := 0, false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		sentControls := append([][]byte(nil), s.controls...)
+		s.mu.Unlock()
+		errCount, recoverable = 0, false
+		for _, raw := range sentControls {
+			var probe struct {
+				Type        string `json:"type"`
+				Code        string `json:"code"`
+				Recoverable bool   `json:"recoverable"`
+			}
+			if json.Unmarshal(raw, &probe) == nil && probe.Type == TypeError &&
+				probe.Code == ErrCodeLessonUnavailable {
+				errCount++
+				recoverable = probe.Recoverable
+			}
+		}
+		if errCount > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if errCount != 1 || !recoverable {
+		t.Fatalf("reentry after the save landed under the read answered %d lesson errors (recoverable=%v), want exactly 1 recoverable — the stale row must be refused", errCount, recoverable)
+	}
+	if got := s.countOf(TypeSessionReady); got != readyBefore {
+		t.Fatalf("session_ready after the refused reinit = %d, want %d (no classroom on the pre-save row)", got, readyBefore)
+	}
+	if got := s.countOf(TypeCheckStarted); got != startedBefore {
+		t.Fatalf("check_started after the refused reinit = %d, want %d (the stale unchecked row must not reopen a panel)", got, startedBefore)
+	}
+	tm.mu.Lock()
+	scopeLesson := tm.activeScope.lessonID
+	tm.mu.Unlock()
+	if scopeLesson != ttLessonID {
+		t.Fatalf("live scope lesson = %q, want %q (the refusal replaced nothing)", scopeLesson, ttLessonID)
+	}
+}
+
 // TestSameLessonReinitDuringInflightSaveRefused (issue #69 rethink3 S4): a
 // same-lessonID re-init that arrives while THIS connection's accepted submit
 // for the row is still running must not build a classroom on the pre-save row

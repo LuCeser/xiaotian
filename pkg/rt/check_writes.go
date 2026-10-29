@@ -58,7 +58,11 @@ func (tm *TurnManager) lessonSaveInFlightLocked(lessonID string) bool {
 }
 
 // completeCheckWrite releases an admission on every return path. It is safe
-// to call more than once and never holds tm.mu while notifying waiters.
+// to call more than once and never holds tm.mu while notifying waiters. The
+// row's completion counter moves in the same hold as the deletion (review
+// P1-2): a same-lessonID re-init that captured the counter before its row
+// read can detect a save landing inside the read→check gap even though the
+// registration is already gone by the check.
 func (tm *TurnManager) completeCheckWrite(w *checkWriteAdmission) {
 	if w == nil {
 		return
@@ -66,9 +70,21 @@ func (tm *TurnManager) completeCheckWrite(w *checkWriteAdmission) {
 	w.once.Do(func() {
 		tm.mu.Lock()
 		delete(tm.checkWrites, w)
+		if w.lessonID != "" {
+			if tm.lessonSaveDone == nil {
+				tm.lessonSaveDone = make(map[string]uint64)
+			}
+			tm.lessonSaveDone[w.lessonID]++
+		}
 		tm.mu.Unlock()
 		close(w.done)
 	})
+}
+
+// lessonSaveDoneCountLocked returns how many accepted saves for lessonID
+// have completed so far. Caller holds tm.mu.
+func (tm *TurnManager) lessonSaveDoneCountLocked(lessonID string) uint64 {
+	return tm.lessonSaveDone[lessonID]
 }
 
 // waitCheckWrites waits without holding either TurnManager lock. Returns

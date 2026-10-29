@@ -472,6 +472,13 @@ type TurnManager struct {
 	// checkWrites is the set of persistence operations accepted before a
 	// close. Closing seals admission and snapshots this set atomically.
 	checkWrites map[*checkWriteAdmission]struct{}
+	// lessonSaveDone counts, per lesson row, the accepted saves that have
+	// COMPLETED (their admission released). A same-lessonID re-init reads the
+	// row and then checks the in-flight registry; a save that completes in
+	// that gap deletes its registration and would make the check pass on a
+	// row the re-init no longer holds (review P1-2) — the counter is the
+	// re-read guard's evidence that the row snapshot predates a landing save.
+	lessonSaveDone map[string]uint64
 	// activeScope is the installed per-classroom identity of the latest
 	// reservation (issue #69 rethink2 R1): gen/lessonID/tutor plus the
 	// in-flight formal-save slot. Generations are reserved by
@@ -777,6 +784,20 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 	}()
 
 	ctx := context.Background()
+	// Same-lessonID reentry guard, first half (review P1-2): snapshot the
+	// row's save activity BEFORE reading the row. An admission still in
+	// flight refuses immediately; the completion counter captured now is the
+	// baseline the post-read re-check compares against, so a save that lands
+	// inside the read→check window cannot slip past as "no activity".
+	tm.mu.Lock()
+	saveInFlightBefore := tm.lessonSaveInFlightLocked(lessonID)
+	doneBefore := tm.lessonSaveDoneCountLocked(lessonID)
+	tm.mu.Unlock()
+	if saveInFlightBefore {
+		tm.failLessonInitBusy(s, req.installGen)
+		return
+	}
+
 	l, err := tm.exec.GetLessonState(ctx, lessonID)
 	if err != nil && !errors.Is(err, lesson.ErrLessonNotFound) {
 		tm.failLessonInit(s, req.installGen)
@@ -793,7 +814,13 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 		// under it — only the request that still owns the pending
 		// reservation may install the row's authority.
 		tm.mu.Lock()
-		saveInFlight := tm.lessonSaveInFlightLocked(lessonID)
+		// Second half of the reentry guard (review P1-2): a save that STARTED
+		// after the snapshot appears in the in-flight registry; a save that
+		// COMPLETED inside the read→check gap is gone from the registry but
+		// moved the completion counter. Either way the row read above
+		// predates a landing save and must never be installed as a classroom.
+		saveInFlight := tm.lessonSaveInFlightLocked(lessonID) ||
+			tm.lessonSaveDoneCountLocked(lessonID) != doneBefore
 		allowed := tm.classroomInstallAllowed(req.installGen)
 		// The admission verdict and the subject write are ONE critical
 		// section (review P1-1): computing allowed under the lock and writing
@@ -810,15 +837,16 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 		tm.mu.Unlock()
 		if saveInFlight {
 			// Same-lessonID reentry while THIS connection's accepted save for
-			// the row is still running (issue #69 rethink3 S4): the row state
-			// read above is already stale by construction — the save will move
-			// its version/stage the moment it lands. Installing a classroom on
-			// it (or blind-fallback rating it) would present a panel that
-			// cannot survive its own save, so the honest answer is a
-			// RECOVERABLE init error: nothing installed, the save keeps
-			// running, a retry after it settles reads the true row. The
-			// bounded wait that lets a quick retry proceed in-place is S7's
-			// persistDone coordination — refusing is this step's minimal fix.
+			// the row is still running or landed under the read (issue #69
+			// rethink3 S4, review P1-2): the row state read above is already
+			// stale by construction — the save moved (or is about to move) its
+			// version/stage. Installing a classroom on it (or blind-fallback
+			// rating it) would present a panel that cannot survive its own
+			// save, so the honest answer is a RECOVERABLE init error: nothing
+			// installed, the save keeps running, a retry after it settles
+			// reads the true row. The bounded wait that lets a quick retry
+			// proceed in-place is S7's persistDone coordination — refusing is
+			// this step's minimal fix.
 			tm.failLessonInitBusy(s, req.installGen)
 			return
 		}
