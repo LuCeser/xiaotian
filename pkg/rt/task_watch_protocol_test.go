@@ -377,34 +377,63 @@ func TestVoiceTurnInitContinuationObserved(t *testing.T) {
 	}
 }
 
-// ttReclaimEvidence is what a §5.1 failure path must establish BEFORE it
-// reports: the observation recorded while parked, whether the true task
-// exit was observed before the report point, and a business-side effect as
-// the report-point witness.
-type ttReclaimEvidence struct {
-	parkedSettled bool // 记录观察：park 中的 settled 读数
-	taskExitSeen  bool // 等待原任务：报告前是否观察到整任务退出
-	submitLanded  bool // 报告点旁证：业务效果是否已落地
+// ttReclaimOrderLog records the reclaim protocol's ORDER. The entries that
+// decide it are written by instrumentation OUTSIDE the helper under test —
+// the release wrappers, the settled probe, the recv wrapper and the caller's
+// report — so deleting the helper's wait turns the recorded ORDER red, never
+// a necessarily-false evidence field (review P2-6).
+type ttReclaimOrderLog struct {
+	mu      sync.Mutex
+	entries []string
 }
 
-// ttReclaim is the §5.1 failure order as a returning helper — 记录观察 →
-// 释放控制点 → 等待原任务真正退出 → （真实失败路径在此报告）。It never
-// Fatals itself (S1: 异步 goroutine 与等待 helper 返回结果，不直接 Fatal)。
-func ttReclaim(settled func() bool, release func(), landed func() bool) ttReclaimEvidence {
-	ev := ttReclaimEvidence{parkedSettled: settled()} // 1. 记录观察
-	release()                                         // 2. 释放控制点
-	ev.taskExitSeen = ttPoll(5*time.Second, settled)  // 3. 等待原任务
-	ev.submitLanded = landed()                        // 4. 报告点在此之后
-	return ev
+func (l *ttReclaimOrderLog) add(kind string) {
+	l.mu.Lock()
+	l.entries = append(l.entries, kind)
+	l.mu.Unlock()
 }
 
-// TestReclaimOrderProtocol: the §5.1 failure path's own order — record the
-// observation, release EVERY control point, wait the task's true exit, and
-// only then report. The reclaim helper runs on its own goroutine and
-// RETURNS its evidence (no Fatal inside the goroutine); the report point
-// must sit after the observed exit, which is exactly what a withdrawn wait
-// breaks (撤掉等待后断言时点早于真实退出).
-func TestReclaimOrderProtocol(t *testing.T) {
+// index returns the FIRST occurrence's position, or -1 when absent.
+func (l *ttReclaimOrderLog) index(kind string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i, e := range l.entries {
+		if e == kind {
+			return i
+		}
+	}
+	return -1
+}
+
+// ttBrowserReclaimCore is the browser fixture's failure-reclaim ORDER as a
+// returning function — reclaimAndFail's body minus the report (review P2-6):
+// release every held control point, then wait (bounded) the whole-task
+// observation, then take the driver's result. It never Fatals; the caller's
+// report (reclaimAndFail's t.Fatalf) runs strictly after. The bound only
+// limits the observation — the verdict rides the observed exit, not the
+// clock. reclaimAndFail runs THIS function; the protocol test drives it with
+// the same order instrumentation so what is verified is the actual browser
+// recovery path, not a look-alike helper.
+func ttBrowserReclaimCore(releases []func(), settled func() bool, recvDriver func() bool, bound time.Duration) (settledSeen, driverGot bool) {
+	for _, release := range releases {
+		if release != nil {
+			release()
+		}
+	}
+	settledSeen = ttPoll(bound, settled)
+	driverGot = recvDriver()
+	return settledSeen, driverGot
+}
+
+// TestBrowserReclaimOrderProtocol (review P2-6): the browser fixture's
+// failure-reclaim core — the exact function reclaimAndFail runs before its
+// report — must observe, IN ORDER: every release, the whole-task
+// observation turning true (the parked task's true exit, seen through the
+// settled probe the core itself polls), the driver's result, and only then
+// may the caller report. The order log is written by wrappers OUTSIDE the
+// core, so withdrawing the core's wait reports without ever observing the
+// exit — the log shows the report with no settled-true in front of it.
+func TestBrowserReclaimOrderProtocol(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	tm, s, _, _ := ttDriveToCheck(t, ttCards("苹果"), words)
 	ttCheckAll(t, tm, s, 1)
@@ -418,28 +447,57 @@ func TestReclaimOrderProtocol(t *testing.T) {
 		ttPoll(5*time.Second, tm.serverTasksSettled)
 		t.Fatal("the submit never reached its FSRS control point")
 	}
+	if tm.serverTasksSettled() {
+		park.openUp()
+		ttPoll(5*time.Second, tm.serverTasksSettled)
+		t.Fatal("settled reported the submit done while it was parked at the FSRS gate")
+	}
 
-	// 异步 goroutine 返回结果，不在 goroutine 内 Fatal。
-	resCh := make(chan ttReclaimEvidence, 1)
+	order := &ttReclaimOrderLog{}
+	settledTrueSeen := false
+	settled := func() bool {
+		ok := tm.serverTasksSettled()
+		if ok && !settledTrueSeen {
+			settledTrueSeen = true
+			order.add("settled_true")
+		}
+		return ok
+	}
+	coreDone := make(chan struct{})
 	go func() {
-		resCh <- ttReclaim(tm.serverTasksSettled, park.openUp, func() bool {
-			return len(words.submissions()) == 1
-		})
+		defer close(coreDone)
+		// The core runs on its own goroutine and RETURNS — no Fatal inside
+		// the goroutine (S1); the caller's report follows the same way
+		// reclaimAndFail's Fatal follows the core.
+		ttBrowserReclaimCore(
+			[]func(){func() { order.add("release"); park.openUp() }},
+			settled,
+			func() bool { order.add("recv"); return true },
+			5*time.Second,
+		)
 	}()
 	select {
-	case ev := <-resCh:
-		if ev.parkedSettled {
-			t.Fatal("the reclaim recorded settled=true while the task was parked")
-		}
-		if !ev.taskExitSeen {
-			t.Fatal("the reclaim reported before observing the task's true exit — the wait was skipped or too short")
-		}
-		if !ev.submitLanded {
-			t.Fatal("the FSRS submission had not landed at the report point")
-		}
+	case <-coreDone:
 	case <-time.After(10 * time.Second):
 		park.openUp()
 		ttPoll(5*time.Second, tm.serverTasksSettled)
-		t.Fatal("the reclaim goroutine never returned its evidence")
+		t.Fatal("the reclaim core never returned")
+	}
+	order.add("report") // the caller's report point (reclaimAndFail's Fatal)
+
+	if got := order.index("release"); got != 0 {
+		t.Fatalf("reclaim order log = %v — the release must come first, was %d", order.entries, got)
+	}
+	if got := order.index("settled_true"); got < 0 || got > order.index("report") {
+		t.Fatalf("reclaim order log = %v — the task's true exit (settled turning true) must be observed before the report; removing the core's wait reports blind", order.entries)
+	}
+	if got, recv := order.index("recv"), order.index("report"); got < 0 || got > recv {
+		t.Fatalf("reclaim order log = %v — the driver's result must be taken before the report", order.entries)
+	}
+	if !ttPoll(5*time.Second, tm.serverTasksSettled) {
+		t.Fatal("server tasks never settled after the reclaim")
+	}
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("FSRS submissions = %d, want the released save to land exactly once", got)
 	}
 }

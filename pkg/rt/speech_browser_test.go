@@ -1093,22 +1093,23 @@ func (f *speechBrowserFixture) recvSpeechDriver(driver <-chan speechDriverResult
 // fixed observation window against the scheduler.
 func (f *speechBrowserFixture) armSwitchGate() { f.switchGate.Store(true) }
 
-// reclaimAndFail is the failure half of §5.1: release EVERY held control
-// point, wait (bounded) for server tasks and the driver goroutine, and only
-// then fail carrying both observations. t.Cleanup stays the last resort — it
-// must never replace this reclaim-before-assert.
+// reclaimAndFail is the failure half of §5.1: the shared browser-reclaim
+// core (ttBrowserReclaimCore — release EVERY held control point, wait
+// (bounded) the whole-task observation, take the driver's result; the
+// protocol test verifies exactly this core's order, review P2-6), then the
+// ONE report. t.Cleanup stays the last resort — it must never replace this
+// reclaim-before-assert.
 func (f *speechBrowserFixture) reclaimAndFail(driver <-chan speechDriverResult, releases []func(), format string, args ...any) {
 	f.t.Helper()
-	for _, release := range releases {
-		if release != nil {
-			release()
-		}
-	}
-	tasksOK := waitFor(f.t, speechReclaimBound, f.speechServerTasksSettled)
-	res, driverGot := f.recvSpeechDriver(driver, speechReclaimBound)
+	var dres speechDriverResult
+	var driverGot bool
+	tasksOK, _ := ttBrowserReclaimCore(releases, f.speechServerTasksSettled, func() bool {
+		dres, driverGot = f.recvSpeechDriver(driver, speechReclaimBound)
+		return driverGot
+	}, speechReclaimBound)
 	ok, errMsg := false, "no driver result within the reclaim bound"
 	if driverGot {
-		ok, errMsg = res.OK, res.Err
+		ok, errMsg = dres.OK, dres.Err
 		if !ok && errMsg == "" {
 			errMsg = "driver reported failure"
 		}
