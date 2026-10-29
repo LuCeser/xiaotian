@@ -2,9 +2,16 @@
 // closes carry scope identity into the unified close claim; a stale completed
 // replay must not end the replacement classroom, while connection goodbye
 // still closes whatever is live.
+//
+// Review P2-5: every failure path follows the one order — record the
+// observation, release EVERY control point, wait the original task AND the
+// whole-task observation, and only then report. No assertion Fatals while a
+// gate still holds the original task.
 package rt
 
 import (
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,26 +32,47 @@ func ttCompletedRowFixture(t *testing.T) (*TurnManager, *captureSender, *fakeExe
 	return tm, &captureSender{}, exec, words
 }
 
+// ttStaleCloseReclaim is the two tests' shared §5.1 failure egress: release
+// the parked completed-close gate (exactly once), wait the original init task
+// and the whole-task observation, and only then report.
+type ttStaleCloseReclaim struct {
+	t     *testing.T
+	tm    *TurnManager
+	aDone *int32
+	gate  chan struct{}
+	once  sync.Once
+}
+
+func (r *ttStaleCloseReclaim) release() {
+	r.once.Do(func() { close(r.gate) })
+}
+
+func (r *ttStaleCloseReclaim) fail(msg string) {
+	r.release()
+	waitFor(r.t, 5*time.Second, func() bool { return atomic.LoadInt32(r.aDone) == 1 })
+	ttPoll(5*time.Second, r.tm.serverTasksSettled)
+	r.t.Fatal(msg)
+}
+
 // TestStaleCompletedCloseCannotEndReplacementClassroom is the S3 acceptance:
 // A's completed replay pauses before its scoped close; B installs on the
 // same connection and finishes its natural opening; A's resume must not
 // close B or terminate the connection — B must still answer control frames.
 func TestStaleCompletedCloseCannotEndReplacementClassroom(t *testing.T) {
 	tm, s, exec, words := ttCompletedRowFixture(t)
-	aCloseGate := make(chan struct{})
 	var aDone int32
-	tm.completedCloseInterleave = func() { <-aCloseGate }
+	reclaim := &ttStaleCloseReclaim{t: t, tm: tm, aDone: &aDone, gate: make(chan struct{})}
+	tm.completedCloseInterleave = func() { <-reclaim.gate }
 
 	go func() {
 		ttInit(t, tm, s)
 		atomic.StoreInt32(&aDone, 1)
 	}()
 	if !waitFor(t, 2*time.Second, func() bool { return s.countOf(TypeSessionReady) == 1 }) {
-		t.Fatal("A's completed replay never shipped session_ready")
+		reclaim.fail("A's completed replay never shipped session_ready")
 	}
-	if s.countOf(TypeSessionEnded) != 0 {
-		t.Fatalf("session_ended before B = %d, want 0 — the close must stay parked", s.countOf(TypeSessionEnded))
-	}
+	// Observation recorded while A's close is still parked.
+	endedWhileParked := s.countOf(TypeSessionEnded)
 
 	// B replaces A with an in-progress dictation row and finishes opening.
 	bCards := ttCards("词1", "词2", "词3")
@@ -57,29 +85,35 @@ func TestStaleCompletedCloseCannotEndReplacementClassroom(t *testing.T) {
 	exec.mu.Unlock()
 	ttInit(t, tm, s)
 	if got := s.countOf(TypeSessionReady); got != 2 {
-		t.Fatalf("session_ready count = %d, want 2 (A then B)", got)
+		reclaim.fail(fmt.Sprintf("session_ready count = %d, want 2 (A then B)", got))
 	}
-	ttAwaitSpoken(t, s, 3)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) >= 3 }) {
+		reclaim.fail("B's opening never spoke before A's stale close resumed")
+	}
 	tm.mu.Lock()
 	bEpoch := tm.epoch
 	tm.mu.Unlock()
 	ttAckLast(t, tm, s, bEpoch)
 	if !waitFor(t, 5*time.Second, tm.serverTasksSettled) {
-		t.Fatal("B's opening tasks never settled before A's stale close resumes")
+		reclaim.fail("B's opening tasks never settled before A's stale close resumed")
 	}
+	// Observation recorded with B live and every task settled.
 	tm.mu.Lock()
 	bGen := uint64(0)
 	if tm.activeScope != nil {
 		bGen = tm.activeScope.gen
 	}
 	tm.mu.Unlock()
-	if bGen != 2 {
-		t.Fatalf("active classroom gen = %d, want 2 (B owns the live scope)", bGen)
-	}
 
-	close(aCloseGate)
+	reclaim.release()
 	if !waitFor(t, 2*time.Second, func() bool { return atomic.LoadInt32(&aDone) == 1 }) {
 		t.Fatal("A's completed init never finished after the stale close ran")
+	}
+	if !ttPoll(5*time.Second, tm.serverTasksSettled) {
+		t.Fatal("server tasks never settled after the stale close ran")
+	}
+	if endedWhileParked != 0 {
+		t.Fatalf("session_ended before B = %d, want 0 — the close must stay parked", endedWhileParked)
 	}
 	if got := s.countOf(TypeSessionEnded); got != 0 {
 		t.Fatalf("session_ended after A's stale close = %d, want 0 — the superseded scope must not close B's live classroom", got)
@@ -94,8 +128,8 @@ func TestStaleCompletedCloseCannotEndReplacementClassroom(t *testing.T) {
 	if closed {
 		t.Fatal("the stale scoped close marked the session closed — B's classroom was ended early")
 	}
-	if liveGen != 2 {
-		t.Fatalf("live classroom gen = %d, want 2 after the stale close", liveGen)
+	if bGen != 2 || liveGen != 2 {
+		t.Fatalf("live classroom gen = %d (B observed %d), want 2 (B owns the live scope before and after the stale close)", liveGen, bGen)
 	}
 	s.mu.Lock()
 	terminated := s.terminated
@@ -115,12 +149,16 @@ func TestStaleCompletedCloseCannotEndReplacementClassroom(t *testing.T) {
 // still claim once and ship the single client-end goodbye.
 func TestClientGoodbyeStillClosesLiveClassroom(t *testing.T) {
 	tm, s, exec, words := ttCompletedRowFixture(t)
-	aCloseGate := make(chan struct{})
-	tm.completedCloseInterleave = func() { <-aCloseGate }
+	var aDone int32
+	reclaim := &ttStaleCloseReclaim{t: t, tm: tm, aDone: &aDone, gate: make(chan struct{})}
+	tm.completedCloseInterleave = func() { <-reclaim.gate }
 
-	go ttInit(t, tm, s)
+	go func() {
+		ttInit(t, tm, s)
+		atomic.StoreInt32(&aDone, 1)
+	}()
 	if !waitFor(t, 2*time.Second, func() bool { return s.countOf(TypeSessionReady) == 1 }) {
-		t.Fatal("completed replay never shipped session_ready")
+		reclaim.fail("completed replay never shipped session_ready")
 	}
 	bCards := ttCards("词1", "词2")
 	words.setDue(lesson.CategoryChinese, bCards)
@@ -131,12 +169,14 @@ func TestClientGoodbyeStillClosesLiveClassroom(t *testing.T) {
 	}
 	exec.mu.Unlock()
 	ttInit(t, tm, s)
-	ttAwaitSpoken(t, s, 3)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) >= 3 }) {
+		reclaim.fail("B's opening never spoke before the goodbye")
+	}
 	tm.mu.Lock()
 	bEpoch := tm.epoch
 	tm.mu.Unlock()
 	ttAckLast(t, tm, s, bEpoch)
-	close(aCloseGate)
+	reclaim.release()
 	if !waitFor(t, 2*time.Second, tm.serverTasksSettled) {
 		t.Fatal("server tasks never settled before client goodbye")
 	}

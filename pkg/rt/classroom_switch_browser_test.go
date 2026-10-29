@@ -227,6 +227,12 @@ func TestClassroomSubmitNaturalBrowser(t *testing.T) {
 	if !got || !res.OK {
 		f.reclaimAndFail(driver, nil, "the natural submit journey failed: %s", res.Err)
 	}
+	// The driver's return is only the PAGE's half: wait the connection and
+	// every server task too before any assertion (review P2-5).
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatalf("the connection or its server tasks did not settle after the natural ending (ready=%d ended=%d close=%d)",
+			res.ReadyCount, res.SessionEndedCount, res.WSCloseCount)
+	}
 	if len(res.Rounds) != 2 || !res.Rounds[0].AllAckedNaturally || !res.Rounds[1].AllAckedNaturally {
 		t.Fatalf("rounds = %+v, want the bridge and the summary both acked naturally", res.Rounds)
 	}
@@ -237,9 +243,6 @@ func TestClassroomSubmitNaturalBrowser(t *testing.T) {
 	}
 	if len(res.ErrorFrames) != 0 {
 		t.Fatalf("error frames = %+v, want none on the natural path", res.ErrorFrames)
-	}
-	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
-		t.Fatal("the connection or its server tasks did not settle after the natural ending")
 	}
 
 	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
@@ -359,6 +362,10 @@ func TestClassroomSwitchDuringSubmitBrowser(t *testing.T) {
 	if !gotDriver || !res.OK {
 		f.reclaimAndFail(driver, nil, "B's own submit journey failed: %s (late window %+v)", res.Err, res.LateWindow)
 	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatalf("the connection or its server tasks did not settle after B's ending (ready=%d ended=%d close=%d)",
+			res.ReadyCount, res.SessionEndedCount, res.WSCloseCount)
+	}
 	if lw := res.LateWindow; lw.TeacherSentences != 0 || lw.ReviewResults != 0 || lw.SessionEnded != 0 || lw.Errors != 0 {
 		t.Fatalf("late window after B's bridge = %+v, want zero A-side output — the switched epoch must refuse the superseded presentation", lw)
 	}
@@ -401,9 +408,6 @@ func TestClassroomSwitchDuringSubmitBrowser(t *testing.T) {
 		t.Fatalf("B's writeback tutor version/checking/reviewSeen = %d/%v/%v, want %d/false/true mirroring B's row — the replayed version=-6900/checking=true must die here too",
 			tutorB.version, tutorB.checking, tutorB.reviewSee, lb.Version)
 	}
-	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
-		t.Fatal("the connection or its server tasks did not settle after B's ending")
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +443,10 @@ func TestClassroomSwitchOpeningEpochBrowser(t *testing.T) {
 	res, gotDriver := f.recvSpeechDriver(driver, speechReclaimBound)
 	if !gotDriver || !res.OK {
 		f.reclaimAndFail(driver, nil, "the opening-switch journey failed: %s", res.Err)
+	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatalf("the connection or its server tasks did not settle after the page left (ready=%d ended=%d close=%d)",
+			res.ReadyCount, res.SessionEndedCount, res.WSCloseCount)
 	}
 	if res.SecondRoundVerdict != "acked" {
 		t.Fatalf("B's opening verdict = %q with rounds %+v (dropped=%d) — the player's registration must show B's audio accepted and naturally acked",
@@ -477,9 +485,6 @@ func TestClassroomSwitchOpeningEpochBrowser(t *testing.T) {
 	}
 	if res.SessionEndedCount != 0 || res.WSCloseCount != 0 {
 		t.Fatalf("session_ended=%d close=%d, want 0/0 — B's live classroom keeps the connection", res.SessionEndedCount, res.WSCloseCount)
-	}
-	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
-		t.Fatal("the connection or its server tasks did not settle after the page left")
 	}
 	if state := speechTutorStateOf(m); state.lessonID != lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryEnglish) {
 		t.Fatalf("live classroom at the end = %q, want B's english row", state.lessonID)
@@ -546,6 +551,10 @@ func TestLateAskContinuationSilentBrowser(t *testing.T) {
 	if !gotDriver || !res.OK {
 		f.reclaimAndFail(driver, nil, "the ask-switch journey failed: %s", res.Err)
 	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatalf("the connection or its server tasks did not settle after the page left (ready=%d close=%d errors=%d)",
+			res.ReadyCount, res.WSCloseCount, len(res.ErrorFrames))
+	}
 	if res.ReadyCount != 1 {
 		t.Fatalf("session_ready count = %d, want exactly 1 (B's) — a late continuation must never install or ship a ready of its own", res.ReadyCount)
 	}
@@ -560,9 +569,6 @@ func TestLateAskContinuationSilentBrowser(t *testing.T) {
 	}
 	if res.Playback.DroppedChunks != 0 || res.WSCloseCount != 0 || len(res.ErrorFrames) != 0 {
 		t.Fatalf("dropped=%d close=%d errors=%+v, want 0/0/none", res.Playback.DroppedChunks, res.WSCloseCount, res.ErrorFrames)
-	}
-	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
-		t.Fatal("the connection or its server tasks did not settle after the page left")
 	}
 	if state := speechTutorStateOf(m); state.lessonID != lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryEnglish) {
 		t.Fatalf("live classroom at the end = %q, want B's english row — the late continuation must not have installed over it", state.lessonID)
@@ -598,6 +604,10 @@ func TestCheckResumeReinitEpochBrowser(t *testing.T) {
 	if !gotDriver || !res.OK {
 		f.reclaimAndFail(driver, nil, "the same-row re-init journey failed: %s", res.Err)
 	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatalf("the connection or its server tasks did not settle after the page left (ready=%d ended=%d close=%d)",
+			res.ReadyCount, res.SessionEndedCount, res.WSCloseCount)
+	}
 	if res.ReadyCount != 2 || res.CheckStartedCount != 2 {
 		t.Fatalf("ready=%d check_started=%d, want 2/2 — the re-init reopens the panel", res.ReadyCount, res.CheckStartedCount)
 	}
@@ -621,9 +631,6 @@ func TestCheckResumeReinitEpochBrowser(t *testing.T) {
 	}
 	if res.SessionEndedCount != 0 || res.WSCloseCount != 0 || len(res.ErrorFrames) != 0 {
 		t.Fatalf("ended=%d close=%d errors=%+v, want 0/0/none — the reopened classroom stays live", res.SessionEndedCount, res.WSCloseCount, res.ErrorFrames)
-	}
-	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
-		t.Fatal("the connection or its server tasks did not settle after the page left")
 	}
 	// The re-init itself wrote nothing: the row only left checking through
 	// the page's departure (the ordinary unchecked close fallback — the
@@ -682,6 +689,10 @@ func TestSameLessonReinitDuringSubmitBrowser(t *testing.T) {
 	if !gotDriver || !res.OK {
 		f.reclaimAndFail(driver, nil, "the reentry journey failed: %s", res.Err)
 	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatalf("the connection or its server tasks did not settle after the natural ending (ready=%d ended=%d close=%d)",
+			res.ReadyCount, res.SessionEndedCount, res.WSCloseCount)
+	}
 	speechWantRecoverableBusyError(t, res)
 	if res.ReadyCount != 1 || res.CheckStartedCount != 1 {
 		t.Fatalf("ready=%d check_started=%d, want 1/1 — the refused reentry installs nothing", res.ReadyCount, res.CheckStartedCount)
@@ -692,9 +703,6 @@ func TestSameLessonReinitDuringSubmitBrowser(t *testing.T) {
 	if res.ReviewResultCount != 1 || res.SessionEndedCount != 1 || res.WSCloseCount != 1 || len(res.InterruptAcks) != 0 {
 		t.Fatalf("review=%d ended=%d close=%d acks=%v, want 1/1/1/0 — A's natural ending after a single save",
 			res.ReviewResultCount, res.SessionEndedCount, res.WSCloseCount, res.InterruptAcks)
-	}
-	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
-		t.Fatal("the connection or its server tasks did not settle after the natural ending")
 	}
 
 	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
