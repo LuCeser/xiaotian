@@ -129,12 +129,12 @@ type speechDriverResult struct {
 	SessionEndedCount  int              `json:"sessionEndedCount"`
 	// EndedReasons (stale-completed-close): ending reasons for diagnostics when
 	// session_ended count assertions fail.
-	EndedReasons              []string                `json:"endedReasons"`
-	StopNowCount              int                     `json:"stopNowCount"`
-	InterruptAcks             []speechInterruptAckObs `json:"interruptAcks"`
-	InterruptAckBeforeReady   bool                    `json:"interruptAckBeforeSecondReady"`
-	ErrorFrames               []speechErrorFrameObs   `json:"errorFrames"`
-	LateWindow                speechLateWindowObs     `json:"lateWindow"`
+	EndedReasons            []string                `json:"endedReasons"`
+	StopNowCount            int                     `json:"stopNowCount"`
+	InterruptAcks           []speechInterruptAckObs `json:"interruptAcks"`
+	InterruptAckBeforeReady bool                    `json:"interruptAckBeforeSecondReady"`
+	ErrorFrames             []speechErrorFrameObs   `json:"errorFrames"`
+	LateWindow              speechLateWindowObs     `json:"lateWindow"`
 }
 
 // speechRoundSentenceObs is one sentence's registration inside an observed
