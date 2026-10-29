@@ -141,3 +141,63 @@ func speechSeedEnglishCheckingWithManualVerdicts(f *speechBrowserFixture) {
 	}
 }
 
+// speechCategoryFetchHold parks the FIRST FetchDueWords of one category (S4's
+// late-continuation control point: the answered ask's own row fetch) and
+// passes every other call through — the switched classroom's fetch must
+// proceed while A parks, so B installs and greets for real.
+type speechCategoryFetchHold struct {
+	inner    WordSource
+	category string
+
+	mu        sync.Mutex
+	entered   chan struct{}
+	release   chan struct{}
+	enterOnce sync.Once
+	openOnce  sync.Once
+}
+
+func speechNewCategoryFetchHold(inner WordSource, category string) *speechCategoryFetchHold {
+	return &speechCategoryFetchHold{
+		inner: inner, category: category,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+}
+
+func (h *speechCategoryFetchHold) FetchDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error) {
+	h.mu.Lock()
+	park := category == h.category
+	h.mu.Unlock()
+	if park {
+		h.enterOnce.Do(func() { close(h.entered) })
+		<-h.release
+	}
+	return h.inner.FetchDueWords(ctx, limit, category)
+}
+
+func (h *speechCategoryFetchHold) PeekDueWords(ctx context.Context, limit int, category string) ([]lesson.Word, error) {
+	return h.inner.PeekDueWords(ctx, limit, category)
+}
+
+func (h *speechCategoryFetchHold) SubmitReview(ctx context.Context, results map[string]string, category string) (ReviewWriteResult, error) {
+	return h.inner.SubmitReview(ctx, results, category)
+}
+
+func (h *speechCategoryFetchHold) openUp() { h.openOnce.Do(func() { close(h.release) }) }
+
+// speechWantRecoverableBusyError asserts the same-lessonID reentry refusal
+// shape among the page's observed error frames.
+func speechWantRecoverableBusyError(t *testing.T, res speechDriverResult) {
+	t.Helper()
+	busy := 0
+	for _, e := range res.ErrorFrames {
+		if e.Code == ErrCodeLessonUnavailable {
+			busy++
+			if !e.Recoverable {
+				t.Fatalf("the same-lessonID reentry error must be recoverable, got %q", e.Message)
+			}
+		}
+	}
+	if busy != 1 {
+		t.Fatalf("lesson_unavailable error frames = %d, want exactly 1 (the refused reentry): %+v", busy, res.ErrorFrames)
+	}
+}
