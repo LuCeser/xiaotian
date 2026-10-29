@@ -1042,7 +1042,10 @@ body {
   min-height: 44px;
 }
 
-.pdf-stop-btn {
+/* 停止/继续 share the bar's bottom row (Issue #80 U7: both render while a
+   run winds down — 停止中 disabled beside 继续 disabled). */
+.pdf-stop-btn,
+.pdf-resume-btn {
   margin-top: 8px;
 }
 

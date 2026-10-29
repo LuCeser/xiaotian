@@ -47,10 +47,36 @@ function installWorkflowGlobals(dom, options) {
 
   global.__parentFormKit = {
     buildCategoryField: function (_name, onChange) {
+      // The real kit's contract (parent-modes.js D-06): 英语|中文 radios
+      // whose change fires onSelected(selected()) — tests drive the REAL
+      // subject switch by firing a radio's change, never by calling the
+      // form's method. 英语 pre-checked: the photo form's recognize gate
+      // requires a selection before any run.
       var field = dom.document.createElement('div');
+      var radios = ['english', 'chinese'].map(function (value) {
+        var radio = dom.document.createElement('input');
+        radio.type = 'radio';
+        radio.value = value;
+        radio.checked = value === 'english';
+        field.appendChild(radio);
+        return radio;
+      });
+      radios.forEach(function (radio) {
+        radio.addEventListener('change', function () {
+          radios.forEach(function (other) {
+            other.checked = other === radio;
+          });
+          if (onChange) {
+            onChange(radio.value);
+          }
+        });
+      });
       return {
         field: field,
-        selected: function () { return 'english'; },
+        selected: function () {
+          var picked = radios.filter(function (r) { return r.checked; })[0];
+          return picked ? picked.value : '';
+        },
         setError: function () {},
       };
     },
@@ -160,6 +186,37 @@ function mountWorkflowForm(options) {
     },
     clickRecognize: function () {
       form.recognizeBtn.fire('click');
+    },
+    /** The status bar's REAL run buttons (null when not rendered). */
+    barStop: function () {
+      return form.pdfBar.querySelector('.pdf-stop-btn') || null;
+    },
+    barResume: function () {
+      return form.pdfBar.querySelector('.pdf-resume-btn') || null;
+    },
+    /** The status bar's REAL retry chip button of one page (null when not rendered). */
+    barRetry: function (pageNo) {
+      var chip = null;
+      form.pdfBar.querySelectorAll('.pdf-page-chip').forEach(function (c) {
+        if (c.getAttribute('data-page') === String(pageNo)) {
+          chip = c;
+        }
+      });
+      return (chip && chip.querySelector('.pdf-retry-btn')) || null;
+    },
+    /**
+     * Fire the REAL category radio's change (the D-06 subject-switch
+     * entry) — returns false when no such radio mounted.
+     */
+    switchCategory: function (value) {
+      var radio = form.categoryKit.field.querySelectorAll('input').filter(function (r) {
+        return r.value === value;
+      })[0] || null;
+      if (!radio) {
+        return false;
+      }
+      radio.fire('change');
+      return true;
     },
     /** Click the status bar's REAL retry chip for one failed page. */
     clickRetryPage: function (pageNo) {
