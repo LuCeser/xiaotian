@@ -791,7 +791,13 @@ func TestStaleCompletedCloseBrowser(t *testing.T) {
 	select {
 	case <-entered:
 	case <-time.After(60 * time.Second):
-		f.reclaimAndFail(driver, nil, "the completed replay's scoped close never parked at its seam")
+		// Review P2-5: this timeout exit must ALSO release the control point
+		// and wait the original task — passing the release into the shared
+		// reclaim core (release → bounded settled wait → driver result → the
+		// ONE report) unblocks a close request that arrives after the bound
+		// instead of stranding it on `<-release` forever.
+		f.reclaimAndFail(driver, []func(){func() { close(release) }},
+			"the completed replay's scoped close never parked at its seam")
 	}
 
 	// B replaces A on the same connection and finishes its natural opening
