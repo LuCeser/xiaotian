@@ -433,6 +433,15 @@ type TurnManager struct {
 	// a newer classroom on the same connection can install and finish its
 	// natural opening while the stale close request is still pending.
 	completedCloseInterleave func()
+	// categoryAdmitInterleave (test seam, issue #69 rethink3 review P1-1;
+	// nil in production) fires between the existing-row admission check
+	// (classroomInstallAllowed) and the row-authority subject write, still
+	// INSIDE the one tm.mu hold that holds them together: a late ask
+	// continuation that checked allowed and then parked must not resume into
+	// a window where a newer session_init already installed and wrote the
+	// live classroom's subject. The deterministic race tests probe from here
+	// — a TryLock on tm.mu may never succeed at this point.
+	categoryAdmitInterleave func()
 
 	// announceEntryInterleave (test seam, PR #60 review J15; nil in
 	// production) fires after runAnnouncementDisplayAt's entry gate has
@@ -786,6 +795,18 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 		tm.mu.Lock()
 		saveInFlight := tm.lessonSaveInFlightLocked(lessonID)
 		allowed := tm.classroomInstallAllowed(req.installGen)
+		// The admission verdict and the subject write are ONE critical
+		// section (review P1-1): computing allowed under the lock and writing
+		// tm.category after it let a late continuation that HAD passed the
+		// check overwrite the subject a newer session_init installed in the
+		// gap — and raced every other lock-disciplined reader of the field.
+		// The seam fires between the two steps, still inside the hold.
+		if tm.categoryAdmitInterleave != nil {
+			tm.categoryAdmitInterleave()
+		}
+		if allowed && !saveInFlight {
+			tm.category = lesson.NormalizeCategory(l.Category)
+		}
 		tm.mu.Unlock()
 		if saveInFlight {
 			// Same-lessonID reentry while THIS connection's accepted save for
@@ -800,9 +821,6 @@ func (tm *TurnManager) continueSessionInit(s Sender, req classroomInitRequest) {
 			// persistDone coordination — refusing is this step's minimal fix.
 			tm.failLessonInitBusy(s)
 			return
-		}
-		if allowed {
-			tm.category = lesson.NormalizeCategory(l.Category)
 		}
 	} else {
 		// Fresh lesson: this process instance is the single creator (init

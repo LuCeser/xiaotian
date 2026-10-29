@@ -322,6 +322,93 @@ func TestCheckResumeReinitSpeaksBridge(t *testing.T) {
 	}
 }
 
+// TestCategoryAdmissionHeldWithInstallCheck (review P1-1): the existing-row
+// subject write must sit in the SAME tm.mu hold as the admission check. A
+// late ask continuation parked between the two (the categoryAdmitInterleave
+// seam) must hold the lock across the whole window — the probe's TryLock may
+// never succeed there — so a newer session_init can neither install in the
+// gap nor have its installed subject overwritten when the continuation
+// resumes; the live classroom's subject stays the newest request's.
+func TestCategoryAdmissionHeldWithInstallCheck(t *testing.T) {
+	words := newFakeWords(ttCards("苹果", "香蕉"))
+	// Both subjects hold due words → the auto entry parks on the clarify.
+	words.setPeek(lesson.CategoryChinese, ttCards("苹果"))
+	words.setPeek(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	exec := newFakeExecutor(ttLessonID, ttCards("苹果", "香蕉"))
+	tm := NewTurnManager(newFakeASR(), newFakeLLM(), newFakeTTS(1, 320), exec,
+		ttConfig(words), NewEventRecorder(&captureLogger{}, "t"), nil)
+	s := &captureSender{}
+
+	tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+		Type: TypeSessionInit, Category: CategoryAuto,
+		Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+	}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSubjectAsk) >= 1 }) {
+		t.Fatal("the auto entry never asked the subject clarify")
+	}
+
+	leaked := false
+	seamEntered := make(chan struct{})
+	seamRelease := make(chan struct{})
+	var probeOnce sync.Once
+	tm.categoryAdmitInterleave = func() {
+		probeOnce.Do(func() {
+			// The probe: at this instant — between the admission check and
+			// the subject write — the lock must be HELD. A successful TryLock
+			// means the implementation dropped the hold between the two
+			// steps (the exact window a newer session_init installs in).
+			if tm.mu.TryLock() {
+				tm.mu.Unlock()
+				leaked = true
+			}
+			close(seamEntered)
+			<-seamRelease
+		})
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// The child answers 语文: the continuation reads the existing row and
+		// parks between the admission check and the subject write.
+		tm.HandleControl(s, mustJSON(t, SubjectPickMsg{Type: TypeSubjectPick, Category: lesson.CategoryChinese}))
+	}()
+	select {
+	case <-seamEntered:
+	case <-time.After(3 * time.Second):
+		close(seamRelease)
+		wg.Wait()
+		t.Fatal("the answered continuation never reached the category admission seam")
+	}
+
+	// B replaces A on the same connection while A is parked at the seam.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tm.HandleControl(s, mustJSON(t, SessionInitMsg{
+			Type: TypeSessionInit, Category: lesson.CategoryEnglish,
+			Audio: AudioSpec{SampleRate: 16000, Format: "s16le", Channels: 1},
+		}))
+	}()
+	close(seamRelease)
+	wg.Wait()
+
+	if leaked {
+		t.Fatal("tm.mu was free between the admission check and the subject write — a newer session_init can install in the gap and be overwritten on resume")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) >= 1 }) {
+		t.Fatal("the replacement classroom never shipped session_ready")
+	}
+	tm.mu.Lock()
+	gotCategory := tm.category
+	tm.mu.Unlock()
+	if gotCategory != lesson.CategoryEnglish {
+		t.Fatalf("live classroom subject = %q, want %q (the newest request's row authority; the parked continuation must not overwrite it)",
+			gotCategory, lesson.CategoryEnglish)
+	}
+}
+
 // TestSameLessonReinitDuringInflightSaveRefused (issue #69 rethink3 S4): a
 // same-lessonID re-init that arrives while THIS connection's accepted submit
 // for the row is still running must not build a classroom on the pre-save row
