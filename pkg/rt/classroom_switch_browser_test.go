@@ -201,3 +201,72 @@ func speechWantRecoverableBusyError(t *testing.T, res speechDriverResult) {
 		t.Fatalf("lesson_unavailable error frames = %d, want exactly 1 (the refused reentry): %+v", busy, res.ErrorFrames)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Case V — the current-classroom successful submit (R0's T1 success half in a
+// real browser): everything natural, and the in-memory writeback must mirror
+// the row exactly (the version=-6900/checking=true replay dies here).
+// ---------------------------------------------------------------------------
+
+func TestClassroomSubmitNaturalBrowser(t *testing.T) {
+	f := newSpeechBrowserFixture(t)
+	f.armPoemPassageSaveChain() // a REAL receipt store on the same temp SQLite
+	f.seedCheckingWithManualVerdicts()
+	// The fake's scripted FSRS answer saves both words — the summary then
+	// carries no partial-save suffix.
+	f.mu.Lock()
+	f.words.reviewResult = ReviewWriteResult{
+		Requested: []string{"听写浏览器", "第二词"},
+		Updated:   []string{"听写浏览器", "第二词"},
+	}
+	f.mu.Unlock()
+
+	driver := f.runDriverAsync("check-submit-natural", 60*time.Second,
+		"--expected-second-json", string(mustJSON(t, speechExpectedSummaryAllCorrect)))
+	res, got := f.recvSpeechDriver(driver, speechReclaimBound)
+	if !got || !res.OK {
+		f.reclaimAndFail(driver, nil, "the natural submit journey failed: %s", res.Err)
+	}
+	if len(res.Rounds) != 2 || !res.Rounds[0].AllAckedNaturally || !res.Rounds[1].AllAckedNaturally {
+		t.Fatalf("rounds = %+v, want the bridge and the summary both acked naturally", res.Rounds)
+	}
+	if res.ReadyCount != 1 || res.CheckStartedCount != 1 || res.ReviewResultCount != 1 ||
+		res.SessionEndedCount != 1 || res.WSCloseCount != 1 || len(res.InterruptAcks) != 0 {
+		t.Fatalf("ready=%d check_started=%d review=%d ended=%d close=%d acks=%v, want 1/1/1/1/1/0",
+			res.ReadyCount, res.CheckStartedCount, res.ReviewResultCount, res.SessionEndedCount, res.WSCloseCount, res.InterruptAcks)
+	}
+	if len(res.ErrorFrames) != 0 {
+		t.Fatalf("error frames = %+v, want none on the natural path", res.ErrorFrames)
+	}
+	if !f.waitManagersClosed(15*time.Second) || !waitFor(t, 15*time.Second, f.speechServerTasksSettled) {
+		t.Fatal("the connection or its server tasks did not settle after the natural ending")
+	}
+
+	lessonID := lessonIDForCategory("speech-browser-fixture", time.Now(), lesson.CategoryChinese)
+	l, err := f.tools.GetLessonState(context.Background(), lessonID)
+	if err != nil {
+		t.Fatalf("read stored lesson: %v", err)
+	}
+	if l.Stage != lesson.StageSubmitted || l.Unchecked || len(l.Verdicts) != 2 {
+		t.Fatalf("row = stage %q unchecked %v verdicts %d, want submitted/false/2", l.Stage, l.Unchecked, len(l.Verdicts))
+	}
+	if subs := f.words.submissions(); len(subs) != 1 || len(subs[0]) != 2 {
+		t.Fatalf("FSRS saves = %v, want exactly one save of both words", subs)
+	}
+	if cats := f.words.submittedCategories(); len(cats) != 1 || cats[0] != "chinese" {
+		t.Fatalf("FSRS save categories = %v, want [chinese]", cats)
+	}
+	receipts, err := f.receipts.ListByLesson(context.Background(), lessonID)
+	if err != nil || len(receipts) != 1 || receipts[0].Status != lesson.ReceiptStatusSaved {
+		t.Fatalf("receipts = %+v err=%v, want exactly one saved receipt for the row", receipts, err)
+	}
+	m := f.tryFirstManager(5 * time.Second)
+	if m == nil {
+		t.Fatal("no /rt connection was created")
+	}
+	tutor := speechTutorStateOf(m)
+	if tutor.version != l.Version || tutor.checking || !tutor.reviewSee {
+		t.Fatalf("writeback tutor version/checking/reviewSeen = %d/%v/%v, want %d/false/true mirroring the row — a polluted writeback must die here",
+			tutor.version, tutor.checking, tutor.reviewSee, l.Version)
+	}
+}
