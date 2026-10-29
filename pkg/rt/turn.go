@@ -1776,7 +1776,14 @@ func (tm *TurnManager) IngestAudio(s Sender, data []byte) {
 	if len(segment) < 2*960 {
 		return
 	}
-	go tm.processTurn(s, segment)
+	// The voice turn is a WHOLE server task (review P1-4): its goroutine can
+	// synchronously run an entire classroom-init continuation (the answered
+	// subject pick's fetch, row reads and install run inside processTurn), so
+	// the whole-task observation must cover it — the ask's own announcement
+	// registration and the final opening starter's registration never span
+	// that middle. serverTasksSettled may not report true while such a
+	// continuation is still running.
+	tm.goServerTask(func() { tm.processTurn(s, segment) })
 }
 
 // processTurn runs one utterance → ASR → intent classification → FSM

@@ -314,6 +314,69 @@ func TestFallbackObservedAtBothCloseEntries(t *testing.T) {
 	run(t, "transport-entry", func(tm *TurnManager, _ *captureSender) { tm.Close(nil) })
 }
 
+// TestVoiceTurnInitContinuationObserved (review P1-4): the answered ask's
+// classroom-init continuation runs synchronously INSIDE the voice turn's
+// processTurn — fetch, row read and install all on that one goroutine, a
+// middle spanned by NEITHER the ask announcement's registration NOR the
+// final opening starter's. The whole-task observation must therefore cover
+// the voice turn itself: parked at the continuation's own row fetch the task
+// is still live, and settled may only report true after the turn's true
+// exit.
+func TestVoiceTurnInitContinuationObserved(t *testing.T) {
+	words := newFakeWords()
+	words.setPeek(lesson.CategoryChinese, ttCards("苹果", "香蕉"))
+	words.setPeek(lesson.CategoryEnglish, ttCards("cat", "dog"))
+	words.setDue(lesson.CategoryChinese, ttCards("苹果", "香蕉"))
+	fetchHold := newHoldFirstDueFetch(words)
+	asr := newFakeASR(asrScript{text: "语文"})
+	tm := NewTurnManager(asr, newFakeLLM(), newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID),
+		TurnManagerConfig{LessonID: ttLessonID, Words: fetchHold},
+		NewEventRecorder(&captureLogger{}, "t"), nil)
+	tm.taskTrack = &serverTaskTracker{}
+	s := &captureSender{}
+
+	// The clarify round: question out, final sentence acked, uplink open.
+	ttSubjectInit(t, tm, s)
+	ttAwaitAskSent(t, s, 0)
+	ttAckLast(t, tm, s, 0)
+	ttWaitClarifyOpen(t, tm)
+	tm.mu.Lock()
+	tm.echoTailUntil = time.Now().Add(-time.Millisecond)
+	tm.mu.Unlock()
+
+	// The spoken 语文 answer rides the REAL capture→VAD→ASR→turn path; its
+	// continuation parks at the answered round's own row fetch.
+	tm.IngestAudio(s, ttUtterance())
+	select {
+	case <-fetchHold.entered:
+	case <-time.After(5 * time.Second):
+		fetchHold.openUp()
+		ttPoll(5*time.Second, tm.serverTasksSettled)
+		t.Fatal("the answered continuation never reached its own row fetch")
+	}
+	if tm.serverTasksSettled() {
+		fetchHold.openUp()
+		ttPoll(5*time.Second, tm.serverTasksSettled)
+		t.Fatal("settled reported done while the voice turn's init continuation was still parked at its row fetch — the ask and starter registrations never span this middle")
+	}
+
+	// The released turn opens the classroom; its greeting plays and settles;
+	// every server task then truly ends before the final assertions.
+	sentsBeforeGreeting := s.countOf(TypeTeacherSentence)
+	fetchHold.openUp()
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionReady) == 1 }) {
+		t.Fatal("the answered classroom never shipped session_ready")
+	}
+	ttAwaitAskSent(t, s, sentsBeforeGreeting)
+	tm.mu.Lock()
+	epoch := tm.epoch
+	tm.mu.Unlock()
+	ttAckLast(t, tm, s, epoch)
+	if !ttPoll(5*time.Second, tm.serverTasksSettled) {
+		t.Fatal("the voice turn task never settled after the release — the continuation's exit is part of the turn's whole-task end")
+	}
+}
+
 // ttReclaimEvidence is what a §5.1 failure path must establish BEFORE it
 // reports: the observation recorded while parked, whether the true task
 // exit was observed before the report point, and a business-side effect as
