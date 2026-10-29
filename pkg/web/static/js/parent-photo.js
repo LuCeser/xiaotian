@@ -3046,18 +3046,15 @@
       // stays reachable) and says so — never the 没有识别到词表 verdict.
       if (summary && summary.pending > 0) {
         // U7fix1 (review P2-2): the stopped hint derives from the batch's
-        // ACTUAL available actions, never from the pending count alone. A
-        // photo batch past its wind-down really offers 继续处理 (§3.2 已停
-        // 止行)； the PDF legacy bar (until U8) renders NO resume button at
-        // all, so its hint only states the remaining fact; and a dead batch
-        // (invalidated) owns no surface — its late wind-down must not
-        // overwrite the hint of whatever replaced it (分类已切换).
+        // ACTUAL available actions, never from the pending count alone —
+        // superseded runs never get this far (every finish caller checks
+        // the execution identity first). A photo batch past its wind-down
+        // really offers 继续处理 (§3.2 已停止行); the PDF legacy bar (until
+        // U8) renders NO resume button at all, so its hint only states the
+        // remaining fact and never promises what the bar cannot honor.
         var runDecision = state.kind === 'photo' && global.importRunDecision
           ? global.importRunDecision(state, { noun: noun })
           : null;
-        if (runDecision && runDecision.phase === 'invalidated') {
-          return;
-        }
         if (runDecision && runDecision.actions.resume.enabled) {
           this.renderPreviewHint('已停止：还有 ' + summary.pending + ' ' + noun +
             '未处理，可点「继续处理」或重新开始');
