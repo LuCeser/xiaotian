@@ -3045,8 +3045,25 @@
       // U7: a STOPPED run with nothing landed yet keeps its plan (继续处理
       // stays reachable) and says so — never the 没有识别到词表 verdict.
       if (summary && summary.pending > 0) {
-        this.renderPreviewHint('已停止：还有 ' + summary.pending + ' ' + noun +
-          '未处理，可点「继续处理」或重新开始');
+        // U7fix1 (review P2-2): the stopped hint derives from the batch's
+        // ACTUAL available actions, never from the pending count alone. A
+        // photo batch past its wind-down really offers 继续处理 (§3.2 已停
+        // 止行)； the PDF legacy bar (until U8) renders NO resume button at
+        // all, so its hint only states the remaining fact; and a dead batch
+        // (invalidated) owns no surface — its late wind-down must not
+        // overwrite the hint of whatever replaced it (分类已切换).
+        var runDecision = state.kind === 'photo' && global.importRunDecision
+          ? global.importRunDecision(state, { noun: noun })
+          : null;
+        if (runDecision && runDecision.phase === 'invalidated') {
+          return;
+        }
+        if (runDecision && runDecision.actions.resume.enabled) {
+          this.renderPreviewHint('已停止：还有 ' + summary.pending + ' ' + noun +
+            '未处理，可点「继续处理」或重新开始');
+        } else {
+          this.renderPreviewHint('已停止：还有 ' + summary.pending + ' ' + noun + '未处理');
+        }
         return;
       }
       // Issue #80 U3: an all-empty run that still has failed/pending pages
@@ -3092,6 +3109,8 @@
     if (!state || this.recognizeBtn.disabled) {
       return;
     }
+    var category = this.draftCategory;
+    var runEpoch = this.recognizeEpoch;
     if (state.kind === 'photo') {
       var retryVerdict = global.importRunDecision(state, { noun: state.noun });
       if (!retryVerdict.actions.retry.enabled) {
@@ -3107,6 +3126,12 @@
     this.runPages(pageNo).then(function (summary) {
       self.settlePhotoRun(state);
       self.setBusy(false);
+      // U7fix1 (review P2-2): a superseded execution owns no surface — its
+      // late wind-down must not render a finish over whatever replaced it
+      // (e.g. the 分类已切换 hint after a mid-flight subject switch).
+      if (!recognizeRunStillValid(self, runEpoch, category)) {
+        return;
+      }
       self.finishRun(summary);
     });
   };
@@ -3126,6 +3151,8 @@
     if (!state || this.recognizeBtn.disabled) {
       return;
     }
+    var category = this.draftCategory;
+    var runEpoch = this.recognizeEpoch;
     if (state.kind === 'photo') {
       var resumeVerdict = global.importRunDecision(state, { noun: state.noun });
       if (!resumeVerdict.actions.resume.enabled) {
@@ -3140,6 +3167,11 @@
     this.runPages().then(function (summary) {
       self.settlePhotoRun(state);
       self.setBusy(false);
+      // U7fix1 (review P2-2): same guard as the retry — a 继续 whose run
+      // was superseded while its request was out finishes NOTHING.
+      if (!recognizeRunStillValid(self, runEpoch, category)) {
+        return;
+      }
       self.finishRun(summary);
     });
   };
@@ -3192,15 +3224,28 @@
       }
       chip.textContent = '第 ' + page.no + ' ' + noun;
       if (page.status === 'failed') {
-        var retry = document.createElement('button');
-        retry.type = 'button';
-        retry.className = 'btn btn-secondary pdf-retry-btn';
-        retry.textContent = '重试';
-        retry.setAttribute('aria-label', '重试第 ' + page.no + ' ' + noun);
-        retry.addEventListener('click', function () {
-          self.handlePdfRetryPage(page.no);
-        });
-        chip.appendChild(retry);
+        // U7fix1 (review P2-1): a PHOTO batch gates the per-photo retry
+        // chip through the SAME button rule as the run buttons — disabled
+        // while another photo executes (running) or a stop's wind-down is
+        // in flight (stopping), and offered NOT AT ALL once the batch is
+        // dead (invalidated — e.g. a subject switch after settling). The
+        // handler already refused those clicks; the chip must not promise
+        // them either. The PDF run keeps the plain chip until U8 wires it
+        // to the same machine.
+        var retryShown = !run ||
+          (run.actions.retry.shown && run.actions.retry.pages.indexOf(page.no) !== -1);
+        if (retryShown) {
+          var retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'btn btn-secondary pdf-retry-btn';
+          retry.textContent = '重试';
+          retry.setAttribute('aria-label', '重试第 ' + page.no + ' ' + noun);
+          retry.disabled = !!run && !run.actions.retry.enabled;
+          retry.addEventListener('click', function () {
+            self.handlePdfRetryPage(page.no);
+          });
+          chip.appendChild(retry);
+        }
       }
       chips.appendChild(chip);
     });
