@@ -9,6 +9,11 @@
  * buttons: 开始 → 停止（停止中）→ 收尾 → 继续, the stopped photo's late
  * result never reaching the draft, 继续 running ONLY pending photos, and
  * saving barred while an execution (wind-down included) is in flight.
+ * Issue #80 U7fix1 — the per-photo retry chip consumes the SAME button rule
+ * (disabled while another photo runs / during a stop's wind-down, hidden on
+ * a dead batch), and a superseded execution's late wind-down renders no
+ * finish: the 分类已切换 hint survives, and the PDF legacy bar's early-stop
+ * hint promises only what its buttons offer.
  *
  * `node tests/test-parent-photo-workflow.js`
  */
@@ -1179,6 +1184,110 @@ async function testPhotoStopBeforeFirstLandingThenResumeCompletes() {
   eq(form.rows.length, 2, 'U7 早停: both photos land after resume');
 }
 
+/**
+ * Issue #80 U7fix1 (review P2-1) — the per-photo retry chip consumes the
+ * SAME §3.2 button rule as the run buttons, through the REAL rendered chip:
+ * photo 1 failed while photo 2 is executing (running) → chip shown but
+ * DISABLED; after 停止 (the wind-down, stopping) → still disabled; once the
+ * wind-down settles → enabled again.
+ */
+async function testRetryChipGatedWhileAnotherPhotoRunsAndDuringWindDown() {
+  var gate = null;
+  var calls = 0;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.reject(new Error('forced fail'));
+      }
+      return new Promise(function (resolve) { gate = resolve; });
+    },
+  });
+  h.pickPhotos([fakePhoto('1.jpg'), fakePhoto('2.jpg')]);
+  h.clickRecognize();
+  await flushPromises(14);
+  var form = h.form;
+  eq(form.photoBatch.plan.pages[0].status, 'failed',
+    'U7fix1 重试: photo 1 fails while photo 2 takes over');
+  eq(form.photoBatch.plan.pages[1].status, 'running',
+    'U7fix1 重试: photo 2 is executing');
+  var chip = h.barRetry(1);
+  assert(!!chip,
+    'U7fix1 重试: the failed photo still SHOWS its retry chip (rule: shown)');
+  eq(!!chip && chip.disabled, true,
+    'U7fix1 重试: retry chip DISABLED while another photo executes (§3.2 running)');
+
+  var stop = h.barStop();
+  assert(!!stop, 'U7fix1 重试: the stop button renders while photo 2 executes');
+  if (stop) {
+    stop.fire('click');
+  }
+  chip = h.barRetry(1);
+  assert(!!chip && chip.disabled,
+    'U7fix1 重试: retry chip stays DISABLED through the stop wind-down (§3.2 stopping)');
+
+  gate({
+    entries: [{ word: 'late-word', meaning: '迟', lesson: '第9课' }],
+    textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+  });
+  await flushPromises(14);
+  eq(form.photoBatch.plan.pages[1].status, 'pending',
+    'U7fix1 重试: the wind-down swept the stopped photo back to pending');
+  chip = h.barRetry(1);
+  assert(!!chip && !chip.disabled,
+    'U7fix1 重试: once settled with a failed photo, the retry chip is ENABLED (§3.2 stopped)');
+  var hint = form.preview.querySelector('.preview-empty');
+  assert(!!hint && hint.textContent.indexOf('可点「继续处理」') >= 0,
+    'U7fix1 重试: the settled-stop hint promises 继续处理 the bar really offers');
+  assert(!!h.barResume() && !h.barResume().disabled,
+    'U7fix1 重试: the bar really renders the enabled 继续处理 the hint names');
+}
+
+/**
+ * Issue #80 U7fix1 (review P2-1) — after a settled stop, the REAL subject
+ * radio's change invalidates the batch: a dead batch offers NO retry chip
+ * (and no resume) — the bar re-render must consume the rule, not the page
+ * status alone.
+ */
+async function testSubjectSwitchAfterSettledStopHidesRetryChip() {
+  var gate = null;
+  var calls = 0;
+  var h = mountWorkflowForm({
+    recognizePhoto: function () {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.reject(new Error('forced fail'));
+      }
+      return new Promise(function (resolve) { gate = resolve; });
+    },
+  });
+  h.pickPhotos([fakePhoto('1.jpg'), fakePhoto('2.jpg')]);
+  h.clickRecognize();
+  await flushPromises(14);
+  var form = h.form;
+  var stop = h.barStop();
+  assert(!!stop, 'U7fix1 失效: the stop button renders while photo 2 executes');
+  if (stop) {
+    stop.fire('click');
+  }
+  gate({
+    entries: [{ word: 'dropped', meaning: '弃', lesson: '第9课' }],
+    textbook: { edition: '人教版PEP', grade: '三年级', volume: '上册' },
+  });
+  await flushPromises(14);
+  assert(!!h.barRetry(1) && !h.barRetry(1).disabled,
+    'U7fix1 失效: before the switch the settled batch offers an enabled retry chip');
+  assert(h.switchCategory('chinese'),
+    'U7fix1 失效: the real category radio fires the subject switch');
+  eq(form.draftCategory, 'chinese', 'U7fix1 失效: the draft subject switched');
+  eq(form.photoBatch.invalidated, true,
+    'U7fix1 失效: the switch invalidated the photo batch');
+  assert(!h.barRetry(1),
+    'U7fix1 失效: the dead batch renders NO retry chip (rule: not shown)');
+  assert(!h.barResume() && !h.barStop(),
+    'U7fix1 失效: the dead batch renders no run buttons at all');
+}
+
 (async function main() {
   await testSinglePhotoEntryClearsViaRecognizeButton();
   await testMultiPhotoEntryClearsViaRecognizeButton();
@@ -1209,6 +1318,8 @@ async function testPhotoStopBeforeFirstLandingThenResumeCompletes() {
   testTextbookPanelRedrawPreservesParentBookChoice();
   await testPhotoStopDropsLateResultAndResumeRunsOnlyPending();
   await testPhotoStopBeforeFirstLandingThenResumeCompletes();
+  await testRetryChipGatedWhileAnotherPhotoRunsAndDuringWindDown();
+  await testSubjectSwitchAfterSettledStopHidesRetryChip();
 
   if (failures) {
     console.error('test-parent-photo-workflow: ' + failures + ' of ' + checks + ' checks failed');
