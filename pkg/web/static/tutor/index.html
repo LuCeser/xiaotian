@@ -136,6 +136,7 @@
     script tag; loading it here would throw and break the page).
   -->
   <script src="js/rt-client.js?v=20261016a"></script>
+  <script src="js/rt-check-receipt.js?v=20261030check"></script>
   <script src="js/rt-capture.js?v=20261012capture-fix"></script>
   <script src="js/rt-playback.js?v=20261024reset"></script>
   <script src="js/rt-photo.js?v=20261008a"></script>
@@ -304,7 +305,7 @@
       // only disabled/pending UI changes at press time). ocr is the
       // ocr_result mirror (13.1-03): display-only recognized text next to
       // each row; the verdicts still come from check_verdicts alone.
-      var check = { active: false, words: [], verdicts: {}, ocr: {}, submitPending: false, resultText: '' };
+      var check = { active: false, words: [], verdicts: {}, ocr: {}, submitPending: false, resultText: '', resultKind: '' };
 
       // WR-01 (13.1-08): the ONE cross-lesson reset — a new session's
       // session_ready fully clears the previous lesson's check panel, both
@@ -320,6 +321,7 @@
         check.ocr = {};
         check.submitPending = false;
         check.resultText = '';
+        check.resultKind = '';
         $('rt-check').hidden = true;
       }
 
@@ -531,6 +533,13 @@
         submit.disabled = !allChecked() || check.submitPending || terminalDraining;
         submit.addEventListener('click', sendSubmit);
         panel.appendChild(submit);
+
+        if (check.resultText) {
+          var resultEl = document.createElement('p');
+          resultEl.className = 'rt-check-result';
+          resultEl.textContent = check.resultText;
+          panel.appendChild(resultEl);
+        }
       }
 
       function sendVerdict(index, correct) {
@@ -840,6 +849,7 @@
         check.ocr = {};
         check.submitPending = false;
         check.resultText = '';
+        check.resultKind = '';
         lesson.words = check.words.slice();
         renderProgress();
         renderCheckPanel();
@@ -882,22 +892,20 @@
       client.on('review_result', function (m) {
         check.submitPending = false;
         if (!m) return;
-        // Honest copy from the REAL sets — partial/zero updates are never
-        // dressed up as success (prohibition P3, S-05).
-        if (m.requested > 0 && m.updated < m.requested) {
-          check.resultText = '保存了 ' + m.updated + ' / ' + m.requested + ' 个，别担心，下次会补上。';
-        } else if (m.requested > 0 && poemTask) {
-          // Issue #12: the poem's save scope is ONE whole work — never
-          // per-line wording.
-          check.resultText = '整首背默结果保存好啦。';
+        if (m.requested > 0 && poemTask) {
+          check.resultKind = m.updated >= m.requested ? 'saved' : 'partial';
+          check.resultText = m.updated >= m.requested
+            ? '整首背默结果保存好啦。'
+            : formatCheckReceipt(m.requested, m.updated, m.missing || []).text;
         } else if (m.requested > 0 && passageTask) {
-          // Issue #14: the passage's save scope is ONE range — never
-          // per-paragraph wording.
-          check.resultText = '这次的背默结果保存好啦。';
-        } else if (m.requested > 0) {
-          check.resultText = '学习记录保存好了，' + m.requested + ' 个词都记上啦。';
+          check.resultKind = m.updated >= m.requested ? 'saved' : 'partial';
+          check.resultText = m.updated >= m.requested
+            ? '这次的背默结果保存好啦。'
+            : formatCheckReceipt(m.requested, m.updated, m.missing || []).text;
         } else {
-          check.resultText = '这次没有要保存的学习记录。';
+          var receipt = formatCheckReceipt(m.requested, m.updated, m.missing || []);
+          check.resultText = receipt.text;
+          check.resultKind = receipt.kind;
         }
         renderCheckPanel();
         renderProgress();

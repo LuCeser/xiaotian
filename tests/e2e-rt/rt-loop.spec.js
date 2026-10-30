@@ -269,7 +269,7 @@ test('complete classroom runs on a single getUserMedia authorization', async ({ 
 
   // The check panel kept the honest full-save copy from review_result.
   const checkObs = await page.evaluate(() => window.__rtTutor.observe().check);
-  expect(checkObs.resultText).toContain('保存好了');
+  expect(checkObs.resultText).toContain('复习安排已更新');
 });
 
 test('interrupt during the second announcement bumps the epoch and the lesson still completes', async ({ page }) => {
@@ -586,9 +586,10 @@ test('partial save renders the honest M/N copy, never fabricated success', async
   // 3 words, all marked correct — but the mock saves only 2 of 3.
   await driveCheckStage(page);
 
-  // review_result copy is honest: 保存了 2 / 3, not full success.
+  // review_result copy is honest: partial save, not full success wording.
   const checkObs = await page.evaluate(() => window.__rtTutor.observe().check);
-  expect(checkObs.resultText).toContain('保存了 2 / 3');
+  expect(checkObs.resultText).toContain('复习安排更新了 2 个');
+  expect(checkObs.resultText).not.toContain('保存好了');
 
   await expect
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
@@ -597,7 +598,7 @@ test('partial save renders the honest M/N copy, never fabricated success', async
   // The completion banner carries the same honest note.
   await expect(page.locator('#rt-banner')).toBeVisible();
   const bannerText = await page.textContent('#rt-banner');
-  expect(bannerText).toContain('保存了 2 / 3');
+  expect(bannerText).toContain('复习安排更新了 2 个');
 
   const s = await getFinalSession(page);
   expect(s.reviewResults).toBe(1);
