@@ -595,6 +595,18 @@ test('partial save renders the honest M/N copy, never fabricated success', async
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 5_000 })
     .toBe('grading');
 
+  // The session STAYS OPEN (#96): read the live mock state — no terminal
+  // close ever arrives, so getFinalSession would wait forever.
+  const session = await getSession(page);
+  expect(session.summaries).toBe(0);
+  expect(session.lessonCompleteSent).toBe(false);
+
+  // The REAL button (not an observe mirror): the retry wording and a
+  // usable submit gate (#96 P3-2).
+  const submitBtn = page.locator('#rt-check .rt-check-submit');
+  await expect(submitBtn).toHaveText('再保存一次');
+  await expect(submitBtn).toBeEnabled();
+
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
 
@@ -617,6 +629,9 @@ test('check-stage playback_ack_timeout does not drain or block submit', async ({
   expect(checkObs.allChecked).toBe(true);
   expect(checkObs.submitPending).toBe(false);
   expect(checkObs.resultText).toContain('复习安排已更新');
+  // #96 review P2-4: the check-stage timeout surfaces NO error copy — the
+  // box stays hidden (no code, no 「若卡住将自动结束」).
+  await expect(page.locator('#rt-error')).toBeHidden();
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });

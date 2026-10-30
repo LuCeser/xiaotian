@@ -524,14 +524,21 @@
         var submit = document.createElement('button');
         submit.type = 'button';
         submit.className = 'rt-btn rt-check-submit';
-        submit.textContent = check.submitPending ? '正在提交…' : '检查完了，提交';
+        var submitLabel = '检查完了，提交';
+        if (check.submitPending) {
+          submitLabel = '正在提交…';
+        } else if (check.resultKind === 'failed' || check.resultKind === 'partial') {
+          submitLabel = '再保存一次';
+        }
+        submit.textContent = submitLabel;
         // 提交 gates on the server echo covering EVERY word with a MANUAL
         // verdict — never on local taps, and an OCR prefill alone never
         // enables it (RT-07 + D-05; the server refuses such a submit too).
         // 13.1-08: terminalDraining joins the gate — after session_ended the
         // button reads 「检查完了，提交」 and stays disabled; no further
         // submit can ride a terminal session.
-        submit.disabled = !allChecked() || check.submitPending || terminalDraining;
+        submit.disabled = !allChecked() || check.submitPending || terminalDraining ||
+          check.resultKind === 'pending' || check.resultKind === 'saved';
         submit.addEventListener('click', sendSubmit);
         panel.appendChild(submit);
 
@@ -855,6 +862,7 @@
         check.resultText = '';
         check.resultKind = '';
         lesson.words = check.words.slice();
+        capture.stop();
         renderProgress();
         renderCheckPanel();
       });
@@ -877,7 +885,6 @@
           }
         });
         photo.reset(); // the recognition round is over — the button unlocks
-        capture.stop();
         renderCheckPanel();
       });
 
@@ -937,27 +944,27 @@
         renderProgress();
         var code = m && m.code ? m.code : '';
         playback.note('error:' + (code || 'unknown'));
-        showError(code, m && m.message);
-        // A failed/gated photo round must leave the 拍照检查 button usable
-        // (13.1-03): the OCR failure and unavailable paths answer an ErrorMsg
-        // with no ocr_result — unlock the controller here.
         photo.reset();
         if (code === 'playback_ack_timeout') {
           var checkOpen = check.active && !courseEnded && !check.resultText;
           if (checkOpen) {
             return;
           }
+          showError(code, m && m.message);
           // Honest degraded order: the timeout code itself is NOT a
           // completion proof — drain the scheduled audio, wait for the
           // natural session_ended + normal close. Never stopNow here.
           beginTerminalDrain();
-        } else if (code === 'lesson_unavailable') {
-          var retry = document.createElement('p');
-          retry.className = 'rt-error-retry';
-          retry.textContent = '点「开始上课」可以重新试一次。';
-          errorEl.appendChild(retry);
-          startBtn.disabled = false;
-          started = false;
+        } else {
+          showError(code, m && m.message);
+          if (code === 'lesson_unavailable') {
+            var retry = document.createElement('p');
+            retry.className = 'rt-error-retry';
+            retry.textContent = '点「开始上课」可以重新试一次。';
+            errorEl.appendChild(retry);
+            startBtn.disabled = false;
+            started = false;
+          }
         }
       });
 
@@ -1171,6 +1178,7 @@
               allChecked: allChecked(),
               submitPending: check.submitPending,
               resultText: check.resultText,
+              resultKind: check.resultKind,
               ocrRows: Object.keys(check.ocr).length,
               photoProcessing: photo.isProcessing
             }

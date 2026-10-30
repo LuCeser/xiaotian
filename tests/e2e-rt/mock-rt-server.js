@@ -1404,7 +1404,11 @@ wss.on('connection', (ws, req, query) => {
         const missing = n - updated;
         state.reviewResults += 1;
         send({ type: 'review_result', requested: n, updated, missing, unchecked: false });
-        announceSummary(correct, updated, n);
+        if (updated >= n) {
+          announceSummary(correct, updated, n);
+        } else {
+          send({ type: 'state', value: 'grading' });
+        }
         break;
       }
 
