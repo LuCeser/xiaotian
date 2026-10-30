@@ -84,6 +84,8 @@ const (
 	// StateMsg.Value. (Qualified as rt.StatePaused — the frozen database
 	// StatePaused = "PAUSED" constant belongs to another package and flow.)
 	StatePaused = "paused"
+	// StateGrading: the check panel is open; uplink is gated after the bridge.
+	StateGrading = "grading"
 )
 
 // Error codes carried by ErrorMsg.Code.

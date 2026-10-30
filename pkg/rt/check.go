@@ -252,7 +252,7 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	tm.tutor.correction = correction
 	tm.tutor.checkVerdicts = panelVerdicts
 	tm.tutor.restoreOutcomes(l.Outcomes)
-	tm.state = StateListening
+	tm.state = StateGrading
 	tm.sessionReadyAt = time.Now()
 	tm.mu.Unlock()
 	// Issue #12: a POEM row reopened into its check panel keeps its poem
@@ -289,6 +289,7 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 		Reason: reason,
 	})
 	tm.broadcastCheckVerdicts(s, panelVerdicts)
+	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateGrading})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
@@ -309,7 +310,7 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	// the announcement blocks on its playback ack — the same shape
 	// startDictationSession uses for the greeting (the ack must stay
 	// servable).
-	go tm.runAnnouncement(s, ctx, cancel, bridge, purposeCheckBridge, nil)
+	go tm.announceCheckQuiet(s, tm.currentEpoch(), ctx, cancel, bridge, bridge, purposeCheckBridge)
 }
 
 // enterCheck opens the check stage; reachable ONLY from advanceTarget's
@@ -446,7 +447,7 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	// the subject-ask pattern): snapshotting the live epoch here would let an
 	// interrupt that already bumped it play the check bridge over whatever
 	// classroom comes next.
-	tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, bridge, bridge, purposeCheckBridge, nil)
+	tm.announceCheckQuiet(s, epoch, ctx, cancel, bridge, bridge, purposeCheckBridge)
 }
 
 // handleCheckVerdict applies one screen verdict (the check_verdict control

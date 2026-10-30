@@ -565,6 +565,7 @@ type fakeWordSource struct {
 	fetchErr     error
 	reviewErr    error
 	reviewResult ReviewWriteResult
+	reviewBlock  chan struct{} // when non-nil, blocks until closed or ctx cancelled
 	due          [][]lesson.Word
 	dueByCat     map[string][]lesson.Word
 	peekByCat    map[string][]lesson.Word
@@ -609,7 +610,14 @@ func (f *fakeWordSource) FetchDueWords(_ context.Context, limit int, category st
 }
 
 // SubmitReview implements WordSource.
-func (f *fakeWordSource) SubmitReview(_ context.Context, results map[string]string, category string) (ReviewWriteResult, error) {
+func (f *fakeWordSource) SubmitReview(ctx context.Context, results map[string]string, category string) (ReviewWriteResult, error) {
+	if f.reviewBlock != nil {
+		select {
+		case <-f.reviewBlock:
+		case <-ctx.Done():
+			return ReviewWriteResult{}, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.submitCalls = append(f.submitCalls, results)
