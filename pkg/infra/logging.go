@@ -104,6 +104,10 @@ type ZapLogger struct {
 	// without decoding zap's internal representation. Mirrors D-25 context
 	// propagation.
 	baseFields []Field
+
+	// closer closes file-backed log output when non-nil. stderr/stdout and
+	// test buffers leave this nil.
+	closer io.Closer
 }
 
 // ensure ZapLogger satisfies Logger at compile time.
@@ -136,7 +140,13 @@ func NewLogger(cfg LogConfig) (Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open log output %q: %w", cfg.Output, err)
 	}
-	logger := newLoggerWithWriter(w, cfg)
+	var closer io.Closer
+	if cfg.Output != "stdout" && cfg.Output != "stderr" && cfg.Output != "" {
+		if f, ok := w.(*os.File); ok {
+			closer = f
+		}
+	}
+	logger := newLoggerWithWriter(w, cfg, closer)
 	logger.Info("logger ready",
 		F("level", cfg.Level),
 		F("format", cfg.Format),
@@ -161,7 +171,7 @@ func NewNoOpLogger() Logger {
 // function never returns an error — invalid level strings fall back to
 // info-level with the assumption that Config.Validate (or NewLogger's
 // pre-check) has already rejected them.
-func newLoggerWithWriter(w io.Writer, cfg LogConfig) Logger {
+func newLoggerWithWriter(w io.Writer, cfg LogConfig, closer io.Closer) Logger {
 	level := zapcore.InfoLevel
 	if parsed, err := zapcore.ParseLevel(cfg.Level); err == nil {
 		level = parsed
@@ -182,7 +192,7 @@ func newLoggerWithWriter(w io.Writer, cfg LogConfig) Logger {
 	// info via zap.AddCaller(), the reported caller is the infra.Logger
 	// invocation site rather than this wrapper's delegation line.
 	zl := zap.New(core, zap.AddCallerSkip(1))
-	return &ZapLogger{l: zl}
+	return &ZapLogger{l: zl, closer: closer}
 }
 
 // selectWriter resolves cfg.Output to an io.Writer following the contract
@@ -231,15 +241,26 @@ func (z *ZapLogger) With(fields ...Field) Logger {
 	accumulated := make([]Field, 0, len(z.baseFields)+len(fields))
 	accumulated = append(accumulated, z.baseFields...)
 	accumulated = append(accumulated, fields...)
-	return &ZapLogger{
+	child := &ZapLogger{
 		l:          z.l.With(zapFields...),
 		baseFields: accumulated,
+		closer:     z.closer,
 	}
+	return child
 }
 
 // Sync implements Logger.
 func (z *ZapLogger) Sync() error {
 	return z.l.Sync()
+}
+
+// Close releases file-backed log output when this logger owns the handle.
+// Call Sync before Close on process exit. stderr/stdout loggers are no-ops.
+func (z *ZapLogger) Close() error {
+	if z.closer == nil {
+		return nil
+	}
+	return z.closer.Close()
 }
 
 // Zap returns the underlying *zap.Logger for interop with packages (e.g.

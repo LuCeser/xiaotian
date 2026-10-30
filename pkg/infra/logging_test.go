@@ -43,7 +43,7 @@ func TestStructuredLogging(t *testing.T) {
 		Level:  "info",
 		Format: "json",
 		Output: "stderr",
-	})
+	}, nil)
 	logger.Info("hello", Field{Key: "user", Value: "alice"})
 	if err := logger.Sync(); err != nil {
 		t.Fatalf("Sync: %v", err)
@@ -92,7 +92,7 @@ func TestLogLevels(t *testing.T) {
 				Level:  "debug",
 				Format: "json",
 				Output: "stderr",
-			})
+			}, nil)
 			tc.emit(logger, "body")
 			_ = logger.Sync()
 
@@ -120,7 +120,7 @@ func TestContextFieldPropagation(t *testing.T) {
 		Level:  "info",
 		Format: "json",
 		Output: "stderr",
-	})
+	}, nil)
 
 	child := base.With(F("request_id", "r-1"))
 	child.Info("first")
@@ -164,7 +164,7 @@ func TestFieldSanitization(t *testing.T) {
 		Level:  "info",
 		Format: "json",
 		Output: "stderr",
-	})
+	}, nil)
 	malicious := "line1\nline2\rinjected"
 	logger.Info("sanitized", F("payload", malicious))
 	_ = logger.Sync()
@@ -223,6 +223,12 @@ func TestNewLoggerFileOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLogger: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = logger.Sync()
+		if z, ok := logger.(*ZapLogger); ok {
+			_ = z.Close()
+		}
+	})
 	logger.Info("boot-info-line")
 	logger.Debug("debug-dropped")
 	if err = logger.Sync(); err != nil {
@@ -301,7 +307,7 @@ func TestLevelFiltering(t *testing.T) {
 		Level:  "warn",
 		Format: "json",
 		Output: "stderr",
-	})
+	}, nil)
 
 	logger.Debug("debug-should-drop")
 	logger.Info("info-should-drop")
