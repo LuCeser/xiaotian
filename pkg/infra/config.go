@@ -225,6 +225,16 @@ type RTConfig struct {
 	// anything above 3600000 (1h) is rejected by Validate.
 	WordTimeoutMs int `json:"wordTimeoutMs" mapstructure:"wordTimeoutMs"`
 
+	// ProcessingTimeout bounds one dictation turn's whole /rt context — the
+	// 「思考中」 phase (ASR + intent classification) included. The turn ctx
+	// carries it as a deadline (rt.TurnManagerConfig.ProcessingTimeout), so a
+	// hung upstream surfaces as the thinking_timeout ErrorMsg and the
+	// classroom returns to listening instead of sitting on the chip forever
+	// (Issue #94 U5). Default 20s; 0 means "use the default"; negative or
+	// outside 5s–60s is rejected by Validate. There is deliberately no
+	// "off" value — off would restore the indefinite hang this key bounds.
+	ProcessingTimeout time.Duration `json:"processingTimeout" mapstructure:"processingTimeout"`
+
 	// ForceStudentMode is the 13.3-05 production anti-fat-finger switch
 	// (ROADMAP success criterion 6): when true, the server FORCES the
 	// student projection for every /rt session — the client-supplied
@@ -243,11 +253,12 @@ type RTConfig struct {
 
 // Validate enforces the RTConfig rules (D-04 fail-fast): origins non-empty
 // with no wildcard "*", WordTimeoutMs in range (0 → default 60000; negative
-// or above 3600000 rejected), and — when LessonID is set — a lightweight
-// sanity check (≤64 runes, no whitespace, no path separators). An empty
-// LessonID is legal and means the daily "r0-YYYYMMDD" derivation. On any
-// failure it returns an error wrapping ErrConfigInvalid so callers branch
-// with errors.Is(err, infra.ErrConfigInvalid).
+// or above 3600000 rejected), ProcessingTimeout in range (0 → default 20s;
+// negative or outside 5s–60s rejected), and — when LessonID is set — a
+// lightweight sanity check (≤64 runes, no whitespace, no path separators).
+// An empty LessonID is legal and means the daily "r0-YYYYMMDD" derivation.
+// On any failure it returns an error wrapping ErrConfigInvalid so callers
+// branch with errors.Is(err, infra.ErrConfigInvalid).
 func (c RTConfig) Validate() error {
 	if len(c.AllowedOrigins) == 0 {
 		return errors.Wrap(ErrConfigInvalid,
@@ -266,6 +277,14 @@ func (c RTConfig) Validate() error {
 	if c.WordTimeoutMs > 3600000 {
 		return errors.Wrap(ErrConfigInvalid,
 			fmt.Sprintf("rt.wordTimeoutMs must not exceed 3600000 (1h), got %d", c.WordTimeoutMs))
+	}
+	if c.ProcessingTimeout < 0 {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("rt.processingTimeout must not be negative, got %v", c.ProcessingTimeout))
+	}
+	if c.ProcessingTimeout != 0 && (c.ProcessingTimeout < 5*time.Second || c.ProcessingTimeout > 60*time.Second) {
+		return errors.Wrap(ErrConfigInvalid,
+			fmt.Sprintf("rt.processingTimeout must be 5s–60s (or 0 for the 20s default), got %v", c.ProcessingTimeout))
 	}
 	if c.LessonID != "" {
 		if len(c.LessonID) > 64 {
@@ -1036,6 +1055,10 @@ func DefaultConfig() Config {
 			// 60s per-word confirm wait; the knob exists for real-device
 			// calibration runs to shorten.
 			WordTimeoutMs: 60000,
+			// 20s 「思考中」 turn deadline (Issue #94 U5): a hung ASR or
+			// classification upstream fails the turn visibly instead of
+			// hanging the chip forever.
+			ProcessingTimeout: 20 * time.Second,
 		},
 	}
 }
@@ -1541,6 +1564,8 @@ func bindEnvForAllLeaves(v *viper.Viper) {
 		"rt.heartbeatInterval",
 		"rt.lessonId",
 		"rt.wordTimeoutMs",
+		// Issue #94 U5: the 「思考中」 turn deadline (5s–60s, 0 → 20s).
+		"rt.processingTimeout",
 		// 13.3-05 production anti-fat-finger switch (success criterion 6).
 		"rt.forceStudentMode",
 	}
