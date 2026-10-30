@@ -30,12 +30,6 @@ func (l *thinkingHangLLM) Chat(ctx context.Context, _ []mimo.Message, _ ...mimo.
 	return mimo.ChatResponse{}, ctx.Err()
 }
 
-func (l *thinkingHangLLM) callCount() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.calls
-}
-
 // ttThinkingFixture boots a one-word classroom with a short 「思考中」
 // deadline and fakes the VAD clocks open (the same 1ms grace/tail +
 // expired-echo-tail trick the VAD gating tests use) so an IngestAudio
