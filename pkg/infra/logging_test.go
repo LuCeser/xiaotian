@@ -225,7 +225,7 @@ func TestNewLoggerFileOutput(t *testing.T) {
 	}
 	logger.Info("boot-info-line")
 	logger.Debug("debug-dropped")
-	if err := logger.Sync(); err != nil {
+	if err = logger.Sync(); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 

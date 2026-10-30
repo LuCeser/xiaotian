@@ -489,8 +489,8 @@ type connLogEntry struct {
 // connLogRecorder is a level-aware infra.Logger (captureLogger in
 // timing_test.go drops the level, and U3 asserts info/warn).
 type connLogRecorder struct {
-	mu      sync.Mutex
 	entries []connLogEntry
+	mu      sync.Mutex
 }
 
 func (c *connLogRecorder) log(level, msg string, fields []infra.Field) {
@@ -557,7 +557,7 @@ func TestConnLifecycleLogs(t *testing.T) {
 	// Recognizable binary payload: whatever the transport logs, these bytes
 	// must never appear in an entry (no frame contents in logs).
 	pcm := []byte{0xDE, 0xAD, 0xBE, 0xEF}
-	if err := conn.WriteMessage(websocket.BinaryMessage, pcm); err != nil {
+	if err = conn.WriteMessage(websocket.BinaryMessage, pcm); err != nil {
 		t.Fatalf("write audio: %v", err)
 	}
 	if !waitFor(t, 2*time.Second, func() bool { return fm.audioCount() >= 1 }) {

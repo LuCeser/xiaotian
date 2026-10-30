@@ -430,11 +430,11 @@ type connWriter struct {
 	control chan []byte
 	audio   chan []byte
 	logger  infra.Logger
-	connID  string
 
 	cancel context.CancelFunc
 	done   chan struct{}
 	ctx    context.Context
+	connID string
 
 	droppedAudio atomic.Int64
 }

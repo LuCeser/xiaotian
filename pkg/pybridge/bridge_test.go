@@ -377,7 +377,7 @@ func TestRunDueSuccessLogsInfoNoStdout(t *testing.T) {
 	}
 	dir := t.TempDir()
 	script := filepath.Join(dir, "vocab_manager.sh")
-	if err := os.WriteFile(script, []byte("echo '[]'\n"), 0o644); err != nil {
+	if err := os.WriteFile(script, []byte("echo '[]'\n"), 0o600); err != nil {
 		t.Fatalf("write fake script: %v", err)
 	}
 
