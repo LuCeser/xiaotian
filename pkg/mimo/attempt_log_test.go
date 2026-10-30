@@ -3,6 +3,7 @@ package mimo
 import (
 	"bytes"
 	"context"
+	"math"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -251,5 +252,150 @@ func TestTranscribeAttemptLogsParentDeadlineAsTimeout(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&calls); n != 1 {
 		t.Errorf("server saw %d requests, want 1", n)
+	}
+}
+
+// flushOKHangBodyHandler sends HTTP 200 headers then blocks on the body so the
+// client times out while reading (not while dialing).
+func flushOKHangBodyHandler(calls *int32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}
+}
+
+// TestChatAttemptLogsBodyReadTimeoutAfterHeaders pins Codex P2 #2: after the
+// upstream flushes HTTP 200, a client Timeout on body read is error_class
+// timeout at warn level with status=200, not decode/error.
+func TestChatAttemptLogsBodyReadTimeoutAfterHeaders(t *testing.T) {
+	var calls int32
+	server, cleanup := mockTTSServer(flushOKHangBodyHandler(&calls))
+	defer cleanup()
+
+	logger := newTestLogger()
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-api-key",
+		BaseURL:    server.URL,
+		Timeout:    150 * time.Millisecond,
+		MaxRetries: 0,
+		RetryDelay: time.Millisecond,
+	}, logger)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+	c := client.(*mimoClient)
+	c.config.MaxRetries = 0
+
+	_, err = client.Chat(context.Background(), []Message{{Role: "user", Content: "你好"}})
+	if err == nil {
+		t.Fatal("Chat: want timeout error")
+	}
+
+	finished := findAttemptEntries(logger, "upstream attempt finished", opChat)
+	if len(finished) != 1 {
+		t.Fatalf("expected 1 finish entry, got %d (%+v)", len(finished), logger.logs)
+	}
+	fin := finished[0]
+	if fin["level"] != "warn" {
+		t.Errorf("finish level = %v, want warn (body read timeout)", fin["level"])
+	}
+	if got, _ := attemptField(fin, "error_class").(string); got != classTimeout {
+		t.Errorf("error_class = %v, want %q", got, classTimeout)
+	}
+	if got, _ := attemptField(fin, "status").(int); got != 200 {
+		t.Errorf("status = %v, want 200 (headers received)", got)
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Errorf("server saw %d requests, want 1 (no retry on timeout)", n)
+	}
+}
+
+// TestChatAttemptLogsEncodingFailureStatusZero pins Codex P2 #3: JSON encode
+// failures never send a request; logged status must be 0, not 200.
+func TestChatAttemptLogsEncodingFailureStatusZero(t *testing.T) {
+	server, cleanup := mockTTSServer(defaultChatHandler)
+	defer cleanup()
+
+	logger := newTestLogger()
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-api-key",
+		BaseURL:    server.URL,
+		Timeout:    5 * time.Second,
+		MaxRetries: 0,
+	}, logger)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	_, err = client.Chat(context.Background(), []Message{{Role: "user", Content: "x"}},
+		WithTemperature(math.NaN()))
+	if !errors.Is(err, ErrEncodingFailed) {
+		t.Fatalf("Chat error = %v, want ErrEncodingFailed", err)
+	}
+
+	finished := findAttemptEntries(logger, "upstream attempt finished", opChat)
+	if len(finished) != 1 {
+		t.Fatalf("expected 1 finish entry, got %d", len(finished))
+	}
+	if got, _ := attemptField(finished[0], "status").(int); got != 0 {
+		t.Errorf("status = %v, want 0 (no HTTP response)", got)
+	}
+	if got, _ := attemptField(finished[0], "error_class").(string); got != classDecode {
+		t.Errorf("error_class = %v, want %q", got, classDecode)
+	}
+}
+
+// flush503HangBodyHandler returns 503 then blocks on the error body read.
+func flush503HangBodyHandler(calls *int32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(calls, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}
+}
+
+// TestChatAttemptLogsHTTPErrorStatusWhenBodyReadTimesOut pins Codex P2 #3:
+// when status 503 was received but reading the error body times out, the log
+// still records status=503.
+func TestChatAttemptLogsHTTPErrorStatusWhenBodyReadTimesOut(t *testing.T) {
+	var calls int32
+	server, cleanup := mockTTSServer(flush503HangBodyHandler(&calls))
+	defer cleanup()
+
+	logger := newTestLogger()
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-api-key",
+		BaseURL:    server.URL,
+		Timeout:    150 * time.Millisecond,
+		MaxRetries: 0,
+	}, logger)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+	c := client.(*mimoClient)
+	c.config.MaxRetries = 0
+
+	_, err = client.Chat(context.Background(), []Message{{Role: "user", Content: "你好"}})
+	if err == nil {
+		t.Fatal("Chat: want error")
+	}
+
+	finished := findAttemptEntries(logger, "upstream attempt finished", opChat)
+	if len(finished) != 1 {
+		t.Fatalf("expected 1 finish entry, got %d", len(finished))
+	}
+	if got, _ := attemptField(finished[0], "status").(int); got != http.StatusServiceUnavailable {
+		t.Errorf("status = %v, want %d", got, http.StatusServiceUnavailable)
 	}
 }
