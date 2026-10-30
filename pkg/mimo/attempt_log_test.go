@@ -410,3 +410,58 @@ func TestChatAttemptLogsHTTPErrorStatusWhenBodyReadTimesOut(t *testing.T) {
 		t.Errorf("finish level = %v, want warn (error-body read timeout)", fin["level"])
 	}
 }
+
+// upstreamTimeoutText400Handler answers 400 with an upstream error message
+// that embeds the local timeout marker strings, standing in for an upstream
+// whose prose collides with the classifier's text probes.
+func upstreamTimeoutText400Handler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_, _ = w.Write([]byte(`{"error":{"code":"invalid_request","message":"upstream gateway: context deadline exceeded while forwarding (i/o timeout)","type":"invalid_request_error"}}`))
+}
+
+// TestChatAttemptLogsUpstreamTimeoutTextAsHTTP pins review-2 P2-2: an
+// upstream 400/401 whose error body text happens to contain the local
+// timeout markers must still log error_class=http at error level. The string
+// fallback only ever applies to our own ErrNetworkError wraps, never to
+// upstream prose carried inside an APIError.
+func TestChatAttemptLogsUpstreamTimeoutTextAsHTTP(t *testing.T) {
+	server, cleanup := mockTTSServer(upstreamTimeoutText400Handler)
+	defer cleanup()
+
+	logger := newTestLogger()
+	client, err := NewClient(ClientConfig{
+		APIKey:     "test-api-key",
+		BaseURL:    server.URL,
+		Timeout:    5 * time.Second,
+		MaxRetries: 3,
+		RetryDelay: time.Millisecond,
+	}, logger)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	_, err = client.Chat(context.Background(), []Message{{Role: "user", Content: "你好"}})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Chat error = %v, want ErrInvalidRequest (400)", err)
+	}
+
+	finished := findAttemptEntries(logger, "upstream attempt finished", opChat)
+	if len(finished) != 1 {
+		t.Fatalf("expected 1 finish entry, got %d (%+v)", len(finished), logger.logs)
+	}
+	fin := finished[0]
+	if got, _ := attemptField(fin, "error_class").(string); got != classHTTP {
+		t.Errorf("error_class = %v, want %q (upstream prose must not fake a timeout)", got, classHTTP)
+	}
+	if fin["level"] != "error" {
+		t.Errorf("finish level = %v, want error (non-retryable 400)", fin["level"])
+	}
+	if got, _ := attemptField(fin, "status").(int); got != http.StatusBadRequest {
+		t.Errorf("status = %v, want %d", got, http.StatusBadRequest)
+	}
+	if n := len(findAttemptEntries(logger, "upstream attempt started", opChat)); n != 1 {
+		t.Errorf("attempts = %d, want 1 (400 must not retry)", n)
+	}
+}

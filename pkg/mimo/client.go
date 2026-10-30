@@ -159,10 +159,18 @@ func (c *mimoClient) logAttemptEnd(ctx context.Context, op, model string, attemp
 
 // classifyAttemptErr maps a failed (or nil) attempt error to the logged
 // error_class. HTTP status for the log line comes from the execute* method,
-// not from error type guessing.
+// not from error type guessing. Typed signals win: an APIError means a full
+// HTTP response arrived and its Message embeds upstream body text, so it is
+// checked BEFORE the timeout probes — upstream prose must never override the
+// real class (a 400 whose message happens to mention "context deadline
+// exceeded" is still an http error, issue #94 review P2).
 func classifyAttemptErr(ctx context.Context, err error) string {
 	if err == nil {
 		return classOK
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return classHTTP
 	}
 	if ctx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
 		return classTimeout
@@ -173,21 +181,15 @@ func classifyAttemptErr(ctx context.Context, err error) string {
 	}
 	// http.Client.Timeout errors arrive wrapped as ErrNetworkError with the
 	// original net.Error flattened into the message text (errors.Wrap keeps
-	// only the text), so the probe above misses them; the text is the only
-	// remaining signal.
-	if msg := err.Error(); strings.Contains(msg, "Client.Timeout exceeded") ||
-		strings.Contains(msg, "context deadline exceeded") {
-		return classTimeout
-	}
-	if isNetTimeout(err) {
+	// only the text), so the probes above miss them; the text is the only
+	// remaining signal. The match is restricted to our own ErrNetworkError
+	// wraps — never arbitrary error text — so upstream error bodies cannot
+	// trip it.
+	if errors.Is(err, ErrNetworkError) && isNetTimeout(err) {
 		return classTimeout
 	}
 	if ctx.Err() == context.Canceled || errors.Is(err, ErrContextCancelled) {
 		return classCancelled
-	}
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
-		return classHTTP
 	}
 	if errors.Is(err, ErrInvalidResponse) || errors.Is(err, ErrEncodingFailed) ||
 		errors.Is(err, ErrDecodingFailed) || errors.Is(err, ErrEmptyTranscription) {
@@ -197,7 +199,14 @@ func classifyAttemptErr(ctx context.Context, err error) string {
 }
 
 // isNetTimeout reports whether err (including wraps) is a network timeout,
-// including body reads after response headers arrived.
+// including body reads after response headers arrived. The text probes cover
+// errors whose type chain was flattened by an errors.Wrap; the markers come
+// from net/http and the context runtime: client timeouts ("Client.Timeout
+// exceeded"), socket deadlines ("i/o timeout"), and the modern body-read
+// cancel text "context deadline exceeded (Client.Timeout or context
+// cancellation while reading body)". This helper is only ever applied to
+// errors produced by our own transport/decode stack, never to upstream body
+// text.
 func isNetTimeout(err error) bool {
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
@@ -205,7 +214,8 @@ func isNetTimeout(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "Client.Timeout exceeded") ||
-		strings.Contains(msg, "i/o timeout")
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "context deadline exceeded")
 }
 
 // Synthesize generates audio from text input
