@@ -28,4 +28,10 @@ const { formatCheckReceipt } = require('../pkg/web/static/tutor/js/rt-check-rece
   assert.strictEqual(r.text, '这次没有要保存的学习记录。');
 }
 
+{
+  const r = formatCheckReceipt(2, 0, ['a', 'b'], { pending: true });
+  assert.strictEqual(r.kind, 'pending');
+  assert.strictEqual(r.text, '批改结果已保留。复习安排待核实。');
+}
+
 console.log('test-rt-check-receipt.js: ok');

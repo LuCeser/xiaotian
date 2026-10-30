@@ -466,6 +466,8 @@ type TurnManager struct {
 	// closed suppresses duplicate session_end emissions when the transport
 	// calls Close after an end_session already closed the session.
 	closed bool
+	// checkRetryBusy guards concurrent check_submit retries (Issue #96 U3).
+	checkRetryBusy bool
 }
 
 // Compile-time check: TurnManager satisfies the transport's SessionManager

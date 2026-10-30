@@ -955,20 +955,22 @@ func TestCheckSubmitZeroUpdatedWithNilErrorIsNotSuccess(t *testing.T) {
 func TestCheckSubmitReviewFailureSpeaksHonestSuffix(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	words.reviewErr = fmt.Errorf("pybridge run review failed")
-	tm, s, log, _ := ttConfirmToCheckSummary(t, words)
+	tm, s, log, _ := ttDriveToCheck(t, ttCards("苹果"), words)
+	ttCheckAll(t, tm, s, 1)
+	ttSubmitCheck(t, tm, s)
 
 	if got := len(words.submissions()); got != 1 {
 		t.Fatalf("SubmitReview calls = %d, want exactly 1", got)
 	}
-	ttLastSentenceEventually(t, s, "没有保存成功")
 	if got := ttEventCount(t, log, EventReviewSubmitted); got != 0 {
 		t.Errorf("review_submitted events = %d, want 0 (the write failed)", got)
 	}
 	if got := ttEventCount(t, log, EventError); got == 0 {
 		t.Error("no server-side error marker for the failed write")
 	}
-
-	ttAckSummaryAndEnd(t, tm, s, nil)
+	if s.countOf(TypeSessionEnded) != 0 {
+		t.Fatal("failed review must not end the session — the panel can retry")
+	}
 }
 
 // TestSaveReceiptCheckSubmit (13.3-01 tracer, behavior 5): the normal check

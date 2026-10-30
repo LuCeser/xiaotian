@@ -908,7 +908,9 @@
             ? '这次的背默结果保存好啦。'
             : formatCheckReceipt(m.requested, m.updated, m.missing || []).text;
         } else {
-          var receipt = formatCheckReceipt(m.requested, m.updated, m.missing || []);
+          var receipt = formatCheckReceipt(m.requested, m.updated, m.missing || [], {
+            pending: !!m.pending
+          });
           check.resultText = receipt.text;
           check.resultKind = receipt.kind;
         }

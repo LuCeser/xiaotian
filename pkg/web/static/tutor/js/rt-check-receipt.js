@@ -9,9 +9,13 @@
    * @param {number} requested
    * @param {number} updated
    * @param {string[]} [missing]
-   * @returns {{ kind: 'saved'|'partial'|'failed'|'empty', text: string }}
+   * @param {{ pending?: boolean }} [opts]
+   * @returns {{ kind: 'saved'|'partial'|'failed'|'empty'|'pending', text: string }}
    */
-  function formatCheckReceipt(requested, updated, missing) {
+  function formatCheckReceipt(requested, updated, missing, opts) {
+    if (opts && opts.pending) {
+      return { kind: 'pending', text: '批改结果已保留。复习安排待核实。' };
+    }
     var req = requested | 0;
     var upd = updated | 0;
     if (req <= 0) {

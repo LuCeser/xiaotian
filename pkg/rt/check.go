@@ -533,10 +533,9 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	}
 	if !checking {
 		if reviewSeen {
-			// In-session duplicate submit (a network retry or a second
-			// tap): the first review_result already went out — replay
-			// NOTHING (no second FSRS write, no second review_result, no
-			// second summary; Pitfall 6). A sanitized diagnostic only.
+			if tm.handleCheckReviewRetry(s, m) {
+				return
+			}
 			tm.recorder.Emit(EventError,
 				infra.F("code", ErrCodeInvalidMessage),
 				infra.F("duplicate", "check_submit"),
@@ -819,6 +818,15 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 	tm.tutor.reviewResult = result
 	tm.mu.Unlock()
 	_ = s.SendControl(result)
+
+	allSaved := !saveFailed && result.Updated == result.Requested && result.Requested > 0
+	if !allSaved {
+		tm.mu.Lock()
+		epoch := tm.epoch
+		tm.mu.Unlock()
+		tm.enterGradingAt(s, epoch)
+		return
+	}
 
 	summary := checkedSummaryText(total, correct, result.Updated, requested, saveFailed)
 	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)

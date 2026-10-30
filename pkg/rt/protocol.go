@@ -623,6 +623,8 @@ type ReviewResultMsg struct {
 	Updated   int    `json:"updated"`
 	Missing   int    `json:"missing"`
 	Unchecked bool   `json:"unchecked"`
+	// Pending: the save receipt never completed — retry must not write again.
+	Pending bool `json:"pending,omitempty"`
 }
 
 // WordRevealedMsg carries one word's plaintext reveal (server → client, the
