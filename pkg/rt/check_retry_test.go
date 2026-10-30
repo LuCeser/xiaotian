@@ -1,9 +1,9 @@
 package rt
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -11,7 +11,10 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 )
 
-func receiptStoreForTest(t *testing.T) *lesson.ReceiptStore {
+// receiptStoreForTest returns a migrated receipt store plus its *sql.DB —
+// the db lets a test break ONE store path in isolation (e.g. an INSERT
+// ABORT trigger that leaves the SELECT path working).
+func receiptStoreForTest(t *testing.T) (*lesson.ReceiptStore, *sql.DB) {
 	t.Helper()
 	db, err := database.Open(filepath.Join(t.TempDir(), "retry-receipt.db"))
 	if err != nil {
@@ -26,11 +29,59 @@ func receiptStoreForTest(t *testing.T) *lesson.ReceiptStore {
 	if err != nil {
 		t.Fatalf("NewReceiptStore: %v", err)
 	}
-	return store
+	return store, db
 }
 
-func TestCheckReviewRetryAfterFailure(t *testing.T) {
-	receipts := receiptStoreForTest(t)
+// TestCheckRetryDuplicateDuringSummaryAck (review P2-1): while the FIRST
+// full-save summary is still waiting for its sentence_ack, a duplicate
+// check_submit must REPLAY the receipt and never speak a second summary.
+// The first submit's ending does not hold the in-flight marker, so this is
+// exactly the window where a re-run ending would double-speak the summary
+// and starve the read loop's ack wait.
+func TestCheckRetryDuplicateDuringSummaryAck(t *testing.T) {
+	receipts, _ := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+	ttSubmitCheck(t, tm, s)
+
+	// The summary is streaming; wait for it to START, then let the rest of
+	// the stream settle before counting.
+	results := s.countOf(TypeReviewResult)
+	spoken := s.countOf(TypeTeacherSentence)
+	if !waitFor(t, 5*time.Second, func() bool {
+		return s.countOf(TypeTeacherSentence) > spoken
+	}) {
+		t.Fatal("the full-save summary never spoke")
+	}
+	time.Sleep(400 * time.Millisecond)
+	stable := s.countOf(TypeTeacherSentence)
+
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-dup-during-ack"}))
+	time.Sleep(400 * time.Millisecond)
+	if got := s.countOf(TypeTeacherSentence); got != stable {
+		t.Fatalf("duplicate submit during the summary ack spoke again: %d sentences -> %d", stable, got)
+	}
+	if got := s.countOf(TypeReviewResult); got != results+1 {
+		t.Fatalf("review_result count = %d, want %d (the duplicate replays the receipt)", got, results+1)
+	}
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want still 1 (the replay writes nothing)", got)
+	}
+
+	// The one summary still ends the session once its ack arrives.
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended never arrived after the summary ack")
+	}
+}
+
+func TestCheckRetryAfterFailure(t *testing.T) {
+	receipts, _ := receiptStoreForTest(t)
 	cards := ttCards("苹果", "香蕉")
 	words := newFakeWords(cards)
 	words.reviewErr = errors.New("review failed")
@@ -72,10 +123,16 @@ func TestCheckReviewRetryAfterFailure(t *testing.T) {
 	if got := s.countOf(TypeReviewResult); got < 2 {
 		t.Fatalf("review_result count = %d, want at least 2", got)
 	}
+	summaryCountBefore := s.countOf(TypeTeacherSentence)
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-retry-3"}))
+	time.Sleep(200 * time.Millisecond)
+	if got := s.countOf(TypeTeacherSentence); got != summaryCountBefore {
+		t.Fatalf("teacher_sentence count after full-save replay = %d, want unchanged %d", got, summaryCountBefore)
+	}
 }
 
-func TestCheckReviewRetryPartialOnlyMissingWords(t *testing.T) {
-	receipts := receiptStoreForTest(t)
+func TestCheckRetryPartialOnlyMissingWords(t *testing.T) {
+	receipts, _ := receiptStoreForTest(t)
 	cards := ttCards("苹果", "香蕉")
 	words := newFakeWords(cards)
 	words.reviewResult = ReviewWriteResult{
@@ -105,8 +162,14 @@ func TestCheckReviewRetryPartialOnlyMissingWords(t *testing.T) {
 	}
 }
 
-func TestCheckReviewRetryConcurrentSingleWrite(t *testing.T) {
-	receipts := receiptStoreForTest(t)
+// TestCheckRetryConcurrentSingleWrite: while one retry is parked inside its
+// SubmitReview, a second check_submit must be consumed by the in-flight
+// marker — silently: no second write AND no replayed receipt frame (the
+// marker check precedes the receipt read). With the marker removed, the
+// second request reads the retry's pending receipt and answers with a
+// pending review_result — the unchanged-frame assertion goes red.
+func TestCheckRetryConcurrentSingleWrite(t *testing.T) {
+	receipts, _ := receiptStoreForTest(t)
 	cards := ttCards("苹果")
 	words := newFakeWords(cards)
 	words.reviewErr = errors.New("fail once")
@@ -119,21 +182,86 @@ func TestCheckReviewRetryConcurrentSingleWrite(t *testing.T) {
 	words.reviewErr = nil
 	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果"}}
 	block := make(chan struct{})
+	entered := make(chan struct{})
 	words.reviewBlock = block
-	var wg sync.WaitGroup
-	wg.Add(2)
+	words.reviewBlockEnter = entered
+
+	// Request A: the in-flight retry, parked INSIDE its SubmitReview (its
+	// receipt Begin has already landed by the time `entered` fires).
 	go func() {
-		defer wg.Done()
 		tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-a"}))
 	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first retry never reached its parked SubmitReview")
+	}
+
+	// Request B: arrives while A's write is in flight.
+	resultsBefore := s.countOf(TypeReviewResult)
+	doneB := make(chan struct{})
 	go func() {
-		defer wg.Done()
+		defer close(doneB)
 		tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-b"}))
 	}()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-doneB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent submit never returned while a retry was in flight")
+	}
+	if got := s.countOf(TypeReviewResult); got != resultsBefore {
+		t.Fatalf("review_result count = %d during an in-flight retry, want unchanged %d", got, resultsBefore)
+	}
+
 	close(block)
-	wg.Wait()
 	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 2 }) {
-		t.Fatalf("SubmitReview calls = %d, want 2 (one failed + one retry)", len(words.submissions()))
+		t.Fatalf("SubmitReview calls = %d, want 2 (one failed first pass + one retry)", len(words.submissions()))
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
+		t.Fatal("session_ended expected after the single successful retry")
+	}
+	if got := len(words.submissions()); got != 2 {
+		t.Fatalf("SubmitReview calls settled at %d, want 2", got)
+	}
+}
+
+// TestCheckRetryBeginFailureSkipsWrite: when the retry's receipt Begin
+// fails, the write must NOT run — without a fresh receipt row there is no
+// dedup basis for a later tap, so the honest answer is a zero-updated
+// review_result and a session left open for another try.
+func TestCheckRetryBeginFailureSkipsWrite(t *testing.T) {
+	receipts, db := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewErr = errors.New("fail once")
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+	ttSubmitCheck(t, tm, s) // the failed receipt is on record
+
+	words.reviewErr = nil
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
+	// Break Begin only: the ABORT trigger fails every receipt INSERT while
+	// ListByLesson (a SELECT) keeps answering.
+	if _, err := db.Exec("CREATE TRIGGER block_receipt_begin BEFORE INSERT ON lesson_save_receipts " +
+		"BEGIN SELECT RAISE(ABORT, 'begin blocked'); END"); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-begin-fail"}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) >= 2 }) {
+		t.Fatal("retry never answered after its receipt Begin failed")
+	}
+	results := s.controlsOf(t, TypeReviewResult)
+	last := results[len(results)-1]
+	if last["updated"] != float64(0) {
+		t.Fatalf("retry review_result updated = %v, want 0", last["updated"])
+	}
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want 1: a failed receipt Begin must not write", got)
+	}
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended = %d, want 0 (the retry stays open for another tap)", got)
 	}
 }
