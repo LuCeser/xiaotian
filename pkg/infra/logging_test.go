@@ -3,6 +3,7 @@ package infra
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -259,6 +260,44 @@ func TestNewLoggerFileOutput(t *testing.T) {
 	}
 	if !sawInfo {
 		t.Errorf("info entry missing from file output; contents: %q", string(raw))
+	}
+}
+
+// TestFileLoggerCloseReleasesHandle pins the review-2 P3 follow-up: Close
+// must actually release the file handle the logger owns — the first Close
+// succeeds and a second Close reports os.ErrClosed (os.File semantics, both
+// platforms). A no-op Close would return nil twice, so the resource release
+// cannot silently regress. stderr loggers Close as a nil no-op forever.
+func TestFileLoggerCloseReleasesHandle(t *testing.T) {
+	logger, err := NewLogger(LogConfig{
+		Level:  "info",
+		Format: "json",
+		Output: filepath.Join(t.TempDir(), "close.log"),
+	})
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	z, ok := logger.(*ZapLogger)
+	if !ok {
+		t.Fatalf("NewLogger returned %T, want *ZapLogger", logger)
+	}
+	closeErr := z.Close()
+	if closeErr != nil {
+		t.Fatalf("first Close: %v, want nil", closeErr)
+	}
+	closeErr = z.Close()
+	if !errors.Is(closeErr, os.ErrClosed) {
+		t.Fatalf("second Close = %v, want os.ErrClosed (handle must be released)", closeErr)
+	}
+
+	stdLogger, err := NewLogger(LogConfig{Level: "info", Format: "json", Output: "stderr"})
+	if err != nil {
+		t.Fatalf("NewLogger(stderr): %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := stdLogger.(*ZapLogger).Close(); err != nil {
+			t.Errorf("stderr Close #%d: %v, want nil (no owned handle)", i+1, err)
+		}
 	}
 }
 
