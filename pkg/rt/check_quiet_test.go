@@ -84,7 +84,7 @@ func ttDriveToCheckBridgePending(t *testing.T, cards []lesson.Word, words *fakeW
 	return tm, s, log, exec
 }
 
-func TestCheckBridgeAckTimeoutStaysOpenAndSubmitSucceeds(t *testing.T) {
+func TestCheckQuietBridgeAckTimeoutStaysOpenAndSubmitSucceeds(t *testing.T) {
 	cards := ttCards("苹果", "香蕉")
 	words := newFakeWords(cards)
 	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
@@ -113,7 +113,7 @@ func TestCheckBridgeAckTimeoutStaysOpenAndSubmitSucceeds(t *testing.T) {
 	}
 }
 
-func TestCheckGradingIgnoresUplinkSpeech(t *testing.T) {
+func TestCheckQuietGradingIgnoresUplinkSpeech(t *testing.T) {
 	cards := ttCards("苹果")
 	words := newFakeWords(cards)
 	tm, s, _, _ := ttDriveToCheck(t, cards, words)
@@ -121,8 +121,12 @@ func TestCheckGradingIgnoresUplinkSpeech(t *testing.T) {
 		t.Fatal("grading state never broadcast after bridge ack")
 	}
 	before := s.countOf(TypeTeacherSentence)
-	tm.IngestAudio(s, make([]byte, 4096))
-	time.Sleep(300 * time.Millisecond)
+	tm.IngestAudio(s, ttUtterance())
+	// ttUtterance carries its own trailing silence, so a still-listening
+	// session would close VAD and answer well inside this window — the fakes
+	// reply instantly once a turn starts. A negative assertion must outlive
+	// that pipeline instead of sampling the unchanged count at once.
+	time.Sleep(2 * time.Second)
 	if got := s.countOf(TypeTeacherSentence); got != before {
 		t.Fatalf("teacher_sentence count = %d, want unchanged %d after uplink in grading", got, before)
 	}
@@ -131,7 +135,7 @@ func TestCheckGradingIgnoresUplinkSpeech(t *testing.T) {
 	}
 }
 
-func TestCheckBridgeTimeoutDuringSubmitDoesNotCancelReview(t *testing.T) {
+func TestCheckQuietBridgeTimeoutDuringSubmitDoesNotCancelReview(t *testing.T) {
 	cards := ttCards("苹果", "香蕉")
 	words := newFakeWords(cards)
 	block := make(chan struct{})
