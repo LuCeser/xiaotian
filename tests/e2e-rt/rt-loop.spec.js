@@ -607,6 +607,29 @@ test('partial save renders the honest M/N copy, never fabricated success', async
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
 
+test('check-stage playback_ack_timeout does not drain or block submit', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + QUIET_PARAMS + '&mock_check_ack_timeout=1');
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+
+  await driveCheckStage(page);
+
+  const obs = await page.evaluate(() => window.__rtTutor.observe());
+  expect(obs.terminalDraining).toBe(false);
+  const checkObs = obs.check;
+  expect(checkObs.allChecked).toBe(true);
+  expect(checkObs.submitPending).toBe(false);
+  expect(checkObs.resultText).toContain('复习安排已更新');
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
 // ---------------------------------------------------------------------------
 // 13.1-02: student-mode anti-leak (D-08/D-09/D-10) — the server is the
 // masking authority: no not-yet-revealed word string may appear in the page

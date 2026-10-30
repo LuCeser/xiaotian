@@ -29,6 +29,7 @@
       <span class="rt-state-chip" data-chip="processing">💭 思考中</span>
       <span class="rt-state-chip" data-chip="speaking">🗣 讲授中</span>
       <span class="rt-state-chip" data-chip="paused">⏸ 休息中</span>
+      <span class="rt-state-chip" data-chip="grading">✅ 检查中</span>
       <span class="rt-state-chip" data-chip="ended">🎓 课程结束</span>
     </div>
     <div class="rt-conn" id="rt-conn" data-conn="idle" role="status">
@@ -821,6 +822,9 @@
         // Five-state dispatch: listening / processing / speaking / paused /
         // ended (paused chip added 13-11 — StatePaused, pkg/rt/protocol.go).
         setStatus(m.value);
+        if (m && m.value === 'grading') {
+          capture.stop();
+        }
       });
 
       client.on('lesson_update', function (m) {
@@ -873,6 +877,7 @@
           }
         });
         photo.reset(); // the recognition round is over — the button unlocks
+        capture.stop();
         renderCheckPanel();
       });
 
@@ -936,6 +941,10 @@
         // with no ocr_result — unlock the controller here.
         photo.reset();
         if (code === 'playback_ack_timeout') {
+          var checkOpen = check.active && !courseEnded && !check.resultText;
+          if (checkOpen) {
+            return;
+          }
           // Honest degraded order: the timeout code itself is NOT a
           // completion proof — drain the scheduled audio, wait for the
           // natural session_ended + normal close. Never stopNow here.

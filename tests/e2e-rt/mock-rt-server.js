@@ -607,6 +607,7 @@ wss.on('connection', (ws, req, query) => {
     empty: query.get('mock_empty') === '1',
     ackTimeout: query.get('mock_ack_timeout') === '1',
     partialSave: query.get('mock_partial_save') === '1',
+    checkBridgeAckTimeout: query.get('mock_check_ack_timeout') === '1',
     voiceVerdict: query.get('mock_voice_verdict') === '1',
     // Issue #55: an optional session_ready.category echo ('english'|
     // 'chinese') for the page's subject-adoption pin — the mock never
@@ -857,7 +858,16 @@ wss.on('connection', (ws, req, query) => {
     send({ type: 'check_started', words: state.words.slice(), reason: 'dictation_done' });
     announce('chk', '全都写完啦！我们一起检查：屏幕上有' + state.words.length +
       '个词，想一想你写的是对还是错，点「对」或「错」告诉我。', PLAN_NOTICE, 800,
-      () => { send({ type: 'state', value: 'listening' }); });
+      () => { send({ type: 'state', value: 'grading' }); });
+    if (mockMode.checkBridgeAckTimeout) {
+      later(400, () => {
+        if (state.ended) return;
+        send({
+          type: 'error', code: 'playback_ack_timeout',
+          message: 'mock: check bridge ack timeout', recoverable: true
+        });
+      });
+    }
     if (pair) {
       pair.phase = 'checking';
       if (wantResume) {
