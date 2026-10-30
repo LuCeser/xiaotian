@@ -130,9 +130,10 @@ func (c *mimoClient) logAttemptStart(ctx context.Context, op, model string, atte
 }
 
 // logAttemptEnd emits the closing line of one upstream attempt with the
-// error class and HTTP status (0 when no response arrived).
-func (c *mimoClient) logAttemptEnd(ctx context.Context, op, model string, attempt int, took time.Duration, err error, willRetry bool) {
-	class, status := classifyAttemptErr(ctx, err)
+// error class and HTTP status (0 when no response arrived; otherwise the
+// status code returned by the execute* method).
+func (c *mimoClient) logAttemptEnd(ctx context.Context, op, model string, attempt int, took time.Duration, status int, err error, willRetry bool) {
+	class := classifyAttemptErr(ctx, err)
 	sid, tid := logIDsFrom(ctx)
 	const msg = "upstream attempt finished"
 	fields := []infra.Field{
@@ -157,19 +158,18 @@ func (c *mimoClient) logAttemptEnd(ctx context.Context, op, model string, attemp
 }
 
 // classifyAttemptErr maps a failed (or nil) attempt error to the logged
-// error_class plus the HTTP status code when one was received. Deadline and
-// net.Error timeouts outrank everything else so a caller-side deadline is
-// never misread as a plain network blip.
-func classifyAttemptErr(ctx context.Context, err error) (string, int) {
+// error_class. HTTP status for the log line comes from the execute* method,
+// not from error type guessing.
+func classifyAttemptErr(ctx context.Context, err error) string {
 	if err == nil {
-		return classOK, http.StatusOK
+		return classOK
 	}
 	if ctx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
-		return classTimeout, 0
+		return classTimeout
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
-		return classTimeout, 0
+		return classTimeout
 	}
 	// http.Client.Timeout errors arrive wrapped as ErrNetworkError with the
 	// original net.Error flattened into the message text (errors.Wrap keeps
@@ -177,20 +177,35 @@ func classifyAttemptErr(ctx context.Context, err error) (string, int) {
 	// remaining signal.
 	if msg := err.Error(); strings.Contains(msg, "Client.Timeout exceeded") ||
 		strings.Contains(msg, "context deadline exceeded") {
-		return classTimeout, 0
+		return classTimeout
+	}
+	if isNetTimeout(err) {
+		return classTimeout
 	}
 	if ctx.Err() == context.Canceled || errors.Is(err, ErrContextCancelled) {
-		return classCancelled, 0
+		return classCancelled
 	}
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
-		return classHTTP, apiErr.StatusCode
+		return classHTTP
 	}
 	if errors.Is(err, ErrInvalidResponse) || errors.Is(err, ErrEncodingFailed) ||
 		errors.Is(err, ErrDecodingFailed) || errors.Is(err, ErrEmptyTranscription) {
-		return classDecode, http.StatusOK
+		return classDecode
 	}
-	return classNetwork, 0
+	return classNetwork
+}
+
+// isNetTimeout reports whether err (including wraps) is a network timeout,
+// including body reads after response headers arrived.
+func isNetTimeout(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Client.Timeout exceeded") ||
+		strings.Contains(msg, "i/o timeout")
 }
 
 // Synthesize generates audio from text input
@@ -217,11 +232,11 @@ func (c *mimoClient) Synthesize(ctx context.Context, text string, opts ...TTSOpt
 
 		start := time.Now()
 		c.logAttemptStart(ctx, opTTS, req.Model, attempt)
-		result, err := c.executeTTSRequest(ctx, req)
+		result, status, err := c.executeTTSRequest(ctx, req)
 		// Issue #94: once the caller's context is done there is no point
 		// starting another attempt, retryable or not.
 		willRetry := err != nil && IsRetryable(err) && ctx.Err() == nil && attempt < c.config.MaxRetries
-		c.logAttemptEnd(ctx, opTTS, req.Model, attempt, time.Since(start), err, willRetry)
+		c.logAttemptEnd(ctx, opTTS, req.Model, attempt, time.Since(start), status, err, willRetry)
 		if err == nil {
 			return result, nil
 		}
@@ -315,11 +330,11 @@ func (c *mimoClient) Transcribe(ctx context.Context, audio []byte, format string
 
 		start := time.Now()
 		c.logAttemptStart(ctx, opASR, req.Model, attempt)
-		result, err := c.executeASRRequest(ctx, req)
+		result, status, err := c.executeASRRequest(ctx, req)
 		// Issue #94: once the caller's context is done there is no point
 		// starting another attempt, retryable or not.
 		willRetry := err != nil && IsRetryable(err) && ctx.Err() == nil && attempt < c.config.MaxRetries
-		c.logAttemptEnd(ctx, opASR, req.Model, attempt, time.Since(start), err, willRetry)
+		c.logAttemptEnd(ctx, opASR, req.Model, attempt, time.Since(start), status, err, willRetry)
 		if err == nil {
 			return result, nil
 		}
@@ -361,11 +376,11 @@ func (c *mimoClient) Chat(ctx context.Context, messages []Message, opts ...ChatO
 
 		start := time.Now()
 		c.logAttemptStart(ctx, opChat, req.Model, attempt)
-		result, err := c.executeChatRequest(ctx, req)
+		result, status, err := c.executeChatRequest(ctx, req)
 		// Issue #94: once the caller's context is done there is no point
 		// starting another attempt, retryable or not.
 		willRetry := err != nil && IsRetryable(err) && ctx.Err() == nil && attempt < c.config.MaxRetries
-		c.logAttemptEnd(ctx, opChat, req.Model, attempt, time.Since(start), err, willRetry)
+		c.logAttemptEnd(ctx, opChat, req.Model, attempt, time.Since(start), status, err, willRetry)
 		if err == nil {
 			return result, nil
 		}
@@ -396,15 +411,15 @@ func (c *mimoClient) buildChatRequest(messages []Message, opts ...ChatOption) Ch
 }
 
 // executeChatRequest executes a chat completion request and returns the response
-func (c *mimoClient) executeChatRequest(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+func (c *mimoClient) executeChatRequest(ctx context.Context, req ChatRequest) (ChatResponse, int, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
-		return ChatResponse{}, errors.Wrap(ErrEncodingFailed, "failed to marshal chat request")
+		return ChatResponse{}, 0, errors.Wrap(ErrEncodingFailed, "failed to marshal chat request")
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return ChatResponse{}, errors.Wrap(err, "failed to create chat HTTP request")
+		return ChatResponse{}, 0, errors.Wrap(err, "failed to create chat HTTP request")
 	}
 
 	httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
@@ -413,26 +428,29 @@ func (c *mimoClient) executeChatRequest(ctx context.Context, req ChatRequest) (C
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ChatResponse{}, errors.Wrap(ErrContextCancelled, "chat request cancelled")
+			return ChatResponse{}, 0, errors.Wrap(ErrContextCancelled, "chat request cancelled")
 		}
-		return ChatResponse{}, errors.Wrap(ErrNetworkError, err.Error())
+		return ChatResponse{}, 0, errors.Wrap(ErrNetworkError, err.Error())
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return ChatResponse{}, c.handleAPIError(resp)
+		return ChatResponse{}, resp.StatusCode, c.handleAPIError(resp)
 	}
 
 	chatResp, err := c.readAndDecodeChatResponse(resp, "chat")
 	if err != nil {
-		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "failed to decode chat response")
+		if isNetTimeout(err) {
+			return ChatResponse{}, resp.StatusCode, errors.Wrap(ErrNetworkError, err.Error())
+		}
+		return ChatResponse{}, resp.StatusCode, errors.Wrap(ErrInvalidResponse, "failed to decode chat response")
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "no choices in chat response")
+		return ChatResponse{}, resp.StatusCode, errors.Wrap(ErrInvalidResponse, "no choices in chat response")
 	}
 
-	return chatResp, nil
+	return chatResp, resp.StatusCode, nil
 }
 
 // ChatVision runs a vision-capable chat completion over one image (Ticket 04:
@@ -463,11 +481,11 @@ func (c *mimoClient) ChatVision(ctx context.Context, systemPrompt, userPrompt st
 
 		start := time.Now()
 		c.logAttemptStart(ctx, opVision, req.Model, attempt)
-		result, err := c.executeChatVisionRequest(ctx, req)
+		result, status, err := c.executeChatVisionRequest(ctx, req)
 		// Issue #94: once the caller's context is done there is no point
 		// starting another attempt, retryable or not.
 		willRetry := err != nil && IsRetryable(err) && ctx.Err() == nil && attempt < c.config.MaxRetries
-		c.logAttemptEnd(ctx, opVision, req.Model, attempt, time.Since(start), err, willRetry)
+		c.logAttemptEnd(ctx, opVision, req.Model, attempt, time.Since(start), status, err, willRetry)
 		if err == nil {
 			return result, nil
 		}
@@ -520,15 +538,15 @@ func (c *mimoClient) buildChatVisionRequest(systemPrompt, userPrompt string, ima
 
 // executeChatVisionRequest posts the vision request to /chat/completions and
 // decodes the (shared) ChatResponse shape.
-func (c *mimoClient) executeChatVisionRequest(ctx context.Context, req ChatVisionRequest) (ChatResponse, error) {
+func (c *mimoClient) executeChatVisionRequest(ctx context.Context, req ChatVisionRequest) (ChatResponse, int, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
-		return ChatResponse{}, errors.Wrap(ErrEncodingFailed, "failed to marshal vision chat request")
+		return ChatResponse{}, 0, errors.Wrap(ErrEncodingFailed, "failed to marshal vision chat request")
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return ChatResponse{}, errors.Wrap(err, "failed to create vision chat HTTP request")
+		return ChatResponse{}, 0, errors.Wrap(err, "failed to create vision chat HTTP request")
 	}
 
 	httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
@@ -537,26 +555,29 @@ func (c *mimoClient) executeChatVisionRequest(ctx context.Context, req ChatVisio
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ChatResponse{}, errors.Wrap(ErrContextCancelled, "vision chat request cancelled")
+			return ChatResponse{}, 0, errors.Wrap(ErrContextCancelled, "vision chat request cancelled")
 		}
-		return ChatResponse{}, errors.Wrap(ErrNetworkError, err.Error())
+		return ChatResponse{}, 0, errors.Wrap(ErrNetworkError, err.Error())
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return ChatResponse{}, c.handleAPIError(resp)
+		return ChatResponse{}, resp.StatusCode, c.handleAPIError(resp)
 	}
 
 	chatResp, err := c.readAndDecodeChatResponse(resp, "vision chat")
 	if err != nil {
-		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "failed to decode vision chat response")
+		if isNetTimeout(err) {
+			return ChatResponse{}, resp.StatusCode, errors.Wrap(ErrNetworkError, err.Error())
+		}
+		return ChatResponse{}, resp.StatusCode, errors.Wrap(ErrInvalidResponse, "failed to decode vision chat response")
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return ChatResponse{}, errors.Wrap(ErrInvalidResponse, "no choices in vision chat response")
+		return ChatResponse{}, resp.StatusCode, errors.Wrap(ErrInvalidResponse, "no choices in vision chat response")
 	}
 
-	return chatResp, nil
+	return chatResp, resp.StatusCode, nil
 }
 
 // maxChatResponseBytes caps a chat-completion body before JSON decoding so
@@ -669,7 +690,7 @@ func (c *mimoClient) HealthCheck(ctx context.Context) error {
 	healthCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	_, err := c.executeTTSRequest(healthCtx, req)
+	_, _, err := c.executeTTSRequest(healthCtx, req)
 	if err != nil {
 		c.logger.Warn("Mimo API health check failed",
 			infra.F("component", "mimo.client"),
@@ -786,17 +807,17 @@ func (c *mimoClient) getMimeType(format string) string {
 }
 
 // executeTTSRequest executes a TTS request and returns audio data
-func (c *mimoClient) executeTTSRequest(ctx context.Context, req TTSRequest) (DecodedAudioData, error) {
+func (c *mimoClient) executeTTSRequest(ctx context.Context, req TTSRequest) (DecodedAudioData, int, error) {
 	// Marshal request
 	body, err := json.Marshal(req)
 	if err != nil {
-		return DecodedAudioData{}, errors.Wrap(ErrEncodingFailed, "failed to marshal TTS request")
+		return DecodedAudioData{}, 0, errors.Wrap(ErrEncodingFailed, "failed to marshal TTS request")
 	}
 
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return DecodedAudioData{}, errors.Wrap(err, "failed to create TTS HTTP request")
+		return DecodedAudioData{}, 0, errors.Wrap(err, "failed to create TTS HTTP request")
 	}
 
 	// Set headers
@@ -807,26 +828,29 @@ func (c *mimoClient) executeTTSRequest(ctx context.Context, req TTSRequest) (Dec
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		if ctx.Err() != nil {
-			return DecodedAudioData{}, errors.Wrap(ErrContextCancelled, "TTS request cancelled")
+			return DecodedAudioData{}, 0, errors.Wrap(ErrContextCancelled, "TTS request cancelled")
 		}
-		return DecodedAudioData{}, errors.Wrap(ErrNetworkError, err.Error())
+		return DecodedAudioData{}, 0, errors.Wrap(ErrNetworkError, err.Error())
 	}
 	defer resp.Body.Close()
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		return DecodedAudioData{}, c.handleAPIError(resp)
+		return DecodedAudioData{}, resp.StatusCode, c.handleAPIError(resp)
 	}
 
 	// Parse response
 	var ttsResp TTSResponse
 	if err = json.NewDecoder(resp.Body).Decode(&ttsResp); err != nil {
-		return DecodedAudioData{}, errors.Wrap(ErrInvalidResponse, "failed to decode TTS response")
+		if isNetTimeout(err) {
+			return DecodedAudioData{}, resp.StatusCode, errors.Wrap(ErrNetworkError, err.Error())
+		}
+		return DecodedAudioData{}, resp.StatusCode, errors.Wrap(ErrInvalidResponse, "failed to decode TTS response")
 	}
 
 	// Validate response
 	if len(ttsResp.Choices) == 0 {
-		return DecodedAudioData{}, errors.Wrap(ErrInvalidResponse, "no audio data in TTS response")
+		return DecodedAudioData{}, resp.StatusCode, errors.Wrap(ErrInvalidResponse, "no audio data in TTS response")
 	}
 
 	choice := ttsResp.Choices[0]
@@ -835,13 +859,13 @@ func (c *mimoClient) executeTTSRequest(ctx context.Context, req TTSRequest) (Dec
 	// Decode base64 audio
 	audioBytes, err := base64.StdEncoding.DecodeString(audioMsg.Audio.Data)
 	if err != nil {
-		return DecodedAudioData{}, errors.Wrap(ErrDecodingFailed, "failed to decode base64 audio")
+		return DecodedAudioData{}, resp.StatusCode, errors.Wrap(ErrDecodingFailed, "failed to decode base64 audio")
 	}
 
 	// The API response carries only the audio bytes (no format/sample_rate/
 	// duration), so derive playback metadata from the bytes and the requested
 	// format.
-	return newDecodedAudio(audioBytes, req.Audio.Format), nil
+	return newDecodedAudio(audioBytes, req.Audio.Format), resp.StatusCode, nil
 }
 
 // newDecodedAudio derives playback metadata from the audio bytes themselves.
@@ -934,17 +958,17 @@ func (c *mimoClient) executeTTSStreamRequest(ctx context.Context, req TTSRequest
 }
 
 // executeASRRequest executes an ASR request and returns transcription
-func (c *mimoClient) executeASRRequest(ctx context.Context, req ASRRequest) (ASRResponse, error) {
+func (c *mimoClient) executeASRRequest(ctx context.Context, req ASRRequest) (ASRResponse, int, error) {
 	// Marshal request
 	body, err := json.Marshal(req)
 	if err != nil {
-		return ASRResponse{}, errors.Wrap(ErrEncodingFailed, "failed to marshal ASR request")
+		return ASRResponse{}, 0, errors.Wrap(ErrEncodingFailed, "failed to marshal ASR request")
 	}
 
 	// Create HTTP request (use /chat/completions endpoint for OpenAI-compatible API)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return ASRResponse{}, errors.Wrap(err, "failed to create ASR HTTP request")
+		return ASRResponse{}, 0, errors.Wrap(err, "failed to create ASR HTTP request")
 	}
 
 	// Set headers
@@ -955,21 +979,24 @@ func (c *mimoClient) executeASRRequest(ctx context.Context, req ASRRequest) (ASR
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ASRResponse{}, errors.Wrap(ErrContextCancelled, "ASR request cancelled")
+			return ASRResponse{}, 0, errors.Wrap(ErrContextCancelled, "ASR request cancelled")
 		}
-		return ASRResponse{}, errors.Wrap(ErrNetworkError, err.Error())
+		return ASRResponse{}, 0, errors.Wrap(ErrNetworkError, err.Error())
 	}
 	defer resp.Body.Close()
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		return ASRResponse{}, c.handleAPIError(resp)
+		return ASRResponse{}, resp.StatusCode, c.handleAPIError(resp)
 	}
 
 	// Parse response (OpenAI-compatible format)
 	var asrResp ASRResponse
 	if err := json.NewDecoder(resp.Body).Decode(&asrResp); err != nil {
-		return ASRResponse{}, errors.Wrap(ErrInvalidResponse, "failed to decode ASR response")
+		if isNetTimeout(err) {
+			return ASRResponse{}, resp.StatusCode, errors.Wrap(ErrNetworkError, err.Error())
+		}
+		return ASRResponse{}, resp.StatusCode, errors.Wrap(ErrInvalidResponse, "failed to decode ASR response")
 	}
 
 	// Validate response. An empty choices array is a well-formed
@@ -977,10 +1004,10 @@ func (c *mimoClient) executeASRRequest(ctx context.Context, req ASRRequest) (ASR
 	// response above): surface it as ErrEmptyTranscription so callers can
 	// tolerate it as an empty transcription instead of a fault.
 	if len(asrResp.Choices) == 0 {
-		return ASRResponse{}, errors.Wrap(ErrEmptyTranscription, "no transcription in ASR response")
+		return ASRResponse{}, resp.StatusCode, errors.Wrap(ErrEmptyTranscription, "no transcription in ASR response")
 	}
 
-	return asrResp, nil
+	return asrResp, resp.StatusCode, nil
 }
 
 // handleAPIError converts HTTP error responses to typed errors
