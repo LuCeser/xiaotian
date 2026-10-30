@@ -3,6 +3,8 @@ package rt
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -161,6 +163,10 @@ type Handler struct {
 	allowedOrigins map[string]bool
 	upgrader       websocket.Upgrader
 	cfg            ServerConfig
+
+	// nextConnID numbers every accepted connection so lifecycle logs can be
+	// correlated without touching query params or cookies (issue #94 U3).
+	nextConnID atomic.Int64
 }
 
 // NewHandler validates the configuration, fills defaults for zero fields,
@@ -266,9 +272,19 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// gorilla already wrote the HTTP error response.
-		h.logger.Warn("rt upgrade failed", infra.ErrField(err))
+		h.logger.Warn("rt upgrade failed",
+			infra.F("component", "pkg/rt.conn"),
+			infra.F("event", "upgrade_failed"),
+			infra.ErrField(err),
+		)
 		return
 	}
+	connID := fmt.Sprintf("c%d", h.nextConnID.Add(1))
+	h.logger.Info("rt connection established",
+		infra.F("component", "pkg/rt.conn"),
+		infra.F("event", "connected"),
+		infra.F("conn_id", connID),
+	)
 
 	// Read governance: hard cap per message, idle timeout rolled forward by
 	// pongs (CR-02/CR-03 semantics from pkg/ws). SetReadDeadline is an
@@ -291,11 +307,11 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if h.cfg.HeartbeatInterval > 0 {
-		go h.heartbeat(ctx, conn, h.cfg.HeartbeatInterval)
+		go h.heartbeat(ctx, conn, h.cfg.HeartbeatInterval, connID)
 	}
 
 	manager := h.factory()
-	writer := newConnWriter(conn, defaultSendQueue, h.logger)
+	writer := newConnWriter(conn, defaultSendQueue, h.logger, connID)
 	writer.start()
 
 	// Transport only moves bytes: binary → audio, text → control
@@ -303,6 +319,7 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		mt, data, err := conn.ReadMessage()
 		if err != nil {
+			h.logDisconnect(connID, err)
 			break
 		}
 		switch mt {
@@ -322,10 +339,47 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	_ = conn.Close()
 }
 
+// logDisconnect emits the closing lifecycle entry for a /rt connection
+// (issue #94 U3): info with the same conn_id as the connected entry and an
+// error_class saying how the read loop died. Only the class and the error
+// text are logged — never frame contents.
+func (h *Handler) logDisconnect(connID string, err error) {
+	class := "other"
+	switch {
+	case isNormalWSClose(err):
+		class = "normal"
+	case isReadTimeout(err):
+		class = "timeout"
+	}
+	fields := []infra.Field{
+		infra.F("component", "pkg/rt.conn"),
+		infra.F("event", "disconnected"),
+		infra.F("conn_id", connID),
+		infra.F("error_class", class),
+	}
+	if class != "normal" {
+		fields = append(fields, infra.ErrField(err))
+	}
+	h.logger.Info("rt connection closed", fields...)
+}
+
+// isNormalWSClose reports whether the read-loop error is a client-initiated
+// clean close (1000 normal / 1001 going away) rather than a failure.
+func isNormalWSClose(err error) bool {
+	return websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway)
+}
+
+// isReadTimeout reports whether the read loop died from the idle read
+// deadline (two missed heartbeats) rather than a peer failure.
+func isReadTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 // heartbeat pings the client every interval until ctx is cancelled or a
 // ping write fails. Pings use WriteControl, which gorilla permits alongside
 // the writer pump's single WriteMessage caller (WR-06).
-func (h *Handler) heartbeat(ctx context.Context, conn *websocket.Conn, interval time.Duration) {
+func (h *Handler) heartbeat(ctx context.Context, conn *websocket.Conn, interval time.Duration, connID string) {
 	if interval <= 0 {
 		// WR-06: time.NewTicker panics on non-positive intervals; the
 		// config guard above makes this unreachable, validate anyway.
@@ -341,7 +395,11 @@ func (h *Handler) heartbeat(ctx context.Context, conn *websocket.Conn, interval 
 			// Half-interval write deadline: never block longer than one
 			// tick on a stalled client.
 			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(interval/2)); err != nil {
-				h.logger.Info("rt heartbeat ping failed; exiting", infra.ErrField(err))
+				h.logger.Info("rt heartbeat ping failed; exiting",
+					infra.F("component", "pkg/rt.conn"),
+					infra.F("conn_id", connID),
+					infra.ErrField(err),
+				)
 				return
 			}
 		}
@@ -372,6 +430,7 @@ type connWriter struct {
 	control chan []byte
 	audio   chan []byte
 	logger  infra.Logger
+	connID  string
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -383,7 +442,7 @@ type connWriter struct {
 // newConnWriter builds the writer. The pump is NOT started here — call
 // start() once (HandleWebSocket does; tests exercise enqueue semantics
 // without the pump before starting it).
-func newConnWriter(conn *websocket.Conn, queueSize int, logger infra.Logger) *connWriter {
+func newConnWriter(conn *websocket.Conn, queueSize int, logger infra.Logger, connID string) *connWriter {
 	if queueSize <= 0 {
 		queueSize = defaultSendQueue
 	}
@@ -396,6 +455,7 @@ func newConnWriter(conn *websocket.Conn, queueSize int, logger infra.Logger) *co
 		control: make(chan []byte, queueSize),
 		audio:   make(chan []byte, queueSize),
 		logger:  logger,
+		connID:  connID,
 		ctx:     ctx,
 		cancel:  cancel,
 		done:    make(chan struct{}),
@@ -475,6 +535,7 @@ func (w *connWriter) drainAndClose() {
 func (w *connWriter) logWriteFailure(kind string, err error) {
 	w.logger.Warn("rt write failed; stopping send pump",
 		infra.F("component", "pkg/rt.conn"),
+		infra.F("conn_id", w.connID),
 		infra.F("kind", kind),
 		infra.ErrField(err),
 	)

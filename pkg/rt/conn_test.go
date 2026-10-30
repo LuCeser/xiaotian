@@ -2,6 +2,7 @@ package rt
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
 )
 
 // ---------------------------------------------------------------------------
@@ -109,11 +112,19 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {
 // config mutation and fake manager.
 func newRTServer(t *testing.T, mutate func(*ServerConfig), fm *fakeManager) *httptest.Server {
 	t.Helper()
+	return newRTServerWithLogger(t, mutate, fm, nil)
+}
+
+// newRTServerWithLogger is newRTServer with an injectable logger, so tests
+// can observe the connection-lifecycle logs emitted by the real
+// HandleWebSocket entry (issue #94 U3).
+func newRTServerWithLogger(t *testing.T, mutate func(*ServerConfig), fm *fakeManager, logger infra.Logger) *httptest.Server {
+	t.Helper()
 	cfg := ServerConfig{AllowedOrigins: []string{"http://origin.test"}}
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	h, err := NewHandler(cfg, func() SessionManager { return fm }, nil)
+	h, err := NewHandler(cfg, func() SessionManager { return fm }, logger)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -384,7 +395,7 @@ func TestWriterDelivers(t *testing.T) {
 
 func TestWriterBackpressure(t *testing.T) {
 	sc, _ := newConnPair(t)
-	w := newConnWriter(sc, 2, nil) // queue size 2; pump deliberately NOT started
+	w := newConnWriter(sc, 2, nil, "c-test") // queue size 2; pump deliberately NOT started
 
 	// Audio: fill 2, overflow 2 — every call returns nil, 2 counted drops,
 	// and the loop never blocks.
@@ -461,5 +472,179 @@ func TestHeartbeatRollsDeadline(t *testing.T) {
 	_ = conn.Close()
 	if !waitFor(t, 2*time.Second, fm.isClosed) {
 		t.Error("manager.Close not called after disconnect")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Connection lifecycle logs (issue #94 U3)
+// ---------------------------------------------------------------------------
+
+// connLogEntry is one recorded log line with its severity.
+type connLogEntry struct {
+	level  string
+	msg    string
+	fields []infra.Field
+}
+
+// connLogRecorder is a level-aware infra.Logger (captureLogger in
+// timing_test.go drops the level, and U3 asserts info/warn).
+type connLogRecorder struct {
+	mu      sync.Mutex
+	entries []connLogEntry
+}
+
+func (c *connLogRecorder) log(level, msg string, fields []infra.Field) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp := make([]infra.Field, len(fields))
+	copy(cp, fields)
+	c.entries = append(c.entries, connLogEntry{level: level, msg: msg, fields: cp})
+}
+
+func (c *connLogRecorder) Debug(msg string, fields ...infra.Field) { c.log("debug", msg, fields) }
+func (c *connLogRecorder) Info(msg string, fields ...infra.Field)  { c.log("info", msg, fields) }
+func (c *connLogRecorder) Warn(msg string, fields ...infra.Field)  { c.log("warn", msg, fields) }
+func (c *connLogRecorder) Error(msg string, fields ...infra.Field) { c.log("error", msg, fields) }
+
+func (c *connLogRecorder) With(fields ...infra.Field) infra.Logger { return c }
+
+func (c *connLogRecorder) Sync() error { return nil }
+
+func (c *connLogRecorder) snapshot() []connLogEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]connLogEntry, len(c.entries))
+	copy(out, c.entries)
+	return out
+}
+
+// field returns the value of key on an entry (nil when absent).
+func (e connLogEntry) field(key string) any {
+	for _, f := range e.fields {
+		if f.Key == key {
+			return f.Value
+		}
+	}
+	return nil
+}
+
+// blob renders every entry's message and field values as one string, for
+// "must not appear" assertions (frame payloads, secrets).
+func (e connLogEntry) blob() string {
+	b := e.msg
+	for _, f := range e.fields {
+		b += " " + fmt.Sprint(f.Key) + "=" + fmt.Sprint(f.Value)
+	}
+	return b
+}
+
+// TestConnLifecycleLogs proves issue #94 U3 through the production entry
+// (Handler.HandleWebSocket behind a real httptest upgrade + dial): a /rt
+// connection logs an info connected entry on upgrade and an info
+// disconnected entry (same conn_id) when the client closes cleanly — and no
+// log line carries frame contents. A rejected origin must leave a warn
+// upgrade_failed entry.
+func TestConnLifecycleLogs(t *testing.T) {
+	fm := newFakeManager()
+	log := &connLogRecorder{}
+	srv := newRTServerWithLogger(t, nil, fm, log)
+
+	conn, _, err := dialRT(t, srv.URL, "http://origin.test")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	// Recognizable binary payload: whatever the transport logs, these bytes
+	// must never appear in an entry (no frame contents in logs).
+	pcm := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	if err := conn.WriteMessage(websocket.BinaryMessage, pcm); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if !waitFor(t, 2*time.Second, func() bool { return fm.audioCount() >= 1 }) {
+		t.Fatal("audio frame not routed before close")
+	}
+
+	// Clean close so the read loop exits on a normal closure code.
+	_ = conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(time.Second))
+	_ = conn.Close()
+	if !waitFor(t, 2*time.Second, fm.isClosed) {
+		t.Fatal("manager.Close not called after client close")
+	}
+
+	var connected, disconnected *connLogEntry
+	for i, e := range log.snapshot() {
+		switch e.msg {
+		case "rt connection established":
+			connected = &log.snapshot()[i]
+		case "rt connection closed":
+			disconnected = &log.snapshot()[i]
+		}
+	}
+	if connected == nil {
+		t.Fatal("no \"rt connection established\" info entry logged")
+	}
+	if connected.level != "info" {
+		t.Errorf("connected level = %q, want info", connected.level)
+	}
+	if got := connected.field("event"); got != "connected" {
+		t.Errorf("connected event = %v, want connected", got)
+	}
+	connID, _ := connected.field("conn_id").(string)
+	if connID == "" {
+		t.Errorf("connected entry has no conn_id: %+v", connected.fields)
+	}
+
+	if disconnected == nil {
+		t.Fatal("no \"rt connection closed\" info entry logged")
+	}
+	if disconnected.level != "info" {
+		t.Errorf("disconnected level = %q, want info", disconnected.level)
+	}
+	if got := disconnected.field("event"); got != "disconnected" {
+		t.Errorf("disconnected event = %v, want disconnected", got)
+	}
+	if got := disconnected.field("conn_id"); got != connID {
+		t.Errorf("disconnected conn_id = %v, want same as connected (%q)", got, connID)
+	}
+	if got := disconnected.field("error_class"); got != "normal" {
+		t.Errorf("disconnected error_class = %v, want normal (clean client close)", got)
+	}
+
+	for _, e := range log.snapshot() {
+		if b := e.blob(); strings.Contains(b, string(pcm)) {
+			t.Errorf("log entry leaked frame payload: %q", b)
+		}
+	}
+
+	// Rejected origin: upgrade fails and leaves a warn upgrade_failed entry.
+	bad, resp, err := dialRT(t, srv.URL, "http://evil.example")
+	if err == nil {
+		_ = bad.Close()
+		t.Fatal("dial with unlisted origin succeeded, want rejection")
+	}
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("rejected dial status = %v, want 403", resp)
+	}
+	var upgradeFailed *connLogEntry
+	// The 403 response can reach the client before the handler goroutine
+	// runs its Warn line — poll for it instead of snapshotting once.
+	if !waitFor(t, 2*time.Second, func() bool {
+		for i, e := range log.snapshot() {
+			if e.msg == "rt upgrade failed" {
+				upgradeFailed = &log.snapshot()[i]
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("no \"rt upgrade failed\" warn entry logged")
+	}
+	if upgradeFailed.level != "warn" {
+		t.Errorf("upgrade_failed level = %q, want warn", upgradeFailed.level)
+	}
+	if got := upgradeFailed.field("event"); got != "upgrade_failed" {
+		t.Errorf("upgrade_failed event = %v, want upgrade_failed", got)
 	}
 }
