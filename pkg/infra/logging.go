@@ -98,16 +98,18 @@ type ZapLogger struct {
 	// the new fields baked in.
 	l *zap.Logger
 
+	// closer closes file-backed log output when non-nil. stderr/stdout and
+	// test buffers leave this nil. Declared before the slice so the
+	// pointer-bearing fields pack together (govet fieldalignment: 32
+	// pointer bytes instead of 48).
+	closer io.Closer
+
 	// baseFields is the accumulated context fields for this logger
 	// instance. Tracked alongside l's internal state so that introspection
 	// (and future features like a Metrics hook) can see the logical context
 	// without decoding zap's internal representation. Mirrors D-25 context
 	// propagation.
 	baseFields []Field
-
-	// closer closes file-backed log output when non-nil. stderr/stdout and
-	// test buffers leave this nil.
-	closer io.Closer
 }
 
 // ensure ZapLogger satisfies Logger at compile time.
