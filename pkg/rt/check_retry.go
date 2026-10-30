@@ -9,7 +9,10 @@ import (
 
 // handleCheckReviewRetry serves a second check_submit after the first
 // finishCheckSubmit pass (reviewSeen, not checking). Returns true when the
-// frame is consumed.
+// frame is consumed. The in-flight marker is taken BEFORE the receipt is
+// read (#96 review): a retry owns the marker across the whole read-decide-
+// write span, so a concurrent submit either sees the marker and stops, or
+// reads a receipt no in-flight retry can silently supersede.
 func (tm *TurnManager) handleCheckReviewRetry(s Sender, m CheckSubmitMsg) bool {
 	if m.RequestID == "" {
 		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
@@ -19,64 +22,65 @@ func (tm *TurnManager) handleCheckReviewRetry(s Sender, m CheckSubmitMsg) bool {
 	lessonID := tm.tutor.lessonID
 	total := len(tm.tutor.words)
 	prior := tm.tutor.reviewResult
+	if tm.checkRetryBusy {
+		tm.mu.Unlock()
+		return true
+	}
+	if tm.cfg.Receipts == nil {
+		tm.mu.Unlock()
+		if prior.Type != "" {
+			_ = s.SendControl(prior)
+		}
+		return true
+	}
+	tm.checkRetryBusy = true
 	tm.mu.Unlock()
 
-	if tm.cfg.Receipts == nil {
-		if prior.Type != "" {
-			_ = s.SendControl(prior)
-		}
-		return true
+	// release hands the marker back on every path that does not write; the
+	// write path keeps it until its goroutine settles.
+	release := func() {
+		tm.mu.Lock()
+		tm.checkRetryBusy = false
+		tm.mu.Unlock()
 	}
 
-	ctx := context.Background()
-	rec, ok := tm.latestCheckReceipt(ctx, lessonID)
+	rec, ok := tm.latestCheckReceipt(context.Background(), lessonID)
 	if !ok {
+		release()
 		if prior.Type != "" {
 			_ = s.SendControl(prior)
 		}
 		return true
 	}
 
-	switch rec.Status {
-	case lesson.ReceiptStatusPending:
-		msg := ReviewResultMsg{
+	if rec.Status == lesson.ReceiptStatusPending {
+		// 待核实 is not retryable (#96 Q4): the Python side may already have
+		// committed — replay the pending receipt, never a second write.
+		release()
+		_ = s.SendControl(ReviewResultMsg{
 			Type:      TypeReviewResult,
 			Requested: len(rec.Requested),
 			Updated:   0,
 			Missing:   len(rec.Requested),
 			Pending:   true,
-		}
-		_ = s.SendControl(msg)
+		})
 		return true
 	}
 
 	missingWords := append([]string(nil), rec.Missing...)
-	if rec.Status == lesson.ReceiptStatusSaved && len(missingWords) == 0 {
-		msg := tm.reviewResultFromReceipt(rec)
-		_ = s.SendControl(msg)
-		tm.mu.Lock()
-		closed := tm.closed
-		tm.mu.Unlock()
-		if !closed && msg.Updated == msg.Requested && msg.Requested > 0 {
-			tm.maybeEndAfterFullSave(s, total, rec)
-		}
-		return true
-	}
 	if rec.Status == lesson.ReceiptStatusFailed {
 		missingWords = append([]string(nil), rec.Requested...)
 	}
 	if len(missingWords) == 0 {
-		msg := tm.reviewResultFromReceipt(rec)
-		_ = s.SendControl(msg)
+		// Full save (#96 review): replay the receipt ONLY. Re-running the
+		// summary ending here would speak it a second time and park this
+		// goroutine on a sentence_ack the read loop cannot serve.
+		release()
+		_ = s.SendControl(tm.reviewResultFromReceipt(rec))
 		return true
 	}
 
 	tm.mu.Lock()
-	if tm.checkRetryBusy {
-		tm.mu.Unlock()
-		return true
-	}
-	tm.checkRetryBusy = true
 	wordsCopy := make([]lesson.Word, len(tm.tutor.words))
 	copy(wordsCopy, tm.tutor.words)
 	verdicts := append([]lesson.CheckVerdict(nil), tm.tutor.checkVerdicts...)
@@ -92,20 +96,14 @@ func (tm *TurnManager) handleCheckReviewRetry(s Sender, m CheckSubmitMsg) bool {
 
 	ratings := checkRatingsForWords(wordsCopy, verdicts, outcomes, missingWords)
 	if len(ratings) == 0 {
-		tm.mu.Lock()
-		tm.checkRetryBusy = false
-		tm.mu.Unlock()
+		release()
 		return true
 	}
 
 	retryCtx, cancel := context.WithCancel(context.Background())
 	go func() {
 		defer cancel()
-		defer func() {
-			tm.mu.Lock()
-			tm.checkRetryBusy = false
-			tm.mu.Unlock()
-		}()
+		defer release()
 		tm.retryCheckReview(s, retryCtx, m.RequestID, lessonID, category, ratings, total, correct)
 	}()
 	return true
@@ -166,10 +164,27 @@ func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, requestID
 			Requested: requestedSet,
 		})
 		if rerr != nil || rec.ID <= 0 {
+			// No receipt row, no dedup basis for a later tap: answer an
+			// honest zero-updated review_result and keep the panel open —
+			// the write itself must NOT run (#96 review P2-3).
 			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
-		} else {
-			receiptID = rec.ID
+			result := ReviewResultMsg{
+				Type:      TypeReviewResult,
+				Requested: len(ratings),
+				Updated:   0,
+				Missing:   len(ratings),
+			}
+			tm.mu.Lock()
+			tm.tutor.reviewResult = result
+			tm.mu.Unlock()
+			_ = s.SendControl(result)
+			tm.mu.Lock()
+			epoch := tm.epoch
+			tm.mu.Unlock()
+			tm.enterGradingAt(s, epoch)
+			return
 		}
+		receiptID = rec.ID
 	}
 
 	var (
@@ -216,13 +231,11 @@ func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, requestID
 	_ = s.SendControl(result)
 
 	if !saveFailed && updated == requested && requested > 0 {
-		tm.mu.Lock()
-		epoch := tm.epoch
-		tm.mu.Unlock()
+		// This goroutine is off the read loop, so the ending's ack wait can
+		// be served; runNaturalEnding owns its own cancel.
 		summary := checkedSummaryText(total, correct, updated, requested, false)
-		retryCtx, cancel := context.WithCancel(context.Background())
-		tm.runNaturalEnding(s, retryCtx, cancel, summary, purposeSummary, ReasonLessonComplete)
-		_ = epoch
+		endCtx, endCancel := context.WithCancel(context.Background())
+		tm.runNaturalEnding(s, endCtx, endCancel, summary, purposeSummary, ReasonLessonComplete)
 		return
 	}
 	tm.mu.Lock()
@@ -230,20 +243,3 @@ func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, requestID
 	tm.mu.Unlock()
 	tm.enterGradingAt(s, epoch)
 }
-
-func (tm *TurnManager) maybeEndAfterFullSave(s Sender, total int, rec lesson.Receipt) {
-	correct := 0
-	tm.mu.Lock()
-	for _, v := range tm.tutor.checkVerdicts {
-		if v.Correct {
-			correct++
-		}
-	}
-	tm.mu.Unlock()
-	req := len(rec.Requested)
-	upd := len(rec.Updated)
-	summary := checkedSummaryText(total, correct, upd, req, false)
-	ctx, cancel := context.WithCancel(context.Background())
-	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
-}
-

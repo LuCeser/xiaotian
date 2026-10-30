@@ -562,19 +562,20 @@ func TestFakesTTSStreamUntilCancel(t *testing.T) {
 // FetchDueWords to per-category batches: a mixed vocabulary where the
 // english fetch can never see the chinese words and vice versa.
 type fakeWordSource struct {
-	fetchErr     error
-	reviewErr    error
-	reviewResult ReviewWriteResult
-	reviewBlock  chan struct{} // when non-nil, blocks until closed or ctx cancelled
-	due          [][]lesson.Word
-	dueByCat     map[string][]lesson.Word
-	peekByCat    map[string][]lesson.Word
-	submitCalls  []map[string]string
-	submitCat    []string
-	fetchCats    []string
-	peekCats     []string
-	fetchCalls   int
-	mu           sync.Mutex
+	fetchErr         error
+	reviewErr        error
+	reviewResult     ReviewWriteResult
+	reviewBlock      chan struct{} // when non-nil, blocks until closed or ctx cancelled
+	reviewBlockEnter chan struct{} // optional: closed when a blocked SubmitReview begins waiting
+	due              [][]lesson.Word
+	dueByCat         map[string][]lesson.Word
+	peekByCat        map[string][]lesson.Word
+	submitCalls      []map[string]string
+	submitCat        []string
+	fetchCats        []string
+	peekCats         []string
+	fetchCalls       int
+	mu               sync.Mutex
 }
 
 func newFakeWords(due ...[]lesson.Word) *fakeWordSource {
@@ -612,6 +613,18 @@ func (f *fakeWordSource) FetchDueWords(_ context.Context, limit int, category st
 // SubmitReview implements WordSource.
 func (f *fakeWordSource) SubmitReview(ctx context.Context, results map[string]string, category string) (ReviewWriteResult, error) {
 	if f.reviewBlock != nil {
+		if f.reviewBlockEnter != nil {
+			// Guarded close: with an in-flight guard removed, more than one
+			// blocked caller may reach this line — the entered signal fires
+			// once, never panics on the second arrival.
+			f.mu.Lock()
+			select {
+			case <-f.reviewBlockEnter:
+			default:
+				close(f.reviewBlockEnter)
+			}
+			f.mu.Unlock()
+		}
 		select {
 		case <-f.reviewBlock:
 		case <-ctx.Done():
