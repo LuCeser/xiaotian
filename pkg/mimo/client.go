@@ -1015,7 +1015,12 @@ func (c *mimoClient) handleAPIError(resp *http.Response) error {
 	// Read error response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return errors.Wrap(ErrNetworkError, fmt.Sprintf("HTTP %d: failed to read error body", resp.StatusCode))
+		// Keep the read error's text: when Client.Timeout fires while the
+		// error body hangs after the status line, attempt classification
+		// must still see the timeout (warn), not a plain network error
+		// (issue #94 review P2). Wrapping as ErrNetworkError preserves the
+		// existing retry semantics.
+		return errors.Wrap(ErrNetworkError, fmt.Sprintf("HTTP %d: failed to read error body: %s", resp.StatusCode, err.Error()))
 	}
 
 	// Parse error JSON

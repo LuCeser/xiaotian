@@ -364,9 +364,10 @@ func flush503HangBodyHandler(calls *int32) http.HandlerFunc {
 	}
 }
 
-// TestChatAttemptLogsHTTPErrorStatusWhenBodyReadTimesOut pins Codex P2 #3:
-// when status 503 was received but reading the error body times out, the log
-// still records status=503.
+// TestChatAttemptLogsHTTPErrorStatusWhenBodyReadTimesOut pins Codex P2 #3
+// and the review-2 follow-up: when status 503 was received but reading the
+// error body times out, the log records status=503 AND keeps the timeout
+// cause — error_class=timeout at warn, not network/error.
 func TestChatAttemptLogsHTTPErrorStatusWhenBodyReadTimesOut(t *testing.T) {
 	var calls int32
 	server, cleanup := mockTTSServer(flush503HangBodyHandler(&calls))
@@ -390,12 +391,22 @@ func TestChatAttemptLogsHTTPErrorStatusWhenBodyReadTimesOut(t *testing.T) {
 	if err == nil {
 		t.Fatal("Chat: want error")
 	}
+	if !errors.Is(err, ErrNetworkError) {
+		t.Fatalf("Chat error = %v, want ErrNetworkError (retry semantics unchanged)", err)
+	}
 
 	finished := findAttemptEntries(logger, "upstream attempt finished", opChat)
 	if len(finished) != 1 {
 		t.Fatalf("expected 1 finish entry, got %d", len(finished))
 	}
-	if got, _ := attemptField(finished[0], "status").(int); got != http.StatusServiceUnavailable {
+	fin := finished[0]
+	if got, _ := attemptField(fin, "status").(int); got != http.StatusServiceUnavailable {
 		t.Errorf("status = %v, want %d", got, http.StatusServiceUnavailable)
+	}
+	if got, _ := attemptField(fin, "error_class").(string); got != classTimeout {
+		t.Errorf("error_class = %v, want %q (timeout cause must survive the 503 status)", got, classTimeout)
+	}
+	if fin["level"] != "warn" {
+		t.Errorf("finish level = %v, want warn (error-body read timeout)", fin["level"])
 	}
 }
