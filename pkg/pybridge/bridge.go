@@ -253,9 +253,13 @@ func (b *Bridge) childEnv(extra ...string) []string {
 //     Cancel + WaitDelay; non-Linux is a no-op and relies on exec's default
 //     Cancel + the standard ctx-kill path).
 //  6. cmd.Env = childEnv() -- UTF-8 + DICTATION_* + VOLCENGINE_TTS_*.
-//  7. cmd.Stdout/stderr = bytes.Buffer -- capture for logResult.
+//  7. cmd.Stdout/stderr = bytes.Buffer -- capture for the caller's
+//     logResult defer.
 //  8. cmd.Run() + capture start time for the duration_ms log field.
-//  9. logResult(...) -- classify the outcome into one structured log entry.
+//     run() itself does NOT log: every Run* command method defers its own
+//     logResult with the command name ("due", "review", ...), which is the
+//     single structured entry per call (issue #94 U4 — run()'s former
+//     duplicate entry carried the interpreter path as `command`).
 //
 // Return values:
 //   - stdout: the subprocess's stdout bytes (may be empty on error)
@@ -303,7 +307,6 @@ func (b *Bridge) run(ctx context.Context, timeout time.Duration, name string, ar
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	start := time.Now()
 	err := cmd.Run()
 	// On Linux the Cancel hook SIGKILLs the process group. Go 1.26's
 	// exec.Wait then prefers the child's "signal: killed" ExitError over
@@ -321,7 +324,6 @@ func (b *Bridge) run(ctx context.Context, timeout time.Duration, name string, ar
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
-	b.logResult(name, start, stdout.Bytes(), stderr.Bytes(), exitCode, err)
 	return stdout.Bytes(), stderr.Bytes(), exitCode, err
 }
 
@@ -346,7 +348,10 @@ func normalizeRunErr(ctx context.Context, err error) error {
 // (success criterion 4). The classification is exhaustive over the (err, exit)
 // space:
 //
-//   - err == nil && exit == 0            -> Debug "python subprocess ok"
+//   - err == nil && exit == 0            -> Info "python subprocess ok"
+//     (issue #94 U4: a successful fetch/write-back must be visible at the
+//     production info level so operators can tell a hung call from a
+//     finished one; still no stdout/stderr on this branch)
 //   - errors.Is(err, DeadlineExceeded)   -> Error "python subprocess timed out"
 //     (error_type=timeout, +stderr)
 //   - exit != 0                          -> Error "python subprocess failed"
@@ -374,7 +379,7 @@ func (b *Bridge) logResult(method string, start time.Time, stdout, stderr []byte
 	}
 	switch {
 	case err == nil && exit == 0:
-		b.logger.Debug("python subprocess ok", fields...)
+		b.logger.Info("python subprocess ok", fields...)
 	case errors.Is(err, context.DeadlineExceeded):
 		fields = append(fields,
 			infra.F("error_type", "timeout"),
