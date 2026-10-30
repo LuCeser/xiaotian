@@ -196,6 +196,13 @@ type TurnManagerConfig struct {
 	// before auto-advancing (0 → 60s default). 13-08 defines the field;
 	// the timer behavior itself lands in 13-09.
 	WordTimeout time.Duration
+	// ProcessingTimeout bounds one dictation turn's whole context — the
+	// 「思考中」 phase (ASR + intent classification) included (0 → 20s
+	// default, Issue #94 U5): a hung upstream surfaces as the
+	// thinking_timeout ErrorMsg and the classroom returns to listening.
+	// Wired from infra.RTConfig.ProcessingTimeout through cmd/service's
+	// rtTurnCfg. Interrupts and closes keep the plain cancel() semantics.
+	ProcessingTimeout time.Duration
 	// ForceStudent is the 13.3-05 production anti-fat-finger switch (ROADMAP
 	// success criterion 6): when true, session_init's client-supplied mode is
 	// IGNORED and the classroom always runs the student projection — the
@@ -210,6 +217,11 @@ type TurnManagerConfig struct {
 // defaultWordTimeout is the per-word confirm wait used when
 // TurnManagerConfig.WordTimeout is unset (13-09 arms the timer).
 const defaultWordTimeout = 60 * time.Second
+
+// defaultProcessingTimeout bounds one dictation turn when
+// TurnManagerConfig.ProcessingTimeout is unset (Issue #94 U5, matching
+// infra.RTConfig's 20s default).
+const defaultProcessingTimeout = 20 * time.Second
 
 // VAD gating window defaults (milliseconds): the session_ready start grace
 // and the post-ack echo tail. Both are starting values awaiting real-device
@@ -481,6 +493,9 @@ var _ SessionManager = (*TurnManager)(nil)
 func NewTurnManager(asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, exec LessonExecutor, cfg TurnManagerConfig, recorder *EventRecorder, logger infra.Logger) *TurnManager {
 	if cfg.WordTimeout <= 0 {
 		cfg.WordTimeout = defaultWordTimeout
+	}
+	if cfg.ProcessingTimeout <= 0 {
+		cfg.ProcessingTimeout = defaultProcessingTimeout
 	}
 	if cfg.VADStartGraceMs <= 0 {
 		cfg.VADStartGraceMs = defaultVADStartGraceMs
