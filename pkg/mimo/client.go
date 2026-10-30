@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -71,6 +72,127 @@ func NewClient(config ClientConfig, logger infra.Logger) (Client, error) {
 	}, nil
 }
 
+// Per-attempt upstream logging (issue #94 U2). Every retry loop opens with
+// an info "upstream attempt started" and closes with one line whose level
+// says what happened: info on success, warn for timeouts/cancellations and
+// attempts that will retry, error for exhausted or non-retryable failures.
+// The ONLY fields allowed are the ones below — never payloads, audio,
+// transcripts, or credentials.
+const (
+	opChat   = "chat"
+	opASR    = "asr"
+	opTTS    = "tts"
+	opVision = "vision"
+)
+
+// error_class values for the closing attempt line.
+const (
+	classOK        = "ok"
+	classTimeout   = "timeout"
+	classCancelled = "cancelled"
+	classNetwork   = "network"
+	classHTTP      = "http"
+	classDecode    = "decode"
+)
+
+// logIDsKey is the unexported context key carrying the session/turn
+// identifiers that attempt logs echo. A struct type so no other package's
+// context keys can collide with it.
+type logIDsKey struct{}
+
+// ContextWithLogIDs returns ctx annotated with the identifiers emitted as
+// session_id/turn_id on every upstream attempt log. Callers without ids
+// simply pass the bare ctx; the fields then log as empty strings (present,
+// not missing, so log queries can key on them).
+func ContextWithLogIDs(ctx context.Context, sessionID, turnID string) context.Context {
+	return context.WithValue(ctx, logIDsKey{}, [2]string{sessionID, turnID})
+}
+
+// logIDsFrom extracts the ContextWithLogIDs pair; absent → empty strings.
+func logIDsFrom(ctx context.Context) (sessionID, turnID string) {
+	if v, ok := ctx.Value(logIDsKey{}).([2]string); ok {
+		return v[0], v[1]
+	}
+	return "", ""
+}
+
+// logAttemptStart emits the opening info line of one upstream attempt.
+func (c *mimoClient) logAttemptStart(ctx context.Context, op, model string, attempt int) {
+	sid, tid := logIDsFrom(ctx)
+	c.logger.Info("upstream attempt started",
+		infra.F("component", "mimo.client"),
+		infra.F("op", op),
+		infra.F("model", model),
+		infra.F("attempt", attempt),
+		infra.F("session_id", sid),
+		infra.F("turn_id", tid),
+	)
+}
+
+// logAttemptEnd emits the closing line of one upstream attempt with the
+// error class and HTTP status (0 when no response arrived).
+func (c *mimoClient) logAttemptEnd(ctx context.Context, op, model string, attempt int, took time.Duration, err error, willRetry bool) {
+	class, status := classifyAttemptErr(ctx, err)
+	sid, tid := logIDsFrom(ctx)
+	const msg = "upstream attempt finished"
+	fields := []infra.Field{
+		infra.F("component", "mimo.client"),
+		infra.F("op", op),
+		infra.F("model", model),
+		infra.F("attempt", attempt),
+		infra.F("duration_ms", took.Milliseconds()),
+		infra.F("status", status),
+		infra.F("error_class", class),
+		infra.F("session_id", sid),
+		infra.F("turn_id", tid),
+	}
+	switch {
+	case err == nil:
+		c.logger.Info(msg, fields...)
+	case class == classTimeout, class == classCancelled, willRetry:
+		c.logger.Warn(msg, fields...)
+	default:
+		c.logger.Error(msg, fields...)
+	}
+}
+
+// classifyAttemptErr maps a failed (or nil) attempt error to the logged
+// error_class plus the HTTP status code when one was received. Deadline and
+// net.Error timeouts outrank everything else so a caller-side deadline is
+// never misread as a plain network blip.
+func classifyAttemptErr(ctx context.Context, err error) (string, int) {
+	if err == nil {
+		return classOK, http.StatusOK
+	}
+	if ctx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
+		return classTimeout, 0
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return classTimeout, 0
+	}
+	// http.Client.Timeout errors arrive wrapped as ErrNetworkError with the
+	// original net.Error flattened into the message text (errors.Wrap keeps
+	// only the text), so the probe above misses them; the text is the only
+	// remaining signal.
+	if msg := err.Error(); strings.Contains(msg, "Client.Timeout exceeded") ||
+		strings.Contains(msg, "context deadline exceeded") {
+		return classTimeout, 0
+	}
+	if ctx.Err() == context.Canceled || errors.Is(err, ErrContextCancelled) {
+		return classCancelled, 0
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return classHTTP, apiErr.StatusCode
+	}
+	if errors.Is(err, ErrInvalidResponse) || errors.Is(err, ErrEncodingFailed) ||
+		errors.Is(err, ErrDecodingFailed) || errors.Is(err, ErrEmptyTranscription) {
+		return classDecode, http.StatusOK
+	}
+	return classNetwork, 0
+}
+
 // Synthesize generates audio from text input
 func (c *mimoClient) Synthesize(ctx context.Context, text string, opts ...TTSOption) (DecodedAudioData, error) {
 	if c.isClosed() {
@@ -84,13 +206,6 @@ func (c *mimoClient) Synthesize(ctx context.Context, text string, opts ...TTSOpt
 	var lastErr error
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
-			c.logger.Debug("TTS synthesis retry attempt",
-				infra.F("component", "mimo.client"),
-				infra.F("attempt", attempt),
-				infra.F("max_retries", c.config.MaxRetries),
-				infra.ErrField(lastErr),
-			)
-
 			// Exponential backoff
 			delay := c.config.RetryDelay * time.Duration(1<<uint(attempt-1))
 			select {
@@ -100,28 +215,22 @@ func (c *mimoClient) Synthesize(ctx context.Context, text string, opts ...TTSOpt
 			}
 		}
 
+		start := time.Now()
+		c.logAttemptStart(ctx, opTTS, req.Model, attempt)
 		result, err := c.executeTTSRequest(ctx, req)
+		// Issue #94: once the caller's context is done there is no point
+		// starting another attempt, retryable or not.
+		willRetry := err != nil && IsRetryable(err) && ctx.Err() == nil && attempt < c.config.MaxRetries
+		c.logAttemptEnd(ctx, opTTS, req.Model, attempt, time.Since(start), err, willRetry)
 		if err == nil {
 			return result, nil
 		}
 
 		lastErr = err
 
-		// Don't retry non-retryable errors
-		if !IsRetryable(err) {
-			c.logger.Warn("TTS synthesis failed with non-retryable error",
-				infra.F("component", "mimo.client"),
-				infra.F("text_length", len(text)),
-				infra.ErrField(err),
-			)
+		if ctx.Err() != nil || !IsRetryable(err) {
 			return DecodedAudioData{}, err
 		}
-
-		c.logger.Debug("TTS synthesis attempt failed, will retry",
-			infra.F("component", "mimo.client"),
-			infra.F("attempt", attempt),
-			infra.ErrField(err),
-		)
 	}
 
 	return DecodedAudioData{}, errors.Wrap(lastErr, "TTS synthesis exhausted retries")
@@ -195,13 +304,6 @@ func (c *mimoClient) Transcribe(ctx context.Context, audio []byte, format string
 	var lastErr error
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
-			c.logger.Debug("ASR transcription retry attempt",
-				infra.F("component", "mimo.client"),
-				infra.F("attempt", attempt),
-				infra.F("max_retries", c.config.MaxRetries),
-				infra.ErrField(lastErr),
-			)
-
 			// Exponential backoff
 			delay := c.config.RetryDelay * time.Duration(1<<uint(attempt-1))
 			select {
@@ -211,28 +313,22 @@ func (c *mimoClient) Transcribe(ctx context.Context, audio []byte, format string
 			}
 		}
 
+		start := time.Now()
+		c.logAttemptStart(ctx, opASR, req.Model, attempt)
 		result, err := c.executeASRRequest(ctx, req)
+		// Issue #94: once the caller's context is done there is no point
+		// starting another attempt, retryable or not.
+		willRetry := err != nil && IsRetryable(err) && ctx.Err() == nil && attempt < c.config.MaxRetries
+		c.logAttemptEnd(ctx, opASR, req.Model, attempt, time.Since(start), err, willRetry)
 		if err == nil {
 			return result, nil
 		}
 
 		lastErr = err
 
-		// Don't retry non-retryable errors
-		if !IsRetryable(err) {
-			c.logger.Warn("ASR transcription failed with non-retryable error",
-				infra.F("component", "mimo.client"),
-				infra.F("audio_size", len(audio)),
-				infra.ErrField(err),
-			)
+		if ctx.Err() != nil || !IsRetryable(err) {
 			return ASRResponse{}, err
 		}
-
-		c.logger.Debug("ASR transcription attempt failed, will retry",
-			infra.F("component", "mimo.client"),
-			infra.F("attempt", attempt),
-			infra.ErrField(err),
-		)
 	}
 
 	return ASRResponse{}, errors.Wrap(lastErr, "ASR transcription exhausted retries")
@@ -255,13 +351,6 @@ func (c *mimoClient) Chat(ctx context.Context, messages []Message, opts ...ChatO
 	var lastErr error
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
-			c.logger.Debug("chat completion retry attempt",
-				infra.F("component", "mimo.client"),
-				infra.F("attempt", attempt),
-				infra.F("max_retries", c.config.MaxRetries),
-				infra.ErrField(lastErr),
-			)
-
 			delay := c.config.RetryDelay * time.Duration(1<<uint(attempt-1))
 			select {
 			case <-time.After(delay):
@@ -270,27 +359,22 @@ func (c *mimoClient) Chat(ctx context.Context, messages []Message, opts ...ChatO
 			}
 		}
 
+		start := time.Now()
+		c.logAttemptStart(ctx, opChat, req.Model, attempt)
 		result, err := c.executeChatRequest(ctx, req)
+		// Issue #94: once the caller's context is done there is no point
+		// starting another attempt, retryable or not.
+		willRetry := err != nil && IsRetryable(err) && ctx.Err() == nil && attempt < c.config.MaxRetries
+		c.logAttemptEnd(ctx, opChat, req.Model, attempt, time.Since(start), err, willRetry)
 		if err == nil {
 			return result, nil
 		}
 
 		lastErr = err
 
-		// Don't retry non-retryable errors
-		if !IsRetryable(err) {
-			c.logger.Warn("chat completion failed with non-retryable error",
-				infra.F("component", "mimo.client"),
-				infra.F("model", req.Model),
-				infra.ErrField(err),
-			)
+		if ctx.Err() != nil || !IsRetryable(err) {
 			return ChatResponse{}, err
 		}
-
-		c.logger.Debug("chat completion attempt failed, will retry",
-			infra.F("component", "mimo.client"),
-			infra.F("attempt", attempt),
-		)
 	}
 
 	return ChatResponse{}, errors.Wrap(lastErr, "chat completion exhausted retries")
@@ -369,13 +453,6 @@ func (c *mimoClient) ChatVision(ctx context.Context, systemPrompt, userPrompt st
 	var lastErr error
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
-			c.logger.Debug("vision chat retry attempt",
-				infra.F("component", "mimo.client"),
-				infra.F("attempt", attempt),
-				infra.F("max_retries", c.config.MaxRetries),
-				infra.ErrField(lastErr),
-			)
-
 			delay := c.config.RetryDelay * time.Duration(1<<uint(attempt-1))
 			select {
 			case <-time.After(delay):
@@ -384,27 +461,22 @@ func (c *mimoClient) ChatVision(ctx context.Context, systemPrompt, userPrompt st
 			}
 		}
 
+		start := time.Now()
+		c.logAttemptStart(ctx, opVision, req.Model, attempt)
 		result, err := c.executeChatVisionRequest(ctx, req)
+		// Issue #94: once the caller's context is done there is no point
+		// starting another attempt, retryable or not.
+		willRetry := err != nil && IsRetryable(err) && ctx.Err() == nil && attempt < c.config.MaxRetries
+		c.logAttemptEnd(ctx, opVision, req.Model, attempt, time.Since(start), err, willRetry)
 		if err == nil {
 			return result, nil
 		}
 
 		lastErr = err
 
-		// Don't retry non-retryable errors
-		if !IsRetryable(err) {
-			c.logger.Warn("vision chat failed with non-retryable error",
-				infra.F("component", "mimo.client"),
-				infra.F("model", req.Model),
-				infra.ErrField(err),
-			)
+		if ctx.Err() != nil || !IsRetryable(err) {
 			return ChatResponse{}, err
 		}
-
-		c.logger.Debug("vision chat attempt failed, will retry",
-			infra.F("component", "mimo.client"),
-			infra.F("attempt", attempt),
-		)
 	}
 
 	return ChatResponse{}, errors.Wrap(lastErr, "vision chat exhausted retries")
