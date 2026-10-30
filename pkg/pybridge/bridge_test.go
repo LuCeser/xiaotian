@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -286,7 +287,7 @@ func TestLogResultClassification(t *testing.T) {
 			name:      "success exit 0 nil err",
 			exit:      0,
 			err:       nil,
-			wantLevel: "debug",
+			wantLevel: "info",
 			wantMsg:   "python subprocess ok",
 		},
 		{
@@ -360,6 +361,59 @@ func TestLogResultClassification(t *testing.T) {
 				t.Errorf("component: got %v, want \"pybridge\"", comp)
 			}
 		})
+	}
+}
+
+// TestRunDueSuccessLogsInfoNoStdout pins issue #94 U4 through the REAL
+// command path: RunDue → run() → logResult against a fake executor (/bin/sh
+// standing in for the interpreter with a one-line script), asserting the
+// success entry surfaces at info (visible at the production level — a
+// finished fetch must be distinguishable from a hung one) and carries NO
+// stdout/stderr fields. Reverting the success branch to Debug turns the
+// level assertion red.
+func TestRunDueSuccessLogsInfoNoStdout(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not present")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "vocab_manager.sh")
+	if err := os.WriteFile(script, []byte("echo '[]'\n"), 0o600); err != nil {
+		t.Fatalf("write fake script: %v", err)
+	}
+
+	fl := newFakeLogger()
+	cfg := validTestCfg()
+	cfg.Interpreter = "/bin/sh"
+	cfg.VocabScript = script
+	cfg.VocabDBPath = filepath.Join(dir, "v.db")
+	b, err := NewBridge(cfg, fl)
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+
+	if _, err := b.RunDue(context.Background(), DueOpts{}); err != nil {
+		t.Fatalf("RunDue with fake executor: %v", err)
+	}
+
+	if len(fl.msgs) != 1 {
+		t.Fatalf("logResult emitted %d entries, want 1 (%+v)", len(fl.msgs), fl.msgs)
+	}
+	got := fl.msgs[0]
+	if got.Level != "info" {
+		t.Errorf("success entry level = %q, want info (issue #94 U4)", got.Level)
+	}
+	if got.Msg != "python subprocess ok" {
+		t.Errorf("success entry msg = %q, want %q", got.Msg, "python subprocess ok")
+	}
+	for _, k := range []string{"component", "command", "exit_code", "duration_ms"} {
+		if _, ok := findField(got.Fields, k); !ok {
+			t.Errorf("success entry missing invariant field %q", k)
+		}
+	}
+	for _, k := range []string{"stdout", "stderr"} {
+		if v, ok := findField(got.Fields, k); ok {
+			t.Errorf("success entry must not carry %q (no subprocess output on ok): %v", k, v)
+		}
 	}
 }
 

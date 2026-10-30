@@ -98,6 +98,12 @@ type ZapLogger struct {
 	// the new fields baked in.
 	l *zap.Logger
 
+	// closer closes file-backed log output when non-nil. stderr/stdout and
+	// test buffers leave this nil. Declared before the slice so the
+	// pointer-bearing fields pack together (govet fieldalignment: 32
+	// pointer bytes instead of 48).
+	closer io.Closer
+
 	// baseFields is the accumulated context fields for this logger
 	// instance. Tracked alongside l's internal state so that introspection
 	// (and future features like a Metrics hook) can see the logical context
@@ -112,7 +118,14 @@ var _ Logger = (*ZapLogger)(nil)
 // NewLogger builds a production Logger from LogConfig (D-19 startup-only).
 // The returned Logger writes structured JSON (when cfg.Format == "json") or
 // human-readable console output (when cfg.Format == "console") to the
-// configured sink.
+// configured sink: "stderr", "stdout", or a file path (issue #94 — opened
+// create+append, 0644, NOT mirrored to stderr). An unopenable path returns
+// an error so startup fails loudly instead of silently falling back to
+// stderr while the operator tails an empty file.
+//
+// On success the first emitted entry is an info "logger ready" carrying the
+// effective level/format/output — one boot line that says where the rest of
+// the log went.
 //
 // cfg.Level is parsed via zapcore.ParseLevel; on failure the returned error
 // wraps the underlying parse error so the caller can branch. This is
@@ -125,7 +138,23 @@ func NewLogger(cfg LogConfig) (Logger, error) {
 	if _, err := zapcore.ParseLevel(cfg.Level); err != nil {
 		return nil, fmt.Errorf("parse log level %q: %w", cfg.Level, err)
 	}
-	return newLoggerWithWriter(selectWriter(cfg.Output), cfg), nil
+	w, err := selectWriter(cfg.Output)
+	if err != nil {
+		return nil, fmt.Errorf("open log output %q: %w", cfg.Output, err)
+	}
+	var closer io.Closer
+	if cfg.Output != "stdout" && cfg.Output != "stderr" && cfg.Output != "" {
+		if f, ok := w.(*os.File); ok {
+			closer = f
+		}
+	}
+	logger := newLoggerWithWriter(w, cfg, closer)
+	logger.Info("logger ready",
+		F("level", cfg.Level),
+		F("format", cfg.Format),
+		F("output", cfg.Output),
+	)
+	return logger, nil
 }
 
 // NewNoOpLogger returns a Logger that discards every entry. It is the
@@ -144,7 +173,7 @@ func NewNoOpLogger() Logger {
 // function never returns an error — invalid level strings fall back to
 // info-level with the assumption that Config.Validate (or NewLogger's
 // pre-check) has already rejected them.
-func newLoggerWithWriter(w io.Writer, cfg LogConfig) Logger {
+func newLoggerWithWriter(w io.Writer, cfg LogConfig, closer io.Closer) Logger {
 	level := zapcore.InfoLevel
 	if parsed, err := zapcore.ParseLevel(cfg.Level); err == nil {
 		level = parsed
@@ -165,24 +194,23 @@ func newLoggerWithWriter(w io.Writer, cfg LogConfig) Logger {
 	// info via zap.AddCaller(), the reported caller is the infra.Logger
 	// invocation site rather than this wrapper's delegation line.
 	zl := zap.New(core, zap.AddCallerSkip(1))
-	return &ZapLogger{l: zl}
+	return &ZapLogger{l: zl, closer: closer}
 }
 
 // selectWriter resolves cfg.Output to an io.Writer following the contract
-// documented in LogConfig.Output: "stderr" (or empty, or unknown) → os.Stderr;
-// "stdout" → os.Stdout. File paths are out of scope for Phase 1 — operators
-// redirect stderr to a file via systemd / docker.
-func selectWriter(output string) io.Writer {
+// documented in LogConfig.Output: "stderr" (or empty) → os.Stderr; "stdout"
+// → os.Stdout; any other value is a file path, opened O_CREATE|O_APPEND
+// (0644) so restarts keep prior history. File-open errors are returned, not
+// swallowed: routing logs to a path the process cannot write must abort
+// startup rather than quietly keep writing stderr (issue #94).
+func selectWriter(output string) (io.Writer, error) {
 	switch output {
 	case "stdout":
-		return os.Stdout
+		return os.Stdout, nil
 	case "stderr", "":
-		return os.Stderr
+		return os.Stderr, nil
 	default:
-		// Unknown values default to stderr so a misconfiguration never
-		// silently routes logs to stdout (where they would corrupt
-		// HTTP responses on a server that writes both to the same fd).
-		return os.Stderr
+		return os.OpenFile(output, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	}
 }
 
@@ -215,15 +243,26 @@ func (z *ZapLogger) With(fields ...Field) Logger {
 	accumulated := make([]Field, 0, len(z.baseFields)+len(fields))
 	accumulated = append(accumulated, z.baseFields...)
 	accumulated = append(accumulated, fields...)
-	return &ZapLogger{
+	child := &ZapLogger{
 		l:          z.l.With(zapFields...),
 		baseFields: accumulated,
+		closer:     z.closer,
 	}
+	return child
 }
 
 // Sync implements Logger.
 func (z *ZapLogger) Sync() error {
 	return z.l.Sync()
+}
+
+// Close releases file-backed log output when this logger owns the handle.
+// Call Sync before Close on process exit. stderr/stdout loggers are no-ops.
+func (z *ZapLogger) Close() error {
+	if z.closer == nil {
+		return nil
+	}
+	return z.closer.Close()
 }
 
 // Zap returns the underlying *zap.Logger for interop with packages (e.g.
