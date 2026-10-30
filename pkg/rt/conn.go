@@ -3,6 +3,7 @@ package rt
 import (
 	"context"
 	"encoding/json"
+	goerrors "errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -341,8 +342,8 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // logDisconnect emits the closing lifecycle entry for a /rt connection
 // (issue #94 U3): info with the same conn_id as the connected entry and an
-// error_class saying how the read loop died. Only the class and the error
-// text are logged — never frame contents.
+// error_class saying how the read loop died. Close frames log only the code,
+// never the reason text (tokens/transcripts must not appear in logs).
 func (h *Handler) logDisconnect(connID string, err error) {
 	class := "other"
 	switch {
@@ -358,9 +359,25 @@ func (h *Handler) logDisconnect(connID string, err error) {
 		infra.F("error_class", class),
 	}
 	if class != "normal" {
-		fields = append(fields, infra.ErrField(err))
+		if code, ok := wsCloseFrameCode(err); ok {
+			fields = append(fields, infra.F("close_code", code))
+		} else if class != "timeout" {
+			fields = append(fields, infra.ErrField(err))
+		}
 	}
 	h.logger.Info("rt connection closed", fields...)
+}
+
+// wsCloseFrameCode returns the WebSocket close status code when err is a
+// close frame (possibly wrapped). Reason text is intentionally ignored.
+func wsCloseFrameCode(err error) (int, bool) {
+	for err != nil {
+		if ce, ok := err.(*websocket.CloseError); ok {
+			return ce.Code, true
+		}
+		err = goerrors.Unwrap(err)
+	}
+	return 0, false
 }
 
 // isNormalWSClose reports whether the read-loop error is a client-initiated

@@ -648,3 +648,50 @@ func TestConnLifecycleLogs(t *testing.T) {
 		t.Errorf("upgrade_failed event = %v, want upgrade_failed", got)
 	}
 }
+
+// TestConnDisconnectOmitsCloseReason proves abnormal WebSocket close frames
+// log close_code and error_class only — never the close reason text (issue
+// #94 Codex review P2).
+func TestConnDisconnectOmitsCloseReason(t *testing.T) {
+	const secretReason = "secret-close-reason-must-not-log"
+	fm := newFakeManager()
+	log := &connLogRecorder{}
+	srv := newRTServerWithLogger(t, nil, fm, log)
+
+	conn, _, err := dialRT(t, srv.URL, "http://origin.test")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	_ = conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.ClosePolicyViolation, secretReason),
+		time.Now().Add(time.Second))
+	_ = conn.Close()
+	if !waitFor(t, 2*time.Second, fm.isClosed) {
+		t.Fatal("manager.Close not called after policy close")
+	}
+
+	var disconnected *connLogEntry
+	for i, e := range log.snapshot() {
+		if e.msg == "rt connection closed" {
+			disconnected = &log.snapshot()[i]
+		}
+	}
+	if disconnected == nil {
+		t.Fatal("no disconnected entry logged")
+	}
+	if got := disconnected.field("error_class"); got != "other" {
+		t.Errorf("error_class = %v, want other", got)
+	}
+	if got := disconnected.field("close_code"); got != websocket.ClosePolicyViolation {
+		t.Errorf("close_code = %v, want %d", got, websocket.ClosePolicyViolation)
+	}
+	if disconnected.field("error") != nil {
+		t.Errorf("disconnected entry must not carry error text for close frames")
+	}
+	for _, e := range log.snapshot() {
+		if strings.Contains(e.blob(), secretReason) {
+			t.Errorf("close reason leaked into log: %q", e.blob())
+		}
+	}
+}
