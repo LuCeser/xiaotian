@@ -112,7 +112,14 @@ var _ Logger = (*ZapLogger)(nil)
 // NewLogger builds a production Logger from LogConfig (D-19 startup-only).
 // The returned Logger writes structured JSON (when cfg.Format == "json") or
 // human-readable console output (when cfg.Format == "console") to the
-// configured sink.
+// configured sink: "stderr", "stdout", or a file path (issue #94 — opened
+// create+append, 0644, NOT mirrored to stderr). An unopenable path returns
+// an error so startup fails loudly instead of silently falling back to
+// stderr while the operator tails an empty file.
+//
+// On success the first emitted entry is an info "logger ready" carrying the
+// effective level/format/output — one boot line that says where the rest of
+// the log went.
 //
 // cfg.Level is parsed via zapcore.ParseLevel; on failure the returned error
 // wraps the underlying parse error so the caller can branch. This is
@@ -125,7 +132,17 @@ func NewLogger(cfg LogConfig) (Logger, error) {
 	if _, err := zapcore.ParseLevel(cfg.Level); err != nil {
 		return nil, fmt.Errorf("parse log level %q: %w", cfg.Level, err)
 	}
-	return newLoggerWithWriter(selectWriter(cfg.Output), cfg), nil
+	w, err := selectWriter(cfg.Output)
+	if err != nil {
+		return nil, fmt.Errorf("open log output %q: %w", cfg.Output, err)
+	}
+	logger := newLoggerWithWriter(w, cfg)
+	logger.Info("logger ready",
+		F("level", cfg.Level),
+		F("format", cfg.Format),
+		F("output", cfg.Output),
+	)
+	return logger, nil
 }
 
 // NewNoOpLogger returns a Logger that discards every entry. It is the
@@ -169,20 +186,19 @@ func newLoggerWithWriter(w io.Writer, cfg LogConfig) Logger {
 }
 
 // selectWriter resolves cfg.Output to an io.Writer following the contract
-// documented in LogConfig.Output: "stderr" (or empty, or unknown) → os.Stderr;
-// "stdout" → os.Stdout. File paths are out of scope for Phase 1 — operators
-// redirect stderr to a file via systemd / docker.
-func selectWriter(output string) io.Writer {
+// documented in LogConfig.Output: "stderr" (or empty) → os.Stderr; "stdout"
+// → os.Stdout; any other value is a file path, opened O_CREATE|O_APPEND
+// (0644) so restarts keep prior history. File-open errors are returned, not
+// swallowed: routing logs to a path the process cannot write must abort
+// startup rather than quietly keep writing stderr (issue #94).
+func selectWriter(output string) (io.Writer, error) {
 	switch output {
 	case "stdout":
-		return os.Stdout
+		return os.Stdout, nil
 	case "stderr", "":
-		return os.Stderr
+		return os.Stderr, nil
 	default:
-		// Unknown values default to stderr so a misconfiguration never
-		// silently routes logs to stdout (where they would corrupt
-		// HTTP responses on a server that writes both to the same fd).
-		return os.Stderr
+		return os.OpenFile(output, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	}
 }
 

@@ -71,7 +71,9 @@ log:
   level: info
   # json (machine-parseable) | console (human-readable)
   format: json
-  # stderr captures by systemd / container runtimes
+  # stderr | stdout | a file path (created append-only, 0644; an unopenable
+  # path fails startup, and file output is NOT mirrored to stderr — the
+  # systemd/launcher stderr capture keeps working either way)
   output: stderr
 
 worker:

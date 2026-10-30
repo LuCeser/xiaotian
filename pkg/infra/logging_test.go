@@ -3,6 +3,9 @@ package infra
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -191,6 +194,76 @@ func TestFieldSanitization(t *testing.T) {
 	if got := lines[0]["payload"]; got != wantSanitized {
 		t.Errorf("payload after sanitization: got %q, want %q (literal backslash escapes)",
 			got, wantSanitized)
+	}
+}
+
+// TestNewLoggerFileOutput proves issue #94 U1 through the production
+// entrypoints (LoadConfig → NewLogger, NOT newLoggerWithWriter): when
+// log.output is a file path, the file is created and receives the info-level
+// JSON stream — the "logger ready" boot line plus every caller Info, with
+// Debug filtered at level info. Before U1 any non-stderr/stdout value fell
+// back to os.Stderr and the configured file stayed empty forever, so this
+// test guards both the file creation and the level filtering on that file.
+func TestNewLoggerFileOutput(t *testing.T) {
+	setRequiredPythonEnv(t)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "server.log")
+
+	path := filepath.Join(dir, "config.yaml")
+	yaml := fmt.Sprintf("log:\n  level: info\n  format: json\n  output: %s\n", logPath)
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig(%s): %v", path, err)
+	}
+	logger, err := NewLogger(cfg.Log)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	logger.Info("boot-info-line")
+	logger.Debug("debug-dropped")
+	if err := logger.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("log output file not created: %v", err)
+	}
+	var sawReady, sawInfo bool
+	for _, line := range parseLogLines(t, raw) {
+		if line["msg"] == "debug-dropped" {
+			t.Errorf("debug entry leaked into info-level file output: %v", line)
+		}
+		if line["msg"] == "logger ready" {
+			sawReady = true
+			if line["output"] != logPath {
+				t.Errorf("logger ready output field: got %v, want %q", line["output"], logPath)
+			}
+		}
+		if line["msg"] == "boot-info-line" && line["level"] == "info" {
+			sawInfo = true
+		}
+	}
+	if !sawReady {
+		t.Errorf("no \"logger ready\" line in file output; contents: %q", string(raw))
+	}
+	if !sawInfo {
+		t.Errorf("info entry missing from file output; contents: %q", string(raw))
+	}
+}
+
+// TestNewLoggerUnopenableOutputFailsStartup proves the no-silent-fallback
+// half of U1: a file path NewLogger cannot open returns an error instead of
+// quietly writing stderr while the operator watches the configured file.
+func TestNewLoggerUnopenableOutputFailsStartup(t *testing.T) {
+	// A path whose parent directory does not exist can never be created.
+	bad := filepath.Join(t.TempDir(), "no-such-dir", "server.log")
+	if _, err := NewLogger(LogConfig{Level: "info", Format: "json", Output: bad}); err == nil {
+		t.Fatalf("NewLogger with unopenable output %q: got nil error, want startup failure", bad)
 	}
 }
 
