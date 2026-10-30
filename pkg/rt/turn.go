@@ -1431,7 +1431,13 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	checking := tm.tutor != nil && tm.tutor.checking
 	epoch := tm.epoch
 	turnID := tm.nextTurnIDLocked()
-	ctx, cancel := context.WithCancel(context.Background())
+	// Issue #94 (U5): the dictation turn ctx carries its own deadline — a
+	// hung ASR or classification Chat must not leave the child on a
+	// permanent 「思考中」 chip. Interrupt and close still plain-cancel();
+	// a deadline hit is converted to the thinking_timeout ErrorMsg at the
+	// two checkpoints below (after ASR, after classification), never into
+	// another provider call.
+	ctx, cancel := context.WithTimeout(context.Background(), tm.cfg.ProcessingTimeout)
 	target := TurnTarget{WordIndex: -1}
 	if !checking && tm.tutor != nil &&
 		tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
@@ -1468,6 +1474,12 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 
 	attempts := 1
 	transcript, err := tm.transcribeObserved(ctx, segment, turnID, attempts)
+	if tm.thinkingExpired(ctx, epoch) {
+		// Deadline hit inside ASR: no classification, no TTS retry on the
+		// dead ctx — the coded error returns the classroom to listening.
+		tm.failThinkingTimeout(s, epoch, turnID, "asr")
+		return
+	}
 	if errors.Is(err, mimo.ErrEmptyTranscription) {
 		// The provider's legitimate "nothing spoken" answer (13-07 sentinel):
 		// silence is not a fault — no user-visible error, no classification,
@@ -1567,10 +1579,48 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	if !tm.epochCurrent(epoch) {
 		return // interrupted mid-classification: abort the whole turn silently
 	}
+	if tm.thinkingExpired(ctx, epoch) {
+		// Deadline hit during classification: no dispatch — the spoken
+		// fallback would re-request TTS on the dead ctx. The coded error
+		// returns the classroom to listening; the child speaks again.
+		tm.failThinkingTimeout(s, epoch, turnID, "chat")
+		return
+	}
 	if tm.dispatchInterleave != nil {
 		tm.dispatchInterleave()
 	}
 	tm.dispatchTurn(s, ctx, cancel, turnID, epoch, intent, reply, turnCtx.target)
+}
+
+// thinkingTimeoutNotice is the fixed student-facing wording for the 「思考中」
+// deadline (Issue #94 U5): recoverable, no spoken fallback — speaking the
+// retry would hang the same turn on TTS.
+const thinkingTimeoutNotice = "老师想得太久了，请再对我说一遍"
+
+// thinkingExpired reports whether the turn's processing deadline already hit
+// AND the observation may still act. DeadlineExceeded is sticky and distinct
+// from an interrupt/close cancel() (Canceled), so the predicate names the
+// deadline alone. The epoch + still-processing gate underneath keeps a LATE
+// expiry observation from failing a turn the classroom already moved past
+// (interrupted, dispatched) — the timeout must never clobber a settled turn.
+func (tm *TurnManager) thinkingExpired(ctx context.Context, epoch uint64) bool {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return false
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.epoch == epoch && !tm.closed && tm.state == StateProcessing
+}
+
+// failThinkingTimeout fails the 「思考中」-expired turn through failTurn
+// (recoverable ErrorMsg + back to listening). step ("asr"/"chat") names where
+// the turn stood when the deadline hit; it rides the existing rt_event error
+// entry together with turn_id (session_id comes from the recorder) — the
+// per-call op logging lands with #94's U2, until then code+step is the
+// diagnosable trace.
+func (tm *TurnManager) failThinkingTimeout(s Sender, epoch, turnID uint64, step string) {
+	tm.failTurn(s, epoch, ErrCodeThinkingTimeout, thinkingTimeoutNotice,
+		infra.F("turn_id", turnID), infra.F("at", step))
 }
 
 // dispatchTurn routes a whitelisted intent into the FSM. The switch covers
