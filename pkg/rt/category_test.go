@@ -235,7 +235,7 @@ func TestDictationChineseClassroomEndToEnd(t *testing.T) {
 		t.Fatalf("check_started.words = %v, want the full 词语 list", started.Words)
 	}
 
-	itAnnounceAck(t, conn) // check bridge
+	itAnnounceAckSettled(t, conn, StateGrading) // check bridge settles to grading (#96 U2)
 	for i := 0; i < 2; i++ {
 		itSendText(t, conn, CheckVerdictMsg{
 			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("it-zh-v-%d", i), WordIndex: i, Correct: true,
