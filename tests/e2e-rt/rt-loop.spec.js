@@ -996,6 +996,69 @@ test('mid-check resume: reconnect restores the stored verdicts and finishes with
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
 
+// #96 review P2: a page that reconnects straight into the check panel gets
+// check_started while getUserMedia is still pending — the handler's
+// capture.stop() fences the start (it resolves false), but the AudioContext
+// is born synchronously inside the gesture and SURVIVES the stop (D-06). The
+// player must be bound anyway, or the bridge and every later audio frame is
+// dropped as silence. Slow permission makes the race deterministic.
+test('mid-check resume keeps playback audible when permission resolves late', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+  const pair = 'pair-slow-mic-' + Date.now();
+  const url = '/tutor/?' + QUIET_PARAMS + '&mock_resume=1&mock_step_ms=250&mock_pair=' + pair;
+
+  // Session 1: drive to the mid-check close so the pair reopens the panel.
+  await page.goto(url);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await expect
+    .poll(async () => ((await getSession(page)).closedMidCheck ? 'closed' : 'dictating'),
+      { timeout: 60_000 })
+    .toBe('closed');
+
+  // Session 2 (same pair id): delay getUserMedia past the connect, count the
+  // player's context bindings, and watch for dropped audio chunks.
+  await page.goto(url);
+  await page.evaluate(() => {
+    const media = navigator.mediaDevices;
+    const origGum = media.getUserMedia.bind(media);
+    media.getUserMedia = (constraints) => new Promise((resolve) => {
+      setTimeout(() => { resolve(origGum(constraints)); }, 2000);
+    });
+    const player = window.__rtTutor.playback;
+    window.__bindingCalls = 0;
+    const origBind = player.setAudioContext.bind(player);
+    player.setAudioContext = function (ctx) {
+      window.__bindingCalls += 1;
+      return origBind(ctx);
+    };
+  });
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
+
+  // The fenced start still bound the player — check_started's stop() beat
+  // the 2s permission promise.
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.capture.isCapturing), { timeout: 10_000 })
+    .toBe(false);
+  await expect
+    .poll(() => page.evaluate(() => window.__bindingCalls), { timeout: 10_000 })
+    .toBeGreaterThanOrEqual(1);
+  // The resume bridge really played: no chunk was dropped and the page acked
+  // the sentence (an unbound player drops every chunk and never acks).
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.playback.droppedChunks), { timeout: 10_000 })
+    .toBe(0);
+  await expect
+    .poll(async () => ((await getSession(page)).acks.length > 0 ? 'acked' : 'silent'),
+      { timeout: 15_000 })
+    .toBe('acked');
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
 // ---------------------------------------------------------------------------
 // 13.1-05: 再练一组 closed loop — the D-13 lesson_complete banner offers the
 // practice entry, the tap restarts with session_init(practice=true) picking

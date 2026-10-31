@@ -1117,10 +1117,24 @@
         // iOS 3-condition unlock inside this handler, then awaits
         // getUserMedia; the stream and AudioContext are held for the whole
         // session — no per-utterance hold-to-talk, no re-authorization.
-        capture.start().then(function (active) {
-          if (!active || !started || courseEnded) return;
-          timing.push(RT_EVENTS.AUTH_COMPLETE);
-          playback.setAudioContext(capture.audioCtx);
+        var startPromise = capture.start();
+        // Bind the player INSIDE the gesture, before awaiting permission
+        // (#96 review P2): start() creates the AudioContext synchronously,
+        // and a page that reconnects straight into the check panel receives
+        // check_started while getUserMedia is still pending — that handler's
+        // capture.stop() fences the start (it resolves false) but the
+        // context SURVIVES (D-06). Binding only on success would drop every
+        // later frame: the player refuses audio without a bound context, so
+        // the bridge and the summary would play as silence forever.
+        if (capture.audioCtx) playback.setAudioContext(capture.audioCtx);
+        startPromise.then(function (active) {
+          if (!started || courseEnded) return;
+          if (active) timing.push(RT_EVENTS.AUTH_COMPLETE);
+          // Re-bind when the promise settles: a fenced start resolves false
+          // (stop() during pending permission), and a restart may have
+          // replaced the context — whichever context is live now is the one
+          // the player must use for everything that follows.
+          if (capture.audioCtx) playback.setAudioContext(capture.audioCtx);
         })['catch'](function (errType) {
           showError(errType, '');
         });
