@@ -732,6 +732,10 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		updated    = 0
 		missing    = 0
 		saveFailed = false
+		// A Complete that never landed leaves the receipt pending — the
+		// write's outcome is unverifiable, so the panel must read 待核实
+		// immediately and the retry gate must stay shut (#96 review P2-3).
+		receiptPending = false
 	)
 	if len(ratings) > 0 {
 		// 13.3-01 receipt phase one: mark the attempt pending BEFORE the
@@ -797,7 +801,11 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
 			}
 			if cerr != nil {
-				// The row stays pending — the parent view's honest 「待核实」.
+				// The row stays pending — the parent view's honest 「待核实」,
+				// and (#96 review P2-3) the in-session panel's too: the
+				// result carries Pending so the copy and the retry gate
+				// reflect it on THIS frame, not after a re-submit.
+				receiptPending = true
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 			}
 		}
@@ -817,6 +825,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		Updated:   updated,
 		Missing:   missing,
 		Unchecked: false,
+		Pending:   receiptPending,
 	}
 	if saveFailed {
 		result.Updated = 0
@@ -828,7 +837,10 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 	tm.mu.Unlock()
 	_ = s.SendControl(result)
 
-	allSaved := !saveFailed && result.Updated == result.Requested && result.Requested > 0
+	// A pending receipt is never all-saved (#96 Q4): the write may have
+	// committed FSRS-side, so no summary, no ending — the panel reads
+	// 待核实 with the retry disabled until someone verifies the row.
+	allSaved := !saveFailed && !receiptPending && result.Updated == result.Requested && result.Requested > 0
 	if !allSaved {
 		tm.enterGradingAt(s, epoch)
 		return

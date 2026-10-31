@@ -332,6 +332,105 @@ func TestCheckSubmitEndSessionDuringWriteDoesNotTrailTerminal(t *testing.T) {
 	}
 }
 
+// TestCheckSubmitCompleteFailureShowsPending (#96 review P2-3): when the
+// receipt's Complete never lands (the row stays pending), the FIRST
+// review_result must already carry pending — the panel shows 待核实 and
+// disables the retry on this frame. A full-success write with a failed
+// Complete must NOT run the summary ending.
+func TestCheckSubmitCompleteFailureShowsPending(t *testing.T) {
+	receipts, db := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+
+	// Break Complete only: the ABORT trigger fails every receipt UPDATE
+	// while Begin (INSERT) and ListByLesson (SELECT) keep answering.
+	if _, err := db.Exec("CREATE TRIGGER block_receipt_complete BEFORE UPDATE ON lesson_save_receipts " +
+		"BEGIN SELECT RAISE(ABORT, 'complete blocked'); END"); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	spokenBefore := s.countOf(TypeTeacherSentence)
+	result := ttSubmitCheck(t, tm, s)
+	if result["pending"] != true {
+		t.Fatalf("review_result.pending = %v, want true on the first frame", result["pending"])
+	}
+	if int(result["updated"].(float64)) != len(cards) {
+		t.Fatalf("review_result.updated = %v, want the real count %d", result["updated"], len(cards))
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended = %d, want 0 (a pending receipt never ends the session)", got)
+	}
+	if got := s.countOf(TypeTeacherSentence); got != spokenBefore {
+		t.Fatalf("teacher sentences = %d, want unchanged %d (no summary over a pending receipt)", got, spokenBefore)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return gradingCount(s) > 0 }) {
+		t.Fatal("the panel never returned to grading")
+	}
+
+	// A re-submit replays the pending receipt — still no second write.
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-pending-replay"}))
+	time.Sleep(300 * time.Millisecond)
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want 1 (a pending receipt is not retryable)", got)
+	}
+	results := s.controlsOf(t, TypeReviewResult)
+	if len(results) < 2 {
+		t.Fatal("the pending replay never answered")
+	}
+	if results[len(results)-1]["pending"] != true {
+		t.Fatalf("replayed review_result.pending = %v, want true", results[len(results)-1]["pending"])
+	}
+}
+
+// TestCheckRetryCompleteFailureShowsPending: the retry path owes the same
+// immediate 待核实 (#96 review P2-3) — a full-success retry whose Complete
+// fails reports pending, stays open, and never speaks the summary.
+func TestCheckRetryCompleteFailureShowsPending(t *testing.T) {
+	receipts, db := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewErr = errors.New("fail once")
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+	ttSubmitCheck(t, tm, s) // the failed receipt is on record
+
+	words.reviewErr = nil
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
+	if _, err := db.Exec("CREATE TRIGGER block_retry_complete BEFORE UPDATE ON lesson_save_receipts " +
+		"BEGIN SELECT RAISE(ABORT, 'complete blocked'); END"); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	spokenBefore := s.countOf(TypeTeacherSentence)
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-retry-complete-fail"}))
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 2 }) {
+		t.Fatalf("SubmitReview calls = %d, want 2 after the retry", len(words.submissions()))
+	}
+	results := s.controlsOf(t, TypeReviewResult)
+	if len(results) < 2 {
+		t.Fatal("the retry never answered")
+	}
+	last := results[len(results)-1]
+	if last["pending"] != true {
+		t.Fatalf("retry review_result.pending = %v, want true", last["pending"])
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended = %d, want 0 (a pending receipt never ends the session)", got)
+	}
+	if got := s.countOf(TypeTeacherSentence); got != spokenBefore {
+		t.Fatalf("teacher sentences = %d, want unchanged %d (no summary over a pending receipt)", got, spokenBefore)
+	}
+}
+
 // TestCheckRetryBeginFailureSkipsWrite: when the retry's receipt Begin
 // fails, the write must NOT run — without a fresh receipt row there is no
 // dedup basis for a later tap, so the honest answer is a zero-updated

@@ -211,6 +211,10 @@ func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, cancel co
 		updated    = 0
 		missing    = 0
 		saveFailed = false
+		// Same contract as the first submit's phase two (#96 review P2-3):
+		// a Complete that never landed leaves the receipt pending — the
+		// answer carries Pending, the panel reads 待核实, no ending runs.
+		receiptPending = false
 	)
 	wres, err := tm.cfg.Words.SubmitReview(ctx, ratings, category)
 	switch {
@@ -227,10 +231,15 @@ func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, cancel co
 	}
 
 	if tm.cfg.Receipts != nil && receiptID > 0 {
+		var cerr error
 		if err != nil {
-			_ = tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false)
+			cerr = tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false)
 		} else {
-			_ = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
+			cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
+		}
+		if cerr != nil {
+			receiptPending = true
+			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 		}
 	}
 
@@ -247,6 +256,7 @@ func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, cancel co
 		Requested: requested,
 		Updated:   updated,
 		Missing:   missing,
+		Pending:   receiptPending,
 	}
 	if saveFailed {
 		result.Updated = 0
@@ -257,7 +267,7 @@ func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, cancel co
 	tm.mu.Unlock()
 	_ = s.SendControl(result)
 
-	if !saveFailed && updated == requested && requested > 0 {
+	if !saveFailed && !receiptPending && updated == requested && requested > 0 {
 		// This goroutine is off the read loop, so the ending's ack wait can
 		// be served; the retry's own registered ctx/cancel ride along so a
 		// close during the summary cancels the wait.
