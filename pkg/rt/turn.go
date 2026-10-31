@@ -1614,13 +1614,23 @@ func (tm *TurnManager) thinkingExpired(ctx context.Context, epoch uint64) bool {
 
 // failThinkingTimeout fails the 「思考中」-expired turn through failTurn
 // (recoverable ErrorMsg + back to listening). step ("asr"/"chat") names where
-// the turn stood when the deadline hit; it rides the existing rt_event error
-// entry together with turn_id (session_id comes from the recorder) — the
-// per-call op logging lands with #94's U2, until then code+step is the
-// diagnosable trace.
+// the turn stood when the deadline hit. The correlated Warn fires AT the
+// threshold (Issue #94 U5 acceptance): op + error_class=timeout + the
+// recorder's session_id + turn_id let the log alone tell a wedged ASR from a
+// wedged Chat; the same op/error_class ride the rt_event error entry beside
+// them (Emit adds its own session_id/t_mono_ns context).
 func (tm *TurnManager) failThinkingTimeout(s Sender, epoch, turnID uint64, step string) {
+	tm.logger.Warn("dictation turn processing deadline exceeded",
+		infra.F("op", step),
+		infra.F("error_class", "timeout"),
+		infra.F("session_id", tm.recorder.SessionID()),
+		infra.F("turn_id", turnID),
+	)
 	tm.failTurn(s, epoch, ErrCodeThinkingTimeout, thinkingTimeoutNotice,
-		infra.F("turn_id", turnID), infra.F("at", step))
+		infra.F("turn_id", turnID),
+		infra.F("op", step),
+		infra.F("error_class", "timeout"),
+	)
 }
 
 // dispatchTurn routes a whitelisted intent into the FSM. The switch covers
