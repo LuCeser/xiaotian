@@ -654,16 +654,30 @@ test('check stage keeps the word chips read-only during the bridge', async ({ pa
     .toBeTruthy();
 
   // The panel opens with the bridge still speaking (state=grading only lands
-  // after the bridge audio drains).
+  // after the bridge audio drains). The disabled assertion must sample
+  // INSIDE the speaking window: toBeDisabled's auto-retry would let a stale
+  // gate pass once grading disables the chips for its own reasons, so the
+  // page returns one atomic snapshot taken while data-state is still
+  // 'speaking' (or 'missed' if the window evaporated).
   await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
-  await expect
-    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 10_000 })
-    .toBe('speaking');
-  const chips = page.locator('#rt-words .rt-word-chip');
-  await expect(chips).toHaveCount(3);
-  for (let i = 0; i < 3; i++) {
-    await expect(chips.nth(i)).toBeDisabled();
-  }
+  const duringBridge = await page.evaluate(() => new Promise((resolve) => {
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      const st = document.getElementById('rt-status').getAttribute('data-state');
+      const chips = Array.from(document.querySelectorAll('#rt-words .rt-word-chip'));
+      if (st === 'speaking' && chips.length === 3) {
+        resolve({ state: st, allDisabled: chips.every((c) => c.disabled) });
+        clearInterval(timer);
+      } else if (st === 'grading' || st === 'ended' || Date.now() - t0 > 20_000) {
+        resolve({ state: st, missed: true });
+        clearInterval(timer);
+      }
+    }, 20);
+  }));
+  expect(duringBridge.missed, 'the speaking window vanished before it could be sampled')
+    .toBeFalsy();
+  expect(duringBridge.allDisabled, 'chips must be read-only while the bridge speaks')
+    .toBe(true);
 
   // A synthetic click bypasses the browser's disabled-button suppression but
   // not the page's own gate: no interrupt, no read_word.
