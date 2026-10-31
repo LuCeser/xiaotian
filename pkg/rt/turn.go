@@ -1726,6 +1726,15 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 			if !proceed {
 				return // interrupted mid-generation: abort silently
 			}
+			if tm.thinkingExpired(ctx, epoch) {
+				// Issue #94 (U5): the on-demand generation is the turn's
+				// SECOND Chat and may hang past the deadline exactly like the
+				// classification call. The honest classifyReply fallback would
+				// announce through TTS on the dead ctx; the coded error with
+				// the fixed notice returns the classroom to listening instead.
+				tm.failThinkingTimeout(s, epoch, turnID, "chat")
+				return
+			}
 			reply = augmented
 		}
 		tm.runTurnAnnouncementDisplayAt(s, epoch, ctx, cancel, reply, tm.replyDisplay(reply), purposeChat, tm.armWordTimer)
