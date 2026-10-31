@@ -2107,24 +2107,35 @@ func (tm *TurnManager) settleListeningAt(s Sender, epoch uint64) bool {
 
 // failTurn reports a turn-level failure and returns the FSM to listening —
 // but only if the turn is still current: an interrupted turn must not emit a
-// spurious error on top of the interrupt ack. Any playback waits the failed
-// announcement left behind are invalidated. Optional fields ride the error
-// event (e.g. the retry-attempts count of the invalid-response discipline).
+// spurious error on top of the interrupt ack. The epoch gate and EVERY side
+// effect — the error and state enqueues, the playback-wait invalidation, the
+// listening flip — run in ONE lock hold (Issue #94 U5 review): a
+// check-then-act split left a window where an interrupt or close landing
+// after the check let the stale failTurn still emit its error behind the
+// interrupt ack and clear the NEXT turn's playback state. Sender enqueues
+// are non-blocking and legal under mu (the applyTurnLocked contract), so
+// the wire order follows the lock order. Optional fields ride the error
+// event (e.g. the retry-attempts count of the invalid-response discipline),
+// emitted after the critical section.
 func (tm *TurnManager) failTurn(s Sender, epoch uint64, code, message string, fields ...infra.Field) {
-	if !tm.epochCurrent(epoch) {
+	tm.mu.Lock()
+	if tm.epoch != epoch || tm.closed {
+		tm.mu.Unlock()
 		return
 	}
-	tm.sendError(s, code, message, true, fields...)
-	tm.mu.Lock()
+	_ = s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: true})
 	for _, p := range tm.pendingPlayback {
 		p.cancelWait()
 	}
 	tm.pendingPlayback = map[string]*pendingPlayback{}
 	tm.playbackPending = false
 	tm.state = StateListening
-	value := tm.effectiveClientStateLocked()
+	_ = s.SendControl(StateMsg{Type: TypeState, Value: tm.effectiveClientStateLocked()})
 	tm.mu.Unlock()
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
+	all := make([]infra.Field, 0, 1+len(fields))
+	all = append(all, infra.F("code", code))
+	all = append(all, fields...)
+	tm.recorder.Emit(EventError, all...)
 }
 
 // sendError is the single error egress: coded ErrorMsg + error event. The
