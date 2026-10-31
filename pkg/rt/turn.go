@@ -1429,15 +1429,31 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	// index=len) — turnTarget must never be asked for a word that does not
 	// exist, and an invalid-marker target can never drive an advance.
 	checking := tm.tutor != nil && tm.tutor.checking
+	// Issue #94 (U5): the turn's branch shape is captured HERE, under the
+	// entry lock, because it picks the ctx flavor below AND the branch point
+	// after ASR must take the SAME decision — a 背默 turn must never classify
+	// on a deadline ctx, and a word-dictation turn must never shed its
+	// deadline mid-flight (poem/passage/checking change only at epoch-bumping
+	// boundaries, so under a live turn this snapshot cannot go stale).
+	reciteTurn := tm.tutor != nil && tm.tutor.recitation()
+	poemTask := tm.tutor != nil && tm.tutor.poem != nil
 	epoch := tm.epoch
 	turnID := tm.nextTurnIDLocked()
-	// Issue #94 (U5): the dictation turn ctx carries its own deadline — a
-	// hung ASR or classification Chat must not leave the child on a
-	// permanent 「思考中」 chip. Interrupt and close still plain-cancel();
-	// a deadline hit is converted to the thinking_timeout ErrorMsg at the
-	// two checkpoints below (after ASR, after classification), never into
-	// another provider call.
-	ctx, cancel := context.WithTimeout(context.Background(), tm.cfg.ProcessingTimeout)
+	// Issue #94 (U5): the WORD-dictation turn ctx carries its own deadline —
+	// a hung ASR or classification Chat must not leave the child on a
+	// permanent 「思考中」 chip. A deadline hit becomes the thinking_timeout
+	// ErrorMsg at the checkpoints below (after ASR, after classification,
+	// after example generation), never another provider call. The subject
+	// clarify, check and 背默 branches keep the pre-#94 plain cancel — their
+	// classifiers retry unconditionally and their TTS dispatch is not
+	// deadline-aware, so the deadline stays scoped to the dictation turn.
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if asking || checking || reciteTurn {
+		ctx, cancel = context.WithCancel(context.Background())
+	} else {
+		ctx, cancel = context.WithTimeout(context.Background(), tm.cfg.ProcessingTimeout)
+	}
 	target := TurnTarget{WordIndex: -1}
 	if !checking && tm.tutor != nil &&
 		tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
@@ -1558,13 +1574,11 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	// Issue #12/#14: a 背默 WRITING stage classifies through its own prompt
 	// (the payload's Index drives the line/paragraph hint) and dispatches
 	// through its own branch table — never the per-word pacing switch below.
-	tm.mu.Lock()
-	reciteMode := tm.tutor.recitation()
-	isPoemTask := tm.tutor.poem != nil
-	tm.mu.Unlock()
-	if reciteMode {
+	// Issue #94 (U5): reciteTurn/poemTask are the ENTRY snapshot's flags —
+	// the very ones that picked this turn's plain-cancel ctx above.
+	if reciteTurn {
 		var p intentPayload
-		if isPoemTask {
+		if poemTask {
 			p = tm.classifyPoemTurn(ctx, transcript)
 		} else {
 			p = tm.classifyPassageTurn(ctx, transcript)
@@ -1572,7 +1586,7 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		if !tm.epochCurrent(epoch) {
 			return
 		}
-		if isPoemTask {
+		if poemTask {
 			tm.dispatchPoemTurn(s, ctx, cancel, turnID, epoch, p)
 		} else {
 			tm.dispatchPassageTurn(s, ctx, cancel, turnID, epoch, p)
