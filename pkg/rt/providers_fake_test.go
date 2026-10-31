@@ -567,18 +567,18 @@ type fakeWordSource struct {
 	reviewResult     ReviewWriteResult
 	reviewBlock      chan struct{} // when non-nil, blocks until closed or ctx cancelled
 	reviewBlockEnter chan struct{} // optional: closed when a blocked SubmitReview begins waiting
+	due              [][]lesson.Word
+	dueByCat         map[string][]lesson.Word
+	peekByCat        map[string][]lesson.Word
+	submitCalls      []map[string]string
+	submitCat        []string
+	fetchCats        []string
+	peekCats         []string
+	fetchCalls       int
 	// reviewBlockIgnoreCtx models a provider whose in-flight write commits
 	// server-side regardless of the caller's cancellation: the blocked call
 	// returns its REAL result only after reviewBlock closes (#96 P2-2).
 	reviewBlockIgnoreCtx bool
-	due                  [][]lesson.Word
-	dueByCat             map[string][]lesson.Word
-	peekByCat            map[string][]lesson.Word
-	submitCalls          []map[string]string
-	submitCat            []string
-	fetchCats            []string
-	peekCats             []string
-	fetchCalls           int
 	mu                   sync.Mutex
 }
 
