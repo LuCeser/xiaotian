@@ -902,9 +902,10 @@ test('unchecked fallback then correction: mid-check close reopens with pending d
       return !c.submitPending && c.resultText !== '' ? 'done' : 'waiting';
     }, { timeout: 30_000 })
     .toBe('done');
-  // Honest diff copy: exactly the ONE override was saved.
+  // Honest diff copy (U1 receipt wording): exactly the ONE override was
+  // saved — a full save of a 1-word batch renders the saved receipt line.
   const checkObs = await page.evaluate(() => window.__rtTutor.observe().check);
-  expect(checkObs.resultText).toContain('1 个词都记上啦');
+  expect(checkObs.resultText).toContain('复习安排已更新，1 个词');
 
   await expect
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
