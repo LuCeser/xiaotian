@@ -15,8 +15,17 @@ import (
 // the db lets a test break ONE store path in isolation (e.g. an INSERT
 // ABORT trigger that leaves the SELECT path working).
 func receiptStoreForTest(t *testing.T) (*lesson.ReceiptStore, *sql.DB) {
+	store, db, _ := receiptStoreForTestPath(t)
+	return store, db
+}
+
+// receiptStoreForTestPath is receiptStoreForTest that also exposes the db
+// PATH: the concurrency regression opens a SECOND handle to the same file
+// to hold the receipts write lock from outside the store's own pool.
+func receiptStoreForTestPath(t *testing.T) (*lesson.ReceiptStore, *sql.DB, string) {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "retry-receipt.db"))
+	path := filepath.Join(t.TempDir(), "retry-receipt.db")
+	db, err := database.Open(path)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -29,7 +38,7 @@ func receiptStoreForTest(t *testing.T) (*lesson.ReceiptStore, *sql.DB) {
 	if err != nil {
 		t.Fatalf("NewReceiptStore: %v", err)
 	}
-	return store, db
+	return store, db, path
 }
 
 // TestCheckRetryDuplicateDuringSummaryAck (review P2-1): while the FIRST
@@ -162,66 +171,77 @@ func TestCheckRetryPartialOnlyMissingWords(t *testing.T) {
 	}
 }
 
-// TestCheckRetryConcurrentSingleWrite: while one retry is parked inside its
-// SubmitReview, a second check_submit must be consumed by the in-flight
-// marker — silently: no second write AND no replayed receipt frame (the
-// marker check precedes the receipt read). With the marker removed, the
-// second request reads the retry's pending receipt and answers with a
-// pending review_result — the unchanged-frame assertion goes red.
+// TestCheckRetryConcurrentSingleWrite (#96 review P3): while one retry's
+// receipt Begin is stalled on the receipts WRITE LOCK — i.e. before its
+// pending row exists — a second check_submit must be consumed by the
+// in-flight marker with NO second write. The lock construction is what
+// makes the regression provable on business counts: with the marker
+// removed, request B reads the SAME stale receipt (A's Begin has not
+// committed), enters the write branch, and BOTH retries SubmitReview —
+// the settled write count goes 2 -> 3. (An A parked INSIDE SubmitReview
+// cannot prove this: its pending receipt already turns B into a replay.)
 func TestCheckRetryConcurrentSingleWrite(t *testing.T) {
-	receipts, _ := receiptStoreForTest(t)
-	cards := ttCards("苹果")
+	receipts, db, path := receiptStoreForTestPath(t)
+	// Two pooled connections for the store: A's stalled Begin occupies one,
+	// B's receipt SELECT needs the other (WAL readers proceed during a held
+	// write transaction; the single-conn default would queue behind A).
+	db.SetMaxOpenConns(2)
+	cards := ttCards("苹果", "香蕉")
 	words := newFakeWords(cards)
-	words.reviewErr = errors.New("fail once")
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果"}, Missing: []string{"香蕉"}}
 	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
 		c.Receipts = receipts
 	})
-	ttCheckAll(t, tm, s, 1)
-	ttSubmitCheck(t, tm, s)
+	ttCheckAll(t, tm, s, len(cards))
+	ttSubmitCheck(t, tm, s) // partial save on record: receipt saved, missing=[香蕉]
 
-	words.reviewErr = nil
-	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果"}}
-	block := make(chan struct{})
-	entered := make(chan struct{})
-	words.reviewBlock = block
-	words.reviewBlockEnter = entered
+	// The retry still cannot finish: its result keeps the batch unfixed.
+	words.reviewResult = ReviewWriteResult{Missing: []string{"香蕉"}}
 
-	// Request A: the in-flight retry, parked INSIDE its SubmitReview (its
-	// receipt Begin has already landed by the time `entered` fires).
-	go func() {
-		tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-a"}))
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("first retry never reached its parked SubmitReview")
+	// Hold the receipts write lock from a SECOND handle: A's retry Begin
+	// (an INSERT) stalls on it while ListByLesson (a SELECT) keeps reading
+	// the pre-retry receipt.
+	lockDb, err := database.Open(path)
+	if err != nil {
+		t.Fatalf("open lock db: %v", err)
 	}
+	t.Cleanup(func() { _ = lockDb.Close() })
+	lockCtx := t.Context()
+	lockConn, err := lockDb.Conn(lockCtx)
+	if err != nil {
+		t.Fatalf("grab lock conn: %v", err)
+	}
+	if _, err = lockConn.ExecContext(lockCtx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("hold receipts write lock: %v", err)
+	}
+	t.Cleanup(func() { _ = lockConn.Close() })
 
-	// Request B: arrives while A's write is in flight.
+	// Request A: synchronous — it takes the marker, reads the partial
+	// receipt, and hands off to its goroutine, whose Begin stalls on the
+	// lock (busy_timeout 5s bounds the stall; release below is immediate).
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-a"}))
+
+	// Request B: arrives while A's Begin is still uncommitted. The marker
+	// must consume it silently — no frame, and (once released) no write.
 	resultsBefore := s.countOf(TypeReviewResult)
-	doneB := make(chan struct{})
-	go func() {
-		defer close(doneB)
-		tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-b"}))
-	}()
-	select {
-	case <-doneB:
-	case <-time.After(5 * time.Second):
-		t.Fatal("concurrent submit never returned while a retry was in flight")
-	}
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-b"}))
 	if got := s.countOf(TypeReviewResult); got != resultsBefore {
 		t.Fatalf("review_result count = %d during an in-flight retry, want unchanged %d", got, resultsBefore)
 	}
 
-	close(block)
-	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 2 }) {
-		t.Fatalf("SubmitReview calls = %d, want 2 (one failed first pass + one retry)", len(words.submissions()))
+	// Release the lock: A's retry is the ONLY write that follows.
+	if _, err = lockConn.ExecContext(lockCtx, "COMMIT"); err != nil {
+		t.Fatalf("release receipts write lock: %v", err)
 	}
-	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
-		t.Fatal("session_ended expected after the single successful retry")
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) >= 2 }) {
+		t.Fatalf("SubmitReview calls = %d, want 2 (one partial first pass + one retry)", len(words.submissions()))
 	}
+	time.Sleep(500 * time.Millisecond) // let a would-be second retry land too
 	if got := len(words.submissions()); got != 2 {
-		t.Fatalf("SubmitReview calls settled at %d, want 2", got)
+		t.Fatalf("SubmitReview calls settled at %d, want 2 (the concurrent duplicate must not write)", got)
+	}
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended = %d, want 0 (the unfixed retry keeps the session open)", got)
 	}
 }
 

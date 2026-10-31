@@ -120,13 +120,30 @@ func TestCheckQuietGradingIgnoresUplinkSpeech(t *testing.T) {
 	if !waitFor(t, 5*time.Second, func() bool { return gradingCount(s) > 0 }) {
 		t.Fatal("grading state never broadcast after bridge ack")
 	}
+	asr, ok := tm.asr.(*fakeASR)
+	if !ok {
+		t.Fatalf("tm.asr is %T, want *fakeASR", tm.asr)
+	}
+	fedBefore := asr.fedCount()
 	before := s.countOf(TypeTeacherSentence)
+	// Outlive BOTH incidental gates first — the 500ms post-ack echo tail and
+	// the 1s session_ready start grace (the instant fakes finish the drive
+	// inside the grace): the assertion must put the STATE gate on trial
+	// alone, or a dropped-by-grace utterance would keep it green for free.
+	time.Sleep(1200 * time.Millisecond)
 	tm.IngestAudio(s, ttUtterance())
 	// ttUtterance carries its own trailing silence, so a still-listening
 	// session would close VAD and answer well inside this window — the fakes
 	// reply instantly once a turn starts. A negative assertion must outlive
 	// that pipeline instead of sampling the unchanged count at once.
 	time.Sleep(2 * time.Second)
+	// The ASR call count is the primary gate proof (#96 review P3): a leaked
+	// turn calls Transcribe even when the fake's script is exhausted (it
+	// answers an error and no teacher sentence follows), so teacher_sentence
+	// alone could stay flat while recognition still ran.
+	if got := asr.fedCount(); got != fedBefore {
+		t.Fatalf("ASR calls = %d after uplink in grading, want unchanged %d", got, fedBefore)
+	}
 	if got := s.countOf(TypeTeacherSentence); got != before {
 		t.Fatalf("teacher_sentence count = %d, want unchanged %d after uplink in grading", got, before)
 	}
