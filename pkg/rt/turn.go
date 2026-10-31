@@ -1492,9 +1492,16 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	if err != nil && errors.Is(err, mimo.ErrInvalidResponse) {
 		// The ASR half of the invalid-response discipline (13-08 built the
 		// LLM half): same ctx, at most ONE retry; the failure count lands
-		// in the event fields when it still fails.
+		// in the event fields when it still fails. Issue #94 (U5): the
+		// deadline check covers the RETRY too — a second ASR that hangs to
+		// the cutoff is a thinking_timeout (fixed notice, op=asr), never a
+		// generic provider_failed with the ASR wording.
 		attempts = 2
 		transcript, err = tm.transcribeObserved(ctx, segment, turnID, attempts)
+		if tm.thinkingExpired(ctx, epoch) {
+			tm.failThinkingTimeout(s, epoch, turnID, "asr")
+			return
+		}
 	}
 	if err != nil {
 		tm.failTurn(s, epoch, ErrCodeProviderFailed, "语音识别失败，请再对我说一遍", infra.F("attempts", attempts))
