@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 	"github.com/xiaotian/home-tutor-agent/pkg/mimo"
 )
 
@@ -76,6 +77,35 @@ func (l *thinkingHangThenChatLLM) callCount() int {
 	return l.calls
 }
 
+// classifyThenHangLLM is thinkingHangThenChatLLM's mirror: the FIRST Chat
+// answers with a scripted verdict (the classification) and every LATER Chat
+// wedges until its ctx dies — the meaning/example generation hanging past
+// the 「思考中」 deadline. It honors ctx, so the deadline (not the test)
+// ends the call.
+type classifyThenHangLLM struct {
+	verdict mimo.ChatResponse
+	mu      sync.Mutex
+	calls   int
+}
+
+func (l *classifyThenHangLLM) Chat(ctx context.Context, _ []mimo.Message, _ ...mimo.ChatOption) (mimo.ChatResponse, error) {
+	l.mu.Lock()
+	l.calls++
+	first := l.calls == 1
+	l.mu.Unlock()
+	if first {
+		return l.verdict, nil
+	}
+	<-ctx.Done()
+	return mimo.ChatResponse{}, ctx.Err()
+}
+
+func (l *classifyThenHangLLM) callCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.calls
+}
+
 // failWindowLogger routes every entry to the embedded capture and, exactly
 // once, fires a test hook the moment the thinking_timeout rt_event error is
 // emitted. On the unfixed failTurn that emission sat INSIDE the race window
@@ -115,11 +145,22 @@ func (l *failWindowLogger) Info(msg string, fields ...infra.Field) {
 // and the manager — the correlated timeout Warn must land on it too.
 func ttThinkingFixture(t *testing.T, timeout time.Duration, asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, log infra.Logger) (*TurnManager, *captureSender) {
 	t.Helper()
+	return ttThinkingFixtureCards(t, timeout, asr, llm, tts, log, ttCards("苹果"), nil)
+}
+
+// ttThinkingFixtureCards is ttThinkingFixture with custom cards and a config
+// mutator — the example-generation test needs a meaning-only card and the
+// Examples seam beside the deadline.
+func ttThinkingFixtureCards(t *testing.T, timeout time.Duration, asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, log infra.Logger, cards []lesson.Word, mutate func(*TurnManagerConfig)) (*TurnManager, *captureSender) {
+	t.Helper()
 	tm := NewTurnManager(asr, llm, tts, newFakeExecutorNoRow(ttLessonID),
-		ttConfigWith(newFakeWords(ttCards("苹果")), func(c *TurnManagerConfig) {
+		ttConfigWith(newFakeWords(cards), func(c *TurnManagerConfig) {
 			c.ProcessingTimeout = timeout
 			c.VADStartGraceMs = 1
 			c.VADEchoTailMs = 1
+			if mutate != nil {
+				mutate(c)
+			}
 		}), NewEventRecorder(log, "t"), log)
 	s := &captureSender{}
 	ttInit(t, tm, s)
@@ -639,4 +680,58 @@ func TestProcessTurnThinkingTimeoutCloseInsideFailWindow(t *testing.T) {
 	if got := s.countOf(TypeError); got != 1 {
 		t.Errorf("error count = %d, want exactly 1 (the thinking_timeout itself)", got)
 	}
+}
+
+// TestProcessTurnThinkingTimeoutAfterHangingExampleGeneration: the
+// classification answers meaning/example INSIDE the deadline, but the
+// dispatch stage's on-demand generation (dispatchTurn → exampleReply, the
+// turn's SECOND Chat) wedges past it. The deadline check between the
+// generation's return and the announcement must fire the SAME
+// thinking_timeout — fixed notice, op=chat, correlated Warn — and never the
+// honest spoken fallback: announcing it would re-request TTS on the dead
+// ctx. Removing the post-generation check turns this red on both the
+// missing thinking_timeout and the TTS call that grew.
+func TestProcessTurnThinkingTimeoutAfterHangingExampleGeneration(t *testing.T) {
+	asr := newFakeASR(asrScript{text: "苹果什么意思"})
+	llm := &classifyThenHangLLM{verdict: wireChatResponse(t, intentScript(intentMeaning, "这个词是苹果的意思。").wire)}
+	tts := newFakeTTS(1, 320)
+	log := &captureLogger{}
+	tm, s := ttThinkingFixtureCards(t, 250*time.Millisecond, asr, llm, tts, log,
+		ttCardsNoExample("苹果"), func(c *TurnManagerConfig) {
+			c.Examples = &fakeExampleSource{ec: ExampleContext{}}
+		})
+	spokenBefore := len(tts.recordedTexts())
+
+	tm.IngestAudio(s, ttUtterance())
+
+	if !waitFor(t, 5*time.Second, func() bool {
+		e := ttLastError(t, s)
+		return e != nil && e["code"] == ErrCodeThinkingTimeout
+	}) {
+		t.Fatalf("thinking_timeout ErrorMsg never arrived; last error = %v", ttLastError(t, s))
+	}
+	if msg, _ := ttLastError(t, s)["message"].(string); msg != thinkingTimeoutNotice {
+		t.Errorf("error message = %q, want %q", msg, thinkingTimeoutNotice)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return ttLastStateValue(t, s) == StateListening }) {
+		t.Fatalf("state after the timeout = %q, want listening", ttLastStateValue(t, s))
+	}
+	if got := llm.callCount(); got != 2 {
+		t.Errorf("llm calls = %d, want 2 (classification + the one generation attempt)", got)
+	}
+	if got := len(tts.recordedTexts()); got != spokenBefore {
+		t.Errorf("tts calls %d → %d, want unchanged (the fallback reply must not speak on the dead ctx)", spokenBefore, got)
+	}
+	if got := ttLastEventField(t, log, EventExampleServed, "result"); got != exampleResultFallback {
+		t.Errorf("example_served result = %q, want %q (generation failed, honest fallback recorded)", got, exampleResultFallback)
+	}
+	ev := ttThinkingTimeoutEvent(t, log)
+	if ev == nil {
+		t.Fatal("no rt_event error entry carries code=thinking_timeout")
+	}
+	if got, _ := fieldValue(t, *ev, "op").(string); got != "chat" {
+		t.Errorf("event op = %q, want \"chat\" (the deadline hit the generation step)", got)
+	}
+	tid, _ := fieldValue(t, *ev, "turn_id").(uint64)
+	ttAssertTimeoutWarn(t, log, "chat", tid)
 }
