@@ -1443,8 +1443,14 @@ wss.on('connection', (ws, req, query) => {
         // it to the check-stage intent and runs the same verdict/announce
         // frames the real server's voice path would. Unknown lines are
         // recorded and ignored — the stand-in has no opinion on them.
+        // #96 U2 mirror: the check stage is QUIET — the real server stops
+        // the mic at check_started, so no voice line can reach the verdict
+        // path once checkActive holds. The line is recorded (the gate's
+        // observable) and applies NOTHING; applyVoiceVerdict above stays
+        // for the day voice verdicts come back.
         if (!mockMode.voiceVerdict) break;
         state.voiceLines.push(String(msg.line || ''));
+        if (state.checkActive) break;
         const said = VOICE_LINES[String(msg.line || '')];
         if (said) applyVoiceVerdict(said);
         break;
