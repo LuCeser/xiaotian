@@ -416,6 +416,17 @@ func TestProcessTurnThinkingTimeoutVerdictCrossesDeadlineWhileSpeaking(t *testin
 	if !waitFor(t, 5*time.Second, func() bool { return ttLastStateValue(t, s) == StateListening }) {
 		t.Fatalf("state after the ack = %q, want listening", ttLastStateValue(t, s))
 	}
+	// Re-checked AFTER the settle: a retro-fitted post-dispatch deadline
+	// check would fire only once the announcement completed.
+	if e := ttLastError(t, s); e != nil {
+		t.Fatalf("an error followed the completed turn: %v", e)
+	}
+	if ev := ttThinkingTimeoutEvent(t, log); ev != nil {
+		t.Error("a thinking_timeout event fired after the winning turn had dispatched")
+	}
+	if w := ttThinkingTimeoutWarn(t, log); w != nil {
+		t.Error("a timeout Warn fired after the winning turn had dispatched")
+	}
 	texts := tts.recordedTexts()
 	if len(texts) == 0 || texts[len(texts)-1] != "好的，我们继续。" {
 		t.Errorf("tts spoke %q, want the model reply 好的，我们继续。", texts)
