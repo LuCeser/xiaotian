@@ -225,6 +225,113 @@ func TestCheckRetryConcurrentSingleWrite(t *testing.T) {
 	}
 }
 
+// TestCheckRetryEndSessionDuringWriteDoesNotTrailTerminal (#96 review
+// P2-2): a retry parked inside its provider write when end_session lands
+// must go silent once the write returns — the session_ended that already
+// shipped is terminal, so no review_result, no state mutation, and no
+// second ending may follow it. The fake's IgnoreCtx mode models the
+// provider whose write commits anyway: the result IS real, the session it
+// would report to is gone.
+func TestCheckRetryEndSessionDuringWriteDoesNotTrailTerminal(t *testing.T) {
+	receipts, _ := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewErr = errors.New("fail once")
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+	ttSubmitCheck(t, tm, s) // the failed receipt is on record (review_result #1)
+
+	words.reviewErr = nil
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
+	block := make(chan struct{})
+	entered := make(chan struct{})
+	words.reviewBlock = block
+	words.reviewBlockEnter = entered
+	words.reviewBlockIgnoreCtx = true
+
+	go tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-end-mid-write"}))
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry never reached its parked SubmitReview")
+	}
+
+	tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+	if got := s.countOf(TypeSessionEnded); got != 1 {
+		t.Fatalf("session_ended count = %d, want 1 (the client goodbye)", got)
+	}
+	if ended := s.controlsOf(t, TypeSessionEnded)[0]; ended["reason"] != ReasonClientEnd {
+		t.Fatalf("session_ended.reason = %v, want %s", ended["reason"], ReasonClientEnd)
+	}
+	resultsAtEnd := s.countOf(TypeReviewResult)
+	spokenAtEnd := s.countOf(TypeTeacherSentence)
+
+	close(block) // the committed write returns — into a closed session
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 2 }) {
+		t.Fatalf("SubmitReview calls = %d, want 2 (the write itself is not undoable)", len(words.submissions()))
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := s.countOf(TypeReviewResult); got != resultsAtEnd {
+		t.Fatalf("review_result count = %d after the write returned post-terminal, want unchanged %d", got, resultsAtEnd)
+	}
+	if got := s.countOf(TypeSessionEnded); got != 1 {
+		t.Fatalf("session_ended count = %d, want still 1 (no second ending)", got)
+	}
+	if got := s.countOf(TypeTeacherSentence); got != spokenAtEnd {
+		t.Fatalf("teacher sentences = %d after the goodbye, want unchanged %d (no summary behind it)", got, spokenAtEnd)
+	}
+}
+
+// TestCheckSubmitEndSessionDuringWriteDoesNotTrailTerminal: the FIRST
+// submit's write owes the same terminal silence (#96 review P2-2 applied to
+// finishCheckSubmit): end_session while its SubmitReview is parked means the
+// goodbye already shipped — the write's late return must not answer it.
+func TestCheckSubmitEndSessionDuringWriteDoesNotTrailTerminal(t *testing.T) {
+	receipts, _ := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
+	block := make(chan struct{})
+	entered := make(chan struct{})
+	words.reviewBlock = block
+	words.reviewBlockEnter = entered
+	words.reviewBlockIgnoreCtx = true
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+
+	go tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-end-mid-first-write"}))
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first submit never reached its parked SubmitReview")
+	}
+
+	tm.HandleControl(s, mustJSON(t, EndSessionMsg{Type: TypeEndSession}))
+	if got := s.countOf(TypeSessionEnded); got != 1 {
+		t.Fatalf("session_ended count = %d, want 1 (the client goodbye)", got)
+	}
+	spokenAtEnd := s.countOf(TypeTeacherSentence)
+
+	close(block) // the committed write returns — into a closed session
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 1 }) {
+		t.Fatalf("SubmitReview calls = %d, want 1 (the write itself is not undoable)", len(words.submissions()))
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := s.countOf(TypeReviewResult); got != 0 {
+		t.Fatalf("review_result count = %d after the write returned post-terminal, want 0", got)
+	}
+	if got := s.countOf(TypeSessionEnded); got != 1 {
+		t.Fatalf("session_ended count = %d, want still 1 (no second ending)", got)
+	}
+	if got := s.countOf(TypeTeacherSentence); got != spokenAtEnd {
+		t.Fatalf("teacher sentences = %d after the goodbye, want unchanged %d (no summary behind it)", got, spokenAtEnd)
+	}
+}
+
 // TestCheckRetryBeginFailureSkipsWrite: when the retry's receipt Begin
 // fails, the write must NOT run — without a fresh receipt row there is no
 // dedup basis for a later tap, so the honest answer is a zero-updated

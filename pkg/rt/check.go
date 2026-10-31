@@ -724,6 +724,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 	hintWords, hintTotal := tm.tutor.hintAccounting()
 	lessonID := tm.tutor.lessonID
 	category := tm.tutor.category
+	epoch := tm.epoch
 	tm.mu.Unlock()
 
 	var (
@@ -802,6 +803,14 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		}
 	}
 
+	// The write may outlive the session that asked for it (a slow provider
+	// returning after end_session / disconnect / interrupt): nothing may
+	// trail the terminal session_ended — no reviewSeen flip, no
+	// review_result, no ending (#96 review P2-2).
+	if tm.reviewStaleAt(epoch) {
+		return
+	}
+
 	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
 		Requested: requested,
@@ -821,9 +830,6 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 
 	allSaved := !saveFailed && result.Updated == result.Requested && result.Requested > 0
 	if !allSaved {
-		tm.mu.Lock()
-		epoch := tm.epoch
-		tm.mu.Unlock()
 		tm.enterGradingAt(s, epoch)
 		return
 	}
