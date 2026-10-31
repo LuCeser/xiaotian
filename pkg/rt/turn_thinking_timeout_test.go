@@ -47,9 +47,9 @@ func (l *thinkingHangLLM) callCount() int {
 // 「思考中」 hang) and answers every later Chat with a fixed verdict — the
 // fresh post-interrupt turn must be allowed to complete normally.
 type thinkingHangThenChatLLM struct {
+	verdict mimo.ChatResponse
 	mu      sync.Mutex
 	calls   int
-	verdict mimo.ChatResponse
 }
 
 func newThinkingHangThenChatLLM(t *testing.T) *thinkingHangThenChatLLM {
@@ -84,9 +84,9 @@ func (l *thinkingHangThenChatLLM) callCount() int {
 // it runs after the whole critical section and must change nothing.
 type failWindowLogger struct {
 	*captureLogger
+	hook  func()
 	mu    sync.Mutex
 	fired bool
-	hook  func()
 }
 
 func (l *failWindowLogger) Info(msg string, fields ...infra.Field) {
