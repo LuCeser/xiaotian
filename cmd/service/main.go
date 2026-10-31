@@ -722,6 +722,9 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 			// Per-word writing timer in milliseconds (config default 60000;
 			// a 0 config value would defer to the FSM's own 60s default).
 			WordTimeout: time.Duration(cfg.RT.WordTimeoutMs) * time.Millisecond,
+			// Issue #94 (U5): the 「思考中」 turn deadline (config default
+			// 20s; 0 defers to the FSM's own 20s default).
+			ProcessingTimeout: cfg.RT.ProcessingTimeout,
 			// 13.1-03 photo check: the shared vision reader plus the existing
 			// photo config block's caps and request timeout — no new env
 			// vars, no new config sections (nil reader degrades the check

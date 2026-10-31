@@ -117,6 +117,13 @@ const (
 	// honest notice and keep the scheduled audio until it drains naturally
 	// or a bounded cleanup stops it.
 	ErrCodePlaybackAckTimeout = "playback_ack_timeout"
+	// ErrCodeThinkingTimeout: the dictation turn's 「思考中」 deadline
+	// (rt.processingTimeout, default 20s — Issue #94 U5) expired while ASR
+	// or the classification Chat was still out. The classroom answers this
+	// code and returns to listening: the child simply speaks again. No
+	// spoken fallback rides this code — the expired turn ctx must not
+	// re-request TTS.
+	ErrCodeThinkingTimeout = "thinking_timeout"
 	// ErrCodePhotoUnavailable: no OCR reader configured server-side, the
 	// photo-check path is disabled (13.1-03; RT-10 degraded semantics — the
 	// check stage keeps working manual-only).

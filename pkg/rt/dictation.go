@@ -1330,7 +1330,11 @@ func (tm *TurnManager) buildClassifyMessages(transcript string, target TurnTarge
 func (tm *TurnManager) classifyTurn(ctx context.Context, transcript string, turnCtx dictationTurnContext) (string, string) {
 	msgs := tm.buildClassifyMessages(transcript, turnCtx.target)
 	intent, reply, ok := tm.classifyOnce(ctx, msgs)
-	if !ok {
+	if !ok && ctx.Err() == nil {
+		// The ONE correction retry — never on a dead ctx (Issue #94 U5):
+		// once the turn's deadline (or an interrupt's cancel) has fired, a
+		// second Chat would hang the same expired turn; the deadline
+		// checkpoint in processTurn owns the turn from there.
 		msgs = append(msgs, mimo.Message{
 			Role:    "user",
 			Content: "你刚才的输出不符合要求。请只输出一个 JSON 对象，键为 intent 与 reply，不要输出任何其它内容。",

@@ -223,3 +223,16 @@ rt:
   # the server (consensus decision 3).
   #
   # forceStudentMode: true
+
+  # Issue #94 (U5): the 「思考中」 turn deadline. One dictation turn's whole
+  # /rt context — ASR plus intent classification — carries this as a
+  # deadline; when it expires the classroom answers the thinking_timeout
+  # ErrorMsg (老师想得太久了，请再对我说一遍) and returns to listening, so a
+  # hung upstream can never leave the child on the 💭 思考中 chip. The
+  # browser adds a second visible path at 25s for the case where the
+  # server's message itself is lost.
+  #
+  #   default 20s · legal range 5s–60s · 0 (or an absent key) = the 20s
+  #   default · no "off" value — off would restore the indefinite hang
+  #
+  # processingTimeout: 20s
