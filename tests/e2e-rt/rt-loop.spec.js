@@ -269,7 +269,7 @@ test('complete classroom runs on a single getUserMedia authorization', async ({ 
 
   // The check panel kept the honest full-save copy from review_result.
   const checkObs = await page.evaluate(() => window.__rtTutor.observe().check);
-  expect(checkObs.resultText).toContain('保存好了');
+  expect(checkObs.resultText).toContain('复习安排已更新');
 });
 
 test('interrupt during the second announcement bumps the epoch and the lesson still completes', async ({ page }) => {
@@ -586,22 +586,108 @@ test('partial save renders the honest M/N copy, never fabricated success', async
   // 3 words, all marked correct — but the mock saves only 2 of 3.
   await driveCheckStage(page);
 
-  // review_result copy is honest: 保存了 2 / 3, not full success.
+  // review_result copy is honest: partial save, not full success wording.
   const checkObs = await page.evaluate(() => window.__rtTutor.observe().check);
-  expect(checkObs.resultText).toContain('保存了 2 / 3');
+  expect(checkObs.resultText).toContain('复习安排更新了 2 个');
+  expect(checkObs.resultText).not.toContain('保存好了');
 
   await expect
-    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
-    .toBe('ended');
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 5_000 })
+    .toBe('grading');
 
-  // The completion banner carries the same honest note.
-  await expect(page.locator('#rt-banner')).toBeVisible();
-  const bannerText = await page.textContent('#rt-banner');
-  expect(bannerText).toContain('保存了 2 / 3');
+  // The session STAYS OPEN (#96): read the live mock state — no terminal
+  // close ever arrives, so getFinalSession would wait forever.
+  const session = await getSession(page);
+  expect(session.summaries).toBe(0);
+  expect(session.lessonCompleteSent).toBe(false);
 
-  const s = await getFinalSession(page);
-  expect(s.reviewResults).toBe(1);
-  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+  // The REAL button (not an observe mirror): the retry wording and a
+  // usable submit gate (#96 P3-2).
+  const submitBtn = page.locator('#rt-check .rt-check-submit');
+  await expect(submitBtn).toHaveText('再保存一次');
+  await expect(submitBtn).toBeEnabled();
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+test('check-stage playback_ack_timeout does not drain or block submit', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + QUIET_PARAMS + '&mock_check_ack_timeout=1');
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+
+  await driveCheckStage(page);
+
+  const obs = await page.evaluate(() => window.__rtTutor.observe());
+  expect(obs.terminalDraining).toBe(false);
+  const checkObs = obs.check;
+  expect(checkObs.allChecked).toBe(true);
+  expect(checkObs.submitPending).toBe(false);
+  expect(checkObs.resultText).toContain('复习安排已更新');
+  // #96 review P2-4: the check-stage timeout surfaces NO error copy — the
+  // box stays hidden (no code, no 「若卡住将自动结束」).
+  await expect(page.locator('#rt-error')).toBeHidden();
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+// #96 review P2-1: quiet starts at check_started, not at the grading state —
+// mid-bridge the status chip still reads speaking and a word-ordinal tap
+// there would fire interrupt + read_word, bumping the epoch out from under
+// the pending grading entry and re-closing the session through the re-read's
+// ack timeout. The chips must be read-only for the WHOLE check stage, and a
+// synthetic click must leave the wire silent.
+test('check stage keeps the word chips read-only during the bridge', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + QUIET_PARAMS);
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+
+  // The panel opens with the bridge still speaking (state=grading only lands
+  // after the bridge audio drains). The disabled assertion must sample
+  // INSIDE the speaking window: toBeDisabled's auto-retry would let a stale
+  // gate pass once grading disables the chips for its own reasons, so the
+  // page returns one atomic snapshot taken while data-state is still
+  // 'speaking' (or 'missed' if the window evaporated).
+  await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
+  const duringBridge = await page.evaluate(() => new Promise((resolve) => {
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      const st = document.getElementById('rt-status').getAttribute('data-state');
+      const chips = Array.from(document.querySelectorAll('#rt-words .rt-word-chip'));
+      if (st === 'speaking' && chips.length === 3) {
+        resolve({ state: st, allDisabled: chips.every((c) => c.disabled) });
+        clearInterval(timer);
+      } else if (st === 'grading' || st === 'ended' || Date.now() - t0 > 20_000) {
+        resolve({ state: st, missed: true });
+        clearInterval(timer);
+      }
+    }, 20);
+  }));
+  expect(duringBridge.missed, 'the speaking window vanished before it could be sampled')
+    .toBeFalsy();
+  expect(duringBridge.allDisabled, 'chips must be read-only while the bridge speaks')
+    .toBe(true);
+
+  // A synthetic click bypasses the browser's disabled-button suppression but
+  // not the page's own gate: no interrupt, no read_word.
+  await page.evaluate(() => {
+    const el = document.querySelectorAll('#rt-words .rt-word-chip')[0];
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  const s = await getSession(page);
+  expect(s.interrupts).toHaveLength(0);
+  expect(s.readWords).toHaveLength(0);
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
@@ -830,9 +916,10 @@ test('unchecked fallback then correction: mid-check close reopens with pending d
       return !c.submitPending && c.resultText !== '' ? 'done' : 'waiting';
     }, { timeout: 30_000 })
     .toBe('done');
-  // Honest diff copy: exactly the ONE override was saved.
+  // Honest diff copy (U1 receipt wording): exactly the ONE override was
+  // saved — a full save of a 1-word batch renders the saved receipt line.
   const checkObs = await page.evaluate(() => window.__rtTutor.observe().check);
-  expect(checkObs.resultText).toContain('1 个词都记上啦');
+  expect(checkObs.resultText).toContain('复习安排已更新，1 个词');
 
   await expect
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
@@ -920,6 +1007,69 @@ test('mid-check resume: reconnect restores the stored verdicts and finishes with
   expect(rr).toEqual({ type: 'review_result', requested: 3, updated: 3, missing: 0, unchecked: false });
   expect(s2.lessonCompleteSent).toBe(true);
   expect(s2.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
+// #96 review P2: a page that reconnects straight into the check panel gets
+// check_started while getUserMedia is still pending — the handler's
+// capture.stop() fences the start (it resolves false), but the AudioContext
+// is born synchronously inside the gesture and SURVIVES the stop (D-06). The
+// player must be bound anyway, or the bridge and every later audio frame is
+// dropped as silence. Slow permission makes the race deterministic.
+test('mid-check resume keeps playback audible when permission resolves late', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+  const pair = 'pair-slow-mic-' + Date.now();
+  const url = '/tutor/?' + QUIET_PARAMS + '&mock_resume=1&mock_step_ms=250&mock_pair=' + pair;
+
+  // Session 1: drive to the mid-check close so the pair reopens the panel.
+  await page.goto(url);
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await expect
+    .poll(async () => ((await getSession(page)).closedMidCheck ? 'closed' : 'dictating'),
+      { timeout: 60_000 })
+    .toBe('closed');
+
+  // Session 2 (same pair id): delay getUserMedia past the connect, count the
+  // player's context bindings, and watch for dropped audio chunks.
+  await page.goto(url);
+  await page.evaluate(() => {
+    const media = navigator.mediaDevices;
+    const origGum = media.getUserMedia.bind(media);
+    media.getUserMedia = (constraints) => new Promise((resolve) => {
+      setTimeout(() => { resolve(origGum(constraints)); }, 2000);
+    });
+    const player = window.__rtTutor.playback;
+    window.__bindingCalls = 0;
+    const origBind = player.setAudioContext.bind(player);
+    player.setAudioContext = function (ctx) {
+      window.__bindingCalls += 1;
+      return origBind(ctx);
+    };
+  });
+  await page.click('#rt-start');
+  await awaitSessionId(page);
+  await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
+
+  // The fenced start still bound the player — check_started's stop() beat
+  // the 2s permission promise.
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.capture.isCapturing), { timeout: 10_000 })
+    .toBe(false);
+  await expect
+    .poll(() => page.evaluate(() => window.__bindingCalls), { timeout: 10_000 })
+    .toBeGreaterThanOrEqual(1);
+  // The resume bridge really played: no chunk was dropped and the page acked
+  // the sentence (an unbound player drops every chunk and never acks).
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor.playback.droppedChunks), { timeout: 10_000 })
+    .toBe(0);
+  await expect
+    .poll(async () => ((await getSession(page)).acks.length > 0 ? 'acked' : 'silent'),
+      { timeout: 15_000 })
+    .toBe('acked');
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
@@ -1049,14 +1199,14 @@ async function sendVoiceLine(page, line) {
   await page.evaluate((l) => window.__rtTutor.client.sendJSON({ type: '__test_voice', line: l }), line);
 }
 
-/** Wait for the check panel AND the settled bridge (listening) — voice
-    lines land only once the panel owns the input surface. */
+/** Wait for the check panel AND the settled bridge (#96 U2: the check
+    stage settles into GRADING — quiet, mic stopped, buttons only). */
 async function awaitCheckPanelSettled(page, rows = 3) {
   await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
   await expect(page.locator('#rt-check .rt-check-row')).toHaveCount(rows);
   await expect
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 30_000 })
-    .toBe('listening');
+    .toBe('grading');
 }
 
 /** True once any teacher subtitle carries all the given fragments. */
@@ -1087,7 +1237,14 @@ async function finishCheckWithButtons(page, fromRow, rows = 3) {
     .toBe('done');
 }
 
-test('voice right-verdict flips the row, speaks the ack line, and submits converged', async ({ page }) => {
+// #96 U2: the check stage is QUIET — the page stops the mic at
+// check_started and the server gates uplink, so voice verdict lines can no
+// longer flip rows, speak acks, or drive OCR displays. The former
+// voice-verdict tests (right-verdict flip, spelling correction with the
+// OCR mirror, index-less clarification, mixed button+voice convergence)
+// collapsed into these two: the gate is silent for EVERY line shape, and
+// the manual buttons alone carry the check to the same honest submission.
+test('check stage ignores voice verdict lines: quiet gate, buttons only', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(String(err)));
 
@@ -1096,27 +1253,33 @@ test('voice right-verdict flips the row, speaks the ack line, and submits conver
   await awaitSessionId(page);
   await awaitCheckPanelSettled(page);
 
-  // 「第一个词对了」: the row flips from the server echo (RT-07 render
-  // source) and the teacher's ack subtitle speaks the marked position.
+  const teacherBefore = await page.locator('#rt-trace .rt-trace-teacher').allTextContents();
+  // All three line shapes — a valid verdict, a spelling correction, an
+  // index-less clarification — land NOTHING: no verdict write, no row flip,
+  // no OCR display, no teacher line.
   await sendVoiceLine(page, '第一个词对了');
-  await expect(page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(0))
-    .toHaveClass(/rt-check-yes-on/, { timeout: 10_000 });
-  await teacherSaid(page, ['第1个词对了']);
-
-  // The verdict write is real: the mock recorded one voice verdict through
-  // the same upsert the button taps use.
+  await sendVoiceLine(page, '第一个词写的是 aple');
+  await sendVoiceLine(page, '嗯那个词怎么样');
+  await page.waitForTimeout(800);
   const s1 = await getSession(page);
-  expect(s1.voiceVerdicts).toBe(1);
-  expect(s1.checkVerdicts).toEqual([{ word_index: 0, correct: true, manual: true }]);
+  expect(s1.voiceLines).toHaveLength(3); // the mock received every line
+  expect(s1.voiceVerdicts).toBe(0);      // ...and applied none of them
+  expect(s1.checkVerdicts).toHaveLength(0);
+  await expect(page.locator('#rt-check .rt-check-yes-on')).toHaveCount(0);
+  await expect(page.locator('#rt-check .rt-check-no-on')).toHaveCount(0);
+  expect(await page.locator('#rt-check .rt-ocr-text').count()).toBe(0);
+  // Nothing spoke: the teacher subtitles are exactly the bridge's, no ack
+  // line, no clarification, no near-miss encouragement.
+  expect(await page.locator('#rt-trace .rt-trace-teacher').allTextContents()).toEqual(teacherBefore);
 
-  // Manual completion + unified submit: the voice verdict counts toward the
-  // same gate and the same honest result (RT-07 convergence).
-  await finishCheckWithButtons(page, 1);
+  // The manual path is untouched: buttons complete every row and the ONE
+  // unified submission reports the honest full-save receipt.
+  await finishCheckWithButtons(page, 0);
   await expect
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
     .toBe('ended');
   const s = await getFinalSession(page);
-  expect(s.voiceVerdicts).toBe(1);
+  expect(s.voiceVerdicts).toBe(0);
   expect(s.reviewResults).toBe(1);
   expect(s.checkVerdicts).toHaveLength(3);
   expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
@@ -1124,7 +1287,7 @@ test('voice right-verdict flips the row, speaks the ack line, and submits conver
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
 
-test('voice spelling correction marks wrong with the actual text shown and the near-miss line', async ({ page }) => {
+test('button-only verdicts converge into one submission (RT-07)', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(String(err)));
 
@@ -1133,54 +1296,17 @@ test('voice spelling correction marks wrong with the actual text shown and the n
   await awaitSessionId(page);
   await awaitCheckPanelSettled(page);
 
-  // 「第一个词写的是 aple」: the verdict grades WRONG (aple vs apple), the
-  // actual written form displays beside the row via the ocr_result channel,
-  // and the near-miss encouragement plays — naming nothing shameful.
-  await sendVoiceLine(page, '第一个词写的是 aple');
-  await expect(page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(1))
-    .toHaveClass(/rt-check-no-on/, { timeout: 10_000 });
-  const rowText = await page.locator('#rt-check .rt-check-row').nth(0).textContent();
-  expect(rowText).toContain('识别：aple');
-  expect(rowText).toContain('好像差一点点');
-  await teacherSaid(page, ['apple', '很接近了']);
-
-  // The stored verdict carries the actual text (the mock mirror of the real
-  // ocr_text verdict field).
-  const s1 = await getSession(page);
-  expect(s1.checkVerdicts).toEqual([
-    { word_index: 0, correct: false, manual: true, ocr_text: 'aple' }
-  ]);
-
-  // Finish and submit: the spelling-corrected word rides the same unified
-  // submission as the button-confirmed rest.
-  await finishCheckWithButtons(page, 1);
-  await expect
-    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
-    .toBe('ended');
-  const s = await getFinalSession(page);
-  expect(s.reviewResults).toBe(1);
-  expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
-
-  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
-});
-
-test('mixed button and voice verdicts converge into one submission (RT-07)', async ({ page }) => {
-  const pageErrors = [];
-  page.on('pageerror', (err) => pageErrors.push(String(err)));
-
-  await page.goto('/tutor/?' + VOICE_PARAMS);
-  await page.click('#rt-start');
-  await awaitSessionId(page);
-  await awaitCheckPanelSettled(page);
-
-  // One voice flip (word 1 right) and two button flips (word 2 wrong,
-  // word 3 right) — different words, two input paths, ONE human check.
-  await sendVoiceLine(page, '第一个词对了');
+  // Two button flips (word 1 right, word 2 wrong) then the voice channel
+  // tries to help (word 3) — the gate ignores it and the last row takes its
+  // human tap like the rest: ONE human check, one submission.
+  await page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(0).click();
   await expect(page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(0))
     .toHaveClass(/rt-check-yes-on/, { timeout: 10_000 });
   await page.locator('#rt-check .rt-check-row').nth(1).locator('button').nth(1).click();
   await expect(page.locator('#rt-check .rt-check-row').nth(1).locator('button').nth(1))
     .toHaveClass(/rt-check-no-on/, { timeout: 10_000 });
+  await sendVoiceLine(page, '第一个词对了');
+  await page.waitForTimeout(400);
   await page.locator('#rt-check .rt-check-row').nth(2).locator('button').nth(0).click();
   await expect
     .poll(() => page.evaluate(() => window.__rtTutor.observe().check.allChecked), { timeout: 10_000 })
@@ -1197,46 +1323,14 @@ test('mixed button and voice verdicts converge into one submission (RT-07)', asy
     .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 60_000 })
     .toBe('ended');
 
-  // The final verdict state reflects BOTH paths; the submission reported
-  // all three words once (the ratings follow the human calls: 2 对 1 错).
+  // The final verdict state reflects the BUTTON calls alone (2 对 1 错);
+  // the gated voice line contributed nothing.
   const s = await getFinalSession(page);
-  expect(s.voiceVerdicts).toBe(1);
+  expect(s.voiceVerdicts).toBe(0);
   expect(s.reviewResults).toBe(1);
-  expect(s.checkVerdicts).toEqual([
-    { word_index: 0, correct: true, manual: true },
-    { word_index: 1, correct: false, manual: true },
-    { word_index: 2, correct: true, manual: true }
-  ]);
   const rr = parseFrames(s.frames).find((m) => m.type === 'review_result');
   expect(rr).toEqual({ type: 'review_result', requested: 3, updated: 3, missing: 0, unchecked: false });
   expect(s.terminalOrder).toEqual(['terminal_ack', 'session_ended', 'close']);
-
-  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
-});
-
-test('an index-less voice line asks again and changes no verdict', async ({ page }) => {
-  const pageErrors = [];
-  page.on('pageerror', (err) => pageErrors.push(String(err)));
-
-  await page.goto('/tutor/?' + VOICE_PARAMS);
-  await page.click('#rt-start');
-  await awaitSessionId(page);
-  await awaitCheckPanelSettled(page);
-
-  // The stand-in classifier maps this line to a check intent WITHOUT an
-  // index — the clarification fallback must ask again with NO write
-  // (T-13.1-13 mirror).
-  await sendVoiceLine(page, '嗯那个词怎么样');
-  await teacherSaid(page, ['你说的是第几个词']);
-  const s1 = await getSession(page);
-  expect(s1.voiceVerdicts).toBe(0);
-  expect(s1.checkVerdicts).toHaveLength(0);
-
-  // The classroom stayed live: a button verdict still applies afterwards.
-  await page.locator('#rt-check .rt-check-row').nth(0).locator('button').nth(0).click();
-  await expect
-    .poll(() => page.evaluate(() => window.__rtTutor.observe().check.checked), { timeout: 10_000 })
-    .toBe(1);
 
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });

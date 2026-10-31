@@ -29,6 +29,7 @@
       <span class="rt-state-chip" data-chip="processing">💭 思考中</span>
       <span class="rt-state-chip" data-chip="speaking">🗣 讲授中</span>
       <span class="rt-state-chip" data-chip="paused">⏸ 休息中</span>
+      <span class="rt-state-chip" data-chip="grading">✅ 检查中</span>
       <span class="rt-state-chip" data-chip="ended">🎓 课程结束</span>
     </div>
     <div class="rt-conn" id="rt-conn" data-conn="idle" role="status">
@@ -136,6 +137,7 @@
     script tag; loading it here would throw and break the page).
   -->
   <script src="js/rt-client.js?v=20261016a"></script>
+  <script src="js/rt-check-receipt.js?v=20261030check"></script>
   <script src="js/rt-capture.js?v=20261012capture-fix"></script>
   <script src="js/rt-playback.js?v=20261024reset"></script>
   <script src="js/rt-photo.js?v=20261008a"></script>
@@ -304,7 +306,7 @@
       // only disabled/pending UI changes at press time). ocr is the
       // ocr_result mirror (13.1-03): display-only recognized text next to
       // each row; the verdicts still come from check_verdicts alone.
-      var check = { active: false, words: [], verdicts: {}, ocr: {}, submitPending: false, resultText: '' };
+      var check = { active: false, words: [], verdicts: {}, ocr: {}, submitPending: false, resultText: '', resultKind: '' };
 
       // WR-01 (13.1-08): the ONE cross-lesson reset — a new session's
       // session_ready fully clears the previous lesson's check panel, both
@@ -320,6 +322,7 @@
         check.ocr = {};
         check.submitPending = false;
         check.resultText = '';
+        check.resultKind = '';
         $('rt-check').hidden = true;
       }
 
@@ -521,16 +524,30 @@
         var submit = document.createElement('button');
         submit.type = 'button';
         submit.className = 'rt-btn rt-check-submit';
-        submit.textContent = check.submitPending ? '正在提交…' : '检查完了，提交';
+        var submitLabel = '检查完了，提交';
+        if (check.submitPending) {
+          submitLabel = '正在提交…';
+        } else if (check.resultKind === 'failed' || check.resultKind === 'partial') {
+          submitLabel = '再保存一次';
+        }
+        submit.textContent = submitLabel;
         // 提交 gates on the server echo covering EVERY word with a MANUAL
         // verdict — never on local taps, and an OCR prefill alone never
         // enables it (RT-07 + D-05; the server refuses such a submit too).
         // 13.1-08: terminalDraining joins the gate — after session_ended the
         // button reads 「检查完了，提交」 and stays disabled; no further
         // submit can ride a terminal session.
-        submit.disabled = !allChecked() || check.submitPending || terminalDraining;
+        submit.disabled = !allChecked() || check.submitPending || terminalDraining ||
+          check.resultKind === 'pending' || check.resultKind === 'saved';
         submit.addEventListener('click', sendSubmit);
         panel.appendChild(submit);
+
+        if (check.resultText) {
+          var resultEl = document.createElement('p');
+          resultEl.className = 'rt-check-result';
+          resultEl.textContent = check.resultText;
+          panel.appendChild(resultEl);
+        }
       }
 
       function sendVerdict(index, correct) {
@@ -621,6 +638,13 @@
         // would speak the original (背默任务，老师不念原文); the server
         // refuses it too, this keeps the chip honestly disabled.
         if (poemTask || passageTask) return false;
+        // #96 U2: quiet starts at check_started, not at the grading state —
+        // mid-bridge the FSM still reads 'speaking', and the interrupt +
+        // read_word a click sends there would bump the epoch out from under
+        // the pending grading entry and re-close the session through the
+        // re-read's ack timeout. The panel rows show every word by then;
+        // reading aloud stays a dictation-stage affordance only.
+        if (check.active) return false;
         return started && !courseEnded && !terminalDraining && !readPending &&
           !check.submitPending && !check.resultText &&
           connEl.getAttribute('data-conn') === 'connected' &&
@@ -812,6 +836,9 @@
         // Five-state dispatch: listening / processing / speaking / paused /
         // ended (paused chip added 13-11 — StatePaused, pkg/rt/protocol.go).
         setStatus(m.value);
+        if (m && m.value === 'grading') {
+          capture.stop();
+        }
       });
 
       client.on('lesson_update', function (m) {
@@ -840,7 +867,9 @@
         check.ocr = {};
         check.submitPending = false;
         check.resultText = '';
+        check.resultKind = '';
         lesson.words = check.words.slice();
+        capture.stop();
         renderProgress();
         renderCheckPanel();
       });
@@ -882,22 +911,22 @@
       client.on('review_result', function (m) {
         check.submitPending = false;
         if (!m) return;
-        // Honest copy from the REAL sets — partial/zero updates are never
-        // dressed up as success (prohibition P3, S-05).
-        if (m.requested > 0 && m.updated < m.requested) {
-          check.resultText = '保存了 ' + m.updated + ' / ' + m.requested + ' 个，别担心，下次会补上。';
-        } else if (m.requested > 0 && poemTask) {
-          // Issue #12: the poem's save scope is ONE whole work — never
-          // per-line wording.
-          check.resultText = '整首背默结果保存好啦。';
+        if (m.requested > 0 && poemTask) {
+          check.resultKind = m.updated >= m.requested ? 'saved' : 'partial';
+          check.resultText = m.updated >= m.requested
+            ? '整首背默结果保存好啦。'
+            : formatCheckReceipt(m.requested, m.updated, m.missing || []).text;
         } else if (m.requested > 0 && passageTask) {
-          // Issue #14: the passage's save scope is ONE range — never
-          // per-paragraph wording.
-          check.resultText = '这次的背默结果保存好啦。';
-        } else if (m.requested > 0) {
-          check.resultText = '学习记录保存好了，' + m.requested + ' 个词都记上啦。';
+          check.resultKind = m.updated >= m.requested ? 'saved' : 'partial';
+          check.resultText = m.updated >= m.requested
+            ? '这次的背默结果保存好啦。'
+            : formatCheckReceipt(m.requested, m.updated, m.missing || []).text;
         } else {
-          check.resultText = '这次没有要保存的学习记录。';
+          var receipt = formatCheckReceipt(m.requested, m.updated, m.missing || [], {
+            pending: !!m.pending
+          });
+          check.resultText = receipt.text;
+          check.resultKind = receipt.kind;
         }
         renderCheckPanel();
         renderProgress();
@@ -922,23 +951,27 @@
         renderProgress();
         var code = m && m.code ? m.code : '';
         playback.note('error:' + (code || 'unknown'));
-        showError(code, m && m.message);
-        // A failed/gated photo round must leave the 拍照检查 button usable
-        // (13.1-03): the OCR failure and unavailable paths answer an ErrorMsg
-        // with no ocr_result — unlock the controller here.
         photo.reset();
         if (code === 'playback_ack_timeout') {
+          var checkOpen = check.active && !courseEnded && !check.resultText;
+          if (checkOpen) {
+            return;
+          }
+          showError(code, m && m.message);
           // Honest degraded order: the timeout code itself is NOT a
           // completion proof — drain the scheduled audio, wait for the
           // natural session_ended + normal close. Never stopNow here.
           beginTerminalDrain();
-        } else if (code === 'lesson_unavailable') {
-          var retry = document.createElement('p');
-          retry.className = 'rt-error-retry';
-          retry.textContent = '点「开始上课」可以重新试一次。';
-          errorEl.appendChild(retry);
-          startBtn.disabled = false;
-          started = false;
+        } else {
+          showError(code, m && m.message);
+          if (code === 'lesson_unavailable') {
+            var retry = document.createElement('p');
+            retry.className = 'rt-error-retry';
+            retry.textContent = '点「开始上课」可以重新试一次。';
+            errorEl.appendChild(retry);
+            startBtn.disabled = false;
+            started = false;
+          }
         }
       });
 
@@ -1084,10 +1117,24 @@
         // iOS 3-condition unlock inside this handler, then awaits
         // getUserMedia; the stream and AudioContext are held for the whole
         // session — no per-utterance hold-to-talk, no re-authorization.
-        capture.start().then(function (active) {
-          if (!active || !started || courseEnded) return;
-          timing.push(RT_EVENTS.AUTH_COMPLETE);
-          playback.setAudioContext(capture.audioCtx);
+        var startPromise = capture.start();
+        // Bind the player INSIDE the gesture, before awaiting permission
+        // (#96 review P2): start() creates the AudioContext synchronously,
+        // and a page that reconnects straight into the check panel receives
+        // check_started while getUserMedia is still pending — that handler's
+        // capture.stop() fences the start (it resolves false) but the
+        // context SURVIVES (D-06). Binding only on success would drop every
+        // later frame: the player refuses audio without a bound context, so
+        // the bridge and the summary would play as silence forever.
+        if (capture.audioCtx) playback.setAudioContext(capture.audioCtx);
+        startPromise.then(function (active) {
+          if (!started || courseEnded) return;
+          if (active) timing.push(RT_EVENTS.AUTH_COMPLETE);
+          // Re-bind when the promise settles: a fenced start resolves false
+          // (stop() during pending permission), and a restart may have
+          // replaced the context — whichever context is live now is the one
+          // the player must use for everything that follows.
+          if (capture.audioCtx) playback.setAudioContext(capture.audioCtx);
         })['catch'](function (errType) {
           showError(errType, '');
         });
@@ -1152,6 +1199,7 @@
               allChecked: allChecked(),
               submitPending: check.submitPending,
               resultText: check.resultText,
+              resultKind: check.resultKind,
               ocrRows: Object.keys(check.ocr).length,
               photoProcessing: photo.isProcessing
             }

@@ -443,6 +443,7 @@ function handleTestState(res) {
       resumed: s.resumed,
       audioFrames: s.audioFrames,
       interrupts: s.interrupts,
+      readWords: s.readWords,
       acks: s.acks,
       acksRejected: s.acksRejected,
       summaryAcked: s.summaryAcked,
@@ -607,6 +608,7 @@ wss.on('connection', (ws, req, query) => {
     empty: query.get('mock_empty') === '1',
     ackTimeout: query.get('mock_ack_timeout') === '1',
     partialSave: query.get('mock_partial_save') === '1',
+    checkBridgeAckTimeout: query.get('mock_check_ack_timeout') === '1',
     voiceVerdict: query.get('mock_voice_verdict') === '1',
     // Issue #55: an optional session_ready.category echo ('english'|
     // 'chinese') for the page's subject-adoption pin — the mock never
@@ -704,6 +706,9 @@ wss.on('connection', (ws, req, query) => {
     resumed: false,
     audioFrames: 0,
     interrupts: [],
+    /** #96 U2: read_word frames received (the page must send NONE once
+        check_started opened the panel — the quiet contract). */
+    readWords: [],
     acks: [],
     acksRejected: [],
     summaryAcked: false,
@@ -857,7 +862,16 @@ wss.on('connection', (ws, req, query) => {
     send({ type: 'check_started', words: state.words.slice(), reason: 'dictation_done' });
     announce('chk', '全都写完啦！我们一起检查：屏幕上有' + state.words.length +
       '个词，想一想你写的是对还是错，点「对」或「错」告诉我。', PLAN_NOTICE, 800,
-      () => { send({ type: 'state', value: 'listening' }); });
+      () => { send({ type: 'state', value: 'grading' }); });
+    if (mockMode.checkBridgeAckTimeout) {
+      later(400, () => {
+        if (state.ended) return;
+        send({
+          type: 'error', code: 'playback_ack_timeout',
+          message: 'mock: check bridge ack timeout', recoverable: true
+        });
+      });
+    }
     if (pair) {
       pair.phase = 'checking';
       if (wantResume) {
@@ -1266,9 +1280,16 @@ wss.on('connection', (ws, req, query) => {
       }
 
       case 'read_word': {
+        state.readWords.push({ word_index: msg.word_index, current_index: msg.current_index });
+        // #96 U2 parity: the check stage never re-reads — the panel rows
+        // show the words, the voice stays quiet from check_started on.
+        if (state.checkActive) {
+          send({ type: 'error', code: 'invalid_message', message: '现在不能重读这个词，请点已经报过的序号', recoverable: true });
+          break;
+        }
         if (!state.ready || state.ended || msg.current_index !== state.currentIndex ||
             !Number.isInteger(msg.word_index) || msg.word_index < 0 || msg.word_index >= state.words.length ||
-            (!state.checkActive && msg.word_index > state.currentIndex)) {
+            msg.word_index > state.currentIndex) {
           send({ type: 'error', code: 'invalid_message', message: '现在不能重读这个词', recoverable: true });
           break;
         }
@@ -1394,7 +1415,11 @@ wss.on('connection', (ws, req, query) => {
         const missing = n - updated;
         state.reviewResults += 1;
         send({ type: 'review_result', requested: n, updated, missing, unchecked: false });
-        announceSummary(correct, updated, n);
+        if (updated >= n) {
+          announceSummary(correct, updated, n);
+        } else {
+          send({ type: 'state', value: 'grading' });
+        }
         break;
       }
 
@@ -1418,8 +1443,14 @@ wss.on('connection', (ws, req, query) => {
         // it to the check-stage intent and runs the same verdict/announce
         // frames the real server's voice path would. Unknown lines are
         // recorded and ignored — the stand-in has no opinion on them.
+        // #96 U2 mirror: the check stage is QUIET — the real server stops
+        // the mic at check_started, so no voice line can reach the verdict
+        // path once checkActive holds. The line is recorded (the gate's
+        // observable) and applies NOTHING; applyVoiceVerdict above stays
+        // for the day voice verdicts come back.
         if (!mockMode.voiceVerdict) break;
         state.voiceLines.push(String(msg.line || ''));
+        if (state.checkActive) break;
         const said = VOICE_LINES[String(msg.line || '')];
         if (said) applyVoiceVerdict(said);
         break;

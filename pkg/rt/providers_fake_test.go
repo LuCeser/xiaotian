@@ -562,18 +562,24 @@ func TestFakesTTSStreamUntilCancel(t *testing.T) {
 // FetchDueWords to per-category batches: a mixed vocabulary where the
 // english fetch can never see the chinese words and vice versa.
 type fakeWordSource struct {
-	fetchErr     error
-	reviewErr    error
-	reviewResult ReviewWriteResult
-	due          [][]lesson.Word
-	dueByCat     map[string][]lesson.Word
-	peekByCat    map[string][]lesson.Word
-	submitCalls  []map[string]string
-	submitCat    []string
-	fetchCats    []string
-	peekCats     []string
-	fetchCalls   int
-	mu           sync.Mutex
+	fetchErr         error
+	reviewErr        error
+	reviewResult     ReviewWriteResult
+	reviewBlock      chan struct{} // when non-nil, blocks until closed or ctx cancelled
+	reviewBlockEnter chan struct{} // optional: closed when a blocked SubmitReview begins waiting
+	due              [][]lesson.Word
+	dueByCat         map[string][]lesson.Word
+	peekByCat        map[string][]lesson.Word
+	submitCalls      []map[string]string
+	submitCat        []string
+	fetchCats        []string
+	peekCats         []string
+	fetchCalls       int
+	// reviewBlockIgnoreCtx models a provider whose in-flight write commits
+	// server-side regardless of the caller's cancellation: the blocked call
+	// returns its REAL result only after reviewBlock closes (#96 P2-2).
+	reviewBlockIgnoreCtx bool
+	mu                   sync.Mutex
 }
 
 func newFakeWords(due ...[]lesson.Word) *fakeWordSource {
@@ -609,7 +615,29 @@ func (f *fakeWordSource) FetchDueWords(_ context.Context, limit int, category st
 }
 
 // SubmitReview implements WordSource.
-func (f *fakeWordSource) SubmitReview(_ context.Context, results map[string]string, category string) (ReviewWriteResult, error) {
+func (f *fakeWordSource) SubmitReview(ctx context.Context, results map[string]string, category string) (ReviewWriteResult, error) {
+	if f.reviewBlock != nil {
+		if f.reviewBlockEnter != nil {
+			// Guarded close: with an in-flight guard removed, more than one
+			// blocked caller may reach this line — the entered signal fires
+			// once, never panics on the second arrival.
+			f.mu.Lock()
+			select {
+			case <-f.reviewBlockEnter:
+			default:
+				close(f.reviewBlockEnter)
+			}
+			f.mu.Unlock()
+		}
+		select {
+		case <-f.reviewBlock:
+		case <-ctx.Done():
+			if !f.reviewBlockIgnoreCtx {
+				return ReviewWriteResult{}, ctx.Err()
+			}
+			<-f.reviewBlock // the write is committed server-side; only its return waits
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.submitCalls = append(f.submitCalls, results)

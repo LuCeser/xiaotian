@@ -84,6 +84,8 @@ const (
 	// StateMsg.Value. (Qualified as rt.StatePaused — the frozen database
 	// StatePaused = "PAUSED" constant belongs to another package and flow.)
 	StatePaused = "paused"
+	// StateGrading: the check panel is open; uplink is gated after the bridge.
+	StateGrading = "grading"
 )
 
 // Error codes carried by ErrorMsg.Code.
@@ -621,6 +623,8 @@ type ReviewResultMsg struct {
 	Updated   int    `json:"updated"`
 	Missing   int    `json:"missing"`
 	Unchecked bool   `json:"unchecked"`
+	// Pending: the save receipt never completed — retry must not write again.
+	Pending bool `json:"pending,omitempty"`
 }
 
 // WordRevealedMsg carries one word's plaintext reveal (server → client, the

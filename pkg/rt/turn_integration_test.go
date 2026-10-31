@@ -246,8 +246,21 @@ func itAnnounceAck(t *testing.T, conn *websocket.Conn) []string {
 	return texts
 }
 
+// itAnnounceAckSettled is itAnnounceAck for announcements that settle to a
+// state OTHER than listening — the #96 check bridge settles to grading (the
+// panel owns the input surface; uplink is gated).
+func itAnnounceAckSettled(t *testing.T, conn *websocket.Conn, settled ...string) []string {
+	texts, _ := itAnnounceAckCounted(t, conn, settled...)
+	return texts
+}
+
 // itAnnounceAckCounted is itAnnounceAck, also returning the number of
 // binary PCM frames delivered for the announcement (报词音频字节 evidence).
+// The optional settled list overrides the default listening settle state
+// (grading for the check bridge, #96 U2) — and an explicit settle only
+// counts AFTER the announcement's own audio was acked: the resume path
+// broadcasts state=grading BEFORE the bridge speaks, so the first state
+// frame alone would return before the wire goes quiet.
 //
 // Protocol-layer scope (PR #61 review): the acks below come from this TEST
 // DRIVER playing a protocol-conforming client — audio_end in, sentence_ack
@@ -255,15 +268,21 @@ func itAnnounceAck(t *testing.T, conn *websocket.Conn) []string {
 // that a real browser played the audio; playback-driven ACK verification is
 // #58's B-layer browser e2e (confirmation.spec.js 等). Same scope applies to
 // every driver helper that acks (itAckEnding, itHoldThenAck).
-func itAnnounceAckCounted(t *testing.T, conn *websocket.Conn) ([]string, int) {
+func itAnnounceAckCounted(t *testing.T, conn *websocket.Conn, settled ...string) ([]string, int) {
 	t.Helper()
+	want := []string{StateListening}
+	explicit := len(settled) > 0
+	if explicit {
+		want = settled
+	}
 	var texts []string
 	binaryFrames := 0
+	ackedAudio := false
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			t.Fatal("announcement never settled to listening")
+			t.Fatalf("announcement never settled to %v", want)
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(remaining))
 		mt, data, err := conn.ReadMessage()
@@ -283,14 +302,41 @@ func itAnnounceAckCounted(t *testing.T, conn *websocket.Conn) ([]string, int) {
 		case TypeAudioEnd:
 			var ae AudioEndMsg
 			_ = json.Unmarshal(data, &ae)
+			ackedAudio = true
 			itSendText(t, conn, SentenceAckMsg{Type: TypeSentenceAck, SentenceID: ae.SentenceID, Epoch: ae.Epoch})
 		case TypeState:
 			var sm StateMsg
 			_ = json.Unmarshal(data, &sm)
-			if sm.Value == StateListening {
-				return texts, binaryFrames
+			if !explicit || ackedAudio {
+				for _, w := range want {
+					if sm.Value == w {
+						return texts, binaryFrames
+					}
+				}
 			}
 		}
+	}
+}
+
+// itExpectQuiet asserts that NOTHING arrives on the wire for the whole
+// window — the gated-uplink contract of the #96 check panel (grading drops
+// mic frames silently: no turn, no echo, no teacher line). Any frame that
+// does arrive fails the test with its wire type. The closing timeout read
+// poisons the connection (gorilla sticky read error, the itDrainUntilTimeout
+// discipline): use only as the LAST wire phase of a test.
+func itExpectQuiet(t *testing.T, conn *websocket.Conn, window time.Duration) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(window))
+	for {
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			return // the read deadline elapsed with the wire silent
+		}
+		typ := "binary"
+		if mt == websocket.TextMessage {
+			typ = itProbe(mt, data).typ
+		}
+		t.Fatalf("expected a quiet wire for %v, got a %s frame", window, typ)
 	}
 }
 
@@ -417,7 +463,7 @@ func TestDictationOverConnHappyPath(t *testing.T) {
 	// The check bridge announcement settles through the ACK gate; then the
 	// harness marks every word correct via check_verdict frames and reads
 	// the authoritative echoes.
-	itAnnounceAck(t, conn)
+	itAnnounceAckSettled(t, conn, StateGrading) // #96 U2
 	for i := 0; i < 3; i++ {
 		itSendText(t, conn, CheckVerdictMsg{
 			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("it-v-%d", i), WordIndex: i, Correct: true,
@@ -841,7 +887,8 @@ func TestCheckResumeMidCheck(t *testing.T) {
 
 	// The resume bridge settles through the ACK gate before the panel is
 	// usable (every announcement does; the ack order is what the gate owns).
-	itAnnounceAck(t, conn)
+	// #96 U2: the settle state is grading — the panel owns the input surface.
+	itAnnounceAckSettled(t, conn, StateGrading)
 
 	// Finish the check: word 1 correct, then the unified submit.
 	itSendText(t, conn, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-resume-v-1", WordIndex: 1, Correct: true})
@@ -943,7 +990,7 @@ func TestUncheckedCorrection(t *testing.T) {
 	if !echo.Verdicts[0].Correct || echo.Verdicts[1].Correct {
 		t.Errorf("derived verdicts = %+v, want [correct (苹果 good→hard), wrong (香蕉 hard→again)]", echo.Verdicts)
 	}
-	itAnnounceAck(t, conn) // the correction bridge
+	itAnnounceAckSettled(t, conn, StateGrading) // the correction bridge settles to grading (#96 U2)
 
 	// Submit BEFORE confirming every word: refused, zero writes.
 	itSendText(t, conn, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-cor-early"})
@@ -1132,7 +1179,7 @@ func TestPracticeSessionEndToEnd(t *testing.T) {
 	if len(started.Words) != 2 {
 		t.Fatalf("check_started.words = %v, want the 2 practice words in plaintext", started.Words)
 	}
-	itAnnounceAck(t, conn) // the check bridge
+	itAnnounceAckSettled(t, conn, StateGrading) // the check bridge settles to grading (#96 U2)
 	for i := 0; i < 2; i++ {
 		itSendText(t, conn, CheckVerdictMsg{
 			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("it-practice-v-%d", i), WordIndex: i, Correct: i == 0,
@@ -1234,7 +1281,7 @@ func itVoiceCheckSession(t *testing.T, asr *fakeASR, llm *fakeLLM, exec *fakeExe
 	itInit(t, conn)
 	itReadCheckStarted(t, conn)
 	itReadCheckVerdicts(t, conn)
-	itAnnounceAck(t, conn) // the resume bridge
+	itAnnounceAckSettled(t, conn, StateGrading) // the resume bridge settles to grading (#96 U2)
 	return conn, words
 }
 
@@ -1251,13 +1298,12 @@ func itCountApplyVerdicts(exec *fakeExecutor) int {
 	return n
 }
 
-// TestCheckVoiceVerdict: 「第一个词对了」 marks word 1 through the SAME
-// executor path as the screen button (RT-07), echoes the authoritative
-// verdicts, and speaks the ack line through the ACK gate; 「第二个词写的是
-// 香焦」 carries the actual written form — the verdict grades WRONG via
-// GradeWord (one rune off → near miss), the recognized text rides the
-// ocr_result display channel, and the teacher line delivers the near-miss
-// encouragement (差一个字母很接近了), never a shaming form.
+// TestCheckVoiceVerdict (#96 U2 rewrite): the check panel settles to grading
+// and the mic is gated — 「第一个词对了」 and 「第二个词写的是香焦」 produce
+// no verdict write, no check_verdicts echo, no ocr_result and no teacher
+// line; the screen button stays the one human input surface (the approved
+// Q1 default: 批改阶段只留屏幕对/错; the voice-verdict implementation stays in
+// the tree, gated off the mic).
 func TestCheckVoiceVerdict(t *testing.T) {
 	exec := newFakeExecutorNoRow("it-lesson")
 	asr := newFakeASR(
@@ -1270,61 +1316,29 @@ func TestCheckVoiceVerdict(t *testing.T) {
 	)
 	conn, _ := itVoiceCheckSession(t, asr, llm, exec)
 
-	// Voice right-verdict: write → echo → ack-gated announcement.
-	itSendUtterance(t, conn)
+	// The screen path is untouched: the button verdict still writes and
+	// echoes through the same executor path.
+	itSendText(t, conn, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-screen-0", WordIndex: 0, Correct: true})
 	echo := itReadCheckVerdicts(t, conn)
 	if len(echo.Verdicts) != 1 || echo.Verdicts[0].WordIndex != 0 || !echo.Verdicts[0].Correct || !echo.Verdicts[0].Manual {
-		t.Fatalf("check_verdicts after voice right = %+v, want word 1 manual correct", echo.Verdicts)
-	}
-	ack := itAnnounceAck(t, conn)
-	if joined := strings.Join(ack, ""); !strings.Contains(joined, "第 1 个词对了") {
-		t.Errorf("verdict ack = %v, want the 第 1 个词对了 wording", ack)
+		t.Fatalf("check_verdicts after the button verdict = %+v, want word 1 manual correct", echo.Verdicts)
 	}
 
-	// Voice spelling correction with the actual written form.
+	// Both spoken forms land on a gated wire: nothing answers, nothing is
+	// written, nothing is echoed. (Quiet goes LAST — the closing timeout
+	// read poisons the connection.)
 	itSendUtterance(t, conn)
-	echo = itReadCheckVerdicts(t, conn)
-	if len(echo.Verdicts) != 2 {
-		t.Fatalf("check_verdicts after spelling = %+v, want 2 entries", echo.Verdicts)
-	}
-	if v := echo.Verdicts[1]; v.WordIndex != 1 || v.Correct || !v.Manual {
-		t.Fatalf("spelling verdict = %+v, want word 2 manual WRONG", v)
-	}
-	ocrRaw := itRead(t, conn, 10*time.Second, func(m itMsg) bool { return m.typ == TypeOcrResult })
-	var ocr OcrResultMsg
-	if err := json.Unmarshal(ocrRaw.raw, &ocr); err != nil {
-		t.Fatalf("ocr_result decode: %v", err)
-	}
-	if len(ocr.Entries) != 1 || ocr.Entries[0].WordIndex != 1 || ocr.Entries[0].OcrText != "香焦" || !ocr.Entries[0].NearMiss {
-		t.Fatalf("ocr_result = %+v, want word 2 香焦 near-miss entry", ocr.Entries)
-	}
-	ack = itAnnounceAck(t, conn)
-	joined := strings.Join(ack, "")
-	if !strings.Contains(joined, "很接近") || !strings.Contains(joined, "香蕉") || strings.Contains(joined, "笨") {
-		t.Errorf("spelling feedback = %v, want gentle near-miss encouragement naming the word", ack)
-	}
-
-	// The executor row holds both human verdicts; the spelling verdict
-	// carries the spoken written form.
-	exec.mu.Lock()
-	stored := append([]lesson.CheckVerdict(nil), exec.lesson.Verdicts...)
-	exec.mu.Unlock()
-	if len(stored) != 2 {
-		t.Fatalf("stored verdicts = %+v, want 2", stored)
-	}
-	if !stored[0].Manual || !stored[0].Correct {
-		t.Errorf("stored word 1 = %+v, want manual correct", stored[0])
-	}
-	if !stored[1].Manual || stored[1].Correct || stored[1].OcrText != "香焦" {
-		t.Errorf("stored word 2 = %+v, want manual wrong with ocr_text 香焦", stored[1])
+	itSendUtterance(t, conn)
+	itExpectQuiet(t, conn, 1500*time.Millisecond)
+	if got := itCountApplyVerdicts(exec); got != 1 {
+		t.Fatalf("gated utterances produced %d apply_verdict writes beyond the button's 1, want none", got-1)
 	}
 }
 
-// TestCheckVoiceSamePathAsButton: the same word flipped by the screen button
-// and then by voice — both human inputs ride the executor's ONE ApplyVerdict
-// method (RT-07), the button with its client request_id, the voice with the
-// server-generated lessonID-verdict-<index>-v<version>-voice key, and the
-// final state is the LAST human call.
+// TestCheckVoiceSamePathAsButton (#96 U2 rewrite): the screen button still
+// rides the executor's ONE ApplyVerdict method (RT-07) with its client
+// request_id — and a spoken flip of the SAME word is gated to zero writes,
+// so the button's state stays authoritative.
 func TestCheckVoiceSamePathAsButton(t *testing.T) {
 	exec := newFakeExecutorNoRow("it-lesson")
 	asr := newFakeASR(asrScript{text: "第一个词对了"})
@@ -1338,18 +1352,11 @@ func TestCheckVoiceSamePathAsButton(t *testing.T) {
 		t.Fatalf("button echo = %+v, want word 1 wrong", echo.Verdicts)
 	}
 
-	// Then voice: the SAME word flipped back to RIGHT — the spoken
-	// correction converges on the same write and the echo shows the new
-	// authoritative state.
+	// Then voice tries to flip it back to RIGHT: the utterance is gated —
+	// no second write, no echo, no announcement. The button's WRONG stays.
 	itSendUtterance(t, conn)
-	echo = itReadCheckVerdicts(t, conn)
-	if len(echo.Verdicts) != 1 || !echo.Verdicts[0].Correct || !echo.Verdicts[0].Manual {
-		t.Fatalf("final echo = %+v, want word 1 manual correct (voice overrode the button)", echo.Verdicts)
-	}
-	itAnnounceAck(t, conn)
+	itExpectQuiet(t, conn, 1500*time.Millisecond)
 
-	// Both human inputs rode apply_verdict on the executor — exactly one
-	// call each, with the two request-id families.
 	exec.mu.Lock()
 	buttons, voices := 0, 0
 	for _, c := range exec.checkCalls {
@@ -1364,8 +1371,8 @@ func TestCheckVoiceSamePathAsButton(t *testing.T) {
 		}
 	}
 	exec.mu.Unlock()
-	if buttons != 1 || voices != 1 {
-		t.Fatalf("apply_verdict calls button=%d voice=%d, want 1/1 (same executor path, RT-07)", buttons, voices)
+	if buttons != 1 || voices != 0 {
+		t.Fatalf("apply_verdict calls button=%d voice=%d, want 1/0 (the button path only, RT-07)", buttons, voices)
 	}
 }
 
@@ -1514,7 +1521,7 @@ func TestCrossConnectionDoubleSubmitSingleReview(t *testing.T) {
 	if started.Reason != CheckStartedReasonDictationDone {
 		t.Errorf("A check_started.reason = %q, want %s", started.Reason, CheckStartedReasonDictationDone)
 	}
-	itAnnounceAck(t, connA) // the check bridge
+	itAnnounceAckSettled(t, connA, StateGrading) // the check bridge settles to grading (#96 U2)
 	for i := 0; i < 3; i++ {
 		itSendText(t, connA, CheckVerdictMsg{
 			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("it-v-%d", i), WordIndex: i, Correct: true,
@@ -1534,7 +1541,7 @@ func TestCrossConnectionDoubleSubmitSingleReview(t *testing.T) {
 	if len(echoB.Verdicts) != 3 {
 		t.Fatalf("B resync verdicts = %+v, want A's 3 stored manual verdicts", echoB.Verdicts)
 	}
-	itAnnounceAck(t, connB) // B's resume bridge
+	itAnnounceAckSettled(t, connB, StateGrading) // B's resume bridge settles to grading (#96 U2)
 
 	// A submits first and wins the latch: honest result, acked ending.
 	itSendText(t, connA, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "it-submit-a"})
@@ -1648,7 +1655,7 @@ func TestCrossConnectionCorrectionStraggler(t *testing.T) {
 	if startedA.Reason != CheckStartedReasonCorrection {
 		t.Fatalf("A check_started.reason = %q, want %s", startedA.Reason, CheckStartedReasonCorrection)
 	}
-	itAnnounceAck(t, connA) // the correction bridge
+	itAnnounceAckSettled(t, connA, StateGrading) // the correction bridge settles to grading (#96 U2)
 	// A confirms both words; 香蕉 is OVERRIDDEN to correct — the one-word diff.
 	itSendText(t, connA, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-cor-a-v0", WordIndex: 0, Correct: true})
 	itReadCheckVerdicts(t, connA)
@@ -1661,7 +1668,7 @@ func TestCrossConnectionCorrectionStraggler(t *testing.T) {
 	if startedB.Reason != CheckStartedReasonCorrection {
 		t.Fatalf("B check_started.reason = %q, want %s (the row is still unchecked)", startedB.Reason, CheckStartedReasonCorrection)
 	}
-	itAnnounceAck(t, connB) // B's own correction bridge
+	itAnnounceAckSettled(t, connB, StateGrading) // B's correction bridge settles to grading (#96 U2)
 	itSendText(t, connB, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-cor-b-v0", WordIndex: 0, Correct: true})
 	itReadCheckVerdicts(t, connB)
 	itSendText(t, connB, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-cor-b-v1", WordIndex: 1, Correct: true})
@@ -1723,10 +1730,11 @@ func TestCrossConnectionCorrectionStraggler(t *testing.T) {
 	}
 }
 
-// TestCheckVoiceInvalidIndex: the model's index/text payload is untrusted —
-// a missing index, an out-of-range index, and a spelling line without the
-// actual text ALL fall back to the clarification question with ZERO verdict
-// writes and no crash; the classroom stays live afterwards.
+// TestCheckVoiceInvalidIndex (#96 U2 rewrite): the model's index/text payload
+// is untrusted — a missing index, an out-of-range index, and a spelling line
+// without the actual text. In the check panel the mic itself is gated, so
+// all three utterances produce ZERO verdict writes and a silent wire; the
+// classroom stays live and the screen path still applies verdicts after.
 func TestCheckVoiceInvalidIndex(t *testing.T) {
 	exec := newFakeExecutorNoRow("it-lesson")
 	asr := newFakeASR(
@@ -1741,22 +1749,22 @@ func TestCheckVoiceInvalidIndex(t *testing.T) {
 	)
 	conn, _ := itVoiceCheckSession(t, asr, llm, exec)
 
-	for i := 0; i < 3; i++ {
-		itSendUtterance(t, conn)
-		ack := itAnnounceAck(t, conn)
-		if joined := strings.Join(ack, ""); !strings.Contains(joined, "你说的是第几个词") {
-			t.Fatalf("invalid payload %d announcement = %v, want the clarification fallback", i+1, ack)
-		}
-		if got := itCountApplyVerdicts(exec); got != 0 {
-			t.Fatalf("invalid payload %d produced %d apply_verdict writes, want 0 (no guessing)", i+1, got)
-		}
-	}
-
-	// The classroom survived: the screen path still applies verdicts after
-	// the clarification rounds (the FSM settled back to listening).
+	// The classroom is live: the screen path applies verdicts (the panel
+	// owns the input surface in grading).
 	itSendText(t, conn, CheckVerdictMsg{Type: TypeCheckVerdict, RequestID: "it-after-invalid", WordIndex: 0, Correct: true})
 	echo := itReadCheckVerdicts(t, conn)
 	if len(echo.Verdicts) != 1 || !echo.Verdicts[0].Correct {
 		t.Fatalf("post-clarification echo = %+v, want the button verdict applied", echo.Verdicts)
 	}
+
+	// All three malformed payloads hit the gated mic: no writes, no crash,
+	// and a wire that stays silent for the whole window (the quiet phase
+	// goes LAST — the closing timeout read poisons the connection).
+	for i := 0; i < 3; i++ {
+		itSendUtterance(t, conn)
+		if got := itCountApplyVerdicts(exec); got != 1 {
+			t.Fatalf("invalid payload %d produced %d apply_verdict writes beyond the button's 1, want none", i+1, got-1)
+		}
+	}
+	itExpectQuiet(t, conn, 1200*time.Millisecond)
 }

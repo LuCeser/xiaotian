@@ -107,11 +107,18 @@ func TestReadWordKeepsPauseAndCheckVerdicts(t *testing.T) {
 		words := newFakeWords(ttCards("苹果"))
 		tm, s, _, _ := ttDriveToCheck(t, ttCards("苹果"), words)
 		t.Cleanup(tm.internalClose)
+		// #96 U2: the check panel settles to grading and re-reading is
+		// refused — the panel rows show the words themselves, and the chip
+		// stays honestly disabled on the page (canReadWord excludes grading).
 		before := s.countOf(TypeTeacherSentence)
 		tm.HandleControl(s, mustJSON(t, ReadWordMsg{Type: TypeReadWord, WordIndex: 0, CurrentIndex: 1}))
-		ttAwaitSpoken(t, s, before+2)
-		ttAckLast(t, tm, s, 0)
-		if s.countOf(TypeError) != 0 || s.countOf(TypeCheckVerdicts) != 0 || s.countOf(TypeReviewResult) != 0 {
+		if got := s.countOf(TypeTeacherSentence); got != before {
+			t.Fatalf("check-stage re-read spoke %d new sentences, want 0", got-before)
+		}
+		if s.countOf(TypeError) != 1 {
+			t.Fatal("check-stage reading must be refused with a visible error")
+		}
+		if s.countOf(TypeCheckVerdicts) != 0 || s.countOf(TypeReviewResult) != 0 {
 			t.Fatal("check-stage reading must not submit or mark a verdict")
 		}
 	})
