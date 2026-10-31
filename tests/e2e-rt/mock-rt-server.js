@@ -443,6 +443,7 @@ function handleTestState(res) {
       resumed: s.resumed,
       audioFrames: s.audioFrames,
       interrupts: s.interrupts,
+      readWords: s.readWords,
       acks: s.acks,
       acksRejected: s.acksRejected,
       summaryAcked: s.summaryAcked,
@@ -705,6 +706,9 @@ wss.on('connection', (ws, req, query) => {
     resumed: false,
     audioFrames: 0,
     interrupts: [],
+    /** #96 U2: read_word frames received (the page must send NONE once
+        check_started opened the panel — the quiet contract). */
+    readWords: [],
     acks: [],
     acksRejected: [],
     summaryAcked: false,
@@ -1276,9 +1280,16 @@ wss.on('connection', (ws, req, query) => {
       }
 
       case 'read_word': {
+        state.readWords.push({ word_index: msg.word_index, current_index: msg.current_index });
+        // #96 U2 parity: the check stage never re-reads — the panel rows
+        // show the words, the voice stays quiet from check_started on.
+        if (state.checkActive) {
+          send({ type: 'error', code: 'invalid_message', message: '现在不能重读这个词，请点已经报过的序号', recoverable: true });
+          break;
+        }
         if (!state.ready || state.ended || msg.current_index !== state.currentIndex ||
             !Number.isInteger(msg.word_index) || msg.word_index < 0 || msg.word_index >= state.words.length ||
-            (!state.checkActive && msg.word_index > state.currentIndex)) {
+            msg.word_index > state.currentIndex) {
           send({ type: 'error', code: 'invalid_message', message: '现在不能重读这个词', recoverable: true });
           break;
         }

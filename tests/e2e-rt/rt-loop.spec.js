@@ -636,6 +636,48 @@ test('check-stage playback_ack_timeout does not drain or block submit', async ({
   expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
 });
 
+// #96 review P2-1: quiet starts at check_started, not at the grading state —
+// mid-bridge the status chip still reads speaking and a word-ordinal tap
+// there would fire interrupt + read_word, bumping the epoch out from under
+// the pending grading entry and re-closing the session through the re-read's
+// ack timeout. The chips must be read-only for the WHOLE check stage, and a
+// synthetic click must leave the wire silent.
+test('check stage keeps the word chips read-only during the bridge', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+
+  await page.goto('/tutor/?' + QUIET_PARAMS);
+  await page.click('#rt-start');
+  await expect
+    .poll(() => page.evaluate(() => window.__rtTutor && window.__rtTutor.client.sessionId),
+      { timeout: 20_000 })
+    .toBeTruthy();
+
+  // The panel opens with the bridge still speaking (state=grading only lands
+  // after the bridge audio drains).
+  await expect(page.locator('#rt-check')).toBeVisible({ timeout: 60_000 });
+  await expect
+    .poll(() => page.getAttribute('#rt-status', 'data-state'), { timeout: 10_000 })
+    .toBe('speaking');
+  const chips = page.locator('#rt-words .rt-word-chip');
+  await expect(chips).toHaveCount(3);
+  for (let i = 0; i < 3; i++) {
+    await expect(chips.nth(i)).toBeDisabled();
+  }
+
+  // A synthetic click bypasses the browser's disabled-button suppression but
+  // not the page's own gate: no interrupt, no read_word.
+  await page.evaluate(() => {
+    const el = document.querySelectorAll('#rt-words .rt-word-chip')[0];
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  const s = await getSession(page);
+  expect(s.interrupts).toHaveLength(0);
+  expect(s.readWords).toHaveLength(0);
+
+  expect(pageErrors, JSON.stringify(pageErrors)).toEqual([]);
+});
+
 // ---------------------------------------------------------------------------
 // 13.1-02: student-mode anti-leak (D-08/D-09/D-10) — the server is the
 // masking authority: no not-yet-revealed word string may appear in the page

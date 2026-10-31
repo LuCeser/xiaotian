@@ -135,6 +135,46 @@ func TestCheckQuietGradingIgnoresUplinkSpeech(t *testing.T) {
 	}
 }
 
+// TestCheckQuietRefusesReadWordDuringBridge (#96 review P2-1): a word-ordinal
+// tap mid-bridge sends interrupt → read_word. The interrupt bumps the epoch
+// and puts the FSM back to listening while checking still holds — the
+// read_word must be refused by the checking gate (not by the state gate), or
+// it plays through the ordinary ack wait whose timeout orderlyCloses the
+// grading session.
+func TestCheckQuietRefusesReadWordDuringBridge(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
+	tm, s, _, _ := ttDriveToCheckBridgePending(t, cards, words)
+
+	tm.HandleControl(s, mustJSON(t, InterruptMsg{Type: TypeInterrupt}))
+	before := s.countOf(TypeTeacherSentence)
+	errBefore := s.countOf(TypeError)
+	tm.HandleControl(s, mustJSON(t, ReadWordMsg{Type: TypeReadWord, WordIndex: 0, CurrentIndex: len(cards)}))
+	time.Sleep(300 * time.Millisecond)
+	if got := s.countOf(TypeTeacherSentence); got != before {
+		t.Fatalf("check-stage re-read spoke %d sentences, want 0", got-before)
+	}
+	if got := s.countOf(TypeError); got != errBefore+1 {
+		t.Fatalf("check-stage re-read errors = %d, want exactly one refusal", got-errBefore)
+	}
+	tm.mu.Lock()
+	closed := tm.closed
+	tm.mu.Unlock()
+	if closed {
+		t.Fatal("a word-ordinal tap during the bridge must not close the session")
+	}
+
+	// The grading session survives the stray tap: verdicts still land, the
+	// one review write answers, and the normal ending still completes.
+	ttCheckAll(t, tm, s, len(cards))
+	result := ttSubmitCheck(t, tm, s)
+	if int(result["updated"].(float64)) != len(cards) {
+		t.Fatalf("review_result.updated = %v, want %d after the refused re-read", result["updated"], len(cards))
+	}
+	ttAckSummaryAndEnd(t, tm, s, nil)
+}
+
 func TestCheckQuietBridgeTimeoutDuringSubmitDoesNotCancelReview(t *testing.T) {
 	cards := ttCards("苹果", "香蕉")
 	words := newFakeWords(cards)

@@ -638,6 +638,13 @@
         // would speak the original (背默任务，老师不念原文); the server
         // refuses it too, this keeps the chip honestly disabled.
         if (poemTask || passageTask) return false;
+        // #96 U2: quiet starts at check_started, not at the grading state —
+        // mid-bridge the FSM still reads 'speaking', and the interrupt +
+        // read_word a click sends there would bump the epoch out from under
+        // the pending grading entry and re-close the session through the
+        // re-read's ack timeout. The panel rows show every word by then;
+        // reading aloud stays a dictation-stage affordance only.
+        if (check.active) return false;
         return started && !courseEnded && !terminalDraining && !readPending &&
           !check.submitPending && !check.resultText &&
           connEl.getAttribute('data-conn') === 'connected' &&
