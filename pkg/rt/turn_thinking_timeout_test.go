@@ -735,3 +735,108 @@ func TestProcessTurnThinkingTimeoutAfterHangingExampleGeneration(t *testing.T) {
 	tid, _ := fieldValue(t, *ev, "turn_id").(uint64)
 	ttAssertTimeoutWarn(t, log, "chat", tid)
 }
+
+// TestProcessTurnThinkingTimeoutScopedToDictationTurn: the 「思考中」
+// deadline belongs to the WORD-dictation turn alone — the check and 背默
+// branches' classifiers (classifyCheckTurn / classifyPoemTurn /
+// classifyPassageTurn) retry unconditionally and dispatch TTS on the SAME
+// ctx, so a deadline ctx would fail them with nothing owning the recovery.
+// Every stage entered through the REAL IngestAudio path must hand its
+// classifier a ctx with NO deadline and still complete its turn normally.
+// Reverting the scoping (WithTimeout for every turn) turns each subtest red
+// through the recorded deadline flag.
+func TestProcessTurnThinkingTimeoutScopedToDictationTurn(t *testing.T) {
+	// settleStage drives one voice turn to a spoken reply and settles it.
+	settleStage := func(t *testing.T, tm *TurnManager, s *captureSender) {
+		t.Helper()
+		sentBefore := s.countOf(TypeTeacherSentence)
+		tm.IngestAudio(s, ttUtterance())
+		if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > sentBefore }) {
+			t.Fatal("the turn never spoke — a scoped-out deadline must not change the dispatch")
+		}
+		ttAckLast(t, tm, s, 0)
+		if !waitFor(t, 5*time.Second, func() bool { return ttLastStateValue(t, s) == StateListening }) {
+			t.Fatalf("state after the turn = %q, want listening", ttLastStateValue(t, s))
+		}
+	}
+
+	t.Run("check stage", func(t *testing.T) {
+		asr := newFakeASR(asrScript{text: "老师我改好了"})
+		llm := newFakeLLM(intentScript(intentChat, "好的，我们继续。"))
+		log := &captureLogger{}
+		tm, s := ttThinkingFixture(t, 250*time.Millisecond, asr, llm, newFakeTTS(1, 320), log)
+		// The check stage is staged through the same white-box seam the
+		// existing check tests use; the TURN itself is the real entry.
+		tm.mu.Lock()
+		tm.tutor.checking = true
+		tm.mu.Unlock()
+
+		settleStage(t, tm, s)
+
+		if flags := llm.ctxDeadlines(); len(flags) != 1 || flags[0] {
+			t.Errorf("check-stage classify ctx deadline flags = %v, want exactly one Chat on a deadline-free ctx", flags)
+		}
+		if e := ttLastError(t, s); e != nil {
+			t.Errorf("unexpected ErrorMsg on the check-stage turn: %v", e)
+		}
+		if w := ttThinkingTimeoutWarn(t, log); w != nil {
+			t.Error("a timeout Warn fired on a stage the deadline must not cover")
+		}
+	})
+
+	t.Run("poem stage", func(t *testing.T) {
+		asr := newFakeASR(asrScript{text: "老师我在背"})
+		llm := newFakeLLM(intentScript(intentChat, "好的，我们继续。"))
+		log := &captureLogger{}
+		tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID),
+			ttConfigWith(nil, func(c *TurnManagerConfig) {
+				c.Poems = &fakePoemSource{p: ttInScopePoem()}
+				c.PoemPractice = &fakePoemPractice{}
+				c.ProcessingTimeout = 250 * time.Millisecond
+				c.VADStartGraceMs = 1
+				c.VADEchoTailMs = 1
+			}), NewEventRecorder(log, "t"), log)
+		s := &captureSender{}
+		ttPoemInit(t, tm, s, 42, ModeTest)
+		tm.mu.Lock()
+		tm.echoTailUntil = time.Now().Add(-time.Millisecond)
+		tm.mu.Unlock()
+
+		settleStage(t, tm, s)
+
+		if flags := llm.ctxDeadlines(); len(flags) != 1 || flags[0] {
+			t.Errorf("poem-stage classify ctx deadline flags = %v, want exactly one Chat on a deadline-free ctx", flags)
+		}
+		if e := ttLastError(t, s); e != nil {
+			t.Errorf("unexpected ErrorMsg on the poem-stage turn: %v", e)
+		}
+	})
+
+	t.Run("passage stage", func(t *testing.T) {
+		asr := newFakeASR(asrScript{text: "老师我在背"})
+		llm := newFakeLLM(intentScript(intentChat, "好的，我们继续。"))
+		log := &captureLogger{}
+		tm := NewTurnManager(asr, llm, newFakeTTS(1, 320), newFakeExecutorNoRow(ttLessonID),
+			ttConfigWith(nil, func(c *TurnManagerConfig) {
+				c.Passages = &fakePassageSource{p: ttInScopePassage()}
+				c.PassagePractice = &fakePassagePractice{}
+				c.ProcessingTimeout = 250 * time.Millisecond
+				c.VADStartGraceMs = 1
+				c.VADEchoTailMs = 1
+			}), NewEventRecorder(log, "t"), log)
+		s := &captureSender{}
+		ttPassageInit(t, tm, s, 77, 51, ModeTest)
+		tm.mu.Lock()
+		tm.echoTailUntil = time.Now().Add(-time.Millisecond)
+		tm.mu.Unlock()
+
+		settleStage(t, tm, s)
+
+		if flags := llm.ctxDeadlines(); len(flags) != 1 || flags[0] {
+			t.Errorf("passage-stage classify ctx deadline flags = %v, want exactly one Chat on a deadline-free ctx", flags)
+		}
+		if e := ttLastError(t, s); e != nil {
+			t.Errorf("unexpected ErrorMsg on the passage-stage turn: %v", e)
+		}
+	})
+}
