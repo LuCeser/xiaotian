@@ -759,23 +759,24 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 			})
 			if rerr != nil || rec.ID <= 0 {
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
-				// N3 (#96 open question 2): Begin did not leave a row while
-				// the store is still readable — skip the write here so the
-				// NEXT check_submit can 补写 the whole batch through a fresh
-				// receipt. S-05 bypass stays for a wholly broken store (e.g.
-				// closed DB): ListByLesson fails too, so SubmitReview still
-				// runs once and review_result stays byte-honest to the
-				// provider (TestSaveReceiptFailureIsBypass).
-				if _, listErr := tm.cfg.Receipts.ListByLesson(ctx, lessonID); listErr == nil {
-					tm.publishCheckReview(s, epoch, ReviewResultMsg{
-						Type:      TypeReviewResult,
-						Requested: requested,
-						Updated:   0,
-						Missing:   requested,
-						Unchecked: false,
-					}, true, false)
-					return
-				}
+				// N3 (#96 open question 2, review strike 1): no receipt row,
+				// no write — regardless of why Begin failed. A readable store
+				// that refused the row and a wholly unreadable one (a closed
+				// DB) take the SAME branch: without a row there is no dedup
+				// basis and no safe word list, and the old S-05 bypass
+				// stranded the batch (FSRS advanced, no row, the recovered
+				// store's next tap could only answer 待核实). The honest
+				// zero-updated frame keeps the panel open; the NEXT
+				// check_submit's whole-batch 补写 through a fresh receipt is
+				// the only sanctioned second chance.
+				tm.publishCheckReview(s, epoch, ReviewResultMsg{
+					Type:      TypeReviewResult,
+					Requested: requested,
+					Updated:   0,
+					Missing:   requested,
+					Unchecked: false,
+				}, true, false)
+				return
 			}
 			receiptID = rec.ID
 		}

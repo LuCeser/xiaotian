@@ -1437,13 +1437,17 @@ func TestSaveReceiptPracticeStorageFailure(t *testing.T) {
 	}
 }
 
-// TestSaveReceiptFailureIsBypass (13.3-01, behavior 6 / T-13.3-02): a
-// receipt store that fails on every call must not move the submission —
-// the review_result counts and the flow all stay exactly what a world
-// without receipts produces; the only trace is the server-side
-// at=save_receipt error event. Since #96 a partial save no longer speaks a
-// summary or ends the session — the panel stays open for an on-panel retry.
-func TestSaveReceiptFailureIsBypass(t *testing.T) {
+// TestSaveReceiptFailureSkipsWrite (#96 N3, Cursor review strike 1 — it
+// replaces TestSaveReceiptFailureIsBypass): a receipt store that is WHOLLY
+// unreadable (Begin fails, ListByLesson would fail too) must stop the FIRST
+// submit's write as well. The old S-05 bypass (write anyway, keep the
+// counts byte-honest) stranded the batch: FSRS advanced, no receipt row
+// existed, and the recovered store's next tap could only answer 待核实 —
+// the missing words were never 补写-able. The honest shape now is the
+// zero-updated frame, the at=save_receipt diagnostic, and a panel left
+// open for the whole-batch 补写
+// (TestCheckSubmitUnreadableStoreRewritesWholeBatchAfterRecovery).
+func TestSaveReceiptFailureSkipsWrite(t *testing.T) {
 	broken := newBrokenReceiptStore(t)
 	words := newFakeWords(ttCards("苹果", "香蕉"))
 	words.reviewResult = ReviewWriteResult{
@@ -1455,23 +1459,24 @@ func TestSaveReceiptFailureIsBypass(t *testing.T) {
 	ttCheckAll(t, tm, s, 2)
 	result := ttSubmitCheck(t, tm, s)
 
-	// The review_result is byte-honest: same requested/updated/missing as
-	// the no-receipt world.
-	if result["requested"] != float64(2) || result["updated"] != float64(1) || result["missing"] != float64(1) {
-		t.Errorf("review_result = %v, want requested 2 / updated 1 / missing 1", result)
+	// No row, no write: the frame reports the WHOLE batch unsaved — not the
+	// provider's would-be partial result (nothing was sent to it).
+	if result["requested"] != float64(2) || result["updated"] != float64(0) || result["missing"] != float64(2) {
+		t.Errorf("review_result = %v, want requested 2 / updated 0 / missing 2", result)
 	}
-	// #96: a partial save is not a completion — no spoken summary, no
-	// session_ended; the check panel stays open for a retry tap.
+	if result["pending"] != nil {
+		t.Errorf("review_result.pending = %v, want absent (nothing was ever written)", result["pending"])
+	}
 	if s.countOf(TypeSessionEnded) != 0 {
-		t.Fatal("partial save with a broken receipt store must not end the session")
+		t.Fatal("an unreadable receipt store must not end the session")
 	}
 	for _, sn := range s.controlsOf(t, TypeTeacherSentence) {
 		if txt, _ := sn["text"].(string); strings.Contains(txt, "保存") {
-			t.Fatalf("a summary spoke after a partial save: %q", txt)
+			t.Fatalf("a summary spoke after a skipped write: %q", txt)
 		}
 	}
 
-	// The bypass left exactly its diagnostic marker.
+	// The skip left exactly its diagnostic marker.
 	ats := ttEventField(t, log, EventError, "at")
 	found := false
 	for _, a := range ats {
@@ -1484,8 +1489,8 @@ func TestSaveReceiptFailureIsBypass(t *testing.T) {
 		t.Errorf("no EventError(at=save_receipt) among %v — the receipt failure went silent", ats)
 	}
 
-	if subs := words.submissions(); len(subs) != 1 {
-		t.Errorf("SubmitReview calls = %d, want exactly 1 (the receipt failure must not retry the batch, S-05)", len(subs))
+	if subs := words.submissions(); len(subs) != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0 (no receipt row is never a write license, #96 N3)", len(subs))
 	}
 }
 
