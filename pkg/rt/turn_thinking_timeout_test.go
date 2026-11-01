@@ -840,3 +840,152 @@ func TestProcessTurnThinkingTimeoutScopedToDictationTurn(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Issue #94 U5 rethink (path B): the in-flight word-timer advance vs the
+// thinking timeout — the two deterministic winners. Both tests enter through
+// the REAL seams only: the captured onWordTimeout firing (the injected
+// timerFactory), gateAdvance's commit-vs-return window, and IngestAudio. No
+// sleep decides a race; channel handoffs decide who takes the deciding lock
+// first.
+// ---------------------------------------------------------------------------
+
+// ttThinkingAdvanceFixture boots a TWO-word classroom (the word-timer
+// advance narrates the NEXT word instead of entering check) with the
+// per-word countdown CAPTURED by an injected timerFactory — the
+// deterministic onWordTimeout: the test fires it by hand while the classroom
+// is listening, so the firing takes the timeoutAdvance branch for real.
+// Returns the captured firing.
+func ttThinkingAdvanceFixture(t *testing.T, timeout time.Duration, exec *fakeExecutor, asr ASRProvider, llm LLMProvider, tts TTSSynthesizer, log infra.Logger) (*TurnManager, *captureSender, func()) {
+	t.Helper()
+	tm := NewTurnManager(asr, llm, tts, exec,
+		ttConfigWith(newFakeWords(ttCards("苹果", "香蕉")), func(c *TurnManagerConfig) {
+			c.ProcessingTimeout = timeout
+			c.WordTimeout = time.Hour // expiry is the test's firing, never the clock
+			c.VADStartGraceMs = 1
+			c.VADEchoTailMs = 1
+		}), NewEventRecorder(log, "t"), log)
+	var armed func()
+	tm.mu.Lock()
+	tm.timerFactory = func(_ time.Duration, cb func()) *time.Timer {
+		armed = cb // invoked under tm.mu by armWordTimerLocked
+		return time.NewTimer(time.Hour)
+	}
+	tm.mu.Unlock()
+	s := &captureSender{}
+	ttInit(t, tm, s)
+	ttAwaitSpoken(t, s, 3)
+	ttAckLast(t, tm, s, 0)
+	ttWaitListening(t, s)
+	tm.mu.Lock()
+	tm.echoTailUntil = time.Now().Add(-time.Millisecond)
+	tm.mu.Unlock()
+	if !waitFor(t, 5*time.Second, func() bool {
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		return armed != nil
+	}) {
+		t.Fatal("the greeting's valid ack never armed the word countdown")
+	}
+	return tm, s, armed
+}
+
+// TestProcessTurnThinkingTimeoutAdvanceBlockedUntilCommit: the word timer's
+// timeoutAdvance is parked INSIDE its executor commit (gateAdvance: row
+// written, call not returned, FSM still listening) when the student's
+// utterance enters processing and its classification wedges to the deadline.
+// The timeout must win the round in ONE critical section, and the released
+// advance must retire silently: no next-word sentence, no audio, no
+// lesson_update, no second error — while the store's committed row stands.
+// Deleting the driverGen retirement (or splitting the commit's critical
+// section) turns this red through the narration the released advance would
+// speak.
+func TestProcessTurnThinkingTimeoutAdvanceBlockedUntilCommit(t *testing.T) {
+	asr := newFakeASR(asrScript{text: "你好"})
+	llm := &thinkingHangLLM{}
+	tts := newFakeTTS(1, 320)
+	log := &captureLogger{}
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm, s, fire := ttThinkingAdvanceFixture(t, 250*time.Millisecond, exec, asr, llm, tts, log)
+	sentences := s.countOf(TypeTeacherSentence)
+	spokenBefore := len(tts.recordedTexts())
+	audioBefore := s.audioCount()
+
+	entered, release := exec.gateAdvance()
+	go fire() // the captured onWordTimeout: listening → timeoutAdvance, parked in the commit
+	<-entered
+	tm.mu.Lock()
+	st := tm.state
+	tm.mu.Unlock()
+	if st != StateListening {
+		t.Fatalf("state inside the gated advance = %q, want listening (the FSM must not have moved yet)", st)
+	}
+
+	tm.IngestAudio(s, ttUtterance()) // the turn enters processing; its Chat wedges to the deadline
+
+	if !waitFor(t, 5*time.Second, func() bool {
+		e := ttLastError(t, s)
+		return e != nil && e["code"] == ErrCodeThinkingTimeout
+	}) {
+		t.Fatal("thinking_timeout ErrorMsg never arrived — the hung Chat outlived the deadline")
+	}
+	errs := s.controlsOf(t, TypeError)
+	if len(errs) != 1 {
+		t.Fatalf("error count = %d, want exactly 1 (the thinking_timeout itself — never 语音识别失败 or 课堂进度更新失败): %v", len(errs), errs)
+	}
+	if msg, _ := errs[0]["message"].(string); msg != thinkingTimeoutNotice {
+		t.Errorf("error message = %q, want %q", msg, thinkingTimeoutNotice)
+	}
+	if rec, _ := errs[0]["recoverable"].(bool); !rec {
+		t.Error("error recoverable = false, want true")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return ttLastStateValue(t, s) == StateListening }) {
+		t.Fatalf("state after the timeout = %q, want listening", ttLastStateValue(t, s))
+	}
+	starts := s.controlsOf(t, TypeTurnStart)
+	if len(starts) != 1 {
+		t.Fatalf("turn_start count = %d, want 1 (the student's utterance)", len(starts))
+	}
+	startID, _ := starts[0]["turn_id"].(float64)
+	ttAssertTimeoutWarn(t, log, "chat", uint64(startID))
+	if got := llm.callCount(); got != 1 {
+		t.Errorf("llm calls = %d, want 1 (the wedged classification alone)", got)
+	}
+
+	close(release) // the committed advance finally returns — into a round the timeout won
+
+	// Deterministic exit: the advance goroutine's own deferred slot cleanup.
+	if !waitFor(t, 5*time.Second, func() bool {
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		return tm.advanceCancel == nil
+	}) {
+		t.Fatal("the gated advance never returned from its executor call")
+	}
+	time.Sleep(200 * time.Millisecond) // room for a would-be undead advance to speak
+
+	if got := s.countOf(TypeTeacherSentence); got != sentences {
+		t.Errorf("teacher sentences %d → %d after the release, want unchanged (the retired advance must not narrate)", sentences, got)
+	}
+	if got := len(tts.recordedTexts()); got != spokenBefore {
+		t.Errorf("tts calls %d → %d after the release, want unchanged", spokenBefore, got)
+	}
+	if got := s.audioCount(); got != audioBefore {
+		t.Errorf("audio chunks %d → %d after the release, want unchanged (no sound may follow the timeout)", audioBefore, got)
+	}
+	if got := s.countOf(TypeLessonUpdate); got != 0 {
+		t.Errorf("lesson_update = %d, want 0 (the store commit stands; the wire never hears it)", got)
+	}
+	if got := ttLastStateValue(t, s); got != StateListening {
+		t.Errorf("state = %q, want listening (and it must stay)", got)
+	}
+	if ttEventCount(t, log, EventTimeoutFired) != 0 {
+		t.Error("timeout_fired claimed an advance the thinking timeout had already won")
+	}
+	exec.mu.Lock()
+	rowIdx := exec.lesson.CurrentIndex
+	exec.mu.Unlock()
+	if rowIdx != 1 {
+		t.Errorf("executor row CurrentIndex = %d, want 1 (a committed advance is never rolled back)", rowIdx)
+	}
+}
