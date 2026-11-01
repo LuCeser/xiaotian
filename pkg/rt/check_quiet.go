@@ -56,16 +56,24 @@ func (tm *TurnManager) waitCheckBridgePlayback(ref PlaybackRef) {
 	}
 }
 
-// enterGradingAt sets the post-bridge check stage: no listening, no echo tail.
-func (tm *TurnManager) enterGradingAt(s Sender, epoch uint64) {
-	tm.mu.Lock()
-	if tm.state == "" || tm.closed || tm.epoch != epoch {
-		tm.mu.Unlock()
-		return
-	}
+// enterGradingLocked is the grading transition's locked half (caller holds
+// tm.mu and has already verified the session is live at its epoch): no
+// listening, no echo tail — the check panel keeps the uplink gated.
+func (tm *TurnManager) enterGradingLocked(s Sender) {
 	tm.state = StateGrading
 	tm.playbackPending = false
-	value := tm.effectiveClientStateLocked()
-	tm.mu.Unlock()
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: value})
+	_ = s.SendControl(StateMsg{Type: TypeState, Value: tm.effectiveClientStateLocked()})
+}
+
+// enterGradingAt sets the post-bridge check stage. The liveness gate, the
+// state write, and the state enqueue are ONE tm.mu hold (#96 N1): SendControl
+// is a non-blocking enqueue, so an end_session can no longer land its
+// terminal session_ended between the gate and the frame.
+func (tm *TurnManager) enterGradingAt(s Sender, epoch uint64) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.state == "" || tm.closed || tm.epoch != epoch {
+		return
+	}
+	tm.enterGradingLocked(s)
 }

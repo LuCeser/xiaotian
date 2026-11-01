@@ -1630,7 +1630,18 @@ func ttDriveToCheck(t *testing.T, cards []lesson.Word, words *fakeWordSource) (*
 // (13.3-01: the save-receipt tests inject cfg.Receipts; every other field
 // and the whole drive sequence stay identical).
 func ttDriveToCheckCfg(t *testing.T, cards []lesson.Word, words *fakeWordSource, mutate func(*TurnManagerConfig)) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
+	return ttDriveToCheckWrapped(t, cards, words, mutate, nil)
+}
+
+// ttDriveToCheckWrapped is ttDriveToCheckCfg with a sender-wrapper factory
+// (#96 N1 probes): wrap receives the drive's captureSender AND its
+// TurnManager before the first processTurn, and every confirm/announcement
+// goroutine then inherits the WRAPPED sender — a probe rides exactly the
+// frame paths the drive's own goroutines publish (the check bridge's grading
+// settle). The drive's settle assertions keep reading the capture underneath.
+func ttDriveToCheckWrapped(t *testing.T, cards []lesson.Word, words *fakeWordSource, mutate func(*TurnManagerConfig), wrap func(*captureSender, *TurnManager) Sender) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
 	t.Helper()
+	view := &captureSender{}
 	log := &captureLogger{}
 	exec := newFakeExecutorNoRow(ttLessonID)
 	asrScripts := make([]asrScript, len(cards))
@@ -1644,11 +1655,14 @@ func ttDriveToCheckCfg(t *testing.T, cards []lesson.Word, words *fakeWordSource,
 	tts := newFakeTTS(2, 320)
 	tts.delay = 20 * time.Millisecond
 	tm := NewTurnManager(asr, llm, tts, exec, ttConfigWith(words, mutate), NewEventRecorder(log, "t"), nil)
-	s := &captureSender{}
-	ttInit(t, tm, s)
-	ttAwaitSpoken(t, s, 3)
-	ttAckLast(t, tm, s, 0)
-	ttWaitListening(t, s)
+	var s Sender = view
+	if wrap != nil {
+		s = wrap(view, tm)
+	}
+	ttInit(t, tm, view)
+	ttAwaitSpoken(t, view, 3)
+	ttAckLast(t, tm, view, 0)
+	ttWaitListening(t, view)
 
 	for i := 0; i < len(cards); i++ {
 		done := make(chan struct{})
@@ -1658,10 +1672,10 @@ func ttDriveToCheckCfg(t *testing.T, cards []lesson.Word, words *fakeWordSource,
 		}()
 		if i < len(cards)-1 {
 			// The next-word announcement blocks the turn until acked.
-			if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeLessonUpdate) == i+1 }) {
+			if !waitFor(t, 5*time.Second, func() bool { return view.countOf(TypeLessonUpdate) == i+1 }) {
 				t.Fatalf("confirm %d never committed", i)
 			}
-			ttAckLast(t, tm, s, 0)
+			ttAckLast(t, tm, view, 0)
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):
@@ -1670,22 +1684,22 @@ func ttDriveToCheckCfg(t *testing.T, cards []lesson.Word, words *fakeWordSource,
 			continue
 		}
 		// The LAST commit opens the check stage instead of a summary.
-		ttCheckStartedWanted(t, s)
+		ttCheckStartedWanted(t, view)
 		// Wait for the bridge sentence BEFORE acking — acking the previous
 		// announcement's last sentence would be a rejected duplicate and
 		// leave the bridge announcement awaiting forever.
-		spokenBefore := s.countOf(TypeTeacherSentence)
-		if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > spokenBefore }) {
+		spokenBefore := view.countOf(TypeTeacherSentence)
+		if !waitFor(t, 5*time.Second, func() bool { return view.countOf(TypeTeacherSentence) > spokenBefore }) {
 			t.Fatal("check bridge announcement never spoke")
 		}
-		ttAckLast(t, tm, s, 0) // the check bridge announcement
+		ttAckLast(t, tm, view, 0) // the check bridge announcement
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
 			t.Fatal("the entering turn never settled after the bridge ack")
 		}
 	}
-	return tm, s, log, exec
+	return tm, view, log, exec
 }
 
 // ttCheckAll marks every word correct (manual screen verdicts) and waits

@@ -226,3 +226,68 @@ func TestCheckQuietBridgeTimeoutDuringSubmitDoesNotCancelReview(t *testing.T) {
 		t.Fatalf("review_result.updated = %v, want %d", result["updated"], len(cards))
 	}
 }
+
+// gradingEndRaceSender races ONE end_session against the post-bridge grading
+// publish (#96 N1, the endRaceSender pattern): the probe fires only when
+// tm.mu is FREE at the moment enterGradingAt ships its state frame. The
+// drive must ride the probe sender — the bridge announcement goroutine
+// (enterCheck → announceCheckQuiet → enterGradingAt) inherits the drive's
+// processTurn sender — and the probe targets ONLY value=grading state
+// frames: this path's earlier sends (greeting, word announcements,
+// check_started) are not this unit's publish.
+type gradingEndRaceSender struct {
+	*captureSender
+	tm    *TurnManager
+	fired bool
+}
+
+// SendControl implements Sender.
+func (e *gradingEndRaceSender) SendControl(v any) error {
+	if !e.fired {
+		var probe struct {
+			Type  string `json:"type"`
+			Value string `json:"value"`
+		}
+		if b, err := json.Marshal(v); err == nil && json.Unmarshal(b, &probe) == nil &&
+			probe.Type == TypeState && probe.Value == StateGrading {
+			if e.tm.mu.TryLock() {
+				e.tm.mu.Unlock()
+				e.tm.handleEndSession(e)
+				e.fired = true
+			}
+		}
+	}
+	return e.captureSender.SendControl(v)
+}
+
+// TestCheckBridgePublishesGradingUnderLock (#96 N1): the post-bridge grading
+// state frame must ride ONE tm.mu hold with its liveness gate — an
+// end_session landing between the gate and the enqueue must never order the
+// terminal session_ended ahead of the grading frame. enterCheck's own path
+// is driven here (NOT startCheckPanelSession, whose pre-bridge grading send
+// is an earlier window this unit does not fix).
+func TestCheckBridgePublishesGradingUnderLock(t *testing.T) {
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	var probe *gradingEndRaceSender
+	_, s, _, _ := ttDriveToCheckWrapped(t, cards, words, nil, func(view *captureSender, tm *TurnManager) Sender {
+		probe = &gradingEndRaceSender{captureSender: view, tm: tm}
+		return probe
+	})
+
+	if probe.fired {
+		// The end landed inside the publish: the grading frame must still
+		// precede the goodbye it raced — session_ended stays the LAST
+		// control message on the connection.
+		ttAssertNothingTrailsEnded(t, s, TypeState)
+		return
+	}
+	// The probe could not slip in: the bridge settled into grading with no
+	// goodbye anywhere on the wire.
+	if got := gradingCount(s); got == 0 {
+		t.Fatal("the bridge never settled into grading")
+	}
+	if ended := s.controlsOf(t, TypeSessionEnded); len(ended) != 0 {
+		t.Fatalf("session_ended count = %d, want 0 (the probe never fired)", len(ended))
+	}
+}

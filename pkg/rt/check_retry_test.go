@@ -2,6 +2,7 @@ package rt
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -489,5 +490,128 @@ func TestCheckRetryBeginFailureSkipsWrite(t *testing.T) {
 	}
 	if got := s.countOf(TypeSessionEnded); got != 0 {
 		t.Fatalf("session_ended = %d, want 0 (the retry stays open for another tap)", got)
+	}
+}
+
+// reviewEndRaceSender races ONE end_session against a review_result publish
+// (#96 N1, the endRaceSender pattern): the probe fires only when tm.mu is
+// FREE at the moment the write path ships its frame. A disciplined publish
+// holds the lock through the liveness gate AND the enqueue, so the probe can
+// never fire — the frame lands, no goodbye exists. An undisciplined one
+// (check the gate, unlock, then send) gets the goodbye strictly BEFORE its
+// review_result, and the wire-order assertion goes red.
+type reviewEndRaceSender struct {
+	*captureSender
+	tm    *TurnManager
+	fired bool
+}
+
+// SendControl implements Sender.
+func (e *reviewEndRaceSender) SendControl(v any) error {
+	if !e.fired {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if b, err := json.Marshal(v); err == nil && json.Unmarshal(b, &probe) == nil && probe.Type == TypeReviewResult {
+			if e.tm.mu.TryLock() {
+				e.tm.mu.Unlock()
+				e.tm.handleEndSession(e)
+				e.fired = true
+			}
+		}
+	}
+	return e.captureSender.SendControl(v)
+}
+
+// ttAssertNothingTrailsEnded fails the test when any frame of typ ships
+// after the first session_ended — the wire shape an unlocked publish leaves
+// behind (session_ended must stay the LAST control message on the
+// connection, #96 N1 probes).
+func ttAssertNothingTrailsEnded(t *testing.T, s *captureSender, typ string) {
+	t.Helper()
+	order := s.typeOrder()
+	firstEnded := -1
+	for i, got := range order {
+		if got == TypeSessionEnded && firstEnded < 0 {
+			firstEnded = i
+		}
+	}
+	if firstEnded < 0 {
+		return
+	}
+	for i := firstEnded + 1; i < len(order); i++ {
+		if order[i] == typ {
+			t.Errorf("%s(@%d) trails session_ended(@%d) — the publish escaped its liveness gate's lock hold", typ, i, firstEnded)
+		}
+	}
+}
+
+// TestCheckSubmitPublishesReviewUnderLock (#96 N1): the FIRST submit's
+// review_result — and, because a partial save never ends the session, the
+// grading state that follows it in the same publish — must ride ONE tm.mu
+// hold with its liveness gate. The probe's end_session lands only in the
+// unlocked gap of a split implementation, and there it orders the terminal
+// session_ended ahead of the frame.
+func TestCheckSubmitPublishesReviewUnderLock(t *testing.T) {
+	receipts, _ := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	// Partial save: the publish is at its widest (review_result AND grading).
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果"}, Missing: []string{"香蕉"}}
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+
+	p := &reviewEndRaceSender{captureSender: s, tm: tm}
+	tm.HandleControl(p, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-race"}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) > 0 }) {
+		t.Fatal("review_result never arrived after check_submit")
+	}
+	if p.fired {
+		ttAssertNothingTrailsEnded(t, s, TypeReviewResult)
+		return
+	}
+	// The probe could not slip in: no client goodbye exists at all, and the
+	// partial save settled the panel into grading with the session open.
+	if ended := s.controlsOf(t, TypeSessionEnded); len(ended) != 0 {
+		t.Fatalf("session_ended count = %d, want 0 (the probe never fired)", len(ended))
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return gradingCount(s) > 0 }) {
+		t.Fatal("the partial save never settled the panel into grading")
+	}
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended = %d, want 0 (a partial save keeps the session open)", got)
+	}
+}
+
+// TestCheckRetryPublishesReviewUnderLock (#96 N1): the RETRY's review_result
+// owes the same one-hold publish — its write path runs off the read loop,
+// exactly where an end_session can land between a split gate and the enqueue.
+func TestCheckRetryPublishesReviewUnderLock(t *testing.T) {
+	receipts, _ := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewErr = errors.New("fail once")
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+	ttSubmitCheck(t, tm, s) // the failed receipt is on record (review_result #1)
+
+	words.reviewErr = nil
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
+	results := s.countOf(TypeReviewResult)
+	p := &reviewEndRaceSender{captureSender: s, tm: tm}
+	tm.HandleControl(p, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-race-retry"}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) >= results+1 }) {
+		t.Fatal("the retry never published its review_result")
+	}
+	if p.fired {
+		ttAssertNothingTrailsEnded(t, s, TypeReviewResult)
+		return
+	}
+	if ended := s.controlsOf(t, TypeSessionEnded); len(ended) != 0 {
+		t.Fatalf("session_ended count = %d, want 0 (the probe never fired — the retry's own summary ending comes later, via its ack)", len(ended))
 	}
 }

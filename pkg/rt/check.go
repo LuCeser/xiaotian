@@ -814,11 +814,10 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 	// The write may outlive the session that asked for it (a slow provider
 	// returning after end_session / disconnect / interrupt): nothing may
 	// trail the terminal session_ended — no reviewSeen flip, no
-	// review_result, no ending (#96 review P2-2).
-	if tm.reviewStaleAt(epoch) {
-		return
-	}
-
+	// review_result, no ending (#96 review P2-2). publishCheckReview owns
+	// that guarantee now: its liveness gate, the tutor writes, and the
+	// enqueues are ONE tm.mu hold (#96 N1), so a close can no longer land
+	// between the check and the frame.
 	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
 		Requested: requested,
@@ -831,18 +830,15 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		result.Updated = 0
 		result.Missing = requested
 	}
-	tm.mu.Lock()
-	tm.tutor.reviewSeen = true
-	tm.tutor.reviewResult = result
-	tm.mu.Unlock()
-	_ = s.SendControl(result)
 
 	// A pending receipt is never all-saved (#96 Q4): the write may have
 	// committed FSRS-side, so no summary, no ending — the panel reads
 	// 待核实 with the retry disabled until someone verifies the row.
 	allSaved := !saveFailed && !receiptPending && result.Updated == result.Requested && result.Requested > 0
+	if !tm.publishCheckReview(s, epoch, result, true, allSaved) {
+		return
+	}
 	if !allSaved {
-		tm.enterGradingAt(s, epoch)
 		return
 	}
 

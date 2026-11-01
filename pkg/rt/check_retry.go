@@ -127,6 +127,33 @@ func (tm *TurnManager) reviewStaleAt(epoch uint64) bool {
 	return tm.closed || tm.epoch != epoch
 }
 
+// publishCheckReview is the shared publish tail of the check stage's review
+// writes (#96 N1): the liveness gate (closed || epoch moved), the tutor
+// writes (reviewResult, plus the FIRST submit's reviewSeen latch), the
+// review_result enqueue, and — when the batch did not fully save — the
+// grading transition with its state enqueue all complete inside ONE tm.mu
+// hold. SendControl is a non-blocking enqueue, so holding the lock across it
+// makes the gate and the frames atomic against end_session: the terminal
+// session_ended can no longer land between the check and the publish, and a
+// session that already closed publishes nothing at all. Returns false on a
+// dead session — the caller runs no summary ending and sends nothing else.
+func (tm *TurnManager) publishCheckReview(s Sender, epoch uint64, result ReviewResultMsg, firstSubmit, allSaved bool) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.closed || tm.epoch != epoch {
+		return false
+	}
+	tm.tutor.reviewResult = result
+	if firstSubmit {
+		tm.tutor.reviewSeen = true
+	}
+	_ = s.SendControl(result)
+	if !allSaved {
+		tm.enterGradingLocked(s)
+	}
+	return true
+}
+
 func (tm *TurnManager) latestCheckReceipt(ctx context.Context, lessonID string) (lesson.Receipt, bool) {
 	rows, err := tm.cfg.Receipts.ListByLesson(ctx, lessonID)
 	if err != nil || len(rows) == 0 {
@@ -196,11 +223,7 @@ func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, cancel co
 				Updated:   0,
 				Missing:   len(ratings),
 			}
-			tm.mu.Lock()
-			tm.tutor.reviewResult = result
-			tm.mu.Unlock()
-			_ = s.SendControl(result)
-			tm.enterGradingAt(s, epoch)
+			tm.publishCheckReview(s, epoch, result, false, false)
 			return
 		}
 		receiptID = rec.ID
@@ -246,11 +269,9 @@ func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, cancel co
 	// The write may outlive the session that asked for it (a blocked
 	// provider released after end_session / disconnect / interrupt): nothing
 	// may trail the terminal session_ended — no state mutation, no
-	// review_result, no second ending (#96 review P2-2).
-	if tm.reviewStaleAt(epoch) {
-		return
-	}
-
+	// review_result, no second ending (#96 review P2-2). publishCheckReview's
+	// liveness gate IS that guarantee now: the gate, the tutor write, and the
+	// enqueue are one lock hold (#96 N1).
 	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
 		Requested: requested,
@@ -262,18 +283,16 @@ func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, cancel co
 		result.Updated = 0
 		result.Missing = requested
 	}
-	tm.mu.Lock()
-	tm.tutor.reviewResult = result
-	tm.mu.Unlock()
-	_ = s.SendControl(result)
+	allSaved := !saveFailed && !receiptPending && updated == requested && requested > 0
+	if !tm.publishCheckReview(s, epoch, result, false, allSaved) {
+		return
+	}
 
-	if !saveFailed && !receiptPending && updated == requested && requested > 0 {
+	if allSaved {
 		// This goroutine is off the read loop, so the ending's ack wait can
 		// be served; the retry's own registered ctx/cancel ride along so a
 		// close during the summary cancels the wait.
 		summary := checkedSummaryText(total, correct, updated, requested, false)
 		tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
-		return
 	}
-	tm.enterGradingAt(s, epoch)
 }
