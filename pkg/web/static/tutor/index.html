@@ -135,7 +135,7 @@
     (registerProcessor scope has no AudioWorkletProcessor under a plain
     script tag; loading it here would throw and break the page).
   -->
-  <script src="js/rt-client.js?v=20261016a"></script>
+  <script src="js/rt-client.js?v=20261031thinking"></script>
   <script src="js/rt-capture.js?v=20261012capture-fix"></script>
   <script src="js/rt-playback.js?v=20261024reset"></script>
   <script src="js/rt-photo.js?v=20261008a"></script>
@@ -354,6 +354,33 @@
         p.textContent = text;
         noticeEl.appendChild(p);
         noticeEl.hidden = false;
+      }
+
+      // Issue #94 (U5): the 「思考中」 browser-side second watch. The server
+      // bounds the thinking phase at rt.processingTimeout (20s) and answers
+      // thinking_timeout; this local 25s fallback (server 20s + 5s slack)
+      // covers the case where that very message is lost — a visible notice
+      // ONLY: the end button stays usable, no end_session, no player calls.
+      var processingWatch = { enteredAt: null, timer: null };
+
+      function clearProcessingWatch() {
+        if (processingWatch.timer !== null) {
+          clearTimeout(processingWatch.timer);
+          processingWatch.timer = null;
+        }
+        processingWatch.enteredAt = null;
+      }
+
+      function armProcessingWatch() {
+        clearProcessingWatch();
+        processingWatch.enteredAt = Date.now();
+        processingWatch.timer = setTimeout(function () {
+          processingWatch.timer = null;
+          if (!shouldTriggerProcessingFallback(processingWatch.enteredAt, Date.now(),
+              PROCESSING_FALLBACK_THRESHOLD_MS)) return;
+          if (statusEl.getAttribute('data-state') !== 'processing') return;
+          showError('thinking_timeout', '');
+        }, PROCESSING_FALLBACK_THRESHOLD_MS);
       }
 
       // ----- ending banners (13.1-05, D-13: three endings, three copies) ----
@@ -812,6 +839,11 @@
         // Five-state dispatch: listening / processing / speaking / paused /
         // ended (paused chip added 13-11 — StatePaused, pkg/rt/protocol.go).
         setStatus(m.value);
+        // Issue #94 (U5): arm the second watch on entering 思考中, disarm on
+        // any other state — the server's own timeout error also flips the
+        // state back to listening, which disarms this one.
+        if (m.value === 'processing') armProcessingWatch();
+        else clearProcessingWatch();
       });
 
       client.on('lesson_update', function (m) {

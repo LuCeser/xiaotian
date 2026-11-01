@@ -108,6 +108,13 @@ func NewEventRecorder(logger infra.Logger, sessionID string) *EventRecorder {
 	}
 }
 
+// SessionID returns the session id every Emit of this recorder stamps —
+// the one id a caller outside the rt_event stream (e.g. Issue #94 U5's
+// thinking-timeout Warn) needs to correlate its entry with the stream.
+func (r *EventRecorder) SessionID() string {
+	return r.sessionID
+}
+
 // MonoNs returns nanoseconds elapsed since the recorder's anchor. This is a
 // MONOTONIC, in-process relative timestamp:
 //

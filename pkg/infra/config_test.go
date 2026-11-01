@@ -1252,6 +1252,9 @@ func TestDefaultRTConfig(t *testing.T) {
 	if cfg.RT.WordTimeoutMs != 60000 {
 		t.Errorf("RT.WordTimeoutMs = %d, want 60000 (60s per-word default)", cfg.RT.WordTimeoutMs)
 	}
+	if cfg.RT.ProcessingTimeout != 20*time.Second {
+		t.Errorf("RT.ProcessingTimeout = %v, want 20s (Issue #94 U5 「思考中」 default)", cfg.RT.ProcessingTimeout)
+	}
 	if err := cfg.RT.Validate(); err != nil {
 		t.Errorf("default RTConfig fails Validate: %v", err)
 	}
@@ -1274,6 +1277,9 @@ func TestRTConfigValidate(t *testing.T) {
 		{mut: func(c *RTConfig) { c.AllowedOrigins = []string{"*"} }, name: "wildcard origin rejected"},
 		{mut: func(c *RTConfig) { c.WordTimeoutMs = -1 }, name: "wordTimeoutMs negative rejected"},
 		{mut: func(c *RTConfig) { c.WordTimeoutMs = 3600001 }, name: "wordTimeoutMs above one hour rejected"},
+		{mut: func(c *RTConfig) { c.ProcessingTimeout = -1 }, name: "processingTimeout negative rejected"},
+		{mut: func(c *RTConfig) { c.ProcessingTimeout = 4 * time.Second }, name: "processingTimeout below five seconds rejected"},
+		{mut: func(c *RTConfig) { c.ProcessingTimeout = 61 * time.Second }, name: "processingTimeout above sixty seconds rejected"},
 		{mut: func(c *RTConfig) { c.LessonID = "r0 test" }, name: "lessonId with whitespace rejected"},
 		{mut: func(c *RTConfig) { c.LessonID = "r0\ttest" }, name: "lessonId with tab rejected"},
 		{mut: func(c *RTConfig) {
@@ -1321,6 +1327,22 @@ func TestRTConfigValidate(t *testing.T) {
 			t.Fatalf("WordTimeoutMs=3600000 Validate() = %v, want nil (inclusive bound)", err)
 		}
 	})
+	t.Run("processingTimeout zero passes as default sentinel", func(t *testing.T) {
+		c := valid
+		c.ProcessingTimeout = 0
+		if err := c.Validate(); err != nil {
+			t.Fatalf("ProcessingTimeout=0 Validate() = %v, want nil (0 means the 20s default)", err)
+		}
+	})
+	t.Run("processingTimeout at both band edges passes", func(t *testing.T) {
+		for _, d := range []time.Duration{5 * time.Second, 60 * time.Second} {
+			c := valid
+			c.ProcessingTimeout = d
+			if err := c.Validate(); err != nil {
+				t.Fatalf("ProcessingTimeout=%v Validate() = %v, want nil (inclusive bound)", d, err)
+			}
+		}
+	})
 }
 
 // TestLoadConfigRTEmptySectionTakesDefaults proves a config with NO rt:
@@ -1359,6 +1381,7 @@ func TestRTAndTLSEnvBinding(t *testing.T) {
 	setRequiredPythonEnv(t)
 	t.Setenv("HTA_RT_LESSONID", "env-lesson")
 	t.Setenv("HTA_RT_WORDTIMEOUTMS", "30000")
+	t.Setenv("HTA_RT_PROCESSINGTIMEOUT", "30s")
 	t.Setenv("HTA_SERVER_TLS_CERTFILE", "a.pem")
 	t.Setenv("HTA_SERVER_TLS_KEYFILE", "b.pem")
 	cfg, err := LoadConfig("")
@@ -1372,6 +1395,10 @@ func TestRTAndTLSEnvBinding(t *testing.T) {
 	if cfg.RT.WordTimeoutMs != 30000 {
 		t.Errorf("RT.WordTimeoutMs = %d, want 30000 (env override via HTA_RT_WORDTIMEOUTMS)",
 			cfg.RT.WordTimeoutMs)
+	}
+	if cfg.RT.ProcessingTimeout != 30*time.Second {
+		t.Errorf("RT.ProcessingTimeout = %v, want 30s (env override via HTA_RT_PROCESSINGTIMEOUT)",
+			cfg.RT.ProcessingTimeout)
 	}
 	if cfg.Server.TLS == nil {
 		t.Fatal("Server.TLS = nil, want non-nil (env pair must allocate the TLS block)")

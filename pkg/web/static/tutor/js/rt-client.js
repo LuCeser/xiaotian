@@ -82,8 +82,36 @@
     // of the server's fixed constant photoUnavailableNotice (pkg/rt/photo.go;
     // wire code pkg/rt/protocol.go ErrCodePhotoUnavailable) — encouraging,
     // child-safe wording.
-    'photo_unavailable': '拍照检查现在用不了，我们看着屏幕逐个确认吧'
+    'photo_unavailable': '拍照检查现在用不了，我们看着屏幕逐个确认吧',
+    // Issue #94 (U5): the server's 「思考中」 deadline (rt.processingTimeout,
+    // default 20s; wire code ErrCodeThinkingTimeout) expired while ASR or
+    // the classification Chat was still out. Verbatim copy of the server's
+    // fixed wording (pkg/rt/turn.go thinkingTimeoutNotice) — the classroom
+    // is already back to listening, the child simply speaks again.
+    'thinking_timeout': '老师想得太久了，请再对我说一遍'
   };
+
+  /**
+   * Browser-side second watch over the 「思考中」 chip (Issue #94 U5): the
+   * server fails the turn at rt.processingTimeout (20s), but if that very
+   * message is lost the chip would stay lit forever. The page arms a local
+   * fallback at 25s (server 20s + 5s slack) when state=processing arrives
+   * and clears it on any other state; this pure function is the trigger
+   * decision so the threshold arithmetic is testable on stock Node.
+   * @param {number|null} enteredAtMs - ms timestamp of the processing entry
+   *        (null when not in processing — never triggers)
+   * @param {number} nowMs - current ms timestamp
+   * @param {number} [thresholdMs] - defaults PROCESSING_FALLBACK_THRESHOLD_MS
+   * @returns {boolean}
+   */
+  function shouldTriggerProcessingFallback(enteredAtMs, nowMs, thresholdMs) {
+    if (typeof enteredAtMs !== 'number' || typeof nowMs !== 'number') return false;
+    var threshold = typeof thresholdMs === 'number' ? thresholdMs : PROCESSING_FALLBACK_THRESHOLD_MS;
+    return nowMs - enteredAtMs >= threshold;
+  }
+
+  /** Server rt.processingTimeout (20s) + 5s slack for the local watch. */
+  var PROCESSING_FALLBACK_THRESHOLD_MS = 25000;
 
   /**
    * Map an error code to its human message (RT-10).
@@ -507,6 +535,8 @@
   global.deriveRtUrl = deriveRtUrl;
   global.RT_EVENTS = RT_EVENTS;
   global.ERROR_MESSAGES = ERROR_MESSAGES;
+  global.shouldTriggerProcessingFallback = shouldTriggerProcessingFallback;
+  global.PROCESSING_FALLBACK_THRESHOLD_MS = PROCESSING_FALLBACK_THRESHOLD_MS;
   global.UPLINK_AUDIO_SPEC = UPLINK_AUDIO_SPEC;
   global.TTS_SAMPLE_RATE = TTS_SAMPLE_RATE;
 })(typeof window !== 'undefined' ? window : this);

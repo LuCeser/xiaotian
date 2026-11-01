@@ -116,10 +116,12 @@ type llmScript struct {
 }
 
 // llmCall records one Chat invocation for post-hoc assertion (13-04 asserts
-// the tool-loop回填 shape here).
+// the tool-loop回填 shape here; Issue #94 U5 asserts the ctx deadline flag —
+// only the word-dictation turn's ctx may carry one).
 type llmCall struct {
-	messages []mimo.Message
-	opts     int
+	messages    []mimo.Message
+	opts        int
+	ctxDeadline bool
 }
 
 // fakeLLM answers Chat calls from a FIFO script queue and records every
@@ -153,7 +155,7 @@ func (f *fakeLLM) gateNextChat() (entered, release chan struct{}) {
 }
 
 // Chat implements LLMProvider.
-func (f *fakeLLM) Chat(_ context.Context, messages []mimo.Message, opts ...mimo.ChatOption) (mimo.ChatResponse, error) {
+func (f *fakeLLM) Chat(ctx context.Context, messages []mimo.Message, opts ...mimo.ChatOption) (mimo.ChatResponse, error) {
 	f.mu.Lock()
 	if len(f.script) == 0 {
 		f.mu.Unlock()
@@ -163,7 +165,8 @@ func (f *fakeLLM) Chat(_ context.Context, messages []mimo.Message, opts ...mimo.
 	f.script = f.script[1:]
 	cp := make([]mimo.Message, len(messages))
 	copy(cp, messages)
-	f.calls = append(f.calls, llmCall{messages: cp, opts: len(opts)})
+	_, ctxDeadline := ctx.Deadline()
+	f.calls = append(f.calls, llmCall{messages: cp, opts: len(opts), ctxDeadline: ctxDeadline})
 	entered, release := f.holdEntered, f.holdRelease
 	f.holdEntered, f.holdRelease = nil, nil
 	f.mu.Unlock()
@@ -190,6 +193,18 @@ func (f *fakeLLM) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.calls)
+}
+
+// ctxDeadlines snapshots the per-call ctx-deadline flag (Issue #94 U5's
+// scoping contract, observed at the provider boundary).
+func (f *fakeLLM) ctxDeadlines() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]bool, len(f.calls))
+	for i, c := range f.calls {
+		out[i] = c.ctxDeadline
+	}
+	return out
 }
 
 // toolCallsWireSample is the RESEARCH Pattern 4 provider response sample:
