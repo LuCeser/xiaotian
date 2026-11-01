@@ -519,6 +519,45 @@ FakeTimers.prototype.pendingMs = function () {
 }
 
 // ---------------------------------------------------------------------------
+// 7c. REBINDING the same AudioContext must not clear the scheduling cursor
+// (#96 N2): the page binds inside the start gesture and again when start()'s
+// promise settles — the same tap, the same still-alive RTCapture context
+// (stop() swaps nothing, D-06). Two chunks are already queued at now + lead
+// and behind it; a cursor reset on the second bind would send the THIRD
+// chunk back to now + lead, overlapping the queue. 7b above keeps the
+// NEW-context reset (J16) honest.
+// ---------------------------------------------------------------------------
+{
+  const pb = makePlayback();
+  const ctx = pb.audioCtx; // currentTime stays 100 for the whole case
+  pb.onTurnStart(1, 1);
+  pb.onAudioStart(1, 's1');
+  pb.onAudioChunk(chunkBuffer(2400)); // 100 + lead
+  pb.onAudioChunk(chunkBuffer(2400)); // gapless behind chunk 1
+  const first = ctx.sources[0].startTimes[0];
+  const second = ctx.sources[1].startTimes[0];
+  assert.ok(second > ctx.currentTime, 'chunk 2 schedules behind chunk 1, past now');
+
+  // The second bind of the SAME object (the promise-then rebind): the
+  // cursor must survive — chunk 3 continues gapless behind chunk 2.
+  pb.setAudioContext(ctx);
+  assert.strictEqual(pb.audioCtx, ctx, 'the context itself is rebound unchanged');
+  pb.onAudioChunk(chunkBuffer(2400));
+  const third = ctx.sources[2].startTimes[0];
+  assert.strictEqual(third, second + 2400 / TTS_RATE,
+    'chunk 3 continues behind chunk 2 (cursor survived the same-object rebind), got '
+    + third.toFixed(2) + ' after chunk 2 at ' + second.toFixed(2));
+  assert.ok(third > first + 2400 / TTS_RATE,
+    'chunk 3 is not a restart at the first chunk\'s slot (now + lead overlap)');
+
+  // Still one ledger, one sentence: the rebind is invisible to acking.
+  pb.onAudioEnd(1, 's1');
+  for (const src of ctx.sources) src.onended();
+  const acks = pb.testClient.sends.filter((m) => m.type === 'sentence_ack');
+  assert.strictEqual(acks.length, 1, 'the sentence still acks exactly once');
+}
+
+// ---------------------------------------------------------------------------
 // 8-10. drainNaturally + watchdog (13-11, T-13-24b) — async contract
 // ---------------------------------------------------------------------------
 (async function testDrainContracts() {

@@ -175,14 +175,16 @@ function playedBeforeAck(trace, epoch, sentenceId) {
 }
 
 /**
- * True only when one playback round resumes listening after EVERY matching
- * sentence ACK. Any listening event between the round's FIRST audio_start
- * and the final ACK is an early resume and permanently rejects the sequence:
- * observing a later, valid listening event must not hide it. (Review
- * @1c0620c P2: checking only from the round's last audio_end missed resumes
- * that happened while earlier sentences were still playing.)
+ * True only when one playback round settles into WANTSTATE after EVERY
+ * matching sentence ACK (#96 N5: the check bridge settles to grading, the
+ * ordinary rounds to listening — one predicate, the state is the
+ * parameter). Any want-state event between the round's FIRST audio_start
+ * and the final ACK is an early settle and permanently rejects the
+ * sequence: observing a later, valid settle must not hide it. (Review
+ * @1c0620c P2: checking only from the round's last audio_end missed
+ * settles that happened while earlier sentences were still playing.)
  */
-function listeningAfterPlayback(log, epoch, sentenceIds) {
+function stateAfterPlayback(log, epoch, sentenceIds, wantState) {
   if (!sentenceIds.length || new Set(sentenceIds).size !== sentenceIds.length) return false;
   const matches = (e, dir, type, sid) => e.dir === dir && e.type === type
     && e.msg && e.msg.epoch === epoch && e.msg.sentence_id === sid;
@@ -194,10 +196,19 @@ function listeningAfterPlayback(log, epoch, sentenceIds) {
 
   const firstStart = Math.min(...starts.map((e) => e.i));
   const lastAck = Math.max(...acks.map((e) => e.i));
-  const listening = log.filter((e) => e.dir === 'in' && e.type === 'state'
-    && e.msg && e.msg.value === 'listening');
-  if (listening.some((e) => e.i > firstStart && e.i < lastAck)) return false;
-  return listening.some((e) => e.i > lastAck);
+  const settles = log.filter((e) => e.dir === 'in' && e.type === 'state'
+    && e.msg && e.msg.value === wantState);
+  if (settles.some((e) => e.i > firstStart && e.i < lastAck)) return false;
+  return settles.some((e) => e.i > lastAck);
+}
+
+/**
+ * listeningAfterPlayback — stateAfterPlayback pinned to listening (the
+ * ordinary playback rounds: greeting, word announcements, the no-due
+ * explanation).
+ */
+function listeningAfterPlayback(log, epoch, sentenceIds) {
+  return stateAfterPlayback(log, epoch, sentenceIds, 'listening');
 }
 
 /** Aggregate binary-frame counters (uplink freeze/release evidence). */
@@ -216,5 +227,5 @@ async function wsStats(page) {
 
 module.exports = {
   installRtObserver, wsView, waitWs, controls, playbackTrace, playbackState,
-  playedBeforeAck, listeningAfterPlayback, wsStats, RT_OBSERVE_INIT,
+  playedBeforeAck, listeningAfterPlayback, stateAfterPlayback, wsStats, RT_OBSERVE_INIT,
 };

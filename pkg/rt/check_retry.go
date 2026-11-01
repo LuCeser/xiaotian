@@ -1,0 +1,358 @@
+package rt
+
+import (
+	"context"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/infra"
+	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
+)
+
+// handleCheckReviewRetry serves a second check_submit after the first
+// finishCheckSubmit pass (reviewSeen, not checking). Returns true when the
+// frame is consumed. The in-flight marker is taken BEFORE the receipt is
+// read (#96 review): a retry owns the marker across the whole read-decide-
+// write span, so a concurrent submit either sees the marker and stops, or
+// reads a receipt no in-flight retry can silently supersede.
+func (tm *TurnManager) handleCheckReviewRetry(s Sender, m CheckSubmitMsg) bool {
+	if m.RequestID == "" {
+		tm.sendError(s, ErrCodeInvalidMessage, checkVerdictInvalidNotice, true)
+		return true
+	}
+	tm.mu.Lock()
+	lessonID := tm.tutor.lessonID
+	total := len(tm.tutor.words)
+	prior := tm.tutor.reviewResult
+	if tm.checkRetryBusy {
+		tm.mu.Unlock()
+		return true
+	}
+	if tm.cfg.Receipts == nil {
+		tm.mu.Unlock()
+		if prior.Type != "" {
+			_ = s.SendControl(prior)
+		}
+		return true
+	}
+	tm.checkRetryBusy = true
+	tm.mu.Unlock()
+
+	// release hands the marker back on every path that does not write; the
+	// write path keeps it until its goroutine settles.
+	release := func() {
+		tm.mu.Lock()
+		tm.checkRetryBusy = false
+		tm.mu.Unlock()
+	}
+
+	rec, lookup := tm.latestCheckReceipt(context.Background(), lessonID)
+	if lookup == receiptQueryFailed {
+		// The store could not answer (#96 N3): whether a write landed is
+		// UNKNOWN — a blind SubmitReview could push already-updated words a
+		// second time. Replay the in-memory result if there is one;
+		// otherwise this submit ends unanswered (no frame, no write).
+		release()
+		if prior.Type != "" {
+			_ = s.SendControl(prior)
+		}
+		return true
+	}
+
+	missingWords := append([]string(nil), rec.Missing...)
+	rewriteAll := false
+	if lookup == receiptFound {
+		if rec.Status == lesson.ReceiptStatusPending {
+			// 待核实 is not retryable (#96 Q4): the Python side may already have
+			// committed — replay the pending receipt, never a second write.
+			release()
+			_ = s.SendControl(ReviewResultMsg{
+				Type:      TypeReviewResult,
+				Requested: len(rec.Requested),
+				Updated:   0,
+				Missing:   len(rec.Requested),
+				Pending:   true,
+			})
+			return true
+		}
+		if rec.Status == lesson.ReceiptStatusFailed {
+			missingWords = append([]string(nil), rec.Requested...)
+		}
+		if len(missingWords) == 0 {
+			// Full save (#96 review): replay the receipt ONLY. Re-running the
+			// summary ending here would speak it a second time and park this
+			// goroutine on a sentence_ack the read loop cannot serve.
+			release()
+			_ = s.SendControl(tm.reviewResultFromReceipt(rec))
+			return true
+		}
+	} else {
+		// No kind=check row at all (#96 N3): the first submit's receipt Begin
+		// failed — either nothing was ever written (its zero-updated frame
+		// latched reviewSeen), or the row vanished under a memory result that
+		// already claims updates. Without a row there is no safe missing
+		// list, so only a never-wrote result may rewrite the whole batch.
+		tm.mu.Lock()
+		alreadyUpdated := prior.Updated > 0 || prior.Pending
+		tm.mu.Unlock()
+		if alreadyUpdated {
+			// Re-sending the full map would push already-updated words again
+			// (an unverifiable pending result is just as unsafe): answer
+			// 待核实 — the retry gate shuts until someone verifies the row
+			// (#96 open question 3).
+			release()
+			pending := ReviewResultMsg{
+				Type:      TypeReviewResult,
+				Requested: prior.Requested,
+				Updated:   0,
+				Missing:   prior.Requested,
+				Pending:   true,
+			}
+			// Latch the pending view into memory too (#96 review P3): the
+			// receiptQueryFailed replay above answers from reviewResult — an
+			// unlatched frame would let a later List failure flip the button
+			// from 待核实 back to 再保存一次 on the stale non-pending result.
+			tm.mu.Lock()
+			tm.tutor.reviewResult = pending
+			tm.mu.Unlock()
+			_ = s.SendControl(pending)
+			return true
+		}
+		// Nothing ever landed: this tap is the honest whole-batch 补写 —
+		// the same word set the first checkRatings assembled, through the
+		// retry path's fresh receipt + SubmitReview.
+		rewriteAll = true
+	}
+
+	tm.mu.Lock()
+	wordsCopy := make([]lesson.Word, len(tm.tutor.words))
+	copy(wordsCopy, tm.tutor.words)
+	verdicts := append([]lesson.CheckVerdict(nil), tm.tutor.checkVerdicts...)
+	outcomes := tm.tutor.snapshotCheckOutcomes()
+	category := tm.tutor.category
+	correct := 0
+	for _, v := range verdicts {
+		if v.Correct {
+			correct++
+		}
+	}
+	tm.mu.Unlock()
+
+	var ratings map[string]string
+	if rewriteAll {
+		ratings = checkRatings(wordsCopy, verdicts, outcomes)
+	} else {
+		ratings = checkRatingsForWords(wordsCopy, verdicts, outcomes, missingWords)
+	}
+	if len(ratings) == 0 {
+		release()
+		return true
+	}
+
+	// Register the retry's cancel as the turn cancel (#96 review P2-2): an
+	// end_session, a disconnect, or an interrupt must reach the in-flight
+	// write exactly as it reaches the first submit's — and the epoch captured
+	// here is the staleness baseline for everything the retry sends later.
+	retryCtx, cancel := context.WithCancel(context.Background())
+	tm.mu.Lock()
+	retryEpoch := tm.epoch
+	tm.turnCancel = cancel
+	tm.mu.Unlock()
+	go func() {
+		defer cancel()
+		defer release()
+		tm.retryCheckReview(s, retryCtx, cancel, retryEpoch, m.RequestID, lessonID, category, ratings, total, correct)
+	}()
+	return true
+}
+
+// reviewStaleAt reports whether the session closed or the epoch moved since a
+// write began — a review completing after end_session / disconnect /
+// interrupt must not touch tutor state nor send any control behind the
+// terminal session_ended (#96 review P2-2).
+func (tm *TurnManager) reviewStaleAt(epoch uint64) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.closed || tm.epoch != epoch
+}
+
+// publishCheckReview is the shared publish tail of the check stage's review
+// writes (#96 N1): the liveness gate (closed || epoch moved), the tutor
+// writes (reviewResult, plus the FIRST submit's reviewSeen latch), the
+// review_result enqueue, and — when the batch did not fully save — the
+// grading transition with its state enqueue all complete inside ONE tm.mu
+// hold. SendControl is a non-blocking enqueue, so holding the lock across it
+// makes the gate and the frames atomic against end_session: the terminal
+// session_ended can no longer land between the check and the publish, and a
+// session that already closed publishes nothing at all. Returns false on a
+// dead session — the caller runs no summary ending and sends nothing else.
+func (tm *TurnManager) publishCheckReview(s Sender, epoch uint64, result ReviewResultMsg, firstSubmit, allSaved bool) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.closed || tm.epoch != epoch {
+		return false
+	}
+	tm.tutor.reviewResult = result
+	if firstSubmit {
+		tm.tutor.reviewSeen = true
+	}
+	_ = s.SendControl(result)
+	if !allSaved {
+		tm.enterGradingLocked(s)
+	}
+	return true
+}
+
+// receiptLookup is latestCheckReceipt's tri-state (#96 N3): FOUND (a
+// kind=check row answered), NONE (the query answered — this lesson simply
+// has no check row), or QUERY_FAILED (the answer itself is unknown). The
+// distinction is the retry's safety line: only NONE plus a zero-update
+// memory result licenses a rewrite.
+type receiptLookup int
+
+const (
+	receiptFound receiptLookup = iota
+	receiptNone
+	receiptQueryFailed
+)
+
+func (tm *TurnManager) latestCheckReceipt(ctx context.Context, lessonID string) (lesson.Receipt, receiptLookup) {
+	rows, err := tm.cfg.Receipts.ListByLesson(ctx, lessonID)
+	if err != nil {
+		return lesson.Receipt{}, receiptQueryFailed
+	}
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].Kind == lesson.ReceiptKindCheck {
+			return rows[i], receiptFound
+		}
+	}
+	return lesson.Receipt{}, receiptNone
+}
+
+func (tm *TurnManager) reviewResultFromReceipt(rec lesson.Receipt) ReviewResultMsg {
+	req := len(rec.Requested)
+	upd := len(rec.Updated)
+	miss := len(rec.Missing)
+	if rec.Status == lesson.ReceiptStatusFailed {
+		upd = 0
+		miss = req
+	}
+	return ReviewResultMsg{
+		Type:      TypeReviewResult,
+		Requested: req,
+		Updated:   upd,
+		Missing:   miss,
+	}
+}
+
+func checkRatingsForWords(words []lesson.Word, verdicts []lesson.CheckVerdict, outcomes map[string]lesson.WordOutcome, want []string) map[string]string {
+	set := make(map[string]struct{}, len(want))
+	for _, w := range want {
+		set[w] = struct{}{}
+	}
+	all := checkRatings(words, verdicts, outcomes)
+	out := make(map[string]string, len(want))
+	for w, r := range all {
+		if _, ok := set[w]; ok {
+			out[w] = r
+		}
+	}
+	return out
+}
+
+func (tm *TurnManager) retryCheckReview(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, requestID, lessonID, category string, ratings map[string]string, total, correct int) {
+	defer cancel()
+	requestedSet := sortedWordSet(ratings)
+	receiptID := int64(0)
+	if tm.cfg.Receipts != nil {
+		rec, rerr := tm.cfg.Receipts.Begin(ctx, lesson.ReceiptInput{
+			LessonID:  lessonID,
+			RequestID: requestID,
+			Kind:      lesson.ReceiptKindCheck,
+			Requested: requestedSet,
+		})
+		if rerr != nil || rec.ID <= 0 {
+			// No receipt row, no dedup basis for a later tap: answer an
+			// honest zero-updated review_result and keep the panel open —
+			// the write itself must NOT run (#96 review P2-3).
+			if tm.reviewStaleAt(epoch) {
+				return
+			}
+			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
+			result := ReviewResultMsg{
+				Type:      TypeReviewResult,
+				Requested: len(ratings),
+				Updated:   0,
+				Missing:   len(ratings),
+			}
+			tm.publishCheckReview(s, epoch, result, false, false)
+			return
+		}
+		receiptID = rec.ID
+	}
+
+	var (
+		requested  = len(ratings)
+		updated    = 0
+		missing    = 0
+		saveFailed = false
+		// Same contract as the first submit's phase two (#96 review P2-3):
+		// a Complete that never landed leaves the receipt pending — the
+		// answer carries Pending, the panel reads 待核实, no ending runs.
+		receiptPending = false
+	)
+	wres, err := tm.cfg.Words.SubmitReview(ctx, ratings, category)
+	switch {
+	case err != nil:
+		saveFailed = true
+		tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed))
+	default:
+		updated, missing = len(wres.Updated), len(wres.Missing)
+		tm.recorder.Emit(EventReviewSubmitted,
+			infra.F("requested", requested),
+			infra.F("updated", updated),
+			infra.F("missing", missing),
+		)
+	}
+
+	if tm.cfg.Receipts != nil && receiptID > 0 {
+		var cerr error
+		if err != nil {
+			cerr = tm.cfg.Receipts.Complete(ctx, receiptID, nil, requestedSet, false)
+		} else {
+			cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
+		}
+		if cerr != nil {
+			receiptPending = true
+			tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
+		}
+	}
+
+	// The write may outlive the session that asked for it (a blocked
+	// provider released after end_session / disconnect / interrupt): nothing
+	// may trail the terminal session_ended — no state mutation, no
+	// review_result, no second ending (#96 review P2-2). publishCheckReview's
+	// liveness gate IS that guarantee now: the gate, the tutor write, and the
+	// enqueue are one lock hold (#96 N1).
+	result := ReviewResultMsg{
+		Type:      TypeReviewResult,
+		Requested: requested,
+		Updated:   updated,
+		Missing:   missing,
+		Pending:   receiptPending,
+	}
+	if saveFailed {
+		result.Updated = 0
+		result.Missing = requested
+	}
+	allSaved := !saveFailed && !receiptPending && updated == requested && requested > 0
+	if !tm.publishCheckReview(s, epoch, result, false, allSaved) {
+		return
+	}
+
+	if allSaved {
+		// This goroutine is off the read loop, so the ending's ack wait can
+		// be served; the retry's own registered ctx/cancel ride along so a
+		// close during the summary cancels the wait.
+		summary := checkedSummaryText(total, correct, updated, requested, false)
+		tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)
+	}
+}

@@ -888,10 +888,9 @@ func TestCheckSubmitWritesReviewAndWaitsForPlaybackAck(t *testing.T) {
 }
 
 // TestCheckSubmitPartialReviewReportsActualCount (13.1-01 rewrite): nil
-// error with a PARTIAL update set is not success — the summary carries the
-// honest "saved M/N" note, review_submitted carries the real counts, the
-// server records an error marker, and SubmitReview runs exactly once (no
-// blind batch retry).
+// error with a PARTIAL update set is not success — review_result carries the
+// real counts, the server records an error marker, and the session stays
+// open for an on-panel retry (issue #96).
 func TestCheckSubmitPartialReviewReportsActualCount(t *testing.T) {
 	words := newFakeWords(ttCards("苹果", "香蕉"))
 	words.reviewResult = ReviewWriteResult{
@@ -906,7 +905,9 @@ func TestCheckSubmitPartialReviewReportsActualCount(t *testing.T) {
 	if got := len(words.submissions()); got != 1 {
 		t.Fatalf("SubmitReview calls = %d, want exactly 1 (no batch retry)", got)
 	}
-	ttLastSentenceEventually(t, s, "保存 1/2")
+	if s.countOf(TypeSessionEnded) != 0 {
+		t.Fatal("partial save must not end the session")
+	}
 	updated := ttEventField(t, log, EventReviewSubmitted, "updated")
 	if len(updated) != 1 || updated[0] != 1 {
 		t.Errorf("review_submitted updated = %v, want [1] (real count)", updated)
@@ -918,13 +919,11 @@ func TestCheckSubmitPartialReviewReportsActualCount(t *testing.T) {
 	if got := ttEventCount(t, log, EventError); got == 0 {
 		t.Error("no server-side error marker for the partial update")
 	}
-
-	ttAckSummaryAndEnd(t, tm, s, nil)
 }
 
 // TestCheckSubmitZeroUpdatedWithNilErrorIsNotSuccess (13.1-01 rewrite): nil
-// error + zero updates must still surface as a failure — the spoken summary
-// reports 0/1 and the server records the error marker.
+// error + zero updates must still surface as a failure — review_result reports
+// zero saved and the session stays open for retry (issue #96).
 func TestCheckSubmitZeroUpdatedWithNilErrorIsNotSuccess(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	words.reviewResult = ReviewWriteResult{
@@ -932,12 +931,16 @@ func TestCheckSubmitZeroUpdatedWithNilErrorIsNotSuccess(t *testing.T) {
 		Updated:   nil,
 		Missing:   []string{"苹果"},
 	}
-	tm, s, log, _ := ttConfirmToCheckSummary(t, words)
+	tm, s, log, _ := ttDriveToCheck(t, ttCards("苹果"), words)
+	ttCheckAll(t, tm, s, 1)
+	ttSubmitCheck(t, tm, s)
 
 	if got := len(words.submissions()); got != 1 {
 		t.Fatalf("SubmitReview calls = %d, want exactly 1", got)
 	}
-	ttLastSentenceEventually(t, s, "保存 0/1")
+	if s.countOf(TypeSessionEnded) != 0 {
+		t.Fatal("zero-updated save must not end the session")
+	}
 	updated := ttEventField(t, log, EventReviewSubmitted, "updated")
 	if len(updated) != 1 || updated[0] != 0 {
 		t.Errorf("review_submitted updated = %v, want [0]", updated)
@@ -945,8 +948,6 @@ func TestCheckSubmitZeroUpdatedWithNilErrorIsNotSuccess(t *testing.T) {
 	if got := ttEventCount(t, log, EventError); got == 0 {
 		t.Error("no server-side error marker for the zero update")
 	}
-
-	ttAckSummaryAndEnd(t, tm, s, nil)
 }
 
 // TestCheckSubmitReviewFailureSpeaksHonestSuffix (13.1-01 rewrite): a real
@@ -955,20 +956,22 @@ func TestCheckSubmitZeroUpdatedWithNilErrorIsNotSuccess(t *testing.T) {
 func TestCheckSubmitReviewFailureSpeaksHonestSuffix(t *testing.T) {
 	words := newFakeWords(ttCards("苹果"))
 	words.reviewErr = fmt.Errorf("pybridge run review failed")
-	tm, s, log, _ := ttConfirmToCheckSummary(t, words)
+	tm, s, log, _ := ttDriveToCheck(t, ttCards("苹果"), words)
+	ttCheckAll(t, tm, s, 1)
+	ttSubmitCheck(t, tm, s)
 
 	if got := len(words.submissions()); got != 1 {
 		t.Fatalf("SubmitReview calls = %d, want exactly 1", got)
 	}
-	ttLastSentenceEventually(t, s, "没有保存成功")
 	if got := ttEventCount(t, log, EventReviewSubmitted); got != 0 {
 		t.Errorf("review_submitted events = %d, want 0 (the write failed)", got)
 	}
 	if got := ttEventCount(t, log, EventError); got == 0 {
 		t.Error("no server-side error marker for the failed write")
 	}
-
-	ttAckSummaryAndEnd(t, tm, s, nil)
+	if s.countOf(TypeSessionEnded) != 0 {
+		t.Fatal("failed review must not end the session — the panel can retry")
+	}
 }
 
 // TestSaveReceiptCheckSubmit (13.3-01 tracer, behavior 5): the normal check
@@ -1003,7 +1006,9 @@ func TestSaveReceiptCheckSubmit(t *testing.T) {
 	})
 	ttCheckAll(t, tm, s, 2)
 	ttSubmitCheck(t, tm, s)
-	ttAckSummaryAndEnd(t, tm, s, nil)
+	if s.countOf(TypeSessionEnded) != 0 {
+		t.Fatal("partial receipt save must not end the session")
+	}
 
 	got, err := receipts.ListByLesson(ctx, ttLessonID)
 	if err != nil {
@@ -1432,12 +1437,17 @@ func TestSaveReceiptPracticeStorageFailure(t *testing.T) {
 	}
 }
 
-// TestSaveReceiptFailureIsBypass (13.3-01, behavior 6 / T-13.3-02): a
-// receipt store that fails on every call must not move the submission —
-// the review_result counts, the summary copy, and the flow all stay
-// exactly what a world without receipts produces; the only trace is the
-// server-side at=save_receipt error event.
-func TestSaveReceiptFailureIsBypass(t *testing.T) {
+// TestSaveReceiptFailureSkipsWrite (#96 N3, Cursor review strike 1 — it
+// replaces TestSaveReceiptFailureIsBypass): a receipt store that is WHOLLY
+// unreadable (Begin fails, ListByLesson would fail too) must stop the FIRST
+// submit's write as well. The old S-05 bypass (write anyway, keep the
+// counts byte-honest) stranded the batch: FSRS advanced, no receipt row
+// existed, and the recovered store's next tap could only answer 待核实 —
+// the missing words were never 补写-able. The honest shape now is the
+// zero-updated frame, the at=save_receipt diagnostic, and a panel left
+// open for the whole-batch 补写
+// (TestCheckSubmitUnreadableStoreRewritesWholeBatchAfterRecovery).
+func TestSaveReceiptFailureSkipsWrite(t *testing.T) {
 	broken := newBrokenReceiptStore(t)
 	words := newFakeWords(ttCards("苹果", "香蕉"))
 	words.reviewResult = ReviewWriteResult{
@@ -1449,15 +1459,24 @@ func TestSaveReceiptFailureIsBypass(t *testing.T) {
 	ttCheckAll(t, tm, s, 2)
 	result := ttSubmitCheck(t, tm, s)
 
-	// The review_result is byte-honest: same requested/updated/missing as
-	// the no-receipt world.
-	if result["requested"] != float64(2) || result["updated"] != float64(1) || result["missing"] != float64(1) {
-		t.Errorf("review_result = %v, want requested 2 / updated 1 / missing 1", result)
+	// No row, no write: the frame reports the WHOLE batch unsaved — not the
+	// provider's would-be partial result (nothing was sent to it).
+	if result["requested"] != float64(2) || result["updated"] != float64(0) || result["missing"] != float64(2) {
+		t.Errorf("review_result = %v, want requested 2 / updated 0 / missing 2", result)
 	}
-	// The summary copy is unchanged (保存 1/2, no receipt noise).
-	ttLastSentenceEventually(t, s, "保存 1/2")
+	if result["pending"] != nil {
+		t.Errorf("review_result.pending = %v, want absent (nothing was ever written)", result["pending"])
+	}
+	if s.countOf(TypeSessionEnded) != 0 {
+		t.Fatal("an unreadable receipt store must not end the session")
+	}
+	for _, sn := range s.controlsOf(t, TypeTeacherSentence) {
+		if txt, _ := sn["text"].(string); strings.Contains(txt, "保存") {
+			t.Fatalf("a summary spoke after a skipped write: %q", txt)
+		}
+	}
 
-	// The bypass left exactly its diagnostic marker.
+	// The skip left exactly its diagnostic marker.
 	ats := ttEventField(t, log, EventError, "at")
 	found := false
 	for _, a := range ats {
@@ -1470,9 +1489,8 @@ func TestSaveReceiptFailureIsBypass(t *testing.T) {
 		t.Errorf("no EventError(at=save_receipt) among %v — the receipt failure went silent", ats)
 	}
 
-	ttAckSummaryAndEnd(t, tm, s, nil)
-	if subs := words.submissions(); len(subs) != 1 {
-		t.Errorf("SubmitReview calls = %d, want exactly 1 (the receipt failure must not retry the batch, S-05)", len(subs))
+	if subs := words.submissions(); len(subs) != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0 (no receipt row is never a write license, #96 N3)", len(subs))
 	}
 }
 
@@ -1617,7 +1635,18 @@ func ttDriveToCheck(t *testing.T, cards []lesson.Word, words *fakeWordSource) (*
 // (13.3-01: the save-receipt tests inject cfg.Receipts; every other field
 // and the whole drive sequence stay identical).
 func ttDriveToCheckCfg(t *testing.T, cards []lesson.Word, words *fakeWordSource, mutate func(*TurnManagerConfig)) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
+	return ttDriveToCheckWrapped(t, cards, words, mutate, nil)
+}
+
+// ttDriveToCheckWrapped is ttDriveToCheckCfg with a sender-wrapper factory
+// (#96 N1 probes): wrap receives the drive's captureSender AND its
+// TurnManager before the first processTurn, and every confirm/announcement
+// goroutine then inherits the WRAPPED sender — a probe rides exactly the
+// frame paths the drive's own goroutines publish (the check bridge's grading
+// settle). The drive's settle assertions keep reading the capture underneath.
+func ttDriveToCheckWrapped(t *testing.T, cards []lesson.Word, words *fakeWordSource, mutate func(*TurnManagerConfig), wrap func(*captureSender, *TurnManager) Sender) (*TurnManager, *captureSender, *captureLogger, *fakeExecutor) {
 	t.Helper()
+	view := &captureSender{}
 	log := &captureLogger{}
 	exec := newFakeExecutorNoRow(ttLessonID)
 	asrScripts := make([]asrScript, len(cards))
@@ -1631,11 +1660,14 @@ func ttDriveToCheckCfg(t *testing.T, cards []lesson.Word, words *fakeWordSource,
 	tts := newFakeTTS(2, 320)
 	tts.delay = 20 * time.Millisecond
 	tm := NewTurnManager(asr, llm, tts, exec, ttConfigWith(words, mutate), NewEventRecorder(log, "t"), nil)
-	s := &captureSender{}
-	ttInit(t, tm, s)
-	ttAwaitSpoken(t, s, 3)
-	ttAckLast(t, tm, s, 0)
-	ttWaitListening(t, s)
+	var s Sender = view
+	if wrap != nil {
+		s = wrap(view, tm)
+	}
+	ttInit(t, tm, view)
+	ttAwaitSpoken(t, view, 3)
+	ttAckLast(t, tm, view, 0)
+	ttWaitListening(t, view)
 
 	for i := 0; i < len(cards); i++ {
 		done := make(chan struct{})
@@ -1645,10 +1677,10 @@ func ttDriveToCheckCfg(t *testing.T, cards []lesson.Word, words *fakeWordSource,
 		}()
 		if i < len(cards)-1 {
 			// The next-word announcement blocks the turn until acked.
-			if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeLessonUpdate) == i+1 }) {
+			if !waitFor(t, 5*time.Second, func() bool { return view.countOf(TypeLessonUpdate) == i+1 }) {
 				t.Fatalf("confirm %d never committed", i)
 			}
-			ttAckLast(t, tm, s, 0)
+			ttAckLast(t, tm, view, 0)
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):
@@ -1657,22 +1689,22 @@ func ttDriveToCheckCfg(t *testing.T, cards []lesson.Word, words *fakeWordSource,
 			continue
 		}
 		// The LAST commit opens the check stage instead of a summary.
-		ttCheckStartedWanted(t, s)
+		ttCheckStartedWanted(t, view)
 		// Wait for the bridge sentence BEFORE acking — acking the previous
 		// announcement's last sentence would be a rejected duplicate and
 		// leave the bridge announcement awaiting forever.
-		spokenBefore := s.countOf(TypeTeacherSentence)
-		if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > spokenBefore }) {
+		spokenBefore := view.countOf(TypeTeacherSentence)
+		if !waitFor(t, 5*time.Second, func() bool { return view.countOf(TypeTeacherSentence) > spokenBefore }) {
 			t.Fatal("check bridge announcement never spoke")
 		}
-		ttAckLast(t, tm, s, 0) // the check bridge announcement
+		ttAckLast(t, tm, view, 0) // the check bridge announcement
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
 			t.Fatal("the entering turn never settled after the bridge ack")
 		}
 	}
-	return tm, s, log, exec
+	return tm, view, log, exec
 }
 
 // ttCheckAll marks every word correct (manual screen verdicts) and waits
@@ -4089,11 +4121,10 @@ func TestPausedStillRecognizesResumeThroughRealProcessTurn(t *testing.T) {
 // without a write. (c) check_submit latches exactly ONE SubmitReview whose
 // ratings follow the D-02 table (检查对＋无提示=good；检查对＋有提示=hard；
 // 检查错=again — the hinted word degrades to hard). (d) review_result
-// reports the REAL requested/updated/missing sets and the spoken summary
-// carries the battle count plus the honest save note. (e) session_ended
-// (lesson_complete) waits for the summary's sentence_ack. (f) A duplicate
-// check_submit replays: no second FSRS write, no second review_result, no
-// second summary (Pitfall 6 / T-13.1-01).
+// reports the REAL requested/updated/missing sets; since #96 a PARTIAL save
+// speaks no summary and does not end the session. (e) A second check_submit
+// retries ONLY the missing word; once that lands, the summary speaks and
+// session_ended (lesson_complete) waits for its sentence_ack.
 func TestThreeStageManualPath(t *testing.T) {
 	cards := ttCards("苹果", "香蕉", "橘子")
 	words := newFakeWords(cards)
@@ -4125,6 +4156,13 @@ func TestThreeStageManualPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLessonTools: %v", err)
 	}
+	// #96 U3: the on-panel retry reads its missing-word set from the save
+	// receipt, so the tracer chain needs the receipt store wired (over the
+	// same temp database).
+	receipts, err := lesson.NewReceiptStore(db, nil)
+	if err != nil {
+		t.Fatalf("NewReceiptStore: %v", err)
+	}
 
 	// Word 1: confirm. Word 2: hint then confirm (the hint factor must
 	// degrade the checked-correct rating to hard). Word 3: confirm.
@@ -4140,7 +4178,9 @@ func TestThreeStageManualPath(t *testing.T) {
 	)
 	tts := newFakeTTS(1, 320)
 	log := &captureLogger{}
-	tm := NewTurnManager(asr, llm, tts, tools, ttConfig(words), NewEventRecorder(log, "t"), nil)
+	tm := NewTurnManager(asr, llm, tts, tools, ttConfigWith(words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	}), NewEventRecorder(log, "t"), nil)
 	s := &captureSender{}
 	ttInit(t, tm, s)
 	ttAwaitSpoken(t, s, 3)
@@ -4291,34 +4331,43 @@ func TestThreeStageManualPath(t *testing.T) {
 		}
 	}
 
-	// (d) Honest result sets + the battle summary. Fake review: 2/3 saved.
+	// (d) Honest result sets, partial save. Fake review: 2/3 saved (#96:
+	// a partial save is NOT a completion — no spoken summary, no
+	// session_ended; the panel stays open for an on-panel retry).
 	if reviewResult["requested"] != float64(3) || reviewResult["updated"] != float64(2) || reviewResult["missing"] != float64(1) {
 		t.Errorf("review_result = %v, want requested 3 / updated 2 / missing 1 (real sets)", reviewResult)
 	}
-	joined := ttSentencesSince(t, s, 0)
-	if !contains(joined, "对了 2 个") || !contains(joined, "都默写完了") {
-		t.Errorf("summary missing the battle count + D-13 completion phrasing: %s", joined)
-	}
-	if !contains(joined, "保存 2/3") {
-		t.Errorf("summary missing the honest save note (updated 2 of 3): %s", joined)
-	}
-
-	// In-session duplicate submit (network retry of the same request_id)
-	// replays NOTHING: still one FSRS write, one review_result, no second
-	// summary, and the session has not ended yet (summary awaits its ack).
-	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-submit-1"}))
-	time.Sleep(200 * time.Millisecond)
-	if got := len(words.submissions()); got != 1 {
-		t.Errorf("SubmitReview calls after duplicate submit = %d, want still 1", got)
-	}
-	if got := s.countOf(TypeReviewResult); got != 1 {
-		t.Errorf("review_result count after duplicate submit = %d, want 1 (no second replay message)", got)
-	}
 	if got := s.countOf(TypeSessionEnded); got != 0 {
-		t.Fatalf("session_ended before the summary ack = %d, want 0", got)
+		t.Fatalf("session_ended after a partial save = %d, want 0", got)
+	}
+	for _, sn := range s.controlsOf(t, TypeTeacherSentence) {
+		if txt, _ := sn["text"].(string); contains(txt, "都默写完了") {
+			t.Fatalf("the completion summary spoke after a partial save: %q", txt)
+		}
 	}
 
-	// (e) session_ended(lesson_complete) strictly after the summary ack.
+	// (e) The on-panel retry submits ONLY the missing word (香蕉 — the
+	// hinted word keeps its hard rating); once it lands, the battle summary
+	// speaks and the ending waits for its ack.
+	words.reviewResult = ReviewWriteResult{
+		Requested: []string{"香蕉"},
+		Updated:   []string{"香蕉"},
+	}
+	spokenBeforeRetry := s.countOf(TypeTeacherSentence)
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-submit-2"}))
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 2 }) {
+		t.Fatalf("SubmitReview calls after retry = %d, want 2", len(words.submissions()))
+	}
+	retry := words.submissions()[1]
+	if len(retry) != 1 || retry["香蕉"] != "hard" {
+		t.Fatalf("retry ratings = %v, want only 香蕉=hard (the already-updated words never re-enter the batch)", retry)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) == 2 }) {
+		t.Fatal("the retry's review_result never arrived")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeTeacherSentence) > spokenBeforeRetry }) {
+		t.Fatal("the completion summary never spoke after the full-save retry")
+	}
 	ttAckLast(t, tm, s, 0)
 	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeSessionEnded) == 1 }) {
 		t.Fatal("session_ended never arrived after the summary ack")
@@ -4350,8 +4399,10 @@ func TestThreeStageManualPath(t *testing.T) {
 	if got := ttEventCount(t, log, EventVerdictApplied); got != 3 {
 		t.Errorf("verdict_applied events = %d, want 3", got)
 	}
-	if got := ttEventCount(t, log, EventReviewSubmitted); got != 1 {
-		t.Errorf("review_submitted events = %d, want 1", got)
+	// Two review_submitted events: the partial first pass + the missing-word
+	// retry (#96 U3 — the already-updated words never re-enter the batch).
+	if got := ttEventCount(t, log, EventReviewSubmitted); got != 2 {
+		t.Errorf("review_submitted events = %d, want 2 (partial pass + retry)", got)
 	}
 }
 

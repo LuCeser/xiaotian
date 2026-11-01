@@ -18,7 +18,12 @@ func (tm *TurnManager) handleReadWord(s Sender, m ReadWordMsg) {
 		}
 		return
 	}
-	if tm.closed || t == nil || (t.completed && !t.checking) || tm.state != StateListening || tm.playbackPending ||
+	// #96 U2: the check stage never re-reads, whatever the FSM state is —
+	// an interrupt that lands mid-bridge puts the FSM back to listening
+	// while checking still holds, and a re-read accepted there would play
+	// through the ordinary ack wait whose timeout orderlyCloses the grading
+	// session. The panel rows show the words; the voice stays off.
+	if tm.closed || t == nil || t.checking || (t.completed && !t.checking) || tm.state != StateListening || tm.playbackPending ||
 		m.WordIndex < 0 || m.WordIndex >= len(t.words) || m.CurrentIndex != t.currentIndex ||
 		(!t.checking && (m.WordIndex > t.currentIndex || t.currentIndex >= len(t.words))) {
 		tm.mu.Unlock()

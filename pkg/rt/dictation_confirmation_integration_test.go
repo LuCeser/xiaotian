@@ -178,18 +178,21 @@ func TestDictationConfirmationProtocolOverConn(t *testing.T) {
 	if len(started.Words) != 3 || started.Words[0] != "苹果" || started.Words[2] != "橘子" {
 		t.Errorf("check_started.words = %v, want the full plaintext list", started.Words)
 	}
-	itAnnounceAck(t, conn) // the check bridge
+	itAnnounceAckSettled(t, conn, StateGrading) // the check bridge settles to grading (#96 U2)
 	if _, handle := ttTimerState(dcWaitManager(t, manager)); handle != nil {
 		t.Error("per-word countdown still armed in the check stage")
 	}
 
-	// A repeated 「好了」 in the check stage: classified through the check
-	// prompt, never an advance — the row keeps current_index 3, no second
-	// check_started, just the degraded spoken line.
+	// A repeated 「好了」 in the check stage hits the GATED mic (#96 U2): no
+	// turn, no ASR call, no spoken line. The evidence is the ASR seam (a
+	// live mic would close VAD and call Transcribe well inside the window —
+	// reading the wire for silence would poison the connection for the
+	// phases below); the row keeps current_index 3 and the loop below pins
+	// that no second check_started arrives.
 	itSendUtterance(t, conn)
-	degraded := itAnnounceAck(t, conn)
-	if joined := joinAny(degraded); joined == "" {
-		t.Error("repeated confirm in the check stage produced no spoken line")
+	time.Sleep(2 * time.Second)
+	if got := asr.fedCount(); got != 3 {
+		t.Fatalf("check-stage utterance produced %d ASR calls, want only the 3 dictation turns", got)
 	}
 	row, err := exec.GetLessonState(context.Background(), dcConfirmLessonID)
 	if err != nil {
@@ -208,6 +211,10 @@ func TestDictationConfirmationProtocolOverConn(t *testing.T) {
 		itReadCheckVerdicts(t, conn)
 	}
 	itSendText(t, conn, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "dc-submit"})
+	// The in-session duplicate rides the #96 full-save replay: sent AFTER
+	// the first review_result (the receipt has settled), it re-sends the
+	// SAME counts and writes nothing.
+	itRead(t, conn, 15*time.Second, func(m itMsg) bool { return m.typ == TypeReviewResult })
 	itSendText(t, conn, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "dc-submit"})
 
 	var (
@@ -248,8 +255,11 @@ func TestDictationConfirmationProtocolOverConn(t *testing.T) {
 			t.Fatal("session_ended arrived before the DRIVER sent the summary sentence_ack (protocol-layer ack gate broken)")
 		}
 	}
+	// Exactly ONE review_result inside this window: the duplicate's #96
+	// replay (the first result was consumed before the loop). The replay
+	// writes nothing — submissions stay at 1 below.
 	if resultCount != 1 {
-		t.Errorf("review_result count = %d, want exactly 1 (the duplicate submit writes nothing)", resultCount)
+		t.Errorf("review_result count = %d, want exactly 1 (the duplicate's replay)", resultCount)
 	}
 	if checkStartedN != 0 {
 		t.Errorf("second check_started after the panel opened = %d, want 0", checkStartedN)
@@ -351,7 +361,7 @@ func TestDictationConfirmationProtocolRestart(t *testing.T) {
 		}
 	}
 	itReadCheckStarted(t, conn1)
-	itAnnounceAck(t, conn1) // the check bridge
+	itAnnounceAckSettled(t, conn1, StateGrading) // the check bridge settles to grading (#96 U2)
 	for i := 0; i < 2; i++ {
 		itSendText(t, conn1, CheckVerdictMsg{
 			Type: TypeCheckVerdict, RequestID: fmt.Sprintf("dc-r-v-%d", i), WordIndex: i, Correct: true,

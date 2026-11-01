@@ -252,7 +252,7 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	tm.tutor.correction = correction
 	tm.tutor.checkVerdicts = panelVerdicts
 	tm.tutor.restoreOutcomes(l.Outcomes)
-	tm.state = StateListening
+	tm.state = StateGrading
 	tm.sessionReadyAt = time.Now()
 	tm.mu.Unlock()
 	// Issue #12: a POEM row reopened into its check panel keeps its poem
@@ -289,6 +289,7 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 		Reason: reason,
 	})
 	tm.broadcastCheckVerdicts(s, panelVerdicts)
+	_ = s.SendControl(StateMsg{Type: TypeState, Value: StateGrading})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tm.mu.Lock()
@@ -309,7 +310,7 @@ func (tm *TurnManager) startCheckPanelSession(s Sender, l lesson.Lesson, reason 
 	// the announcement blocks on its playback ack — the same shape
 	// startDictationSession uses for the greeting (the ack must stay
 	// servable).
-	go tm.runAnnouncement(s, ctx, cancel, bridge, purposeCheckBridge, nil)
+	go tm.announceCheckQuiet(s, tm.currentEpoch(), ctx, cancel, bridge, bridge, purposeCheckBridge)
 }
 
 // enterCheck opens the check stage; reachable ONLY from advanceTarget's
@@ -446,7 +447,7 @@ func (tm *TurnManager) enterCheck(s Sender, ctx context.Context, cancel context.
 	// the subject-ask pattern): snapshotting the live epoch here would let an
 	// interrupt that already bumped it play the check bridge over whatever
 	// classroom comes next.
-	tm.runAnnouncementDisplayAt(s, epoch, ctx, cancel, bridge, bridge, purposeCheckBridge, nil)
+	tm.announceCheckQuiet(s, epoch, ctx, cancel, bridge, bridge, purposeCheckBridge)
 }
 
 // handleCheckVerdict applies one screen verdict (the check_verdict control
@@ -532,10 +533,9 @@ func (tm *TurnManager) handleCheckSubmit(s Sender, m CheckSubmitMsg) {
 	}
 	if !checking {
 		if reviewSeen {
-			// In-session duplicate submit (a network retry or a second
-			// tap): the first review_result already went out — replay
-			// NOTHING (no second FSRS write, no second review_result, no
-			// second summary; Pitfall 6). A sanitized diagnostic only.
+			if tm.handleCheckReviewRetry(s, m) {
+				return
+			}
 			tm.recorder.Emit(EventError,
 				infra.F("code", ErrCodeInvalidMessage),
 				infra.F("duplicate", "check_submit"),
@@ -724,6 +724,7 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 	hintWords, hintTotal := tm.tutor.hintAccounting()
 	lessonID := tm.tutor.lessonID
 	category := tm.tutor.category
+	epoch := tm.epoch
 	tm.mu.Unlock()
 
 	var (
@@ -731,6 +732,10 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		updated    = 0
 		missing    = 0
 		saveFailed = false
+		// A Complete that never landed leaves the receipt pending — the
+		// write's outcome is unverifiable, so the panel must read 待核实
+		// immediately and the retry gate must stay shut (#96 review P2-3).
+		receiptPending = false
 	)
 	if len(ratings) > 0 {
 		// 13.3-01 receipt phase one: mark the attempt pending BEFORE the
@@ -738,6 +743,11 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		// discipline (kept for phase two below): a receipt failure only
 		// emits a server-side error event — it never returns, never touches
 		// saveFailed/updated/missing, and NEVER drives a rewrite (S-05).
+		// The ONE exception (#96 N3, open question 2): a receipt Begin that
+		// never produced a row leaves no dedup basis and no safe word list
+		// for a blind rewrite — the write must NOT run here. The retry
+		// path's 补写 (whole batch through a fresh receipt) is the only
+		// sanctioned second chance.
 		receiptID := int64(0)
 		requestedSet := sortedWordSet(ratings)
 		if tm.cfg.Receipts != nil {
@@ -749,9 +759,26 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 			})
 			if rerr != nil || rec.ID <= 0 {
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
-			} else {
-				receiptID = rec.ID
+				// N3 (#96 open question 2, review strike 1): no receipt row,
+				// no write — regardless of why Begin failed. A readable store
+				// that refused the row and a wholly unreadable one (a closed
+				// DB) take the SAME branch: without a row there is no dedup
+				// basis and no safe word list, and the old S-05 bypass
+				// stranded the batch (FSRS advanced, no row, the recovered
+				// store's next tap could only answer 待核实). The honest
+				// zero-updated frame keeps the panel open; the NEXT
+				// check_submit's whole-batch 补写 through a fresh receipt is
+				// the only sanctioned second chance.
+				tm.publishCheckReview(s, epoch, ReviewResultMsg{
+					Type:      TypeReviewResult,
+					Requested: requested,
+					Updated:   0,
+					Missing:   requested,
+					Unchecked: false,
+				}, true, false)
+				return
 			}
+			receiptID = rec.ID
 		}
 
 		wres, err := tm.cfg.Words.SubmitReview(ctx, ratings, category)
@@ -796,28 +823,46 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 				cerr = tm.cfg.Receipts.Complete(ctx, receiptID, wres.Updated, wres.Missing, true)
 			}
 			if cerr != nil {
-				// The row stays pending — the parent view's honest 「待核实」.
+				// The row stays pending — the parent view's honest 「待核实」,
+				// and (#96 review P2-3) the in-session panel's too: the
+				// result carries Pending so the copy and the retry gate
+				// reflect it on THIS frame, not after a re-submit.
+				receiptPending = true
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
 			}
 		}
 	}
 
+	// The write may outlive the session that asked for it (a slow provider
+	// returning after end_session / disconnect / interrupt): nothing may
+	// trail the terminal session_ended — no reviewSeen flip, no
+	// review_result, no ending (#96 review P2-2). publishCheckReview owns
+	// that guarantee now: its liveness gate, the tutor writes, and the
+	// enqueues are ONE tm.mu hold (#96 N1), so a close can no longer land
+	// between the check and the frame.
 	result := ReviewResultMsg{
 		Type:      TypeReviewResult,
 		Requested: requested,
 		Updated:   updated,
 		Missing:   missing,
 		Unchecked: false,
+		Pending:   receiptPending,
 	}
 	if saveFailed {
 		result.Updated = 0
 		result.Missing = requested
 	}
-	tm.mu.Lock()
-	tm.tutor.reviewSeen = true
-	tm.tutor.reviewResult = result
-	tm.mu.Unlock()
-	_ = s.SendControl(result)
+
+	// A pending receipt is never all-saved (#96 Q4): the write may have
+	// committed FSRS-side, so no summary, no ending — the panel reads
+	// 待核实 with the retry disabled until someone verifies the row.
+	allSaved := !saveFailed && !receiptPending && result.Updated == result.Requested && result.Requested > 0
+	if !tm.publishCheckReview(s, epoch, result, true, allSaved) {
+		return
+	}
+	if !allSaved {
+		return
+	}
 
 	summary := checkedSummaryText(total, correct, result.Updated, requested, saveFailed)
 	tm.runNaturalEnding(s, ctx, cancel, summary, purposeSummary, ReasonLessonComplete)

@@ -69,6 +69,7 @@ body[data-page="tutor"] {
 .rt-state[data-state="processing"] .rt-state-chip[data-chip="processing"],
 .rt-state[data-state="speaking"] .rt-state-chip[data-chip="speaking"],
 .rt-state[data-state="paused"] .rt-state-chip[data-chip="paused"],
+.rt-state[data-state="grading"] .rt-state-chip[data-chip="grading"],
 .rt-state[data-state="ended"] .rt-state-chip[data-chip="ended"] {
   background: var(--accent);
   color: #ffffff;

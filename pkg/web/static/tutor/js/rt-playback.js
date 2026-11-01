@@ -213,6 +213,14 @@
    * cursor, so the explicit-end restart path was never affected).
    */
   RTCPlayback.prototype.setAudioContext = function (ctx) {
+    // Same-object rebind (#96 N2): the page binds inside the start gesture
+    // AND again when start()'s promise settles — the same tap hands over the
+    // SAME still-alive RTCapture context (stop() swaps nothing, D-06). The
+    // chunks already scheduled advanced the cursor past now + lead; clearing
+    // it here would schedule the next chunk at now + lead AGAIN, overlapping
+    // what is already queued on the same clock. A genuinely NEW context is a
+    // new clock domain and still resets below.
+    if (this.audioCtx === ctx) return;
     this.audioCtx = ctx;
     this._cursor = 0;
   };
