@@ -432,13 +432,19 @@ func TestCheckRetryCompleteFailureShowsPending(t *testing.T) {
 
 	spokenBefore := s.countOf(TypeTeacherSentence)
 	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-retry-complete-fail"}))
-	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 2 }) {
-		t.Fatalf("SubmitReview calls = %d, want 2 after the retry", len(words.submissions()))
+	// Wait for the retry's FRAME, not its SubmitReview return (#96 N4): the
+	// call count moved the moment the provider call returned, while the
+	// receipt Complete and the publish still lay ahead on the same goroutine
+	// — a correct implementation could legitimately lose the race between
+	// the old wait and the frame read. The second frame on the wire IS the
+	// settled publish.
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) >= 2 }) {
+		t.Fatal("the retry's review_result frame never arrived")
+	}
+	if got := len(words.submissions()); got != 2 {
+		t.Fatalf("SubmitReview calls = %d, want 2 after the retry", got)
 	}
 	results := s.controlsOf(t, TypeReviewResult)
-	if len(results) < 2 {
-		t.Fatal("the retry never answered")
-	}
 	last := results[len(results)-1]
 	if last["pending"] != true {
 		t.Fatalf("retry review_result.pending = %v, want true", last["pending"])
