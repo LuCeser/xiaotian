@@ -615,3 +615,167 @@ func TestCheckRetryPublishesReviewUnderLock(t *testing.T) {
 		t.Fatalf("session_ended count = %d, want 0 (the probe never fired — the retry's own summary ending comes later, via its ack)", len(ended))
 	}
 }
+
+// TestCheckSubmitBeginFailureRewritesOnNextTap (#96 N3, criteria 1+2): with
+// the receipt INSERT broken (a BEFORE INSERT ABORT trigger — the SELECT path
+// keeps answering), the FIRST submit must not write at all: it answers an
+// honest zero-updated review_result, latches reviewSeen, keeps the stage
+// submitted and the session open. Once the trigger is gone, the NEXT
+// check_submit finds no check row, sees the never-wrote memory result, and
+// rewrites the WHOLE batch through a fresh receipt — the map and the new
+// row's requested set both carry every word, and the honest full result
+// (updated = requested) follows.
+func TestCheckSubmitBeginFailureRewritesOnNextTap(t *testing.T) {
+	receipts, db := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
+	tm, s, _, exec := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+
+	if _, err := db.Exec("CREATE TRIGGER block_first_begin BEFORE INSERT ON lesson_save_receipts " +
+		"BEGIN SELECT RAISE(ABORT, 'begin blocked'); END"); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	// Criterion 1: no write, an honest zero frame, the latch still fell.
+	result := ttSubmitCheck(t, tm, s)
+	if int(result["updated"].(float64)) != 0 {
+		t.Fatalf("review_result.updated = %v, want 0 (the receipt Begin failed)", result["updated"])
+	}
+	if int(result["missing"].(float64)) != len(cards) {
+		t.Fatalf("review_result.missing = %v, want %d (the whole batch is unsaved)", result["missing"], len(cards))
+	}
+	if result["pending"] != nil {
+		t.Fatalf("review_result.pending = %v, want absent (nothing was ever written)", result["pending"])
+	}
+	if got := len(words.submissions()); got != 0 {
+		t.Fatalf("SubmitReview calls = %d, want 0: no receipt row, no write", got)
+	}
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended = %d, want 0 (the panel stays open for another tap)", got)
+	}
+	l, err := exec.GetLessonState(t.Context(), ttLessonID)
+	if err != nil {
+		t.Fatalf("GetLessonState: %v", err)
+	}
+	if l.Stage != lesson.StageSubmitted {
+		t.Fatalf("stage = %q, want submitted (the CompleteCheck latch does not roll back)", l.Stage)
+	}
+
+	// Criterion 2: trigger gone — the next tap 补写s the whole batch.
+	if _, err := db.Exec("DROP TRIGGER block_first_begin"); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-rewrite"}))
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 1 }) {
+		t.Fatal("the rewrite never ran after the trigger was dropped")
+	}
+	batch := words.submissions()[0]
+	for _, w := range []string{"苹果", "香蕉"} {
+		if _, ok := batch[w]; !ok {
+			t.Fatalf("rewrite map missing %q: %v", w, batch)
+		}
+	}
+	rows, rerr := receipts.ListByLesson(t.Context(), ttLessonID)
+	if rerr != nil {
+		t.Fatalf("ListByLesson: %v", rerr)
+	}
+	var rec *lesson.Receipt
+	for i := range rows {
+		if rows[i].Kind == lesson.ReceiptKindCheck {
+			rec = &rows[i]
+		}
+	}
+	if rec == nil {
+		t.Fatal("the rewrite never created its receipt row")
+	}
+	if len(rec.Requested) != len(cards) {
+		t.Fatalf("receipt requested = %v, want the whole batch %v", rec.Requested, cards)
+	}
+	results := s.controlsOf(t, TypeReviewResult)
+	last := results[len(results)-1]
+	if int(last["updated"].(float64)) != len(cards) {
+		t.Fatalf("rewrite review_result.updated = %v, want %d", last["updated"], len(cards))
+	}
+	// The rewritten batch ends the lesson once its summary acks.
+	ttAckSummaryAndEnd(t, tm, s, nil)
+}
+
+// TestCheckRetryNoReceiptRowWithUpdatesAnswersPending (#96 N3, criterion 3):
+// the receipt row is gone but the memory result already claims real updates
+// — without a row there is no safe rewrite list, and re-sending the whole
+// map would push already-updated words a second time. The answer is 待核实:
+// one pending frame, no write, the retry gate shut.
+func TestCheckRetryNoReceiptRowWithUpdatesAnswersPending(t *testing.T) {
+	receipts, db := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果"}, Missing: []string{"香蕉"}}
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+	first := ttSubmitCheck(t, tm, s)
+	if int(first["updated"].(float64)) != 1 {
+		t.Fatalf("first review_result.updated = %v, want 1 (the partial save is on record)", first["updated"])
+	}
+
+	if _, err := db.Exec("DELETE FROM lesson_save_receipts"); err != nil {
+		t.Fatalf("delete receipt rows: %v", err)
+	}
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-no-row"}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) >= 2 }) {
+		t.Fatal("the no-row submit never answered")
+	}
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want still 1 (no safe rewrite list without a row)", got)
+	}
+	last := s.controlsOf(t, TypeReviewResult)[s.countOf(TypeReviewResult)-1]
+	if last["pending"] != true {
+		t.Fatalf("review_result.pending = %v, want true (待核实, not a rewrite)", last["pending"])
+	}
+	if int(last["updated"].(float64)) != 0 {
+		t.Fatalf("review_result.updated = %v, want 0", last["updated"])
+	}
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended = %d, want 0", got)
+	}
+}
+
+// TestCheckRetryReceiptQueryFailureWritesNothing (#96 N3, criterion 4): the
+// receipt store itself is unreachable — whether a write landed is UNKNOWN,
+// so this submit must not write either; it replays the in-memory result and
+// stays open.
+func TestCheckRetryReceiptQueryFailureWritesNothing(t *testing.T) {
+	receipts, db := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果"}, Missing: []string{"香蕉"}}
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+	ttSubmitCheck(t, tm, s) // the partial receipt is on record
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	results := s.countOf(TypeReviewResult)
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-query-dead"}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) >= results+1 }) {
+		t.Fatal("the query-failed submit never answered")
+	}
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want still 1 (an unknown answer never licenses a write)", got)
+	}
+	last := s.controlsOf(t, TypeReviewResult)[s.countOf(TypeReviewResult)-1]
+	if int(last["updated"].(float64)) != 1 {
+		t.Fatalf("replayed review_result.updated = %v, want the in-memory 1", last["updated"])
+	}
+	if got := s.countOf(TypeSessionEnded); got != 0 {
+		t.Fatalf("session_ended = %d, want 0", got)
+	}
+}

@@ -743,6 +743,11 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 		// discipline (kept for phase two below): a receipt failure only
 		// emits a server-side error event — it never returns, never touches
 		// saveFailed/updated/missing, and NEVER drives a rewrite (S-05).
+		// The ONE exception (#96 N3, open question 2): a receipt Begin that
+		// never produced a row leaves no dedup basis and no safe word list
+		// for a blind rewrite — the write must NOT run here. The retry
+		// path's 补写 (whole batch through a fresh receipt) is the only
+		// sanctioned second chance.
 		receiptID := int64(0)
 		requestedSet := sortedWordSet(ratings)
 		if tm.cfg.Receipts != nil {
@@ -754,9 +759,19 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 			})
 			if rerr != nil || rec.ID <= 0 {
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
-			} else {
-				receiptID = rec.ID
+				// Honest zero-updated answer, reviewSeen latched, panel open
+				// on the failed copy (再保存一次): the NEXT check_submit
+				// sees no receipt row and rewrites the whole batch.
+				tm.publishCheckReview(s, epoch, ReviewResultMsg{
+					Type:      TypeReviewResult,
+					Requested: requested,
+					Updated:   0,
+					Missing:   requested,
+					Unchecked: false,
+				}, true, false)
+				return
 			}
+			receiptID = rec.ID
 		}
 
 		wres, err := tm.cfg.Words.SubmitReview(ctx, ratings, category)

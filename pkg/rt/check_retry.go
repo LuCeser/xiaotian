@@ -44,8 +44,12 @@ func (tm *TurnManager) handleCheckReviewRetry(s Sender, m CheckSubmitMsg) bool {
 		tm.mu.Unlock()
 	}
 
-	rec, ok := tm.latestCheckReceipt(context.Background(), lessonID)
-	if !ok {
+	rec, lookup := tm.latestCheckReceipt(context.Background(), lessonID)
+	if lookup == receiptQueryFailed {
+		// The store could not answer (#96 N3): whether a write landed is
+		// UNKNOWN — a blind SubmitReview could push already-updated words a
+		// second time. Replay the in-memory result if there is one;
+		// otherwise this submit ends unanswered (no frame, no write).
 		release()
 		if prior.Type != "" {
 			_ = s.SendControl(prior)
@@ -53,31 +57,61 @@ func (tm *TurnManager) handleCheckReviewRetry(s Sender, m CheckSubmitMsg) bool {
 		return true
 	}
 
-	if rec.Status == lesson.ReceiptStatusPending {
-		// 待核实 is not retryable (#96 Q4): the Python side may already have
-		// committed — replay the pending receipt, never a second write.
-		release()
-		_ = s.SendControl(ReviewResultMsg{
-			Type:      TypeReviewResult,
-			Requested: len(rec.Requested),
-			Updated:   0,
-			Missing:   len(rec.Requested),
-			Pending:   true,
-		})
-		return true
-	}
-
 	missingWords := append([]string(nil), rec.Missing...)
-	if rec.Status == lesson.ReceiptStatusFailed {
-		missingWords = append([]string(nil), rec.Requested...)
-	}
-	if len(missingWords) == 0 {
-		// Full save (#96 review): replay the receipt ONLY. Re-running the
-		// summary ending here would speak it a second time and park this
-		// goroutine on a sentence_ack the read loop cannot serve.
-		release()
-		_ = s.SendControl(tm.reviewResultFromReceipt(rec))
-		return true
+	rewriteAll := false
+	if lookup == receiptFound {
+		if rec.Status == lesson.ReceiptStatusPending {
+			// 待核实 is not retryable (#96 Q4): the Python side may already have
+			// committed — replay the pending receipt, never a second write.
+			release()
+			_ = s.SendControl(ReviewResultMsg{
+				Type:      TypeReviewResult,
+				Requested: len(rec.Requested),
+				Updated:   0,
+				Missing:   len(rec.Requested),
+				Pending:   true,
+			})
+			return true
+		}
+		if rec.Status == lesson.ReceiptStatusFailed {
+			missingWords = append([]string(nil), rec.Requested...)
+		}
+		if len(missingWords) == 0 {
+			// Full save (#96 review): replay the receipt ONLY. Re-running the
+			// summary ending here would speak it a second time and park this
+			// goroutine on a sentence_ack the read loop cannot serve.
+			release()
+			_ = s.SendControl(tm.reviewResultFromReceipt(rec))
+			return true
+		}
+	} else {
+		// No kind=check row at all (#96 N3): the first submit's receipt Begin
+		// failed — either nothing was ever written (its zero-updated frame
+		// latched reviewSeen), or the row vanished under a memory result that
+		// already claims updates. Without a row there is no safe missing
+		// list, so only a never-wrote result may rewrite the whole batch.
+		tm.mu.Lock()
+		alreadyUpdated := prior.Updated > 0 || prior.Pending
+		tm.mu.Unlock()
+		if alreadyUpdated {
+			// Re-sending the full map would push already-updated words again
+			// (an unverifiable pending result is just as unsafe): answer
+			// 待核实 — the retry gate shuts until someone verifies the row
+			// (#96 open question 3).
+			release()
+			_ = s.SendControl(ReviewResultMsg{
+				Type:      TypeReviewResult,
+				Requested: prior.Requested,
+				Updated:   0,
+				Missing:   prior.Requested,
+				Pending:   true,
+			})
+			return true
+		}
+		// Nothing ever landed: this tap is the honest whole-batch 补写 —
+		// the same word set the first checkRatings assembled, through the
+		// retry path's fresh receipt + SubmitReview.
+		rewriteAll = true
 	}
 
 	tm.mu.Lock()
@@ -94,7 +128,12 @@ func (tm *TurnManager) handleCheckReviewRetry(s Sender, m CheckSubmitMsg) bool {
 	}
 	tm.mu.Unlock()
 
-	ratings := checkRatingsForWords(wordsCopy, verdicts, outcomes, missingWords)
+	var ratings map[string]string
+	if rewriteAll {
+		ratings = checkRatings(wordsCopy, verdicts, outcomes)
+	} else {
+		ratings = checkRatingsForWords(wordsCopy, verdicts, outcomes, missingWords)
+	}
 	if len(ratings) == 0 {
 		release()
 		return true
@@ -154,17 +193,30 @@ func (tm *TurnManager) publishCheckReview(s Sender, epoch uint64, result ReviewR
 	return true
 }
 
-func (tm *TurnManager) latestCheckReceipt(ctx context.Context, lessonID string) (lesson.Receipt, bool) {
+// receiptLookup is latestCheckReceipt's tri-state (#96 N3): FOUND (a
+// kind=check row answered), NONE (the query answered — this lesson simply
+// has no check row), or QUERY_FAILED (the answer itself is unknown). The
+// distinction is the retry's safety line: only NONE plus a zero-update
+// memory result licenses a rewrite.
+type receiptLookup int
+
+const (
+	receiptFound receiptLookup = iota
+	receiptNone
+	receiptQueryFailed
+)
+
+func (tm *TurnManager) latestCheckReceipt(ctx context.Context, lessonID string) (lesson.Receipt, receiptLookup) {
 	rows, err := tm.cfg.Receipts.ListByLesson(ctx, lessonID)
-	if err != nil || len(rows) == 0 {
-		return lesson.Receipt{}, false
+	if err != nil {
+		return lesson.Receipt{}, receiptQueryFailed
 	}
 	for i := len(rows) - 1; i >= 0; i-- {
 		if rows[i].Kind == lesson.ReceiptKindCheck {
-			return rows[i], true
+			return rows[i], receiptFound
 		}
 	}
-	return lesson.Receipt{}, false
+	return lesson.Receipt{}, receiptNone
 }
 
 func (tm *TurnManager) reviewResultFromReceipt(rec lesson.Receipt) ReviewResultMsg {
