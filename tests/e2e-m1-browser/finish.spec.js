@@ -4,8 +4,9 @@
 // seeding; replaced parts: vendor answers (strict stub, tone PCM) and the mic
 // source (fake mic). The spec never acks on the classroom's behalf, never
 // mutates state, never fakes an onended — completion evidence is only the
-// production player's real onended → sentence_ack, and every listening resume
-// must follow the round's LAST ack (listeningAfterPlayback).
+// production player's real onended → sentence_ack, and every settle state
+// must follow the round's LAST ack (stateAfterPlayback: listening for the
+// ordinary rounds, GRADING after the check bridge per #96 U2).
 //
 //   J13 last word   — exactly ONE check entry, current_index reaches the
 //                     word-count boundary, answers masked until
@@ -14,17 +15,17 @@
 //   J14 check & end — the REAL 对/错 buttons, one submit, honest
 //                     review_result + saved copy, the summary fully acked
 //                     BEFORE session_ended(lesson_complete), mic + playback
-//                     resources released, uplink frozen; plus the same tail
-//                     under a REAL partial save (the parent deletes a word
-//                     mid-check) — the honest 1/2 copy everywhere, never a
-//                     dressed-up success;
+//                     resources released, uplink frozen; plus the tail under
+//                     a REAL partial save (the parent deletes a word
+//                     mid-check): the honest 1/2 copy, NO summary, NO
+//                     session_ended — the panel keeps 再保存一次 (#96 U3);
 //   J15/J16 follow in later tests of this file (主动结束、完成后再开/换科).
 'use strict';
 
 const { test, expect } = require('@playwright/test');
 const {
-  installRtObserver, waitWs, controls, playbackState, playedBeforeAck, listeningAfterPlayback,
-  wsStats,
+  installRtObserver, waitWs, controls, playbackState, playedBeforeAck,
+  stateAfterPlayback, wsStats,
 } = require('./helpers/rt-observe');
 const { installFakeMic, micInfo, playPcm16 } = require('./helpers/fake-mic');
 const { startSpecService, makeStubControl } = require('./helpers/spec-service');
@@ -120,10 +121,13 @@ async function awaitRound(page, fromI, count, label) {
 
 /**
  * The round's sentences ack NATURALLY (production onended per source before
- * its sentence_ack); with settle (default) the server's listening must follow
- * the round's LAST ack — never sit between the final audio_end and ack.
+ * its sentence_ack); with settle (default 'listening') the server's settle
+ * state must follow the round's LAST ack — never sit between the final
+ * audio_end and ack. The check bridge settles to GRADING (#96 U2/N5: no
+ * listening after the bridge — the uplink gate stays on), so its callers
+ * pass settle: 'grading'.
  */
-async function awaitAcked(page, round, label, { settle = true } = {}) {
+async function awaitAcked(page, round, label, { settle = 'listening' } = {}) {
   await waitWs(page, (log) => {
     const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack'
       && e.msg.epoch === round.epoch && round.sids.includes(e.msg.sentence_id));
@@ -134,8 +138,9 @@ async function awaitAcked(page, round, label, { settle = true } = {}) {
     expect(playedBeforeAck(trace, round.epoch, sid), label + ': real onended before ack ' + sid).toBe(true);
   }
   if (settle) {
-    await waitWs(page, (log) => listeningAfterPlayback(log, round.epoch, round.sids),
-      { label: label + ': listening only after the last ack' });
+    const wantState = settle === 'grading' ? 'grading' : 'listening';
+    await waitWs(page, (log) => stateAfterPlayback(log, round.epoch, round.sids, wantState),
+      { label: label + ': ' + wantState + ' only after the last ack' });
   }
 }
 
@@ -187,7 +192,7 @@ async function checkSubmitNaturalEnd(page, words) {
 
   await expect(page.locator('#rt-banner')).toContainText('今天的 ' + words.length + ' 个词都默写完了');
   await expect(page.locator('#rt-banner'))
-    .toContainText('学习记录保存好了，' + words.length + ' 个词都记上啦。');
+    .toContainText('批改已保存。复习安排已更新，' + words.length + ' 个词。');
   await expect(page.locator('#rt-banner .rt-practice-btn')).toBeVisible();
   return endedI;
 }
@@ -466,7 +471,7 @@ test('J13+J14 last word → one check entry, masked answers, real check submit, 
   await expect(page.locator('#rt-words .rt-word-chip')).toHaveText(words);
 
   const bridge = await awaitRound(page, csI, 2, 'check bridge');
-  await awaitAcked(page, bridge, 'check bridge');
+  await awaitAcked(page, bridge, 'check bridge', { settle: 'grading' });
 
   // J13: no fabricated save state before the submit.
   expect((await controls(page)).filter((e) => e.type === 'review_result')).toHaveLength(0);
@@ -524,17 +529,18 @@ test('J13+J14 last word → one check entry, masked answers, real check submit, 
   });
 });
 
-// J14's save-failure leg (review PR #72 P2): the only product-real way a
-// BROWSER journey can stage a save failure — SubmitReview goes Python/SQLite
-// and the stub layer cannot inject one — is the parent surface itself: while
-// the check panel waits for the verdicts, DELETE /words really removes one
-// of the two cards, so the submit's `review` batch finds it gone and skips
-// it (updated 1 of 2 requested, missing 1). The page must then narrate the
-// PARTIAL save honestly in every channel — resultText, banner, and the
-// teacher's spoken summary — and the ending must still complete. (The hard
-// error path — the python subprocess itself failing — has no browser-layer
-// trigger; that boundary belongs to the Go tests.)
-test('J14 partial save: the parent deletes a word mid-check → the honest 1/2 copy, the ending still completes', async ({ page }) => {
+// J14's save-failure leg (review PR #72 P2; U3 contract per #96): the only
+// product-real way a BROWSER journey can stage a save failure — SubmitReview
+// goes Python/SQLite and the stub layer cannot inject one — is the parent
+// surface itself: while the check panel waits for the verdicts, DELETE
+// /words really removes one of the two cards, so the submit's `review` batch
+// finds it gone and skips it (updated 1 of 2 requested, missing 1). A
+// PARTIAL save never ends the session (#96 U3): no summary TTS, no
+// session_ended — the panel tells the honest U1 partial copy and keeps a
+// re-tappable 再保存一次 on an open socket. (The hard error path — the
+// python subprocess itself failing — has no browser-layer trigger; that
+// boundary belongs to the Go tests.)
+test('J14 partial save: the parent deletes a word mid-check → the honest 1/2 copy, the session stays open for 再保存一次', async ({ page }) => {
   await installRtObserver(page);
   await installFakeMic(page);
   const words = ['e2e-fin-ps-a', 'e2e-fin-ps-b'];
@@ -543,10 +549,10 @@ test('J14 partial save: the parent deletes a word mid-check → the honest 1/2 c
   });
   expect(seed.ok, 'english seed').toBeTruthy();
 
-  // Same deterministic corpus as the J13+J14 journey, EXCEPT the battle
-  // summary gains a THIRD sentence: 「全部都写对了，你真棒！」 ends at ！, so
-  // the partial-save suffix 「本次保存 1/2 个。」 is its own speakable
-  // sentence (splitSentences) — the tts FIFO must script it too.
+  // Same deterministic corpus as the J13+J14 journey MINUS the battle
+  // summary: a partial save speaks nothing (#96 U3), so no summary sentence
+  // is scripted — any summary request would exhaust the script and surface
+  // as a stub violation.
   await stubScripts({
     asr: [{ content: '好了' }, { content: '好了' }],
     llm: [
@@ -558,8 +564,6 @@ test('J14 partial save: the parent deletes a word mid-check → the honest 1/2 c
       { ms: 1200, match: '你好呀' }, { ms: 1200, match: '个词要写' }, { ms: 1200, match: '第 1 个词' },
       { ms: 1200, match: '第 2 个词' },
       { ms: 1200, match: '全都写完啦' }, { ms: 1200, match: '我们一起检查' },
-      { ms: 1200, match: '都默写完了' }, { ms: 1200, match: '全部都写对了' },
-      { ms: 1200, match: '本次保存 1/2' },
     ],
   });
 
@@ -589,7 +593,7 @@ test('J14 partial save: the parent deletes a word mid-check → the honest 1/2 c
   const started = (await controls(page)).find((e) => e.type === 'check_started');
   expect(started.msg.words).toEqual(words);
   const bridge = await awaitRound(page, csI, 2, 'check bridge');
-  await awaitAcked(page, bridge, 'check bridge');
+  await awaitAcked(page, bridge, 'check bridge', { settle: 'grading' });
 
   // THE REAL SAVE FAILURE: the parent deletes word 2 through the real parent
   // REST surface. The classroom keeps its in-session snapshot and drives on;
@@ -620,34 +624,34 @@ test('J14 partial save: the parent deletes a word mid-check → the honest 1/2 c
   'honest review_result: 2 requested, only 1 really saved');
   expect(resI).toBeGreaterThan(submitI);
 
-  // The ending still completes — the summary (now THREE sentences, the last
-  // one the partial-save note) fully acked by the production player before
-  // session_ended(lesson_complete).
-  const summary = await awaitRound(page, resI, 3, 'battle summary with the honest 1/2 sentence');
-  await awaitAcked(page, summary, 'battle summary', { settle: false });
-  const lastAckI = Math.max(...(await controls(page))
-    .filter((e) => e.dir === 'out' && e.type === 'sentence_ack'
-      && summary.sids.includes(e.msg.sentence_id))
-    .map((e) => e.i));
-  const endedI = await waitIndex(page, (e) => e.dir === 'in' && e.type === 'session_ended'
-    && e.msg.reason === 'lesson_complete', 'session_ended(lesson_complete) despite the partial save');
-  expect(endedI, 'the goodbye still follows the summary\'s last real ack').toBeGreaterThan(lastAckI);
-  await awaitSocketClosed(page, endedI, 'the partial-save ending');
-
-  // Honest copy in EVERY channel: the panel's resultText, the banner, and
-  // the teacher really SPOKE the partial save (the third summary sentence
-  // reached the vendor — not just the screen).
+  // U3 (#96): the partial save neither speaks a summary nor ends the
+  // session. The panel carries the honest story — the U1 partial copy with a
+  // re-tappable 再保存一次 — the banner never appears, and the socket stays
+  // open for the retry.
   expect((await observe(page)).check.resultText, 'the panel\'s honest partial-save copy')
-    .toBe('保存了 1 / 2 个，别担心，下次会补上。');
-  await expect(page.locator('#rt-banner')).toContainText('今天的 2 个词都默写完了');
-  await expect(page.locator('#rt-banner'))
-    .toContainText('保存了 1 / 2 个，别担心，下次会补上。');
-  await expect(page.locator('#rt-banner .rt-practice-btn'), 'the ending still offers 再练一组')
-    .toBeVisible();
+    .toBe('批改已保存。复习安排更新了 1 个，还有 1 个没有更新。');
+  const submitBtn = page.locator('#rt-check .rt-check-submit');
+  await expect(submitBtn, 'a partial save keeps 再保存一次 tappable').toBeEnabled();
+  await expect(submitBtn).toHaveText('再保存一次');
+  await expect(page.locator('#rt-banner'), 'no ending banner — the session did not end').toBeHidden();
+
+  // Nothing follows the honest result: no summary round, no goodbye, and the
+  // teacher never spoke past the bridge (a would-be summary would also show
+  // up as new vendor traffic — the stability window catches it).
+  const after = await ttsCountStable();
+  expect(after.stable, 'no vendor traffic after the partial-save result').toBe(true);
+  const logAfter = await controls(page);
+  expect(logAfter.filter((e) => e.dir === 'in' && e.type === 'audio_start' && e.i > resI),
+    'no summary audio_start after the partial result').toEqual([]);
+  expect(logAfter.filter((e) => e.dir === 'in' && e.type === 'session_ended'),
+    'a partial save never ends the session').toEqual([]);
+  expect(await page.evaluate(() => window.__rtTutor.client.ws.readyState),
+    'the socket stays open for 再保存一次').toBe(1);
+
   const state = await stubState();
   const spoken = state.requests.filter((r) => r.category === 'tts').map((r) => r.text);
-  expect(spoken.some((t) => t.includes('本次保存 1/2 个')),
-    'the teacher really SPOKE the partial save').toBe(true);
+  expect(spoken.some((t) => t.includes('本次保存 1/2 个') || t.includes('都默写完了')),
+    'the teacher never SPOKE a summary over the partial save').toBe(false);
   expect(state.remaining.tts, 'every scripted sentence served, none extra').toBe(0);
   expect(state.violations, 'the strict stub saw only scripted traffic').toEqual([]);
 
@@ -708,7 +712,7 @@ async function driveLessonToNaturalEnd(page, words, readyI, { onGreetingSettled 
       const started = (await controls(page)).find((e) => e.type === 'check_started');
       expect(started.msg.words).toEqual(words);
       const bridge = await awaitRound(page, csI, 2, 'check bridge');
-      await awaitAcked(page, bridge, 'check bridge');
+      await awaitAcked(page, bridge, 'check bridge', { settle: 'grading' });
     }
   }
   return checkSubmitNaturalEnd(page, words);
@@ -818,7 +822,7 @@ async function waitIndexSince(page, fromI, pred, label) {
   return at;
 }
 
-async function ackedSince(page, round, fromI, traceMark, label, { settle = true } = {}) {
+async function ackedSince(page, round, fromI, traceMark, label, { settle = 'listening' } = {}) {
   await waitWs(page, (log) => {
     const acks = log.filter((e) => e.dir === 'out' && e.type === 'sentence_ack' && e.i > fromI
       && e.msg.epoch === round.epoch && round.sids.includes(e.msg.sentence_id));
@@ -829,8 +833,9 @@ async function ackedSince(page, round, fromI, traceMark, label, { settle = true 
     expect(playedBeforeAck(since, round.epoch, sid), label + ': real onended before ack ' + sid).toBe(true);
   }
   if (settle) {
-    await waitWs(page, (log) => listeningAfterPlayback(log.filter((e) => e.i > fromI), round.epoch, round.sids),
-      { label: label + ': listening only after the last ack (this round)' });
+    const wantState = settle === 'grading' ? 'grading' : 'listening';
+    await waitWs(page, (log) => stateAfterPlayback(log.filter((e) => e.i > fromI), round.epoch, round.sids, wantState),
+      { label: label + ': ' + wantState + ' only after the last ack (this round)' });
   }
 }
 
@@ -869,7 +874,7 @@ async function practiceSubmitNaturalEnd(page, words, fromI, traceMark) {
 
   await expect(page.locator('#rt-banner')).toContainText('这组练习完成啦');
   expect((await observe(page)).check.resultText, 'the practice records saved — honest copy')
-    .toBe('学习记录保存好了，' + words.length + ' 个词都记上啦。');
+    .toBe('批改已保存。复习安排已更新，' + words.length + ' 个词。');
   await expect(page.locator('#rt-banner .rt-practice-btn'), 'no second practice button (bounded loop)')
     .toHaveCount(0);
   return endedI;
@@ -976,7 +981,7 @@ test('J16 finish → real 再练一组: in-page second round, fresh progress/aud
       pWords = started.msg.words;
       expect([...pWords].sort()).toEqual([...zhWords2].sort());
       const bridge = await awaitRound(page, csI, 2, 'practice check bridge');
-      await ackedSince(page, bridge, tapI, traceMark, 'practice check bridge');
+      await ackedSince(page, bridge, tapI, traceMark, 'practice check bridge', { settle: 'grading' });
     }
   }
   const endedI = await practiceSubmitNaturalEnd(page, pWords, tapI, traceMark);

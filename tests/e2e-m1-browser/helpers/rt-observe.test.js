@@ -11,7 +11,7 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { test } = require('node:test');
-const { playedBeforeAck, listeningAfterPlayback, RT_OBSERVE_INIT } = require('./rt-observe.js');
+const { playedBeforeAck, listeningAfterPlayback, stateAfterPlayback, RT_OBSERVE_INIT } = require('./rt-observe.js');
 
 // Boot the observer init script in a bare sandbox with a fake NATIVE
 // WebSocket: just enough surface for the wrapper to install (constructor,
@@ -144,4 +144,37 @@ test("early resume from the round's first audio_start is rejected even with a la
   // 本轮没有 audio_start 证据时起点不可知，不得放行。
   assert.equal(listeningAfterPlayback([end(2, ids[0]), ack(3, ids[0]), listening(4)], 4, [ids[0]]), false,
     'a round without its audio_start cannot be verified');
+});
+
+// #96 N5（U2 契约）：检查桥接确认后落定的状态是 grading，不再是
+// listening。stateAfterPlayback 把 listeningAfterPlayback 的状态值参数化，
+// 早落定拒绝与「最后一条 ack 之后」两条纪律原样保留。
+test('the check bridge settles into grading after the last ack (#96 U2)', () => {
+  const event = (i, dir, type, msg) => ({ i, dir, type, msg });
+  const ids = ['bridge-1', 'bridge-2'];
+  const start = (i, sid) => event(i, 'in', 'audio_start', { epoch: 0, sentence_id: sid });
+  const end = (i, sid) => event(i, 'in', 'audio_end', { epoch: 0, sentence_id: sid });
+  const ack = (i, sid) => event(i, 'out', 'sentence_ack', { epoch: 0, sentence_id: sid });
+  const state = (i, value) => event(i, 'in', 'state', { value });
+  const wire = [
+    start(1, ids[0]), end(2, ids[0]), ack(3, ids[0]),
+    start(4, ids[1]), end(5, ids[1]), ack(6, ids[1]),
+    state(7, 'grading'),
+  ];
+
+  assert.equal(stateAfterPlayback(wire, 0, ids, 'grading'), true,
+    'grading after the round\'s last ack verifies the bridge settle');
+  assert.equal(stateAfterPlayback(wire, 0, ids, 'listening'), false,
+    'the bridge never settles to listening under U2 — the old expectation must fail');
+  assert.equal(stateAfterPlayback(
+    [...wire.slice(0, 6), state(7, 'listening'), state(8, 'grading')], 0, ids, 'grading'),
+    true,
+    'a listening frame after the last ack is not an early GRADING settle — the predicate polices only its own state');
+  assert.equal(stateAfterPlayback(
+    [start(1, ids[0]), end(2, ids[0]), state(3, 'grading'), ack(4, ids[0]), start(5, ids[1]), end(6, ids[1]), ack(7, ids[1]), state(8, 'grading')],
+    0, ids, 'grading'),
+    false,
+    'a grading frame MID-round (before the final ack) permanently rejects the settle');
+  assert.equal(listeningAfterPlayback(wire, 0, ids), false,
+    'listeningAfterPlayback keeps its own meaning: a grading-only tail is no listening settle');
 });
