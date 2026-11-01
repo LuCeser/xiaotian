@@ -710,6 +710,84 @@ func TestCheckSubmitBeginFailureRewritesOnNextTap(t *testing.T) {
 	ttAckSummaryAndEnd(t, tm, s, nil)
 }
 
+// TestCheckSubmitUnreadableStoreRewritesWholeBatchAfterRecovery (#96 N3,
+// Cursor review strike 1): the WHOLLY unreadable store — Begin AND
+// ListByLesson both fail, e.g. the SQLite handle is gone — must take the
+// same first-submit skip the INSERT trigger does (criterion 1 of the
+// sibling test), and once a fresh handle on the same file answers again,
+// the NEXT check_submit finds no check row over a never-wrote memory
+// result and 补写s the WHOLE batch through a fresh receipt. This is the
+// half the old ListByLesson bypass stranded: FSRS written with no row, the
+// recovered store answering pending forever.
+func TestCheckSubmitUnreadableStoreRewritesWholeBatchAfterRecovery(t *testing.T) {
+	receipts, db, path := receiptStoreForTestPath(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果", "香蕉"}}
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+
+	// Break the WHOLE store: every receipt call fails, not just the INSERT.
+	if err := db.Close(); err != nil {
+		t.Fatalf("close receipt db: %v", err)
+	}
+	result := ttSubmitCheck(t, tm, s)
+	if int(result["updated"].(float64)) != 0 {
+		t.Fatalf("review_result.updated = %v, want 0 (the whole store is down)", result["updated"])
+	}
+	if got := len(words.submissions()); got != 0 {
+		t.Fatalf("SubmitReview calls = %d, want 0 before recovery", got)
+	}
+
+	// Recovery: a fresh handle on the same file answers again.
+	recoveredDb, err := database.Open(path)
+	if err != nil {
+		t.Fatalf("reopen receipt db: %v", err)
+	}
+	t.Cleanup(func() { _ = recoveredDb.Close() })
+	recovered, err := lesson.NewReceiptStore(recoveredDb, nil)
+	if err != nil {
+		t.Fatalf("NewReceiptStore: %v", err)
+	}
+	tm.cfg.Receipts = recovered
+
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-recover-rewrite"}))
+	if !waitFor(t, 5*time.Second, func() bool { return len(words.submissions()) == 1 }) {
+		t.Fatal("the whole-batch 补写 never ran after the store recovered")
+	}
+	batch := words.submissions()[0]
+	for _, w := range []string{"苹果", "香蕉"} {
+		if _, ok := batch[w]; !ok {
+			t.Fatalf("补写 map missing %q: %v", w, batch)
+		}
+	}
+	rows, rerr := recovered.ListByLesson(t.Context(), ttLessonID)
+	if rerr != nil {
+		t.Fatalf("ListByLesson: %v", rerr)
+	}
+	var rec *lesson.Receipt
+	for i := range rows {
+		if rows[i].Kind == lesson.ReceiptKindCheck {
+			rec = &rows[i]
+		}
+	}
+	if rec == nil {
+		t.Fatal("the 补写 never created its receipt row")
+	}
+	if len(rec.Requested) != len(cards) {
+		t.Fatalf("receipt requested = %v, want the whole batch %v", rec.Requested, cards)
+	}
+	results := s.controlsOf(t, TypeReviewResult)
+	last := results[len(results)-1]
+	if int(last["updated"].(float64)) != len(cards) {
+		t.Fatalf("补写 review_result.updated = %v, want %d", last["updated"], len(cards))
+	}
+	// The rewritten batch ends the lesson once its summary acks.
+	ttAckSummaryAndEnd(t, tm, s, nil)
+}
+
 // TestCheckRetryNoReceiptRowWithUpdatesAnswersPending (#96 N3, criterion 3):
 // the receipt row is gone but the memory result already claims real updates
 // — without a row there is no safe rewrite list, and re-sending the whole
