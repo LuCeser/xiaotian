@@ -759,17 +759,23 @@ func (tm *TurnManager) finishCheckSubmit(s Sender, ctx context.Context, cancel c
 			})
 			if rerr != nil || rec.ID <= 0 {
 				tm.recorder.Emit(EventError, infra.F("code", ErrCodeProviderFailed), infra.F("at", "save_receipt"))
-				// Honest zero-updated answer, reviewSeen latched, panel open
-				// on the failed copy (再保存一次): the NEXT check_submit
-				// sees no receipt row and rewrites the whole batch.
-				tm.publishCheckReview(s, epoch, ReviewResultMsg{
-					Type:      TypeReviewResult,
-					Requested: requested,
-					Updated:   0,
-					Missing:   requested,
-					Unchecked: false,
-				}, true, false)
-				return
+				// N3 (#96 open question 2): Begin did not leave a row while
+				// the store is still readable — skip the write here so the
+				// NEXT check_submit can 补写 the whole batch through a fresh
+				// receipt. S-05 bypass stays for a wholly broken store (e.g.
+				// closed DB): ListByLesson fails too, so SubmitReview still
+				// runs once and review_result stays byte-honest to the
+				// provider (TestSaveReceiptFailureIsBypass).
+				if _, listErr := tm.cfg.Receipts.ListByLesson(ctx, lessonID); listErr == nil {
+					tm.publishCheckReview(s, epoch, ReviewResultMsg{
+						Type:      TypeReviewResult,
+						Requested: requested,
+						Updated:   0,
+						Missing:   requested,
+						Unchecked: false,
+					}, true, false)
+					return
+				}
 			}
 			receiptID = rec.ID
 		}
