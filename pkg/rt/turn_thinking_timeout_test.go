@@ -850,6 +850,50 @@ func TestProcessTurnThinkingTimeoutScopedToDictationTurn(t *testing.T) {
 // first.
 // ---------------------------------------------------------------------------
 
+// advanceHoldTTS is the advance-wins test's TTS: once armed, a call signals
+// the moment speakTurn has entered (state already flipped to speaking, tm.mu
+// NOT held) and then blocks until the test releases it — the deterministic
+// 「播报已经开起来」 observation point, parked outside every manager lock.
+type advanceHoldTTS struct {
+	entered chan struct{}
+	hold    chan struct{}
+	texts   []string
+	mu      sync.Mutex
+	armed   bool
+}
+
+func (f *advanceHoldTTS) arm() {
+	f.mu.Lock()
+	f.armed = true
+	f.mu.Unlock()
+}
+
+func (f *advanceHoldTTS) recordedTexts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.texts...)
+}
+
+// SynthesizeStream implements TTSSynthesizer.
+func (f *advanceHoldTTS) SynthesizeStream(_ context.Context, text string, onAudio AudioChunkFunc, _ ...mimo.TTSOption) (*mimo.StreamResult, error) {
+	f.mu.Lock()
+	f.texts = append(f.texts, text)
+	armed := f.armed
+	f.mu.Unlock()
+	if armed {
+		close(f.entered)
+		<-f.hold
+	}
+	buf := make([]byte, 320)
+	for i := range buf {
+		buf[i] = byte(i % 251)
+	}
+	if err := onAudio(buf, true); err != nil {
+		return &mimo.StreamResult{ChunkCount: 1}, err
+	}
+	return &mimo.StreamResult{TotalDuration: 10, ChunkCount: 1}, nil
+}
+
 // ttThinkingAdvanceFixture boots a TWO-word classroom (the word-timer
 // advance narrates the NEXT word instead of entering check) with the
 // per-word countdown CAPTURED by an injected timerFactory — the
@@ -888,6 +932,31 @@ func ttThinkingAdvanceFixture(t *testing.T, timeout time.Duration, exec *fakeExe
 		t.Fatal("the greeting's valid ack never armed the word countdown")
 	}
 	return tm, s, armed
+}
+
+// ttPendingWaitOpen reports whether the wire's newest sentence still has a
+// REGISTERED, uncancelled playback wait — the exact entry a stale failTurn
+// or a losing timeout would cancelWait.
+func ttPendingWaitOpen(t *testing.T, tm *TurnManager, s *captureSender) bool {
+	t.Helper()
+	sents := s.controlsOf(t, TypeTeacherSentence)
+	if len(sents) == 0 {
+		return false
+	}
+	sid, _ := sents[len(sents)-1]["sentence_id"].(string)
+	epoch, _ := sents[len(sents)-1]["epoch"].(float64)
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	p, ok := tm.pendingPlayback[pendingKey(uint64(epoch), sid)]
+	if !ok {
+		return false
+	}
+	select {
+	case <-p.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // TestProcessTurnThinkingTimeoutAdvanceBlockedUntilCommit: the word timer's
@@ -987,5 +1056,93 @@ func TestProcessTurnThinkingTimeoutAdvanceBlockedUntilCommit(t *testing.T) {
 	exec.mu.Unlock()
 	if rowIdx != 1 {
 		t.Errorf("executor row CurrentIndex = %d, want 1 (a committed advance is never rolled back)", rowIdx)
+	}
+}
+
+// TestProcessTurnThinkingTimeoutDoesNotClobberAdvancePlayback: the mirror
+// winner — the gated word-timer advance is released while the utterance's
+// classification still hangs; its first commit claims the round
+// (thinkingYieldTurn) and speakTurn flips the classroom to speaking before
+// the deadline crosses. The thinking timeout must then abandon with ZERO
+// side effects: no fixed notice over the announcement, no cleared playback
+// wait, no listening flip — and the held sentence's audio must still flow
+// once released. Deleting the state/turn guards from the commit's critical
+// section (or the thinkingYieldTurn claim) turns this red through the
+// clobbered wait and the error the child would see.
+func TestProcessTurnThinkingTimeoutDoesNotClobberAdvancePlayback(t *testing.T) {
+	const timeout = 3 * time.Second
+	asr := newFakeASR(asrScript{text: "你好"})
+	llm := &thinkingHangLLM{}
+	tts := &advanceHoldTTS{entered: make(chan struct{}), hold: make(chan struct{})}
+	log := &captureLogger{}
+	exec := newFakeExecutorNoRow(ttLessonID)
+	tm, s, fire := ttThinkingAdvanceFixture(t, timeout, exec, asr, llm, tts, log)
+	tts.arm()
+
+	entered, release := exec.gateAdvance()
+	go fire() // listening → timeoutAdvance, parked inside its executor commit
+	<-entered
+
+	t0 := time.Now()
+	tm.IngestAudio(s, ttUtterance()) // processing; the classification wedges to the deadline
+	if !waitFor(t, 2*time.Second, func() bool { return llm.callCount() >= 1 }) {
+		t.Fatal("staging failure: the classification never left — not a product failure")
+	}
+	close(release) // the advance returns and races for the round — it must win
+
+	// speakTurn has flipped speaking, registered the pending wait, and parked
+	// in TTS outside every manager lock.
+	select {
+	case <-tts.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("staging failure: the advance's next-word announcement never reached TTS within 2s")
+	}
+	if !ttPendingWaitOpen(t, tm, s) {
+		t.Fatal("staging failure: the advance's playback wait was not registered open")
+	}
+	if got := s.countOf(TypeLessonUpdate); got != 1 {
+		t.Fatalf("staging failure: lesson_update = %d, want 1 (the advance's first commit)", got)
+	}
+	audioBefore := s.audioCount()
+
+	// The deadline crosses mid-announcement, reply unacked.
+	if rest := time.Until(t0.Add(timeout + 400*time.Millisecond)); rest > 0 {
+		time.Sleep(rest)
+	}
+
+	if e := ttLastError(t, s); e != nil {
+		t.Errorf("the advance-won round was retro-failed: %v", e)
+	}
+	if ev := ttThinkingTimeoutEvent(t, log); ev != nil {
+		t.Error("a thinking_timeout event fired over the advance's announcement")
+	}
+	if w := ttThinkingTimeoutWarn(t, log); w != nil {
+		t.Error("a timeout Warn fired over the advance's announcement")
+	}
+	if !ttPendingWaitOpen(t, tm, s) {
+		t.Error("the pending playback wait was cleared or cancelled after the deadline crossed")
+	}
+	if got := ttLastStateValue(t, s); got != StateSpeaking {
+		t.Errorf("state = %q, want speaking (the announcement must stand)", got)
+	}
+
+	close(tts.hold) // the held sentence's audio may flow — the timeout must not have dismantled it
+	if !waitFor(t, 5*time.Second, func() bool { return s.audioCount() > audioBefore }) {
+		t.Fatal("the held sentence's audio never flowed after the release")
+	}
+	if e := ttLastError(t, s); e != nil {
+		t.Fatalf("an error followed the audio release: %v", e)
+	}
+
+	// Settle the announcement through the REAL ack path.
+	ttAckLast(t, tm, s, 0)
+	if !waitFor(t, 5*time.Second, func() bool { return ttLastStateValue(t, s) == StateListening }) {
+		t.Fatalf("state after the ack = %q, want listening", ttLastStateValue(t, s))
+	}
+	if got := s.countOf(TypeError); got != 0 {
+		t.Errorf("error count = %d, want 0 across the whole race (no thinking_timeout, no 语音识别失败)", got)
+	}
+	if texts := tts.recordedTexts(); len(texts) == 0 || texts[len(texts)-1] != announceText(2, 2, "香蕉") {
+		t.Errorf("tts spoke %v, want the advance's next-word announcement last", texts)
 	}
 }
