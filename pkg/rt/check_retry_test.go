@@ -829,6 +829,56 @@ func TestCheckRetryNoReceiptRowWithUpdatesAnswersPending(t *testing.T) {
 	}
 }
 
+// TestCheckRetryNoRowPendingFrameLatchesMemory (#96 review P3): the no-row
+// 待核实 frame must LATCH into tutor.reviewResult — a later submit whose
+// ListByLesson fails too (the query-failed branch) replays the in-memory
+// result, and an unlatched frame would hand back the stale non-pending
+// partial result, flipping the button from 待核实 back to 再保存一次.
+func TestCheckRetryNoRowPendingFrameLatchesMemory(t *testing.T) {
+	receipts, db := receiptStoreForTest(t)
+	cards := ttCards("苹果", "香蕉")
+	words := newFakeWords(cards)
+	words.reviewResult = ReviewWriteResult{Updated: []string{"苹果"}, Missing: []string{"香蕉"}}
+	tm, s, _, _ := ttDriveToCheckCfg(t, cards, words, func(c *TurnManagerConfig) {
+		c.Receipts = receipts
+	})
+	ttCheckAll(t, tm, s, len(cards))
+	ttSubmitCheck(t, tm, s) // the partial save is on record (updated=1)
+
+	// No row + Updated>0: the pending frame (#96 N3 criterion 3).
+	if _, err := db.Exec("DELETE FROM lesson_save_receipts"); err != nil {
+		t.Fatalf("delete receipt rows: %v", err)
+	}
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-no-row"}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) >= 2 }) {
+		t.Fatal("the no-row submit never answered")
+	}
+	last := s.controlsOf(t, TypeReviewResult)[s.countOf(TypeReviewResult)-1]
+	if last["pending"] != true {
+		t.Fatalf("no-row review_result.pending = %v, want true", last["pending"])
+	}
+
+	// List fails too: the replay answers from memory — still pending.
+	if err := db.Close(); err != nil {
+		t.Fatalf("close receipt db: %v", err)
+	}
+	results := s.countOf(TypeReviewResult)
+	tm.HandleControl(s, mustJSON(t, CheckSubmitMsg{Type: TypeCheckSubmit, RequestID: "req-list-dead"}))
+	if !waitFor(t, 5*time.Second, func() bool { return s.countOf(TypeReviewResult) >= results+1 }) {
+		t.Fatal("the query-failed replay never answered")
+	}
+	replayed := s.controlsOf(t, TypeReviewResult)[s.countOf(TypeReviewResult)-1]
+	if replayed["pending"] != true {
+		t.Fatalf("replayed review_result.pending = %v, want true (the no-row pending frame latched)", replayed["pending"])
+	}
+	if int(replayed["updated"].(float64)) != 0 {
+		t.Fatalf("replayed review_result.updated = %v, want 0", replayed["updated"])
+	}
+	if got := len(words.submissions()); got != 1 {
+		t.Fatalf("SubmitReview calls = %d, want still 1 (no write on either tap)", got)
+	}
+}
+
 // TestCheckRetryReceiptQueryFailureWritesNothing (#96 N3, criterion 4): the
 // receipt store itself is unreachable — whether a write landed is UNKNOWN,
 // so this submit must not write either; it replays the in-memory result and

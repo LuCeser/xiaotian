@@ -99,13 +99,21 @@ func (tm *TurnManager) handleCheckReviewRetry(s Sender, m CheckSubmitMsg) bool {
 			// 待核实 — the retry gate shuts until someone verifies the row
 			// (#96 open question 3).
 			release()
-			_ = s.SendControl(ReviewResultMsg{
+			pending := ReviewResultMsg{
 				Type:      TypeReviewResult,
 				Requested: prior.Requested,
 				Updated:   0,
 				Missing:   prior.Requested,
 				Pending:   true,
-			})
+			}
+			// Latch the pending view into memory too (#96 review P3): the
+			// receiptQueryFailed replay above answers from reviewResult — an
+			// unlatched frame would let a later List failure flip the button
+			// from 待核实 back to 再保存一次 on the stale non-pending result.
+			tm.mu.Lock()
+			tm.tutor.reviewResult = pending
+			tm.mu.Unlock()
+			_ = s.SendControl(pending)
 			return true
 		}
 		// Nothing ever landed: this tap is the honest whole-batch 补写 —
