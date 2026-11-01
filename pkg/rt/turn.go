@@ -388,6 +388,12 @@ type TurnManager struct {
 	vad *VAD
 	// turnCancel cancels the current turn's/announcement's provider context.
 	turnCancel context.CancelFunc
+	// advanceCancel is the word-timer advance's OWN cancel slot (Issue #94
+	// U5 rethink); nil when none is in flight. timeoutAdvance no longer
+	// overwrites turnCancel — that slot belongs to the student's turn — so
+	// the interrupt/close paths cancel THIS slot beside turnCancel, and a
+	// committed thinking timeout cancels it to retire the round it won.
+	advanceCancel *advanceCancelSlot
 	// wordTimer is the live countdown handle; nil when disarmed.
 	wordTimer *time.Timer
 	// tutor is the dictation FSM state; nil until a lesson session starts.
@@ -470,6 +476,25 @@ type TurnManager struct {
 	// ocrRuns disambiguates prefill idempotency keys across retakes (a
 	// replayed key would pin the FIRST reading and drop the retake's).
 	ocrRuns uint64
+	// driverGen is the word-timer advance generation (Issue #94 U5 rethink),
+	// bumped ONLY inside a committed thinking-timeout critical section: an
+	// in-flight timeoutAdvance stamps the generation into its ctx, and every
+	// gate after its executor call — the post-return check, the first-commit
+	// lock, speakTurn's entry/chunk locks, the announcement entry — treats a
+	// mismatch exactly like a stale epoch (silent stop, no lesson_update, no
+	// audio, no second error).
+	driverGen uint64
+	// processingTurnID is the live processing turn's identity (Issue #94 U5
+	// rethink): processTurn stores it in the same hold that flips
+	// StateProcessing, so a word-timer advance that commits while the turn
+	// thinks can name WHICH turn it stole the round from.
+	processingTurnID uint64
+	// thinkingYieldTurn is the processing turn a word-timer advance already
+	// claimed at its first-commit lock (Issue #94 U5 rethink): that turn's
+	// thinking timeout abandons with zero side effects — the child hears the
+	// advance's next word, never the fixed notice over it. Cleared at the
+	// next processTurn entry.
+	thinkingYieldTurn uint64
 
 	mu sync.Mutex
 	// playbackPending marks an announcement awaiting its final ack; uplink
@@ -1091,8 +1116,11 @@ func (tm *TurnManager) runAnnouncementDisplayAt(s Sender, epoch uint64, ctx cont
 	defer cancel()
 
 	tm.mu.Lock()
-	if tm.epoch != epoch || tm.closed {
-		// Stale before the first sound: nothing registered, nothing spoken.
+	if tm.epoch != epoch || tm.closed || !tm.driverGenCurrentLocked(ctx) {
+		// Stale before the first sound: nothing registered, nothing spoken —
+		// and (Issue #94 U5 rethink) before a new announcement id is burned:
+		// a retired word-timer advance must not consume an id it can never
+		// use.
 		tm.mu.Unlock()
 		return
 	}
@@ -1163,6 +1191,13 @@ func (tm *TurnManager) handleInterrupt(s Sender, m InterruptMsg) {
 	newEpoch := tm.epoch
 	if tm.turnCancel != nil {
 		tm.turnCancel()
+	}
+	if tm.advanceCancel != nil {
+		// Issue #94 U5 rethink: the word-timer advance keeps its own cancel
+		// slot now (it no longer overwrites turnCancel), so the interrupt
+		// must cancel it here too — an advance parked inside the executor
+		// still dies with the epoch bump.
+		tm.advanceCancel.cancel()
 	}
 
 	// Played = this announcement's acked sentences ∪ the interrupt's
@@ -1295,6 +1330,11 @@ func (tm *TurnManager) internalClose() {
 func (tm *TurnManager) internalCloseLocked() {
 	if tm.turnCancel != nil {
 		tm.turnCancel()
+	}
+	if tm.advanceCancel != nil {
+		// Issue #94 U5 rethink: close the word-timer advance's own slot with
+		// the session — it no longer rides turnCancel.
+		tm.advanceCancel.cancel()
 	}
 	for _, p := range tm.pendingPlayback {
 		p.cancelWait()
@@ -1476,6 +1516,11 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		}
 		tm.state = StateProcessing
 		tm.turnCancel = cancel
+		// Issue #94 U5 rethink: this turn now owns the thinking-timeout
+		// race — a leftover thinkingYieldTurn from a previous round dies
+		// here so the fresh utterance can time out again.
+		tm.processingTurnID = turnID
+		tm.thinkingYieldTurn = 0
 		return nil
 	})
 	tm.mu.Unlock()
@@ -1490,10 +1535,13 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 
 	attempts := 1
 	transcript, err := tm.transcribeObserved(ctx, segment, turnID, attempts)
-	if tm.thinkingExpired(ctx, epoch) {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		// Deadline hit inside ASR: no classification, no TTS retry on the
-		// dead ctx — the coded error returns the classroom to listening.
-		tm.failThinkingTimeout(s, epoch, turnID, "asr")
+		// dead ctx. Issue #94 U5 rethink: ONE critical section adjudicates
+		// and commits; even a REFUSED commit (the round was lost to a
+		// word-timer advance) leaves here — never dispatch on the expired
+		// ctx, never report it as provider_failed.
+		tm.commitThinkingTimeout(s, ctx, epoch, turnID, "asr")
 		return
 	}
 	if errors.Is(err, mimo.ErrEmptyTranscription) {
@@ -1514,8 +1562,8 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 		// generic provider_failed with the ASR wording.
 		attempts = 2
 		transcript, err = tm.transcribeObserved(ctx, segment, turnID, attempts)
-		if tm.thinkingExpired(ctx, epoch) {
-			tm.failThinkingTimeout(s, epoch, turnID, "asr")
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			tm.commitThinkingTimeout(s, ctx, epoch, turnID, "asr")
 			return
 		}
 	}
@@ -1600,11 +1648,11 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 	if !tm.epochCurrent(epoch) {
 		return // interrupted mid-classification: abort the whole turn silently
 	}
-	if tm.thinkingExpired(ctx, epoch) {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		// Deadline hit during classification: no dispatch — the spoken
 		// fallback would re-request TTS on the dead ctx. The coded error
 		// returns the classroom to listening; the child speaks again.
-		tm.failThinkingTimeout(s, epoch, turnID, "chat")
+		tm.commitThinkingTimeout(s, ctx, epoch, turnID, "chat")
 		return
 	}
 	if tm.dispatchInterleave != nil {
@@ -1618,40 +1666,114 @@ func (tm *TurnManager) processTurn(s Sender, segment []byte) {
 // retry would hang the same turn on TTS.
 const thinkingTimeoutNotice = "老师想得太久了，请再对我说一遍"
 
-// thinkingExpired reports whether the turn's processing deadline already hit
-// AND the observation may still act. DeadlineExceeded is sticky and distinct
-// from an interrupt/close cancel() (Canceled), so the predicate names the
-// deadline alone. The epoch + still-processing gate underneath keeps a LATE
-// expiry observation from failing a turn the classroom already moved past
-// (interrupted, dispatched) — the timeout must never clobber a settled turn.
-func (tm *TurnManager) thinkingExpired(ctx context.Context, epoch uint64) bool {
-	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return false
-	}
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	return tm.epoch == epoch && !tm.closed && tm.state == StateProcessing
+// advanceCancelSlot is the word-timer advance's cancel slot (Issue #94 U5
+// rethink). The POINTER is the identity — func values are not comparable —
+// so an exiting timeoutAdvance clears tm.advanceCancel only when the slot is
+// still its own; a successor's slot must stand.
+type advanceCancelSlot struct {
+	cancel context.CancelFunc
 }
 
-// failThinkingTimeout fails the 「思考中」-expired turn through failTurn
-// (recoverable ErrorMsg + back to listening). step ("asr"/"chat") names where
-// the turn stood when the deadline hit. The correlated Warn fires AT the
-// threshold (Issue #94 U5 acceptance): op + error_class=timeout + the
-// recorder's session_id + turn_id let the log alone tell a wedged ASR from a
-// wedged Chat; the same op/error_class ride the rt_event error entry beside
-// them (Emit adds its own session_id/t_mono_ns context).
-func (tm *TurnManager) failThinkingTimeout(s Sender, epoch, turnID uint64, step string) {
+// driverGenCtxKey carries the word-timer advance's launch generation in its
+// ctx (Issue #94 U5 rethink). Every processTurn-driven ctx carries NO
+// generation and therefore always matches the live one.
+type driverGenCtxKey struct{}
+
+// withDriverGen stamps the generation into the advance's ctx.
+func withDriverGen(ctx context.Context, gen uint64) context.Context {
+	return context.WithValue(ctx, driverGenCtxKey{}, gen)
+}
+
+// driverGenCurrentLocked reports whether a generation-carrying ctx still
+// matches the live driver generation; a ctx without one (every
+// processTurn-driven path) always matches. Caller holds tm.mu.
+func (tm *TurnManager) driverGenCurrentLocked(ctx context.Context) bool {
+	gen, ok := ctx.Value(driverGenCtxKey{}).(uint64)
+	return !ok || gen == tm.driverGen
+}
+
+// driverGenCurrent is driverGenCurrentLocked for callers not holding tm.mu.
+func (tm *TurnManager) driverGenCurrent(ctx context.Context) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.driverGenCurrentLocked(ctx)
+}
+
+// commitThinkingTimeout adjudicates AND commits the 「思考中」 deadline in ONE
+// critical section (Issue #94 U5 rethink, path B): the epoch, the turn
+// identity, the still-processing observation, and every failure side effect —
+// the error enqueue, the playback-wait invalidation, the listening flip, and
+// the driver-generation bump that retires an in-flight word-timer advance —
+// land in a single tm.mu hold, so the processing fact can never go stale
+// between the observation and the act. A REFUSED commit (the round was lost
+// to an advance that already claimed it, the epoch moved, the session
+// closed) is zero side effects: no ErrorMsg, no state change, no Warn, no
+// rt_event. Callers return on DeadlineExceeded whatever the answer — the
+// expired ctx must never dispatch or degrade into provider_failed.
+//
+// step ("asr"/"chat") names where the turn stood when the deadline hit. The
+// correlated Warn and the rt_event error entry fire AFTER the critical
+// section (op + error_class=timeout + the recorder's session_id + turn_id
+// let the log alone tell a wedged ASR from a wedged Chat), so their hooks
+// observe the settled result, never a half-committed one.
+func (tm *TurnManager) commitThinkingTimeout(s Sender, ctx context.Context, epoch, turnID uint64, step string) bool {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return false // a cancel (interrupt/close), not a deadline — not ours
+	}
+	tm.mu.Lock()
+	if tm.epoch != epoch || tm.closed || tm.state != StateProcessing ||
+		tm.turnID != turnID || tm.thinkingYieldTurn == turnID {
+		// The round is gone: interrupted, closed, superseded by a newer turn
+		// or announcement, or already yielded to the word-timer advance whose
+		// first commit claimed it. Refuse with zero side effects.
+		tm.mu.Unlock()
+		return false
+	}
+	_ = s.SendControl(ErrorMsg{
+		Type:        TypeError,
+		Code:        ErrCodeThinkingTimeout,
+		Message:     thinkingTimeoutNotice,
+		Recoverable: true,
+	})
+	tm.applyFailLocked(s)
+	tm.driverGen++ // retires the in-flight word-timer advance's whole round
+	if tm.advanceCancel != nil {
+		// Cancels ONLY the advance's own ctx; turnCancel belongs to this
+		// turn's providers and dies with the caller's defer.
+		tm.advanceCancel.cancel()
+	}
+	tm.mu.Unlock()
+
 	tm.logger.Warn("dictation turn processing deadline exceeded",
 		infra.F("op", step),
 		infra.F("error_class", "timeout"),
 		infra.F("session_id", tm.recorder.SessionID()),
 		infra.F("turn_id", turnID),
 	)
-	tm.failTurn(s, epoch, ErrCodeThinkingTimeout, thinkingTimeoutNotice,
+	tm.recorder.Emit(EventError,
+		infra.F("code", ErrCodeThinkingTimeout),
 		infra.F("turn_id", turnID),
 		infra.F("op", step),
 		infra.F("error_class", "timeout"),
 	)
+	return true
+}
+
+// applyFailLocked runs the failure side effects failTurn and
+// commitThinkingTimeout share — invalidate every registered playback wait,
+// return the FSM to listening, queue the listening StateMsg (the EFFECTIVE
+// client state: a paused classroom still shows paused) — after the caller's
+// OWN predicate already passed under the same hold. The caller queues its
+// ErrorMsg first; the wire order error → state follows the lock order.
+// Caller holds tm.mu.
+func (tm *TurnManager) applyFailLocked(s Sender) {
+	for _, p := range tm.pendingPlayback {
+		p.cancelWait()
+	}
+	tm.pendingPlayback = map[string]*pendingPlayback{}
+	tm.playbackPending = false
+	tm.state = StateListening
+	_ = s.SendControl(StateMsg{Type: TypeState, Value: tm.effectiveClientStateLocked()})
 }
 
 // dispatchTurn routes a whitelisted intent into the FSM. The switch covers
@@ -1726,13 +1848,13 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 			if !proceed {
 				return // interrupted mid-generation: abort silently
 			}
-			if tm.thinkingExpired(ctx, epoch) {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				// Issue #94 (U5): the on-demand generation is the turn's
 				// SECOND Chat and may hang past the deadline exactly like the
 				// classification call. The honest classifyReply fallback would
 				// announce through TTS on the dead ctx; the coded error with
 				// the fixed notice returns the classroom to listening instead.
-				tm.failThinkingTimeout(s, epoch, turnID, "chat")
+				tm.commitThinkingTimeout(s, ctx, epoch, turnID, "chat")
 				return
 			}
 			reply = augmented
@@ -1853,8 +1975,12 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 	// UNDER the executor call. The store commit stands — it is the durable
 	// truth a reconnect reads — but nothing after the return may touch the
 	// dead session: no tutor mutation, no lesson_update, no check stage, no
-	// error message.
-	if !tm.epochCurrent(epoch) {
+	// error message. Issue #94 U5 rethink adds the SAME retirement for a
+	// thinking-timeout commit that won while this advance sat inside the
+	// executor (driverGen bumped, this ctx cancelled): the round is over, so
+	// the return path stays silent too — the cancellation it caused must
+	// never surface as 「课堂进度更新失败」.
+	if !tm.epochCurrent(epoch) || !tm.driverGenCurrent(ctx) {
 		return
 	}
 	if err != nil {
@@ -1896,9 +2022,17 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 	// the close paths send session_ended only AFTER closed is set — so
 	// lesson_update can never trail the goodbye on the wire.
 	tm.mu.Lock()
-	if tm.epoch != epoch || tm.closed {
+	if tm.epoch != epoch || tm.closed || !tm.driverGenCurrentLocked(ctx) {
 		tm.mu.Unlock()
 		return
+	}
+	if tm.state == StateProcessing {
+		// Issue #94 U5 rethink: this first commit just claimed the round
+		// from a live thinking turn — that turn's timeout (if its deadline
+		// crosses later) abandons with zero side effects instead of
+		// clobbering this narration: the child hears the next word, never
+		// the fixed notice over it.
+		tm.thinkingYieldTurn = tm.processingTurnID
 	}
 	tm.tutor.align(res.NewIndex, res.NewVersion)
 	tm.tutor.commitOutcome(target.WordIndex, outcome)
@@ -1975,13 +2109,15 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 	}
 
 	tm.mu.Lock()
-	if tm.epoch != epoch || tm.closed {
+	if tm.epoch != epoch || tm.closed || !tm.driverGenCurrentLocked(ctx) {
 		// Stale before the first sound: nothing registered, nothing spoken.
 		// The closed flag rides the entry check (PR #60/#61 review, J15): a
 
 		// close does not bump the epoch, so the comparison alone let a dead
 		// session's announcement record history, drive the FSM to speaking
-		// and ship state=speaking past session_ended.
+		// and ship state=speaking past session_ended. Issue #94 U5 rethink:
+		// a retired word-timer advance (its thinking timeout committed) is
+		// as dead as a stale epoch — no registration, no sound.
 		tm.mu.Unlock()
 		return PlaybackRef{}
 	}
@@ -2016,7 +2152,7 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		// a sentence of a dead session register and ship.
 
 		tm.mu.Lock()
-		if tm.epoch != epoch || tm.closed {
+		if tm.epoch != epoch || tm.closed || !tm.driverGenCurrentLocked(ctx) {
 			tm.mu.Unlock()
 			return ref
 		}
@@ -2033,7 +2169,7 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		var sentSamples int
 		_, err := tm.tts.SynthesizeStream(ctx, sentence, func(pcm []byte, isFinal bool) error {
 			tm.mu.Lock()
-			if tm.epoch != epoch || tm.closed {
+			if tm.epoch != epoch || tm.closed || !tm.driverGenCurrentLocked(ctx) {
 				tm.mu.Unlock()
 				cancel() // late chunk: abort the provider stream too
 				return ErrStaleEpoch
@@ -2053,7 +2189,7 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 		if p, ok := tm.pendingPlayback[pendingKey(epoch, sentID)]; ok {
 			p.pcmSamples = sentSamples
 		}
-		stale := tm.epoch != epoch || tm.closed
+		stale := tm.epoch != epoch || tm.closed || !tm.driverGenCurrentLocked(ctx)
 		if !stale {
 			_ = s.SendControl(AudioEndMsg{Type: TypeAudioEnd, TurnID: turnID, Epoch: epoch, SentenceID: sentID})
 		}
@@ -2164,13 +2300,12 @@ func (tm *TurnManager) failTurn(s Sender, epoch uint64, code, message string, fi
 		return
 	}
 	_ = s.SendControl(ErrorMsg{Type: TypeError, Code: code, Message: message, Recoverable: true})
-	for _, p := range tm.pendingPlayback {
-		p.cancelWait()
-	}
-	tm.pendingPlayback = map[string]*pendingPlayback{}
-	tm.playbackPending = false
-	tm.state = StateListening
-	_ = s.SendControl(StateMsg{Type: TypeState, Value: tm.effectiveClientStateLocked()})
+	// The shared failure side effects (Issue #94 U5 rethink): one copy of
+	// the wait-invalidation + listening flip, beside the predicate this
+	// function keeps — epoch and closed only. A thinking timeout goes through
+	// commitThinkingTimeout instead; state==processing must NOT grow onto
+	// this gate (a speaking-turn TTS failure still reports through here).
+	tm.applyFailLocked(s)
 	tm.mu.Unlock()
 	all := make([]infra.Field, 0, 1+len(fields))
 	all = append(all, infra.F("code", code))

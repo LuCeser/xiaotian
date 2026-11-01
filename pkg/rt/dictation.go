@@ -715,15 +715,33 @@ func (tm *TurnManager) onWordTimeout(gen uint64, epoch uint64, target TurnTarget
 // confirm/timeout race resolves through the executor — the loser replays
 // Idempotent=true and aligns with zero side effects (only the first driver
 // writes the outcome, messages, narration and review).
+//
+// Issue #94 U5 rethink: the advance no longer OVERWRITES tm.turnCancel — that
+// slot belongs to the student's turn, and the overwrite left a hung
+// classification's cancel homeless. It keeps its OWN cancel slot (canceled by
+// the interrupt/close paths and by a committed thinking timeout) and stamps
+// the driver generation into its ctx: a thinking-timeout commit that wins the
+// round bumps the generation, and every gate in advanceTarget/speakTurn
+// treats the mismatch exactly like a stale epoch — no align, no
+// lesson_update, no narration, no second error.
 func (tm *TurnManager) timeoutAdvance(s Sender, epoch uint64, target TurnTarget) {
 	if s == nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	slot := &advanceCancelSlot{cancel: cancel}
 	tm.mu.Lock()
-	tm.turnCancel = cancel
+	ctx = withDriverGen(ctx, tm.driverGen)
+	tm.advanceCancel = slot
 	tm.mu.Unlock()
-	defer cancel()
+	defer func() {
+		tm.mu.Lock()
+		if tm.advanceCancel == slot {
+			tm.advanceCancel = nil // only OUR slot — a successor's must stand
+		}
+		tm.mu.Unlock()
+		cancel()
+	}()
 
 	tm.advanceTarget(s, ctx, cancel, epoch, target, outcomeTimeout, "", func() {
 		// EventTimeoutFired is emitted by the FIRST COMMIT ONLY: a timeout
