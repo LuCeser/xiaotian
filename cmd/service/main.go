@@ -102,7 +102,12 @@ func run(ctx context.Context, configPath, healthAddrOverride string) int {
 		log.Printf("logger build failed: %v", err)
 		return 1
 	}
-	defer func() { _ = logger.Sync() }()
+	defer func() {
+		_ = logger.Sync()
+		if z, ok := logger.(*infra.ZapLogger); ok {
+			_ = z.Close()
+		}
+	}()
 
 	if healthAddrOverride != "" {
 		cfg.Server.HealthAddr = healthAddrOverride

@@ -824,8 +824,11 @@ type LogConfig struct {
 	// for log aggregators).
 	Format string `json:"format" mapstructure:"format"`
 
-	// Output is the log destination: "stderr", "stdout", or a file path.
-	// Default "stderr" so systemd / container runtimes capture logs.
+	// Output is the log destination: "stderr", "stdout", or a file path
+	// (opened create+append, 0644; an unopenable path fails startup rather
+	// than silently falling back to stderr). Default "stderr" so systemd /
+	// container runtimes capture logs; file output is NOT mirrored to
+	// stderr.
 	Output string `json:"output" mapstructure:"output"`
 }
 
