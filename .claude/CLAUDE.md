@@ -32,7 +32,10 @@ Technology stack not yet documented. Will populate after codebase mapping or fir
 
 ## Conventions
 
-Conventions not yet established. Will populate as patterns emerge during development.
+### 目录职责（#102）
+
+- **`logs/` 只放运行日志**（`run.ps1` 只写日志）——永不落 `.go` 文件：`.gitignore` 挡不住 `go build ./...`，残留 `.go` 草稿会让本机全量永远红。
+- **调试/会话草稿一律进 `.scratch/`**：点前缀目录被 go 工具跳过，不参与 `./...` 编译。详见 `.planning/CONVENTIONS.md`。
 <!-- GSD:conventions-end -->
 
 <!-- GSD:architecture-start source:ARCHITECTURE.md -->

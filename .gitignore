@@ -81,5 +81,6 @@ nul
 .scratch/debug/
 tests/e2e/.pdf-capture/
 
-# session scratch logs (asr captures, recurrence drafts) — never enter git
+# session scratch logs (asr captures, recurrence drafts) — never enter git.
+# NB: gitignore does NOT stop `go build ./...` (#102) — no .go files under logs/; drafts go to .scratch/
 logs/
