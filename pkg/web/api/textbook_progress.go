@@ -53,12 +53,12 @@ type ProgressInterpretRequest struct {
 // meaning_generate.go precedent; its json tags are the wire contract).
 type progressInterpretResponse struct {
 	Status         string                  `json:"status"`
-	TextbookID     int64                   `json:"textbookId,omitempty"`
 	TextbookName   string                  `json:"textbookName,omitempty"`
 	Lesson         string                  `json:"lesson,omitempty"`
-	LearnedLessons int                     `json:"learnedLessons,omitempty"`
 	Reason         string                  `json:"reason,omitempty"`
 	Candidates     []ocr.ProgressCandidate `json:"candidates,omitempty"`
+	TextbookID     int64                   `json:"textbookId,omitempty"`
+	LearnedLessons int                     `json:"learnedLessons,omitempty"`
 }
 
 // interpretTextbookProgress serves POST /textbooks/progress/interpret.
