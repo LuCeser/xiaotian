@@ -6,10 +6,10 @@ current_phase: 14
 current_phase_name: R1 对话接真实课堂
 status: planning
 stopped_at: Phase 13/13.1 完结（2026-10-11 用户决策，验收项单独处理），ready to plan Phase 14
-last_updated: "2026-11-08T08:06:50.556Z"
-last_activity: 2026-10-25
+last_updated: "2026-11-08T10:05:58.220Z"
+last_activity: 2026-11-08
 last_activity_desc: Completed quick task 261012-auz — Issue
-state_head: 014ce42309375457b99a41c505e6ccd46a32c850
+state_head: 2e7908bd8c744e481f8f1d0895c82be8bda8086c
 progress:
   total_phases: 7
   completed_phases: 3
@@ -195,6 +195,7 @@ None yet.
 | 261024-njp | scripts/deploy.ps1 升级/回滚（preflight→TEMP 构建→stop→备份→换新→start 健康门→失败提示回滚）+ tests/test-deploy-ps1.js A-F 全绿 | 2026-10-25 | 32f4c74 | — | .planning/quick/261024-njp-scripts-deploy-ps1-go-build-windows-cgo-enabled-0-ldflags-s |
 | 261025-fzp | README 增补「安装与部署（Windows 本机）」：install/hta/deploy 三件套用法与实战踩坑要点 | 2026-10-25 | 68c2523 | — | [261025-fzp-windows-readme-md-readme-md-windows-1-in](./quick/261025-fzp-windows-readme-md-readme-md-windows-1-in/) |
 | 261108-lm8 | 修 CI 红：重排 4 处结构体字段消除 govet fieldalignment 告警（pkg/ocr 三个 + pkg/web/api 一个，#82 引入） | 2026-11-08 | 014ce42 | complete | [261108-lm8-ci-4-govet-fieldalignment-pkg-ocr-progre](./quick/261108-lm8-ci-4-govet-fieldalignment-pkg-ocr-progre/) |
+| 41 | 修 #103：e2ecorpus prepare 测试补 unix 平台门＋SA4023 接缝 nolint，Windows 全量门该包转绿 | 2026-11-08 | 2e7908b | — | — |
 
 ### Roadmap Evolution
 
