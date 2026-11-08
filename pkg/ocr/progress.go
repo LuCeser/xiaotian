@@ -42,7 +42,6 @@ const (
 // lessons across books, the ordered lesson list (the ground truth the
 // model must copy lesson names from), and the current learned count.
 type ProgressTextbook struct {
-	ID             int64
 	Name           string
 	Category       string
 	Edition        string
@@ -51,6 +50,7 @@ type ProgressTextbook struct {
 	Volume         string
 	Module         string
 	Lessons        []string
+	ID             int64
 	LearnedLessons int
 }
 
@@ -58,9 +58,9 @@ type ProgressTextbook struct {
 // is in doubt: the book that contains the named lesson, with the learned
 // count applying this candidate would set.
 type ProgressCandidate struct {
-	TextbookID     int64  `json:"textbookId"`
 	TextbookName   string `json:"textbookName"`
 	Lesson         string `json:"lesson"`
+	TextbookID     int64  `json:"textbookId"`
 	LearnedLessons int    `json:"learnedLessons"`
 }
 
@@ -69,12 +69,12 @@ type ProgressCandidate struct {
 // ask) and possibly Candidates; NotStatement fills Reason only.
 type ProgressInterpretation struct {
 	Status         string
-	TextbookID     int64
 	TextbookName   string
 	Lesson         string
-	LearnedLessons int
 	Reason         string
 	Candidates     []ProgressCandidate
+	TextbookID     int64
+	LearnedLessons int
 }
 
 // progressSystemPrompt states the task: decide whether the sentence is a
