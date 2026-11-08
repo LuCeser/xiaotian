@@ -53,8 +53,8 @@ func withCacheDirLock(ctx context.Context, dir string, fn func() error) error {
 	if err != nil {
 		return fmt.Errorf("e2ecorpus: open %s: %w", cacheLockName, err)
 	}
-	defer f.Close() //nolint:gosec // G104: best-effort close of a lock file
-	if err := lockCacheFile(ctx, f); err != nil {
+	defer f.Close()                               //nolint:gosec // G104: best-effort close of a lock file
+	if err := lockCacheFile(ctx, f); err != nil { //nolint:staticcheck // SA4023: on !unix lockCacheFile always errors by design (lock_other.go), so err!=nil is provably true; the nil branch is reachable on unix (lock_unix.go)
 		return err
 	}
 	defer func() { _ = unlockCacheFile(f) }()
