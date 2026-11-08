@@ -38,6 +38,13 @@ func TestLoadValidation(t *testing.T) {
 		{"empty id", strings.Replace(validPhoto, `"id":"p"`, `"id":""`, 1), "empty id"},
 		{"absolute file", strings.Replace(validPhoto, `"file":"a.jpg"`, `"file":"/etc/a.jpg"`, 1), "relative name"},
 		{"escaping file", strings.Replace(validPhoto, `"file":"a.jpg"`, `"file":"../a.jpg"`, 1), "relative name"},
+		// Issue #101: the manifest is a shared cross-platform asset, so a
+		// name absolute under EITHER convention must be refused on EVERY
+		// platform — filepath.IsAbs alone let /etc/a.jpg through on Windows,
+		// and a POSIX host lets the Windows forms through.
+		{"windows drive file", strings.Replace(validPhoto, `"file":"a.jpg"`, `"file":"C:\\a.jpg"`, 1), "relative name"},
+		{"windows slash-drive file", strings.Replace(validPhoto, `"file":"a.jpg"`, `"file":"C:/a.jpg"`, 1), "relative name"},
+		{"windows rooted file", strings.Replace(validPhoto, `"file":"a.jpg"`, `"file":"\\a.jpg"`, 1), "relative name"},
 		{"short sha256", strings.Replace(validPhoto, hex64, "abc", 1), "64-hex"},
 		{"non-hex sha256", strings.Replace(validPhoto, hex64, strings.Repeat("z", 64), 1), "64-hex"},
 		{"sha256 with punctuation", strings.Replace(validPhoto, hex64, strings.Repeat("a-", 32), 1), "64-hex"},
@@ -172,5 +179,21 @@ func TestVerifyMaterial(t *testing.T) {
 	err := p.Verify(dir)
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Verify(missing material) = %v, want fs.ErrNotExist so the live run can skip", err)
+	}
+}
+
+// TestVerifyFileGuard pins the Issue #101 contract at the Verify seam: a
+// Photo may be built in code rather than loaded, so Verify re-checks the
+// file name itself — and with platform-independent rules, because a name
+// absolute under EITHER convention must be refused on EVERY platform, not
+// only where the host OS would agree (/etc/a.jpg on Windows, C:\a.jpg on
+// Linux).
+func TestVerifyFileGuard(t *testing.T) {
+	for _, name := range []string{"/etc/a.jpg", `C:\a.jpg`, "C:/a.jpg", `\a.jpg`, "../a.jpg"} {
+		p := Photo{ID: "p", File: name, SHA256: hex64}
+		err := p.Verify(t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "relative name") {
+			t.Errorf("Verify(file=%q) = %v, want the plain-relative-name rejection", name, err)
+		}
 	}
 }

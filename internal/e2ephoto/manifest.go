@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -201,7 +202,7 @@ func (p Photo) validate() error {
 	switch {
 	case p.ID == "":
 		return fmt.Errorf("empty id")
-	case p.File == "" || filepath.IsAbs(p.File) || strings.Contains(p.File, ".."):
+	case !plainName(p.File):
 		return fmt.Errorf("photo %s: file %q must be a plain relative name", p.ID, p.File)
 	case len(p.SHA256) != 64 || !isHex(p.SHA256):
 		return fmt.Errorf("photo %s: sha256 %q is not a 64-hex digest", p.ID, p.SHA256)
@@ -246,6 +247,29 @@ func isHex(s string) bool {
 	return true
 }
 
+// plainName reports whether name is a plain relative file name under every
+// platform this manifest can be consumed on. The manifest is a shared
+// cross-platform asset, so absoluteness is judged under BOTH conventions
+// and the verdict must not drift with the host OS (Issue #101:
+// filepath.IsAbs is host semantics — it let /etc/a.jpg through on
+// Windows). Refused everywhere: POSIX-absolute (/etc/a.jpg), a Windows
+// backslash root (\a.jpg — rooted but volume-less, not filepath.IsAbs on
+// Windows either), any host-absolute form, a drive-letter reference
+// (C:\a.jpg, C:/a.jpg, C:a.jpg — volume-shaped even when parsed on POSIX),
+// and traversal (..).
+func plainName(name string) bool {
+	if name == "" || path.IsAbs(name) || filepath.IsAbs(name) ||
+		strings.HasPrefix(name, `\`) || strings.Contains(name, "..") {
+		return false
+	}
+	if len(name) >= 2 && name[1] == ':' {
+		if c := name[0]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
 // Verify resolves File under dir and checks the material hash. A missing
 // directory or file surfaces an error wrapping fs.ErrNotExist (the live
 // run turns that into a skip); a present file whose hash does not match
@@ -254,7 +278,7 @@ func isHex(s string) bool {
 func (p Photo) Verify(dir string) error {
 	// Guard here too, not only in validate: Verify may be called on a
 	// Photo built in code rather than loaded through Load.
-	if p.File == "" || filepath.IsAbs(p.File) || strings.Contains(p.File, "..") {
+	if !plainName(p.File) {
 		return fmt.Errorf("e2ephoto: photo %s: file %q must be a plain relative name", p.ID, p.File)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, p.File)) // #nosec G703 -- File is traversal-guarded just above and validated at Load
