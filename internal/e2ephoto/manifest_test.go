@@ -189,7 +189,7 @@ func TestVerifyMaterial(t *testing.T) {
 // only where the host OS would agree (/etc/a.jpg on Windows, C:\a.jpg on
 // Linux).
 func TestVerifyFileGuard(t *testing.T) {
-	for _, name := range []string{"/etc/a.jpg", `C:\a.jpg`, "C:/a.jpg", `\a.jpg`, "../a.jpg"} {
+	for _, name := range []string{"/etc/a.jpg", `C:\a.jpg`, "C:/a.jpg", "C:a.jpg", `\a.jpg`, "../a.jpg"} {
 		p := Photo{ID: "p", File: name, SHA256: hex64}
 		err := p.Verify(t.TempDir())
 		if err == nil || !strings.Contains(err.Error(), "relative name") {

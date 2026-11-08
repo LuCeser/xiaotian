@@ -202,7 +202,7 @@ func (p Photo) validate() error {
 	switch {
 	case p.ID == "":
 		return fmt.Errorf("empty id")
-	case !plainName(p.File):
+	case !isPlainName(p.File):
 		return fmt.Errorf("photo %s: file %q must be a plain relative name", p.ID, p.File)
 	case len(p.SHA256) != 64 || !isHex(p.SHA256):
 		return fmt.Errorf("photo %s: sha256 %q is not a 64-hex digest", p.ID, p.SHA256)
@@ -247,7 +247,7 @@ func isHex(s string) bool {
 	return true
 }
 
-// plainName reports whether name is a plain relative file name under every
+// isPlainName reports whether name is a plain relative file name under every
 // platform this manifest can be consumed on. The manifest is a shared
 // cross-platform asset, so absoluteness is judged under BOTH conventions
 // and the verdict must not drift with the host OS (Issue #101:
@@ -257,7 +257,7 @@ func isHex(s string) bool {
 // Windows either), any host-absolute form, a drive-letter reference
 // (C:\a.jpg, C:/a.jpg, C:a.jpg — volume-shaped even when parsed on POSIX),
 // and traversal (..).
-func plainName(name string) bool {
+func isPlainName(name string) bool {
 	if name == "" || path.IsAbs(name) || filepath.IsAbs(name) ||
 		strings.HasPrefix(name, `\`) || strings.Contains(name, "..") {
 		return false
@@ -278,7 +278,7 @@ func plainName(name string) bool {
 func (p Photo) Verify(dir string) error {
 	// Guard here too, not only in validate: Verify may be called on a
 	// Photo built in code rather than loaded through Load.
-	if !plainName(p.File) {
+	if !isPlainName(p.File) {
 		return fmt.Errorf("e2ephoto: photo %s: file %q must be a plain relative name", p.ID, p.File)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, p.File)) // #nosec G703 -- File is traversal-guarded just above and validated at Load
