@@ -30,7 +30,8 @@ func (tm *TurnManager) handleReadWord(s Sender, m ReadWordMsg) {
 		tm.sendError(s, ErrCodeInvalidMessage, "现在不能重读这个词，请点已经报过的序号", true)
 		return
 	}
-	spoken := repeatText(t.words[m.WordIndex].Word)
+	word := t.words[m.WordIndex]
+	spoken := wordReadingText(word, t.category, m.WordIndex+1, repeatText(word.Word), false)
 	display := spoken
 	if tm.mode != ModeTest && !t.checking {
 		display = repeatMaskedText(m.WordIndex + 1)

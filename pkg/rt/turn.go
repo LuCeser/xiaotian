@@ -952,7 +952,7 @@ func (tm *TurnManager) startDictationSession(s Sender, l lesson.Lesson, practice
 	}
 	tm.turnCancel = cancel
 	tm.mu.Unlock()
-	spoken := greetingText(total, first.Word)
+	spoken := wordReadingText(first, category, l.CurrentIndex+1, greetingText(total, first.Word), false)
 	display := spoken
 	if mode != ModeTest {
 		// 13.1-02 student masking (D-10): the greeting subtitle drops the
@@ -1807,9 +1807,9 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		}
 		tm.confirmTarget(s, ctx, cancel, turnID, epoch, reply, target)
 	case intentRepeat:
-		tm.speakCurrentWordReading(s, ctx, cancel, epoch, repeatText, repeatMaskedText)
+		tm.speakCurrentWordReading(s, ctx, cancel, epoch, false)
 	case intentSlow:
-		tm.speakCurrentWordReading(s, ctx, cancel, epoch, slowReadText, slowMaskedText)
+		tm.speakCurrentWordReading(s, ctx, cancel, epoch, true)
 	case intentHint:
 		// U-9 ruling (2026-10-06): every hint request increments the word's
 		// hint count and pre-records the hint outcome. The pre-record is
@@ -1874,19 +1874,21 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 		}
 		tm.runAnnouncementAt(s, epoch, ctx, cancel, pauseAckText(), purposeChat, nil)
 	case intentResume:
-		idx, word, mode := 0, "", ""
+		idx, mode, category := 0, "", ""
+		word := lesson.Word{}
 		if !tm.applyTurnAt(epoch, func() error {
 			mode = tm.mode
+			category = tm.category
 			if tm.tutor != nil && tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
 				tm.tutor.paused = false
 				idx = tm.tutor.currentIndex + 1
-				word = tm.tutor.words[tm.tutor.currentIndex].Word
+				word = tm.tutor.words[tm.tutor.currentIndex]
 			}
 			return nil
 		}) {
 			return
 		}
-		spoken := resumeAckText(idx, word)
+		spoken := wordReadingText(word, category, idx, resumeAckText(idx, word.Word), false)
 		display := spoken
 		if mode != ModeTest {
 			display = resumeMaskedText(idx)
@@ -1902,19 +1904,25 @@ func (tm *TurnManager) dispatchTurn(s Sender, ctx context.Context, cancel contex
 // (voice is the answer channel, D-10); the masked variant rides the subtitle
 // in student mode. Re-arms the per-word countdown after the reading's valid
 // final ack.
-func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, template func(string) string, masked func(int) string) {
-	word, mode, idx := "", "", 0
+func (tm *TurnManager) speakCurrentWordReading(s Sender, ctx context.Context, cancel context.CancelFunc, epoch uint64, slow bool) {
+	template, masked := repeatText, repeatMaskedText
+	if slow {
+		template, masked = slowReadText, slowMaskedText
+	}
+	word := lesson.Word{}
+	mode, category, idx := "", "", 0
 	if !tm.applyTurnAt(epoch, func() error {
 		mode = tm.mode
+		category = tm.category
 		if tm.tutor != nil && tm.tutor.currentIndex >= 0 && tm.tutor.currentIndex < len(tm.tutor.words) {
-			word = tm.tutor.words[tm.tutor.currentIndex].Word
+			word = tm.tutor.words[tm.tutor.currentIndex]
 			idx = tm.tutor.currentIndex + 1
 		}
 		return nil
 	}) {
 		return
 	}
-	spoken := template(word)
+	spoken := wordReadingText(word, category, idx, template(word.Word), slow)
 	display := spoken
 	if mode != ModeTest {
 		display = masked(idx)
@@ -2069,8 +2077,9 @@ func (tm *TurnManager) advanceTarget(s Sender, ctx context.Context, cancel conte
 	word := tm.tutor.words[res.NewIndex]
 	total := len(tm.tutor.words)
 	mode := tm.mode
+	category := tm.tutor.category
 	tm.mu.Unlock()
-	spoken := announceText(res.NewIndex+1, total, word.Word)
+	spoken := wordReadingText(word, category, res.NewIndex+1, announceText(res.NewIndex+1, total, word.Word), false)
 	display := spoken
 	if mode != ModeTest {
 		// 13.1-02 student masking (D-10): the announcement subtitle is the
@@ -2105,9 +2114,13 @@ func (tm *TurnManager) speakTurn(s Sender, turnID, epoch uint64, spoken, display
 	spokenSents := splitSentences(spoken)
 	displaySents := splitSentences(display)
 	if len(displaySents) != len(spokenSents) {
-		// Masking must never change the sentence count; a mismatching display
-		// falls back to the spoken text rather than corrupting the stream.
-		displaySents = spokenSents
+		// Stored examples can add spoken sentences to a position-only subtitle.
+		// Keep that safe display even when counts differ; falling back to the
+		// spoken copy would expose the dictation answer on screen.
+		displaySents = make([]string, len(spokenSents))
+		for i := range displaySents {
+			displaySents[i] = display
+		}
 	}
 
 	tm.mu.Lock()
