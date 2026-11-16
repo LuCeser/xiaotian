@@ -30,6 +30,8 @@ func TestEnglishReadingKindsAcrossClassroomActions(t *testing.T) {
 	for _, tc := range []struct{ word, example, normal, slow string }{
 		{"on the ground floor", "The library is on the ground floor.", "第 1 个词组，on the ground floor。例句：The library is on the ground floor.请写词组。", "第 1 个词组，on the ground floor。on the ground floor。例句：The library is on the ground floor.请写词组。"},
 		{"look after", "I look after my cat.", "第 1 个词组，look after。例句：I look after my cat.请写词组。", "第 1 个词组，look after。look after。例句：I look after my cat.请写词组。"},
+		{"do homework", "I do homework after school.", "第 1 个词组，do homework。例句：I do homework after school.请写词组。", "第 1 个词组，do homework。do homework。例句：I do homework after school.请写词组。"},
+		{"look after you", "I look after you.", "第 1 个词组，look after you。例句：I look after you.请写词组。", "第 1 个词组，look after you。look after you。例句：I look after you.请写词组。"},
 		{"Where is the library?", "Ignored example.", "第 1 句，Where is the library?请写整句。", "第 1 句，Where is the library?Where is the library?请写整句。"},
 		{"I like cats", "Ignored example.", "第 1 句，I like cats。请写整句。", "第 1 句，I like cats。I like cats。请写整句。"},
 		{"Where is the library", "", "第 1 句，Where is the library。请写整句。", "第 1 句，Where is the library。Where is the library。请写整句。"},

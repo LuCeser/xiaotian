@@ -12,7 +12,7 @@ import (
 	"github.com/xiaotian/home-tutor-agent/pkg/english"
 )
 
-var examplePlaceholder = regexp.MustCompile(`\.(?:[\s\p{Zs}]*\.){2,}|…+`)
+var examplePlaceholder = english.Placeholder
 var englishToken = regexp.MustCompile(`[a-zA-Z]+(?:['’-][a-zA-Z]+)*`)
 
 // IsEnglishPhraseCandidate conservatively excludes ordinary words and complete sentences.

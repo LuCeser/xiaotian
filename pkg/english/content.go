@@ -23,9 +23,15 @@ var abbreviation = regexp.MustCompile(`(?i)\b(?:sb|sth|mr|mrs|ms|dr)\.|\b(?:[A-Z
 
 // The finite inventory deliberately prefers missed phrases to treating an
 // unpunctuated sentence as a phrase. New constructions need explicit examples.
-var knownPhrase = regexp.MustCompile(`(?i)^(?:on the (?:ground|first|second|third|top) floor|ice cream|look after|take care|take care of|in front of|next to|be kind to|live near)(?:\s+(?:sb\.|sth\.))?$`)
-var sentenceStart = regexp.MustCompile(`(?i)^(?:i|you|he|she|it|we|they|i'm|you're|he's|she's|it's|we're|they're|where|what|when|why|who|how|is|are|am|was|were|do|does|did|can|could|will|would|shall|should|there|this|that|these|those)\b`)
-var subject = regexp.MustCompile(`(?i)\b(?:i|you|he|she|it|we|they)\b`)
+var knownPhrase = regexp.MustCompile(`(?i)^(?:on the (?:ground|first|second|third|top) floor|ice cream|do homework|look after|take care|take care of|in front of|next to|be kind to|live near)(?:\s+(?:sb\.|sth\.|me|you|him|her|it|us|them))?$`)
+
+// A bare "do" or an object "you" is not evidence of a sentence. Require
+// a subject/predicate pair or a question construction from a finite inventory.
+const personalSubject = `(?:i|you|he|she|it|we|they)`
+const predicate = `(?:am|is|are|was|were|have|has|had|like|likes|live|lives|play|plays|want|wants|need|needs|can|could|will|would|do|does|did)`
+
+var subjectPredicate = regexp.MustCompile(`(?i)\b` + personalSubject + `(?:\s+` + predicate + `\b|['’](?:m|re|s|ve|ll|d)\b)`)
+var questionStart = regexp.MustCompile(`(?i)^(?:(?:where|what|when|why|who|how)\s+` + predicate + `\b|` + predicate + `\s+` + personalSubject + `\b|(?:there|this|that|these|those)\s+(?:is|are|was|were)\b)`)
 
 func Classify(text string) Kind {
 	s := strings.TrimSpace(text)
@@ -41,7 +47,7 @@ func Classify(text string) Kind {
 	if len(token.FindAllString(withoutAbbreviations, -1)) < 2 {
 		return Word
 	}
-	if strings.ContainsAny(withoutAbbreviations, ".!?。！？\n\r") || sentenceStart.MatchString(s) || subject.MatchString(s) {
+	if strings.ContainsAny(withoutAbbreviations, ".!?。！？\n\r") || questionStart.MatchString(s) || subjectPredicate.MatchString(s) {
 		return Sentence
 	}
 	if knownPhrase.MatchString(strings.Join(strings.Fields(s), " ")) {

@@ -136,6 +136,13 @@ test('ordinary words, complete sentences and Chinese content do not generate exa
   await request.delete('/api/v1/words', { data: { category: 'chinese', unit } });
 });
 
+test('verb phrases and object pronouns retain add-time examples', async ({ request }) => {
+  await fixture(request, { 'do homework': 'I do homework after school.', 'look after you': 'I look after you.' });
+  const result = await add(request, [{ word: 'do homework', meaning: '做作业' }, { word: 'look after you', meaning: '照顾你' }]);
+  expect(result.examples.saved).toBe(2);
+  expect((await words(request)).every(x => x.example)).toBe(true);
+});
+
 test('whitespace-only examples are missing and can be generated or filled by supplied text', async ({ request }) => {
   const result = await add(request, [{ word: 'give ... to ...', meaning: '把某物给某人', example: ' \n\t' }]);
   expect(result.examples.saved).toBe(1);
@@ -216,6 +223,7 @@ test('ordinary phrase examples are saved and reused by new classrooms and reread
 async function readPhraseClassroom(request, word, example) {
   const WebSocket = require('ws');
   const before = (await state(request)).speech.length;
+  const chatsBeforeReading = (await state(request)).chatCalls;
   const ws = new WebSocket('ws://127.0.0.1:18080/rt', { origin: 'http://127.0.0.1:18080' });
   const messages = [];
   ws.on('message', (data, binary) => {
@@ -233,6 +241,7 @@ async function readPhraseClassroom(request, word, example) {
     expect(spoken).toContain(word);
     expect(spoken).toContain('例句：' + example);
     expect(spoken).toContain('请写词组。');
+    expect((await state(request)).chatCalls).toBe(chatsBeforeReading);
     const reads = messages.filter(x => x.type === 'state' && x.value === 'listening').length;
     const repeatStart = (await state(request)).speech.length;
     ws.send(JSON.stringify({ type: 'read_word', word_index: 0, current_index: 0 }));
@@ -240,6 +249,7 @@ async function readPhraseClassroom(request, word, example) {
     spoken = (await state(request)).speech.slice(repeatStart).join('');
     expect(spoken).toContain('例句：' + example);
     expect(spoken).toContain('请写词组。');
+    expect((await state(request)).chatCalls).toBe(chatsBeforeReading);
     const slowStart = (await state(request)).speech.length;
     const chatsBeforeSlow = (await state(request)).chatCalls;
     const listeningBeforeSlow = messages.filter(x => x.type === 'state' && x.value === 'listening').length;
