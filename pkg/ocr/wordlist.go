@@ -41,6 +41,7 @@ type ListReader func(ctx context.Context, systemPrompt, userPrompt string, image
 // is the model's self-reported certainty for the entry, clamped to [0,1];
 // the parent reviews every row anyway, so nothing is gated on it here.
 type WordlistEntry struct {
+	Example    string  `json:"example,omitempty"`
 	Word       string  `json:"word"`
 	Meaning    string  `json:"meaning"`
 	Lesson     string  `json:"lesson"`
@@ -142,11 +143,12 @@ type WordlistResult struct {
 const wordlistSystemPromptEnglish = `你是家长端英语词表导入助手。家长上传一张英语单词表的照片（PNG 或 JPEG），可能是印刷教材，也可能拍照略有倾斜。
 请只提取照片中明确的词表条目：以列表或表格排版、作为单词表出现的单词、短语和它们旁边的原文释义。
 不要把普通正文句子里出现的词、练习题、题目编号、页眉页脚或装饰文字当作词条；无需裁图，直接忽略这些内容。
+例句只提取材料明确提供的原文，放入 example 字段；无例句填空字符串，识别时不要生成。
 短语中的空格要保留，整个短语算一个条目；释义按照片原文转录（中文或英文都照抄），词表没有给释义就留空。
 word 只填单词或短语的文字本身，条目前后的 ★、☆、●、▲、※ 等排版装饰符一律剥离，不要写进 word。
 同时读取照片上明确印出的教材信息：版本（出版社或教材系列）、学段、年级、上下册、单元或模块、课次（如 Unit 3、第 5 课、Lesson 2）。
 教材信息只能报告照片上真实印着的内容；任何一项识别不出或照片上没有就填 null，不要根据单词难度、年级或文件名推测教材和课次。
-只输出一个 JSON 对象，格式：{"textbook":{"edition":"人教版PEP","stage":null,"grade":"三年级","volume":"上册","module":"Unit 3","lesson":"第5课"},"entries":[{"word":"ice cream","meaning":"冰激凌","lesson":"第5课","confidence":0.9}]}
+只输出一个 JSON 对象，格式：{"textbook":{"edition":"人教版PEP","stage":null,"grade":"三年级","volume":"上册","module":"Unit 3","lesson":"第5课"},"entries":[{"word":"ice cream","meaning":"冰激凌","example":"","lesson":"第5课","confidence":0.9}]}
 整个教材信息都识别不出时 textbook 为 null；entries 里每条的 lesson 能从照片确定就填，不能确定填 null。
 confidence 是你对这一条识别正确性的把握，0 到 1 的数字。没有识别到任何词表条目时 entries 为 []。不要输出对象以外的内容。`
 
@@ -371,6 +373,7 @@ func (p *WordlistPipeline) Recognize(ctx context.Context, image []byte, category
 		out = append(out, WordlistEntry{
 			Word:       word,
 			Meaning:    strings.TrimSpace(e.Meaning),
+			Example:    e.Example,
 			Lesson:     lesson,
 			Confidence: clamp01(e.Confidence),
 		})

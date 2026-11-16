@@ -162,6 +162,9 @@ const (
 func editArgs(cfg infra.PythonConfig, opts EditOpts) []string {
 	args := []string{cfg.VocabScript, "--db", cfg.VocabDBPath, "edit",
 		"--id", strconv.FormatInt(opts.ID, 10)}
+	if opts.ExpectedExampleRevision != nil {
+		args = append(args, "--expected-example-revision", strconv.FormatInt(*opts.ExpectedExampleRevision, 10))
+	}
 	if opts.Word != nil {
 		args = append(args, "--word", *opts.Word)
 	}

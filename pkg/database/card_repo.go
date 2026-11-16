@@ -27,12 +27,14 @@ var (
 // Write-separation contract (D-03-a): Python owns writes to the cards table
 // via pybridge.Executor.RunReview. Go only reads.
 type Card struct {
-	Word     string
-	Meaning  string
-	Example  string
-	Unit     string
-	Category string
-	FsrsCard string // opaque JSON — never parsed in Go (Pitfall 5)
+	ExampleSource   string
+	ExampleRevision int64
+	Word            string
+	Meaning         string
+	Example         string
+	Unit            string
+	Category        string
+	FsrsCard        string // opaque JSON — never parsed in Go (Pitfall 5)
 	// MeaningSource is the Issue #8 provenance flag: "generated" marks a
 	// system-supplemented meaning (ADR-0005); "material" covers everything
 	// else (material original, library legacy, hand-filled).
@@ -126,6 +128,7 @@ func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, e
 	defer rows.Close()
 	hasParticipation := false
 	hasMeaningSource := false
+	hasExampleSource, hasExampleRevision := false, false
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, columnType string
@@ -135,6 +138,12 @@ func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, e
 		}
 		if name == "participates" {
 			hasParticipation = true
+		}
+		if name == "example_source" {
+			hasExampleSource = true
+		}
+		if name == "example_revision" {
+			hasExampleRevision = true
 		}
 		if name == "meaning_source" {
 			hasMeaningSource = true
@@ -153,6 +162,16 @@ func (r *sqliteCardRepository) cardColumns(ctx context.Context) (string, bool, e
 		cols += ", meaning_source"
 	} else {
 		cols += ", 'material' AS meaning_source"
+	}
+	if hasExampleSource {
+		cols += ", example_source"
+	} else {
+		cols += ", 'material' AS example_source"
+	}
+	if hasExampleRevision {
+		cols += ", example_revision"
+	} else {
+		cols += ", 0 AS example_revision"
 	}
 	return cols, hasParticipation, nil
 }
@@ -204,6 +223,8 @@ func scanCard(row interface{ Scan(...any) error }) (Card, error) {
 		&fetchLocked,
 		&c.Participates,
 		&c.MeaningSource,
+		&c.ExampleSource,
+		&c.ExampleRevision,
 	)
 	if err != nil {
 		return Card{}, err

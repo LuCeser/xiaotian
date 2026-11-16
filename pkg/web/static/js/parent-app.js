@@ -330,6 +330,9 @@
         return (data && Array.isArray(data.units)) ? data.units : [];
       });
     },
+    fillExamples: function (ids) {
+      return fetchJSON('POST', '/api/v1/words/examples/fill', { ids: ids });
+    },
     editWord: editWord,
     setParticipation: function (ids, enabled) {
       return fetchJSON('PUT', '/api/v1/words/participation', {
@@ -385,7 +388,19 @@
 
   var addCard = new window.AddCard(addContainer, {
     submitWords: function (payload) {
-      return fetchJSON('POST', '/api/v1/words', payload);
+      return fetchJSON('POST', '/api/v1/words', payload).then(function (result) {
+        if (result.examples && result.examples.missing.length) {
+          var note = document.getElementById('phrase-example-result');
+          if (!note) {
+            note = document.createElement('p');
+            note.id = 'phrase-example-result';
+            note.setAttribute('role', 'status');
+            addContainer.appendChild(note);
+          }
+          note.textContent = '词条已保存，' + result.examples.missing.length + ' 个词组例句未补齐；可在浏览词库点击「补充缺失例句」重试。';
+        }
+        return result;
+      });
     },
     fetchWords: function (category) {
       return fetchJSON('GET', '/api/v1/words?category=' + encodeURIComponent(category))

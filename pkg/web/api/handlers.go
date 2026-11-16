@@ -108,6 +108,7 @@ func NewHandler(exec pybridge.Executor, cards database.CardRepository, textbooks
 	mux.HandleFunc("POST /words", h.addWords)
 	mux.HandleFunc("POST /words/photo/recognize", h.recognizeWordsPhoto)
 	mux.HandleFunc("POST /words/meaning/generate", h.generateWordMeanings)
+	mux.HandleFunc("POST /words/examples/fill", h.generatePhraseExamples)
 	mux.HandleFunc("GET /units", h.listUnits)
 	mux.HandleFunc("PUT /words/{id}", h.editWord)
 	mux.HandleFunc("PUT /words/participation", h.setWordParticipation)
@@ -337,11 +338,12 @@ func (h *handler) deleteWords(w http.ResponseWriter, r *http.Request) {
 // wordJSON is one element of the GET /words response array. Field tags
 // are snake_case per the shared response convention (health.go:18-26).
 type wordJSON struct {
-	Word     string `json:"word"`
-	Meaning  string `json:"meaning"`
-	Example  string `json:"example"`
-	Unit     string `json:"unit"`
-	Category string `json:"category"`
+	ExampleSource string `json:"example_source"`
+	Word          string `json:"word"`
+	Meaning       string `json:"meaning"`
+	Example       string `json:"example"`
+	Unit          string `json:"unit"`
+	Category      string `json:"category"`
 	// MeaningSource rides along for the browse view's 系统 supplement
 	// marker (Issue #8): the display rule is meaning non-empty AND
 	// meaning_source == "generated" — the client applies it, the wire
@@ -373,8 +375,9 @@ type wordsResponse struct {
 // addResponse is the POST /words response body, mirroring the Python
 // result contract {"added": N, "skipped": N} (vocab_manager.py:206).
 type addResponse struct {
-	Added   int `json:"added"`
-	Skipped int `json:"skipped"`
+	Examples *exampleOutcome `json:"examples,omitempty"`
+	Added    int             `json:"added"`
+	Skipped  int             `json:"skipped"`
 }
 
 // errorBody is the locked error envelope shape.
@@ -495,6 +498,7 @@ func (h *handler) listWords(w http.ResponseWriter, r *http.Request) {
 			Word:          c.Word,
 			Meaning:       c.Meaning,
 			Example:       c.Example,
+			ExampleSource: c.ExampleSource,
 			Unit:          c.Unit,
 			Category:      c.Category,
 			MeaningSource: c.MeaningSource,
@@ -575,7 +579,12 @@ func (h *handler) addWords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, addResponse{Added: result.Added, Skipped: result.Skipped})
+	response := addResponse{Added: result.Added, Skipped: result.Skipped}
+	if len(result.IDs) > 0 && req.Category == CategoryEnglish {
+		outcome := h.fillPhraseExamples(r.Context(), result.IDs, req.TextbookID)
+		response.Examples = &outcome
+	}
+	writeJSON(w, response)
 }
 
 // unitsResponse is the GET /units response envelope. Elements reuse

@@ -158,6 +158,7 @@
       var meaning = (e && e.meaning != null ? String(e.meaning) : '').trim();
       var lesson = (e && e.lesson != null ? String(e.lesson) : '').trim();
       var row = { index: i, word: word, meaning: meaning, lesson: lesson, status: 'new', reason: '', existingMeaning: '', resolution: '' };
+      if (e && e.example) { row.example = String(e.example); }
 
       if (!word) {
         row.status = 'invalid';
@@ -747,7 +748,7 @@
     return input && input.value ? String(input.value).trim() : '';
   }
 
-  function submitChunked(form, rows) {
+  function submitChunked(form, rows, bookID) {
     var unit = commitUnit(form);
     var outcome = { added: 0, skipped: 0 };
     var chain = Promise.resolve();
@@ -759,11 +760,12 @@
           // commit rows under the other subject.
           category: form.draftCategory,
           unit: unit,
+          textbook_id: bookID || 0,
           entries: part.map(function (r) {
             return {
               word: r.word,
               meaning: r.meaning,
-              example: '',
+              example: r.example || '',
               // Issue #8: the provenance rides the add path (ADR-0005 #3);
               // the only distinguishable value is 'generated' — everything
               // else (material original, hand-typed, cancelled-missing)
@@ -2634,7 +2636,7 @@
   PhotoAddForm.prototype.reclassify = function () {
     var textbookMode = this.bookChoice !== 'none';
     var entries = this.rows.map(function (r) {
-      return { word: r.word, meaning: r.meaning, lesson: r.lesson };
+      return { word: r.word, meaning: r.meaning, lesson: r.lesson, example: r.example };
     });
     var next = classifyPhotoEntries(entries, this.existingWords);
     // Carry over the checked flag and the lesson the parent set (new rows
@@ -4252,8 +4254,11 @@
     // Issue #7: the new rows go out sliced and aggregated (a whole
     // textbook in one confirm); a mid-run failure rejects with
     // partialOutcome (submitChunked's contract).
-    var addPromise = addRows.length
-      ? submitChunked(self, addRows).catch(function (err) {
+    var saveRows = committed.filter(function (r) {
+      return r.status === 'new' || String(r.example || '').trim();
+    });
+    var addPromise = saveRows.length
+      ? submitChunked(self, saveRows, book.id).catch(function (err) {
         err.message = '词汇添加失败：' + (err.message || '未知错误');
         throw err;
       })

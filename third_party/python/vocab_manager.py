@@ -158,6 +158,8 @@ def get_db(db_path=DB_PATH):
         os.makedirs(db_dir, exist_ok=True)
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
+    # Match the API's blank-example rule, including tabs and newlines.
+    db.create_function("example_is_blank", 1, lambda value: not value.strip(), deterministic=True)
     db.execute("PRAGMA journal_mode=WAL")
     return db
 
@@ -246,6 +248,29 @@ def init_db(db):
             "ALTER TABLE cards ADD COLUMN meaning_source TEXT NOT NULL DEFAULT 'material' "
             "CHECK (meaning_source IN ('material', 'generated'))"
         )
+    if "example_source" not in cols:
+        db.execute("ALTER TABLE cards ADD COLUMN example_source TEXT NOT NULL DEFAULT 'material'")
+    if "example_revision" not in cols:
+        db.execute("ALTER TABLE cards ADD COLUMN example_revision INTEGER NOT NULL DEFAULT 0")
+    db.executescript("""
+        CREATE TRIGGER IF NOT EXISTS cards_example_revision
+        AFTER UPDATE OF word, meaning, example, unit, category ON cards
+        BEGIN
+          UPDATE cards SET example_revision = example_revision + 1 WHERE id = NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS assignments_example_revision_insert
+        AFTER INSERT ON card_assignments BEGIN
+          UPDATE cards SET example_revision = example_revision + 1 WHERE id = NEW.card_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS assignments_example_revision_update
+        AFTER UPDATE ON card_assignments BEGIN
+          UPDATE cards SET example_revision = example_revision + 1 WHERE id = NEW.card_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS assignments_example_revision_delete
+        AFTER DELETE ON card_assignments BEGIN
+          UPDATE cards SET example_revision = example_revision + 1 WHERE id = OLD.card_id;
+        END;
+    """)
     db.commit()
 
 
@@ -363,7 +388,13 @@ def cmd_add(db, args):
     # Create a new FSRS card for each
     added = 0
     skipped = 0
+    ids = []
+    seen = set()
     for entry in entries:
+        if entry["word"] in seen:
+            skipped += 1
+            continue
+        seen.add(entry["word"])
         fsrs_card = Card()
         try:
             db.execute(
@@ -381,9 +412,17 @@ def cmd_add(db, args):
             added += 1
         except sqlite3.IntegrityError:
             skipped += 1
+            # Duplicate imports may fill a blank with a supplied example only.
+            if entry.get("example", "").strip():
+                db.execute("UPDATE cards SET example = ?, example_source = 'material' "
+                           "WHERE word = ? AND category = ? AND example_is_blank(example)",
+                           (entry["example"], entry["word"], args.category or "english"))
+        row = db.execute("SELECT id FROM cards WHERE word = ? AND category = ?",
+                         (entry["word"], args.category or "english")).fetchone()
+        ids.append(row["id"])
 
     db.commit()
-    print(json.dumps({"added": added, "skipped": skipped}, ensure_ascii=False))
+    print(json.dumps({"added": added, "skipped": skipped, "ids": ids}, ensure_ascii=False))
 
 
 def cmd_due(db, args):
@@ -849,6 +888,14 @@ def cmd_edit(db, args):
     exists).
     """
     card_id = args.id
+    if args.expected_example_revision is not None:
+        cursor = db.execute(
+            "UPDATE cards SET example = ?, example_source = 'generated' "
+            "WHERE id = ? AND example_revision = ? AND example_is_blank(example) AND category = 'english'",
+            (args.example, card_id, args.expected_example_revision))
+        db.commit()
+        print(json.dumps({"applied": cursor.rowcount == 1}))
+        return
     row = db.execute("SELECT id FROM cards WHERE id = ?", (card_id,)).fetchone()
     if not row:
         print(f"Card {card_id} not found")
@@ -860,10 +907,11 @@ def cmd_edit(db, args):
         SET word = COALESCE(?, word),
             meaning = COALESCE(?, meaning),
             example = COALESCE(?, example),
-            unit = COALESCE(?, unit)
+            unit = COALESCE(?, unit),
+            example_source = CASE WHEN ? IS NULL OR ? = example THEN example_source ELSE 'material' END
         WHERE id = ?
         """,
-        (args.word, args.meaning, args.example, args.unit, card_id),
+        (args.word, args.meaning, args.example, args.unit, args.example, args.example, card_id),
     )
     db.commit()
 
@@ -1347,6 +1395,7 @@ def main():
     p_edit.add_argument("--word", default=None, help="New word text (absent keeps current; empty string clears)")
     p_edit.add_argument("--meaning", default=None, help="New meaning (absent keeps current; empty string clears)")
     p_edit.add_argument("--example", default=None, help="New example (absent keeps current; empty string clears)")
+    p_edit.add_argument("--expected-example-revision", type=int, default=None)
     p_edit.add_argument("--unit", default=None, help="New unit (absent keeps current; empty string clears)")
 
     p_participation = subparsers.add_parser("set-participation", help="Set classroom participation for cards")

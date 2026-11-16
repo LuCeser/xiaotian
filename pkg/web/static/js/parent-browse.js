@@ -628,6 +628,7 @@
     this.deleteWords = options.deleteWords || function () {
       return Promise.reject(new Error('BrowseView: missing deleteWords handler'));
     };
+    this.fillExamples = options.fillExamples || null;
     this.onMutated = options.onMutated || function () {};
     this.onUnitSuggestions = options.onUnitSuggestions || function () {};
     // Issue #4 hooks (parent-textbook.js surfaces): open the 教材管理
@@ -719,6 +720,37 @@
 
     toolbar.appendChild(searchBox);
     toolbar.appendChild(pills);
+    if (this.fillExamples) {
+      var fillBtn = document.createElement('button');
+      fillBtn.type = 'button';
+      fillBtn.className = 'btn btn-secondary';
+      fillBtn.textContent = '补充缺失例句';
+      fillBtn.addEventListener('click', function () {
+        if (fillBtn.disabled) { return; }
+        var ids = self.words.filter(function (w) {
+          return w.category === 'english' && !String(w.example || '').trim();
+        }).map(function (w) { return w.id; });
+        fillBtn.disabled = true;
+        var saved = 0, missing = 0;
+        var chain = Promise.resolve();
+        for (var i = 0; i < ids.length; i += 10) {
+          (function (part) {
+            chain = chain.then(function () {
+              return self.fillExamples(part).then(function (result) {
+                saved += result.saved;
+                missing += result.missing.length;
+              });
+            });
+          })(ids.slice(i, i + 10));
+        }
+        chain.then(function () {
+          toast('已补充 ' + saved + ' 个例句' + (missing ? '，' + missing + ' 个未补齐，可重试或编辑释义后重试' : '，已有例句已跳过'), missing ? 'error' : 'success');
+        }).catch(function (err) {
+          toast('已补充 ' + saved + ' 个例句；其余未完成，可重试：' + errorMessage(err), 'error');
+        }).then(function () { fillBtn.disabled = false; self.refresh(); });
+      });
+      toolbar.appendChild(fillBtn);
+    }
 
     // Issue #11/#13: the unified content view's 类型 filter — 词语 (the
     // existing page) | 古诗 | 课文. The poems pill mounts only when the
@@ -1385,6 +1417,12 @@
     }
     if (srcBadge) {
       row.appendChild(srcBadge);
+    }
+    if (word.example) {
+      var example = document.createElement('span');
+      example.className = 'word-example';
+      example.textContent = '例句：' + word.example + (word.example_source === 'generated' ? '（系统生成）' : '（用户／教材提供）');
+      row.appendChild(example);
     }
     row.appendChild(badge);
     chips.forEach(function (chip) {

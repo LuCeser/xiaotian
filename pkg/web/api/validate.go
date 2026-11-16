@@ -70,9 +70,10 @@ func ValidateCategory(v string) error {
 
 // AddRequest is the decoded POST /words body shape.
 type AddRequest struct {
-	Category string `json:"category"`
-	Unit     string `json:"unit"`
-	Entries  []struct {
+	TextbookID int64  `json:"textbook_id,omitempty"`
+	Category   string `json:"category"`
+	Unit       string `json:"unit"`
+	Entries    []struct {
 		Word    string `json:"word"`
 		Meaning string `json:"meaning"`
 		Example string `json:"example"`
@@ -312,6 +313,9 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 // as a misleading 502 python_failed. Returns "" on success or the error
 // message on failure.
 func validateAddRequest(req *AddRequest) string {
+	if req.TextbookID < 0 {
+		return "invalid textbook id"
+	}
 	if err := ValidateCategory(req.Category); err != nil {
 		return "category must be \"english\" or \"chinese\""
 	}

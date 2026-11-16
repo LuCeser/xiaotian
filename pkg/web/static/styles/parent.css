@@ -356,6 +356,13 @@ body {
   font-weight: 600;
 }
 
+.word-example {
+  flex-basis: 100%;
+  order: 6;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 /* Mobile: meaning wraps to its own line under the word (UI-SPEC
    Responsive Behavior <768px row); >=768px single line. */
 .word-meaning {

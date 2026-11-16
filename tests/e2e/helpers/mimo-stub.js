@@ -169,7 +169,26 @@ function completion(content) {
   };
 }
 
+let phraseFixture = { examples: { 'give ... to ...': 'I give a book to Tom.' }, delayMs: 0 };
+let phraseCalls = 0;
+let phraseInputs = [];
 const server = http.createServer((req, res) => {
+  if (req.url === '/phrase-fixture') {
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ calls: phraseCalls, inputs: phraseInputs }));
+    } else {
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        phraseFixture = JSON.parse(Buffer.concat(chunks).toString());
+        phraseCalls = 0;
+        phraseInputs = [];
+        res.end('ok');
+      });
+    }
+    return;
+  }
   if (req.method === 'GET' && req.url.startsWith('/healthz')) {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('ok');
@@ -206,6 +225,18 @@ const server = http.createServer((req, res) => {
     }
     const image = findImagePart(body);
     if (!image) {
+	  if (promptText(body).includes('你为孩子补充英语词组例句')) {
+	    const inputs = JSON.parse(body.messages[1].content);
+	    phraseCalls++;
+	    phraseInputs = inputs;
+	    const fixture = phraseFixture;
+	    setTimeout(() => {
+	      res.writeHead(200, { 'Content-Type': 'application/json' });
+	      const rows = inputs.filter(x => fixture.examples[x.word]).map(x => ({ id: x.id, sentence: fixture.examples[x.word] }));
+	      res.end(JSON.stringify(completion(fixture.invalidJSON ? 'bad output' : JSON.stringify(rows))));
+	    }, fixture.delayMs || 0);
+	    return;
+	  }
       const hit = textRegistered.find((r) => promptText(body).includes(r.match));
       if (hit) {
         hit.hits += 1;
@@ -225,6 +256,11 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(completion('好了')));
+      return;
+    }
+    if (phraseFixture.photoReply) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(completion(JSON.stringify(phraseFixture.photoReply))));
       return;
     }
     const hit = registered.find((r) => r.bytes.equals(image));

@@ -321,8 +321,9 @@ type AddOpts struct {
 // prints on a successful add call (verified against vocab_manager.py:206).
 // Skipped counts duplicates (UNIQUE(word, category) violations).
 type AddResult struct {
-	Added   int `json:"added"`
-	Skipped int `json:"skipped"`
+	IDs     []int64 `json:"ids,omitempty"`
+	Added   int     `json:"added"`
+	Skipped int     `json:"skipped"`
 }
 
 // EditOpts carries the operational flags for the vocab_manager.py edit
@@ -333,6 +334,7 @@ type AddResult struct {
 // string CLEARS the column via cmd_edit's COALESCE update. FSRS learning
 // state is never touched either way (D-07).
 type EditOpts struct {
+	ExpectedExampleRevision *int64
 
 	// Word replaces the word text when non-nil. Forwarded as --word.
 	Word *string
@@ -356,7 +358,8 @@ type EditOpts struct {
 // vocab_manager.py's cmd_edit prints after committing (the post-update
 // word from a fresh SELECT — Plan 09-02 contract).
 type EditResult struct {
-	Edited struct {
+	Applied bool `json:"applied,omitempty"`
+	Edited  struct {
 		Word string `json:"word"`
 		ID   int64  `json:"id"`
 	} `json:"edited"`
