@@ -172,11 +172,13 @@ function completion(content) {
 let phraseFixture = { examples: { 'give ... to ...': 'I give a book to Tom.' }, delayMs: 0 };
 let phraseCalls = 0;
 let phraseInputs = [];
+let phraseSpeech = [];
+let phraseChatCalls = 0;
 const server = http.createServer((req, res) => {
   if (req.url === '/phrase-fixture') {
     if (req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ calls: phraseCalls, inputs: phraseInputs }));
+      res.end(JSON.stringify({ calls: phraseCalls, inputs: phraseInputs, speech: phraseSpeech, chatCalls: phraseChatCalls }));
     } else {
       const chunks = [];
       req.on('data', c => chunks.push(c));
@@ -184,6 +186,8 @@ const server = http.createServer((req, res) => {
         phraseFixture = JSON.parse(Buffer.concat(chunks).toString());
         phraseCalls = 0;
         phraseInputs = [];
+        phraseSpeech = [];
+        phraseChatCalls = 0;
         res.end('ok');
       });
     }
@@ -215,6 +219,7 @@ const server = http.createServer((req, res) => {
     // stub answers with one short silence chunk + the stop terminator so
     // the REAL announcement/summary flow completes through its acks.
     if (body.stream === true) {
+      phraseSpeech.push(promptText({ messages: (body.messages || []).filter(x => x.role === 'assistant') }));
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -225,6 +230,17 @@ const server = http.createServer((req, res) => {
     }
     const image = findImagePart(body);
     if (!image) {
+      if (phraseFixture.classroomIntent && /asr/.test(body.model)) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(completion('慢一点读')));
+        return;
+      }
+      if (!/asr/.test(body.model)) phraseChatCalls++;
+	  if (phraseFixture.classroomIntent && promptText(body).includes('意图词表（intent 只能是以下九个值之一）')) {
+	    res.writeHead(200, { 'Content-Type': 'application/json' });
+	    res.end(JSON.stringify(completion(JSON.stringify({ intent: phraseFixture.classroomIntent, reply: '' }))));
+	    return;
+	  }
 	  if (promptText(body).includes('你为孩子补充英语词组例句')) {
 	    const inputs = JSON.parse(body.messages[1].content);
 	    phraseCalls++;

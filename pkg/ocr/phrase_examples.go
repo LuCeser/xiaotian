@@ -8,6 +8,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/xiaotian/home-tutor-agent/pkg/english"
 )
 
 var examplePlaceholder = regexp.MustCompile(`\.(?:[\s\p{Zs}]*\.){2,}|…+`)
@@ -16,6 +18,9 @@ var englishToken = regexp.MustCompile(`[a-zA-Z]+(?:['’-][a-zA-Z]+)*`)
 // IsEnglishPhraseCandidate conservatively excludes ordinary words and complete sentences.
 // Sentence-like entries without punctuation are also classified by the model.
 func IsEnglishPhraseCandidate(word string) bool {
+	if english.Classify(word) == english.Sentence {
+		return false
+	}
 	for _, r := range word {
 		if unicode.IsLetter(r) && r > 127 {
 			return false

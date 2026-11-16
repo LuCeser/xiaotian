@@ -129,7 +129,7 @@ test('invalid generation reports a gap on the page while preserving the saved wo
 });
 
 test('ordinary words, complete sentences and Chinese content do not generate examples', async ({ request }) => {
-  await add(request, [{ word: 'apple', meaning: '苹果' }, { word: 'I like cats.', meaning: '我喜欢猫' }]);
+  await add(request, [{ word: 'apple', meaning: '苹果' }, { word: 'I like cats.', meaning: '我喜欢猫' }, { word: 'I like cats', meaning: '我喜欢猫' }, { word: 'Where is the library', meaning: '图书馆在哪里' }]);
   const chinese = await request.post('/api/v1/words', { data: { category: 'chinese', unit, entries: [{ word: '山川', meaning: '山与河流' }] } });
   expect(chinese.ok()).toBeTruthy();
   expect((await state(request)).calls).toBe(0);
@@ -172,6 +172,98 @@ async function add(request, entries, extra = {}) {
   const response = await request.post('/api/v1/words', { data: { category: 'english', unit, entries, ...extra } });
   expect(response.ok(), await response.text()).toBeTruthy();
   return response.json();
+}
+
+// Real HTTP -> Python/SQLite -> new lesson snapshot -> real WebSocket/TTS
+// request boundary. Only the external model/audio service is replaced.
+test('ordinary phrase examples are saved and reused by new classrooms and rereads', async ({ request }) => {
+  const all = (await (await request.get('/api/v1/words?category=english&limit=500')).json()).words;
+  const participating = all.filter(x => x.participates).map(x => x.id);
+  const participation = async (ids, participates) => {
+    if (ids.length) expect((await request.put('/api/v1/words/participation', { data: { ids, participates } })).ok()).toBeTruthy();
+  };
+  await participation(participating, false);
+  try {
+    await fixture(request, { 'on the ground floor': 'The library is on the ground floor.' }, { classroomIntent: 'slow' });
+    const result = await add(request, [{ word: 'on the ground floor', meaning: '在底楼' }]);
+    expect(result.examples.saved).toBe(1);
+    expect((await words(request))[0].example).toBe('The library is on the ground floor.');
+    const generated = (await state(request)).calls;
+    for (let i = 0; i < 2; i++) {
+      await readPhraseClassroom(request, 'on the ground floor', 'The library is on the ground floor.');
+      expect((await state(request)).calls).toBe(generated);
+      // Practice ids use second precision; wait for a genuinely new classroom.
+      await new Promise(resolve => setTimeout(resolve, 1100));
+    }
+    const card = (await words(request))[0];
+    await participation([card.id], false);
+    // A historical blank survives a failed add-time supplement, then the
+    // explicit one-time fill supplies the snapshot of a later classroom.
+    await fixture(request, {});
+    await add(request, [{ word: 'look after', meaning: '照顾' }]);
+    const historical = (await words(request)).find(x => x.word === 'look after');
+    expect(historical.example).toBe('');
+    await fixture(request, { 'look after': 'I look after my cat.' }, { classroomIntent: 'slow' });
+    const fill = await request.post('/api/v1/words/examples/fill', { data: { ids: [historical.id] } });
+    expect((await fill.json()).saved).toBe(1);
+    await readPhraseClassroom(request, 'look after', 'I look after my cat.');
+    expect((await state(request)).calls).toBe(1);
+  } finally {
+    await participation(participating, true);
+  }
+});
+
+async function readPhraseClassroom(request, word, example) {
+  const WebSocket = require('ws');
+  const before = (await state(request)).speech.length;
+  const ws = new WebSocket('ws://127.0.0.1:18080/rt', { origin: 'http://127.0.0.1:18080' });
+  const messages = [];
+  ws.on('message', (data, binary) => {
+    if (binary) return;
+    const msg = JSON.parse(String(data));
+    messages.push(msg);
+    if (msg.type === 'audio_end') ws.send(JSON.stringify({ type: 'sentence_ack', sentence_id: msg.sentence_id, epoch: msg.epoch }));
+  });
+  await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+  try {
+    ws.send(JSON.stringify({ type: 'session_init', mode: 'test', category: 'english', practice: true, audio: { sampleRate: 16000, format: 's16le', channels: 1 } }));
+    await expect.poll(() => messages.find(x => x.type === 'session_ready')?.lesson.words).toEqual([word]);
+    await expect.poll(() => messages.filter(x => x.type === 'state' && x.value === 'listening').length).toBeGreaterThan(0);
+    let spoken = (await state(request)).speech.slice(before).join('');
+    expect(spoken).toContain(word);
+    expect(spoken).toContain('例句：' + example);
+    expect(spoken).toContain('请写词组。');
+    const reads = messages.filter(x => x.type === 'state' && x.value === 'listening').length;
+    const repeatStart = (await state(request)).speech.length;
+    ws.send(JSON.stringify({ type: 'read_word', word_index: 0, current_index: 0 }));
+    await expect.poll(() => messages.filter(x => x.type === 'state' && x.value === 'listening').length).toBeGreaterThan(reads);
+    spoken = (await state(request)).speech.slice(repeatStart).join('');
+    expect(spoken).toContain('例句：' + example);
+    expect(spoken).toContain('请写词组。');
+    const slowStart = (await state(request)).speech.length;
+    const chatsBeforeSlow = (await state(request)).chatCalls;
+    const listeningBeforeSlow = messages.filter(x => x.type === 'state' && x.value === 'listening').length;
+    // Respect the real start-grace/echo-tail gate, then send a voice turn
+    // through the actual VAD and ASR adapter, as in the poem classroom suite.
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const speech = Buffer.alloc(960), silence = Buffer.alloc(960);
+    for (let i = 0; i < 480; i++) speech.writeInt16LE(Math.round(5000 * Math.sin(2 * Math.PI * 220 * i / 16000)), i * 2);
+    for (const [frame, count] of [[speech, 60], [silence, 50]]) {
+      for (let i = 0; i < count; i++) {
+        ws.send(frame);
+        await new Promise(resolve => setTimeout(resolve, 30));
+      }
+    }
+    await expect.poll(() => messages.filter(x => x.type === 'state' && x.value === 'listening').length, { timeout: 15_000 }).toBeGreaterThan(listeningBeforeSlow);
+    spoken = (await state(request)).speech.slice(slowStart).join('');
+    expect(spoken).toContain(word + '。' + word + '。');
+    expect(spoken.split(example)).toHaveLength(2);
+    expect((await state(request)).chatCalls - chatsBeforeSlow).toBe(1); // classification only
+    ws.send(JSON.stringify({ type: 'end_session' }));
+    await expect.poll(() => messages.some(x => x.type === 'session_ended')).toBe(true);
+  } finally {
+    ws.close();
+  }
 }
 
 test('partial generation preserves originals, reports missing and retries historical blanks only', async ({ page, request }) => {

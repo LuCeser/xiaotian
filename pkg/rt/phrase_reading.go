@@ -7,11 +7,12 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/xiaotian/home-tutor-agent/pkg/english"
 	"github.com/xiaotian/home-tutor-agent/pkg/lesson"
 )
 
 // Match placeholders only: ordinary periods, decimals and abbreviations survive.
-var phrasePlaceholder = regexp.MustCompile(`\.(?:[\s\p{Zs}]*\.){2,}|…+`)
+var phrasePlaceholder = english.Placeholder
 
 var englishExampleLetter = regexp.MustCompile(`[A-Za-z]`)
 
@@ -19,8 +20,27 @@ var englishExampleLetter = regexp.MustCompile(`[A-Za-z]`)
 // card remains the dictation/check target. This path never generates examples.
 // ordinary preserves the existing templates for all other vocabulary/subjects.
 func wordReadingText(word lesson.Word, category string, index int, ordinary string, slow bool) string {
-	if category != lesson.CategoryEnglish || !phrasePlaceholder.MatchString(word.Word) {
+	if category != lesson.CategoryEnglish {
 		return ordinary
+	}
+	kind := english.Classify(word.Word)
+	if kind == english.Word {
+		return ordinary
+	}
+	if kind != english.Phrase {
+		text := strings.TrimSpace(word.Word)
+		if !strings.ContainsAny(text[len(text)-1:], ".!?") && !strings.HasSuffix(text, "。") && !strings.HasSuffix(text, "！") && !strings.HasSuffix(text, "？") {
+			text += "。"
+		}
+		label, instruction := "句", "请写整句。"
+		if kind == english.Ambiguous {
+			label, instruction = "项", "请按原文写完整内容。"
+		}
+		spoken := fmt.Sprintf("第 %d %s，%s", index, label, text)
+		if slow {
+			spoken += text
+		}
+		return spoken + instruction
 	}
 	fixed := []string{}
 	start := 0
@@ -42,9 +62,13 @@ func wordReadingText(word lesson.Word, category string, index int, ordinary stri
 		fixed = append(fixed, part)
 	}
 	fixedText := strings.Join(fixed, "，")
-	spoken := fmt.Sprintf("第 %d 个词组，%s。", index, fixedText)
+	ending := "。"
+	if strings.HasSuffix(fixedText, ".") && !phrasePlaceholder.MatchString(word.Word) {
+		ending = ""
+	}
+	spoken := fmt.Sprintf("第 %d 个词组，%s%s", index, fixedText, ending)
 	if slow {
-		spoken += fixedText + "。"
+		spoken += fixedText + ending
 	}
 	const instruction = "请写词组。"
 	example := strings.TrimSpace(word.Example)
